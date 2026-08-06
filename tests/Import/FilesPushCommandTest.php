@@ -281,7 +281,6 @@ final class FilesPushCommandTest extends TestCase
             json_encode([
                 'push_session_id' => str_repeat('1', 32),
                 'phase' => 'starting_plan',
-                'push_root_local_relative_path' => '',
                 'push_plan_cursor' => null,
                 'local_paths_to_push_byte_offset' => 0,
                 'local_paths_to_push_count' => null,

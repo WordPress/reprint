@@ -3,7 +3,6 @@
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
 use function WordPress\Reprint\Exporter\path_is_within_root;
-use function WordPress\Reprint\Exporter\path_remainder_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
 
@@ -62,19 +61,16 @@ use function WordPress\Reprint\Exporter\path_remainder_under;
  * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
  * @phpstan-type IndexingCursor array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}
  * @phpstan-type StartingDiffCursor array{phase:'starting_diff'}
- * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_local_index:int,byte_offset_in_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int,deleted_directory_stack_top_byte_offset:int|null,previous_fresh_local_index_entry_path:string|null}
- * @phpstan-type CompleteCursor array{phase:'complete',local_paths_to_push_count:int}
+ * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_local_index:int,byte_offset_in_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int|null,deleted_directory_stack_top_byte_offset:int|null,previous_fresh_local_index_entry_path:string|null}
+ * @phpstan-type CompleteCursor array{phase:'complete',local_paths_to_push_count:int|null}
  * @phpstan-type PushPlanPosition IndexingCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
- * @phpstan-type PushPlanCursor array{plan_directory:string,filesystem_root:string,local_index_file:string,push_root_local_relative_path:string,position:PushPlanPosition}
+ * @phpstan-type PushPlanCursor array{plan_directory:string,filesystem_root:string,local_index_file:string,position:PushPlanPosition}
  * @phpstan-type DeletedDirectoryStackEntry array{path:string,previous_byte_offset:int|null}
  */
 class PushPlan
 {
     /** @var string Resolved filesystem root inspected while building the fresh local index. */
     private string $filesystem_root;
-
-    /** @var string Push root relative to the local filesystem root. */
-    private string $push_root_local_relative_path;
 
     /** @var string Caller-owned active plan directory. */
     private string $plan_directory;
@@ -149,22 +145,15 @@ class PushPlan
      * @param string $filesystem_root     Resolved filesystem root.
      * @param string $local_index_file    Local index file this plan diffs against.
      * @param string $excluded_paths_path Caller-owned target exclusions file.
-     * @param string $push_root_local_relative_path Push root relative to the local filesystem root.
      * @return self Open plan positioned at the initial indexing cursor.
      */
     public static function start(
         string $plan_directory,
         string $filesystem_root,
         string $local_index_file,
-        string $excluded_paths_path,
-        string $push_root_local_relative_path = ""
+        string $excluded_paths_path
     ): self {
-        $plan = new self(
-            $plan_directory,
-            $filesystem_root,
-            $local_index_file,
-            $push_root_local_relative_path
-        );
+        $plan = new self($plan_directory, $filesystem_root, $local_index_file);
         if (!@copy($excluded_paths_path, $plan->excluded_paths_file)) {
             throw new RuntimeException("Failed to copy excluded paths into the push plan: {$excluded_paths_path}");
         }
@@ -184,7 +173,6 @@ class PushPlan
             "plan_directory" => $plan->plan_directory,
             "filesystem_root" => $plan->filesystem_root,
             "local_index_file" => $plan->local_index_file,
-            "push_root_local_relative_path" => $plan->push_root_local_relative_path,
             "position" => [
                 "phase" => "indexing",
                 "file_index_cursor" => $plan->file_index_processor->get_cursor(),
@@ -205,11 +193,20 @@ class PushPlan
      */
     public static function resume(array $cursor): self
     {
+        $position = $cursor["position"];
+        if (
+            ($position["phase"] === "diffing" || $position["phase"] === "complete")
+            && !array_key_exists("local_paths_to_push_count", $position)
+        ) {
+            // Keep the plan single-pass when an older cursor has no path count.
+            $position["local_paths_to_push_count"] = null;
+            $cursor["position"] = $position;
+        }
+
         $plan = new self(
             $cursor["plan_directory"],
             $cursor["filesystem_root"],
-            $cursor["local_index_file"],
-            $cursor["push_root_local_relative_path"]
+            $cursor["local_index_file"]
         );
         $plan->cursor = $cursor;
         $position = $plan->cursor["position"];
@@ -244,8 +241,10 @@ class PushPlan
 
     /**
      * Returns the number of local paths in the completed push plan.
+     *
+     * Null means the plan resumed from an older cursor without a saved count.
      */
-    public function get_local_paths_to_push_count(): int
+    public function get_local_paths_to_push_count(): ?int
     {
         $position = $this->cursor["position"];
         if ($position["phase"] !== "complete") {
@@ -276,13 +275,11 @@ class PushPlan
      * @param string $plan_directory   Caller-owned active plan directory.
      * @param string $filesystem_root  Resolved filesystem root.
      * @param string $local_index_file Local index file this plan diffs against.
-     * @param string $push_root_local_relative_path Push root relative to the local filesystem root.
      */
     private function __construct(
         string $plan_directory,
         string $filesystem_root,
-        string $local_index_file,
-        string $push_root_local_relative_path
+        string $local_index_file
     ) {
         $plan_directory = rtrim($plan_directory, "/");
         if (!is_dir($plan_directory)) {
@@ -291,8 +288,6 @@ class PushPlan
         $this->plan_directory = $plan_directory;
         $this->set_filesystem_root($filesystem_root);
         $this->local_index_file = $local_index_file;
-        $this->push_root_local_relative_path =
-            rtrim($push_root_local_relative_path, "/");
         $this->local_paths_to_push = $plan_directory . "/local_paths_to_push.jsonl";
         $this->local_paths_to_delete = $plan_directory . "/local_paths_to_delete";
         $this->fresh_local_index_file = $plan_directory . "/fresh_local_index.jsonl";
@@ -657,7 +652,9 @@ class PushPlan
                 }
                 if (!$this->path_conflicts_with_excluded_paths($fresh_local_index_entry["path"])) {
                     $this->append_local_path_to_push($fresh_local_index_entry);
-                    ++$local_paths_to_push_count;
+                    if ($local_paths_to_push_count !== null) {
+                        ++$local_paths_to_push_count;
+                    }
                     $local_paths_to_push_changed = true;
                 }
             } elseif ($path_comparison > 0) {
@@ -723,7 +720,9 @@ class PushPlan
                 }
                 if ($needs_push && !$path_is_excluded) {
                     $this->append_local_path_to_push($fresh_local_index_entry);
-                    ++$local_paths_to_push_count;
+                    if ($local_paths_to_push_count !== null) {
+                        ++$local_paths_to_push_count;
+                    }
                     $local_paths_to_push_changed = true;
                 }
             }
@@ -993,9 +992,8 @@ class PushPlan
      */
     private function append_local_path_to_delete(string $path): void
     {
-        $push_root_relative_path_with_nul =
-            $this->local_relative_path_to_push_root_relative_path($path) . "\0";
-        if (fwrite($this->local_paths_to_delete_handle, $push_root_relative_path_with_nul) !== strlen($push_root_relative_path_with_nul)) {
+        $path_with_nul = $path . "\0";
+        if (fwrite($this->local_paths_to_delete_handle, $path_with_nul) !== strlen($path_with_nul)) {
             throw new RuntimeException("Short write on local paths to delete {$this->local_paths_to_delete}, is the disk full?");
         }
     }
@@ -1093,44 +1091,15 @@ class PushPlan
      */
     private function path_conflicts_with_excluded_paths(string $path): bool
     {
-        $push_root_relative_path =
-            $this->local_relative_path_to_push_root_relative_path($path);
         foreach ($this->excluded_paths as $excluded_path) {
             if (
-                path_is_within_root($push_root_relative_path, $excluded_path)
-                || path_is_within_root($excluded_path, $push_root_relative_path)
+                path_is_within_root($path, $excluded_path)
+                || path_is_within_root($excluded_path, $path)
             ) {
                 return true;
             }
         }
         return false;
-    }
-
-    /**
-     * Maps a local relative path to its push-root-relative path.
-     */
-    private function local_relative_path_to_push_root_relative_path(
-        string $local_relative_path
-    ): string {
-        if ($this->push_root_local_relative_path === "") {
-            return $local_relative_path;
-        }
-        $path_remainder = path_remainder_under(
-            $local_relative_path,
-            $this->push_root_local_relative_path
-        );
-        if ($path_remainder === null) {
-            throw new RuntimeException(
-                "Local relative path "
-                . base64_encode($local_relative_path)
-                . " is not below the push root's local relative path "
-                . base64_encode($this->push_root_local_relative_path)
-                . "."
-            );
-        }
-        return $path_remainder === ""
-            ? ""
-            : substr($path_remainder, 1);
     }
 
     /**
