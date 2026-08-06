@@ -4525,16 +4525,28 @@ class ImportClient
         $wp_includes_detached = $wp_includes_path !== null
             && $wp_includes_path !== $abspath . "/wp-includes";
         $content_detached = $content_dir !== null
-            && strpos($content_dir, $abspath . "/") !== 0;
+            && (
+                $content_dir === $abspath
+                || !path_is_within_root($content_dir, $abspath)
+            );
         $plugins_detached = $plugins_dir !== null
             && $content_dir !== null
-            && strpos($plugins_dir, $content_dir . "/") !== 0;
+            && (
+                $plugins_dir === $content_dir
+                || !path_is_within_root($plugins_dir, $content_dir)
+            );
         $mu_plugins_detached = $mu_plugins_dir !== null
             && $content_dir !== null
-            && strpos($mu_plugins_dir, $content_dir . "/") !== 0;
+            && (
+                $mu_plugins_dir === $content_dir
+                || !path_is_within_root($mu_plugins_dir, $content_dir)
+            );
         $uploads_detached = $uploads_basedir !== null
             && $content_dir !== null
-            && strpos($uploads_basedir, $content_dir . "/") !== 0;
+            && (
+                $uploads_basedir === $content_dir
+                || !path_is_within_root($uploads_basedir, $content_dir)
+            );
 
         // If any sub-component is detached from content_dir, we need to
         // "explode" wp-content into a real directory with individual symlinks
