@@ -3,7 +3,9 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use function Reprint\Importer\sort_index_file;
 
+require_once __DIR__ . '/../../packages/reprint-importer/src/lib/sort-index-file.php';
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push-plan.php';
 
 /**
@@ -173,6 +175,23 @@ final class PushPlanTest extends TestCase
             'b/c.txt' => [200, 7, 'file'],
         ]);
         $this->saveLocalIndex($index);
+
+        $plan = $this->startPlan($index);
+        $this->planToCompletion($plan);
+
+        $this->assertPathCounts(0, 0);
+        $this->assertSame([], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
+        $this->assertSame('', file_get_contents($this->planPath('local_paths_to_delete')));
+    }
+
+    public function testUnchangedRawPathSortedIndexProducesEmptyPlans(): void
+    {
+        $index = $this->writeIndex([
+            'wp-admin/js/widgets.js' => [100, 5, 'file'],
+            'wp-admin/js/widgets/custom-html-widgets.js' => [200, 7, 'file'],
+        ]);
+        $this->saveLocalIndex($index);
+        sort_index_file($this->localIndexFile());
 
         $plan = $this->startPlan($index);
         $this->planToCompletion($plan);

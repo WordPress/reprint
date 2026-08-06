@@ -1,5 +1,6 @@
 <?php
 
+use function Reprint\Importer\sort_index_file;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
 use function WordPress\Reprint\Exporter\path_is_within_root;
@@ -500,10 +501,15 @@ class PushPlan
     }
 
     /**
-     * Starts the index diff and opens its plan files.
+     * Sorts the fresh local index by raw path, then starts the index diff.
      */
     private function start_index_diff(): void
     {
+        if (!sort_index_file($this->fresh_local_index_file)) {
+            throw new RuntimeException(
+                "Failed to sort the fresh local index: {$this->fresh_local_index_file}"
+            );
+        }
         if (file_put_contents($this->deleted_directories_stack, "") !== 0) {
             throw new RuntimeException("Failed to initialize the deleted-directory stack: {$this->deleted_directories_stack}");
         }
