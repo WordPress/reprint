@@ -294,12 +294,15 @@ Inside a class, omit the class name when context already supplies it: use
 
 ## Repo mechanics that will bite you
 
-- Composer's classmap autoloads exporter classes from
-  `vendor/wp-php-toolkit/reprint-exporter/` — a stale mirror silently runs
-  old code under the tests. After editing anything in
-  `packages/reprint-exporter/src/`, copy the file to BOTH
-  `vendor/wp-php-toolkit/reprint-exporter/src/` and
-  `reprint-exporter-wp/vendor/wp-php-toolkit/reprint-exporter/src/`.
+- The root Composer install uses Composer's default path-repository strategy,
+  which symlinks the local exporter and importer packages when the platform
+  supports it. Tests then run the files under `packages/` without a copied
+  `vendor/` tree drifting behind them. The PHAR build temporarily mirrors
+  those packages because the archive must be self-contained, then restores
+  the development links. The `reprint-exporter-wp/vendor/` tree remains a
+  physical copy for the same reason; install it afresh or run
+  `composer reinstall wp-php-toolkit/reprint-exporter` in that directory before
+  testing a local plugin bundle.
 - `packages/reprint-importer/src/lib/upload/` must stay PHP 7.4-PARSEABLE:
   import.php loads it for pull users on 7.4, and the push client's 8.1
   requirement is a runtime check in its constructor.

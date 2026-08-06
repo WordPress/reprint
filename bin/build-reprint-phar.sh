@@ -34,6 +34,28 @@ if [ ! -f "$PROJECT_ROOT/vendor/autoload.php" ]; then
     exit 1
 fi
 
+# Box does not follow Composer's local package symlinks into the PHAR. Replace
+# them with mirrors for the build, then restore the development install.
+local_package_names=(
+    wp-php-toolkit/reprint-exporter
+    wp-php-toolkit/reprint-importer
+)
+local_packages_are_symlinked=false
+if [ -L "$PROJECT_ROOT/vendor/wp-php-toolkit/reprint-exporter" ] ||
+    [ -L "$PROJECT_ROOT/vendor/wp-php-toolkit/reprint-importer" ]; then
+    if ! command -v composer >/dev/null 2>&1; then
+        echo "Error: composer not found in PATH." >&2
+        exit 1
+    fi
+    local_packages_are_symlinked=true
+    trap '
+        if $local_packages_are_symlinked; then
+            composer reinstall --no-interaction "${local_package_names[@]}"
+        fi
+    ' EXIT
+    COMPOSER_MIRROR_PATH_REPOS=1 composer reinstall --no-interaction "${local_package_names[@]}"
+fi
+
 # ── Locate or download Box ────────────────────────────────────────
 
 BOX_PHAR="$PROJECT_ROOT/box.phar"
@@ -65,6 +87,11 @@ echo "Version: $VERSION"
 rm -f reprint.phar
 
 php -d phar.readonly=0 "$BOX_PHAR" compile
+
+if $local_packages_are_symlinked; then
+    composer reinstall --no-interaction "${local_package_names[@]}"
+    local_packages_are_symlinked=false
+fi
 
 SIZE=$(du -h reprint.phar | cut -f1)
 echo ""
