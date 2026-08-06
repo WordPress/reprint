@@ -3,7 +3,6 @@
 use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 
-use function WordPress\DataLiberation\URL\is_child_url_of;
 /**
  * Rewrites URLs in a single decoded database value by detecting the data
  * format and applying the appropriate rewriting strategy.
@@ -52,9 +51,8 @@ class StructuredDataUrlRewriter
      * Pre-parsed url_mapping: each entry is
      *   [ 'from_url' => <parsed URL>, 'to_url' => <parsed URL> ]
      * where <parsed URL> is whatever WPURL::parse() returns (declared as
-     * mixed here because is_child_url_of() and WPURL::replace_base_url()
-     * both accept either a string or the parsed object form — we pass the
-     * object form for performance).
+     * mixed here because WPURL::parse() may return either URL backend used by
+     * the toolkit. Both expose the same URL component properties.
      *
      * Parsing is pure, deterministic work that used to happen inside
      * rewrite_urls() on every leaf-value call. With N mappings and L leaves
@@ -499,29 +497,121 @@ class StructuredDataUrlRewriter
             return $cached;
         }
 
-        $converted = false;
+        $converted_raw_url = false;
+        $converted_parsed_url = false;
         foreach ($this->parsed_mapping as $mapping) {
-            if (!is_child_url_of($parsed_url, $mapping['from_url'])) {
+            if ($mapping['from_url'] === false || $mapping['to_url'] === false) {
                 continue;
             }
 
-            $converted = WPURL::replace_base_url(
-                $parsed_url,
-                [
-                    'old_base_url' => $this->base_url,
-                    'new_base_url' => $mapping['to_url'],
-                    'raw_url' => $raw_url,
-                    'is_relative' => $token_type !== '#text' && !WPURL::can_parse($raw_url),
-                ]
+            if (
+                $parsed_url->protocol !== $mapping['from_url']->protocol
+                || $parsed_url->hostname !== $mapping['from_url']->hostname
+                || $parsed_url->port !== $mapping['from_url']->port
+            ) {
+                continue;
+            }
+
+            // Match and slice parser-encoded pathnames. Decoding before the
+            // slice makes encoded source bytes consume part of the suffix.
+            $source_pathname = $mapping['from_url']->pathname;
+            if ($source_pathname === '/') {
+                $source_pathname = '';
+            } elseif (substr($source_pathname, -1) === '/') {
+                $source_pathname = substr($source_pathname, 0, -1);
+            }
+            if (
+                $source_pathname !== ''
+                && $parsed_url->pathname !== $source_pathname
+                && strncmp(
+                    $parsed_url->pathname,
+                    $source_pathname . '/',
+                    strlen($source_pathname) + 1
+                ) !== 0
+            ) {
+                continue;
+            }
+
+            $replacement_source_url = $this->parsed_mapping[0]['from_url'] ?? false;
+            if ($replacement_source_url === false) {
+                break;
+            }
+            $replacement_source_pathname = $replacement_source_url->pathname;
+            if ($replacement_source_pathname === '/') {
+                $replacement_source_pathname = '';
+            } elseif (substr($replacement_source_pathname, -1) === '/') {
+                $replacement_source_pathname = substr($replacement_source_pathname, 0, -1);
+            }
+            if (
+                $replacement_source_pathname !== ''
+                && $parsed_url->pathname !== $replacement_source_pathname
+                && strncmp(
+                    $parsed_url->pathname,
+                    $replacement_source_pathname . '/',
+                    strlen($replacement_source_pathname) + 1
+                ) !== 0
+            ) {
+                break;
+            }
+
+            $unmatched_pathname = substr(
+                $parsed_url->pathname,
+                strlen($replacement_source_pathname)
             );
+            $target_pathname = $mapping['to_url']->pathname;
+            if ($target_pathname === '/') {
+                $target_pathname = '';
+            } elseif (substr($target_pathname, -1) === '/') {
+                $target_pathname = substr($target_pathname, 0, -1);
+            }
+
+            // Cloning retains the original query, fragment, and unmatched
+            // pathname spelling while the mapped base components change.
+            $converted_parsed_url = clone $parsed_url;
+            $converted_parsed_url->protocol = $mapping['to_url']->protocol;
+            $converted_parsed_url->hostname = $mapping['to_url']->hostname;
+            $converted_parsed_url->port = $mapping['to_url']->port;
+            $converted_parsed_url->pathname = $target_pathname . $unmatched_pathname;
+
+            $should_trim_trailing_slash = (
+                $parsed_url->pathname !== ''
+                && $parsed_url->search === ''
+                && $parsed_url->hash === ''
+                && (
+                    (
+                        substr($parsed_url->pathname, -1) !== '/'
+                        && $parsed_url->pathname !== '/'
+                    )
+                    || (
+                        $parsed_url->pathname === '/'
+                        && $raw_url !== ''
+                        && substr($raw_url, -1) !== '/'
+                    )
+                )
+            );
+
+            $is_relative = $token_type !== '#text' && !WPURL::can_parse($raw_url);
+            if ($is_relative) {
+                $converted_raw_url = $converted_parsed_url->pathname;
+                if (strlen($converted_raw_url) > 1 && $should_trim_trailing_slash) {
+                    $converted_raw_url = rtrim($converted_raw_url, '/');
+                }
+                $converted_raw_url .= $converted_parsed_url->search;
+                $converted_raw_url .= $converted_parsed_url->hash;
+            } else {
+                $converted_raw_url = $converted_parsed_url->toString();
+                if ($should_trim_trailing_slash) {
+                    $converted_raw_url = rtrim($converted_raw_url, '/');
+                }
+            }
             break;
         }
 
         $cache_value = false;
-        if ($converted !== false) {
+        if ($converted_raw_url !== false && $converted_parsed_url !== false) {
             $cache_value = [
-                'raw_url' => (string) $converted,
-                'parsed_url' => $converted->new_url,
+                'raw_url' => $converted_raw_url,
+                'parsed_url' => $converted_parsed_url,
             ];
         }
         $this->set_cached_rewrite_result($cache_key, $cache_value);

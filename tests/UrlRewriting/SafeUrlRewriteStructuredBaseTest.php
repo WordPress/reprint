@@ -55,6 +55,19 @@ class SafeUrlRewriteStructuredBaseTest extends TestCase {
         );
     }
 
+    public function testStructuredEqualNonDefaultSourcePortIsAcceptedAndPreservesSuffix(): void
+    {
+        $input = '<a href="https://source.example:8443/my%20blog/article">Article</a>';
+
+        $this->assertSame(
+            '<a href="https://destination.example/article">Article</a>',
+            $this->rewriteBlockMarkup(
+                $input,
+                [self::SOURCE_ORIGIN . ':8443/my%20blog' => self::TARGET_ORIGIN]
+            )
+        );
+    }
+
     public function testStructuredPercentEncodedSourceSubpathPreservesUnmatchedSuffix(): void
     {
         $input = '<a href="https://source.example/my%20blog/article">Article</a>';
