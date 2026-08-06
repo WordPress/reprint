@@ -199,6 +199,19 @@ class ExportDirectoryAutoDetectTest extends TestCase
         $this->assertSame(1, $count['/srv/htdocs'] ?? 0);
     }
 
+    public function testAddsExtraDirectoryBesideAConfiguredRoot(): void
+    {
+        $this->writeState([]);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->setPrivate($client, 'extra_directory', '/srv/htdocs-old');
+
+        $dirs = $this->getExportDirectories($client);
+
+        $this->assertContains('/srv/htdocs-old', $dirs);
+    }
+
     public function testIgnoresEmptyAutoPrependFile(): void
     {
         $this->writeState([

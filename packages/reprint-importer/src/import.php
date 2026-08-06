@@ -9968,17 +9968,7 @@ class ImportClient
                 continue;
             }
             // Check if this path is already covered by an existing dir.
-            $covered = false;
-            foreach ($dirs as $root) {
-                if (
-                    $path === $root ||
-                    str_starts_with($path, $root . "/")
-                ) {
-                    $covered = true;
-                    break;
-                }
-            }
-            if (!$covered) {
+            if (!path_is_within_root($path, $dirs)) {
                 $dirs[] = $path;
                 $this->audit_log(
                     "DIRECTORY AUTO-DETECT | adding {$label} outside roots: " .
