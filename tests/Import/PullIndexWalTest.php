@@ -42,17 +42,15 @@ final class PullIndexWalTest extends TestCase
     {
         mkdir($this->fileRoot . '/site');
         file_put_contents($this->fileRoot . '/site/file.txt', 'hello');
-        $client = $this->client();
-        $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('record_pulled_path')->invoke(
-            $client,
+        $journal = $this->journal($this->client());
+        $journal->record_remote_upsert(
             '/site/file.txt',
-            (string) realpath($this->fileRoot . '/site/file.txt'),
             42,
             5,
-            'file'
+            'file',
+            (string) realpath($this->fileRoot . '/site/file.txt')
         );
-        $reflection->getMethod('apply_pull_index_wal')->invoke($client);
+        $journal->apply_pending();
 
         $pullIndexWalPath = $this->pullStateDirectory . '/index.wal';
         $this->assertFileExists($pullIndexWalPath);
@@ -71,16 +69,14 @@ final class PullIndexWalTest extends TestCase
         );
         $this->assertSame(5, $localIndexEntries['site/file.txt']['size']);
 
-        $reflection->getMethod('remove_pull_index_wal')->invoke($client);
+        $journal->remove_empty_marker();
         $this->assertFileDoesNotExist($pullIndexWalPath);
     }
 
     public function testRecordedMutationsUsePlusAndMinusOperations(): void
     {
-        $client = $this->client();
-        $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('upsert_remote_index_entry')->invoke(
-            $client,
+        $journal = $this->journal($this->client());
+        $journal->record_remote_upsert(
             '/site/file.txt',
             42,
             5,
@@ -88,13 +84,11 @@ final class PullIndexWalTest extends TestCase
         );
         $filesystemRoot = realpath($this->fileRoot);
         $this->assertIsString($filesystemRoot);
-        $reflection->getMethod('wal_append_successful_deletion')->invoke(
-            $client,
+        $journal->record_successful_deletion(
             '/site/file.txt',
             $filesystemRoot . '/site/file.txt'
         );
-        $reflection->getMethod('wal_append_remote_index_invalidation')->invoke(
-            $client,
+        $journal->record_remote_invalidation(
             '/site/unreadable.txt'
         );
 
@@ -118,23 +112,21 @@ final class PullIndexWalTest extends TestCase
             file_get_contents($this->pullStateDirectory . '/index.wal')
         );
 
-        $reflection->getMethod('apply_pull_index_wal')->invoke($client);
+        $journal->apply_pending();
         $this->assertSame([], $this->remoteIndexEntryPaths());
-        $reflection->getMethod('remove_pull_index_wal')->invoke($client);
+        $journal->remove_empty_marker();
     }
 
     public function testUpsertingFileDoesNotCreateParentDirectoryEntries(): void
     {
-        $client = $this->client();
-        $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('upsert_remote_index_entry')->invoke(
-            $client,
+        $journal = $this->journal($this->client());
+        $journal->record_remote_upsert(
             '/site/nested/file.txt',
             42,
             5,
             'file'
         );
-        $reflection->getMethod('apply_pull_index_wal')->invoke($client);
+        $journal->apply_pending();
 
         $this->assertSame(
             ['/site/nested/file.txt'],
@@ -186,9 +178,7 @@ final class PullIndexWalTest extends TestCase
             $completeRecord . '{"op":"+","remote_absolute_path_b64":"'
         );
 
-        $client = $this->client();
-        $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('replay_pull_index_wal')->invoke($client);
+        $this->journal($this->client())->apply_pending();
 
         $this->assertSame('/site/complete.txt', $this->firstRemoteIndexEntryPath());
         $this->assertSame(
@@ -248,6 +238,15 @@ final class PullIndexWalTest extends TestCase
             $this->stateDirectory,
             $this->fileRoot
         );
+    }
+
+    private function journal(\ImportClient $client): \PullIndexJournal
+    {
+        $journal_property = new \ReflectionProperty(
+            \ImportClient::class,
+            'pull_index_journal'
+        );
+        return $journal_property->getValue($client);
     }
 
     private function firstRemoteIndexEntryPath(): string
