@@ -178,6 +178,25 @@ class WpcloudHostAnalyzerTest extends TestCase
         $this->assertSame('{fs-root}/__wp__/', $manifest->server_vars['WP_DIR']);
     }
 
+    public function testExtractConstantsTreatsASiblingPrefixAsOutsideAbspath(): void
+    {
+        $constants = \extract_constants([
+            'database' => [
+                'wp' => [
+                    'paths_urls' => [
+                        'abspath' => '/srv/site',
+                        'content_dir' => '/srv/site-old/wp-content',
+                    ],
+                ],
+            ],
+        ]);
+
+        $this->assertSame(
+            ['WP_CONTENT_DIR' => '{fs-root}/wp-content'],
+            $constants
+        );
+    }
+
     public function testScoreIdentifiesWpcloudSite(): void
     {
         $preflight = $this->wpcloudPreflight();
