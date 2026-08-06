@@ -9415,16 +9415,13 @@ class ImportClient
             return;
         }
 
-        if (
-            $dir !== $real_filesystem_root &&
-            !str_starts_with($dir, $real_filesystem_root . "/")
-        ) {
+        $relative = relative_path_under($dir, $real_filesystem_root);
+        if ($relative === null) {
             throw new RuntimeException(
                 "Security: Refusing to create directory outside filesystem root: {$dir}",
             );
         }
 
-        $relative = ltrim(substr($dir, strlen($real_filesystem_root)), "/");
         if ($relative === "") {
             return;
         }
