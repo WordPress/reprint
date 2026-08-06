@@ -136,11 +136,12 @@ A push plan is an internal part of the sender lifecycle:
    active `plan/` directory.
 2. The sender starts one internal `PushPlan`. The plan copies the exclusions to
    `plan/excluded_paths.json`, then opens
-   `plan/fresh_local_index.jsonl` and a `FileIndexProcessor`. Each `indexing`
-   step advances one traversal event, appends its JSONL entries when applicable,
-   flushes those bytes, and then updates its traversal cursor and committed byte
-   offset. The sender stores that cursor in `sender.json` before returning
-   from its step.
+   `plan/fresh_local_index.jsonl` and a `FileIndexProcessor`. Each internal
+   `indexing` step advances one traversal event, appends its JSONL entries when
+   applicable, and updates its traversal cursor and fresh-index byte offset.
+   One sender step runs at most 256 internal planning steps without crossing
+   an internal phase boundary, flushes their output, and stores the resulting
+   cursor in `sender.json` before returning.
 3. Once traversal is complete, the plan enters `starting_diff`. The next step
    starts the index diff and enters `diffing`.
 4. Each later `next_step()` compares at most one path represented by either
@@ -356,13 +357,13 @@ remaining handles before `close()` returns.
 
 The sender stores the mandatory preflight document root, creates the push session,
 and stores its exclusion policy before it starts PushPlan. Each internal
-`indexing` step completes one traversal event,
-and `starting_diff` initializes the index diff. Each internal `diffing` step
-compares at most one path and updates the path lists. PushPlan owns the
-meaning of its file-index cursor, index offsets, output lengths, and
-deleted-directory ranges. `sender.json` stores the complete cursor. No
-upload begins until both indexes have been consumed and the two path lists are
-stable.
+`indexing` step completes one traversal event, and `starting_diff` initializes
+the index diff. Each internal `diffing` step compares at most one path and
+updates the path lists. One sender step runs at most 256 internal steps from
+the current phase before flushing their output and storing the complete
+PushPlan cursor in `sender.json`. PushPlan owns the meaning of its file-index
+cursor, index offsets, output lengths, and deleted-directory ranges. No upload
+begins until both indexes have been consumed and the two path lists are stable.
 
 `sender.json` contains no copied receiver cursor. It stores the current push
 session, an optional blocking push session, the phase, the document root's local

@@ -1853,10 +1853,11 @@ final class PushEndpointsTest extends TestCase {
     {
         $local_docroot = $this->root . '/retained-plan-local-docroot';
         mkdir($local_docroot, 0700, true);
-        for ($index = 0; $index < 3; ++$index) {
+        for ($index = 0; $index < 513; ++$index) {
             file_put_contents($local_docroot . sprintf('/file-%04d.txt', $index), 'x');
         }
         $push_state_directory = $this->root . '/retained-plan-state';
+        $fresh_local_index_path = $push_state_directory . '/plan/fresh_local_index.jsonl';
         $plan_property = new ReflectionProperty(PushFilesSender::class, 'plan');
         $fresh_local_index_handle_property = new ReflectionProperty(
             PushPlan::class,
@@ -1885,6 +1886,10 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame($plan, $plan_property->getValue($sender));
             $cursor_after_first_step = $this->loadPlanPosition($push_state_directory);
             $this->assertNotSame($cursor_before_step, $cursor_after_first_step);
+            $this->assertCount(
+                256,
+                file($fresh_local_index_path, FILE_IGNORE_NEW_LINES)
+            );
 
             $sender->next_step();
 
@@ -1894,6 +1899,10 @@ final class PushEndpointsTest extends TestCase {
             $this->assertNotSame(
                 $cursor_after_first_step,
                 $this->loadPlanPosition($push_state_directory)
+            );
+            $this->assertCount(
+                512,
+                file($fresh_local_index_path, FILE_IGNORE_NEW_LINES)
             );
         } finally {
             $this->closeSender($sender);
@@ -1909,8 +1918,9 @@ final class PushEndpointsTest extends TestCase {
     {
         $local_docroot = $this->root . '/bounded-index-local-docroot';
         mkdir($local_docroot, 0700, true);
-        file_put_contents($local_docroot . '/a.txt', 'a');
-        file_put_contents($local_docroot . '/b.txt', 'bb');
+        for ($index = 0; $index < 257; ++$index) {
+            file_put_contents($local_docroot . sprintf('/file-%04d.txt', $index), 'x');
+        }
         $push_state_directory = $this->root . '/bounded-index-state';
         $fresh_local_index_path = $push_state_directory . '/plan/fresh_local_index.jsonl';
         $options = $this->senderOptions($local_docroot, $push_state_directory);
@@ -1980,7 +1990,7 @@ final class PushEndpointsTest extends TestCase {
 
         $index_lines = file($fresh_local_index_path, FILE_IGNORE_NEW_LINES);
         $this->assertIsArray($index_lines);
-        $this->assertCount(2, $index_lines);
+        $this->assertCount(257, $index_lines);
     }
 
     /**
@@ -1997,9 +2007,19 @@ final class PushEndpointsTest extends TestCase {
         }
         $local_docroot = $this->root . '/killed-index-local-docroot';
         mkdir($local_docroot, 0700, true);
-        file_put_contents($local_docroot . '/a.txt', 'a');
-        file_put_contents($local_docroot . '/b.txt', 'b');
+        $local_index_entries = [];
+        for ($index = 0; $index < 257; ++$index) {
+            $local_relative_path = sprintf('file-%04d.txt', $index);
+            $path = $local_docroot . '/' . $local_relative_path;
+            file_put_contents($path, 'x');
+            $stat = lstat($path);
+            $this->assertIsArray($stat);
+            $local_index_entries[$local_relative_path] = [$stat['ctime'], $stat['size'], 'file'];
+        }
         $push_state_directory = $this->root . '/killed-index-state';
+        $local_index_fixture_file = $this->root . '/killed-index-local-index.jsonl';
+        $this->writeIndex($local_index_fixture_file, $local_index_entries);
+        $this->seedLocalIndex($push_state_directory, $local_index_fixture_file);
         $options = $this->senderOptions($local_docroot, $push_state_directory);
 
         $child = pcntl_fork();
@@ -2032,7 +2052,7 @@ final class PushEndpointsTest extends TestCase {
             FILE_IGNORE_NEW_LINES
         );
         $this->assertIsArray($local_index_lines);
-        $this->assertCount(2, $local_index_lines);
+        $this->assertCount(257, $local_index_lines);
     }
 
     /**

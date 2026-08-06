@@ -48,13 +48,12 @@ use function WordPress\Reprint\Exporter\path_remainder_under;
  * ## Durability and memory
  *
  * Each indexing step advances one FileIndexProcessor traversal event and
- * flushes any appended JSONL bytes before updating the traversal cursor and
- * committed byte offset returned to the caller.
- * A separate step starts the index diff. Each diff step compares at most one
- * path represented by either index and flushes only the output changed by that
- * step before updating its next cursor. The caller stores that cursor before
- * returning from its own step. `resume()` discards bytes beyond saved offsets,
- * so an interrupted step cannot leave duplicate durable entries.
+ * updates the traversal cursor and fresh-index byte offset returned to the
+ * caller. A separate step starts the index diff. Each diff step compares at
+ * most one path represented by either index and updates its next cursor.
+ * The owner flushes pending output before storing a cursor. `resume()` discards
+ * bytes beyond saved offsets, so an interrupted step cannot leave duplicate
+ * durable entries.
  *
  * PushPlan retains the next entry from each index and the top of an append-only
  * deleted-directory stack needed to suppress redundant descendant deletions. It
@@ -288,6 +287,28 @@ class PushPlan
     }
 
     /**
+     * Flushes plan files before the owner persists the current cursor.
+     *
+     * A later process truncates bytes beyond that cursor before appending.
+     */
+    public function flush_pending_outputs(): void
+    {
+        if (
+            is_resource($this->fresh_local_index_handle)
+            && !fflush($this->fresh_local_index_handle)
+        ) {
+            throw new RuntimeException("Failed to flush the fresh local index.");
+        }
+        if (
+            ( is_resource($this->local_paths_to_push_handle) && !fflush($this->local_paths_to_push_handle) )
+            || ( is_resource($this->local_paths_to_delete_handle) && !fflush($this->local_paths_to_delete_handle) )
+            || ( is_resource($this->deleted_directories_stack_handle) && !fflush($this->deleted_directories_stack_handle) )
+        ) {
+            throw new RuntimeException("Failed to flush a push-plan output.");
+        }
+    }
+
+    /**
      * Initializes paths in the caller-owned active plan directory.
      *
      * @param string $plan_directory   Caller-owned active plan directory.
@@ -459,18 +480,19 @@ class PushPlan
     private function next_file_index_step(): void
     {
         if (!$this->file_index_processor->next_index_step()) {
+            if (!fflush($this->fresh_local_index_handle)) {
+                throw new RuntimeException("Failed to flush the fresh local index.");
+            }
             $this->file_index_processor->close();
             $this->close_fresh_local_index_handle();
             $this->cursor["position"] = ["phase" => "starting_diff"];
             return;
         }
 
-        $fresh_local_index_changed = false;
         switch ($this->file_index_processor->get_step_status()) {
             case FileIndexProcessor::STATUS_INDEXED:
                 foreach ($this->file_index_processor->get_index_entries() as $file_index_processor_entry) {
                     $this->append_fresh_local_index_entry($file_index_processor_entry);
-                    $fresh_local_index_changed = true;
                 }
                 break;
 
@@ -486,9 +508,6 @@ class PushPlan
                 break;
         }
 
-        if ($fresh_local_index_changed && !fflush($this->fresh_local_index_handle)) {
-            throw new RuntimeException("Failed to flush the fresh local index.");
-        }
         $fresh_local_index_byte_offset = ftell($this->fresh_local_index_handle);
         if (!is_int($fresh_local_index_byte_offset)) {
             throw new RuntimeException("Failed to determine the fresh local index byte offset.");
@@ -594,9 +613,6 @@ class PushPlan
         $byte_offset_in_local_index = $cursor["byte_offset_in_local_index"];
         $local_paths_to_push_count = $cursor["local_paths_to_push_count"];
         $deleted_directory_stack_top_byte_offset = $cursor["deleted_directory_stack_top_byte_offset"];
-        $local_paths_to_push_changed = false;
-        $local_paths_to_delete_changed = false;
-        $deleted_directories_stack_changed = false;
 
         if (!$this->fresh_local_index_entry_loaded) {
             $this->fresh_local_index_entry = $this->read_next_index_entry($this->fresh_local_index_handle);
@@ -669,20 +685,17 @@ class PushPlan
                     )
                 ) {
                     $this->append_local_path_to_delete($fresh_local_index_entry["path"]);
-                    $local_paths_to_delete_changed = true;
                     $deleted_directory_stack_top_byte_offset =
                         $this->append_deleted_directory_stack_entry(
                             $fresh_local_index_entry["path"],
                             $deleted_directory_stack_top_byte_offset
                         );
-                    $deleted_directories_stack_changed = true;
                 }
                 if (!$this->path_conflicts_with_excluded_paths($fresh_local_index_entry["path"])) {
                     $this->append_local_path_to_push($fresh_local_index_entry);
                     if ($local_paths_to_push_count !== null) {
                         ++$local_paths_to_push_count;
                     }
-                    $local_paths_to_push_changed = true;
                 }
             } elseif ($path_comparison > 0) {
                 $local_empty_directory_is_implied_by_fresh_descendant =
@@ -704,13 +717,11 @@ class PushPlan
                     )
                 ) {
                     $this->append_local_path_to_delete($local_path_to_delete);
-                    $local_paths_to_delete_changed = true;
                     if ($local_path_to_delete !== $local_index_entry["path"]) {
                         $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
                             $local_path_to_delete,
                             $deleted_directory_stack_top_byte_offset
                         );
-                        $deleted_directories_stack_changed = true;
                     }
                 }
             } else {
@@ -743,14 +754,12 @@ class PushPlan
                     )
                 ) {
                     $this->append_local_path_to_delete($local_index_entry["path"]);
-                    $local_paths_to_delete_changed = true;
                 }
                 if ($needs_push && !$path_is_excluded) {
                     $this->append_local_path_to_push($fresh_local_index_entry);
                     if ($local_paths_to_push_count !== null) {
                         ++$local_paths_to_push_count;
                     }
-                    $local_paths_to_push_changed = true;
                 }
             }
 
@@ -768,17 +777,16 @@ class PushPlan
             }
         }
 
-        if (
-            ( $local_paths_to_push_changed && !fflush($this->local_paths_to_push_handle) )
-            || ( $local_paths_to_delete_changed && !fflush($this->local_paths_to_delete_handle) )
-            || ( $deleted_directories_stack_changed && !fflush($this->deleted_directories_stack_handle) )
-        ) {
-            throw new RuntimeException("Failed to flush a push-plan output.");
-        }
-
         $complete = $this->fresh_local_index_entry === null
             && $this->local_index_lookahead_entry === null;
         if ($complete) {
+            if (
+                !fflush($this->local_paths_to_push_handle)
+                || !fflush($this->local_paths_to_delete_handle)
+                || !fflush($this->deleted_directories_stack_handle)
+            ) {
+                throw new RuntimeException("Failed to flush a push-plan output.");
+            }
             $deleted_directory_stack_top_byte_offset = null;
             $this->deleted_directory_stack_entry = null;
         }
