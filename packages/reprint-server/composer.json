@@ -1,8 +1,11 @@
 {
     "name": "wp-php-toolkit/reprint-server",
-    "description": "Streaming export engine used by the Reprint Exporter WordPress plugin",
+    "description": "Streaming export engine used by the Reprint Server WordPress plugin",
     "type": "library",
     "license": "GPL-2.0-or-later",
+    "replace": {
+        "wp-php-toolkit/reprint-exporter": "self.version"
+    },
     "require": {
         "php": ">=7.2",
         "wp-php-toolkit/data-liberation": "^0.8.0",

@@ -3,6 +3,9 @@
     "description": "Streaming site importer with CLI and PHAR distribution support",
     "type": "library",
     "license": "GPL-2.0-or-later",
+    "replace": {
+        "wp-php-toolkit/reprint-importer": "self.version"
+    },
     "require": {
         "php": ">=7.4",
         "ext-pdo": "*",
