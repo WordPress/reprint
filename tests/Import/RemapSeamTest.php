@@ -247,4 +247,36 @@ class RemapSeamTest extends TestCase
             realpath_with_missing_tail($broken_symlink . '/child')
         );
     }
+
+    public function testNextRemoteIndexMatchesFilesystemRootAndPathBoundaries(): void
+    {
+        $client = $this->clientWithRules(array());
+        $next_remote_index_file = $this->tempDir . '/remote-index.next.jsonl';
+        file_put_contents(
+            $next_remote_index_file,
+            json_encode([
+                'path' => base64_encode('/srv/site/child.txt'),
+                'ctime' => 0,
+                'size' => 1,
+                'type' => 'file',
+            ]) . "\n"
+        );
+        $this->set($client, 'next_remote_index_file', $next_remote_index_file);
+
+        $this->assertTrue($this->call(
+            $client,
+            'next_remote_index_contains_remote_absolute_path_prefix',
+            array('/')
+        ));
+        $this->assertTrue($this->call(
+            $client,
+            'next_remote_index_contains_remote_absolute_path_prefix',
+            array('/srv/site')
+        ));
+        $this->assertFalse($this->call(
+            $client,
+            'next_remote_index_contains_remote_absolute_path_prefix',
+            array('/srv/site-old')
+        ));
+    }
 }

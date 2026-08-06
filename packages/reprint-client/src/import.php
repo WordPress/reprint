@@ -8611,10 +8611,7 @@ class ImportClient
     private function next_remote_index_contains_remote_absolute_path_prefix(
         string $remote_absolute_path
     ): bool {
-        $remote_absolute_path = rtrim(normalize_path($remote_absolute_path), "/");
-        if ($remote_absolute_path === "") {
-            return false;
-        }
+        $remote_absolute_path = normalize_path($remote_absolute_path);
 
         if (isset($this->next_remote_index_prefix_cache[$remote_absolute_path])) {
             return $this->next_remote_index_prefix_cache[$remote_absolute_path];
@@ -8631,7 +8628,6 @@ class ImportClient
             return false;
         }
 
-        $remote_absolute_path_prefix = $remote_absolute_path . "/";
         $path_prefix_found = false;
         while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
             try {
@@ -8643,13 +8639,7 @@ class ImportClient
                 continue;
             }
             $next_remote_index_entry_path = $next_remote_index_entry["path"];
-            if (
-                $next_remote_index_entry_path === $remote_absolute_path ||
-                str_starts_with(
-                    $next_remote_index_entry_path,
-                    $remote_absolute_path_prefix
-                )
-            ) {
+            if (path_is_within_root($next_remote_index_entry_path, $remote_absolute_path)) {
                 $path_prefix_found = true;
                 break;
             }
