@@ -129,6 +129,8 @@
  */
 final class PushFilesSender
 {
+    private const MAXIMUM_PUSH_PLAN_STEPS_PER_SENDER_STEP = 256;
+
     /** @var string Filesystem root whose local paths to push are sent. */
     private string $filesystem_root;
 
@@ -687,12 +689,26 @@ final class PushFilesSender
     private function next_plan_step(): void
     {
         try {
-            $has_next_step = $this->plan->next_step();
+            $has_next_step = true;
+            $plan_cursor = $this->plan->get_cursor();
+            $plan_phase = $plan_cursor['position']['phase'];
+            for (
+                $steps_processed = 0;
+                $has_next_step && $steps_processed < self::MAXIMUM_PUSH_PLAN_STEPS_PER_SENDER_STEP;
+                ++$steps_processed
+            ) {
+                $has_next_step = $this->plan->next_step();
+                $plan_cursor = $this->plan->get_cursor();
+                if ($plan_cursor['position']['phase'] !== $plan_phase) {
+                    break;
+                }
+            }
+            $this->plan->flush_pending_outputs();
         } catch (RuntimeException $exception) {
             $this->fail('local_io_error', $exception->getMessage());
             return;
         }
-        $this->state['push_plan_cursor'] = $this->plan->get_cursor();
+        $this->state['push_plan_cursor'] = $plan_cursor;
         if (!$has_next_step) {
             $this->state['local_paths_to_push_count'] = $this->plan->get_local_paths_to_push_count();
             $this->plan->close();
