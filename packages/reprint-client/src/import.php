@@ -12126,10 +12126,10 @@ if (
     }
 
     /**
-     * Render the install-exporter guide.
+     * Render the install-server guide.
      *
-     * Shows the download URL for the exporter plugin matching this version
-     * of reprint, and step-by-step installation instructions.
+     * Shows the download URL for the Reprint Server plugin matching this
+     * version of reprint, and step-by-step installation instructions.
      */
     function _cli_render_install_exporter(): void
     {
@@ -12341,7 +12341,7 @@ if (
                 "    --target-user=root --target-db=wp_local \\\n" .
                 "    --new-site-url=http://localhost:8881\n",
         ],
-        "install-exporter" => [
+        "install-server" => [
             "level" => "high",
             "short" => "Show how to install the exporter plugin on your site",
             "description" =>
@@ -12653,14 +12653,15 @@ if (
         "flat-document-root" => "flat-docroot",
         "flatten-docroot" => "flat-docroot",
         "import-metadata" => "pull-metadata",
+        "install-exporter" => "install-server",
     ];
     if (isset($command_aliases[$command])) {
         $command = $command_aliases[$command];
     }
 
-    // install-exporter is a standalone guide — no URL, state-dir, or filesystem root needed.
+    // install-server is a standalone guide — no URL, state-dir, or filesystem root needed.
     // Handle it before per-command --help so it always shows the full guide.
-    if ($command === "install-exporter") {
+    if ($command === "install-server") {
         _cli_render_install_exporter();
         exit(0);
     }

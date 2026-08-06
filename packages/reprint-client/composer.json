@@ -12,6 +12,7 @@
         "wp-php-toolkit/reprint-server": "*@dev"
     },
     "bin": [
-        "bin/reprint-client"
+        "bin/reprint-client",
+        "bin/reprint-importer"
     ]
 }

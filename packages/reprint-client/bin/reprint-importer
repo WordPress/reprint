@@ -1,0 +1,5 @@
+#!/usr/bin/env php
+<?php
+// Compatibility binary: the Composer bin was renamed to reprint-client.
+// Kept so consumers invoking vendor/bin/reprint-importer keep working.
+require_once __DIR__ . '/reprint-client';
