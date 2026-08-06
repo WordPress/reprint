@@ -18,8 +18,8 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
  * 3. Leaf text → byte-literal source-base replacement. With a block_markup
- *    hint, raw text is rewritten first and BlockMarkupUrlProcessor then handles
- *    URL-bearing tags and block-comment attributes.
+ *    hint, JsonStringIterator updates block-comment attributes without
+ *    rebuilding their JSON, then BlockMarkupUrlProcessor handles tags.
  *
  * HTML is never auto-detected — the caller must explicitly pass
  * content_type='block_markup' for values known to contain HTML/block markup.
@@ -415,8 +415,9 @@ class StructuredDataUrlRewriter
      *
      * Raw text uses byte-literal source-base replacement so surrounding CSS,
      * shortcodes, and other unknown syntax remain unchanged. The structured
-     * parser handles URL-bearing HTML attributes, block-comment attributes,
-     * CSS in style attributes, URL casing, and IDN canonicalization.
+     * parsers handle URL-bearing HTML attributes, block-comment attributes,
+     * CSS in style attributes, URL casing, and IDN canonicalization. Changed
+     * block-comment strings do not rebuild unrelated JSON values.
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
@@ -477,6 +478,58 @@ class StructuredDataUrlRewriter
     }
 
     /**
+     * Rewrite one parsed URL and cache the mapping result.
+     *
+     * @param mixed  $parsed_url Parsed source URL.
+     * @param string $raw_url    Original URL spelling.
+     * @param string $token_type Structured token type containing the URL.
+     * @return false|array {
+     *     Rewritten URL details, or false when no mapping matches.
+     *
+     *     @type string $raw_url    Rewritten URL spelling.
+     *     @type mixed  $parsed_url Parsed rewritten URL.
+     * }
+     * @phpstan-return false|array{raw_url: string, parsed_url: mixed}
+     */
+    private function rewrite_parsed_url($parsed_url, string $raw_url, string $token_type)
+    {
+        $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
+        $cached = $this->get_cached_rewrite_result($cache_key);
+        if ($cached !== null) {
+            return $cached;
+        }
+
+        $converted = false;
+        foreach ($this->parsed_mapping as $mapping) {
+            if (!is_child_url_of($parsed_url, $mapping['from_url'])) {
+                continue;
+            }
+
+            $converted = WPURL::replace_base_url(
+                $parsed_url,
+                [
+                    'old_base_url' => $this->base_url,
+                    'new_base_url' => $mapping['to_url'],
+                    'raw_url' => $raw_url,
+                    'is_relative' => $token_type !== '#text' && !WPURL::can_parse($raw_url),
+                ]
+            );
+            break;
+        }
+
+        $cache_value = false;
+        if ($converted !== false) {
+            $cache_value = [
+                'raw_url' => (string) $converted,
+                'parsed_url' => $converted->new_url,
+            ];
+        }
+        $this->set_cached_rewrite_result($cache_key, $cache_value);
+
+        return $cache_value;
+    }
+
+    /**
      * Migrate URLs in post content. See WPRewriteUrlsTests for
      * specific examples. TODO: A better description.
      *
@@ -492,59 +545,17 @@ class StructuredDataUrlRewriter
      * <!-- wp:image {"src":"https:\/\/modern-webstore.org\/image.jpg"} -->
      * ```
      *
-     * @TODO Use a proper JSON parser and encoder to:
-     * * Support UTF-16 characters
-     * * Gracefully handle recoverable encoding issues
-     * * Avoid changing the whitespace in the same manner as
-     *   we do in WP_HTML_Tag_Processor. e.g. if we start with:
+     * Block-comment attribute changes use byte spans so whitespace and
+     * unrelated values retain their original representation.
      *
-     * ```html
-     * <!-- wp:block {"url":"https://w.org"}` -->
-     *                     ^ no space here
-     * ```
-     *
-     * then it would be nice to re-encode that block markup also without the space character. This is similar
-     * to how the tag processor avoids changing parts of the tag it doesn't need to change.
-     * 
-     * TODO: Migrate these changes back into the php-toolkit repo
+     * @TODO Migrate the block-comment adapter into the php-toolkit repo.
      */
     private function rewrite_urls( string $content, string $content_type ): string {
-        // $this->parsed_mapping is built once in the constructor and reused
-        // here on every call, avoiding a fresh round of WPURL::parse() per
-        // leaf value.
-        $parsed_mapping = $this->parsed_mapping;
-        $base_url       = $this->base_url;
+        $base_url = $this->base_url;
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
-                $block_processor = new BlockMarkupUrlProcessor($content, $base_url);
-                while ($block_processor->next_token()) {
-                    if ($block_processor->get_token_type() !== '#block-comment') {
-                        continue;
-                    }
-
-                    while ($block_processor->next_block_attribute()) {
-                        $attribute_value = $block_processor->get_block_attribute_value();
-                        if (
-                            !is_string($attribute_value)
-                            || !$this->could_be_php_serialization_with_strings($attribute_value)
-                        ) {
-                            continue;
-                        }
-
-                        $rewritten_attribute_value = $this->rewrite_php_serialization(
-                            $attribute_value,
-                            self::BLOCK_MARKUP
-                        );
-                        if (
-                            $rewritten_attribute_value !== null
-                            && $rewritten_attribute_value !== $attribute_value
-                        ) {
-                            $block_processor->set_block_attribute_value($rewritten_attribute_value);
-                        }
-                    }
-                }
-                $content = $block_processor->get_updated_html();
+                $content = $this->rewrite_block_comment_json_values($content);
                 $content_length = strlen($content);
                 $cursor = 0;
                 $rewritten_content = '';
@@ -596,47 +607,18 @@ class StructuredDataUrlRewriter
                 while ( $p->next_url() ) {
                     $raw_url = $p->get_raw_url();
                     $token_type = $p->get_token_type() ?? '';
-                    if ($token_type === '#text') {
+                    if ($token_type === '#text' || $token_type === '#block-comment') {
                         continue;
                     }
-                    $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
-                    $cached = $this->get_cached_rewrite_result($cache_key);
-                    if ($cached !== null) {
-                        if ($cached !== false) {
-                            $p->set_url($cached['raw_url'], $cached['parsed_url']);
-                        }
+                    $rewrite_result = $this->rewrite_parsed_url(
+                        $p->get_parsed_url(),
+                        $raw_url,
+                        $token_type
+                    );
+                    if ($rewrite_result === false) {
                         continue;
                     }
-
-                    $parsed_url = $p->get_parsed_url();
-                    $converted = false;
-                    foreach ( $parsed_mapping as $mapping ) {
-                        if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
-                            $converted = WPURL::replace_base_url(
-                                $parsed_url,
-                                array(
-                                    'old_base_url' => $base_url,
-                                    'new_base_url' => $mapping['to_url'],
-                                    'raw_url'      => $raw_url,
-                                    'is_relative'  => (
-                                        '#text' !== $token_type &&
-                                        ! WPURL::can_parse($raw_url)
-                                    ),
-                                )
-                            );
-                            break;
-                        }
-                    }
-
-                    $cache_value = false;
-                    if ($converted !== false) {
-                        $cache_value = [
-                            'raw_url'    => (string) $converted,
-                            'parsed_url' => $converted->new_url,
-                        ];
-                        $p->set_url($cache_value['raw_url'], $cache_value['parsed_url']);
-                    }
-                    $this->set_cached_rewrite_result($cache_key, $cache_value);
+                    $p->set_url($rewrite_result['raw_url'], $rewrite_result['parsed_url']);
                 }
 
                 return $p->get_updated_html();
@@ -648,6 +630,158 @@ class StructuredDataUrlRewriter
                 _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );
                 return '';
         }
+    }
+
+    /**
+     * Rewrite block-comment string attributes without rebuilding their JSON.
+     *
+     * Direct string attributes retain the URL processor's existing scope.
+     * Complete PHP serializations remain eligible at any nesting depth.
+     */
+    private function rewrite_block_comment_json_values(string $content): string
+    {
+        $content_length = strlen($content);
+        $search_position = 0;
+        $last_replacement_end = 0;
+        $output = '';
+        $changed = false;
+
+        while ($search_position < $content_length) {
+            $comment_start = strpos($content, '<!--', $search_position);
+            if ($comment_start === false) {
+                break;
+            }
+
+            $comment_end = strpos($content, '-->', $comment_start + 4);
+            if ($comment_end === false) {
+                break;
+            }
+            $search_position = $comment_end + 3;
+
+            $position = $comment_start + 4;
+            while ($position < $comment_end && strpos(" \t\f\r\n", $content[$position]) !== false) {
+                ++$position;
+            }
+            if (
+                $position >= $comment_end
+                || $content[$position] === '/'
+                || substr($content, $position, 3) !== 'wp:'
+            ) {
+                continue;
+            }
+
+            $block_name_start = $position;
+            $position += 3;
+            $block_name_length = strspn(
+                $content,
+                'abcdefghijklmnopqrstuwxvyzABCDEFGHIJKLMNOPRQSTUWXVYZ0123456789_-',
+                $position,
+                $comment_end - $position
+            );
+            if ($block_name_length === 0) {
+                continue;
+            }
+            $position += $block_name_length;
+            $block_name = substr(
+                $content,
+                $block_name_start,
+                $position - $block_name_start
+            );
+
+            while ($position < $comment_end && strpos(" \t\f\r\n", $content[$position]) !== false) {
+                ++$position;
+            }
+            if (
+                $position >= $comment_end
+                || ( $content[$position] !== '{' && $content[$position] !== '[' )
+            ) {
+                continue;
+            }
+
+            $json_start = $position;
+            $json_end = $comment_end;
+            if ($content[$json_end - 1] === '/') {
+                --$json_end;
+            }
+            $json = substr($content, $json_start, $json_end - $json_start);
+            $iterator = new JsonStringIterator($json, true);
+            if ($iterator->is_malformed()) {
+                continue;
+            }
+
+            while ($iterator->next_value()) {
+                $attribute_value = $iterator->get_value();
+                if ($this->could_be_php_serialization_with_strings($attribute_value)) {
+                    $rewritten_attribute_value = $this->rewrite_php_serialization(
+                        $attribute_value,
+                        self::BLOCK_MARKUP
+                    );
+                    if ($rewritten_attribute_value !== null) {
+                        if ($rewritten_attribute_value !== $attribute_value) {
+                            $iterator->set_value($rewritten_attribute_value);
+                        }
+                        continue;
+                    }
+                }
+
+                $attribute_key = $iterator->get_current_object_key();
+                if ($iterator->get_current_nesting_depth() !== 1) {
+                    continue;
+                }
+
+                $accepts_relative_url = (
+                    $attribute_key !== null
+                    && isset(BlockMarkupUrlProcessor::BLOCK_ATTRIBUTES_TO_ACCEPT_RELATIVE_URLS_FROM[$block_name])
+                    && in_array(
+                        $attribute_key,
+                        BlockMarkupUrlProcessor::BLOCK_ATTRIBUTES_TO_ACCEPT_RELATIVE_URLS_FROM[$block_name],
+                        true
+                    )
+                );
+                $accepts_relative_url = apply_filters(
+                    'url_processor_is_relative_url_block_attribute', // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Uses the toolkit's public extension point.
+                    $accepts_relative_url,
+                    [
+                        'block_name' => $block_name,
+                        'attribute_name' => $attribute_key,
+                    ]
+                );
+
+                $parsed_url = $accepts_relative_url
+                    ? WPURL::parse($attribute_value, $this->base_url)
+                    : WPURL::parse($attribute_value);
+                if ($parsed_url === false) {
+                    continue;
+                }
+
+                $rewrite_result = $this->rewrite_parsed_url(
+                    $parsed_url,
+                    $attribute_value,
+                    '#block-comment'
+                );
+                if ($rewrite_result !== false) {
+                    $iterator->set_value($rewrite_result['raw_url']);
+                }
+            }
+
+            $rewritten_json = $iterator->get_result();
+            if ($rewritten_json === $json) {
+                continue;
+            }
+
+            $output .= substr(
+                $content,
+                $last_replacement_end,
+                $json_start - $last_replacement_end
+            );
+            $output .= $rewritten_json;
+            $last_replacement_end = $json_end;
+            $changed = true;
+        }
+
+        return $changed
+            ? $output . substr($content, $last_replacement_end)
+            : $content;
     }
 
     /**

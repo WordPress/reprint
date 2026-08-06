@@ -367,6 +367,26 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $result);
     }
 
+    public function testKnownBlockMarkupRewritesUrlInRootArrayAttributes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:example ["https://old-site.com/article"] -->';
+        $expected = '<!-- wp:example ["https:\/\/new-site.com\/article"] -->';
+
+        $this->assertSame($expected, $rewriter->rewrite_known_block_markup_value($input));
+    }
+
+    public function testKnownBlockMarkupUrlStartingLikeSerializationStillUsesUrlProcessor(): void
+    {
+        $rewriter = $this->createRewriter([
+            'sftp://old-site.com' => 'sftp://new-site.com',
+        ]);
+        $input = '<!-- wp:example {"url":"sftp://old-site.com/article"} -->';
+        $expected = '<!-- wp:example {"url":"sftp:\/\/new-site.com\/article"} -->';
+
+        $this->assertSame($expected, $rewriter->rewrite_known_block_markup_value($input));
+    }
+
     public function testKnownBlockMarkupDoesNotRewriteEmbeddedQueryUrl(): void
     {
         $rewriter = $this->createRewriter();
