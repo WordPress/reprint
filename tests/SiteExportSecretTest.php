@@ -166,6 +166,12 @@ if (!function_exists('home_url')) {
     }
 }
 
+if (!function_exists('plugin_dir_url')) {
+    function plugin_dir_url(string $file): string {
+        return $file === '' ? '' : 'https://example.test/wp-content/plugins/reprint-exporter/';
+    }
+}
+
 if (!function_exists('wp_nonce_field')) {
     function wp_nonce_field(string $action): void {
         echo '<input type="hidden" name="_wpnonce" value="' . esc_attr($action) . '" />';
@@ -202,6 +208,14 @@ final class SiteExportSecretTest extends TestCase
     /** @var string|false */
     private $original_push_enabled_environment;
 
+    private string $standalone_push_root;
+
+    private string $standalone_docroot;
+
+    private string $standalone_reprint_directory;
+
+    private string $standalone_push_configuration_path;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -225,6 +239,21 @@ final class SiteExportSecretTest extends TestCase
         $_POST = [];
         putenv('SITE_EXPORT_PUSH_ENABLED');
 
+        $this->standalone_push_root = sys_get_temp_dir()
+            . '/site-export-standalone-push-test-'
+            . bin2hex(random_bytes(6));
+        $docroot = $this->standalone_push_root . '/site';
+        mkdir($docroot, 0700, true);
+        $_SERVER['DOCUMENT_ROOT'] = $docroot;
+        $canonical_docroot = realpath($docroot);
+        $this->assertIsString($canonical_docroot);
+        $this->standalone_docroot = $canonical_docroot;
+        $this->standalone_reprint_directory = dirname($canonical_docroot)
+            . '/.reprint-'
+            . substr(hash('sha256', $canonical_docroot), 0, 12);
+        $this->standalone_push_configuration_path = $this->standalone_reprint_directory
+            . '/.reprint/push-config.json';
+
         if (file_exists(SITE_EXPORT_SECRET_FILE)) {
             unlink(SITE_EXPORT_SECRET_FILE);
         }
@@ -238,6 +267,9 @@ final class SiteExportSecretTest extends TestCase
 
         if (is_dir(SITE_EXPORT_PLUGIN_DIR)) {
             rmdir(SITE_EXPORT_PLUGIN_DIR);
+        }
+        if (isset($this->standalone_push_root)) {
+            $this->removeTree($this->standalone_push_root);
         }
 
         $_SERVER = $this->original_server;
@@ -416,6 +448,45 @@ final class SiteExportSecretTest extends TestCase
         $this->assertTrue(_site_export_is_push_authorized());
     }
 
+    public function testPushAccessWritesPrivateStandaloneConfiguration(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+
+        $this->assertTrue(_site_export_update_push_authorization(true));
+
+        $this->assertFileExists($this->standalone_push_configuration_path);
+        $this->assertSame(0600, fileperms($this->standalone_push_configuration_path) & 0777);
+        $this->assertSame(
+            [
+                'connection_secret_b64' => base64_encode('current-token'),
+                'push_authorization_error' => null,
+                'docroot_b64' => base64_encode($this->standalone_docroot),
+                'reprint_directory_b64' => base64_encode($this->standalone_reprint_directory),
+                'excluded_paths_b64' => [],
+            ],
+            $this->readStandalonePushConfiguration()
+        );
+    }
+
+    public function testRevokingPushAccessKeepsOnlyDurableCommitRecovery(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $this->assertTrue(_site_export_update_push_authorization(true));
+
+        $this->assertTrue(_site_export_update_push_authorization(false));
+
+        $this->assertSame(
+            [
+                'connection_secret_b64' => base64_encode('current-token'),
+                'push_authorization_error' => 'Push access is disabled for the current connection token.',
+                'docroot_b64' => base64_encode($this->standalone_docroot),
+                'reprint_directory_b64' => base64_encode($this->standalone_reprint_directory),
+                'excluded_paths_b64' => [],
+            ],
+            $this->readStandalonePushConfiguration()
+        );
+    }
+
     public function testDownloadOnlyAdminCopyAndPushAccessForm(): void
     {
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
@@ -439,6 +510,11 @@ final class SiteExportSecretTest extends TestCase
 
         $this->assertStringContainsString('<strong>Connected for downloads and push.</strong>', $html);
         $this->assertStringContainsString('name="site_export_push_enabled" value="1" checked', $html);
+        $this->assertStringContainsString('<h2>Push endpoint</h2>', $html);
+        $this->assertStringContainsString(
+            'https://example.test/wp-content/plugins/reprint-exporter/push.php',
+            $html
+        );
     }
 
     public function testManagedAdminCopyIsReadOnlyAndShowsEffectiveState(): void
@@ -458,5 +534,35 @@ final class SiteExportSecretTest extends TestCase
         ob_start();
         Site_Export_Plugin::get_instance()->render_admin_page();
         return (string) ob_get_clean();
+    }
+
+    /** @return array<string,mixed> */
+    private function readStandalonePushConfiguration(): array
+    {
+        $configuration = json_decode(
+            (string) file_get_contents($this->standalone_push_configuration_path),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertIsArray($configuration);
+        return $configuration;
+    }
+
+    private function removeTree(string $path): void
+    {
+        if (!file_exists($path) && !is_link($path)) {
+            return;
+        }
+        if (!is_dir($path) || is_link($path)) {
+            unlink($path);
+            return;
+        }
+        foreach (scandir($path) ?: [] as $entry) {
+            if ($entry !== '.' && $entry !== '..') {
+                $this->removeTree($path . '/' . $entry);
+            }
+        }
+        rmdir($path);
     }
 }

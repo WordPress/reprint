@@ -1,13 +1,16 @@
 <?php
 
-// This fixture supplies the WordPress functions and values the production
-// plugin entry point reads. API routing, authentication, and dispatch all run
-// through index.php and its site_export_api_options filter.
+// This fixture serves the production standalone push route directly. Other
+// requests receive the WordPress functions and values read by index.php and
+// its site_export_api_options filter.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound
 
 $reprint_push_test_request_log = (string) getenv('REPRINT_PUSH_TEST_REQUEST_LOG');
 $reprint_push_test_endpoint = filter_input(INPUT_GET, 'endpoint', FILTER_UNSAFE_RAW);
+// phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- The router needs the raw path to select the production route under test.
+$reprint_push_test_request_path = parse_url( (string) ( $_SERVER['REQUEST_URI'] ?? '' ), PHP_URL_PATH );
+$reprint_push_test_is_standalone_push_request = $reprint_push_test_request_path === '/reprint-exporter-wp/push.php';
 if ($reprint_push_test_request_log !== '' && is_string($reprint_push_test_endpoint)) {
     register_shutdown_function(
         static function () use ($reprint_push_test_request_log, $reprint_push_test_endpoint): void {
@@ -50,12 +53,35 @@ if (!is_array($reprint_push_test_docroot_configuration)) {
     $reprint_push_test_docroot_configuration = [];
 }
 
-define('ABSPATH', rtrim( (string) getenv('REPRINT_PUSH_TEST_ABSPATH'), '/\\') . '/');
 if (is_string($reprint_push_test_docroot_configuration['document_root'] ?? null)) {
     $_SERVER['DOCUMENT_ROOT'] = $reprint_push_test_docroot_configuration['document_root'];
 } else {
     unset($_SERVER['DOCUMENT_ROOT']);
 }
+
+// phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- DOCUMENT_ROOT is trusted test server configuration and must retain exact filesystem bytes.
+$reprint_push_test_document_root = $_SERVER['DOCUMENT_ROOT'] ?? null;
+$reprint_push_test_defunct_plugin_path = is_string($reprint_push_test_document_root)
+    ? rtrim($reprint_push_test_document_root, '/\\') . '/wp-content/plugins/defunct/defunct.php'
+    : '';
+if (!$reprint_push_test_is_standalone_push_request && is_file($reprint_push_test_defunct_plugin_path)) {
+    try {
+        require $reprint_push_test_defunct_plugin_path;
+    } catch (Throwable $throwable) {
+        http_response_code(500);
+        header('Content-Type: text/plain');
+        echo 'WordPress could not boot after loading the pushed plugin.';
+        return;
+    }
+}
+if ($reprint_push_test_is_standalone_push_request) {
+    $_SERVER['SCRIPT_FILENAME'] = rtrim( (string) $reprint_push_test_document_root, '/\\')
+        . '/reprint-exporter-wp/push.php';
+    require dirname(__DIR__, 2) . '/reprint-exporter-wp/push.php';
+    return;
+}
+
+define('ABSPATH', rtrim( (string) getenv('REPRINT_PUSH_TEST_ABSPATH'), '/\\') . '/');
 if (is_string($reprint_push_test_docroot_configuration['wp_plugin_dir'] ?? null)) {
     define('WP_PLUGIN_DIR', $reprint_push_test_docroot_configuration['wp_plugin_dir']);
 }

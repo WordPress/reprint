@@ -147,6 +147,39 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
     }
 
+    public function testStandalonePushRouteUsesTheConfiguredAuthenticationAndAuthorization(): void
+    {
+        $standalone_push_url = $this->enableStandalonePushRoute();
+        $push_session_id = str_repeat('a', 32);
+
+        $authentication = $this->requestPushEndpoint(
+            'not-the-server-secret',
+            'POST',
+            'push_create',
+            $push_session_id,
+            null,
+            null,
+            $standalone_push_url
+        );
+        $this->assertSame(403, $authentication['http_code']);
+        $this->assertSame('auth_failed', $authentication['response']['reason']);
+
+        $this->writeStandalonePushConfiguration(
+            'Push access is disabled for the current connection token.'
+        );
+        $authorization = $this->requestPushEndpoint(
+            self::SECRET,
+            'POST',
+            'push_create',
+            $push_session_id,
+            null,
+            null,
+            $standalone_push_url
+        );
+        $this->assertSame(403, $authorization['http_code']);
+        $this->assertSame('push_disabled', $authorization['response']['reason']);
+    }
+
     public function testAuthorizedFuturePushEndpointUsesPushErrorContract(): void
     {
         $response = $this->requestPushEndpoint(
@@ -2511,7 +2544,7 @@ final class PushEndpointsTest extends TestCase {
             'filesystem_root' => $local_docroot,
             'push_root' => '/',
             'push_state_directory' => $push_state_directory,
-            'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
+            'push_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
@@ -2848,6 +2881,76 @@ final class PushEndpointsTest extends TestCase {
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
     }
 
+    public function testFilesPushCliRepairsAPluginWhichPreventsWordPressFromStarting(): void
+    {
+        $wordpress_reprint_api_url = $this->remote_reprint_api_url;
+        $standalone_push_url = $this->enableStandalonePushRoute();
+        $local_docroot = $this->root . '/cli-broken-wordpress-local-docroot';
+        $state_directory = $this->root . '/cli-broken-wordpress-state';
+        $plugin_directory = $local_docroot . '/wp-content/plugins/defunct';
+        mkdir($plugin_directory, 0700, true);
+        mkdir($local_docroot . '/preserved', 0700, true);
+        file_put_contents($local_docroot . '/preserved/value.txt', 'must not replace');
+        file_put_contents(
+            $plugin_directory . '/defunct.php',
+            "<?php\nthrow new RuntimeException('The pushed plugin broke WordPress boot.');\n"
+        );
+
+        $break_site = $this->runFilesPushCli(
+            $local_docroot,
+            $state_directory,
+            [],
+            '/',
+            $standalone_push_url
+        );
+
+        $this->assertSame(0, $break_site['exit'], $break_site['output']);
+        $this->assertSame('complete', $this->lastCliJsonLine($break_site['stdout'])['status'] ?? null);
+        $this->assertFileExists($this->docroot . '/wp-content/plugins/defunct/defunct.php');
+        $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
+
+        $handle = curl_init($wordpress_reprint_api_url);
+        curl_setopt($handle, CURLOPT_RETURNTRANSFER, true);
+        $body = curl_exec($handle);
+        $this->assertIsString($body);
+        $this->assertSame(500, curl_getinfo($handle, CURLINFO_HTTP_CODE));
+        curl_close($handle);
+        $this->assertStringContainsString('WordPress could not boot', $body);
+
+        $push_create_requests = $this->countEndpointRequests('push_create');
+        file_put_contents(
+            $plugin_directory . '/defunct.php',
+            "<?php\n// WordPress can start again.\n"
+        );
+
+        $repair_site = $this->runFilesPushCli(
+            $local_docroot,
+            $state_directory,
+            [],
+            '/',
+            $standalone_push_url
+        );
+
+        $this->assertSame(0, $repair_site['exit'], $repair_site['output']);
+        $this->assertSame('complete', $this->lastCliJsonLine($repair_site['stdout'])['status'] ?? null);
+        $this->assertSame(
+            "<?php\n// WordPress can start again.\n",
+            file_get_contents($this->docroot . '/wp-content/plugins/defunct/defunct.php')
+        );
+        $this->assertSame($push_create_requests + 1, $this->countEndpointRequests('push_create'));
+        $this->assertFileExists(
+            $state_directory
+                . '/remotes/'
+                . md5(rtrim($wordpress_reprint_api_url, '?&'))
+                . '/local_index.jsonl'
+        );
+        $this->assertDirectoryDoesNotExist(
+            $state_directory
+                . '/remotes/'
+                . md5(rtrim($standalone_push_url, '?&'))
+        );
+    }
+
     public function testFilesPushCliStopsAtTheCallerDeadlineAndAnotherProcessCompletes(): void
     {
         $local_docroot = $this->root . '/cli-partial-local-docroot';
@@ -3081,19 +3184,23 @@ final class PushEndpointsTest extends TestCase {
      * Runs the production CLI against the production endpoint router.
      *
      * @param array<string,string> $ini_settings PHP ini values for the subprocess.
+     * @param string $push_root Remote absolute push root written to preflight state.
+     * @param string|null $push_url Separate URL receiving push requests.
      * @return array{exit:int,stdout:string,stderr:string,output:string}
      */
     private function runFilesPushCli(
         string $filesystem_root,
         string $state_directory,
         array $ini_settings = [],
-        string $push_root = '/'
+        string $push_root = '/',
+        ?string $push_url = null
     ): array {
         [$process, $pipes] = $this->startFilesPushCli(
             $filesystem_root,
             $state_directory,
             $ini_settings,
-            $push_root
+            $push_root,
+            $push_url
         );
         return $this->finishFilesPushCli($process, $pipes);
     }
@@ -3102,13 +3209,16 @@ final class PushEndpointsTest extends TestCase {
      * Starts a production files-push CLI subprocess.
      *
      * @param array<string,string> $ini_settings PHP ini values for the subprocess.
+     * @param string $push_root Remote absolute push root written to preflight state.
+     * @param string|null $push_url Separate URL receiving push requests.
      * @return array{0:resource,1:array<int,resource>}
      */
     private function startFilesPushCli(
         string $filesystem_root,
         string $state_directory,
         array $ini_settings = [],
-        string $push_root = '/'
+        string $push_root = '/',
+        ?string $push_url = null
     ): array {
         $this->writeFilesPushPreflight($state_directory, $push_root);
 
@@ -3126,6 +3236,9 @@ final class PushEndpointsTest extends TestCase {
             '--secret=' . self::SECRET,
             '--force-http',
         ]);
+        if ($push_url !== null) {
+            $command[] = '--push-url=' . $push_url;
+        }
         $process = proc_open(
             $command,
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
@@ -3231,7 +3344,7 @@ final class PushEndpointsTest extends TestCase {
             'filesystem_root' => $filesystem_root,
             'push_root' => '/',
             'push_state_directory' => $push_state_directory,
-            'remote_reprint_api_url' => $this->remote_reprint_api_url,
+            'push_url' => $this->remote_reprint_api_url,
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 4 * 1024 * 1024,
@@ -3467,6 +3580,51 @@ final class PushEndpointsTest extends TestCase {
         $this->fail('Push endpoint test server did not start: ' . $server_log);
     }
 
+    /** Installs and authorizes the bundled route without loading WordPress. */
+    private function enableStandalonePushRoute(): string
+    {
+        $canonical_docroot = realpath($this->docroot);
+        $canonical_plugin_directory = realpath(__DIR__ . '/../reprint-exporter-wp');
+        $this->assertIsString($canonical_docroot);
+        $this->assertIsString($canonical_plugin_directory);
+        symlink($canonical_plugin_directory, $canonical_docroot . '/reprint-exporter-wp');
+
+        $this->writeStandalonePushConfiguration(null);
+
+        $url = parse_url($this->remote_reprint_api_url);
+        $this->assertIsArray($url);
+        return (string) $url['scheme']
+            . '://'
+            . (string) $url['host']
+            . ( isset($url['port']) ? ':' . $url['port'] : '' )
+            . '/reprint-exporter-wp/push.php';
+    }
+
+    /** Writes the private configuration read by the production push route. */
+    private function writeStandalonePushConfiguration(?string $push_authorization_error): void
+    {
+        $canonical_docroot = realpath($this->docroot);
+        $this->assertIsString($canonical_docroot);
+
+        $reprint_directory = dirname($canonical_docroot)
+            . '/.reprint-'
+            . substr(hash('sha256', $canonical_docroot), 0, 12);
+        $configuration_directory = $reprint_directory . '/.reprint';
+        if (!is_dir($configuration_directory)) {
+            mkdir($configuration_directory, 0700, true);
+        }
+        $configuration_path = $configuration_directory . '/push-config.json';
+        $configuration = json_encode([
+            'connection_secret_b64' => base64_encode(self::SECRET),
+            'push_authorization_error' => $push_authorization_error,
+            'docroot_b64' => base64_encode($canonical_docroot),
+            'reprint_directory_b64' => base64_encode($reprint_directory),
+            'excluded_paths_b64' => [base64_encode('preserved')],
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        file_put_contents($configuration_path, $configuration . "\n");
+        chmod($configuration_path, 0600);
+    }
+
     /**
      * Builds the production sender options used at each lifecycle boundary.
      *
@@ -3485,7 +3643,7 @@ final class PushEndpointsTest extends TestCase {
             'filesystem_root' => $filesystem_root,
             'push_root' => '/',
             'push_state_directory' => $push_state_directory,
-            'remote_reprint_api_url' => $this->remote_reprint_api_url,
+            'push_url' => $this->remote_reprint_api_url,
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 64,
@@ -3767,10 +3925,10 @@ final class PushEndpointsTest extends TestCase {
         proc_close($process);
     }
 
-    private function newClient(string $secret, ?string $remote_reprint_api_url = null): MultipartPushStreamClient
+    private function newClient(string $secret, ?string $push_url = null): MultipartPushStreamClient
     {
         return new MultipartPushStreamClient([
-            'remote_reprint_api_url' => $remote_reprint_api_url ?? $this->remote_reprint_api_url,
+            'push_url' => $push_url ?? $this->remote_reprint_api_url,
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client($secret),
             'chunk_bytes' => 4,
@@ -3868,6 +4026,7 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
+     * @param string|null $push_url URL receiving the request, or the test WordPress route by default.
      * @return array{http_code:int,body:string,response:array<string,mixed>}
      */
     private function requestPushEndpoint(
@@ -3876,10 +4035,13 @@ final class PushEndpointsTest extends TestCase {
         string $endpoint,
         string $push_session_id,
         ?string $body = null,
-        ?string $content_type = null
+        ?string $content_type = null,
+        ?string $push_url = null
     ): array {
-        $url = $this->remote_reprint_api_url
-            . '&endpoint=' . rawurlencode($endpoint)
+        $push_url = $push_url ?? $this->remote_reprint_api_url;
+        $url = $push_url
+            . ( strpos($push_url, '?') === false ? '?' : '&' )
+            . 'endpoint=' . rawurlencode($endpoint)
             . '&push_session_id=' . rawurlencode($push_session_id);
         $curl_headers = [];
         if ($content_type !== null) {

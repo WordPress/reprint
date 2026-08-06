@@ -179,6 +179,214 @@ function _site_export_update_shared_secret(string $secret): bool {
     return (bool) update_option(SITE_EXPORT_SECRET_OPTION, $secret, false);
 }
 
+/** Copies push authentication, authorization, and path policy outside WordPress. */
+function _site_export_sync_standalone_push_configuration(): bool {
+    $configuration_path = _site_export_get_standalone_push_configuration_path();
+    if ($configuration_path === null) {
+        return false;
+    }
+
+    $connection_secret = _site_export_get_shared_secret();
+    clearstatcache(true, $configuration_path);
+    $configuration_exists = file_exists($configuration_path) || is_link($configuration_path);
+    if ($connection_secret === null) {
+        return !$configuration_exists || @unlink($configuration_path);
+    }
+
+    $push_authorization_error = _site_export_get_push_authorization_error();
+    if ($push_authorization_error !== null && !$configuration_exists) {
+        // A download-only connection needs no second copy of its token. Once
+        // push has been enabled, retain the token so an interrupted commit can
+        // still authenticate after push access is revoked.
+        return true;
+    }
+
+    return _site_export_write_standalone_push_configuration(
+        $connection_secret,
+        $push_authorization_error
+    );
+}
+
+/** Returns the private configuration read by the standalone push route. */
+function _site_export_get_standalone_push_configuration_path(): ?string {
+    // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- DOCUMENT_ROOT is trusted server configuration and must retain exact filesystem bytes.
+    $configured_docroot = $_SERVER['DOCUMENT_ROOT'] ?? null;
+    if (!is_string($configured_docroot) || $configured_docroot === '') {
+        return null;
+    }
+
+    $docroot = realpath($configured_docroot);
+    if ($docroot === false || !is_dir($docroot)) {
+        return null;
+    }
+    $docroot = $docroot === '/' ? '/' : rtrim($docroot, '/\\');
+    $reprint_directory = dirname($docroot)
+        . '/.reprint-'
+        . substr(hash('sha256', $docroot), 0, 12);
+
+    return $reprint_directory . '/.reprint/push-config.json';
+}
+
+/** Atomically writes the private configuration read without WordPress. */
+function _site_export_write_standalone_push_configuration(
+    string $connection_secret,
+    ?string $push_authorization_error
+): bool {
+    if ($connection_secret === '') {
+        return false;
+    }
+    $configuration_path = _site_export_get_standalone_push_configuration_path();
+    if ($configuration_path === null) {
+        return false;
+    }
+    $push_server_configuration = _site_export_get_standalone_push_server_configuration();
+    if ($push_server_configuration === null) {
+        // A stale default-authentication file must not remain usable after the
+        // site switches to policy which cannot run without WordPress.
+        clearstatcache(true, $configuration_path);
+        if (file_exists($configuration_path) || is_link($configuration_path)) {
+            @unlink($configuration_path);
+        }
+        return false;
+    }
+    $configuration_directory = dirname($configuration_path);
+    if (
+        !is_dir($configuration_directory)
+        && !@mkdir($configuration_directory, 0700, true)
+        && !is_dir($configuration_directory)
+    ) {
+        return false;
+    }
+
+    $configuration = [
+        'connection_secret_b64' => base64_encode($connection_secret),
+        'push_authorization_error' => $push_authorization_error,
+        'docroot_b64' => base64_encode($push_server_configuration['docroot']),
+        'reprint_directory_b64' => base64_encode($push_server_configuration['reprint_directory']),
+        'excluded_paths_b64' => array_map('base64_encode', $push_server_configuration['excluded_paths']),
+    ];
+    foreach (['maximum_part_bytes', 'maximum_commit_entries'] as $option_name) {
+        if (array_key_exists($option_name, $push_server_configuration)) {
+            $configuration[$option_name] = $push_server_configuration[$option_name];
+        }
+    }
+    $contents = json_encode($configuration, JSON_UNESCAPED_SLASHES);
+    if ($contents === false) {
+        return false;
+    }
+    $contents .= "\n";
+    if (
+        is_file($configuration_path)
+        && !is_link($configuration_path)
+        && file_get_contents($configuration_path) === $contents
+    ) {
+        return true;
+    }
+
+    try {
+        $temporary_path = $configuration_path . '.' . bin2hex(random_bytes(8)) . '.tmp';
+    } catch (Throwable $throwable) {
+        return false;
+    }
+    $temporary_handle = @fopen($temporary_path, 'x+b');
+    if ($temporary_handle === false) {
+        return false;
+    }
+    $written_bytes = 0;
+    $temporary_file_complete = false;
+    try {
+        if (!@chmod($temporary_path, 0600)) {
+            return false;
+        }
+        $contents_bytes = strlen($contents);
+        while ($written_bytes < $contents_bytes) {
+            $written = fwrite($temporary_handle, substr($contents, $written_bytes));
+            if ($written === false || $written === 0) {
+                return false;
+            }
+            $written_bytes += $written;
+        }
+        if (!fflush($temporary_handle)) {
+            return false;
+        }
+        $temporary_file_complete = true;
+    } finally {
+        fclose($temporary_handle);
+        if (!$temporary_file_complete) {
+            @unlink($temporary_path);
+        }
+    }
+    if (!@rename($temporary_path, $configuration_path)) {
+        @unlink($temporary_path);
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * Returns the trusted path policy persisted for requests which skip WordPress.
+ *
+ * @return array|null {
+ *     Standalone push-server options, or null when they cannot be persisted.
+ *
+ *     @type string   $docroot                  Resolved document root changed by push.
+ *     @type string   $reprint_directory        Private push storage directory.
+ *     @type string[] $excluded_paths           Document-root-relative paths push must preserve.
+ *     @type int      $maximum_part_bytes       Optional maximum upload-part bytes.
+ *     @type int      $maximum_commit_entries   Optional maximum entries processed by one commit request.
+ * }
+ */
+function _site_export_get_standalone_push_server_configuration(): ?array {
+    $options = [];
+    if (function_exists('apply_filters')) {
+        $options = apply_filters('site_export_api_options', []);
+    }
+    if (!is_array($options) || ( $options['authenticate'] ?? null ) !== null) {
+        return null;
+    }
+
+    if (array_key_exists('docroot', $options)) {
+        $configured_docroot = $options['docroot'];
+    } else {
+        // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- DOCUMENT_ROOT is trusted server configuration and must retain exact filesystem bytes.
+        $configured_docroot = $_SERVER['DOCUMENT_ROOT'] ?? null;
+    }
+    if (!is_string($configured_docroot) || $configured_docroot === '') {
+        return null;
+    }
+    $docroot = realpath($configured_docroot);
+    if ($docroot === false || !is_dir($docroot)) {
+        return null;
+    }
+    $docroot = $docroot === '/' ? '/' : rtrim($docroot, '/\\');
+
+    $reprint_directory = $options['reprint_directory'] ?? (
+        dirname($docroot) . '/.reprint-' . substr(hash('sha256', $docroot), 0, 12)
+    );
+    $excluded_paths = $options['excluded_paths'] ?? [];
+    if (!is_string($reprint_directory) || $reprint_directory === '' || !is_array($excluded_paths)) {
+        return null;
+    }
+    foreach ($excluded_paths as $excluded_path) {
+        if (!is_string($excluded_path)) {
+            return null;
+        }
+    }
+
+    $configuration = [
+        'docroot' => $docroot,
+        'reprint_directory' => $reprint_directory,
+        'excluded_paths' => array_values($excluded_paths),
+    ];
+    foreach (['maximum_part_bytes', 'maximum_commit_entries'] as $option_name) {
+        if (array_key_exists($option_name, $options)) {
+            $configuration[$option_name] = $options[$option_name];
+        }
+    }
+    return $configuration;
+}
+
 /**
  * Returns the hosting provider's push policy, or null when the site controls it.
  *
@@ -241,15 +449,40 @@ function _site_export_update_push_authorization(bool $enabled): bool {
         return false;
     }
 
-    $fingerprint = '';
-    if ($enabled) {
-        $fingerprint = hash('sha256', $secret);
+    $fingerprint = $enabled ? hash('sha256', $secret) : '';
+    $previous_fingerprint = function_exists('get_option')
+        ? get_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, '')
+        : '';
+    if ($previous_fingerprint === $fingerprint) {
+        return _site_export_sync_standalone_push_configuration();
     }
-    if (function_exists('get_option') && get_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, '') === $fingerprint) {
+
+    if (!$enabled) {
+        $configuration_updated = $secret === null
+            ? _site_export_sync_standalone_push_configuration()
+            : _site_export_write_standalone_push_configuration(
+                $secret,
+                'Push access is disabled for the current connection token.'
+            );
+        if (!$configuration_updated) {
+            return false;
+        }
+    }
+
+    if (! (bool) update_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, $fingerprint, false)) {
+        _site_export_sync_standalone_push_configuration();
+        return false;
+    }
+    if (_site_export_sync_standalone_push_configuration()) {
         return true;
     }
 
-    return (bool) update_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, $fingerprint, false);
+    // The standalone route is the recovery path. Do not leave its grant and
+    // WordPress's authorization record disagreeing when its file cannot be
+    // updated.
+    update_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, $previous_fingerprint, false);
+    _site_export_sync_standalone_push_configuration();
+    return false;
 }
 
 /**

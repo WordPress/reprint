@@ -274,8 +274,9 @@ resets, empty responses, and malformed responses end the current sender run
 without changing request sizing. A later push command reconciles the receiver
 cursor before continuing.
 
-The WordPress plugin passes the platform-supplied `docroot` to push endpoints,
-defaulting to the web server's `DOCUMENT_ROOT`. A platform supplies the complete
+The WordPress plugin copies the platform-supplied `docroot` and the rest of the
+push path policy into private standalone-route configuration, defaulting
+`docroot` to the web server's `DOCUMENT_ROOT`. A platform supplies the complete
 trusted API-options array through the early `site_export_api_options` filter; a
 direct embedder passes the same array to `_site_export_handle_api_request()`.
 The document-root path must resolve to an existing directory. `ABSPATH` remains
@@ -435,9 +436,13 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 ## Low-level files-push command
 
 `reprint files-push <remote-reprint-api-url>` is the production CLI caller for one
-`PushFilesSender`. It sends only the resolved filesystem root named by `--fs-root`.
-It requires `--state-dir`, `--fs-root`, `--secret`, and saved preflight
-data for the remote document root; HTTPS is required unless the operator passes
+`PushFilesSender`. The positional URL selects the shared remote state directory;
+`--push-url` may send push requests to a separate route without changing that
+state. It defaults to the positional URL. The sender records the push URL in
+`sender.json` and rejects a different URL while that push is active. Files-push
+sends only the resolved filesystem root named by `--fs-root`. It requires
+`--state-dir`, `--fs-root`, `--secret`, and saved preflight data for the
+remote document root; HTTPS is required unless the operator passes
 `--force-http`. It reads but never writes
 `<remote-state-directory>/pull/state.json`. It does not run preflight itself,
 show a plan, ask for confirmation, transfer a database, retry a failed request,
@@ -454,7 +459,7 @@ md5(rtrim(<remote-reprint-api-url>, "?&"))
 A different remote query therefore selects a different retained local index. A
 different filesystem root requires a different state directory and does not
 participate in the directory name. Fragments, URL user-info, and `SECRET_KEY`
-target parameters are rejected. The local push state directory must be outside
+parameters are rejected in either URL. The local push state directory must be outside
 the filesystem root so planning cannot index its own changing files.
 
 One process starts or resumes exactly one sender. Before every `next_step()` it
@@ -537,9 +542,10 @@ Order:
 1. **Receive work, outside maintenance:** multipart requests write one bounded
    chunk at a time into `work/inflight.data` and move complete values into
    `work/files`. The site runs normally throughout receipt.
-2. **Maintenance on.** Commit writes the `.maintenance` file itself, and since
-   WordPress executes that file, ours whitelists reprint API requests
-   (`$upgrading = 0` for us, `time()` for everyone else). WordPress's own
+2. **Maintenance on.** Commit writes the `.maintenance` file itself. The
+   standalone push route does not load WordPress, and the WordPress route is
+   whitelisted by the marker (`$upgrading = 0` for it, `time()` for everyone
+   else). WordPress's own
    rule that a `.maintenance` file older than 10 minutes is ignored stays
    intact, so an interrupted commit can never leave the site down for good.
 3. **Commit:** consume `work/deletes`, then `work/files`, with the durable
@@ -557,16 +563,26 @@ file after 10 minutes on its own, and the next commit request resumes from
 excluded from installs and deletes and reported as excluded in the summary.
 Updating reprint itself is a separate concern, never part of a sync.
 
-## Escape hatch: commit without booting WordPress
+## Push without booting WordPress
 
-Normally the endpoint runs through the WordPress boot because it is
-convenient. But a commit step can break that boot — a fatal in a partially
-committed plugin — so the same endpoint is also reachable as a standalone PHP file that
-never loads WordPress: it reads database credentials from `wp-config.php`
-directly and operates on the filesystem and database with reprint's own code.
-The driver falls back to it automatically when the normal route stops
-answering sensibly. This is what makes commit failures recoverable from the
-outside instead of requiring SSH.
+The WordPress plugin exposes `push.php` as the files-push URL. It authenticates
+and dispatches every push operation without loading WordPress, so a pushed
+plugin which breaks WordPress startup cannot block the next files-push.
+
+While WordPress is healthy, the plugin writes the current connection token,
+authorization state, document root, reprint directory, exclusions, and limits
+to the mode-0600 private `push-config.json`. The route adds its own installed
+directory to the exclusions. Disabling push blocks every operation except
+continuing `push_commit` after its durable checkpoint; the retained token lets
+that recovery request use the same authentication contract as before
+revocation.
+
+The WordPress-front-controller URL remains the positional remote Reprint API
+URL because it selects the remote state directory and shared local index.
+Files-push receives the standalone URL shown by the plugin settings through
+`--push-url`; that option changes only where push requests are sent. There is
+no automatic fallback between URLs. Hosts which block direct plugin PHP must
+allow this file or provide another no-WordPress route.
 
 ## Database diff (phase two)
 
@@ -632,7 +648,8 @@ Files first, database second, each PR small and stacked in this order:
 8. **Commit engine, files** — delete `work/deletes`, then rename values from
    `work/files` into the document root with the whitelisted maintenance file
    and resumable `commit.json` cursor.
-9. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
+9. **Standalone push route** — the no-WordPress endpoint and its private path
+   policy and authorization configuration.
 10. **Row index and database diff** — the local row index, previously pushed
     rows, diff generation and URL rewrite, the commit batch.
 11. **`reprint files-push`** — the low-level, files-only caller that retains

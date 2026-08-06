@@ -14,8 +14,13 @@ is absolute or relative to a named root.
 - The **filesystem root** is the local directory under which a pulled remote
   filesystem is reconstructed and whose contents are compared, pulled, and
   pushed. Use `$filesystem_root`.
-- The **remote Reprint API URL** is the configured URL used for Reprint
-  requests. Use `$remote_reprint_api_url`.
+- The **remote Reprint API URL** identifies one remote state directory and
+  receives pull requests. Files-push keeps this URL as its positional argument
+  so pull, diff, and push share one local index. Use
+  `$remote_reprint_api_url`.
+- The **push URL** receives push requests. It defaults to the remote Reprint
+  API URL, but `--push-url` may select a standalone route without changing the
+  remote state directory. Use `$push_url`.
 - The **push root** is the remote root selected by the receiving push session.
   Use `$push_root`.
 
@@ -277,6 +282,7 @@ Use these names verbatim:
 | Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
 | Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
 | Local push state directory | `push_state_directory`, `$push_state_directory` |
+| Push URL | `push_url`, `$push_url` |
 | PushPlan cursor | `push_plan_cursor`, `$push_plan_cursor`, `get_cursor()` |
 | Sender-owned excluded paths | `excluded_paths.json`, `$excluded_paths_path` |
 | Deleted-directory stack | `deleted_directories_stack.jsonl`, `$deleted_directories_stack` |
@@ -287,7 +293,9 @@ Use these names verbatim:
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
 `sender.json` and `excluded_paths.json` live directly under the local push
-state directory. The sender creates `plan/` for one active plan. PushPlan
+state directory. `sender.json` records the push URL so a later process cannot
+resume the active push through a different route. The sender creates `plan/`
+for one active plan. PushPlan
 copies the sender-owned exclusions to `plan/excluded_paths.json` when it starts.
 `fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
 `local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
@@ -311,12 +319,13 @@ links to the preceding active directory. The exclusions have a maximum of 100
 paths. The `sender.json` phases are `creating`, `starting_plan`,
 `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
 `saving_local_index`, `completing`,
-`removing`, and `discarding_plan`. It stores the push session ID, selected
-path-list cursor, selected local-path count, target-confirmed local-path count,
-receiver part limit, and request-sizing state. The index diff cursor retains
-the selected local-path count as it builds the path list, and its complete
-cursor retains the final count. The index diff completes before local paths
-are sent. The index copy after a target-confirmed commit
+`removing`, and `discarding_plan`. It stores the push URL, push session ID,
+push root, selected path-list cursor, selected local-path count,
+target-confirmed local-path count, receiver part limit, and request-sizing
+state. The index diff cursor retains the selected local-path count as it builds
+the path list, and its complete cursor retains the final count. The index diff
+completes before local paths are sent. The index copy after a target-confirmed
+commit
 has no separate copy cursor and is repeated after interruption. After the index
 is saved or the remote confirms removal, the sender clears the PushPlan
 cursor, then removes the entire plan directory and its exclusions file. It
@@ -352,8 +361,9 @@ reports `complete`, `restart`, or `failed`.
 
 ## Files-diff CLI names
 
-The local-only command is `files-diff`. Its `remote Reprint API URL` and
-`filesystem root` have the same meanings as for `files-push`. It reads
+The local-only command is `files-diff`. Its `remote Reprint API URL` selects
+the same remote state directory as files-push, and its `filesystem root` has
+the same meaning. It reads
 `<remote-state-directory>/local_index.jsonl`, which files-pull advances after
 completed local mutations and files-push writes after the target confirms
 commit. Files-diff never changes it.
@@ -375,11 +385,14 @@ running the command again prints the complete report.
 
 ## Files-push CLI names
 
-The low-level, files-only command is `files-push`. Its `remote Reprint API URL` is the
-exporter API URL, and its `filesystem root` is the resolved absolute directory supplied by
-`--fs-root`. It requires saved preflight data and uses its remote document
-root as the push root. It also requires `--secret=TOKEN`; `--force-http` is
-the explicit plain-HTTP opt-in.
+The low-level, files-only command is `files-push`. Its positional `remote
+Reprint API URL` selects the remote state directory shared with files-pull and
+files-diff. Its `push URL` receives push requests and defaults to that remote
+Reprint API URL; `--push-url=URL` selects a different route without selecting
+different state. Its `filesystem root` is the resolved absolute directory
+supplied by `--fs-root`. It requires saved preflight data and uses its remote
+document root as the push root. It also requires `--secret=TOKEN`;
+`--force-http` is the explicit plain-HTTP opt-in.
 
 The **local push state directory** is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash
@@ -392,7 +405,8 @@ md5(rtrim(<remote-reprint-api-url>, "?&"))
 The state directory belongs to one filesystem root. Use a different state
 directory for a different filesystem root; the filesystem root does not
 participate in the directory name. `files-push` chooses `start` or `resume`
-only from whether `sender.json` exists there. The receiver-confirmed upload
+only from whether `sender.json` exists there. An active `sender.json` records
+the push URL, and resume rejects another push URL. The receiver-confirmed upload
 positions remain receiver-owned; they are not a files-push cursor and are not
 copied into `<remote-state-directory>/pull/state.json` or the state-directory-wide
 `progress.json`.
@@ -426,6 +440,7 @@ Use these names verbatim inside `PushFilesSender`:
 | Local path to delete | `LocalPathToDelete`, `$local_path_to_delete`, `read_next_local_path_to_delete()` |
 | Push stream client | `$push_stream_client`, `create_push_stream_client()` |
 | Push stream client options | `$push_stream_client_options` |
+| Push URL | `$push_url` |
 | Request sizer options | `request_sizer_options`, `$request_sizer_options` |
 | Push request | `send_push_request()` |
 | Open upload request stage | `$upload_request_stage`: `closed`, `sending_parts`, or `finishing` |

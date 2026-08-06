@@ -60,6 +60,7 @@ final class FilesPushCommandTest extends TestCase
             . '/push';
 
         $this->assertSame($trimmedRemoteReprintApiUrl, $context['remote_reprint_api_url']);
+        $this->assertSame($trimmedRemoteReprintApiUrl, $context['push_url']);
         $this->assertSame(realpath($this->localTree), $context['filesystem_root']);
         $this->assertSame($expectedPushStateDirectory, $context['push_state_directory']);
 
@@ -90,6 +91,23 @@ final class FilesPushCommandTest extends TestCase
                 . md5($trimmedRemoteReprintApiUrl)
                 . '/push',
             $differentFilesystemRootContext['push_state_directory']
+        );
+
+        $standalonePushUrl = 'https://example.test/wp-content/plugins/reprint-exporter/push.php';
+        $standaloneContext = ImportClient::prepare_files_push_context(
+            $remoteReprintApiUrl,
+            $this->stateDirectory,
+            $this->localTree,
+            [
+                'secret' => 'token',
+                'force_http' => false,
+                'push_url' => $standalonePushUrl,
+            ]
+        );
+        $this->assertSame($standalonePushUrl, $standaloneContext['push_url']);
+        $this->assertSame(
+            $context['push_state_directory'],
+            $standaloneContext['push_state_directory']
         );
     }
 
@@ -181,6 +199,30 @@ final class FilesPushCommandTest extends TestCase
         $this->assertStringContainsString('must use HTTPS', $plainHttp['output']);
         $this->assertStringContainsString('--force-http', $plainHttp['output']);
 
+        $pushUrlQuerySecret = $this->runFilesPush(
+            'https://example.test/?reprint-api=1',
+            [
+                '--secret=token',
+                '--push-url=https://example.test/push.php?SECRET_KEY=push-query-secret',
+            ]
+        );
+        $this->assertSame(1, $pushUrlQuerySecret['exit']);
+        $this->assertStringContainsString(
+            'files-push does not accept SECRET_KEY in the push URL; pass --secret=TOKEN.',
+            $pushUrlQuerySecret['output']
+        );
+        $this->assertStringNotContainsString('push-query-secret', $pushUrlQuerySecret['output']);
+
+        $plainHttpPushUrl = $this->runFilesPush(
+            'https://example.test/?reprint-api=1',
+            ['--secret=token', '--push-url=http://example.test/push.php']
+        );
+        $this->assertSame(1, $plainHttpPushUrl['exit']);
+        $this->assertStringContainsString(
+            'The files-push push URL must use HTTPS',
+            $plainHttpPushUrl['output']
+        );
+
         $missingTree = $this->root . '/missing-tree';
         $missingTreeResult = $this->runCli([
             'files-push',
@@ -265,6 +307,29 @@ final class FilesPushCommandTest extends TestCase
         );
     }
 
+    public function testFilesPushResumesOnlyThroughItsRecordedPushUrl(): void
+    {
+        $remoteReprintApiUrl = 'https://example.test/?reprint-api=1';
+        $this->writePreflightState($remoteReprintApiUrl);
+
+        $first = $this->runFilesPush($remoteReprintApiUrl, [
+            '--secret=token',
+            '--push-url=https://127.0.0.1:1/push.php',
+        ]);
+        $this->assertSame(1, $first['exit'], $first['output']);
+
+        $changed = $this->runFilesPush($remoteReprintApiUrl, [
+            '--secret=token',
+            '--push-url=https://127.0.0.1:2/push.php',
+        ]);
+
+        $this->assertSame(1, $changed['exit'], $changed['output']);
+        $this->assertStringContainsString(
+            'files-push must resume with the same push URL recorded by its active sender.',
+            $changed['output']
+        );
+    }
+
     public function testCorruptSenderStateUsesTheStructuredWorkflowErrorResult(): void
     {
         $remoteReprintApiUrl = 'https://127.0.0.1:1/?reprint-api=1';
@@ -280,6 +345,7 @@ final class FilesPushCommandTest extends TestCase
             $context['push_state_directory'] . '/sender.json',
             json_encode([
                 'push_session_id' => str_repeat('1', 32),
+                'push_url' => $context['push_url'],
                 'phase' => 'starting_plan',
                 'push_root_local_relative_path' => '',
                 'push_plan_cursor' => null,
