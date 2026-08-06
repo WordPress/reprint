@@ -689,6 +689,9 @@ final class PushFilesSender
     private function next_plan_step(): void
     {
         try {
+            // Run a bounded batch from one PushPlan phase, then flush its
+            // output before storing the cursor. This avoids one flush and
+            // state write per path while preserving each phase boundary.
             $has_next_step = true;
             $plan_cursor = $this->plan->get_cursor();
             $plan_phase = $plan_cursor['position']['phase'];
