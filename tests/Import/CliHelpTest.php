@@ -8,7 +8,7 @@ class CliHelpTest extends TestCase
 {
     private function runHelp(string $command): string
     {
-        $entry = __DIR__ . '/../../client/import.php';
+        $entry = __DIR__ . '/../../client/cli.php';
         $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($entry) . ' ' . escapeshellarg($command) . ' --help';
         return shell_exec($cmd . ' 2>&1') ?? '';
     }
@@ -91,7 +91,7 @@ class CliHelpTest extends TestCase
 
     public function testPullMetadataRejectsAnInvocationWithoutARemoteReprintApiUrl(): void
     {
-        $entry = __DIR__ . '/../../client/import.php';
+        $entry = __DIR__ . '/../../client/cli.php';
         $stateDirectory =
             sys_get_temp_dir() . '/pull-metadata-missing-remote-' . uniqid('', true);
         $command =

@@ -7,7 +7,7 @@ use function WordPress\Reprint\Exporter\path_is_within_root;
 use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\relative_path_under;
 
-require_once __DIR__ . '/../../client/import.php';
+require_once __DIR__ . '/../../client/cli.php';
 
 /**
  * --remap: the single write seam (map_remote_absolute_path_to_local_absolute_path)

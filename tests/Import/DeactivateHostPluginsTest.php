@@ -8,7 +8,7 @@ use PDOException;
 use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 
-require_once __DIR__ . '/../../client/import.php';
+require_once __DIR__ . '/../../client/cli.php';
 
 /**
  * Verify deactivate_host_plugins() rewrites active_plugins identically on
