@@ -2,6 +2,8 @@
 
 namespace Reprint\Importer;
 
+use function WordPress\Reprint\Exporter\path_is_within_root;
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exceptions contain CLI filesystem paths, never HTML output.
 
 /**
@@ -151,10 +153,10 @@ function merge_local_index_mutations(
 			 */
 			while (
 				$local_index_entries->valid()
-				&& strpos(
-					   $local_index_entries->current()['path'],
-					   $local_index_update_path . '/'
-				   ) === 0
+				&& path_is_within_root(
+					$local_index_entries->current()['path'],
+					$local_index_update_path
+				)
 			) {
 				$local_index_entries->next();
 			}
