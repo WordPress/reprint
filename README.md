@@ -477,6 +477,21 @@ Host and port default to the URL rewrite target from `db-apply` (so the server
 listens on the same address the database was rewritten to). Override with
 `--host` and `--port`.
 
+The database written into `runtime.php` is the one `db-apply` connected to. To
+point the runtime at a database `db-apply` did not create — a local database you
+are keeping, for instance, when you pull the files but not the database — name
+it with the same `--target-*` options `db-apply` takes:
+
+```bash
+php reprint.phar apply-runtime "$URL" --state-dir="$STATE_DIR" \
+    --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=php-builtin \
+    --target-engine=sqlite --target-sqlite-path="$FLAT_DIR/wp-content/database/.ht.sqlite"
+```
+
+The SQLite file itself may be missing — the `sqlite-database-integration` plugin
+creates it on the first request — but its directory must exist. The options
+apply to this run only; `apply-runtime` does not record them in state.
+
 **What gets generated:**
 
 The command produces a `runtime.php` file that sets PHP constants, server

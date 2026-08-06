@@ -25,6 +25,7 @@ use Reprint\Importer\Tuning\AdaptiveTuner;
 
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
+use function Reprint\Importer\normalize_database_target_engine;
 use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
@@ -136,6 +137,21 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
+
+    /**
+     * Database target options that only mean something once --target-engine
+     * says which engine they configure.
+     *
+     * @var array<string,string> Option key => command-line flag.
+     */
+    private const DATABASE_TARGET_FLAGS = [
+        "target_db" => "--target-db",
+        "target_sqlite_path" => "--target-sqlite-path",
+        "target_host" => "--target-host",
+        "target_port" => "--target-port",
+        "target_user" => "--target-user",
+        "target_pass" => "--target-pass",
+    ];
 
     /**
      * Maximum number of consecutive interrupted responses with no cursor
@@ -4028,20 +4044,19 @@ class ImportClient
         $manifest = $analyzer->analyze($preflight_data);
         $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data);
 
-        // Step 1b: Merge target database configuration from db-apply state.
-        // db-apply persists the target engine and connection details so that
-        // apply-runtime can generate the matching DB_* constants and, for
-        // SQLite targets, set up the database integration plugin.
-        $apply_state = $this->get_state()->apply;
-        $target_engine = $apply_state->target_engine;
+        // Step 1b: Merge the target database configuration into the manifest.
+        // The target is either stated on the command line or read from what
+        // db-apply connected to, and decides the DB_* constants and, for
+        // SQLite targets, the database integration plugin setup.
+        $target = $this->resolve_runtime_database_target($options);
+        $target_engine = $target["engine"];
         if ($target_engine === "mysql") {
-            $manifest->constants["DB_NAME"] = $apply_state->target_db ?? "";
-            $manifest->constants["DB_USER"] = $apply_state->target_user ?? "";
-            $manifest->constants["DB_PASSWORD"] = $apply_state->target_pass ?? "";
-            $host_value = $apply_state->target_host ?? "127.0.0.1";
-            $port_value = (int) ($apply_state->target_port ?? 3306);
-            if ($port_value !== 3306) {
-                $host_value .= ":" . $port_value;
+            $manifest->constants["DB_NAME"] = $target["db"];
+            $manifest->constants["DB_USER"] = $target["user"];
+            $manifest->constants["DB_PASSWORD"] = $target["pass"];
+            $host_value = $target["host"];
+            if ($target["port"] !== 3306) {
+                $host_value .= ":" . $target["port"];
             }
             $manifest->constants["DB_HOST"] = $host_value;
             // runtime.php defines DB_* before wp-config.php loads, which
@@ -4049,13 +4064,13 @@ class ImportClient
             // generated runtime.php installs a handler to suppress them.
             $manifest->has_db_constants = true;
         } elseif ($target_engine === "sqlite") {
-            $sqlite_path = $apply_state->target_sqlite_path;
-            $manifest->constants["DB_NAME"] = $apply_state->target_db ?? "sqlite_database";
+            $sqlite_path = $target["sqlite_path"];
+            $manifest->constants["DB_NAME"] = $target["db"];
             // The SQLite integration still requires a non-empty DB_NAME
             // for its MySQL information-schema emulation, even though the
             // physical database location comes from DB_DIR/DB_FILE.
             $manifest->has_db_constants = true;
-            if ($sqlite_path !== null && $sqlite_path !== '') {
+            if ($sqlite_path !== null) {
                 $db_dir = rtrim(dirname($sqlite_path), '/') . '/';
                 $db_file = basename($sqlite_path);
             } else {
@@ -4208,6 +4223,179 @@ class ImportClient
             }
         }
     }
+
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.
+    /**
+     * Resolve the database target the generated runtime should point at.
+     *
+     * --target-engine and its companion options state the target outright,
+     * which is how a caller that keeps its own database — and so never runs
+     * db-apply — points the runtime at it. Without an explicit engine, the
+     * target is the one db-apply connected to and recorded in state.
+     *
+     * With an explicit engine, each field falls back from the option to the
+     * recorded value to the default, so `pull` still reaches the SQLite path
+     * db-apply derived from the source content directory. A stated engine
+     * that differs from the recorded one drops the recorded target entirely:
+     * merging a MySQL user with a stated SQLite path would build a target
+     * nobody asked for.
+     *
+     * A stated target is checked here for the pieces the runtime needs. A
+     * target that comes only from state is used as it stands: db-apply
+     * connected to it, and rejecting it now would refuse runtimes that have
+     * always generated.
+     *
+     * @param array $options apply-runtime options.
+     * @return array {
+     *     The resolved target. Only $engine is present when no target is known.
+     *
+     *     @type string|null $engine      mysql, sqlite, or null when neither the
+     *                                    command line nor state names a target.
+     *     @type string      $db          Database name (both engines).
+     *     @type string|null $sqlite_path SQLite database file, or null for the
+     *                                    runtime default under wp-content (sqlite).
+     *     @type string      $host        Database host (mysql).
+     *     @type int         $port        Database port (mysql).
+     *     @type string      $user        Database user (mysql).
+     *     @type string      $pass        Database password (mysql).
+     * }
+     */
+    private function resolve_runtime_database_target(array $options): array
+    {
+        $recorded_target = $this->get_state()->apply;
+        $stated_engine = $options["target_engine"] ?? null;
+        $engine_was_stated = $stated_engine !== null && $stated_engine !== "";
+
+        if ($engine_was_stated) {
+            $engine = normalize_database_target_engine($stated_engine);
+            if (
+                $recorded_target->target_engine !== null &&
+                $recorded_target->target_engine !== $engine
+            ) {
+                $recorded_target = new DatabaseApplyCommandState();
+            }
+        } else {
+            $this->assert_database_target_options_name_an_engine($options);
+            $engine = $recorded_target->target_engine;
+        }
+
+        if ($engine === null) {
+            return ["engine" => null];
+        }
+
+        $option_then_recorded = static function ($option_value, $recorded_value, $default_value) {
+            foreach ([$option_value, $recorded_value] as $candidate) {
+                if ($candidate !== null && $candidate !== "") {
+                    return $candidate;
+                }
+            }
+            return $default_value;
+        };
+
+        if ($engine === "sqlite") {
+            $sqlite_path = $option_then_recorded(
+                $options["target_sqlite_path"] ?? null,
+                $recorded_target->target_sqlite_path,
+                null,
+            );
+            if ($engine_was_stated && $sqlite_path !== null) {
+                $this->assert_sqlite_target_directory_exists($sqlite_path);
+            }
+
+            return [
+                "engine" => "sqlite",
+                "db" => (string) $option_then_recorded(
+                    $options["target_db"] ?? null,
+                    $recorded_target->target_db,
+                    "sqlite_database",
+                ),
+                "sqlite_path" => $sqlite_path === null ? null : (string) $sqlite_path,
+            ];
+        }
+
+        $target = [
+            "engine" => "mysql",
+            "db" => (string) $option_then_recorded(
+                $options["target_db"] ?? null,
+                $recorded_target->target_db,
+                "",
+            ),
+            "host" => (string) $option_then_recorded(
+                $options["target_host"] ?? null,
+                $recorded_target->target_host,
+                "127.0.0.1",
+            ),
+            "port" => (int) $option_then_recorded(
+                $options["target_port"] ?? null,
+                $recorded_target->target_port,
+                3306,
+            ),
+            "user" => (string) $option_then_recorded(
+                $options["target_user"] ?? null,
+                $recorded_target->target_user,
+                "",
+            ),
+            "pass" => (string) $option_then_recorded(
+                $options["target_pass"] ?? null,
+                $recorded_target->target_pass,
+                "",
+            ),
+        ];
+
+        if ($engine_was_stated) {
+            foreach (["user" => "--target-user", "db" => "--target-db"] as $field => $flag) {
+                if ($target[$field] === "") {
+                    throw new InvalidArgumentException(
+                        "apply-runtime with --target-engine=mysql requires {$flag}: " .
+                        "neither the command line nor the recorded db-apply target supplied one."
+                    );
+                }
+            }
+        }
+
+        return $target;
+    }
+
+    /**
+     * Reject database target options that never say which engine they configure.
+     *
+     * Without --target-engine, apply-runtime uses the target db-apply
+     * recorded, so a lone --target-sqlite-path or --target-user would go
+     * nowhere.
+     */
+    private function assert_database_target_options_name_an_engine(array $options): void
+    {
+        foreach (self::DATABASE_TARGET_FLAGS as $option_key => $flag) {
+            $value = $options[$option_key] ?? null;
+            if ($value === null || $value === "") {
+                continue;
+            }
+            throw new InvalidArgumentException(
+                "apply-runtime received {$flag} without --target-engine. " .
+                "Add --target-engine=mysql or --target-engine=sqlite to state the database target."
+            );
+        }
+    }
+
+    /**
+     * Require the directory holding the SQLite database file to exist.
+     *
+     * The file itself may be absent: the sqlite-database-integration plugin
+     * creates it when the site first boots.
+     */
+    private function assert_sqlite_target_directory_exists(string $sqlite_path): void
+    {
+        $directory = dirname($sqlite_path);
+        if (is_dir($directory)) {
+            return;
+        }
+
+        throw new InvalidArgumentException(
+            "The directory for --target-sqlite-path={$sqlite_path} does not exist: {$directory}. " .
+            "Create it first; the database file itself is created on the first request."
+        );
+    }
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     /**
      * Enable the temporary remote upload proxy when uploads may still be
@@ -5011,12 +5199,9 @@ class ImportClient
 
     private function create_target_db_apply_connection(array $options): array
     {
-        $target_engine = strtolower((string) ($options["target_engine"] ?? "mysql"));
-        if (!in_array($target_engine, ["mysql", "sqlite"], true)) {
-            throw new InvalidArgumentException(
-                "Invalid --target-engine value: {$target_engine}. Valid engines: mysql, sqlite.",
-            );
-        }
+        $target_engine = normalize_database_target_engine(
+            (string) ($options["target_engine"] ?? "mysql"),
+        );
 
         if ($target_engine === "sqlite") {
             $target_path = $options["target_sqlite_path"] ?? null;
@@ -11623,7 +11808,7 @@ if (
             'target' => 'target_engine',
             'placeholder' => 'ENGINE',
             'help' => 'Target database engine: mysql or sqlite',
-            'commands' => ['pull', 'pull-db', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
         ],
         [
             'name' => 'target-host',
@@ -11631,7 +11816,7 @@ if (
             'target' => 'target_host',
             'placeholder' => 'HOST',
             'help' => 'Target MySQL host (default: 127.0.0.1)',
-            'commands' => ['pull', 'pull-db', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
         ],
         [
             'name' => 'target-port',
@@ -11640,7 +11825,7 @@ if (
             'placeholder' => 'PORT',
             'cast' => 'int',
             'help' => 'Target MySQL port (default: 3306)',
-            'commands' => ['pull', 'pull-db', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
         ],
         [
             'name' => 'target-user',
@@ -11648,7 +11833,7 @@ if (
             'target' => 'target_user',
             'placeholder' => 'USER',
             'help' => 'Target MySQL user (required for mysql)',
-            'commands' => ['pull', 'pull-db', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
         ],
         [
             'name' => 'target-pass',
@@ -11656,7 +11841,7 @@ if (
             'target' => 'target_pass',
             'placeholder' => 'PASS',
             'help' => 'Target MySQL password',
-            'commands' => ['pull', 'pull-db', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
         ],
         [
             'name' => 'target-db',
@@ -11664,7 +11849,7 @@ if (
             'target' => 'target_db',
             'placeholder' => 'NAME',
             'help' => 'Target DB name (required for mysql, optional for sqlite)',
-            'commands' => ['pull', 'pull-db', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
         ],
         [
             'name' => 'target-sqlite-path',
@@ -11672,7 +11857,7 @@ if (
             'target' => 'target_sqlite_path',
             'placeholder' => 'PATH',
             'help' => 'Target SQLite database file (default: <wp-content>/database/.ht.sqlite)',
-            'commands' => ['pull', 'pull-db', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
         ],
         [
             'name' => 'rewrite-url',
@@ -12534,8 +12719,8 @@ if (
                 "from preflight data and removes production-only drop-ins and mu-plugins\n" .
                 "that would crash outside the original host.\n" .
                 "\n" .
-                "If db-apply was run first, embeds the target database credentials\n" .
-                "into runtime.php automatically.\n" .
+                "Embeds the target database in runtime.php: the one named by the\n" .
+                "--target-* options, or the one db-apply connected to.\n" .
                 "\n" .
                 "The remote Reprint API URL selects the state used to generate the\n" .
                 "runtime configuration; no network calls are made.\n" .
@@ -12550,13 +12735,21 @@ if (
                 "  playground-cli — writes runtime.php + blueprint.json\n" .
                 "\n" .
                 "Database configuration:\n" .
-                "  When db-apply has been run before apply-runtime, the target database\n" .
-                "  engine and credentials are read from state and included in runtime.php\n" .
-                "  as DB_* constants. For MySQL targets this means DB_HOST, DB_NAME,\n" .
-                "  DB_USER, and DB_PASSWORD. For SQLite targets, the sqlite-database-\n" .
-                "  integration plugin is copied into the output directory and a lazy-\n" .
-                "  loading \$wpdb proxy is generated in runtime.php (Playground-style,\n" .
-                "  no files placed in the filesystem root).\n" .
+                "  The target database is included in runtime.php as DB_* constants.\n" .
+                "  Name it with --target-engine and its companion options, or leave\n" .
+                "  those out and apply-runtime uses the target db-apply connected to.\n" .
+                "  Options win field by field; a --target-engine that differs from the\n" .
+                "  one db-apply used replaces the recorded target completely.\n" .
+                "  For MySQL targets the constants are DB_HOST, DB_NAME, DB_USER, and\n" .
+                "  DB_PASSWORD. For SQLite targets, the sqlite-database-integration\n" .
+                "  plugin is copied into the output directory and a lazy-loading \$wpdb\n" .
+                "  proxy is generated in runtime.php (Playground-style, no files placed\n" .
+                "  in the filesystem root). The SQLite file may be absent — the plugin\n" .
+                "  creates it on the first request — but its directory must exist.\n" .
+                "  apply-runtime does not write these options to state: they configure\n" .
+                "  one run, unlike db-apply's record of a database it connected to.\n" .
+                "  Like db-apply, apply-runtime writes its full command line to the\n" .
+                "  audit log, so a --target-pass value ends up there.\n" .
                 "\n" .
                 "Output files (nginx-fpm):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
@@ -12581,6 +12774,11 @@ if (
                 "  # From flattened layout:\n" .
                 "  reprint apply-runtime https://example.com --state-dir=./state \\\n" .
                 "    --flat-document-root=./flat --output-dir=./runtime --runtime=php-builtin\n" .
+                "\n" .
+                "  # Point the runtime at a database db-apply did not create:\n" .
+                "  reprint apply-runtime https://example.com --state-dir=./state \\\n" .
+                "    --fs-root=./files --output-dir=./runtime --runtime=php-builtin \\\n" .
+                "    --target-engine=sqlite --target-sqlite-path=./files/wp-content/database/.ht.sqlite\n" .
                 "\n" .
                 "  bash ./runtime/start.sh\n",
         ],

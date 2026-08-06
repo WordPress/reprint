@@ -2,8 +2,30 @@
 
 namespace Reprint\Importer;
 
+use InvalidArgumentException;
 use PDO;
 use RuntimeException;
+
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values, never HTML output.
+
+/**
+ * Normalize a database target engine name, rejecting anything Reprint
+ * cannot apply a dump to or generate a runtime for.
+ *
+ * @param string $engine Engine name as given on the command line.
+ * @return string Lowercased engine name: mysql or sqlite.
+ */
+function normalize_database_target_engine(string $engine): string
+{
+	$normalized = strtolower($engine);
+	if (! in_array($normalized, array('mysql', 'sqlite'), true)) {
+		throw new InvalidArgumentException(
+			"Invalid --target-engine value: {$engine}. Valid engines: mysql, sqlite."
+		);
+	}
+
+	return $normalized;
+}
 
 /**
  * If the ALL_PROXY environment variable is set, apply it to the cURL

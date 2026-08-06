@@ -8,6 +8,8 @@ use Reprint\Importer\State\FileDiffProgressState;
 use Reprint\Importer\State\FilesPullSummaryState;
 use Reprint\Importer\State\RemoteFileIndexCursorState;
 
+use function Reprint\Importer\normalize_database_target_engine;
+
 require_once __DIR__ . '/class-pull-failure-reported-exception.php';
 
 /**
@@ -694,21 +696,19 @@ class Pull
      * MySQL database apply needs a user and database name because Reprint connects to
      * an existing server. SQLite database apply can use the generated default path
      * when no explicit target path is supplied.
+     *
+     * Returns the options with the effective engine named.
      */
     private function validate_database_target_options(array $options): array
     {
-        if (!empty($options['target_engine'])) {
-            $engine = strtolower($options['target_engine']);
-            if (!in_array($engine, ['mysql', 'sqlite'], true)) {
-                throw new InvalidArgumentException(
-                    "Invalid --target-engine value: {$options['target_engine']}. " .
-                    "Valid engines: mysql, sqlite"
-                );
-            }
-            $options['target_engine'] = $engine;
-        }
+        // MySQL is the engine credentials alone imply. Name it in the options
+        // so every stage — including apply-runtime, which otherwise falls back
+        // to db-apply state — reads one effective target.
+        $options['target_engine'] = normalize_database_target_engine(
+            !empty($options['target_engine']) ? $options['target_engine'] : 'mysql'
+        );
 
-        if (($options['target_engine'] ?? 'mysql') === 'mysql') {
+        if ($options['target_engine'] === 'mysql') {
             if (empty($options['target_user'])) {
                 throw new InvalidArgumentException(
                     "--target-user is required when db-apply targets MySQL."
