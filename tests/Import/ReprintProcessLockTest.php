@@ -76,6 +76,29 @@ final class ReprintProcessLockTest extends TestCase
         $process_lock->close();
     }
 
+    public function testPushStateDirectoryFollowsAnExistingStateDirectorySymlink(): void
+    {
+        $state_directory_target = $this->root . '/state-target';
+        $state_directory_link = $this->root . '/state-link';
+        mkdir($state_directory_target, 0700);
+        symlink($state_directory_target, $state_directory_link);
+        $canonical_state_directory_target = realpath($state_directory_target);
+        $this->assertIsString($canonical_state_directory_target);
+
+        $this->assertSame(
+            $canonical_state_directory_target
+                . '/remotes/'
+                . md5('https://example.com/?site-export-api')
+                . '/push',
+            \ImportClient::resolve_push_state_directory(
+                'https://example.com/?site-export-api',
+                $state_directory_link,
+                $this->root . '/files',
+                'files-diff'
+            )
+        );
+    }
+
     public function testImportClientRejectsAConcurrentCommand(): void
     {
         $process_lock = new \ReprintProcessLock($this->root . '/state');
