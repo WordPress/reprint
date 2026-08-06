@@ -4,10 +4,10 @@ Clone any WordPress site over HTTP. One command pulls the files, database, and s
 
 ## Quick start
 
-### 1. Install the exporter plugin on the source site
+### 1. Install the Reprint Server plugin on the source site
 
 ```bash
-php reprint.phar install-exporter
+php reprint.phar install-server
 ```
 
 This prints the download URL and step-by-step instructions for installing the WordPress plugin on the site you want to clone. The plugin exposes the HTTP API that reprint connects to.
@@ -83,26 +83,31 @@ php reprint.phar pull https://example.com --secret=TOKEN \
 
 ## Composer packages
 
-The exporter and importer are published as separate Composer packages:
+The server and client are published as separate Composer packages:
 
-- [`wp-php-toolkit/reprint-exporter`](https://packagist.org/packages/wp-php-toolkit/reprint-exporter) — Streaming export engine (SQL dumps, file trees, cursor-based resumption).
-- [`wp-php-toolkit/reprint-importer`](https://packagist.org/packages/wp-php-toolkit/reprint-importer) — Streaming site importer with CLI and PHAR support.
+- [`wp-php-toolkit/reprint-server`](https://packagist.org/packages/wp-php-toolkit/reprint-server) — Streaming export engine (SQL dumps, file trees, cursor-based resumption) that backs the Reprint Server plugin.
+- [`wp-php-toolkit/reprint-client`](https://packagist.org/packages/wp-php-toolkit/reprint-client) — Streaming site importer with CLI and PHAR support.
 
 Install whichever you need:
 
 ```bash
-composer require wp-php-toolkit/reprint-exporter
-composer require wp-php-toolkit/reprint-importer
+composer require wp-php-toolkit/reprint-server
+composer require wp-php-toolkit/reprint-client
 ```
+
+These packages were previously published as `wp-php-toolkit/reprint-exporter`
+and `wp-php-toolkit/reprint-importer`. Each renamed package replaces its
+predecessor at `self.version`, so the old and new names cannot be installed
+side by side; consumers migrate by changing the requirement name.
 
 Both packages depend on [`wp-php-toolkit/data-liberation`](https://packagist.org/packages/wp-php-toolkit/data-liberation) and [`wp-php-toolkit/html`](https://packagist.org/packages/wp-php-toolkit/html), which Composer pulls in automatically.
 
 ## Repository layout
 
-- `packages/reprint-exporter` — Source for the `wp-php-toolkit/reprint-exporter` Composer package.
-- `packages/reprint-importer` — Source for the `wp-php-toolkit/reprint-importer` Composer package.
-- `reprint-exporter-wp` — WordPress plugin distribution that bundles `reprint-exporter`.
-- `importer/import.php` — thin compatibility wrapper for the importer package entrypoint.
+- `packages/reprint-server` — Source for the `wp-php-toolkit/reprint-server` Composer package.
+- `packages/reprint-client` — Source for the `wp-php-toolkit/reprint-client` Composer package.
+- `reprint-server-wp` — WordPress plugin distribution that bundles `reprint-server`. The release ZIP keeps the legacy `reprint-exporter-wp.zip` name so upgrades land in the existing installed plugin directory.
+- `client/import.php` — thin wrapper for the client package entry point. `importer/import.php` remains as a compatibility shim for the old path.
 
 ### Technical requirements
 

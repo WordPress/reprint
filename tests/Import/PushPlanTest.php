@@ -5,8 +5,8 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 use function Reprint\Importer\sort_index_file;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/sort-index-file.php';
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push-plan.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/sort-index-file.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/push/class-push-plan.php';
 
 /**
  * Coverage for PushPlan's local index and bounded steps.

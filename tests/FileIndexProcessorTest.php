@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 
-require_once dirname(__DIR__) . '/packages/reprint-exporter/src/class-file-index-processor.php';
+require_once dirname(__DIR__) . '/packages/reprint-server/src/class-file-index-processor.php';
 
 final class FileIndexProcessorTest extends TestCase {
 

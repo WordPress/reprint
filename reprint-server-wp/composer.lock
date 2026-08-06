@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "c5be971ccfa307949af2f876340c5310",
+    "content-hash": "648476139f09aef406475c1adbe2b8ae",
     "packages": [
         {
             "name": "wp-php-toolkit/bytestream",
@@ -357,17 +357,20 @@
             "time": "2026-05-18T15:07:36+00:00"
         },
         {
-            "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-adamziel/authenticated-push-endpoints",
+            "name": "wp-php-toolkit/reprint-server",
+            "version": "dev-adamziel/rename-reprint-server-client",
             "dist": {
                 "type": "path",
-                "url": "../packages/reprint-exporter",
-                "reference": "2050e07227a82c058c6267c5e8b3e77d0cd4dbdc"
+                "url": "../packages/reprint-server",
+                "reference": "e9905691eb4f5220054498ccbc7c784fc811fbb8"
             },
             "require": {
                 "php": ">=7.2",
                 "wp-php-toolkit/data-liberation": "^0.8.0",
                 "wp-php-toolkit/html": "^0.8.0"
+            },
+            "replace": {
+                "wp-php-toolkit/reprint-exporter": "self.version"
             },
             "suggest": {
                 "ext-pdo": "Needed for the SQLite export path; recommended for MySQL exports (the wpdb fallback handles MySQL when absent).",
@@ -380,6 +383,7 @@
                 },
                 "classmap": [
                     "src/class-mysql-dump-producer.php",
+                    "src/class-file-index-processor.php",
                     "src/class-file-tree-producer.php",
                     "src/class-hmac-client.php",
                     "src/class-hmac-server.php",
@@ -400,7 +404,7 @@
             "license": [
                 "GPL-2.0-or-later"
             ],
-            "description": "Streaming export engine used by the Reprint Exporter WordPress plugin",
+            "description": "Streaming export engine used by the Reprint Server WordPress plugin",
             "transport-options": {
                 "symlink": false,
                 "relative": true
@@ -468,7 +472,7 @@
     "aliases": [],
     "minimum-stability": "dev",
     "stability-flags": {
-        "wp-php-toolkit/reprint-exporter": 20
+        "wp-php-toolkit/reprint-server": 20
     },
     "prefer-stable": true,
     "prefer-lowest": false,

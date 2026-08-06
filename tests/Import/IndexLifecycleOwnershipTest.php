@@ -7,7 +7,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../client/import.php';
 
 final class IndexLifecycleOwnershipTest extends TestCase
 {
@@ -118,7 +118,7 @@ final class IndexLifecycleOwnershipTest extends TestCase
         $process = proc_open(
             array_merge([
                 PHP_BINARY,
-                __DIR__ . '/../../importer/import.php',
+                __DIR__ . '/../../client/import.php',
             ], $arguments),
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
             $pipes,

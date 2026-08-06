@@ -5,7 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../client/import.php';
 
 /**
  * Verify that HTTP requests never advertise brotli (br) encoding.

@@ -10280,7 +10280,7 @@ class ImportClient
                     'code' => 'AUTH_FAILED',
                     'message' =>
                         "The request was blocked (HTTP {$http_code}) but the " .
-                        "server did not say why. The exporter plugin always " .
+                        "server did not say why. The Reprint Server plugin always " .
                         "explains authentication failures, so something " .
                         "upstream is blocking the request — a server-level " .
                         "firewall, .htaccess rule, or security plugin.",
@@ -10342,21 +10342,21 @@ class ImportClient
             return [
                 'code' => 'EXPORT_NOT_CONFIGURED',
                 'message' =>
-                    "The exporter plugin is installed but not configured. " .
+                    "The Reprint Server plugin is installed but not configured. " .
                     "The server reported: {$server_msg}",
             ];
         }
 
         // ── Not found ────────────────────────────────────────────
         if ($http_code === 404) {
-            $msg = "The exporter plugin is not installed on the remote site.";
+            $msg = "The Reprint Server plugin is not installed on the remote site.";
             if ($looks_like_html) {
                 $msg .= " The server returned an HTML 404 page instead of " .
                          "the export API.";
             } else {
                 $msg .= " The server returned HTTP 404.";
             }
-            $msg .= "\n\nRun `php reprint.phar install-exporter` for setup " .
+            $msg .= "\n\nRun `php reprint.phar install-server` for setup " .
                      "instructions.";
             return ['code' => 'NOT_FOUND', 'message' => $msg];
         }
@@ -10377,10 +10377,10 @@ class ImportClient
                 'code' => 'HTML_RESPONSE',
                 'http_code' => $http_code,
                 'message' =>
-                    "The exporter plugin is not installed on the remote site. " .
+                    "The Reprint Server plugin is not installed on the remote site. " .
                     "The server returned an HTML page (HTTP {$http_code}) " .
                     "instead of a JSON API response.\n\n" .
-                    "Run `php reprint.phar install-exporter` for setup " .
+                    "Run `php reprint.phar install-server` for setup " .
                     "instructions.",
             ];
         }
@@ -11402,7 +11402,7 @@ function get_importer_version(): string {
 // Only run CLI logic if this file is executed directly (not included/required).
 // IMPORTER_PHAR_ENTRY is defined by the phar stub and IMPORTER_WRAPPER_ENTRY is
 // defined by the repo/package wrapper scripts, so the guard also passes when
-// running as `php reprint.phar`, `php importer/import.php`, or the Composer bin.
+// running as `php reprint.phar`, `php client/import.php`, or the Composer bin.
 if (
     PHP_SAPI === "cli" &&
     isset($argv) &&
@@ -12124,10 +12124,10 @@ if (
     }
 
     /**
-     * Render the install-exporter guide.
+     * Render the install-server guide.
      *
-     * Shows the download URL for the exporter plugin matching this version
-     * of reprint, and step-by-step installation instructions.
+     * Shows the download URL for the Reprint Server plugin matching this
+     * version of reprint, and step-by-step installation instructions.
      */
     function _cli_render_install_exporter(): void
     {
@@ -12142,9 +12142,9 @@ if (
         $repo = "WordPress/reprint";
         $zip_url = "https://github.com/{$repo}/releases/download/{$version}/reprint-exporter-wp.zip";
 
-        echo "{$bold}Install the RePrint Exporter Plugin{$reset}\n";
+        echo "{$bold}Install the Reprint Server Plugin{$reset}\n";
         echo "\n";
-        echo "The exporter plugin must be installed on the WordPress site you\n";
+        echo "The Reprint Server plugin must be installed on the WordPress site you\n";
         echo "want to mirror. It exposes the HTTP API that reprint connects to.\n";
         echo "\n";
 
@@ -12152,12 +12152,12 @@ if (
         echo "\n";
         if ($is_dev) {
             echo "  You are running an unreleased development build ({$version}).\n";
-            echo "  Install the exporter plugin from the same branch:\n";
+            echo "  Install the Reprint Server plugin from the same branch:\n";
             echo "\n";
-            echo "  {$dim}composer build:exporter-plugin{$reset}\n";
+            echo "  {$dim}composer build:server-plugin{$reset}\n";
             echo "\n";
             echo "  Then upload reprint-exporter-wp.zip through wp-admin,\n";
-            echo "  or symlink reprint-exporter-wp/ into wp-content/plugins/.\n";
+            echo "  or symlink reprint-server-wp/ into wp-content/plugins/.\n";
         } else {
             echo "  {$cyan}{$zip_url}{$reset}\n";
         }
@@ -12171,7 +12171,7 @@ if (
         echo "\n";
         echo "{$bold}Step 3: Configure the shared secret{$reset}\n";
         echo "\n";
-        echo "  1. In wp-admin, go to Site Export (in the sidebar)\n";
+        echo "  1. In wp-admin, go to Reprint Server (in the sidebar)\n";
         echo "  2. Enter a shared secret and save\n";
         echo "  3. Use the same secret with reprint:\n";
         echo "\n";
@@ -12339,15 +12339,15 @@ if (
                 "    --target-user=root --target-db=wp_local \\\n" .
                 "    --new-site-url=http://localhost:8881\n",
         ],
-        "install-exporter" => [
+        "install-server" => [
             "level" => "high",
-            "short" => "Show how to install the exporter plugin on your site",
+            "short" => "Show how to install the Reprint Server plugin on your site",
             "description" =>
-                "Prints the download URL for the exporter WordPress plugin that\n" .
+                "Prints the download URL for the Reprint Server WordPress plugin that\n" .
                 "matches this version of reprint, and step-by-step installation\n" .
                 "instructions.\n" .
                 "\n" .
-                "The exporter plugin must be installed on the remote site before\n" .
+                "The Reprint Server plugin must be installed on the remote site before\n" .
                 "any other reprint command can connect to it.\n",
             "extra" => null,
         ],
@@ -12651,14 +12651,15 @@ if (
         "flat-document-root" => "flat-docroot",
         "flatten-docroot" => "flat-docroot",
         "import-metadata" => "pull-metadata",
+        "install-exporter" => "install-server",
     ];
     if (isset($command_aliases[$command])) {
         $command = $command_aliases[$command];
     }
 
-    // install-exporter is a standalone guide — no URL, state-dir, or filesystem root needed.
+    // install-server is a standalone guide — no URL, state-dir, or filesystem root needed.
     // Handle it before per-command --help so it always shows the full guide.
-    if ($command === "install-exporter") {
+    if ($command === "install-server") {
         _cli_render_install_exporter();
         exit(0);
     }

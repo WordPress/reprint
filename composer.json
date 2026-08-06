@@ -8,19 +8,19 @@
     "repositories": [
         {
             "type": "path",
-            "url": "packages/reprint-exporter"
+            "url": "packages/reprint-server"
         },
         {
             "type": "path",
-            "url": "packages/reprint-importer"
+            "url": "packages/reprint-client"
         }
     ],
     "require": {
         "php": ">=7.4",
         "ext-pdo": "*",
         "ext-pdo_mysql": "*",
-        "wp-php-toolkit/reprint-exporter": "*@dev",
-        "wp-php-toolkit/reprint-importer": "*@dev"
+        "wp-php-toolkit/reprint-server": "*@dev",
+        "wp-php-toolkit/reprint-client": "*@dev"
     },
     "require-dev": {
         "phpunit/phpunit": "^10.0",
@@ -33,13 +33,14 @@
         "test": "cd tests && phpunit --testdox --colors",
         "test:coverage": "cd tests && phpunit --coverage-html coverage/ --coverage-text",
         "build:phar": "./bin/build-reprint-phar.sh",
-        "build:exporter-plugin": "cd reprint-exporter-wp && composer install --no-dev && cd .. && zip -r reprint-exporter-wp.zip reprint-exporter-wp -x 'reprint-exporter-wp/secret.php'",
+        "build:server-plugin": "rm -f reprint-exporter-wp.zip && composer install --no-dev --working-dir=reprint-server-wp && cd reprint-server-wp && zip -r ../reprint-exporter-wp.zip . -x './secret.php'",
+        "build:exporter-plugin": "@build:server-plugin",
         "analyze": "phpstan analyze --memory-limit=1G",
         "lint:php": "phpcs --standard=phpcs.xml.dist",
         "lint:php:fix": "phpcbf --standard=phpcs.xml.dist",
         "lint:php:compat": [
-            "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.2- -ps packages/reprint-exporter/src reprint-exporter-wp --ignore=reprint-exporter-wp/wordpress",
-            "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.4- -ps packages/reprint-importer/src"
+            "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.2- -ps packages/reprint-server/src reprint-server-wp --ignore=reprint-server-wp/wordpress",
+            "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.4- -ps packages/reprint-client/src"
         ],
         "compat": "@lint:php:compat"
     },

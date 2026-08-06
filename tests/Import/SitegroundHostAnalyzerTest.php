@@ -4,10 +4,10 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/class-runtime-manifest.php';
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/interface-host-analyzer.php';
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/functions.php';
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/analyzers/class-siteground-host-analyzer.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/class-runtime-manifest.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/interface-host-analyzer.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/functions.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/analyzers/class-siteground-host-analyzer.php';
 
 class SitegroundHostAnalyzerTest extends TestCase
 {

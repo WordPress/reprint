@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "80964e8e850ba630412416ac9eca68da",
+    "content-hash": "40247d2cff4fefbc84888dc43a867877",
     "packages": [
         {
             "name": "wp-php-toolkit/bytestream",
@@ -357,17 +357,52 @@
             "time": "2026-05-27T22:01:51+00:00"
         },
         {
-            "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-adamziel/investigate-push-session-failures",
+            "name": "wp-php-toolkit/reprint-client",
+            "version": "dev-adamziel/rename-reprint-server-client",
             "dist": {
                 "type": "path",
-                "url": "packages/reprint-exporter",
-                "reference": "dbc6c2bfd0027b377cf207cf32afe8fcd76a4f30"
+                "url": "packages/reprint-client",
+                "reference": "e5df507dc657f3e55b759576fa11185dc3167a60"
+            },
+            "require": {
+                "ext-pdo": "*",
+                "ext-pdo_mysql": "*",
+                "php": ">=7.4",
+                "wp-php-toolkit/data-liberation": "^0.8.0",
+                "wp-php-toolkit/html": "^0.8.0",
+                "wp-php-toolkit/reprint-server": "*@dev"
+            },
+            "replace": {
+                "wp-php-toolkit/reprint-importer": "self.version"
+            },
+            "bin": [
+                "bin/reprint-client",
+                "bin/reprint-importer"
+            ],
+            "type": "library",
+            "license": [
+                "GPL-2.0-or-later"
+            ],
+            "description": "Streaming site importer with CLI and PHAR distribution support",
+            "transport-options": {
+                "relative": true
+            }
+        },
+        {
+            "name": "wp-php-toolkit/reprint-server",
+            "version": "dev-adamziel/rename-reprint-server-client",
+            "dist": {
+                "type": "path",
+                "url": "packages/reprint-server",
+                "reference": "57109228fef702ea4181db6cdfe266346457dead"
             },
             "require": {
                 "php": ">=7.2",
                 "wp-php-toolkit/data-liberation": "^0.8.0",
                 "wp-php-toolkit/html": "^0.8.0"
+            },
+            "replace": {
+                "wp-php-toolkit/reprint-exporter": "self.version"
             },
             "suggest": {
                 "ext-pdo": "Needed for the SQLite export path; recommended for MySQL exports (the wpdb fallback handles MySQL when absent).",
@@ -401,35 +436,7 @@
             "license": [
                 "GPL-2.0-or-later"
             ],
-            "description": "Streaming export engine used by the Reprint Exporter WordPress plugin",
-            "transport-options": {
-                "relative": true
-            }
-        },
-        {
-            "name": "wp-php-toolkit/reprint-importer",
-            "version": "dev-adamziel/investigate-push-session-failures",
-            "dist": {
-                "type": "path",
-                "url": "packages/reprint-importer",
-                "reference": "b7ed8b1bc68bcb7294d5e5600daf42efa3062850"
-            },
-            "require": {
-                "ext-pdo": "*",
-                "ext-pdo_mysql": "*",
-                "php": ">=7.4",
-                "wp-php-toolkit/data-liberation": "^0.8.0",
-                "wp-php-toolkit/html": "^0.8.0",
-                "wp-php-toolkit/reprint-exporter": "*@dev"
-            },
-            "bin": [
-                "bin/reprint-importer"
-            ],
-            "type": "library",
-            "license": [
-                "GPL-2.0-or-later"
-            ],
-            "description": "Streaming site importer with CLI and PHAR distribution support",
+            "description": "Streaming export engine used by the Reprint Server WordPress plugin",
             "transport-options": {
                 "relative": true
             }
@@ -2680,8 +2687,8 @@
     "aliases": [],
     "minimum-stability": "dev",
     "stability-flags": {
-        "wp-php-toolkit/reprint-exporter": 20,
-        "wp-php-toolkit/reprint-importer": 20
+        "wp-php-toolkit/reprint-client": 20,
+        "wp-php-toolkit/reprint-server": 20
     },
     "prefer-stable": true,
     "prefer-lowest": false,

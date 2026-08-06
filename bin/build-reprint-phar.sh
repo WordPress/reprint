@@ -37,12 +37,12 @@ fi
 # Box does not follow Composer's local package symlinks into the PHAR. Replace
 # them with mirrors for the build, then restore the development install.
 local_package_names=(
-    wp-php-toolkit/reprint-exporter
-    wp-php-toolkit/reprint-importer
+    wp-php-toolkit/reprint-server
+    wp-php-toolkit/reprint-client
 )
 local_packages_are_symlinked=false
-if [ -L "$PROJECT_ROOT/vendor/wp-php-toolkit/reprint-exporter" ] ||
-    [ -L "$PROJECT_ROOT/vendor/wp-php-toolkit/reprint-importer" ]; then
+if [ -L "$PROJECT_ROOT/vendor/wp-php-toolkit/reprint-server" ] ||
+    [ -L "$PROJECT_ROOT/vendor/wp-php-toolkit/reprint-client" ]; then
     if ! command -v composer >/dev/null 2>&1; then
         echo "Error: composer not found in PATH." >&2
         exit 1
@@ -79,7 +79,7 @@ else
     LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
     VERSION="${LATEST_TAG:-v0.0.0}-trunk"
 fi
-echo "$VERSION" > packages/reprint-importer/src/VERSION
+echo "$VERSION" > packages/reprint-client/src/VERSION
 echo "Version: $VERSION"
 
 # ── Build ─────────────────────────────────────────────────────────

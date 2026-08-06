@@ -6,8 +6,8 @@ use PHPUnit\Framework\TestCase;
 use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\try_exec_sort_index_file;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/sort-index-file.php';
-require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/sort-index-file.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
 
 final class SortIndexFileTest extends TestCase
 {
@@ -106,8 +106,8 @@ final class SortIndexFileTest extends TestCase
         $path = $this->write_unsorted_index();
         $script = $this->temporary_directory . '/sort-without-exec.php';
         file_put_contents($script, '<?php' . "\n"
-            . 'require ' . var_export(dirname(__DIR__, 2) . '/packages/reprint-exporter/src/utils.php', true) . ';' . "\n"
-            . 'require ' . var_export(dirname(__DIR__, 2) . '/packages/reprint-importer/src/lib/sort-index-file.php', true) . ';' . "\n"
+            . 'require ' . var_export(dirname(__DIR__, 2) . '/packages/reprint-server/src/utils.php', true) . ';' . "\n"
+            . 'require ' . var_export(dirname(__DIR__, 2) . '/packages/reprint-client/src/lib/sort-index-file.php', true) . ';' . "\n"
             . '\\Reprint\\Importer\\sort_index_file($argv[1]);' . "\n");
 
         $process = proc_open(

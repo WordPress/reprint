@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../client/import.php';
 
 /**
  * Verify run_flat_document_root() picks up wp-config.php when it lives

@@ -12,12 +12,12 @@ This is a WordPress site export/import system that enables resumable, cursor-bas
 
 The codebase follows a producer-consumer pattern with two main components:
 
-### Export Side (Server) — `packages/reprint-exporter/src/`
+### Export Side (Server) — `packages/reprint-server/src/`
 - **export.php**: HTTP endpoint that serves as the export API, handling authentication and routing requests to the appropriate producer
 - **MySQLDumpProducer**: Generates SQL dump fragments with cursor-based resumption, supporting batched INSERT statements and all MySQL data types
 - **FileTreeProducer / FileListProducer**: Streams filesystem contents (full tree or explicit list) in chunks with support for symlinks and cursor-based resumption
 
-### Import Side (Client) — `packages/reprint-importer/src/`
+### Import Side (Client) — `packages/reprint-client/src/`
 - **import.php**: CLI script that downloads from export.php using streaming multipart parsing, no buffering of entire response
 - **MultipartStreamParser**: Incremental multipart/mixed parser that processes chunks as they arrive
 
@@ -157,8 +157,8 @@ PHPUnit tests automatically create/drop test databases. The naming convention is
 
 The `apply-runtime` command separates source host detection from target runtime configuration. The flow is:
 
-1. **Host analyzer** (in `packages/reprint-importer/src/lib/host/analyzers/`) reads preflight data and produces a `RuntimeManifest` — a pure-data object with INI directives, constants, server vars, routes, `paths_to_remove`, and `extra_directories`.
-2. **Runtime applier** (in `packages/reprint-importer/src/lib/target-runtime/`) reads the manifest and generates server-specific configuration files.
+1. **Host analyzer** (in `packages/reprint-client/src/lib/host/analyzers/`) reads preflight data and produces a `RuntimeManifest` — a pure-data object with INI directives, constants, server vars, routes, `paths_to_remove`, and `extra_directories`.
+2. **Runtime applier** (in `packages/reprint-client/src/lib/target-runtime/`) reads the manifest and generates server-specific configuration files.
 
 The `WpcloudHostAnalyzer` auto-detects WP Cloud production infrastructure that won't work locally: Memcached-backed `object-cache.php`, wpcomsh mu-plugins, and `auto_prepend_file`/`auto_append_file` directories. It populates `paths_to_remove` (stripped after flattening) and `extra_directories` (auto-included in the export file list). The `SitegroundHostAnalyzer` detects SiteGround hosting via `sg-*` plugin prefixes and strips `sg-cachepress` and `sg-security` from disk.
 
@@ -176,19 +176,20 @@ During files-push, progress records include `files_done` and `files_total` toget
 
 ## File Organization
 
-- packages/reprint-exporter/: Packagist exporter package
+- packages/reprint-server/: Packagist server package (previously reprint-exporter)
   - src/: Core export engine (export.php, producers, HMAC client, utilities)
-- packages/reprint-importer/: Packagist importer package
+- packages/reprint-client/: Packagist client package (previously reprint-importer)
   - src/: Import client and importer runtime support code
   - src/lib/host/: Host analyzers and RuntimeManifest (WpcloudHostAnalyzer, SitegroundHostAnalyzer, DefaultHostAnalyzer)
   - src/lib/target-runtime/: Runtime appliers (NginxFpmApplier, PhpBuiltinApplier, PlaygroundCliApplier)
   - src/lib/url-rewrite/: URL rewriting for db-apply
   - src/lib/mysql-query-stream/: MySQL query stream parser for direct streaming
-- reprint-exporter-wp/: Self-contained WordPress plugin distribution directory
+- reprint-server-wp/: Self-contained WordPress plugin distribution directory
   - index.php: WordPress plugin entry point — intercepts `?reprint-api` requests (and the legacy `?site-export-api` alias) during plugin load, requires lib.php
   - lib.php: Standalone library — constants, auth functions, and request handler. Can be required without index.php by projects that want to embed the export engine with their own URL routing and authentication (pass a custom `authenticate` callable in the `$options` array to `_site_export_handle_api_request()`)
   - wordpress/: WordPress admin UI (site-export.php)
-- importer/: Thin compatibility wrapper that loads the importer package entry point
+- client/: Thin wrapper that loads the client package entry point
+- importer/: Compatibility shim for the old client/ wrapper path
 - markdown/: Architecture documentation (read these for deep understanding)
 - tests/: PHPUnit test suite organized by component
 - tests/e2e/: End-to-end Docker-based integration tests

@@ -8,7 +8,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use function Reprint\Importer\merge_local_index_mutations;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../client/import.php';
 
 final class LocalIndexUpdateFunctionsTest extends TestCase
 {

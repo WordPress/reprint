@@ -12,9 +12,10 @@
 
 	<config name="text_domain" value="reprint"/>
 
-	<file>packages/reprint-exporter/src</file>
-	<file>packages/reprint-importer/src</file>
-	<file>reprint-exporter-wp</file>
+	<file>packages/reprint-server/src</file>
+	<file>packages/reprint-client/src</file>
+	<file>reprint-server-wp</file>
+	<file>client/import.php</file>
 	<file>importer/import.php</file>
 
 	<exclude-pattern>*/vendor/*</exclude-pattern>

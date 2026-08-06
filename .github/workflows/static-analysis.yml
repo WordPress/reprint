@@ -60,6 +60,6 @@ jobs:
 
       - name: Lint exporter sources for PHP 7.2 parse errors
         run: |
-          find packages/reprint-exporter/src reprint-exporter-wp \
-            -name '*.php' -not -path 'reprint-exporter-wp/wordpress/*' \
+          find packages/reprint-server/src reprint-server-wp \
+            -name '*.php' -not -path 'reprint-server-wp/wordpress/*' \
             -print0 | xargs -0 -n1 php -l

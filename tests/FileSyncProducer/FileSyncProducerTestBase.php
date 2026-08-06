@@ -4,7 +4,7 @@ namespace FileSyncProducerTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-exporter/src/class-file-tree-producer.php';
+require_once __DIR__ . '/../../packages/reprint-server/src/class-file-tree-producer.php';
 
 /**
  * Base test class for FileTreeProducer tests

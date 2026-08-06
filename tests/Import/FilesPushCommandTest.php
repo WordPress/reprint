@@ -8,7 +8,7 @@ namespace ImportTests;
 use ImportClient;
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../client/import.php';
 
 final class FilesPushCommandTest extends TestCase
 {
@@ -365,7 +365,7 @@ final class FilesPushCommandTest extends TestCase
     private function runCli(array $arguments): array
     {
         $command = array_merge(
-            [PHP_BINARY, __DIR__ . '/../../importer/import.php'],
+            [PHP_BINARY, __DIR__ . '/../../client/import.php'],
             $arguments
         );
         $process = proc_open(

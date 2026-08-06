@@ -13,7 +13,7 @@
  * the traversal list because it's a parent of __wp__, causing the entire
  * site wp-content to be missing from the index.
  *
- * This test skips full WordPress boot — it loads only the exporter plugin
+ * This test skips full WordPress boot — it loads only the server plugin
  * and exercises the file_index endpoint directly.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -74,7 +74,7 @@ _site_export_handle_api_request();
                 mkdirSync(join(siteDir, 'wp-content', 'plugins', 'site-export'), { recursive: true });
                 mkdirSync(join(siteDir, 'wp-content', 'themes'), { recursive: true });
 
-                // Copy exporter plugin
+                // Copy server plugin
                 const pluginSrc = join(wpDir, 'wp-content', 'plugins', 'site-export');
                 if (existsSync(pluginSrc)) {
                     execSync(`cp -a "${pluginSrc}/." "${join(siteDir, 'wp-content', 'plugins', 'site-export')}/"`)
