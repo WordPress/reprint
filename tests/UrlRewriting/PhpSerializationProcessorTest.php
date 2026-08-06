@@ -299,6 +299,62 @@ class PhpSerializationProcessorTest extends TestCase
     }
 
     // ---------------------------------------------------------------
+    // Enum cases (E:)
+    // ---------------------------------------------------------------
+
+    public function testEnumPassthroughAllowsSurroundingStringReplacements(): void
+    {
+        $enum_identifier = 'Example\\Münich_Status:Published';
+        $serialized_enum = 'E:' . strlen($enum_identifier) . ':"' . $enum_identifier . '";';
+        $input = 'a:3:{'
+            . serialize('before') . serialize('old')
+            . serialize('status') . $serialized_enum
+            . serialize('after') . serialize('keep')
+            . '}';
+        $expected = 'a:3:{'
+            . serialize('before') . serialize('a longer replacement')
+            . serialize('status') . $serialized_enum
+            . serialize('after') . serialize('keep')
+            . '}';
+
+        $processor = new PhpSerializationProcessor($input);
+
+        $this->assertFalse($processor->is_malformed());
+        $this->assertTrue($processor->next_value());
+        $this->assertSame('old', $processor->get_value());
+        $processor->set_value('a longer replacement');
+        $this->assertTrue($processor->next_value());
+        $this->assertSame('keep', $processor->get_value());
+        $this->assertFalse($processor->next_value());
+        $this->assertSame($expected, $processor->get_updated_serialization());
+    }
+
+    /**
+     * @dataProvider malformedEnumSerializationCases
+     */
+    public function testMalformedEnumSerializationIsRejected(string $input): void
+    {
+        $processor = new PhpSerializationProcessor($input);
+
+        $this->assertTrue($processor->is_malformed());
+        $this->assertFalse($processor->next_value());
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function malformedEnumSerializationCases(): iterable
+    {
+        yield 'empty identifier' => ['E:0:"";'];
+        yield 'missing class and case separator' => ['E:3:"abc";'];
+        yield 'empty class' => ['E:2:":A";'];
+        yield 'empty case' => ['E:2:"A:";'];
+        yield 'multiple separators' => ['E:5:"A:B:C";'];
+        yield 'declared length exceeds payload' => ['E:4:"A:B";'];
+        yield 'missing semicolon' => ['E:3:"A:B"'];
+    }
+
+    // ---------------------------------------------------------------
     // URL rewriting: URL replaced and s:N: updated
     // ---------------------------------------------------------------
 

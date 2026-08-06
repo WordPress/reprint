@@ -228,6 +228,8 @@ class PhpSerializationProcessor
                 return $this->parse_object($pos);
             case 'C':
                 return $this->parse_custom($pos);
+            case 'E':
+                return $this->parse_enum($pos);
             case 'r':
             case 'R':
                 return $this->parse_reference($pos);
@@ -570,6 +572,51 @@ class PhpSerializationProcessor
             return false;
         }
         $pos++; // skip '}'
+
+        return true;
+    }
+
+    /**
+     * Parse an enum case: E:N:"EnumClass:Case";.
+     *
+     * The enum identifier is structural metadata, so it is preserved as an
+     * opaque byte string and is not exposed as a rewritable string value.
+     */
+    private function parse_enum(int &$pos): bool
+    {
+        if (!isset($this->data[$pos + 1]) || $this->data[$pos] !== 'E' || $this->data[$pos + 1] !== ':') {
+            return false;
+        }
+        $pos += 2; // skip 'E:'
+
+        $digit_len = strspn($this->data, self::DIGITS, $pos);
+        if ($digit_len === 0) {
+            return false;
+        }
+        $identifier_length = (int) substr($this->data, $pos, $digit_len);
+        $pos += $digit_len;
+
+        if ($pos + $identifier_length + 4 > $this->data_length
+            || $this->data[$pos] !== ':'
+            || $this->data[$pos + 1] !== '"'
+        ) {
+            return false;
+        }
+        $pos += 2; // skip ':"'
+
+        if ($identifier_length < 3
+            || $this->data[$pos] === ':'
+            || $this->data[$pos + $identifier_length - 1] === ':'
+            || substr_count($this->data, ':', $pos, $identifier_length) !== 1
+        ) {
+            return false;
+        }
+        $pos += $identifier_length; // Move past the enum identifier.
+
+        if ($this->data[$pos] !== '"' || $this->data[$pos + 1] !== ';') {
+            return false;
+        }
+        $pos += 2; // skip '";'
 
         return true;
     }
