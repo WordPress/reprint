@@ -668,7 +668,7 @@ final class FilesPullLocalIndexTest extends TestCase
     {
         mkdir($this->pullStateDirectory, 0700, true);
         $state = new \PullState();
-        $state->preflight = [
+        $state->set_preflight_record([
             'http_code' => 200,
             'data' => [
                 'ok' => true,
@@ -695,7 +695,7 @@ final class FilesPullLocalIndexTest extends TestCase
                     ],
                 ],
             ],
-        ];
+        ]);
         file_put_contents(
             $this->pullStateDirectory . '/state.json',
             json_encode(

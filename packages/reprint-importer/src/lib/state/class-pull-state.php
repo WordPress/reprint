@@ -19,10 +19,30 @@ use Reprint\Importer\State\ResumableCommandCheckpointState;
  */
 class PullState
 {
+    /**
+     * Config paths readable via get(), mapped to the default applied when the
+     * preflight payload has no usable value at that path. A null default means
+     * absence is meaningful and the caller handles it.
+     */
+    private const CONFIG_DEFAULTS = [
+        'preflight.limits.max_request_bytes' => 4 * 1024 * 1024,
+        'preflight.runtime.document_root' => '',
+        'preflight.runtime.ini_get_all' => [],
+        'preflight.database.wp.table_prefix' => 'wp_',
+        'preflight.database.wp.paths_urls.abspath' => null,
+        'preflight.database.wp.paths_urls.wp_admin_path' => null,
+        'preflight.database.wp.paths_urls.wp_includes_path' => null,
+        'preflight.database.wp.paths_urls.content_dir' => null,
+        'preflight.database.wp.paths_urls.plugins_dir' => null,
+        'preflight.database.wp.paths_urls.mu_plugins_dir' => null,
+        'preflight.database.wp.paths_urls.uploads.basedir' => null,
+        'preflight.wp_detect.roots' => [],
+    ];
+
     /** Resume checkpoint for a lower-level command run directly or inside a pull pipeline. */
     public ResumableCommandCheckpointState $active_resumable_command;
-    /** @var array<string,mixed>|null */
-    public ?array $preflight = null;
+    /** @var array<string,mixed>|null Verbatim preflight record; read it through preflight_record() or get(). */
+    private ?array $preflight = null;
     public ?int $remote_protocol_version = null;
     /** @var string|null Source WordPress version saved with state. */
     public ?string $version = null;
@@ -124,6 +144,73 @@ class PullState
         $state->tuning = AdaptiveTuningState::from_array($data['tuning']);
         $state->pull_pipeline = PullPipelineCheckpointState::from_array($data['pull_pipeline']);
         return $state;
+    }
+
+    /**
+     * The verbatim preflight record, for code that reports what the server
+     * said (pipeline status, pull metadata, host analyzers). Code that needs
+     * an effective config value uses get() instead.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function preflight_record(): ?array
+    {
+        return $this->preflight;
+    }
+
+    /** @param array<string,mixed>|null $entry */
+    public function set_preflight_record(?array $entry): void
+    {
+        $this->preflight = $entry;
+    }
+
+    /**
+     * Read an effective config value from the preflight payload.
+     *
+     * $preflight stays exactly what the server reported; defaults for missing
+     * or unusable values are applied here instead. Every path read anywhere in
+     * the importer must be registered in CONFIG_DEFAULTS, so a typo throws
+     * instead of silently returning null.
+     */
+    public function get(string $path)
+    {
+        if (!array_key_exists($path, self::CONFIG_DEFAULTS)) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Hardcoded path from our own call sites, never HTML output.
+            throw new UnexpectedValueException('Unknown config path: ' . $path);
+        }
+        $default = self::CONFIG_DEFAULTS[$path];
+
+        $segments = explode('.', $path);
+        // The leading "preflight" segment maps to $preflight['data'], the raw payload.
+        array_shift($segments);
+        $value = $this->preflight['data'] ?? null;
+        foreach ($segments as $segment) {
+            if (!is_array($value) || !array_key_exists($segment, $value)) {
+                $value = null;
+                break;
+            }
+            $value = $value[$segment];
+        }
+
+        if ($value === null) {
+            return $default;
+        }
+
+        // A reported value of the wrong type is as unusable as a missing one.
+        // The int defaults are all sizes and limits, where the exporter reports
+        // 0 when the host has none configured; stay conservative and use the
+        // default there too.
+        if (is_int($default)) {
+            return is_numeric($value) && (int) $value > 0 ? (int) $value : $default;
+        }
+        if (is_string($default) && !is_string($value)) {
+            return $default;
+        }
+        if (is_array($default) && !is_array($value)) {
+            return $default;
+        }
+
+        return $value;
     }
 
     public function to_array(): array

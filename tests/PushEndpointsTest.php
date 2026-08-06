@@ -3342,14 +3342,14 @@ final class PushEndpointsTest extends TestCase {
             mkdir($pull_state_directory, 0700, true);
         }
         $pull_state = new PullState();
-        $pull_state->preflight = [
+        $pull_state->set_preflight_record([
             'http_code' => 200,
             'data' => [
                 'runtime' => [
                     'document_root' => 'base64:' . base64_encode($document_root),
                 ],
             ],
-        ];
+        ]);
         file_put_contents(
             $pull_state_file,
             json_encode($pull_state->to_array(), JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR)

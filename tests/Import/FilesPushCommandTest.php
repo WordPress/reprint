@@ -345,14 +345,14 @@ final class FilesPushCommandTest extends TestCase
             mkdir($pullStateDirectory, 0700, true);
         }
         $pullState = new \PullState();
-        $pullState->preflight = [
+        $pullState->set_preflight_record([
             'http_code' => 200,
             'data' => [
                 'runtime' => [
                     'document_root' => 'base64:' . base64_encode($documentRoot),
                 ],
             ],
-        ];
+        ]);
         file_put_contents(
             $pullStateFile,
             json_encode($pullState->to_array(), JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR)

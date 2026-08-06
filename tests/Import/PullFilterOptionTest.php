@@ -70,7 +70,7 @@ class PullFilterFakeClient extends \ImportClient
     {
         $this->preflight_runs++;
         $state = $this->get_state();
-        $state->preflight = [
+        $state->set_preflight_record([
             "http_code" => 200,
             "data" => [
                 "ok" => true,
@@ -89,7 +89,7 @@ class PullFilterFakeClient extends \ImportClient
                     "phpversion" => "8.2",
                 ],
             ],
-        ];
+        ]);
         $state->active_resumable_command->completion_state = "complete";
         $this->save_state();
     }
@@ -144,10 +144,10 @@ class PullFailingPreflightFakeClient extends PullFilterFakeClient
         $this->preflight_runs++;
         $this->last_error_code = 'HTTP_ERROR';
         $state = $this->get_state();
-        $state->preflight = [
+        $state->set_preflight_record([
             "http_code" => 500,
             "error" => "Exporter unavailable",
-        ];
+        ]);
         $state->active_resumable_command->completion_state = "complete";
         $this->save_state();
     }
