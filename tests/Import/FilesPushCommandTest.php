@@ -281,6 +281,7 @@ final class FilesPushCommandTest extends TestCase
             json_encode([
                 'push_session_id' => str_repeat('1', 32),
                 'phase' => 'starting_plan',
+                'document_root_local_relative_path' => '',
                 'push_plan_cursor' => null,
                 'local_paths_to_push_byte_offset' => 0,
                 'local_paths_to_push_count' => null,
@@ -336,7 +337,7 @@ final class FilesPushCommandTest extends TestCase
 
     private function writePreflightState(
         string $remoteReprintApiUrl,
-        string $pushRoot = '/'
+        string $documentRoot = '/'
     ): void {
         $pullStateFile = $this->pullStateFileForRemoteReprintApiUrl($remoteReprintApiUrl);
         $pullStateDirectory = dirname($pullStateFile);
@@ -348,7 +349,7 @@ final class FilesPushCommandTest extends TestCase
             'http_code' => 200,
             'data' => [
                 'runtime' => [
-                    'document_root' => 'base64:' . base64_encode($pushRoot),
+                    'document_root' => 'base64:' . base64_encode($documentRoot),
                 ],
             ],
         ];

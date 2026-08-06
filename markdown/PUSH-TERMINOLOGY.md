@@ -16,9 +16,6 @@ is absolute or relative to a named root.
   pushed. Use `$filesystem_root`.
 - The **remote Reprint API URL** is the configured URL used for Reprint
   requests. Use `$remote_reprint_api_url`.
-- The **push root** is the remote root selected by the receiving push session.
-  Use `$push_root`.
-
 The domain path terms are:
 
 | Term | Meaning | Preferred name |
@@ -26,7 +23,7 @@ The domain path terms are:
 | Remote absolute path | Absolute path on the remote machine. | `$remote_absolute_path` |
 | Local absolute path | Absolute path on the local machine. | `$local_absolute_path` |
 | Local relative path | Path relative to the filesystem root. | `$local_relative_path` |
-| Push-root-relative path | Path relative to the push root. | `$push_root_relative_path` |
+| Document-root-relative path | Path relative to the document root. | `$document_root_relative_path` |
 
 An **absolute path** begins at `/`. A **relative path** has no leading slash.
 A **normalized path** has repeated separators and `.` or `..` segments removed
@@ -42,7 +39,7 @@ is present.
 
 The pull conversion flow is remote absolute path → local absolute path →
 local relative path. Push applies the reverse mapping from a
-local relative path to a push-root-relative path.
+local relative path to a document-root-relative path.
 
 ## Indexes and mappings
 
@@ -66,17 +63,17 @@ local relative path to a push-root-relative path.
 - The **pull index WAL** records completed pull mutations awaiting application
   to the remote and local indexes.
 - A **pull plan** lists remote absolute paths still scheduled for download or
-  deletion. A **push plan** maps local relative paths to push-root-relative
+  deletion. A **push plan** maps local relative paths to document-root-relative
   paths.
 
 A **resolved path mapping** is an immutable mapping between remote absolute
 prefixes and local absolute prefixes. A **pull mapping** converts a remote
 absolute path to a local absolute path. A **push mapping** converts a
-local relative path to a push-root-relative path. An **addressable mapping**
-maps every relevant local relative path to exactly one push-root-relative path below the
-push root; an **ambiguous mapping** has more than one push-root-relative path,
+local relative path to a document-root-relative path. An **addressable mapping**
+maps every relevant local relative path to exactly one document-root-relative path below the
+document root; an **ambiguous mapping** has more than one document-root-relative path,
 and an **unaddressable mapping** has none. An **identity mapping** leaves local
-and push-root-relative paths identical. `path-mapping.json` stores the resolved
+and document-root-relative paths identical. `path-mapping.json` stores the resolved
 path mapping.
 
 A state directory belongs to one filesystem root. Reusing its mapping state
@@ -377,10 +374,10 @@ running the command again prints the complete report.
 
 The low-level, files-only command is `files-push`. Its `remote Reprint API URL` is the
 exporter API URL, and its `filesystem root` is the resolved absolute directory supplied by
-`--fs-root` and represents the push root locally. Every local relative path is
-also its push-root-relative path; the target's absolute document root is not a
-local path prefix. It requires saved preflight data and `--secret=TOKEN`;
-`--force-http` is the explicit plain-HTTP opt-in.
+`--fs-root`. It requires saved preflight data and treats its remote document
+root as a path beneath that filesystem root. Local relative paths beneath the document root become document-root-relative paths; other local paths do not
+become push or delete work. It also requires `--secret=TOKEN`; `--force-http`
+is the explicit plain-HTTP opt-in.
 
 The **local push state directory** is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash
