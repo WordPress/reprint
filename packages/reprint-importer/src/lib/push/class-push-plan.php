@@ -571,10 +571,14 @@ class PushPlan
             );
         }
 
-        $local_relative_path = substr(
+        $local_relative_path = path_remainder_under(
             $file_index_processor_entry["path"],
-            strlen($this->filesystem_root) + 1
+            $this->filesystem_root
         );
+        if ($local_relative_path === null) {
+            throw new LogicException("File index path is outside the filesystem root.");
+        }
+        $local_relative_path = ltrim($local_relative_path, "/");
         $fresh_local_index_entry = [
             "path" => base64_encode($local_relative_path),
             "ctime" => $file_index_processor_entry["ctime"],
