@@ -807,7 +807,9 @@ final class FileIndexProcessor {
             if ($raw_target[0] !== "/") {
                 $raw_target = dirname($path) . "/" . $raw_target;
             }
-            $absolute_raw_target = self::normalize_dot_segments($raw_target);
+            // Resolve only textual dot segments. realpath() would skip the
+            // intermediate links that this walk must inspect.
+            $absolute_raw_target = \WordPress\Reprint\Exporter\normalize_path($raw_target);
             if (
                 $absolute_raw_target !== ""
                 && $absolute_raw_target[0] === "/"
@@ -872,39 +874,5 @@ final class FileIndexProcessor {
             }
         }
         return $entries;
-    }
-
-    /**
-     * Removes dot segments without following symlinks.
-     *
-     * realpath() cannot be used here because it would skip the intermediate
-     * symlinks that find_parent_symlinks() needs to inspect.
-     *
-     * @param string $path Absolute path containing optional dot segments.
-     * @return string Path with dot segments removed.
-     */
-    private static function normalize_dot_segments(string $path): string
-    {
-        $parts = explode("/", $path);
-        $normalized = [];
-
-        // Resolve only textual dot segments. Filesystem resolution here would
-        // skip the intermediate links this path is being prepared to inspect.
-        foreach ($parts as $part) {
-            if ($part === "" || $part === ".") {
-                if (empty($normalized)) {
-                    $normalized[] = "";
-                }
-                continue;
-            }
-            if ($part === "..") {
-                if (count($normalized) > 1) {
-                    array_pop($normalized);
-                }
-                continue;
-            }
-            $normalized[] = $part;
-        }
-        return implode("/", $normalized);
     }
 }

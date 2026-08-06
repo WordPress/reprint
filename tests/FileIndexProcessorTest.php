@@ -148,6 +148,48 @@ final class FileIndexProcessorTest extends TestCase {
         $processor->close();
     }
 
+    public function testFollowedRelativeSymlinkIndexesAnIntermediateLink(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        $real_target = $this->tempDir . '/real/target';
+        $alias = $this->tempDir . '/alias';
+        mkdir($docroot, 0755, true);
+        mkdir($real_target, 0755, true);
+        symlink($this->tempDir . '/real', $alias);
+        symlink('../alias/./target', $docroot . '/link');
+
+        $processor = FileIndexProcessor::start(
+            [ (string) realpath($docroot) ],
+            $docroot,
+            true,
+            true,
+            ''
+        );
+        $entries = [];
+        while ($processor->next_index_step()) {
+            foreach ($processor->get_index_entries() as $entry) {
+                $entries[] = $entry;
+            }
+        }
+        $processor->close();
+
+        $intermediate_entries = array_values(array_filter(
+            $entries,
+            static fn(array $entry): bool => ( $entry['intermediate'] ?? false ) === true
+        ));
+        $this->assertCount(1, $intermediate_entries);
+        $this->assertSame('link', $intermediate_entries[0]['type']);
+        $link_entries = array_values(array_filter(
+            $entries,
+            static fn(array $entry): bool => $entry['path'] === (string) realpath($docroot) . '/link'
+        ));
+        $this->assertCount(1, $link_entries);
+        $this->assertSame(
+            (string) realpath($real_target),
+            $link_entries[0]['target']
+        );
+    }
+
     public function testResumeWithACompletedCursorRemainsComplete(): void
     {
         $docroot = $this->tempDir . '/site';
