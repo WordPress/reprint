@@ -3,6 +3,7 @@
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Push errors become authenticated API JSON, never HTML output.
 
 use function WordPress\Reprint\Exporter\normalize_excluded_paths;
+use function WordPress\Reprint\Exporter\path_remainder_under;
 
 if (!class_exists('Site_Export_Multipart_Processor', false)) {
     require_once __DIR__ . '/class-multipart-processor.php';
@@ -136,9 +137,9 @@ final class Site_Export_Push_Session {
         if ($reprint_directory === $this->docroot) {
             throw new InvalidArgumentException('The reprint directory must not be the document root itself.');
         }
-        $docroot_prefix = $this->docroot === '/' ? '/' : $this->docroot . '/';
-        if (strpos($reprint_directory . '/', $docroot_prefix) === 0) {
-            $relative_reprint_directory = ltrim(substr($reprint_directory, strlen($this->docroot)), '/');
+        $relative_reprint_directory = path_remainder_under($reprint_directory, $this->docroot);
+        if ($relative_reprint_directory !== null) {
+            $relative_reprint_directory = ltrim($relative_reprint_directory, '/');
             if ($relative_reprint_directory !== '') {
                 $excluded_paths[] = $relative_reprint_directory;
             }
@@ -2382,7 +2383,7 @@ final class Site_Export_Push_Session {
     private function assert_path_does_not_overlap_excluded_paths(string $path): void {
         $this->assert_path_is_not_excluded($path);
         foreach ($this->excluded_paths as $excluded_path) {
-            if (strpos($excluded_path, $path . '/') === 0) {
+            if (path_remainder_under($excluded_path, $path) !== null) {
                 throw new InvalidArgumentException(
                     'Excluded document-root-relative path ' . base64_encode($excluded_path)
                     . ' is contained by the requested path, which cannot be changed: '
@@ -2411,7 +2412,7 @@ final class Site_Export_Push_Session {
                     . base64_encode($path) . '.'
                 );
             }
-            if (strpos($path, $excluded_path . '/') === 0) {
+            if (path_remainder_under($path, $excluded_path) !== null) {
                 throw new InvalidArgumentException(
                     'Excluded document-root-relative path ' . base64_encode($excluded_path)
                     . ' contains the requested descendant, which cannot be changed: '
@@ -2566,22 +2567,15 @@ final class Site_Export_Push_Session {
      */
     private function ensure_private_parent(string $path, bool $create_missing = true): void {
         $parent = dirname($path);
-        $root = null;
-        foreach ([$this->work_files_directory] as $candidate) {
-            if ($parent === $candidate || strpos($parent . '/', $candidate . '/') === 0) {
-                $root = $candidate;
-                break;
-            }
-        }
-        if ($root === null) {
+        $relative = path_remainder_under($parent, $this->work_files_directory);
+        if ($relative === null) {
             throw new LogicException('Private work path escaped work/files.');
         }
-        if ($parent === $root) {
+        if ($relative === '') {
             return;
         }
-        $relative = substr($parent, strlen($root) + 1);
-        $current = $root;
-        foreach (explode('/', $relative) as $segment) {
+        $current = $this->work_files_directory;
+        foreach (explode('/', ltrim($relative, '/')) as $segment) {
             $current .= '/' . $segment;
             $identity = $this->lstat_path($current);
             if ($identity === null) {
