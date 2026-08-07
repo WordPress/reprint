@@ -565,7 +565,11 @@ final class FilesPullLocalIndexTest extends TestCase
         ], $extraArguments));
     }
 
-    /** @return array{exit:int,stdout:string,stderr:string,output:string} */
+    /**
+     * Runs files-diff with explicit JSONL output for record-level assertions.
+     *
+     * @return array{exit:int,stdout:string,stderr:string,output:string}
+     */
     private function runFilesDiff(): array
     {
         return $this->runCli([
@@ -573,6 +577,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->targetUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->rawFileRoot,
+            '--progress=jsonl',
         ]);
     }
 

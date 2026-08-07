@@ -15,9 +15,10 @@ require_once __DIR__ . '/../../client/cli.php';
  * files-diff compares the filesystem root with the local index for the remote
  * Reprint API URL — the index a completed files-push writes —
  * without contacting the target, and reports the complete diff on every run.
- * These tests pin that contract: local-only operation, correct change records,
- * arbitrary path bytes, the local-index requirement, no mutation of the local
- * index, and a complete report after an interrupted run.
+ * These tests pin that contract: local-only operation, automatic terminal or
+ * JSONL output, explicit progress modes, arbitrary path bytes, the local-index
+ * requirement, no mutation of the local index, and a complete report after an
+ * interrupted run.
  */
 final class FilesDiffCommandTest extends TestCase
 {
@@ -77,6 +78,85 @@ final class FilesDiffCommandTest extends TestCase
         ];
         $this->assertSame($this->encodeJsonLine($expectedRecord), $result['stdout']);
         $this->assertSame('', $result['stderr']);
+    }
+
+    public function testFilesDiffSelectsStatusLinesInAutoModeOnATerminal(): void
+    {
+        if (!function_exists('posix_isatty') || PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('This test requires POSIX pseudoterminal support.');
+        }
+        $this->writeLocalIndex(array_keys($this->initialFiles));
+        file_put_contents($this->filesystemRoot . '/added.txt', 'new file');
+        file_put_contents($this->filesystemRoot . "/bell-\x07.txt", 'control path byte');
+        file_put_contents($this->filesystemRoot . "/line\nbreak.txt", 'raw path byte');
+        unlink($this->filesystemRoot . '/deleted.txt');
+
+        $result = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+        ], true);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertSame(
+            "\033[31mmodified: added.txt\033[0m\n"
+            . "\033[31mmodified: \"bell-\\a.txt\"\033[0m\n"
+            . "\033[31mmodified: \"line\\nbreak.txt\"\033[0m\n"
+            . "\033[31mdeleted: deleted.txt\033[0m\n",
+            str_replace("\r\n", "\n", $result['stdout'])
+        );
+        $this->assertSame('', $result['stderr']);
+
+        $jsonlResult = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+            '--progress=jsonl',
+        ], true);
+
+        $this->assertSame(0, $jsonlResult['exit'], $jsonlResult['output']);
+        $this->assertStringNotContainsString("\033[", $jsonlResult['stdout']);
+        $this->assertStringContainsString('"action":"push"', $jsonlResult['stdout']);
+        $this->assertStringContainsString('"action":"delete"', $jsonlResult['stdout']);
+        $this->assertSame('', $jsonlResult['stderr']);
+    }
+
+    public function testFilesDiffSelectsJsonlInAutoModeWhenRedirected(): void
+    {
+        $this->writeLocalIndex(array_keys($this->initialFiles));
+        file_put_contents($this->filesystemRoot . '/added.txt', 'new file');
+        unlink($this->filesystemRoot . '/deleted.txt');
+
+        $result = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+        ]);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertStringNotContainsString("\033[", $result['stdout']);
+        $this->assertStringContainsString('"action":"push"', $result['stdout']);
+        $this->assertStringContainsString('"action":"delete"', $result['stdout']);
+        $this->assertSame('', $result['stderr']);
+
+        $ttyResult = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+            '--progress=tty',
+        ]);
+
+        $this->assertSame(0, $ttyResult['exit'], $ttyResult['output']);
+        $this->assertSame(
+            "\033[31mmodified: added.txt\033[0m\n"
+            . "\033[31mdeleted: deleted.txt\033[0m\n",
+            $ttyResult['stdout']
+        );
+        $this->assertSame('', $ttyResult['stderr']);
     }
 
     public function testFilesDiffReportsAddedEditedDeletedAndTypeChangedPaths(): void
@@ -223,7 +303,12 @@ final class FilesDiffCommandTest extends TestCase
 
     public function testFilesDiffWithoutALocalIndexFailsWithPointedGuidance(): void
     {
-        $result = $this->runFilesDiff();
+        $result = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+        ]);
 
         $this->assertSame(1, $result['exit'], $result['output']);
         $this->assertSame('', $result['stdout']);
@@ -236,6 +321,27 @@ final class FilesDiffCommandTest extends TestCase
             . 'writes it after the target finishes applying the push. Use the same '
             . 'remote Reprint API URL and state directory.',
             $errorRecord['error'] ?? null
+        );
+    }
+
+    public function testFilesDiffPrintsHumanReadableErrorsWithProgressTty(): void
+    {
+        $result = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+            '--progress=tty',
+        ]);
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertSame('', $result['stdout']);
+        $this->assertSame(
+            "Error: files-diff requires <remote-state-directory>/local_index.jsonl. "
+            . "files-pull writes it from completed local mutations; files-push "
+            . "writes it after the target finishes applying the push. Use the same "
+            . "remote Reprint API URL and state directory.\n",
+            $result['stderr']
         );
     }
 
@@ -269,6 +375,39 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertDirectoryDoesNotExist($this->pushStateDirectory());
     }
 
+    public function testFilesDiffRejectsInvalidProgressMode(): void
+    {
+        $result = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+            '--progress=pretty',
+        ]);
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertSame('', $result['stdout']);
+        $this->assertSame(
+            "Invalid --progress value: pretty. Valid values: auto, tty, jsonl\n",
+            $result['stderr']
+        );
+    }
+
+    public function testOtherCommandsRejectTheFilesDiffProgressOption(): void
+    {
+        $result = $this->runCli([
+            'files-pull',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+            '--progress=jsonl',
+        ]);
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertSame('', $result['stdout']);
+        $this->assertSame("Error: --progress is accepted only by files-diff.\n", $result['stderr']);
+    }
+
     public function testInterruptedFilesDiffReportsTheCompleteDiffWhenItIsRunAgain(): void
     {
         // An empty local index selects every current path for push.
@@ -284,6 +423,7 @@ final class FilesDiffCommandTest extends TestCase
             $this->remoteReprintApiUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->filesystemRoot,
+            '--progress=jsonl',
         ]);
         stream_set_blocking($pipes[1], false);
         $firstOutput = '';
@@ -418,8 +558,11 @@ final class FilesDiffCommandTest extends TestCase
         return $this->remoteStateDirectory() . '/local_index.jsonl';
     }
 
-    /** @param list<string> $extraArguments
-     *  @return array{exit:int,stdout:string,stderr:string,output:string}
+    /**
+     * Runs files-diff with explicit JSONL output for record-level assertions.
+     *
+     * @param list<string> $extraArguments
+     * @return array{exit:int,stdout:string,stderr:string,output:string}
      */
     private function runFilesDiff(?string $remoteReprintApiUrl = null, array $extraArguments = []): array
     {
@@ -428,15 +571,18 @@ final class FilesDiffCommandTest extends TestCase
             $remoteReprintApiUrl ?? $this->remoteReprintApiUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->filesystemRoot,
+            '--progress=jsonl',
         ], $extraArguments));
     }
 
-    /** @param list<string> $arguments
-     *  @return array{exit:int,stdout:string,stderr:string,output:string}
+    /**
+     * @param list<string> $arguments CLI arguments.
+     * @param bool         $stdoutIsTty Whether stdout uses a pseudoterminal.
+     * @return array{exit:int,stdout:string,stderr:string,output:string}
      */
-    private function runCli(array $arguments): array
+    private function runCli(array $arguments, bool $stdoutIsTty = false): array
     {
-        [$process, $pipes] = $this->startCliProcess($arguments);
+        [$process, $pipes] = $this->startCliProcess($arguments, $stdoutIsTty);
         $stdout = stream_get_contents($pipes[1]);
         $stderr = stream_get_contents($pipes[2]);
         fclose($pipes[1]);
@@ -452,14 +598,20 @@ final class FilesDiffCommandTest extends TestCase
         ];
     }
 
-    /** @param list<string> $arguments
-     *  @return array{0:resource,1:array<int,resource>}
+    /**
+     * @param list<string> $arguments CLI arguments.
+     * @param bool         $stdoutIsTty Whether stdout uses a pseudoterminal.
+     * @return array{0:resource,1:array<int,resource>}
      */
-    private function startCliProcess(array $arguments): array
+    private function startCliProcess(array $arguments, bool $stdoutIsTty = false): array
     {
         $process = proc_open(
             array_merge([PHP_BINARY, __DIR__ . '/../../client/cli.php'], $arguments),
-            [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+            [
+                ['pipe', 'r'],
+                $stdoutIsTty ? ['pty'] : ['pipe', 'w'],
+                ['pipe', 'w'],
+            ],
             $pipes,
             $this->root
         );

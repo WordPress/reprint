@@ -355,13 +355,19 @@ The local-only command is `files-diff`. Its `remote Reprint API URL` and
 completed local mutations and files-push writes after the target confirms
 commit. Files-diff never changes it.
 
-Each JSONL change record has `command: "files-diff"`, an `action` of `push` or
-`delete`, and `path_b64`. A push record also has the local path `type`, `size`,
-and `ctime`; its type is `file`, `dir`, or `link`. These records form a local
-minimized push operation plan before remote exclusions: descendants represent
-a new non-empty directory, one deleted subtree root covers its descendants,
-and metadata-only changes to non-empty directories select no operation. The
-final record has `status: "complete"`, `local_paths_to_push`, and
+`--progress` accepts `auto`, `tty`, or `jsonl`. `auto` is the default: it
+selects `tty` when stdout is a TTY and `jsonl` otherwise. `tty` uses
+`modified: PATH` for each local path to push and `deleted: PATH` for each local
+path to delete, both in Git's red status color. Paths containing unsafe bytes
+use C-style quoting so one path always occupies one output line. `jsonl`
+selects uncolored machine-readable output. Each JSONL change record has
+`command: "files-diff"`, an `action` of `push` or `delete`, and `path_b64`. A
+push record also has the local path `type`, `size`, and `ctime`; its type is
+`file`, `dir`, or `link`. These records form a local minimized push operation
+plan before remote exclusions: descendants represent a new non-empty
+directory, one deleted subtree root covers its descendants, and metadata-only
+changes to non-empty directories select no operation. The final JSONL record
+has `status: "complete"`, `local_paths_to_push`, and
 `local_paths_to_delete`.
 
 files-diff persists nothing between runs. It runs one complete PushPlan in
