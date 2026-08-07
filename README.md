@@ -613,9 +613,35 @@ Both fields are emitted together only when the fetch list exists — they
 are absent during the index and diff phases. `files_done` grows monotonically
 up to `files_total` and survives exit-code-2 restarts.
 
-During `files-push`, terminal output refreshes as the command changes phase and
-shows `Uploading — N / T files` while local paths are sent. Non-interactive
-output emits `push_progress` JSONL records. After planning completes, those
+Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl`. The
+default `auto` mode uses terminal progress when its output stream is a TTY and
+JSONL otherwise. Use `--progress=tty` to force the terminal presentation when
+output is captured, or `--progress=jsonl` to force structured progress in a
+terminal:
+
+```bash
+php reprint.phar files-push "$URL" --state-dir="$STATE_DIR" \
+    --fs-root="$FS_ROOT" --secret="$SECRET" --progress=jsonl
+```
+
+The selected mode applies only to that invocation and is not retained in
+command state. Explicit `tty` and `jsonl` modes cannot be combined with
+`--verbose`.
+
+The selector governs progress, lifecycle, and status output. It does not
+reformat a command's data result, such as preflight or pull-metadata JSON,
+files-stats JSON, db-domains lines, or SQL written with `--sql-output=stdout`.
+
+The files-push terminal presentation uses one stage-weighted progress bar. The
+percentage comes first, followed by a major stage such as `Indexing`, `Pushing`,
+or `Committing`. While pushing local paths, the line also shows target-confirmed
+file bytes against the file byte total collected by the plan. Durable index byte
+offsets, target-confirmed counts and byte offsets, and phase milestones advance
+the bar. The percentage describes lifecycle progress, not elapsed time or an
+estimated completion time.
+
+These terminal-only details do not change machine output. The JSONL
+presentation emits `push_progress` records. After planning completes, those
 records, the final result, and `progress.json` include `files_done` and
 `files_total` together. `files_total` is the number of local paths selected by
 the plan; `files_done` advances only after the target confirms the request
@@ -749,7 +775,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 ```
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
-* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
+* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary in terminal mode or one structured result in JSONL mode. Exits with code 0 if migration looks feasible, code 1 if not.
 * `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
 * `pull-db` — Runs `preflight`, `db-pull`, and `db-apply` as one resumable high-level command.
 * `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.

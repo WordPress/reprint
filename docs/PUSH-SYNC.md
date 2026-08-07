@@ -391,10 +391,12 @@ begins until both indexes have been consumed and the two path lists are stable.
 `sender.json` contains no copied receiver cursor. It stores the current push
 session, an optional blocking push session, the phase, the document root's local
 relative path, the PushPlan cursor, the next byte offset in
-`local_paths_to_push.jsonl`, the receiver part limit, and learned request-body
-sizing state. Its phases are `creating`, `finishing_previous_commit`,
-`starting_plan`, `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
-`saving_local_index`, `completing`, `removing`, and `discarding_plan`.
+`local_paths_to_push.jsonl`, the selected local-path count and file byte total,
+the target-confirmed local-path count and completed file bytes, the receiver
+part limit, and learned request-body sizing state. Its phases are `creating`,
+`finishing_previous_commit`, `starting_plan`, `planning`, `pushing_paths`,
+`pushing_deletes`, `committing`, `saving_local_index`, `completing`, `removing`,
+and `discarding_plan`.
 The separate previous-commit, start, local-index-save, completion, removal,
 and discard phases ensure that a process stop between durable actions repeats
 only the current action.
@@ -412,7 +414,9 @@ upload retains the receiver-confirmed position for later steps in the same
 lifecycle. A partial file resumes only while it still matches the plan. A lost
 upload response leaves the earlier local path-list boundary in place; the next
 process checks the receiver and either advances past complete work or safely
-replays it.
+replays it. The sender persists completed file sizes with that path-list
+boundary. It keeps a partial file's receiver-confirmed byte offset only in
+memory and reads it from `push_status` again after resume.
 
 After all local paths are pushed, a newly opened sender reads
 `work_deletes_bytes` and `work_deletes_complete` from `push_status`. Successful
@@ -489,6 +493,12 @@ participate in the directory name. Fragments, URL user-info, and `SECRET_KEY`
 target parameters are rejected. The local push state directory must be outside
 the filesystem root so planning cannot index its own changing files.
 
+Like every `ImportClient` command, files-push accepts
+`--progress=auto|tty|jsonl` for one invocation. The default `auto` mode uses
+terminal progress when its output stream is a TTY and JSONL otherwise. `tty`
+and `jsonl` force the corresponding presentation; they are not stored in
+sender state and cannot be combined with `--verbose`.
+
 One process starts or resumes exactly one sender. Before every `next_step()` it
 checks whether another step may begin. The wall-clock admission deadline is 80
 percent of PHP's finite `max_execution_time`; zero is unlimited. With a finite
@@ -508,9 +518,25 @@ The stable CLI mapping is `complete`/0, `partial`/2, `interrupted`/2,
 `restart`/2, `failed`/1, and `error`/1. Exit 2 asks the operator to run the
 same command again. After `restart`, that next run builds a fresh plan. The
 state-directory-wide audit log records opening mode, phase changes, planned pauses, handled
-interruptions, and terminal outcomes. Terminal output names the active phase
-and shows `Uploading — N / T files` while local paths are sent.
-Non-interactive output emits throttled `push_progress` JSONL records.
+interruptions, and terminal outcomes. The terminal presentation uses one
+stage-weighted progress bar. The percentage precedes a label which changes only
+at the major `Preparing`, `Indexing`, `Pushing`, `Pushing deletions`,
+`Committing`, `Saving index`, and `Finishing` stages. The index diff advances
+from durable byte offsets across both indexes, local-path upload advances from
+target-confirmed path counts, and deleted-path upload advances from the
+target-confirmed deletion-list byte offset. While local paths are pushed, the
+line also shows the sum of target-confirmed file bytes against the file byte
+total accumulated by the single-pass plan. Indexing and commit have no bounded
+total, so they advance only at phase milestones. The percentage is lifecycle
+progress, not a time estimate.
+
+PushPlan reports its internal phase and durable index byte counts.
+PushFilesSender combines those with target-confirmed upload counts in one
+progress snapshot. The CLI alone maps that snapshot onto stage weights and
+terminal labels.
+
+The overall bar is terminal-only. The JSONL presentation emits the same
+throttled `push_progress` records as before.
 After planning, those records, the final result, and the flat progress file
 include `files_done` and `files_total` together. The total comes from the
 completed plan; the completed count advances only when the target confirms the

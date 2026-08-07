@@ -37,6 +37,17 @@ describe('Import: Protocol Version Mismatch', () => {
         writeFileSync(stateFilePath(), JSON.stringify(state, null, 2));
     }
 
+    function assertionResult(result) {
+        const records = result.stdout
+            .trim()
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .map((line) => JSON.parse(line));
+        const report = records.find((record) => record.command === 'preflight-assert');
+        assert.ok(report, `Expected preflight-assert result:\n${result.stdout}`);
+        return report;
+    }
+
     beforeAll(async () => {
         await ensureSite(site);
     });
@@ -62,8 +73,11 @@ describe('Import: Protocol Version Mismatch', () => {
         });
 
         assert.equal(result.exitCode, 0, `Expected exit 0:\nstdout: ${result.stdout}`);
-        assert.ok(result.stdout.includes('[PASS] Protocol compatible'), `Expected PASS for protocol check:\n${result.stdout}`);
-        assert.match(result.stdout, /remote v\d+, client v\d+/);
+        const report = assertionResult(result);
+        assert.equal(report.status, 'complete');
+        const protocolCheck = report.checks.find((check) => check.label === 'Protocol compatible');
+        assert.equal(protocolCheck.pass, true);
+        assert.match(protocolCheck.detail, /remote v\d+, client v\d+/);
     });
 
     it('fails when the remote protocol version is lower', () => {
@@ -73,6 +87,7 @@ describe('Import: Protocol Version Mismatch', () => {
 
         const result = runImporter(importUrl(), tempDir, 'preflight-assert', {
             secret: getSiteSecret(site),
+            extraArgs: ['--progress=tty'],
         });
 
         assert.equal(result.exitCode, 1, `Expected exit 1:\nstdout: ${result.stdout}`);
@@ -91,9 +106,12 @@ describe('Import: Protocol Version Mismatch', () => {
         });
 
         assert.equal(result.exitCode, 1, `Expected exit 1:\nstdout: ${result.stdout}`);
-        assert.ok(result.stdout.includes('[FAIL] Protocol compatible'), `Expected FAIL for protocol check:\n${result.stdout}`);
-        assert.ok(result.stdout.includes('does not match'), `Expected mismatch message:\n${result.stdout}`);
-        assert.ok(result.stdout.includes('Update the Reprint client'), `Expected update instruction:\n${result.stdout}`);
+        const report = assertionResult(result);
+        assert.equal(report.status, 'error');
+        const protocolCheck = report.checks.find((check) => check.label === 'Protocol compatible');
+        assert.equal(protocolCheck.pass, false);
+        assert.match(protocolCheck.detail, /does not match/);
+        assert.match(protocolCheck.detail, /Update the Reprint client/);
     });
 
     it('fails when remote does not report a protocol version', () => {
@@ -106,8 +124,11 @@ describe('Import: Protocol Version Mismatch', () => {
         });
 
         assert.equal(result.exitCode, 1, `Expected exit 1:\nstdout: ${result.stdout}`);
-        assert.ok(result.stdout.includes('[FAIL] Protocol compatible'), `Expected FAIL for protocol check:\n${result.stdout}`);
-        assert.ok(result.stdout.includes('does not report a protocol version'), `Expected missing version message:\n${result.stdout}`);
-        assert.ok(result.stdout.includes('Update the export plugin'), `Expected update instruction:\n${result.stdout}`);
+        const report = assertionResult(result);
+        assert.equal(report.status, 'error');
+        const protocolCheck = report.checks.find((check) => check.label === 'Protocol compatible');
+        assert.equal(protocolCheck.pass, false);
+        assert.match(protocolCheck.detail, /does not report a protocol version/);
+        assert.match(protocolCheck.detail, /Update the export plugin/);
     });
 });
