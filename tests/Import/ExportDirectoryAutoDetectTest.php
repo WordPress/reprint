@@ -199,6 +199,26 @@ class ExportDirectoryAutoDetectTest extends TestCase
         $this->assertSame(1, $count['/srv/htdocs'] ?? 0);
     }
 
+    public function testKeepsFilesystemRootFromPreflight(): void
+    {
+        $this->writeState([
+            'preflight' => [
+                'data' => [
+                    'wp_detect' => [
+                        'roots' => [
+                            ['path' => '/'],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+
+        $this->assertSame(['/'], $this->getExportDirectories($client));
+    }
+
     public function testAddsExtraDirectoryBesideAConfiguredRoot(): void
     {
         $this->writeState([]);
