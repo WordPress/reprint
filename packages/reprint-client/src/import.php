@@ -2560,15 +2560,14 @@ class ImportClient
         // Log non-standard WordPress directory layouts for awareness
         $paths = $payload["database"]["wp"]["paths_urls"] ?? null;
         if (is_array($paths)) {
-            $abspath = rtrim($paths["abspath"] ?? "", "/");
-            $content_dir = rtrim($paths["content_dir"] ?? "", "/");
-            $uploads_basedir = rtrim(
-                $paths["uploads"]["basedir"] ?? "",
-                "/",
+            $abspath = $this->clean_preflight_path($paths["abspath"] ?? null);
+            $content_dir = $this->clean_preflight_path($paths["content_dir"] ?? null);
+            $uploads_basedir = $this->clean_preflight_path(
+                $paths["uploads"]["basedir"] ?? null,
             );
             if (
-                $abspath !== "" &&
-                $content_dir !== "" &&
+                $abspath !== null &&
+                $content_dir !== null &&
                 $content_dir !== wp_join_unix_paths($abspath, "wp-content")
             ) {
                 $this->audit_log(
@@ -2577,9 +2576,9 @@ class ImportClient
                 );
             }
             if (
-                $content_dir !== "" &&
-                $uploads_basedir !== "" &&
-                strpos($uploads_basedir, $content_dir) !== 0
+                $content_dir !== null &&
+                $uploads_basedir !== null &&
+                !path_is_within_root($uploads_basedir, $content_dir)
             ) {
                 $this->audit_log(
                     "NON-STANDARD LAYOUT | uploads at {$uploads_basedir} " .
@@ -2652,7 +2651,7 @@ class ImportClient
         foreach ($files as $f) {
             $parent = dirname($f);
             if ($parent !== "" && $parent !== ".") {
-                $by_dir[rtrim($parent, "/")][] = $f;
+                $by_dir[trim_right_slash($parent)][] = $f;
             }
         }
 
@@ -4323,14 +4322,11 @@ class ImportClient
             // source server. Files are downloaded preserving the full
             // remote absolute path, so the local document root is --fs-root +
             // document_root.
-            $remote_doc_root = $preflight_data["runtime"]["document_root"] ?? "";
-            if (is_string($remote_doc_root)) {
-                $remote_doc_root = rtrim($remote_doc_root, "/");
-            } else {
-                $remote_doc_root = "";
-            }
+            $remote_doc_root = $this->clean_preflight_path(
+                $preflight_data["runtime"]["document_root"] ?? null,
+            );
 
-            if ($remote_doc_root !== "") {
+            if ($remote_doc_root !== null) {
                 $raw_local_document_root = wp_join_unix_paths(
                     $this->filesystem_root,
                     $remote_doc_root
@@ -4436,11 +4432,11 @@ class ImportClient
         // directory (e.g. /wordpress/core/X.Y.Z) which maps to
         // filesystem root + ABSPATH when using --fs-root.
         $paths_urls = $preflight_data["database"]["wp"]["paths_urls"] ?? [];
-        $abspath = rtrim($paths_urls["abspath"] ?? "", "/");
+        $abspath = $this->clean_preflight_path($paths_urls["abspath"] ?? null);
         if (!empty($flat_document_root)) {
             // Flattened layout: index.php is at the top level.
             $wordpress_index_php = wp_join_unix_paths($local_document_root, 'index.php');
-        } elseif ($abspath !== "") {
+        } elseif ($abspath !== null) {
             // Raw download: ABSPATH is relative to the download root,
             // not the local document root (which is filesystem root + document root).
             $wordpress_index_php = realpath(
@@ -5369,11 +5365,12 @@ class ImportClient
             $target_db = $options["target_db"] ?? "sqlite_database";
 
             if (!$target_path) {
-                $content_dir = rtrim(
-                    $this->get_state()->get('preflight.database.wp.paths_urls.content_dir') ?? "",
-                    "/",
+                $content_dir = $this->clean_preflight_path(
+                    $this->get_state()->get(
+                        'preflight.database.wp.paths_urls.content_dir'
+                    ),
                 );
-                if(!$content_dir) {
+                if ($content_dir === null) {
                     throw new InvalidArgumentException(
                         "--target-sqlite-path option is required but was missing.",
                     );
@@ -9573,7 +9570,7 @@ class ImportClient
             if ($part === "") {
                 continue;
             }
-            $current .= "/" . $part;
+            $current = wp_join_unix_paths($current, $part);
             if (is_link($current)) {
                 return true;
             }
@@ -9651,7 +9648,7 @@ class ImportClient
             if ($part === "") {
                 continue;
             }
-            $current .= "/" . $part;
+            $current = wp_join_unix_paths($current, $part);
 
             if (is_link($current)) {
                 if ($this->fs_root_nonempty_behavior === 'preserve-local') {
@@ -10176,8 +10173,8 @@ class ImportClient
         foreach (["auto_prepend_file", "auto_append_file"] as $ini_key) {
             $ini_path = $ini_all[$ini_key] ?? "";
             if (is_string($ini_path) && $ini_path !== "" && $ini_path[0] === "/") {
-                $ini_dir = rtrim(dirname($ini_path), "/");
-                if ($ini_dir !== "" && $ini_dir !== "/") {
+                $ini_dir = trim_right_slash(dirname($ini_path));
+                if ($ini_dir !== "/") {
                     $extra_paths[$ini_key] = $ini_dir;
                 }
             }

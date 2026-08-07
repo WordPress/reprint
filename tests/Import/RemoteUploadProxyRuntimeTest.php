@@ -161,6 +161,51 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         );
     }
 
+    public function testApplyRuntimeFindsRootAbspathInTheRawDownload(): void
+    {
+        mkdir($this->fsRoot . '/remote-document-root');
+        file_put_contents(
+            $this->fsRoot . '/remote-document-root/index.php',
+            "<?php echo 'document root';\n",
+        );
+        $this->writeState([
+            'preflight' => [
+                'data' => [
+                    'runtime' => [
+                        'document_root' => '/remote-document-root',
+                    ],
+                    'database' => [
+                        'wp' => [
+                            'paths_urls' => [
+                                'abspath' => '/',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        ob_start();
+        try {
+            $this->callPrivate($client, 'run_apply_runtime', [[
+                'runtime' => 'php-builtin',
+                'output_dir' => $this->outputDir,
+            ]]);
+        } finally {
+            ob_end_clean();
+        }
+        $runtime = file_get_contents($this->outputDir . '/runtime.php');
+        $resolved_filesystem_root = realpath($this->fsRoot);
+        $this->assertIsString($resolved_filesystem_root);
+
+        $this->assertStringContainsString(
+            "\$wordpress_core_dir = '" . addslashes($resolved_filesystem_root) . "';",
+            $runtime,
+        );
+    }
+
     public function testApplyRuntimeAddsProxyForEssentialFilesFilter(): void
     {
         $client = $this->makeClient();
