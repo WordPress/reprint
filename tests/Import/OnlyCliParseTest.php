@@ -130,7 +130,7 @@ PHP, var_export($requestsLog, true)));
             $socket = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.1);
             if ($socket) {
                 fclose($socket);
-                return "http://127.0.0.1:{$port}/export.php?site-export-api";
+                return "http://127.0.0.1:{$port}/server.php?site-export-api";
             }
             usleep(100000);
         }

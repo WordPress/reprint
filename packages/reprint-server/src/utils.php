@@ -1,6 +1,6 @@
 <?php
 /**
- * Shared utility functions used by both export.php and import.php.
+ * Shared utility functions used by both server.php and client.php.
  *
  * These helpers live in a namespace so they don't collide with global
  * functions of the same name declared by third-party plugins or

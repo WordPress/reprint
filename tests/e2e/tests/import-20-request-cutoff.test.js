@@ -1,5 +1,5 @@
 /**
- * Test 20: Request Cutoff and Resume via import.php
+ * Test 20: Request Cutoff and Resume via client.php
  * Uses test hooks to simulate PHP crashing mid-stream by calling exit()
  * after a few file index batches. Verifies the importer can resume
  * and eventually reach completion.

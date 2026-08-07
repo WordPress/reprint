@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/client.php';
 
 /**
  * Verify that files_done and files_total progress counters are correct

@@ -7,7 +7,7 @@ use Site_Export_HMAC_Client;
 use MultipartPushStreamClient;
 use PushRequestSizer;
 
-require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/client.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/upload/class-multipart-push-stream-client.php';
 
 final class MultipartPushStreamClientTest extends TestCase {

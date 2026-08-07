@@ -86,41 +86,41 @@ function _site_export_is_push_endpoint(string $endpoint): bool {
  * Supports both plugin release bundles (with reprint-server-wp/vendor/) and
  * the monorepo checkout (root vendor/ + vendor/wp-php-toolkit/reprint-server).
  *
- * @return string|null Absolute path to export.php, or null when the runtime is missing.
+ * @return string|null Absolute path to server.php, or null when the runtime is missing.
  */
 function _site_export_load_exporter_runtime(): ?string {
-    static $loaded_export_path = null;
+    static $loaded_server_path = null;
 
-    if ($loaded_export_path !== null) {
-        return $loaded_export_path;
+    if ($loaded_server_path !== null) {
+        return $loaded_server_path;
     }
 
     $repo_root = dirname(SITE_EXPORT_PLUGIN_DIR);
     $candidates = [
         [
             'autoload' => SITE_EXPORT_PLUGIN_DIR . 'vendor/autoload.php',
-            'export' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-server/src/export.php',
+            'server' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-server/src/server.php',
         ],
         [
             'autoload' => $repo_root . '/vendor/autoload.php',
-            'export' => $repo_root . '/vendor/wp-php-toolkit/reprint-server/src/export.php',
+            'server' => $repo_root . '/vendor/wp-php-toolkit/reprint-server/src/server.php',
         ],
     ];
 
     foreach ($candidates as $candidate) {
-        if (!file_exists($candidate['autoload']) || !file_exists($candidate['export'])) {
+        if (!file_exists($candidate['autoload']) || !file_exists($candidate['server'])) {
             continue;
         }
 
         $autoload_path = realpath($candidate['autoload']);
-        $export_path = realpath($candidate['export']);
-        if ($autoload_path === false || $export_path === false) {
+        $server_path = realpath($candidate['server']);
+        if ($autoload_path === false || $server_path === false) {
             continue;
         }
 
         require_once $autoload_path;
-        $loaded_export_path = $export_path;
-        return $export_path;
+        $loaded_server_path = $server_path;
+        return $server_path;
     }
 
     return null;
@@ -473,7 +473,7 @@ function _site_export_handle_api_request(array $options = []): void {
     }
 
     // Ensure the Composer autoloader is loaded so Site_Export_HTTP_Server
-    // is resolvable. The class itself will require export.php on demand
+    // is resolvable. The class itself will require server.php on demand
     // via serve() below.
     if (_site_export_load_exporter_runtime() === null) {
         _site_export_error(

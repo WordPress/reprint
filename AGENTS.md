@@ -304,7 +304,7 @@ Inside a class, omit the class name when context already supplies it: use
   `composer reinstall wp-php-toolkit/reprint-server` in that directory before
   testing a local plugin bundle.
 - `packages/reprint-client/src/lib/upload/` must stay PHP 7.4-PARSEABLE:
-  import.php loads it for pull users on 7.4, and the push client's 8.1
+  client.php loads it for pull users on 7.4, and the push client's 8.1
   requirement is a runtime check in its constructor.
   PushClientPhpCompatibilityTest enforces this; do not "clean up" the
   untyped `$max_request_seconds` property into an 8.0 union type.

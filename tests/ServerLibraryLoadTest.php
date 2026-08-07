@@ -5,41 +5,41 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 
 /**
- * Verifies that requiring export.php does not authenticate requests
+ * Verifies that requiring server.php does not authenticate requests
  * or terminate the process — it only registers functions and classes.
  *
- * Tests run in subprocesses because export.php registers shutdown and
+ * Tests run in subprocesses because server.php registers shutdown and
  * error handlers at module level.
  */
-final class ExportLibraryLoadTest extends TestCase {
-    private const EXPORT_PATH = __DIR__ . '/../packages/reprint-server/src/export.php';
+final class ServerLibraryLoadTest extends TestCase {
+    private const SERVER_PATH = __DIR__ . '/../packages/reprint-server/src/server.php';
 
-    public function testRequiringExportPhpDoesNotRejectMissingSecretKey(): void
+    public function testRequiringServerPhpDoesNotRejectMissingSecretKey(): void
     {
         $script = <<<'PHP'
         $_GET['endpoint'] = 'preflight';
         PHP;
 
-        $result = $this->runExportWith($script);
+        $result = $this->runServerWith($script);
 
         $this->assertStringNotContainsString('Invalid secret key', $result['output']);
         $this->assertStringContainsString('endpoint-handlers-loaded', $result['output']);
     }
 
-    public function testRequiringExportPhpDefinesEndpointHandlers(): void
+    public function testRequiringServerPhpDefinesEndpointHandlers(): void
     {
-        $result = $this->runExportWith('');
+        $result = $this->runServerWith('');
 
         $this->assertStringContainsString('endpoint-handlers-loaded', $result['output']);
     }
 
     public function testNormalizePathListKeepsTheFilesystemRoot(): void
     {
-        $export_path = realpath(self::EXPORT_PATH);
-        $this->assertNotFalse($export_path, 'export.php must exist');
+        $server_path = realpath(self::SERVER_PATH);
+        $this->assertNotFalse($server_path, 'server.php must exist');
 
         $result = $this->runPhpCode(
-            "<?php\nrequire " . var_export($export_path, true) . ";\n"
+            "<?php\nrequire " . var_export($server_path, true) . ";\n"
             . "echo json_encode(normalize_path_list(['/']), JSON_UNESCAPED_SLASHES);\n"
         );
 
@@ -51,12 +51,12 @@ final class ExportLibraryLoadTest extends TestCase {
     {
         $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
         $this->assertNotFalse($autoload_path, 'Composer autoloader must exist');
-        $export_path = realpath(self::EXPORT_PATH);
-        $this->assertNotFalse($export_path, 'export.php must exist');
+        $server_path = realpath(self::SERVER_PATH);
+        $this->assertNotFalse($server_path, 'server.php must exist');
 
         $result = $this->runPhpCode(
             "<?php\nrequire " . var_export($autoload_path, true) . ";\n"
-            . "require " . var_export($export_path, true) . ";\n"
+            . "require " . var_export($server_path, true) . ";\n"
             . "ob_start();\n"
             . "\$preflight = endpoint_preflight(['directory' => '/']);\n"
             . "ob_end_clean();\n"
@@ -75,18 +75,18 @@ final class ExportLibraryLoadTest extends TestCase {
         $linked_plugin_directory = $tmp_dir . '/linked-plugin';
         $autoload_path = $physical_plugin_directory . '/vendor/autoload.php';
         $linked_autoload_path = $linked_plugin_directory . '/vendor/autoload.php';
-        $export_path = $physical_plugin_directory . '/vendor/wp-php-toolkit/reprint-server/src/export.php';
-        mkdir(dirname($export_path), 0755, true);
+        $server_path = $physical_plugin_directory . '/vendor/wp-php-toolkit/reprint-server/src/server.php';
+        mkdir(dirname($server_path), 0755, true);
         file_put_contents($autoload_path, "<?php\n");
-        file_put_contents($export_path, "<?php\n");
+        file_put_contents($server_path, "<?php\n");
 
         if (!symlink($physical_plugin_directory, $linked_plugin_directory)) {
             $this->removePath($tmp_dir);
             $this->markTestSkipped('Could not create a plugin directory symlink.');
         }
 
-        $canonical_export_path = realpath($export_path);
-        $this->assertNotFalse($canonical_export_path, 'export.php must exist');
+        $canonical_server_path = realpath($server_path);
+        $this->assertNotFalse($canonical_server_path, 'server.php must exist');
         $canonical_autoload_path = realpath($autoload_path);
         $this->assertNotFalse($canonical_autoload_path, 'autoload.php must exist');
         $lib_path = realpath(__DIR__ . '/../reprint-server-wp/lib.php');
@@ -106,7 +106,7 @@ final class ExportLibraryLoadTest extends TestCase {
             $result = $this->runPhpCode($php_code);
 
             $this->assertSame(0, $result['status'], $result['output']);
-            $this->assertSame($canonical_export_path, trim($result['output']));
+            $this->assertSame($canonical_server_path, trim($result['output']));
         } finally {
             $this->removePath($tmp_dir);
         }
@@ -120,15 +120,15 @@ final class ExportLibraryLoadTest extends TestCase {
      * }
      * @phpstan-return array{output:string}
      */
-    private function runExportWith(string $setup_script): array
+    private function runServerWith(string $setup_script): array
     {
-        $export_path = realpath(self::EXPORT_PATH);
-        $this->assertNotFalse($export_path, 'export.php must exist');
+        $server_path = realpath(self::SERVER_PATH);
+        $this->assertNotFalse($server_path, 'server.php must exist');
 
         $php_code = <<<PHP
         <?php
         {$setup_script}
-        require '{$export_path}';
+        require '{$server_path}';
         // If we got here, require() completed without die()ing.
         // Print a marker indicating endpoint functions are defined.
         echo function_exists('endpoint_preflight') ? 'endpoint-handlers-loaded' : 'handlers-missing';

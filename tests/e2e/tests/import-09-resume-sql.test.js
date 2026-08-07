@@ -1,5 +1,5 @@
 /**
- * Test 09: SQL Resume via import.php
+ * Test 09: SQL Resume via client.php
  * Tests that db-pull resumes correctly when using short max_execution_time.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';

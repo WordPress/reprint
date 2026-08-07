@@ -27,7 +27,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/only-files-prefix-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $remoteReprintApiUrl = 'https://src.example/export.php';
+        $remoteReprintApiUrl = 'https://src.example/server.php';
         $this->pullStateDirectory =
             $this->stateDir
             . '/remotes/'
@@ -72,7 +72,7 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     private function client(array $preflightData): \ImportClient
     {
-        $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
+        $c = new \ImportClient('https://src.example/server.php', $this->stateDir, $this->fsRoot);
         $c->get_state()->set_preflight_record(array('data' => $preflightData));
         $this->set($c, 'audit_log_file', $this->tempDir . '/audit.log');
         return $c;
@@ -124,14 +124,14 @@ class OnlyFilesPathPrefixTest extends TestCase
         );
 
         \write_current_pull_state(
-            new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot),
+            new \ImportClient('https://src.example/server.php', $this->stateDir, $this->fsRoot),
             array_replace_recursive($defaults, $state)
         );
     }
 
     private function runFilesPull(array $fileSelectionOptions): void
     {
-        $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
+        $c = new \ImportClient('https://src.example/server.php', $this->stateDir, $this->fsRoot);
         $output = fopen('php://temp', 'w');
         $clientReflection = new \ReflectionClass($c);
         $clientReflection->getProperty('progress_fd')->setValue($c, $output);

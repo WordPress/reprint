@@ -27,7 +27,7 @@ class RemapResolveTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/remap-resolve-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $remoteReprintApiUrl = 'https://src.example/export.php';
+        $remoteReprintApiUrl = 'https://src.example/server.php';
         $this->pullStateDirectory =
             $this->stateDir
             . '/remotes/'
@@ -73,7 +73,7 @@ class RemapResolveTest extends TestCase
 
     private function client(array $pathsUrls): \ImportClient
     {
-        $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
+        $c = new \ImportClient('https://src.example/server.php', $this->stateDir, $this->fsRoot);
         $c->get_state()->set_preflight_record(array('data' => array(
             'database' => array('wp' => array('paths_urls' => $pathsUrls)),
         )));
@@ -82,7 +82,7 @@ class RemapResolveTest extends TestCase
 
     private function filesystemRootClient(array $pathsUrls): \ImportClient
     {
-        $c = new \ImportClient('https://src.example/export.php', $this->stateDir, '/');
+        $c = new \ImportClient('https://src.example/server.php', $this->stateDir, '/');
         $c->get_state()->set_preflight_record(array('data' => array(
             'database' => array('wp' => array('paths_urls' => $pathsUrls)),
         )));
@@ -95,7 +95,7 @@ class RemapResolveTest extends TestCase
         symlink($this->fsRoot, $symlinkedFilesystemRoot);
 
         $client = new \ImportClient(
-            'https://src.example/export.php',
+            'https://src.example/server.php',
             $this->stateDir,
             $symlinkedFilesystemRoot
         );

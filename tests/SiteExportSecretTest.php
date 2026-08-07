@@ -186,7 +186,7 @@ if (!function_exists('esc_html')) {
 // phpcs:enable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound
 
 require_once __DIR__ . '/../reprint-server-wp/lib.php';
-require_once __DIR__ . '/../reprint-server-wp/wordpress/site-export.php';
+require_once __DIR__ . '/../reprint-server-wp/wordpress/site-server.php';
 
 final class SiteExportSecretTest extends TestCase
 {

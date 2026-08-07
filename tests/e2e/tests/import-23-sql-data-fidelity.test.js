@@ -1,5 +1,5 @@
 /**
- * Test 23: SQL Data Fidelity via import.php
+ * Test 23: SQL Data Fidelity via client.php
  * Round-trip test with edge-case MySQL data types: NULLs, empty strings,
  * binary blobs, unicode, MAX_INT, zero dates, very long text.
  * Verifies exact data preservation after export + import.

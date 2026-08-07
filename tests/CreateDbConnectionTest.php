@@ -8,9 +8,9 @@ final class CreateDbConnectionTest extends TestCase {
     public function testMysqlSessionUsesStableCharsetAndCollation(): void
     {
         $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
-        $export_path = realpath(__DIR__ . '/../packages/reprint-server/src/export.php');
+        $server_path = realpath(__DIR__ . '/../packages/reprint-server/src/server.php');
         $this->assertIsString($autoload_path);
-        $this->assertIsString($export_path);
+        $this->assertIsString($server_path);
         $connection_script = <<<'PHP'
         require $argv[1];
         require $argv[2];
@@ -42,7 +42,7 @@ final class CreateDbConnectionTest extends TestCase {
             '-r',
             $connection_script,
             $autoload_path,
-            $export_path,
+            $server_path,
         ]);
         $this->assertSame(
             0,
@@ -70,9 +70,9 @@ final class CreateDbConnectionTest extends TestCase {
         }
 
         $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
-        $export_path = realpath(__DIR__ . '/../packages/reprint-server/src/export.php');
+        $server_path = realpath(__DIR__ . '/../packages/reprint-server/src/server.php');
         $this->assertIsString($autoload_path);
-        $this->assertIsString($export_path);
+        $this->assertIsString($server_path);
         $connection_script = <<<'PHP'
         function extension_loaded($extension) {
             return $extension !== 'pdo_mysql';
@@ -112,7 +112,7 @@ final class CreateDbConnectionTest extends TestCase {
             '-r',
             $connection_script,
             $autoload_path,
-            $export_path,
+            $server_path,
         ]);
         $this->assertSame(
             0,
@@ -167,9 +167,9 @@ final class CreateDbConnectionTest extends TestCase {
             ? 'localhost:' . $socket_path
             : $socket_path;
         $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
-        $export_path = realpath(__DIR__ . '/../packages/reprint-server/src/export.php');
+        $server_path = realpath(__DIR__ . '/../packages/reprint-server/src/server.php');
         $this->assertIsString($autoload_path);
-        $this->assertIsString($export_path);
+        $this->assertIsString($server_path);
         $connection_script = <<<'PHP'
         require $argv[1];
         require $argv[2];
@@ -193,7 +193,7 @@ final class CreateDbConnectionTest extends TestCase {
 
         try {
             $process = proc_open(
-                [PHP_BINARY, '-r', $connection_script, $autoload_path, $export_path, $db_host],
+                [PHP_BINARY, '-r', $connection_script, $autoload_path, $server_path, $db_host],
                 $descriptors,
                 $pipes
             );

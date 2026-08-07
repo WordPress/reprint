@@ -1,5 +1,5 @@
 /**
- * Test 04: Files Index via import.php
+ * Test 04: Files Index via client.php
  * Tests files-index command produces pull/remote-index.next.jsonl.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';

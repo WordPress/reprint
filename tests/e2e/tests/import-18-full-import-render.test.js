@@ -1,5 +1,5 @@
 /**
- * Test 18: Full Import Round-Trip via import.php
+ * Test 18: Full Import Round-Trip via client.php
  * End-to-end test that exports a site (files + SQL), imports the SQL into
  * a fresh database, and verifies data integrity by comparing the original
  * and imported databases.

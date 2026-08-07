@@ -1,5 +1,5 @@
 /**
- * Test 25: State File Corruption via import.php
+ * Test 25: State File Corruption via client.php
  * Tests importer behavior when pull/state.json is corrupted or contains
  * unexpected data. Verifies the importer recovers gracefully.
  */

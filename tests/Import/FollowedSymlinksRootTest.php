@@ -51,12 +51,12 @@ class FollowedSymlinksRootTest extends TestCase
 
     private function newClient(): \ImportClient
     {
-        return new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
+        return new \ImportClient('https://src.example/server.php', $this->stateDir, $this->fsRoot);
     }
 
     private function newRootClient(): \ImportClient
     {
-        return new \ImportClient('https://src.example/export.php', $this->stateDir, '/');
+        return new \ImportClient('https://src.example/server.php', $this->stateDir, '/');
     }
 
     // ── Resolving the local followed symlinks root (:fs-root: grammar, within-root) ──

@@ -1,5 +1,5 @@
 /**
- * Test 15: Volatile Files and Deleted Dirs via import.php
+ * Test 15: Volatile Files and Deleted Dirs via client.php
  * Uses test hooks to modify files and delete directories during export,
  * verifying the importer detects and reports these changes.
  */

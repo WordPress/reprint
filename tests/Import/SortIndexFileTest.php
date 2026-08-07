@@ -7,7 +7,7 @@ use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\try_exec_sort_index_file;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/sort-index-file.php';
-require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/client.php';
 
 final class SortIndexFileTest extends TestCase
 {

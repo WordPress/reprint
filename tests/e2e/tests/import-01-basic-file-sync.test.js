@@ -1,5 +1,5 @@
 /**
- * Test 01: Basic File Sync via import.php
+ * Test 01: Basic File Sync via client.php
  * Tests files-pull completes, files match source, and restart behavior.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';

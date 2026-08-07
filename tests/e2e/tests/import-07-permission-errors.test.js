@@ -1,5 +1,5 @@
 /**
- * Test 07: Permission Errors via import.php
+ * Test 07: Permission Errors via client.php
  * Tests chmod-denied and mysql-restricted sites complete gracefully
  * and produce appropriate error chunks in the audit log.
  */

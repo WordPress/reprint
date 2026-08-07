@@ -2,4 +2,4 @@
 <?php
 
 define('IMPORTER_WRAPPER_ENTRY', true);
-require_once __DIR__ . '/../src/import.php';
+require_once __DIR__ . '/../src/client.php';

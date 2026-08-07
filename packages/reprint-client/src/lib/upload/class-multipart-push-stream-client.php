@@ -57,7 +57,7 @@ use function Reprint\Importer\apply_curl_proxy_from_environment;
  * Pausing from a PHP cURL read callback is reliable only on PHP 8.1 and newer;
  * older bindings interpret CURL_READFUNC_PAUSE as end-of-body and silently
  * truncate the upload. The constructor enforces that runtime requirement while
- * this PHP file remains PHP 7.4 parseable for import.php's pull commands.
+ * this PHP file remains PHP 7.4 parseable for client.php's pull commands.
  */
 class MultipartPushStreamClient
 {

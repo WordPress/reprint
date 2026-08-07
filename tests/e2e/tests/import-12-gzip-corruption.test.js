@@ -1,5 +1,5 @@
 /**
- * Test 12: Gzip Corruption Handling via import.php
+ * Test 12: Gzip Corruption Handling via client.php
  * Uses test hooks to inject garbage bytes into the gzip stream,
  * verifying the importer detects corruption and exits with an error.
  */

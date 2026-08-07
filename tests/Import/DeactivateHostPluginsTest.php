@@ -314,7 +314,7 @@ class DeactivateHostPluginsTest extends TestCase
 
     private function makeClient(): \ImportClient
     {
-        return new \ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot);
+        return new \ImportClient('https://source.example/server.php', $this->stateDir, $this->fsRoot);
     }
 
     private function loadClientState(\ImportClient $client): void

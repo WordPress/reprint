@@ -3,7 +3,7 @@ parameters:
 		-
 			message: "#^Parameter \\#2 \\$newvalue of function ini_set expects string, int given\\.$#"
 			count: 1
-			path: ../../packages/reprint-client/src/import.php
+			path: ../../packages/reprint-client/src/client.php
 
 		-
 			message: "#^Unreachable statement \\- code above always terminates\\.$#"
@@ -13,22 +13,22 @@ parameters:
 		-
 			message: "#^Function get_option not found\\.$#"
 			count: 5
-			path: ../../packages/reprint-server/src/export.php
+			path: ../../packages/reprint-server/src/server.php
 
 		-
 			message: "#^Parameter \\#1 \\$flag of function ob_implicit_flush expects int, true given\\.$#"
 			count: 1
-			path: ../../packages/reprint-server/src/export.php
+			path: ../../packages/reprint-server/src/server.php
 
 		-
 			message: "#^Negated boolean expression is always false\\.$#"
 			count: 1
-			path: ../../packages/reprint-server/src/export.php
+			path: ../../packages/reprint-server/src/server.php
 
 		-
 			message: "#^Variable \\$directories in empty\\(\\) always exists and is not falsy\\.$#"
 			count: 1
-			path: ../../packages/reprint-server/src/export.php
+			path: ../../packages/reprint-server/src/server.php
 
 		-
 			message: "#^Function _doing_it_wrong not found\\.$#"

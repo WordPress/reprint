@@ -1,5 +1,5 @@
 /**
- * Test 02: SQL Sync via import.php
+ * Test 02: SQL Sync via client.php
  * Tests db-pull and db-index commands produce correct output.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';

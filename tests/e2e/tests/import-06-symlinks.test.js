@@ -1,5 +1,5 @@
 /**
- * Test 06: Symlinks via import.php
+ * Test 06: Symlinks via client.php
  * Tests that symlinks-outside and circular-symlinks sites sync properly.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';

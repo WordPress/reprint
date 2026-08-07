@@ -1,5 +1,5 @@
 /**
- * Test 13: SHA1 Integrity via import.php
+ * Test 13: SHA1 Integrity via client.php
  * Tests that file hashes match after sync, including large binary files.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';

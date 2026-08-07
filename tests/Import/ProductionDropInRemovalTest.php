@@ -120,7 +120,7 @@ class ProductionDropInRemovalTest extends TestCase
 
     private function makeClient(): \ImportClient
     {
-        return new \ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot);
+        return new \ImportClient('https://source.example/server.php', $this->stateDir, $this->fsRoot);
     }
 
     private function callPrivate(\ImportClient $client, string $method, array $args = [])

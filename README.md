@@ -573,7 +573,7 @@ The two that might be particularly useful for integrators are:
 When an external process (e.g. a web UI) needs to poll migration progress, it can read
 `$STATE_DIR/progress.json`.
 
-Pass `--step=N` and `--steps=N` to your `import.php` calls to embed the pipeline position in
+Pass `--step=N` and `--steps=N` to your `client.php` calls to embed the pipeline position in
 the progress file. For example, a four-step pipeline would pass `--step=1 --steps=4` for the
 preflight, `--step=2 --steps=4` for db-index, and so on.
 

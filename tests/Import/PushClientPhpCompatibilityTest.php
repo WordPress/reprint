@@ -5,7 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 
 /**
- * import.php requires the upload lib for every command, including pull on
+ * client.php requires the upload lib for every command, including pull on
  * PHP 7.4 — the push client's PHP 8.1 requirement is enforced at runtime in
  * its constructor, not at parse time. This scan fails when 8.x-only syntax
  * sneaks into the upload or push lib and would fatal 7.4 pull users at require time.

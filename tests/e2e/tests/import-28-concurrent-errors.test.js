@@ -1,5 +1,5 @@
 /**
- * Test 28: Concurrent Error Types via import.php
+ * Test 28: Concurrent Error Types via client.php
  * Deploys hooks that cause multiple error types simultaneously:
  * file_open (chmod 000), file_changed (touch mid-stream), and
  * file_missing (delete mid-stream) all in the same sync.

@@ -1,5 +1,5 @@
 /**
- * Test 17: 301 Redirect Handling via import.php
+ * Test 17: 301 Redirect Handling via client.php
  * Tests that the importer reports a clear error when hitting a 301 redirect,
  * since the importer does not follow redirects (CURLOPT_FOLLOWLOCATION=false).
  *

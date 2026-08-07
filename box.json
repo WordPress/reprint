@@ -1,5 +1,5 @@
 {
-    "main": "packages/reprint-client/src/import.php",
+    "main": "packages/reprint-client/src/client.php",
     "output": "reprint.phar",
     "check-requirements": false,
 

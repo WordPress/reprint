@@ -1,5 +1,5 @@
 /**
- * Test 08: Large Directory via import.php
+ * Test 08: Large Directory via client.php
  * Tests files-pull with 2000+ files.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';

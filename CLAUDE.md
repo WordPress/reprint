@@ -13,12 +13,12 @@ This is a WordPress site export/import system that enables resumable, cursor-bas
 The codebase follows a producer-consumer pattern with two main components:
 
 ### Export Side (Server) — `packages/reprint-server/src/`
-- **export.php**: HTTP endpoint that serves as the export API, handling authentication and routing requests to the appropriate producer
+- **server.php**: HTTP endpoint that serves as the export API, handling authentication and routing requests to the appropriate producer
 - **MySQLDumpProducer**: Generates SQL dump fragments with cursor-based resumption, supporting batched INSERT statements and all MySQL data types
 - **FileTreeProducer / FileListProducer**: Streams filesystem contents (full tree or explicit list) in chunks with support for symlinks and cursor-based resumption
 
 ### Import Side (Client) — `packages/reprint-client/src/`
-- **import.php**: CLI script that downloads from export.php using streaming multipart parsing, no buffering of entire response
+- **client.php**: CLI script that downloads from server.php using streaming multipart parsing, no buffering of entire response
 - **MultipartStreamParser**: Incremental multipart/mixed parser that processes chunks as they arrive
 
 ### Supporting Classes
@@ -113,7 +113,7 @@ Symlinks ARE automatically recreated during import. This is safe because all pat
 
 ### Server-Side Directory Dedup
 
-The file indexer (`endpoint_file_index` in `export.php`) prevents duplicate traversal of directories that overlap with configured roots. The `should_skip_index_root()` function checks each directory's `realpath()` against the scheduled root list — if a directory is a duplicate or parent of an already-scheduled root, traversal skips it. This is critical for WP.com Atomic sites where symlinks create overlapping paths (e.g. `/srv/htdocs/srv` → `/srv` creating infinite cycles, or `/wordpress/` and `/srv/htdocs/wordpress/` resolving to the same location).
+The file indexer (`endpoint_file_index` in `server.php`) prevents duplicate traversal of directories that overlap with configured roots. The `should_skip_index_root()` function checks each directory's `realpath()` against the scheduled root list — if a directory is a duplicate or parent of an already-scheduled root, traversal skips it. This is critical for WP.com Atomic sites where symlinks create overlapping paths (e.g. `/srv/htdocs/srv` → `/srv` creating infinite cycles, or `/wordpress/` and `/srv/htdocs/wordpress/` resolving to the same location).
 
 ### Non-Empty fs-root Handling (`--on-fs-root-nonempty`)
 
@@ -181,7 +181,7 @@ Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl` for that
 ## File Organization
 
 - packages/reprint-server/: Packagist server package (previously reprint-exporter)
-  - src/: Core export engine (export.php, producers, HMAC client, utilities)
+  - src/: Core export engine (server.php, producers, HMAC client, utilities)
 - packages/reprint-client/: Packagist client package (previously reprint-importer)
   - src/: Import client and importer runtime support code
   - src/lib/host/: Host analyzers and RuntimeManifest (WpcloudHostAnalyzer, SitegroundHostAnalyzer, DefaultHostAnalyzer)
@@ -191,7 +191,7 @@ Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl` for that
 - reprint-server-wp/: Self-contained WordPress plugin distribution directory
   - index.php: WordPress plugin entry point — intercepts `?reprint-api` requests (and the legacy `?site-export-api` alias) during plugin load, requires lib.php
   - lib.php: Standalone library — constants, auth functions, and request handler. Can be required without index.php by projects that want to embed the export engine with their own URL routing and authentication (pass a custom `authenticate` callable in the `$options` array to `_site_export_handle_api_request()`)
-  - wordpress/: WordPress admin UI (site-export.php)
+  - wordpress/: WordPress admin UI (site-server.php)
 - docs/: Architecture documentation (read these for deep understanding) and project logos (docs/assets/)
 - tests/: PHPUnit test suite organized by component
 - tests/e2e/: End-to-end Docker-based integration tests
@@ -222,7 +222,7 @@ The exporter must scan both roots (document root + ABSPATH) without infinite loo
 
 ## Common Gotchas
 
-- **Cursor encoding**: Producers work with JSON strings. export.php handles base64 encoding for HTTP. Never pass base64 to producer constructors.
+- **Cursor encoding**: Producers work with JSON strings. server.php handles base64 encoding for HTTP. Never pass base64 to producer constructors.
 - **Variable names**: Use full, descriptive names for domain values. Do not abbreviate to save characters (for example, prefer `$current_base64_path` over `$cur_b64`).
 - **JSON/JSONL parsing**: Parse JSON as JSON and validate semantic fields. Do not match prefixes, slice by fixed offsets, or depend on JSON field order or escaping.
 - **Memory limits**: Large dataset tests require at least 512MB PHP memory_limit

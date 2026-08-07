@@ -201,7 +201,7 @@ final class FileFetchCompressionTest extends TestCase
         mkdir($dirPath, 0755, true);
 
         // runFileFetch asserts the worker exits 0 — without the guard it exits
-        // 1 (the fread fatal is escalated by export.php's error handler).
+        // 1 (the fread fatal is escalated by server.php's error handler).
         $stdout = $this->runFileFetch($siteDir, [$dirPath]);
 
         // The directory is handled (a 0-byte directory chunk), not read; the
@@ -215,7 +215,7 @@ final class FileFetchCompressionTest extends TestCase
         // itself probably won't accept this, but the heuristic must.)
         $siteDir = $this->tempDir . '/site';
         mkdir($siteDir, 0755, true);
-        require_once __DIR__ . '/../packages/reprint-server/src/export.php';
+        require_once __DIR__ . '/../packages/reprint-server/src/server.php';
         $this->assertFalse(file_fetch_paths_should_gzip([]));
     }
 
@@ -223,7 +223,7 @@ final class FileFetchCompressionTest extends TestCase
     {
         // Direct unit test of the heuristic — broader coverage than the
         // in-process file_fetch tests above.
-        require_once __DIR__ . '/../packages/reprint-server/src/export.php';
+        require_once __DIR__ . '/../packages/reprint-server/src/server.php';
 
         // Single-file cases.
         $this->assertTrue(file_fetch_paths_should_gzip(['a.php']),                     'single text');
@@ -305,7 +305,7 @@ final class FileFetchCompressionTest extends TestCase
      */
     public function testPathExtensionClassifier(string $path, bool $expected): void
     {
-        require_once __DIR__ . '/../packages/reprint-server/src/export.php';
+        require_once __DIR__ . '/../packages/reprint-server/src/server.php';
         $this->assertSame($expected, path_extension_compressibility($path) === 'yes', "classifier for $path");
     }
 
@@ -360,7 +360,7 @@ $config = json_decode(file_get_contents(%s), true, 512, JSON_THROW_ON_ERROR);
 $budget = new ResourceBudget(microtime(true), 10, 128 * 1024 * 1024, 0.9);
 endpoint_file_fetch($config, $budget);
 PHP,
-                var_export(dirname(__DIR__) . '/packages/reprint-server/src/export.php', true),
+                var_export(dirname(__DIR__) . '/packages/reprint-server/src/server.php', true),
                 var_export($configPath, true),
             ),
         );

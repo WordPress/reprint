@@ -1,5 +1,5 @@
 /**
- * Test 10: File Resume via import.php
+ * Test 10: File Resume via client.php
  * Tests that files-pull can resume after a partial transfer.
  * Uses large-directory site (5000+ files) with --max-exec=10 to force short requests.
  */

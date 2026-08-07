@@ -1,5 +1,5 @@
 /**
- * Test 19: Error Chunk Types via import.php
+ * Test 19: Error Chunk Types via client.php
  * Systematically tests that the export side emits correct error chunks
  * and the importer records them in the audit log.
  *

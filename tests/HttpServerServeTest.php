@@ -6,18 +6,18 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Tests Site_Export_HTTP_Server::serve() — the one-call convenience
- * entry point that loads export.php, constructs the server, and
+ * entry point that loads server.php, constructs the server, and
  * dispatches the current request.
  *
- * Tests run in subprocesses because serve() requires export.php, which
+ * Tests run in subprocesses because serve() requires server.php, which
  * registers shutdown and error handlers at module level.
  */
 final class HttpServerServeTest extends TestCase
 {
     private const CLASS_PATH = __DIR__ . '/../packages/reprint-server/src/class-http-server.php';
-    private const EXPORT_PATH = __DIR__ . '/../packages/reprint-server/src/export.php';
+    private const SERVER_PATH = __DIR__ . '/../packages/reprint-server/src/server.php';
 
-    public function testServeLoadsExportPhpWhenNotYetLoaded(): void
+    public function testServeLoadsServerPhpWhenNotYetLoaded(): void
     {
         $script = <<<PHP
         \$_GET['endpoint'] = 'preflight';
@@ -25,7 +25,7 @@ final class HttpServerServeTest extends TestCase
 
         require '{$this->classPath()}';
 
-        // endpoint_preflight is defined by export.php; it must not
+        // endpoint_preflight is defined by server.php; it must not
         // exist before serve() is called.
         if (function_exists('endpoint_preflight')) {
             echo "FAIL: endpoint_preflight defined before serve()";
@@ -34,7 +34,7 @@ final class HttpServerServeTest extends TestCase
 
         Site_Export_HTTP_Server::serve();
 
-        // serve() should have required export.php, which defines endpoint_preflight.
+        // serve() should have required server.php, which defines endpoint_preflight.
         echo function_exists('endpoint_preflight') ? "OK" : "FAIL: endpoint_preflight not defined";
         PHP;
 
@@ -44,16 +44,16 @@ final class HttpServerServeTest extends TestCase
         $this->assertStringNotContainsString('FAIL', $output);
     }
 
-    public function testServeDoesNotRedundantlyReloadExportPhp(): void
+    public function testServeDoesNotRedundantlyReloadServerPhp(): void
     {
         $script = <<<PHP
         \$_GET['endpoint'] = 'preflight';
         \$_GET['directory'] = sys_get_temp_dir();
 
         require '{$this->classPath()}';
-        require '{$this->exportPath()}';
+        require '{$this->serverPath()}';
 
-        // Track require side-effect: if export.php was re-required, endpoint_preflight
+        // Track require side-effect: if server.php was re-required, endpoint_preflight
         // would be re-declared which would be a fatal error.
         Site_Export_HTTP_Server::serve();
         echo "OK";
@@ -92,9 +92,9 @@ final class HttpServerServeTest extends TestCase
         return $path;
     }
 
-    private function exportPath(): string
+    private function serverPath(): string
     {
-        $path = realpath(self::EXPORT_PATH);
+        $path = realpath(self::SERVER_PATH);
         $this->assertNotFalse($path);
         return $path;
     }

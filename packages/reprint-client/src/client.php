@@ -1,9 +1,9 @@
 #!/usr/bin/env php
 <?php
 /**
- * Reprint client for export.php.
+ * Reprint client for server.php.
  *
- * Downloads SQL and files from a remote export.php script, with support for:
+ * Downloads SQL and files from a remote server.php script, with support for:
  * - Resumable downloads using cursors
  * - Streaming multipart parsing (no buffering)
  * - Progress reporting via JSON lines to stdout

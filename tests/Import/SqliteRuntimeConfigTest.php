@@ -93,7 +93,7 @@ class SqliteRuntimeConfigTest extends TestCase
         ];
 
         \write_current_pull_state(
-            new \ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot),
+            new \ImportClient('https://source.example/server.php', $this->stateDir, $this->fsRoot),
             array_replace_recursive($defaults, $state)
         );
     }
@@ -122,7 +122,7 @@ class SqliteRuntimeConfigTest extends TestCase
     {
         $this->writeState([]);
 
-        $client = new \ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot);
+        $client = new \ImportClient('https://source.example/server.php', $this->stateDir, $this->fsRoot);
         $this->loadClientState($client);
 
         ob_start();

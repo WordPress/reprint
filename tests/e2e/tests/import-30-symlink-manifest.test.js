@@ -1,5 +1,5 @@
 /**
- * Test 30: Symlink Handling via import.php
+ * Test 30: Symlink Handling via client.php
  * Verifies that the importer correctly handles symlinks from the source site:
  * - Symlinks are recreated in the import output
  * - Symlink targets are preserved correctly

@@ -889,7 +889,7 @@ class MySQLDumpProducer
      *
      * The caller can pass this string back as the "cursor" option to a new
      * MySQLDumpProducer to resume exactly where this one left off. The JSON is
-     * NOT base64-encoded — that's the HTTP layer's concern (export.php).
+     * NOT base64-encoded — that's the HTTP layer's concern (server.php).
      *
      * String values in the in-flight row and primary key checkpoints are
      * wrapped in {"__binary__": "<base64>"} markers because raw database

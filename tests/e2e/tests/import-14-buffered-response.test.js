@@ -1,5 +1,5 @@
 /**
- * Test 14: Buffered Response via import.php
+ * Test 14: Buffered Response via client.php
  * Tests file sync and SQL sync through buffered Nginx proxy (port 8098).
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';

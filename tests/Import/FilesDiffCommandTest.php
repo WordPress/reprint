@@ -25,7 +25,7 @@ final class FilesDiffCommandTest extends TestCase
     private string $root;
     private string $stateDirectory;
     private string $filesystemRoot;
-    private string $remoteReprintApiUrl = 'https://example.test/export.php?site-export-api';
+    private string $remoteReprintApiUrl = 'https://example.test/server.php?site-export-api';
     private ?string $invalidBytePathInIndex = null;
 
     /** @var array<string,string> */

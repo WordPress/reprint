@@ -1,5 +1,5 @@
 /**
- * Test 05: Unicode/Emoji Paths via import.php
+ * Test 05: Unicode/Emoji Paths via client.php
  * Tests file sync and SQL sync with unicode filenames.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';

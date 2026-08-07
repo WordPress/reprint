@@ -1,5 +1,5 @@
 /**
- * Test 16: Custom WP Content via import.php
+ * Test 16: Custom WP Content via client.php
  * Tests file sync and SQL sync for site with non-standard wp-content directory.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';

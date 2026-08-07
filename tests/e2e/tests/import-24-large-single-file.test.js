@@ -1,5 +1,5 @@
 /**
- * Test 24: Large Single File via import.php
+ * Test 24: Large Single File via client.php
  * Tests that a single file larger than the chunk size (5MB default)
  * is correctly transferred in multiple chunks and the SHA1 hash
  * matches after sync.

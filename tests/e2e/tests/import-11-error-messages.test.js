@@ -1,5 +1,5 @@
 /**
- * Test 11: Error Messages via import.php
+ * Test 11: Error Messages via client.php
  * Tests that various error conditions produce useful error messages.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';

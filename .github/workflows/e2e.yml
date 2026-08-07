@@ -123,7 +123,7 @@ jobs:
           # Warm up the export endpoint before any time-boxed importer command.
           # ensureSite only provisions files + DB via wp-cli; the first HTTP
           # request still pays the full PHP-FPM cold start (worker spawn, WP
-          # bootstrap, Composer autoload, export.php require). Poll until the
+          # bootstrap, Composer autoload, server.php require). Poll until the
           # stack returns any HTTP response — a 403/503 auth rejection is a
           # perfectly good "warm" signal; curl exits non-zero only on a
           # connect/timeout failure. This removes the cold-start stall that

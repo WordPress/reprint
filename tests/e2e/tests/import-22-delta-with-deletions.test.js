@@ -1,5 +1,5 @@
 /**
- * Test 22: Delta Sync with Source Deletions via import.php
+ * Test 22: Delta Sync with Source Deletions via client.php
  * Tests that files-pull correctly detects when files have been
  * deleted on the source between initial and delta syncs.
  */

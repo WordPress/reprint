@@ -1,5 +1,5 @@
 /**
- * Test 03: Delta File Sync via import.php
+ * Test 03: Delta File Sync via client.php
  * Tests files-pull after initial sync, with and without changes.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
