@@ -1,6 +1,7 @@
 <?php
 
 use function WordPress\Filesystem\wp_join_unix_paths;
+use function WordPress\Reprint\Exporter\trim_right_slash;
 
 /**
  * Streams a provided list of filesystem paths in sorted order with
@@ -185,10 +186,10 @@ class FileTreeProducer
     private function normalize_directories($directories): array
     {
         if (is_string($directories)) {
-            return [rtrim($directories, "/") ?: "/"];
+            return [trim_right_slash($directories)];
         }
         return array_map(function ($d) {
-            return rtrim($d, "/") ?: "/";
+            return trim_right_slash($d);
         }, $directories);
     }
 

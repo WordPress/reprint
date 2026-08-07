@@ -38,6 +38,7 @@ use function WordPress\Reprint\Exporter\path_is_within_root;
 use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 use function WordPress\Reprint\Exporter\relative_path_under;
+use function WordPress\Reprint\Exporter\trim_right_slash;
 use function Reprint\Importer\merge_local_index_mutations;
 use function Reprint\Importer\write_local_index_update;
 
@@ -424,7 +425,7 @@ class ImportClient
 
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
-        $this->filesystem_root = rtrim($filesystem_root, "/") ?: "/";
+        $this->filesystem_root = trim_right_slash($filesystem_root);
         $remote_state_directory = self::remote_state_directory_path(
             $this->remote_reprint_api_url,
             $this->state_dir
@@ -2048,7 +2049,7 @@ class ImportClient
         }
         return [
             'remote_reprint_api_url' => rtrim($remote_reprint_api_url, '?&'),
-            'filesystem_root' => rtrim($resolved_local_filesystem_root, '/') ?: '/',
+            'filesystem_root' => trim_right_slash($resolved_local_filesystem_root),
             'push_state_directory' => $push_state_directory,
         ];
     }
@@ -2095,7 +2096,7 @@ class ImportClient
                 'The filesystem root does not exist or is not a directory: ' . $filesystem_root . '.'
             );
         }
-        $resolved_local_filesystem_root = rtrim($resolved_local_filesystem_root, '/') ?: '/';
+        $resolved_local_filesystem_root = trim_right_slash($resolved_local_filesystem_root);
         // Resolve an absolute physical path even when its final components do not exist.
         $remote_state_directory = self::remote_state_directory_path(
             $remote_reprint_api_url,
@@ -4163,7 +4164,7 @@ class ImportClient
 
         if (!empty($flat_document_root)) {
             // --flat-document-root: used directly as the web root.
-            $raw_local_document_root = rtrim($flat_document_root, "/") ?: "/";
+            $raw_local_document_root = trim_right_slash($flat_document_root);
         } else {
             // --fs-root: the raw download directory. The remote site's
             // document_root tells us where the web root lived on the
@@ -4511,7 +4512,7 @@ class ImportClient
             );
         }
 
-        $flatten_to = rtrim($flatten_to, "/") ?: "/";
+        $flatten_to = trim_right_slash($flatten_to);
         $force = $options["force"] ?? false;
 
         // Ensure the filesystem root exists
@@ -4891,7 +4892,7 @@ class ImportClient
         if (!is_string($value) || trim($value) === "") {
             return null;
         }
-        return rtrim($value, "/") ?: "/";
+        return trim_right_slash($value);
     }
 
     /**
@@ -9094,7 +9095,7 @@ class ImportClient
         }
 
         if ($resolved !== "") {
-            $resolved = rtrim($resolved, "/") ?: "/";
+            $resolved = trim_right_slash($resolved);
         }
         assert_valid_path($resolved, "path \"{$raw}\"");
 
@@ -10000,7 +10001,7 @@ class ImportClient
         ];
 
         if ($this->extra_directory !== null && $this->extra_directory !== "") {
-            $extra_paths["extra_directory"] = rtrim($this->extra_directory, "/") ?: "/";
+            $extra_paths["extra_directory"] = trim_right_slash($this->extra_directory);
         }
 
         // Ensure every --remap source is enumerated — including plugins or
