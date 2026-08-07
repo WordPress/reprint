@@ -1,5 +1,7 @@
 <?php
 
+use function WordPress\Reprint\Exporter\relative_path_under;
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Sender failures are CLI/API values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
@@ -1472,14 +1474,11 @@ final class PushFilesSender
         if ($local_relative_path === false) {
             throw new RuntimeException('Failed to decode a path in the local paths-to-push file.');
         }
-        $document_root_local_relative_path = $this->state['document_root_local_relative_path'];
-        if ($document_root_local_relative_path === '') {
-            $document_root_relative_path = $local_relative_path;
-        } else {
-            $document_root_relative_path = $local_relative_path === $document_root_local_relative_path
-                ? ''
-                : substr($local_relative_path, strlen($document_root_local_relative_path) + 1);
-        }
+        $document_root_relative_path = relative_path_under(
+            $local_relative_path,
+            $this->state['document_root_local_relative_path']
+        );
+        /** @var string $document_root_relative_path PushPlan includes only paths beneath the document root. */
         return [
             'local_relative_path' => $local_relative_path,
             'document_root_relative_path' => $document_root_relative_path,

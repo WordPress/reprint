@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use function WordPress\Reprint\Exporter\relative_path_under;
 
 require_once dirname(__DIR__) . '/packages/reprint-server/src/class-file-index-processor.php';
 
@@ -303,11 +304,12 @@ final class FileIndexProcessorTest extends TestCase {
      */
     private function relativePaths(array $entries, string $docroot): array
     {
-        $prefix = rtrim( (string) realpath($docroot), '/') . '/';
+        $root = (string) realpath($docroot);
         $paths = [];
         foreach ($entries as $entry) {
-            if (strpos($entry['path'], $prefix) === 0) {
-                $paths[] = substr($entry['path'], strlen($prefix));
+            $relativePath = relative_path_under($entry['path'], $root);
+            if ($relativePath !== null && $relativePath !== '') {
+                $paths[] = $relativePath;
             }
         }
         return $paths;

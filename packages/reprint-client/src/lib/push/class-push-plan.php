@@ -4,7 +4,7 @@ use function Reprint\Importer\sort_index_file;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
 use function WordPress\Reprint\Exporter\path_is_within_root;
-use function WordPress\Reprint\Exporter\path_remainder_under;
+use function WordPress\Reprint\Exporter\relative_path_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
 
@@ -571,14 +571,13 @@ class PushPlan
             );
         }
 
-        $local_relative_path = path_remainder_under(
+        $local_relative_path = relative_path_under(
             $file_index_processor_entry["path"],
             $this->filesystem_root
         );
         if ($local_relative_path === null) {
             throw new LogicException("File index path is outside the filesystem root.");
         }
-        $local_relative_path = ltrim($local_relative_path, "/");
         $fresh_local_index_entry = [
             "path" => base64_encode($local_relative_path),
             "ctime" => $file_index_processor_entry["ctime"],
@@ -1031,8 +1030,10 @@ class PushPlan
      */
     private function append_local_path_to_delete(string $path): void
     {
-        $document_root_relative_path =
-            $this->local_relative_path_to_document_root_relative_path($path);
+        $document_root_relative_path = relative_path_under(
+            $path,
+            $this->document_root_local_relative_path
+        );
         if ($document_root_relative_path === null) {
             return;
         }
@@ -1135,8 +1136,10 @@ class PushPlan
      */
     private function path_conflicts_with_excluded_paths(string $path): bool
     {
-        $document_root_relative_path =
-            $this->local_relative_path_to_document_root_relative_path($path);
+        $document_root_relative_path = relative_path_under(
+            $path,
+            $this->document_root_local_relative_path
+        );
         if ($document_root_relative_path === null) {
             return true;
         }
@@ -1149,28 +1152,6 @@ class PushPlan
             }
         }
         return false;
-    }
-
-    /**
-     * Returns the document-root-relative path, or null when the local
-     * relative path is outside the document root.
-     */
-    private function local_relative_path_to_document_root_relative_path(
-        string $local_relative_path
-    ): ?string {
-        if ($this->document_root_local_relative_path === "") {
-            return $local_relative_path;
-        }
-        $path_remainder = path_remainder_under(
-            $local_relative_path,
-            $this->document_root_local_relative_path
-        );
-        if ($path_remainder === null) {
-            return null;
-        }
-        return $path_remainder === ""
-            ? ""
-            : substr($path_remainder, 1);
     }
 
     /**
