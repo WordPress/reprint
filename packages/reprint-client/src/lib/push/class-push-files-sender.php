@@ -1,5 +1,6 @@
 <?php
 
+use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\relative_path_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Sender failures are CLI/API values, never HTML output.
@@ -377,7 +378,7 @@ final class PushFilesSender
         if ($resolved_local_filesystem_root === false) {
             throw new InvalidArgumentException('PushFilesSender requires a real filesystem root directory.');
         }
-        $this->filesystem_root = rtrim($resolved_local_filesystem_root, '/');
+        $this->filesystem_root = rtrim($resolved_local_filesystem_root, '/') ?: '/';
         $this->document_root_local_relative_path = trim($document_root, '/');
         $this->process_lock = $process_lock;
         $this->push_state_directory = rtrim($push_state_directory, '/');
@@ -885,7 +886,12 @@ final class PushFilesSender
             ];
             $upload_completes_local_path = true;
         } elseif ($local_path_type_size_and_ctime['type'] === 'symlink') {
-            $symlink_target = @readlink($this->filesystem_root . '/' . $local_path_to_push['local_relative_path']);
+            $symlink_target = @readlink(
+                wp_join_unix_paths(
+                    $this->filesystem_root,
+                    $local_path_to_push['local_relative_path']
+                )
+            );
             $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['local_relative_path']);
             if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
@@ -931,7 +937,10 @@ final class PushFilesSender
                 $local_io_failure_detail = null;
                 if (!is_resource($this->local_file_handle)) {
                     $this->local_file_handle = fopen(
-                        $this->filesystem_root . '/' . $local_path_to_push['local_relative_path'],
+                        wp_join_unix_paths(
+                            $this->filesystem_root,
+                            $local_path_to_push['local_relative_path']
+                        ),
                         'rb'
                     );
                 }
@@ -1537,7 +1546,7 @@ final class PushFilesSender
      */
     private function directory_is_empty(string $path): ?bool
     {
-        $directory_handle = @opendir($this->filesystem_root . '/' . $path);
+        $directory_handle = @opendir(wp_join_unix_paths($this->filesystem_root, $path));
         if ($directory_handle === false) {
             return null;
         }
@@ -1569,7 +1578,7 @@ final class PushFilesSender
      */
     private function stat_local_path(string $path): ?array
     {
-        $absolute_path = $this->filesystem_root . '/' . $path;
+        $absolute_path = wp_join_unix_paths($this->filesystem_root, $path);
         clearstatcache(true, $absolute_path);
         $path_stat = @lstat($absolute_path);
         if (!is_array($path_stat)) {
