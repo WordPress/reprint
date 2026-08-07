@@ -320,7 +320,7 @@ class ImportClient
      *   "skipped-earlier"  — download only uploads
      *
      * The presets are translated into the same include and exclude path
-     * prefixes used by --only and --exclude. Set via --filter=<value> and
+     * prefixes used by --include and --exclude. Set via --filter=<value> and
      * persisted in state so it survives across resume cycles within the same
      * run.
      */
@@ -337,7 +337,7 @@ class ImportClient
     private $resolved_path_mappings = [];
 
     /**
-     * @var array<int,string> Resolved `--only` file paths: a list of real source
+     * @var array<int,string> Resolved `--include` file paths: a list of real source
      * absolute path prefixes the files-pull command is restricted to. Empty = full sync
      * (every detected root).
      */
@@ -758,9 +758,9 @@ class ImportClient
             $this->resolved_path_mappings = $this->resolve_remap($remap_raw);
         }
 
-        $only_raw = $options["only"] ?? [];
-        if (is_string($only_raw)) {
-            $only_raw = [$only_raw];
+        $include_raw = $options["include"] ?? $options["only"] ?? [];
+        if (is_string($include_raw)) {
+            $include_raw = [$include_raw];
         }
         $excluded_raw = $options["exclude"] ?? [];
         if (is_string($excluded_raw)) {
@@ -770,14 +770,14 @@ class ImportClient
         if ($this->filter === "essential-files") {
             $excluded_raw[] = ":wp-uploads:";
         } elseif ($this->filter === "skipped-earlier") {
-            $only_raw[] = ":wp-uploads:";
+            $include_raw[] = ":wp-uploads:";
         }
 
         $this->pull_only_files_with_path_prefixes = [];
         $this->pull_excluded_files_with_path_prefixes = [];
-        if (!empty($only_raw)) {
+        if (!empty($include_raw)) {
             $this->pull_only_files_with_path_prefixes =
-                $this->resolve_remote_paths($only_raw, "only");
+                $this->resolve_remote_paths($include_raw, "include");
         }
         if (!empty($excluded_raw)) {
             $this->pull_excluded_files_with_path_prefixes =
@@ -3517,8 +3517,8 @@ class ImportClient
     private function discover_symlink_targets(): void
     {
         // Seed "already covered" from the dirs actually enumerated this run (the
-        // --only prefixes when scoped), not the full preflight roots — otherwise a
-        // narrow --only skips a target under a root but outside its scope.
+        // --include prefixes when scoped), not the full preflight roots — otherwise a
+        // narrow --include skips a target under a root but outside its scope.
         $roots = $this->get_export_directories();
 
         // Collect all indexed directory real paths for containment checks
@@ -6518,11 +6518,11 @@ class ImportClient
         if ($cursor === null) {
             $start = $roots[0];
             if (!empty($this->pull_only_files_with_path_prefixes)) {
-                // With --only, get_export_directories() returns only the resolved
+                // With --include, get_export_directories() returns only the resolved
                 // file path prefixes, and those become the request's directory[]
                 // allowlist. The exporter rejects list_dir unless it is inside
                 // that allowlist, so $roots[0] may no longer be valid. Start from
-                // the first --only file path prefix; the exporter still traverses
+                // the first --include file path prefix; the exporter still traverses
                 // the remaining directory[] entries.
                 $start = $export_dirs[0] ?? $roots[0];
             }
@@ -8870,7 +8870,7 @@ class ImportClient
     /**
      * Refuse to resume a files-pull after changing its path selection.
      *
-     * --only determines the next remote index traversal, while --exclude determines
+     * --include determines the next remote index traversal, while --exclude determines
      * which entries enter the later fetch list. Keep both fixed for the complete
      * in-progress lifecycle rather than allowing a resumed stage to cross a path-
      * selection boundary. Completed runs may use a different selection because the
@@ -8887,7 +8887,7 @@ class ImportClient
 
         if ($previous !== $fingerprint) {
             throw new RuntimeException(
-                "Cannot change --only or --exclude while resuming files-pull. " .
+                "Cannot change --include or --exclude while resuming files-pull. " .
                     "Use the original path selections, or use --abort to start a new files-pull.",
             );
         }
@@ -9122,11 +9122,11 @@ class ImportClient
     }
 
     /**
-     * Whether a path is selected by the active --only and --exclude prefixes.
+     * Whether a path is selected by the active --include and --exclude prefixes.
      *
-     * The exporter has already applied --only to entries in the next remote
-     * index, including followed symlink targets outside an --only prefix. Other
-     * paths are checked against --only locally. An included root itself is not
+     * The exporter has already applied --include to entries in the next remote
+     * index, including followed symlink targets outside an --include prefix. Other
+     * paths are checked against --include locally. An included root itself is not
      * selected because the next remote index lists its contents, not the root
      * entry. Exclusions always win.
      *
@@ -9210,7 +9210,7 @@ class ImportClient
     }
 
     /**
-     * Resolve a --remap/--only/--exclude path argument into an absolute path.
+     * Resolve a --remap/--include/--exclude path argument into an absolute path.
      *
      * Substitutes a known leading `:token:` (see the token tables in
      * resolve_remap and resolve_remote_paths) with its
@@ -10095,7 +10095,7 @@ class ImportClient
 
     /**
      * Whether $path falls under one of the ORIGINAL export directories (the
-     * --only prefixes, or the base roots without --only) — i.e. it was going to
+     * --include prefixes, or the base roots without --include) — i.e. it was going to
      * be pulled anyway. Evaluated against the pre-follow scope; a followed
      * target outside all of these is "escaping" and eligible for symlink bundling.
      */
@@ -10121,13 +10121,13 @@ class ImportClient
      */
     private function get_export_directories(): array
     {
-        // Memoized: The inputs (pull_only, remap, preflight) are all set before
+        // Memoized: The inputs (include, remap, preflight) are all set before
         // the first caller and never change mid-run, so cache on first use.
         if ($this->export_directories_cache !== null) {
             return $this->export_directories_cache;
         }
 
-        // With --only, files-pull should enumerate only the selected source path
+        // With --include, files-pull should enumerate only the selected source path
         // prefixes. Do not add the default roots, remap sources, document root, or
         // auto-prepend/append directories below.
         if (!empty($this->pull_only_files_with_path_prefixes)) {
@@ -11983,14 +11983,15 @@ if (
             'commands' => ['pull-files', 'files-pull'],
         ],
         [
-            'name' => 'only',
+            'name' => 'include',
             'type' => 'value-or-next',
-            'target' => 'only',
+            'target' => 'include',
             'placeholder' => 'SOURCE',
             'repeatable' => true,
             'help' => 'Restrict the file pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
                 'repeat for several. Default pulls everything',
             'commands' => ['pull-files', 'files-pull'],
+            'aliases' => ['only'],
         ],
         [
             'name' => 'exclude',
@@ -12546,7 +12547,7 @@ if (
                 "\n" .
                 "  reprint pull-files https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
-                "    --only=:wp-content: --exclude=:wp-uploads:\n",
+                "    --include=:wp-content: --exclude=:wp-uploads:\n",
         ],
         "pull-db" => [
             "level" => "high",
@@ -12627,7 +12628,7 @@ if (
                 "Runs files-index internally to write the next remote index.\n",
             "extra" =>
                 "Path selection:\n" .
-                "  --only=SOURCE      Include only this source path prefix; repeatable.\n" .
+                "  --include=SOURCE   Include only this source path prefix; repeatable.\n" .
                 "  --exclude=SOURCE   Exclude this source path prefix; repeatable.\n" .
                 "  Exclusions win when include and exclude prefixes overlap.\n" .
                 "\n" .
