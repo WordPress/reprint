@@ -9786,26 +9786,6 @@ class ImportClient
             return;
         }
 
-        // Remove existing file/symlink if present
-        if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
-            if (
-                !$this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)
-            ) {
-                $this->audit_log(
-                    "Failed to remove existing path for symlink: {$local_absolute_path}",
-                    true,
-                );
-                $this->output_progress([
-                    "type" => "symlink_error",
-                    "path" => $path,
-                    "target" => $target_for_local,
-                    "error" => "Failed to replace existing path",
-                    "message" => "Symlink error: {$path} -> {$target}",
-                ]);
-                return;
-            }
-        }
-
         // Create parent directory
         $dir = dirname($local_absolute_path);
         if (!is_dir($dir)) {
@@ -9836,7 +9816,7 @@ class ImportClient
 
         // Create symlink
         $symlink_result = symlink($target_for_local, $local_absolute_path);
-        if (true !== $symlink_result || !is_link($local_absolute_path)) {
+        if (true !== $symlink_result) {
             // Log error and skip this symlink
             $this->audit_log(
                 "Failed to create symlink: {$local_absolute_path} -> {$target_for_local}",
