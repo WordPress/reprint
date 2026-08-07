@@ -3,6 +3,7 @@
  * Unified export API for SQL and file operations.
  */
 
+use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\build_pdo_dsn;
 use function WordPress\Reprint\Exporter\json_encode_or_throw;
@@ -561,7 +562,10 @@ if (getenv('SITE_EXPORT_TEST_MODE')) {
         if (isset($config['directory'])) {
             $dirs = is_array($config['directory']) ? $config['directory'] : [$config['directory']];
             foreach ($dirs as $d) {
-                $candidates[] = rtrim($d, '/') . '/wp-content/plugins/site-export/test-hooks.php';
+                $candidates[] = wp_join_unix_paths(
+                    $d,
+                    'wp-content/plugins/site-export/test-hooks.php'
+                );
             }
         }
         // Also check relative to this file's parent
@@ -755,11 +759,11 @@ function detect_wp_roots(array $start_paths): array
         $current = $start;
         while ($current !== "" && !isset($seen[$current])) {
             $seen[$current] = true;
-            $wp_load_path = $current . "/wp-load.php";
-            $wp_config_path = $current . "/wp-config.php";
+            $wp_load_path = wp_join_unix_paths($current, "wp-load.php");
+            $wp_config_path = wp_join_unix_paths($current, "wp-config.php");
             $has_wp_load = file_exists($wp_load_path);
             $has_wp_config = file_exists($wp_config_path);
-            $has_wp_content = is_dir($current . "/wp-content");
+            $has_wp_content = is_dir(wp_join_unix_paths($current, "wp-content"));
             if ($has_wp_load || $has_wp_config) {
                 $roots[$current] = [
                     "path" => $current,
@@ -1313,7 +1317,7 @@ function endpoint_preflight(array $config): array
                 "disk_total_bytes" => $disk_total !== false ? $disk_total : null,
             ];
 
-            $htaccess_path = rtrim($dir, "/") . "/.htaccess";
+            $htaccess_path = wp_join_unix_paths($dir, ".htaccess");
             if (file_exists($htaccess_path)) {
                 $htaccess_readable = is_readable($htaccess_path);
                 $htaccess_size = @filesize($htaccess_path);
@@ -1345,9 +1349,9 @@ function endpoint_preflight(array $config): array
                 ];
             }
 
-            $plugins_dir = rtrim($dir, "/") . "/wp-content/plugins";
-            $mu_plugins_dir = rtrim($dir, "/") . "/wp-content/mu-plugins";
-            $themes_dir = rtrim($dir, "/") . "/wp-content/themes";
+            $plugins_dir = wp_join_unix_paths($dir, "wp-content/plugins");
+            $mu_plugins_dir = wp_join_unix_paths($dir, "wp-content/mu-plugins");
+            $themes_dir = wp_join_unix_paths($dir, "wp-content/themes");
             $wp_paths[] = [
                 "root" => $dir,
                 "plugins_dir" => $plugins_dir,
@@ -1359,9 +1363,9 @@ function endpoint_preflight(array $config): array
 
     if (!empty($wp_scan_roots)) {
         foreach ($wp_scan_roots as $dir) {
-            $plugins_dir = rtrim($dir, "/") . "/wp-content/plugins";
-            $mu_plugins_dir = rtrim($dir, "/") . "/wp-content/mu-plugins";
-            $themes_dir = rtrim($dir, "/") . "/wp-content/themes";
+            $plugins_dir = wp_join_unix_paths($dir, "wp-content/plugins");
+            $mu_plugins_dir = wp_join_unix_paths($dir, "wp-content/mu-plugins");
+            $themes_dir = wp_join_unix_paths($dir, "wp-content/themes");
             $wp_paths[] = [
                 "root" => $dir,
                 "plugins_dir" => $plugins_dir,
@@ -1380,12 +1384,11 @@ function endpoint_preflight(array $config): array
         )
     );
     $wp_paths = array_map(function ($root) {
-        $root = rtrim($root, "/");
         return [
             "root" => $root,
-            "plugins_dir" => $root . "/wp-content/plugins",
-            "mu_plugins_dir" => $root . "/wp-content/mu-plugins",
-            "themes_dir" => $root . "/wp-content/themes",
+            "plugins_dir" => wp_join_unix_paths($root, "wp-content/plugins"),
+            "mu_plugins_dir" => wp_join_unix_paths($root, "wp-content/mu-plugins"),
+            "themes_dir" => wp_join_unix_paths($root, "wp-content/themes"),
         ];
     }, $wp_paths);
 
@@ -1658,7 +1661,7 @@ function endpoint_preflight(array $config): array
                         // the importer knows where the files actually live.
                         $wp_admin_path = null;
                         if (defined("ABSPATH")) {
-                            $wp_admin_candidate = ABSPATH . "wp-admin";
+                            $wp_admin_candidate = wp_join_unix_paths(ABSPATH, "wp-admin");
                             $wp_admin_real = realpath($wp_admin_candidate);
                             if ($wp_admin_real !== false && is_dir($wp_admin_real)) {
                                 $wp_admin_path = $wp_admin_real;
@@ -1668,7 +1671,7 @@ function endpoint_preflight(array $config): array
                         $wp_includes_path = null;
                         if (defined("ABSPATH")) {
                             $wpinc = defined("WPINC") ? WPINC : "wp-includes";
-                            $wp_includes_candidate = ABSPATH . $wpinc;
+                            $wp_includes_candidate = wp_join_unix_paths(ABSPATH, $wpinc);
                             $wp_includes_real = realpath($wp_includes_candidate);
                             if ($wp_includes_real !== false && is_dir($wp_includes_real)) {
                                 $wp_includes_path = $wp_includes_real;
@@ -1682,13 +1685,13 @@ function endpoint_preflight(array $config): array
                         // find the directory at the resolved location where
                         // files are actually downloaded.
                         $abspath_raw = defined("ABSPATH")
-                            ? rtrim(ABSPATH, "/")
+                            ? (rtrim(ABSPATH, "/") ?: "/")
                             : null;
                         $abspath_resolved = null;
                         if ($abspath_raw !== null) {
                             $abspath_real = realpath($abspath_raw);
                             $abspath_resolved = $abspath_real !== false
-                                ? rtrim($abspath_real, "/")
+                                ? (rtrim($abspath_real, "/") ?: "/")
                                 : $abspath_raw;
                         }
 
@@ -1697,19 +1700,19 @@ function endpoint_preflight(array $config): array
                             "wp_admin_path" => $wp_admin_path,
                             "wp_includes_path" => $wp_includes_path,
                             "content_dir" => defined("WP_CONTENT_DIR")
-                                ? realpath(rtrim(WP_CONTENT_DIR, "/"))
+                                ? realpath(WP_CONTENT_DIR)
                                 : null,
                             "content_url" => function_exists("content_url")
                                 ? content_url()
                                 : (defined("WP_CONTENT_URL") ? WP_CONTENT_URL : null),
                             "plugins_dir" => defined("WP_PLUGIN_DIR")
-                                ? realpath(rtrim(WP_PLUGIN_DIR, "/"))
+                                ? realpath(WP_PLUGIN_DIR)
                                 : null,
                             "plugins_url" => function_exists("plugins_url")
                                 ? plugins_url()
                                 : (defined("WP_PLUGIN_URL") ? WP_PLUGIN_URL : null),
                             "mu_plugins_dir" => defined("WPMU_PLUGIN_DIR")
-                                ? realpath(rtrim(WPMU_PLUGIN_DIR, "/"))
+                                ? realpath(WPMU_PLUGIN_DIR)
                                 : null,
                             "mu_plugins_url" => function_exists("content_url")
                                 ? content_url("/mu-plugins")
@@ -1955,21 +1958,21 @@ function endpoint_preflight(array $config): array
     // Scan each directory to list installed plugins, mu-plugins, and themes.
     $wp_runtime_paths = null;
     if ($db["wp"]["wp_load_loaded"]) {
-        $runtime_root = defined("ABSPATH") ? rtrim(ABSPATH, "/") : null;
+        $runtime_root = defined("ABSPATH") ? (rtrim(ABSPATH, "/") ?: "/") : null;
         $content_dir = defined("WP_CONTENT_DIR")
-            ? rtrim(WP_CONTENT_DIR, "/")
+            ? (rtrim(WP_CONTENT_DIR, "/") ?: "/")
             : null;
         $plugins_dir = defined("WP_PLUGIN_DIR")
-            ? rtrim(WP_PLUGIN_DIR, "/")
+            ? (rtrim(WP_PLUGIN_DIR, "/") ?: "/")
             : null;
         $mu_plugins_dir = defined("WPMU_PLUGIN_DIR")
-            ? rtrim(WPMU_PLUGIN_DIR, "/")
+            ? (rtrim(WPMU_PLUGIN_DIR, "/") ?: "/")
             : null;
         $themes_dir = null;
         if (function_exists("get_theme_root")) {
             $themes_dir = get_theme_root();
             if (is_string($themes_dir)) {
-                $themes_dir = rtrim($themes_dir, "/");
+                $themes_dir = rtrim($themes_dir, "/") ?: "/";
             } else {
                 $themes_dir = null;
             }
@@ -1977,13 +1980,13 @@ function endpoint_preflight(array $config): array
 
         if ($content_dir !== null) {
             if ($plugins_dir === null) {
-                $plugins_dir = $content_dir . "/plugins";
+                $plugins_dir = wp_join_unix_paths($content_dir, "plugins");
             }
             if ($mu_plugins_dir === null) {
-                $mu_plugins_dir = $content_dir . "/mu-plugins";
+                $mu_plugins_dir = wp_join_unix_paths($content_dir, "mu-plugins");
             }
             if ($themes_dir === null) {
-                $themes_dir = $content_dir . "/themes";
+                $themes_dir = wp_join_unix_paths($content_dir, "themes");
             }
         }
 
@@ -2015,7 +2018,7 @@ function endpoint_preflight(array $config): array
                 if ($entry === "." || $entry === "..") {
                     continue;
                 }
-                $path = $plugins_dir . "/" . $entry;
+                $path = wp_join_unix_paths($plugins_dir, $entry);
                 $root_entry["plugins"][] = [
                     "name" => $entry,
                     "type" => is_dir($path) ? "dir" : "file",
@@ -2036,7 +2039,7 @@ function endpoint_preflight(array $config): array
                 if ($entry === "." || $entry === "..") {
                     continue;
                 }
-                $path = $mu_plugins_dir . "/" . $entry;
+                $path = wp_join_unix_paths($mu_plugins_dir, $entry);
                 $root_entry["mu_plugins"][] = [
                     "name" => $entry,
                     "type" => is_dir($path) ? "dir" : "file",
@@ -2057,7 +2060,7 @@ function endpoint_preflight(array $config): array
                 if ($entry === "." || $entry === "..") {
                     continue;
                 }
-                $path = $themes_dir . "/" . $entry;
+                $path = wp_join_unix_paths($themes_dir, $entry);
                 if (is_dir($path)) {
                     $root_entry["themes"][] = $entry;
                 }
