@@ -1400,7 +1400,7 @@ class ImportClient
             . 'writes it after the target finishes applying the push. Use the same '
             . 'remote Reprint API URL and state directory.';
 
-        $plan_directory = $push_state_directory . '/files-diff-plan';
+        $plan_directory = wp_join_unix_paths($push_state_directory, 'files-diff-plan');
         try {
             if (!is_file($this->local_index_file)) {
                 throw new RuntimeException($missing_local_index_message);
@@ -1412,7 +1412,7 @@ class ImportClient
             if (!mkdir($plan_directory, 0755, true)) {
                 throw new RuntimeException('Failed to create the local plan directory: ' . $plan_directory . '.');
             }
-            $excluded_paths_path = $plan_directory . '/no_target_exclusions.json';
+            $excluded_paths_path = wp_join_unix_paths($plan_directory, 'no_target_exclusions.json');
             if (file_put_contents($excluded_paths_path, "[]\n") === false) {
                 throw new RuntimeException('Failed to write the empty exclusions file: ' . $excluded_paths_path . '.');
             }
@@ -1622,7 +1622,7 @@ class ImportClient
             if ($plan_file === '.' || $plan_file === '..') {
                 continue;
             }
-            $plan_file_path = $plan_directory . '/' . $plan_file;
+            $plan_file_path = wp_join_unix_paths($plan_directory, $plan_file);
             if (!is_file($plan_file_path) || !unlink($plan_file_path)) {
                 throw new RuntimeException('Failed to remove a local plan file: ' . $plan_file_path . '.');
             }
@@ -1698,7 +1698,7 @@ class ImportClient
             'chunk_bytes' => $chunk_bytes,
         ];
 
-        $resuming = is_file($context['push_state_directory'] . '/sender.json');
+        $resuming = is_file(wp_join_unix_paths($context['push_state_directory'], 'sender.json'));
         $sender = $resuming
             ? PushFilesSender::resume($sender_options, $process_lock)
             : PushFilesSender::start($sender_options, $process_lock);

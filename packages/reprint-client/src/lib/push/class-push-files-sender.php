@@ -382,12 +382,12 @@ final class PushFilesSender
         $this->filesystem_root = trim_right_slash($resolved_local_filesystem_root);
         $this->document_root_local_relative_path = trim($document_root, '/');
         $this->process_lock = $process_lock;
-        $this->push_state_directory = rtrim($push_state_directory, '/');
-        $this->plan_directory = $this->push_state_directory . '/plan';
+        $this->push_state_directory = trim_right_slash($push_state_directory);
+        $this->plan_directory = wp_join_unix_paths($this->push_state_directory, 'plan');
         $remote_state_directory = dirname($this->push_state_directory);
-        $this->local_index_file = $remote_state_directory . '/local_index.jsonl';
-        $this->state_path = $this->push_state_directory . '/sender.json';
-        $this->excluded_paths_path = $this->push_state_directory . '/excluded_paths.json';
+        $this->local_index_file = wp_join_unix_paths($remote_state_directory, 'local_index.jsonl');
+        $this->state_path = wp_join_unix_paths($this->push_state_directory, 'sender.json');
+        $this->excluded_paths_path = wp_join_unix_paths($this->push_state_directory, 'excluded_paths.json');
         $this->request_sizer_options = $request_sizer_options;
         $this->push_stream_client_options = $push_stream_client_options;
     }
@@ -1415,7 +1415,7 @@ final class PushFilesSender
             if ($plan_file === '.' || $plan_file === '..') {
                 continue;
             }
-            $plan_file_path = $this->plan_directory . '/' . $plan_file;
+            $plan_file_path = wp_join_unix_paths($this->plan_directory, $plan_file);
             if (!unlink($plan_file_path)) {
                 throw new RuntimeException('Failed to remove a push plan file: ' . $plan_file_path);
             }
