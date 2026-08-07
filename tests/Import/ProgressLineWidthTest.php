@@ -82,6 +82,15 @@ class ProgressLineWidthTest extends TestCase
             $this->displayWidth($result) . ", max: 60. Output: " . $result);
     }
 
+    public function testProgressBarPercentageComesFirstAndUsesDefaultOutputColor(): void
+    {
+        $progress = $this->createProgress();
+        $result = $progress->render_progress_bar('Pushing', 0.6);
+
+        $this->assertStringContainsString('60% Pushing', $result);
+        $this->assertStringNotContainsString("\033[2m", $result);
+    }
+
     public function testUnicodeSpinnerWidth(): void
     {
         $progress = $this->createProgress(80);
