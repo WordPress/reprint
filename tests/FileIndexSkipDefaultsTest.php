@@ -494,10 +494,12 @@ final class FileIndexSkipDefaultsTest extends TestCase
 <?php
 declare(strict_types=1);
 require_once %s;
+require_once %s;
 $config = json_decode(file_get_contents(%s), true, 512, JSON_THROW_ON_ERROR);
 $budget = new ResourceBudget(microtime(true), 10, 128 * 1024 * 1024, 0.9);
 endpoint_file_index($config, $budget);
 PHP,
+                var_export(dirname(__DIR__) . '/vendor/autoload.php', true),
                 var_export(dirname(__DIR__) . '/packages/reprint-server/src/export.php', true),
                 var_export($configPath, true),
             ),
