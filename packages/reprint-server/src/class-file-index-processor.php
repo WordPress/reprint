@@ -1,5 +1,7 @@
 <?php
 
+use function WordPress\Filesystem\wp_join_unix_paths;
+
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Exporter classes use unprefixed domain names.
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Traversal failures become API or CLI values, never HTML output.
 
@@ -805,7 +807,7 @@ final class FileIndexProcessor {
         $raw_target = @readlink($path);
         if ($raw_target !== false && $raw_target !== "") {
             if ($raw_target[0] !== "/") {
-                $raw_target = dirname($path) . "/" . $raw_target;
+                $raw_target = wp_join_unix_paths(dirname($path), $raw_target);
             }
             // Resolve only textual dot segments. realpath() would skip the
             // intermediate links that this walk must inspect.
@@ -846,7 +848,7 @@ final class FileIndexProcessor {
                 $current = "/";
                 continue;
             }
-            $current = rtrim($current, "/") . "/" . $part;
+            $current = wp_join_unix_paths($current, $part);
             if (!@is_link($current)) {
                 continue;
             }
