@@ -16,10 +16,6 @@
         <testsuite name="Import Tests">
             <directory>Import</directory>
         </testsuite>
-        <testsuite name="Uploads Proxy Tests">
-            <directory>UploadsProxy</directory>
-            <exclude>UploadsProxy/fixtures</exclude>
-        </testsuite>
         <testsuite name="URL Rewriting Tests">
             <directory>UrlRewriting</directory>
         </testsuite>
