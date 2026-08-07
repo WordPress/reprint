@@ -2113,10 +2113,7 @@ class ImportClient
         $push_state_directory = realpath_with_missing_tail(
             $push_state_directory
         );
-        if (
-            $resolved_local_filesystem_root === '/'
-            || path_is_within_root($push_state_directory, $resolved_local_filesystem_root)
-        ) {
+        if (path_is_within_root($push_state_directory, $resolved_local_filesystem_root)) {
             throw new InvalidArgumentException(
                 'The local push state directory ' . $push_state_directory
                 . ' must be outside the filesystem root ' . $resolved_local_filesystem_root . '.'
