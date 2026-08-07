@@ -206,6 +206,27 @@ class WpcloudHostAnalyzerTest extends TestCase
         $this->assertGreaterThanOrEqual(0.5, $score);
     }
 
+    public function testScoreMatchesWpcloudMarkersUnderTheFilesystemRoot(): void
+    {
+        $preflight = $this->wpcloudPreflight([
+            'runtime' => [
+                'document_root' => '/',
+            ],
+            'filesystem' => [
+                'directories' => [
+                    ['path' => '/__wp__', 'exists' => true],
+                ],
+            ],
+            'wp_detect' => [
+                'roots' => [
+                    ['path' => '/__wp__'],
+                ],
+            ],
+        ]);
+
+        $this->assertGreaterThanOrEqual(0.9, \WpcloudHostAnalyzer::score($preflight));
+    }
+
     public function testScoreRejectsNonWpcloudSite(): void
     {
         $preflight = [
