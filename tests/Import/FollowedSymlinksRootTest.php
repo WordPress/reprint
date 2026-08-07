@@ -54,6 +54,11 @@ class FollowedSymlinksRootTest extends TestCase
         return new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
     }
 
+    private function newRootClient(): \ImportClient
+    {
+        return new \ImportClient('https://src.example/export.php', $this->stateDir, '/');
+    }
+
     // ── Resolving the local followed symlinks root (:fs-root: grammar, within-root) ──
 
     private function resolve(string $raw): string
@@ -159,6 +164,28 @@ class FollowedSymlinksRootTest extends TestCase
         );
     }
 
+    public function testFilesystemRootPlacementKeepsOneLeadingSlash(): void
+    {
+        $client = $this->newRootClient();
+        $reflection = new \ReflectionClass($client);
+        $reflection->getProperty('pull_only_files_with_path_prefixes')->setValue($client, []);
+
+        $this->assertSame(
+            '/tmp/shared/foo/style.css',
+            $this->place($client, '/tmp/shared/foo/style.css')
+        );
+
+        $reflection->getProperty('local_followed_symlinks_root')->setValue($client, '/');
+        $reflection->getProperty('pull_only_files_with_path_prefixes')->setValue(
+            $client,
+            ['/var/www/html']
+        );
+        $this->assertSame(
+            '/tmp/shared/foo/style.css',
+            $this->place($client, '/tmp/shared/foo/style.css')
+        );
+    }
+
     // Regression: an escaping root (/shared) that is an ANCESTOR of the scope
     // (/shared/wp-content) must not move the in-scope subtree.
     public function testAncestorEscapingRootLeavesInScopeContentInPlace(): void
@@ -229,6 +256,16 @@ class FollowedSymlinksRootTest extends TestCase
         $this->assertGuard($c, null, hash('sha256', $this->root));
         $this->assertGuard($c, $this->root, hash('sha256', $this->root));
         $this->addToAssertionCount(1); // no exception == pass
+    }
+
+    public function testDefaultFollowedSymlinksRootFingerprintKeepsFilesystemRoot(): void
+    {
+        $client = $this->newRootClient();
+        $fingerprint = (new \ReflectionClass($client))
+            ->getMethod('local_followed_symlinks_root_fingerprint')
+            ->invoke($client);
+
+        $this->assertSame(hash('sha256', '/'), $fingerprint);
     }
 
     // ── Repoint routes via remap even when the target is spelled within fs-root ──
