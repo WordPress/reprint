@@ -3,8 +3,9 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Exporter\assert_valid_relative_path;
 use function WordPress\Reprint\Exporter\path_is_descendant_of;
+use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 use function WordPress\Reprint\Exporter\relative_path_under;
@@ -152,6 +153,39 @@ class RemapSeamTest extends TestCase
             'trailing slash on path' => array('', '/home/adam/', '/home/adam'),
             'trailing slash on both' => array('', '/home/adam/', '/home/adam/'),
             'under, prefix has trailing slash' => array('/c', '/a/b/c', '/a/b/'),
+        );
+    }
+
+    public function testAssertValidRelativePathAllowsDocumentRootDescendants(): void
+    {
+        foreach (array('index.php', 'wp-content/plugins/example.php', 'leading space/file') as $path) {
+            assert_valid_relative_path($path, 'Document-root-relative path');
+        }
+
+        $this->addToAssertionCount(1);
+    }
+
+    /**
+     * @dataProvider provideInvalidRelativePathCases
+     */
+    public function testAssertValidRelativePathRejectsReservedForms(string $path, string $message): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage($message);
+
+        assert_valid_relative_path($path, 'Document-root-relative path');
+    }
+
+    public static function provideInvalidRelativePathCases(): array
+    {
+        return array(
+            'empty path' => array('', 'Document-root-relative path must not be empty.'),
+            'absolute path' => array('/index.php', 'Document-root-relative path must not be absolute: L2luZGV4LnBocA==.'),
+            'NUL byte' => array("nul\0byte", 'Document-root-relative path must not contain a NUL byte: bnVsAGJ5dGU=.'),
+            'backslash' => array('windows\\path', 'Document-root-relative path must not contain a backslash: d2luZG93c1xwYXRo.'),
+            'empty component' => array('wp-content//plugins', 'Document-root-relative path must not contain an empty component: d3AtY29udGVudC8vcGx1Z2lucw==.'),
+            'dot component' => array('./index.php', 'Document-root-relative path must not contain a dot component: Li9pbmRleC5waHA=.'),
+            'parent component' => array('wp-content/../index.php', 'Document-root-relative path must not contain a parent component: d3AtY29udGVudC8uLi9pbmRleC5waHA=.'),
         );
     }
 
