@@ -2,6 +2,7 @@
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Push errors become authenticated API JSON, never HTML output.
 
+use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\normalize_excluded_paths;
 use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\relative_path_under;
@@ -144,19 +145,19 @@ final class Site_Export_Push_Session {
             $excluded_paths[] = $relative_reprint_directory;
         }
         $this->excluded_paths = normalize_excluded_paths($excluded_paths);
-        $push_sessions_directory = $this->reprint_directory . '/.reprint/push';
-        $this->commit_state_path = $push_sessions_directory . '/commit-state';
-        $this->commit_state_lock_path = $push_sessions_directory . '/commit-state.lock';
-        $this->push_directory = $push_sessions_directory . '/' . $push_session_id;
-        $this->push_json_path = $this->push_directory . '/push.json';
-        $this->commit_json_path = $this->push_directory . '/commit.json';
-        $this->push_lock_path = $this->push_directory . '/push.lock';
-        $this->work_dir = $this->push_directory . '/work';
-        $this->work_files_directory = $this->work_dir . '/files';
-        $this->work_inflight_path = $this->work_dir . '/inflight.json';
-        $this->work_inflight_data_path = $this->work_dir . '/inflight.data';
-        $this->work_deletes_path = $this->work_dir . '/deletes';
-        $this->maintenance_copy_path = $this->work_dir . '/maintenance.php';
+        $push_sessions_directory = wp_join_unix_paths($this->reprint_directory, '.reprint', 'push');
+        $this->commit_state_path = wp_join_unix_paths($push_sessions_directory, 'commit-state');
+        $this->commit_state_lock_path = wp_join_unix_paths($push_sessions_directory, 'commit-state.lock');
+        $this->push_directory = wp_join_unix_paths($push_sessions_directory, $push_session_id);
+        $this->push_json_path = wp_join_unix_paths($this->push_directory, 'push.json');
+        $this->commit_json_path = wp_join_unix_paths($this->push_directory, 'commit.json');
+        $this->push_lock_path = wp_join_unix_paths($this->push_directory, 'push.lock');
+        $this->work_dir = wp_join_unix_paths($this->push_directory, 'work');
+        $this->work_files_directory = wp_join_unix_paths($this->work_dir, 'files');
+        $this->work_inflight_path = wp_join_unix_paths($this->work_dir, 'inflight.json');
+        $this->work_inflight_data_path = wp_join_unix_paths($this->work_dir, 'inflight.data');
+        $this->work_deletes_path = wp_join_unix_paths($this->work_dir, 'deletes');
+        $this->maintenance_copy_path = wp_join_unix_paths($this->work_dir, 'maintenance.php');
     }
 
     /**
@@ -198,7 +199,10 @@ final class Site_Export_Push_Session {
                     );
                 }
             });
-            $removing_push_directory = $push_sessions_directory . '/.removing-' . $push_session_id;
+            $removing_push_directory = wp_join_unix_paths(
+                $push_sessions_directory,
+                '.removing-' . $push_session_id
+            );
             if (file_exists($removing_push_directory) || is_link($removing_push_directory)) {
                 throw new Site_Export_Push_Exception(
                     self::ERROR_LOCK_ACQUISITION_FAILURE,
@@ -566,7 +570,7 @@ final class Site_Export_Push_Session {
             $reported_path = null;
             if ($path !== null) {
                 $this->assert_path_does_not_overlap_excluded_paths($path);
-                $complete = $this->work_files_directory . '/' . $path;
+                $complete = wp_join_unix_paths($this->work_files_directory, $path);
                 $this->ensure_private_parent($complete, false);
                 $inflight = $this->read_inflight();
                 if ($inflight !== null && base64_decode($inflight['path_b64'], true) === $path) {
@@ -757,7 +761,10 @@ final class Site_Export_Push_Session {
      */
     public function remove_push_directory(): bool {
         $push_sessions_directory = self::create_push_sessions_directory($this->reprint_directory);
-        $removing_push_directory = $push_sessions_directory . '/.removing-' . $this->push_session_id;
+        $removing_push_directory = wp_join_unix_paths(
+            $push_sessions_directory,
+            '.removing-' . $this->push_session_id
+        );
         $create_remove_lock = self::acquire_create_remove_lock($push_sessions_directory, 'remove');
         try {
             if ($this->lstat_path($this->push_directory) === null) {
@@ -934,7 +941,7 @@ final class Site_Export_Push_Session {
             return;
         }
         $path = base64_decode($inflight['path_b64'], true);
-        $work_path = $this->work_files_directory . '/' . $path;
+        $work_path = wp_join_unix_paths($this->work_files_directory, $path);
         $work_identity = $this->lstat_path($work_path);
         if ($inflight['type'] === 'file') {
             $data = $this->lstat_path($this->work_inflight_data_path);
@@ -1016,7 +1023,7 @@ final class Site_Export_Push_Session {
         }
         $this->finish_inflight_completion();
         $inflight = $this->read_inflight();
-        $complete_path = $this->work_files_directory . '/' . $path;
+        $complete_path = wp_join_unix_paths($this->work_files_directory, $path);
         $complete = $this->lstat_path($complete_path);
         if ($inflight === null && $complete !== null && $complete['type'] === 'file' && $complete['size'] === $total_bytes && $offset === $total_bytes && $part_bytes === 0) {
             if ($this->read_current_upload_body_piece() !== null) {
@@ -1115,7 +1122,7 @@ final class Site_Export_Push_Session {
             throw new InvalidArgumentException('Multipart directory part must have Content-Length 0.');
         }
         $path = $this->decode_path_header($headers, 'x-directory-path');
-        $target = $this->work_files_directory . '/' . $path;
+        $target = wp_join_unix_paths($this->work_files_directory, $path);
         $this->finish_inflight_completion();
         $inflight = $this->read_inflight();
         if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
@@ -1185,7 +1192,7 @@ final class Site_Export_Push_Session {
         if ($target_value === '' || strlen($target_value) > self::MAX_PATH_BYTES || strpos($target_value, "\0") !== false) {
             throw new InvalidArgumentException('Symlink target must contain between 1 and ' . self::MAX_PATH_BYTES . ' bytes without NUL.');
         }
-        $target = $this->work_files_directory . '/' . $path;
+        $target = wp_join_unix_paths($this->work_files_directory, $path);
         $this->finish_inflight_completion();
         $inflight = $this->read_inflight();
         if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
@@ -1482,8 +1489,13 @@ final class Site_Export_Push_Session {
             }
             return;
         }
-        $child_relative = $relative_path . '/' . $entry;
-        $this->remove_docroot_entry($absolute_path . '/' . $entry, $child_relative, $requested_path, $identity['dev']);
+        $child_relative = wp_join_unix_paths($relative_path, $entry);
+        $this->remove_docroot_entry(
+            wp_join_unix_paths($absolute_path, $entry),
+            $child_relative,
+            $requested_path,
+            $identity['dev']
+        );
     }
 
     /**
@@ -1526,7 +1538,7 @@ final class Site_Export_Push_Session {
             if ($stack_size > 0) {
                 $work_ancestor_directory_cleanup = $this->commit_cursor_path($commit_state['commit_cursor']) === $path;
             }
-            $work_path = $this->work_files_directory . '/' . $path;
+            $work_path = wp_join_unix_paths($this->work_files_directory, $path);
             $work_identity = $this->lstat_path($work_path);
 
             if ($work_ancestor_directory_cleanup) {
@@ -1574,7 +1586,7 @@ final class Site_Export_Push_Session {
             $work_directory_path = $this->work_files_directory;
         } else {
             $parent_path = $this->commit_cursor_path($commit_state['commit_cursor']);
-            $work_directory_path = $this->work_files_directory . '/' . $parent_path;
+            $work_directory_path = wp_join_unix_paths($this->work_files_directory, $parent_path);
         }
         $entry = $this->first_directory_entry($work_directory_path);
         if ($entry === null) {
@@ -1622,9 +1634,9 @@ final class Site_Export_Push_Session {
             return;
         }
 
-        $path = $parent_path === '' ? $entry : $parent_path . '/' . $entry;
+        $path = wp_join_unix_paths($parent_path, $entry);
         $this->assert_path_not_reserved($path);
-        $work_path = $this->work_files_directory . '/' . $path;
+        $work_path = wp_join_unix_paths($this->work_files_directory, $path);
         $identity = $this->lstat_path($work_path);
         if ($identity === null) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Selected work path disappeared before installing_files: ' . base64_encode($path) . '.');
@@ -1690,7 +1702,7 @@ final class Site_Export_Push_Session {
      * @param bool $recovering Whether current_work_files_descendant is already durable.
      */
     private function install_work_value(array &$commit_state, string $path, string $expected_type, bool $recovering): void {
-        $work_path = $this->work_files_directory . '/' . $path;
+        $work_path = wp_join_unix_paths($this->work_files_directory, $path);
         $work_identity = $this->lstat_path($work_path);
         if ($work_identity === null || $work_identity['type'] !== $expected_type) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Work ' . $expected_type . ' ' . base64_encode($path) . ' is not present for installing_files.');
@@ -1756,8 +1768,8 @@ final class Site_Export_Push_Session {
         $segments = explode('/', $path);
         array_pop($segments);
         foreach ($segments as $segment) {
-            $relative = $relative === '' ? $segment : $relative . '/' . $segment;
-            $absolute .= ( $absolute === '/' ? '' : '/' ) . $segment;
+            $relative = wp_join_unix_paths($relative, $segment);
+            $absolute = wp_join_unix_paths($absolute, $segment);
             $identity = $this->lstat_path($absolute);
             if ($identity === null) {
                 if ($operation === 'delete') {
@@ -1950,10 +1962,11 @@ final class Site_Export_Push_Session {
         if ($entry === null) {
             return $relative_path;
         }
-        $child_path = $relative_path . '/' . $entry;
-        $identity = $this->lstat_path($directory . '/' . $entry);
+        $child_path = wp_join_unix_paths($relative_path, $entry);
+        $entry_path = wp_join_unix_paths($directory, $entry);
+        $identity = $this->lstat_path($entry_path);
         if ($identity !== null && $identity['type'] === 'directory') {
-            return $this->first_work_files_descendant_path($directory . '/' . $entry, $child_path);
+            return $this->first_work_files_descendant_path($entry_path, $child_path);
         }
         return $child_path;
     }
@@ -2341,7 +2354,7 @@ final class Site_Export_Push_Session {
             if (!is_string($component) || $component === '' || strpos($component, '/') !== false) {
                 throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit cursor frame does not contain one valid base64 path component.');
             }
-            $path = $path === '' ? $component : $path . '/' . $component;
+            $path = wp_join_unix_paths($path, $component);
             if (strlen($path) > self::MAX_PATH_BYTES) {
                 throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit cursor path exceeds the maximum of ' . self::MAX_PATH_BYTES . ' bytes.');
             }
@@ -2693,7 +2706,7 @@ final class Site_Export_Push_Session {
      * @return string Canonical push sessions directory.
      */
     private static function create_push_sessions_directory(string $reprint_directory): string {
-        $push_sessions_directory = $reprint_directory . '/.reprint/push';
+        $push_sessions_directory = wp_join_unix_paths($reprint_directory, '.reprint', 'push');
         if (!@mkdir($push_sessions_directory, 0700, true) && !is_dir($push_sessions_directory)) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create push sessions directory ' . $push_sessions_directory . '.');
         }
@@ -2711,7 +2724,7 @@ final class Site_Export_Push_Session {
      * @return resource Exclusively locked create/remove handle.
      */
     private static function acquire_create_remove_lock(string $push_sessions_directory, string $operation) {
-        $create_remove_lock = @fopen($push_sessions_directory . '/create-remove.lock', 'c+b');
+        $create_remove_lock = @fopen(wp_join_unix_paths($push_sessions_directory, 'create-remove.lock'), 'c+b');
         if ($create_remove_lock === false) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open create-remove.lock for the ' . $operation . ' request.');
         }
@@ -2740,7 +2753,7 @@ final class Site_Export_Push_Session {
         if (!is_dir($tombstone)) {
             return true;
         }
-        $push_lock_path = $tombstone . '/push.lock';
+        $push_lock_path = wp_join_unix_paths($tombstone, 'push.lock');
         $lock = @fopen($push_lock_path, 'r+b');
         if ($lock === false) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open the push removal tombstone lock.');
@@ -2837,7 +2850,7 @@ final class Site_Export_Push_Session {
                 if ($remaining_entries === 0) {
                     return false;
                 }
-                $entry_path = $directory_path . '/' . $entry;
+                $entry_path = wp_join_unix_paths($directory_path, $entry);
                 clearstatcache(true, $entry_path);
                 $stat = @lstat($entry_path);
                 if (!is_array($stat)) {
@@ -2893,7 +2906,7 @@ final class Site_Export_Push_Session {
                         break;
                     }
                     if ($entry !== '.' && $entry !== '..') {
-                        self::remove_tree($path . '/' . $entry);
+                        self::remove_tree(wp_join_unix_paths($path, $entry));
                     }
                 }
             } finally {
