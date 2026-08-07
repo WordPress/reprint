@@ -8,6 +8,7 @@ use function WordPress\Reprint\Exporter\normalize_excluded_paths;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_within_root;
+use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 
 /**
  * Exposes push-session operations through the exporter HTTP dispatcher.
@@ -104,25 +105,9 @@ final class Site_Export_Push_Endpoints {
 
         assert_valid_path($reprint_directory, 'Push endpoint reprint_directory');
         assert_valid_path($docroot, 'Push endpoint docroot');
-        $normalized_reprint_directory = normalize_path($reprint_directory);
-        $canonical_reprint_directory = realpath($normalized_reprint_directory);
-        if ($canonical_reprint_directory === false) {
-            $missing_components = [];
-            $existing_ancestor = $normalized_reprint_directory;
-            $canonical_existing_ancestor = realpath($existing_ancestor);
-            while ($canonical_existing_ancestor === false) {
-                array_unshift($missing_components, basename($existing_ancestor));
-                $parent = dirname($existing_ancestor);
-                if ($parent === $existing_ancestor) {
-                    break;
-                }
-                $existing_ancestor = $parent;
-                $canonical_existing_ancestor = realpath($existing_ancestor);
-            }
-            $canonical_reprint_directory = $canonical_existing_ancestor === false
-                ? $normalized_reprint_directory
-                : normalize_path($canonical_existing_ancestor . '/' . implode('/', $missing_components));
-        }
+        $canonical_reprint_directory = realpath_with_missing_tail(
+            $reprint_directory
+        );
         $canonical_docroot = realpath($docroot);
         if ($canonical_docroot === false) {
             $canonical_docroot = normalize_path($docroot);
