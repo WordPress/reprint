@@ -36,6 +36,7 @@ use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_within_root;
 use function WordPress\Reprint\Exporter\path_remainder_under;
+use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 use function WordPress\Reprint\Exporter\relative_path_under;
 use function Reprint\Importer\merge_local_index_mutations;
 use function Reprint\Importer\write_local_index_update;
@@ -2036,26 +2037,9 @@ class ImportClient
             }
             $push_state_directory = $working_directory . '/' . $push_state_directory;
         }
-        $push_state_directory = normalize_path($push_state_directory);
-        $existing_state_path = $push_state_directory;
-        $missing_state_components = [];
-        while (
-            !file_exists($existing_state_path)
-            && !is_link($existing_state_path)
-            && $existing_state_path !== '/'
-        ) {
-            array_unshift($missing_state_components, basename($existing_state_path));
-            $existing_state_path = dirname($existing_state_path);
-        }
-        $resolved_existing_state_path = realpath($existing_state_path);
-        if ($resolved_existing_state_path !== false) {
-            $push_state_directory = normalize_path(
-                $resolved_existing_state_path
-                    . ( $missing_state_components === []
-                        ? ''
-                        : '/' . implode('/', $missing_state_components) )
-            );
-        }
+        $push_state_directory = realpath_with_missing_tail(
+            $push_state_directory
+        );
         if (
             $resolved_local_filesystem_root === '/'
             || path_is_within_root($push_state_directory, $resolved_local_filesystem_root)
