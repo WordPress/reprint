@@ -130,6 +130,61 @@ class RemapSeamTest extends TestCase
         $this->assertSame($this->root . '/var/www/html/wp-content/x.txt', $local_absolute_path);
     }
 
+    public function testFileErrorChunkRecordsDecodedRemotePathWithoutDeletingMappedFile(): void
+    {
+        $remote_absolute_path = '/remote-root/file.txt';
+        $mapped_local_path = $this->root . '/mapped-root/file.txt';
+        mkdir(dirname($mapped_local_path), 0755, true);
+        file_put_contents($mapped_local_path, 'mapped');
+
+        $client = $this->clientWithRules(array(
+            '/remote-root' => $this->root . '/mapped-root',
+        ));
+        $this->set($client, 'is_tty', true);
+
+        $this->call($client, 'handle_error_chunk', array(
+            array(
+                'body' => json_encode(array(
+                    'error_type' => 'file_changed',
+                    'path' => base64_encode($remote_absolute_path),
+                    'message' => 'The file changed while the server read it.',
+                ), JSON_THROW_ON_ERROR),
+            ),
+            'files',
+        ));
+
+        $this->assertFileExists($mapped_local_path);
+
+        $reflection = new \ReflectionClass($client);
+        $volatile_files_file = $reflection
+            ->getProperty('volatile_files_file')
+            ->getValue($client);
+        $this->assertSame(
+            array($remote_absolute_path => 1),
+            json_decode((string) file_get_contents($volatile_files_file), true),
+        );
+
+        $pull_index_wal_handle = $reflection
+            ->getProperty('pull_index_wal_handle')
+            ->getValue($client);
+        $this->assertTrue(fflush($pull_index_wal_handle));
+        $pull_index_wal_path = $reflection
+            ->getProperty('pull_index_wal_path')
+            ->getValue($client);
+        $this->assertSame(
+            array(
+                'op' => '-',
+                'remote_absolute_path_b64' => base64_encode($remote_absolute_path),
+            ),
+            json_decode(
+                (string) file_get_contents($pull_index_wal_path),
+                true,
+                512,
+                JSON_THROW_ON_ERROR,
+            ),
+        );
+    }
+
     /**
      * The path-prefix helper underpinning rule matching. A trailing slash on
      * either argument is path-equivalent and must be ignored.

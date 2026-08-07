@@ -6320,7 +6320,7 @@ class ImportClient
                 }
                 // @TODO: Cleanup the local file that we may have started downloading.
             } elseif ($chunk_type === "error") {
-                $this->handle_error_chunk($chunk, "files", $context);
+                $this->handle_error_chunk($chunk, "files");
             } elseif ($chunk_type === "progress") {
                 $this->handle_progress($chunk, "files");
             } elseif ($chunk_type === "completion") {
@@ -6684,7 +6684,7 @@ class ImportClient
                             : null,
                 ];
             } elseif ($chunk_type === "error") {
-                $this->handle_error_chunk($chunk, "index", $context);
+                $this->handle_error_chunk($chunk, "index");
             }
         };
 
@@ -8129,7 +8129,7 @@ class ImportClient
                             true,
                         );
                     } elseif ($chunk_type === "error") {
-                        $this->handle_error_chunk($chunk, "sql", $context);
+                        $this->handle_error_chunk($chunk, "sql");
                     }
                 };
 
@@ -8614,7 +8614,7 @@ class ImportClient
                             true,
                         );
                     } elseif ($chunk_type === "error") {
-                        $this->handle_error_chunk($chunk, "db-index", $context);
+                        $this->handle_error_chunk($chunk, "db-index");
                     }
                 };
 
@@ -9963,13 +9963,16 @@ class ImportClient
     }
 
     /**
-     * Handle an error chunk from the server.
+     * Handles an error chunk from the server.
+     *
+     * The exporter encodes error paths as base64 because a remote path can
+     * contain arbitrary bytes. Decode that protocol field before recording
+     * its path in pull state. A source-side read error invalidates remote
+     * state, but does not authorize deleting a local file: a later response
+     * may replay the file's data.
      */
-    private function handle_error_chunk(
-        array $chunk,
-        string $phase,
-        StreamingContext $context
-    ): void {
+    private function handle_error_chunk(array $chunk, string $phase): void
+    {
         $body = $chunk["body"] ?? "";
         $data = json_decode($body, true);
         if (!$data) {
@@ -9982,7 +9985,20 @@ class ImportClient
         }
 
         $error_type = $data["error_type"] ?? "unknown";
-        $path = $data["path"] ?? "";
+        $encoded_path = $data["path"] ?? "";
+        $path = is_string($encoded_path)
+            ? base64_decode($encoded_path, true)
+            : false;
+        if ($path === false) {
+            $observed_path = is_string($encoded_path)
+                ? substr($encoded_path, 0, 100)
+                : gettype($encoded_path);
+            $this->audit_log(
+                "REMOTE ERROR | phase={$phase} | invalid base64 path: {$observed_path}",
+                true,
+            );
+            $path = "";
+        }
         $message = $data["message"] ?? "Error";
 
         $this->audit_log(
@@ -9996,18 +10012,6 @@ class ImportClient
             true,
         );
         if ($path !== "" && $is_file_error) {
-            $local_absolute_path = $this->filesystem_root . $path;
-            if ($context->file_handle && $context->file_path === $local_absolute_path) {
-                fclose($context->file_handle);
-                $context->file_handle = null;
-                $context->file_path = null;
-                $context->file_ctime = null;
-                $context->file_bytes_written = 0;
-            }
-
-            if (file_exists($local_absolute_path)) {
-                @unlink($local_absolute_path);
-            }
             $this->wal_append_remote_index_invalidation($path);
 
             if ($error_type === "file_changed") {
