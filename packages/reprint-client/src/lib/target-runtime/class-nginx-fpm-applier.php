@@ -1,4 +1,7 @@
 <?php
+
+use function WordPress\Filesystem\wp_join_unix_paths;
+
 /**
  * Runtime applier for nginx + PHP-FPM (also works with Apache + PHP-FPM).
  *
@@ -22,13 +25,13 @@ class NginxFpmApplier implements RuntimeApplier
         $summary = [];
 
         // 1. Write runtime.php
-        $runtime_path = $output_dir . '/runtime.php';
+        $runtime_path = wp_join_unix_paths($output_dir, 'runtime.php');
         $runtime = generate_runtime_php($manifest, $filesystem_root);
         write_runtime_file($runtime_path, $runtime);
         $summary[] = "Wrote {$runtime_path}";
 
         // 2. Write nginx.conf (includes auto_prepend_file + INI directives)
-        $nginx_conf_path = $output_dir . '/nginx.conf';
+        $nginx_conf_path = wp_join_unix_paths($output_dir, 'nginx.conf');
         $nginx_conf = $this->generate_nginx_conf($manifest, $filesystem_root, $runtime_path, $host, $port);
         write_runtime_file($nginx_conf_path, $nginx_conf);
         $summary[] = "Wrote {$nginx_conf_path}";

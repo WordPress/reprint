@@ -1,4 +1,7 @@
 <?php
+
+use function WordPress\Filesystem\wp_join_unix_paths;
+
 /**
  * Runtime applier for PHP's built-in development server.
  *
@@ -24,14 +27,14 @@ class PhpBuiltinApplier implements RuntimeApplier
         $summary = [];
 
         // 1. Write runtime.php (base layers + CLI-server routing)
-        $runtime_path = $output_dir . '/runtime.php';
+        $runtime_path = wp_join_unix_paths($output_dir, 'runtime.php');
         $runtime = generate_runtime_php($manifest, $filesystem_root);
         $runtime .= $this->generate_cli_server_routing($options);
         write_runtime_file($runtime_path, $runtime);
         $summary[] = "Wrote {$runtime_path}";
 
         // 2. Write start.sh
-        $start_path = $output_dir . '/start.sh';
+        $start_path = wp_join_unix_paths($output_dir, 'start.sh');
         $start_script = $this->generate_start_script($manifest, $filesystem_root, $runtime_path, $host, $port);
         write_runtime_file($start_path, $start_script);
         chmod($start_path, 0755);
