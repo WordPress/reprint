@@ -7,7 +7,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../client/cli.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * The files-diff user contract.
@@ -606,7 +606,7 @@ final class FilesDiffCommandTest extends TestCase
     private function startCliProcess(array $arguments, bool $stdoutIsTty = false): array
     {
         $process = proc_open(
-            array_merge([PHP_BINARY, __DIR__ . '/../../client/cli.php'], $arguments),
+            array_merge([PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client'], $arguments),
             [
                 ['pipe', 'r'],
                 $stdoutIsTty ? ['pty'] : ['pipe', 'w'],

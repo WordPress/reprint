@@ -6,7 +6,7 @@ use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Protocol\MultipartStreamParser;
 use Reprint\Importer\StreamingContext;
 
-require_once __DIR__ . '/../../client/cli.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 class FileBodyStreamingTest extends TestCase
 {

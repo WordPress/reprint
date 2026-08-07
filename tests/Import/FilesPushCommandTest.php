@@ -8,7 +8,7 @@ namespace ImportTests;
 use ImportClient;
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../client/cli.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 final class FilesPushCommandTest extends TestCase
 {
@@ -365,7 +365,7 @@ final class FilesPushCommandTest extends TestCase
     private function runCli(array $arguments): array
     {
         $command = array_merge(
-            [PHP_BINARY, __DIR__ . '/../../client/cli.php'],
+            [PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client'],
             $arguments
         );
         $process = proc_open(

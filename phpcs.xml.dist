@@ -15,8 +15,6 @@
 	<file>packages/reprint-server/src</file>
 	<file>packages/reprint-client/src</file>
 	<file>reprint-server-wp</file>
-	<file>client/cli.php</file>
-	<file>importer/import.php</file>
 
 	<exclude-pattern>*/vendor/*</exclude-pattern>
 

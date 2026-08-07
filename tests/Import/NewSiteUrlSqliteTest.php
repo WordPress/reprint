@@ -6,7 +6,7 @@ use PHPUnit\Framework\TestCase;
 use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 
-require_once __DIR__ . '/../../client/cli.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Test that --new-site-url rewrites siteurl and home when db-apply

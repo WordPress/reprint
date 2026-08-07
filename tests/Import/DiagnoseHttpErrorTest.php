@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../client/cli.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Verify that diagnose_http_error() maps HTTP status codes and response

@@ -8,7 +8,7 @@ use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 use function WordPress\Reprint\Exporter\relative_path_under;
 
-require_once __DIR__ . '/../../client/cli.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * --remap: the single write seam (map_remote_absolute_path_to_local_absolute_path)

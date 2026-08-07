@@ -8,7 +8,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use function Reprint\Importer\merge_local_index_mutations;
 
-require_once __DIR__ . '/../../client/cli.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 final class LocalIndexUpdateFunctionsTest extends TestCase
 {
