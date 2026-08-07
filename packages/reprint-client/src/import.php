@@ -4160,7 +4160,7 @@ class ImportClient
 
         if (!empty($flat_document_root)) {
             // --flat-document-root: used directly as the web root.
-            $raw_local_document_root = rtrim($flat_document_root, "/");
+            $raw_local_document_root = rtrim($flat_document_root, "/") ?: "/";
         } else {
             // --fs-root: the raw download directory. The remote site's
             // document_root tells us where the web root lived on the
@@ -4175,7 +4175,10 @@ class ImportClient
             }
 
             if ($remote_doc_root !== "") {
-                $raw_local_document_root = $this->filesystem_root . $remote_doc_root;
+                $raw_local_document_root = wp_join_unix_paths(
+                    $this->filesystem_root,
+                    $remote_doc_root
+                );
             } else {
                 $raw_local_document_root = $this->filesystem_root;
             }
@@ -4280,13 +4283,15 @@ class ImportClient
         $abspath = rtrim($paths_urls["abspath"] ?? "", "/");
         if (!empty($flat_document_root)) {
             // Flattened layout: index.php is at the top level.
-            $wordpress_index_php = $local_document_root . '/index.php';
+            $wordpress_index_php = wp_join_unix_paths($local_document_root, 'index.php');
         } elseif ($abspath !== "") {
             // Raw download: ABSPATH is relative to the download root,
             // not the local document root (which is filesystem root + document root).
-            $wordpress_index_php = realpath($this->filesystem_root . $abspath . '/index.php') ?: '';
+            $wordpress_index_php = realpath(
+                wp_join_unix_paths($this->filesystem_root, $abspath, 'index.php')
+            ) ?: '';
         } else {
-            $wordpress_index_php = $local_document_root . '/index.php';
+            $wordpress_index_php = wp_join_unix_paths($local_document_root, 'index.php');
         }
 
         // Step 2: Runtime applier writes server-specific config files.
@@ -4330,7 +4335,7 @@ class ImportClient
         // depend on infrastructure (Memcached servers, multisite APIs)
         // not available outside the original hosting environment.
         foreach ($manifest->paths_to_remove as $rel_path) {
-            $full_path = $local_document_root . '/' . ltrim($rel_path, '/');
+            $full_path = wp_join_unix_paths($local_document_root, $rel_path);
             if (!file_exists($full_path) && !is_link($full_path)) {
                 continue;
             }
@@ -4354,7 +4359,7 @@ class ImportClient
         // Read the structured start config if the applier wrote one.
         // Playground CLI writes start.json with mount paths as seen by
         // this PHP process — callers (e.g. Studio) map them to host paths.
-        $start_config_path = $abs_output_dir . '/start.json';
+        $start_config_path = wp_join_unix_paths($abs_output_dir, 'start.json');
         $start_config = null;
         if (file_exists($start_config_path)) {
             $start_config = json_decode(file_get_contents($start_config_path), true);

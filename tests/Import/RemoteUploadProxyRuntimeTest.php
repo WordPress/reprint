@@ -123,20 +123,42 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $this->setPrivate($client, 'state', $state);
     }
 
-    private function runApplyRuntime(\ImportClient $client): string
+    private function runApplyRuntime(
+        \ImportClient $client,
+        ?string $flat_document_root = null
+    ): string
     {
         ob_start();
         try {
             $this->callPrivate($client, 'run_apply_runtime', [[
                 'runtime' => 'php-builtin',
                 'output_dir' => $this->outputDir,
-                'flat_document_root' => $this->fsRoot,
+                'flat_document_root' => $flat_document_root ?? $this->fsRoot,
             ]]);
         } finally {
             ob_end_clean();
         }
 
         return file_get_contents($this->outputDir . '/runtime.php');
+    }
+
+    public function testApplyRuntimeKeepsTheFilesystemRootAsTheFlatDocumentRoot(): void
+    {
+        $this->writeState([
+            'active_resumable_command' => [
+                'command_name' => 'files-pull',
+                'completion_state' => 'complete',
+            ],
+        ]);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client, '/');
+
+        $this->assertStringContainsString(
+            "-t '/'",
+            file_get_contents($this->outputDir . '/start.sh')
+        );
     }
 
     public function testApplyRuntimeAddsProxyForEssentialFilesFilter(): void
