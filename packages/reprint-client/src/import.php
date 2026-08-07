@@ -2398,7 +2398,10 @@ class ImportClient
         // check the filesystem root for a __wp__ symlink as a fallback
         // when the remote preflight didn't report enough filesystem data.
         $detected_webhost = is_array($payload) ? detect_host($payload) : 'other';
-        if ($detected_webhost === 'other' && is_link($this->filesystem_root . '/__wp__')) {
+        if (
+            $detected_webhost === 'other'
+            && is_link(wp_join_unix_paths($this->filesystem_root, '__wp__'))
+        ) {
             $detected_webhost = 'wpcloud';
         }
         $this->get_state()->webhost = $detected_webhost;
@@ -8784,7 +8787,7 @@ class ImportClient
      */
     private function local_followed_symlinks_root_fingerprint(): string
     {
-        $effective = $this->local_followed_symlinks_root ?? rtrim($this->filesystem_root, "/");
+        $effective = $this->local_followed_symlinks_root ?? $this->filesystem_root;
         return hash("sha256", $effective);
     }
 
@@ -8796,7 +8799,7 @@ class ImportClient
      */
     private function resolve_local_followed_symlinks_root(string $raw): string
     {
-        $filesystem_root = rtrim($this->filesystem_root, "/");
+        $filesystem_root = $this->filesystem_root;
         $directory = $this->resolve_token_path($raw, ["fs-root" => $filesystem_root]);
 
         if (!path_is_within_root($directory, $filesystem_root)) {
@@ -8822,7 +8825,7 @@ class ImportClient
      */
     private function resolve_remap(array $remap_raw): array
     {
-        $filesystem_root = rtrim($this->filesystem_root, "/");
+        $filesystem_root = $this->filesystem_root;
 
         $source_tokens = $this->remote_path_tokens();
         $target_tokens = ["fs-root" => $filesystem_root];
@@ -9118,10 +9121,13 @@ class ImportClient
         // Use the same local followed symlinks root for copied content and rewritten symlink targets so the links do not dangle.
         if ($this->local_followed_symlinks_root !== null
             && !$this->path_is_within_original_export_scope($remote_absolute_path)) {
-            return $this->local_followed_symlinks_root . $remote_absolute_path;
+            return wp_join_unix_paths(
+                $this->local_followed_symlinks_root,
+                $remote_absolute_path
+            );
         }
 
-        return $this->filesystem_root . $remote_absolute_path;
+        return wp_join_unix_paths($this->filesystem_root, $remote_absolute_path);
     }
 
 
