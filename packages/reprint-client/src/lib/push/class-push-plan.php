@@ -269,34 +269,6 @@ class PushPlan
     }
 
     /**
-     * Returns the number of local paths in the completed push plan.
-     *
-     * Null means the plan resumed from an older cursor without a saved count.
-     */
-    public function get_local_paths_to_push_count(): ?int
-    {
-        $position = $this->cursor["position"];
-        if ($position["phase"] !== "complete") {
-            throw new LogicException("Cannot count local paths to push before the push plan is complete.");
-        }
-        return $position["local_paths_to_push_count"];
-    }
-
-    /**
-     * Returns the sum of file sizes in the completed push plan.
-     *
-     * Null means the plan resumed from an older cursor without a saved byte total.
-     */
-    public function get_local_file_bytes_to_push(): ?int
-    {
-        $position = $this->cursor["position"];
-        if ($position["phase"] !== "complete") {
-            throw new LogicException("Cannot total local file bytes before the push plan is complete.");
-        }
-        return $position["local_file_bytes_to_push"];
-    }
-
-    /**
      * Returns progress through the open plan.
      *
      * Durable byte offsets across both indexes describe diff progress. An

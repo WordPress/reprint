@@ -470,10 +470,11 @@ participate in the directory name. Fragments, URL user-info, and `SECRET_KEY`
 target parameters are rejected. The local push state directory must be outside
 the filesystem root so planning cannot index its own changing files.
 
-`--progress=auto|tty|jsonl` selects progress output for one invocation. The
-default `auto` mode uses terminal progress when its output stream is a TTY and
-JSONL otherwise. `tty` and `jsonl` force the corresponding presentation; they
-are not stored in sender state and cannot be combined with `--verbose`.
+Like every `ImportClient` command, files-push accepts
+`--progress=auto|tty|jsonl` for one invocation. The default `auto` mode uses
+terminal progress when its output stream is a TTY and JSONL otherwise. `tty`
+and `jsonl` force the corresponding presentation; they are not stored in
+sender state and cannot be combined with `--verbose`.
 
 One process starts or resumes exactly one sender. Before every `next_step()` it
 checks whether another step may begin. The wall-clock admission deadline is 80

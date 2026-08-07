@@ -279,9 +279,9 @@ Use these names verbatim:
 | Deleted-directory stack | `deleted_directories_stack.jsonl`, `$deleted_directories_stack` |
 | Active state | `sender.json`, `$state_path` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
-| Selected local-path count | `local_paths_to_push_count`, `$local_paths_to_push_count`, `get_local_paths_to_push_count()` |
+| Selected local-path count | `local_paths_to_push_count`, `$local_paths_to_push_count` |
 | Target-confirmed local-path count | `local_paths_pushed`, `$local_paths_pushed` |
-| Selected local file bytes | `local_file_bytes_to_push`, `$local_file_bytes_to_push`, `get_local_file_bytes_to_push()` |
+| Selected local file bytes | `local_file_bytes_to_push`, `$local_file_bytes_to_push` |
 | Target-confirmed completed local file bytes | `local_file_bytes_pushed`, `$local_file_bytes_pushed` |
 | Consumed index bytes in progress | `index_bytes_done`, `$index_bytes_done` |
 | Combined index bytes in progress | `index_bytes_total`, `$index_bytes_total` |
@@ -355,6 +355,15 @@ request. In `pushing_paths` or
 returns true while another step may be performed and false when `get_status()`
 reports `complete`, `restart`, or `failed`.
 
+## CLI progress output names
+
+The **progress output mode** is the invocation-only `--progress` value accepted
+by every command executed by `ImportClient`: `auto`, `tty`, or `jsonl`. `auto`
+selects the terminal presentation when the current progress stream is a TTY and
+the JSONL presentation otherwise. `tty` and `jsonl` force those presentations.
+Never store the progress output mode in command state. Explicit `tty` and
+`jsonl` modes do not combine with `--verbose`.
+
 ## Files-diff CLI names
 
 The local-only command is `files-diff`. Its `remote Reprint API URL` and
@@ -393,12 +402,8 @@ root as a path beneath that filesystem root. Local relative paths beneath the do
 become push or delete work. It also requires `--secret=TOKEN`; `--force-http`
 is the explicit plain-HTTP opt-in.
 
-The **progress output mode** is the invocation-only `--progress` value for
-`files-push`: `auto`, `tty`, or `jsonl`. `auto` selects the terminal
-presentation when the current progress stream is a TTY and the JSONL
-presentation otherwise. `tty` and `jsonl` force those presentations. Never
-store the progress output mode in sender state. Explicit `tty` and `jsonl`
-modes do not combine with `--verbose`.
+`files-push` uses the shared progress output mode. It never stores that mode in
+sender state.
 
 The **local push state directory** is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash

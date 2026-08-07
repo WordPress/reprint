@@ -775,8 +775,10 @@ final class PushFilesSender
         }
         $this->state['push_plan_cursor'] = $plan_cursor;
         if (!$has_next_step) {
-            $this->state['local_paths_to_push_count'] = $this->plan->get_local_paths_to_push_count();
-            $this->state['local_file_bytes_to_push'] = $this->plan->get_local_file_bytes_to_push();
+            /** @var array{phase:'complete',local_paths_to_push_count:int|null,local_file_bytes_to_push:int|null} $completed_plan_position */
+            $completed_plan_position = $plan_cursor['position'];
+            $this->state['local_paths_to_push_count'] = $completed_plan_position['local_paths_to_push_count'];
+            $this->state['local_file_bytes_to_push'] = $completed_plan_position['local_file_bytes_to_push'];
             $this->plan->close();
             $this->state['phase'] = 'pushing_paths';
         }

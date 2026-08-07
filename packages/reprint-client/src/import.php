@@ -137,7 +137,28 @@ register_shutdown_function(function () {
 class ImportClient
 {
 
-    /** Progress output modes accepted by files-diff and files-push. */
+    /** Commands executed by ImportClient. */
+    public const COMMANDS = [
+        "pull",
+        "pull-files",
+        "pull-db",
+        "files-pull",
+        "files-diff",
+        "files-push",
+        "files-index",
+        "files-stats",
+        "db-pull",
+        "db-index",
+        "db-domains",
+        "db-apply",
+        "pull-metadata",
+        "preflight",
+        "preflight-assert",
+        "flat-docroot",
+        "apply-runtime",
+    ];
+
+    /** Progress output modes accepted by every command. */
     public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl'];
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
@@ -920,10 +941,10 @@ class ImportClient
      * reading or writing command state. A supplied lock remains caller-owned.
      *
      * @param array $options Options:
-     *   - command: Required. One of the entries in $valid_commands below.
+     *   - command: Required. One of the entries in self::COMMANDS.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
-     *   - progress: Optional files-diff or files-push progress output mode: auto, tty, or jsonl
+     *   - progress: Optional progress output mode: auto, tty, or jsonl
      * @param ReprintProcessLock|null $process_lock Optional lock already held
      *                                               for this state directory.
      */
@@ -940,10 +961,6 @@ class ImportClient
         }
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
-        if ($this->progress_output_mode !== 'auto') {
-            $this->progress_output_mode = 'auto';
-            $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
-        }
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
         $this->include_caches = $options["include_caches"] ?? false;
         $this->extra_directory = $options["extra_directory"] ?? null;
@@ -974,37 +991,41 @@ class ImportClient
         $this->pipeline_step = $options["pipeline_step"] ?? null;
         $this->pipeline_steps = $options["pipeline_steps"] ?? null;
 
-        $valid_commands = [
-            "pull",
-            "pull-files",
-            "pull-db",
-            "files-pull",
-            "files-diff",
-            "files-push",
-            "files-index",
-            "files-stats",
-            "db-pull",
-            "db-index",
-            "db-domains",
-            "db-apply",
-            "pull-metadata",
-            "preflight",
-            "preflight-assert",
-            "flat-docroot",
-            "apply-runtime",
-        ];
-
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: " . implode(", ", $valid_commands),
+                "Command is required. Valid commands: " . implode(", ", self::COMMANDS),
             );
         }
 
-        if (!in_array($command, $valid_commands, true)) {
+        if (!in_array($command, self::COMMANDS, true)) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: " . implode(", ", $valid_commands),
+                "Invalid command: {$command}. Valid commands: " . implode(", ", self::COMMANDS),
             );
         }
+
+        $progress_output_mode = $options['progress'] ?? 'auto';
+        if (
+            !is_string($progress_output_mode)
+            || !in_array($progress_output_mode, self::PROGRESS_OUTPUT_MODES, true)
+        ) {
+            $invalid_progress_output_mode = is_string($progress_output_mode)
+                ? $progress_output_mode
+                : gettype($progress_output_mode);
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option errors are not HTML.
+            throw new InvalidArgumentException(
+                "Invalid --progress value: {$invalid_progress_output_mode}. Valid values: "
+                . implode(', ', self::PROGRESS_OUTPUT_MODES)
+            );
+        }
+        if ($this->verbose_mode && $progress_output_mode !== 'auto') {
+            throw new InvalidArgumentException(
+                "{$command} does not accept --verbose with --progress={$progress_output_mode}. "
+                . 'Use --progress=auto with --verbose.'
+            );
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        $this->progress_output_mode = $progress_output_mode;
+        $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
 
         // files-diff uses local push state and must not load or write the
         // pull command's pull/state.json file.
@@ -1018,29 +1039,6 @@ class ImportClient
             return;
         }
         if ($command === "files-push") {
-            $progress_output_mode = $options['progress'] ?? 'auto';
-            if (
-                !is_string($progress_output_mode)
-                || !in_array($progress_output_mode, self::PROGRESS_OUTPUT_MODES, true)
-            ) {
-                $invalid_progress_output_mode = is_string($progress_output_mode)
-                    ? $progress_output_mode
-                    : gettype($progress_output_mode);
-                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option errors are not HTML.
-                throw new InvalidArgumentException(
-                    "Invalid --progress value: {$invalid_progress_output_mode}. Valid values: "
-                    . implode(', ', self::PROGRESS_OUTPUT_MODES)
-                );
-            }
-            if ($this->verbose_mode && $progress_output_mode !== 'auto') {
-                throw new InvalidArgumentException(
-                    "files-push does not accept --verbose with --progress={$progress_output_mode}. "
-                    . 'Use --progress=auto with --verbose.'
-                );
-            }
-            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-            $this->progress_output_mode = $progress_output_mode;
-            $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
             if (is_file($this->pull_index_wal_path)) {
                 throw new RuntimeException(
                     "Finish or abort the interrupted files-pull before running files-push."
@@ -1406,22 +1404,7 @@ class ImportClient
      */
     private function run_files_diff(array $options): void
     {
-        $progress_mode = $options['progress'] ?? ( $this->is_tty ? 'tty' : 'jsonl' );
-        if (
-            !is_string($progress_mode)
-            || !in_array($progress_mode, self::PROGRESS_OUTPUT_MODES, true)
-        ) {
-            $invalid_progress_mode = is_string($progress_mode)
-                ? $progress_mode
-                : gettype($progress_mode);
-            throw new InvalidArgumentException(
-                'Invalid files-diff progress mode: ' . $invalid_progress_mode . '. Valid modes: '
-                . implode(', ', self::PROGRESS_OUTPUT_MODES) . '.'
-            );
-        }
-        if ($progress_mode === 'auto') {
-            $progress_mode = $this->is_tty ? 'tty' : 'jsonl';
-        }
+        $progress_mode = $this->uses_terminal_progress() ? 'tty' : 'jsonl';
         $push_state_directory = $options['files_diff_push_state_directory'] ?? self::resolve_push_state_directory(
             $this->remote_reprint_api_url,
             $this->state_dir,
@@ -11730,7 +11713,8 @@ if (
             'target' => 'progress',
             'placeholder' => 'MODE',
             'help' => 'Progress output: auto, tty, or jsonl (default: auto)',
-            'commands' => ['files-diff', 'files-push'],
+            'help_section' => 'global',
+            'commands' => ImportClient::COMMANDS,
             'valid_values' => ImportClient::PROGRESS_OUTPUT_MODES,
         ],
         [
@@ -12974,18 +12958,8 @@ if (
                 exit(1);
             }
         }
-        $reprint_files_diff_progress_mode = $options['progress'] ?? 'auto';
-        if ($reprint_files_diff_progress_mode === 'auto') {
-            $reprint_stdout_is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
-            $reprint_files_diff_progress_mode = $reprint_stdout_is_tty ? 'tty' : 'jsonl';
-        }
-        // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound -- Existing parsed option hash.
-        $options['progress'] = $reprint_files_diff_progress_mode;
     } elseif (!empty($options['force_http'])) {
         fwrite(STDERR, "Error: --force-http is accepted only by files-push.\n");
-        exit(1);
-    } elseif (isset($options['progress'])) {
-        fwrite(STDERR, "Error: --progress is accepted only by files-diff and files-push.\n");
         exit(1);
     }
 
@@ -13067,9 +13041,14 @@ if (
         }
         return;
     } catch (\Throwable $e) {
-        $is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
+        $reprint_progress_output_mode = $options['progress'] ?? 'auto';
+        $reprint_progress_stream = ( $options['sql_output'] ?? null ) === 'stdout' ? STDERR : STDOUT;
+        $reprint_progress_stream_is_tty =
+            function_exists("posix_isatty") && posix_isatty($reprint_progress_stream);
+        $reprint_uses_terminal_progress = $reprint_progress_output_mode === 'tty'
+            || ( $reprint_progress_output_mode === 'auto' && $reprint_progress_stream_is_tty );
         $error_code = isset($client) ? $client->last_error_code : null;
-        if ($command === 'files-diff' ? ( $options['progress'] ?? 'tty' ) !== 'jsonl' : $is_tty) {
+        if ($reprint_uses_terminal_progress && empty($options['verbose'])) {
             fwrite(STDERR, ( $command === 'files-diff' ? '' : "\n" ) . "Error: " . $e->getMessage() . "\n");
         } else {
             $error = [

@@ -432,6 +432,7 @@ class PullFilterOptionTest extends TestCase
 
         $client->run([
             "command" => "pull-files",
+            "progress" => "tty",
         ]);
 
         $output = $client->terminalProgressOutput();
@@ -447,6 +448,7 @@ class PullFilterOptionTest extends TestCase
 
         $client->run([
             "command" => "pull-files",
+            "progress" => "tty",
             "only" => ["/var/www/html/wp-content/uploads/reprint-demo"],
         ]);
 
