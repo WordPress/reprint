@@ -263,13 +263,15 @@ function ensure_sqlite_plugin_database_driver(string $source_dir, string $target
 
 function sqlite_plugin_database_driver_source(string $source_dir): string
 {
+    // The packaged CLI passes a phar:// source directory. The Unix filesystem
+    // helper would collapse the scheme's required `:///` separator.
     $candidates = [
-        wp_join_unix_paths($source_dir, 'wp-includes/database'),
-        wp_join_unix_paths(dirname($source_dir), 'mysql-on-sqlite/src'),
+        $source_dir . '/wp-includes/database',
+        dirname($source_dir) . '/mysql-on-sqlite/src',
     ];
 
     foreach ($candidates as $candidate) {
-        if (is_file(wp_join_unix_paths($candidate, 'version.php'))) {
+        if (is_file($candidate . '/version.php')) {
             return realpath($candidate) ?: $candidate;
         }
     }

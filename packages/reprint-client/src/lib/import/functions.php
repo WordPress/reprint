@@ -5,8 +5,6 @@ namespace Reprint\Importer;
 use PDO;
 use RuntimeException;
 
-use function WordPress\Filesystem\wp_join_unix_paths;
-
 /**
  * If the ALL_PROXY environment variable is set, apply it to the cURL
  * handle via CURLOPT_PROXY.
@@ -92,7 +90,9 @@ function resolve_sqlite_integration_path(string $suffix = ''): string
 {
 	$source_directory = dirname(__DIR__, 2);
 	foreach (array(dirname($source_directory, 3), dirname($source_directory, 4)) as $project_root) {
-		$candidate = wp_join_unix_paths($project_root, 'lib/sqlite-database-integration', $suffix);
+		// The packaged CLI has a phar:// project root. Joining it with the
+		// Unix filesystem helper would collapse the scheme's required `:///`.
+		$candidate = $project_root . '/lib/sqlite-database-integration' . $suffix;
 		if (file_exists($candidate)) {
 			return $candidate;
 		}
@@ -112,8 +112,9 @@ function resolve_sqlite_integration_plugin_path(): string
 {
 	$source_directory = dirname(__DIR__, 2);
 	foreach (array(dirname($source_directory, 3), dirname($source_directory, 4)) as $project_root) {
-		$root    = wp_join_unix_paths($project_root, 'lib/sqlite-database-integration');
-		$package = wp_join_unix_paths($root, 'packages/plugin-sqlite-database-integration');
+		// Keep the phar:// scheme intact when this runs from the packaged CLI.
+		$root    = $project_root . '/lib/sqlite-database-integration';
+		$package = $root . '/packages/plugin-sqlite-database-integration';
 		if (is_dir($package)) {
 			return $package;
 		}
