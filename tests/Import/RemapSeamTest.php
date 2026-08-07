@@ -164,6 +164,11 @@ class RemapSeamTest extends TestCase
     public static function provideRelativePathCases(): array
     {
         return array(
+            'empty relative root itself' => array('', '', ''),
+            'empty relative root child' => array('child/path', 'child/path', ''),
+            'empty relative root child with trailing slash' => array('child/path', 'child/path/', ''),
+            'absolute path outside empty relative root' => array(null, '/child/path', ''),
+            'relative path outside filesystem root' => array(null, 'child/path', '/'),
             'filesystem root itself' => array('', '/', '/'),
             'filesystem root child' => array('child', '/child', '/'),
             'exact non-root match' => array('', '/a', '/a'),

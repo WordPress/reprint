@@ -373,10 +373,12 @@ function path_remainder_under(string $path, string $prefix): ?string
  *     relative_path_under('/srv/site', '/srv/site');            // ''
  *     relative_path_under('/srv/site-old', '/srv/site');        // null
  *     relative_path_under('/wp-content', '/');                  // 'wp-content'
+ *     relative_path_under('wp-content/plugins', '');            // 'wp-content/plugins'
  *
  * Trailing slashes do not change the result. This is a lexical operation: it
  * does not resolve dot segments or symlinks, and it also accepts relative
- * slash-delimited paths.
+ * slash-delimited paths. An empty root contains every relative path, but no
+ * absolute path.
  *
  * @param string $path Candidate path to make relative.
  * @param string $root Root that must contain the candidate path.
@@ -385,6 +387,9 @@ function path_remainder_under(string $path, string $prefix): ?string
  */
 function relative_path_under(string $path, string $root): ?string
 {
+    if ($root === "") {
+        return str_starts_with($path, "/") ? null : rtrim($path, "/");
+    }
     $remainder = path_remainder_under($path, $root);
     return $remainder === null ? null : ltrim($remainder, "/");
 }
