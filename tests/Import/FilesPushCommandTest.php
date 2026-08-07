@@ -135,6 +135,15 @@ final class FilesPushCommandTest extends TestCase
         );
     }
 
+    public function testFilesPushHelpDocumentsForceTakeover(): void
+    {
+        $result = $this->runCli(['files-push', '--help']);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertStringContainsString('--force-takeover', $result['output']);
+        $this->assertStringContainsString('Take over the target push owner', $result['output']);
+    }
+
     public function testFilesPushRejectsAnInvalidProgressMode(): void
     {
         $result = $this->runFilesPush(

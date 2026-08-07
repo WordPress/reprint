@@ -402,7 +402,9 @@ exporter API URL, and its `filesystem root` is the resolved absolute directory s
 `--fs-root`. It requires saved preflight data and treats its remote document
 root as a path beneath that filesystem root. Local relative paths beneath the document root become document-root-relative paths; other local paths do not
 become push or delete work. It also requires `--secret=TOKEN`; `--force-http`
-is the explicit plain-HTTP opt-in.
+is the explicit plain-HTTP opt-in. `--force-takeover` first learns the current
+push owner, then sends a guarded takeover request naming that owner and its
+ownership epoch.
 
 `files-push` uses the shared progress output mode. It never stores that mode in
 sender state.

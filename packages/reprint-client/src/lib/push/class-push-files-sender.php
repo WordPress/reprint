@@ -130,7 +130,7 @@ use function WordPress\Reprint\Exporter\trim_right_slash;
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{local_relative_path:string,document_root_relative_path:string,document_root_relative_path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
- * @phpstan-type State array{push_session_id:string,ownership_epoch:int|null,blocking_push_session_id:string|null,phase:'creating'|'finishing_previous_commit'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',document_root_local_relative_path:string,push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,local_file_bytes_to_push:int|null,local_file_bytes_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
+ * @phpstan-type State array{push_session_id:string,ownership_epoch:int|null,blocking_push_session_id:string|null,blocking_ownership_epoch:int|null,phase:'creating'|'finishing_previous_commit'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',document_root_local_relative_path:string,push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,local_file_bytes_to_push:int|null,local_file_bytes_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
 {
@@ -238,6 +238,12 @@ final class PushFilesSender
     /** @var array<string,mixed> Push stream client options used by start() or resume(). */
     private array $push_stream_client_options;
 
+    /** @var bool Whether this command may take over the owner reported by push_create. */
+    private bool $force_takeover;
+
+    /** @var bool Whether this process already sent its guarded takeover request. */
+    private bool $force_takeover_request_sent = false;
+
     /**
      * Starts a new sender while the caller holds the Reprint process lock.
      *
@@ -253,6 +259,7 @@ final class PushFilesSender
      *     @type string                  $remote_reprint_api_url  Required remote Reprint API URL.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
      *     @type bool                    $allow_http              Explicit plain-HTTP opt-in. Default false.
+     *     @type bool                    $force_takeover          Explicitly take over the owner reported by push_create. Default false.
      *     @type int|float|string        $chunk_bytes             Maximum bytes read from one local file. Default 4 MiB.
      *     @type int|float|string        $connect_timeout         Connect phase seconds. Default 30.
      *     @type int|float|string        $stall_timeout           No-upload-progress seconds. Default 60.
@@ -284,6 +291,7 @@ final class PushFilesSender
                 'push_session_id' => bin2hex(random_bytes(16)),
                 'ownership_epoch' => null,
                 'blocking_push_session_id' => null,
+                'blocking_ownership_epoch' => null,
                 'phase' => 'creating',
                 'document_root_local_relative_path' => $sender->document_root_local_relative_path,
                 'push_plan_cursor' => null,
@@ -370,6 +378,10 @@ final class PushFilesSender
         if (!is_array($request_sizer_options)) {
             throw new InvalidArgumentException('request_sizer_options must be an array.');
         }
+        $force_takeover = $options['force_takeover'] ?? false;
+        if (!is_bool($force_takeover)) {
+            throw new InvalidArgumentException('force_takeover must be boolean.');
+        }
 
         $push_stream_client_options = [
             'remote_reprint_api_url' => $options['remote_reprint_api_url'] ?? null,
@@ -397,6 +409,7 @@ final class PushFilesSender
         $this->excluded_paths_path = wp_join_unix_paths($this->push_state_directory, 'excluded_paths.json');
         $this->request_sizer_options = $request_sizer_options;
         $this->push_stream_client_options = $push_stream_client_options;
+        $this->force_takeover = $force_takeover;
     }
 
     /**
@@ -652,13 +665,43 @@ final class PushFilesSender
      */
     private function create_push_session(): void
     {
-        $request_result = $this->push_stream_client->send_push_request('POST', 'push_create', [
+        $parameters = [
             'push_session_id' => $this->state['push_session_id'],
-        ], ['created']);
+        ];
+        if (
+            $this->force_takeover
+            && $this->state['blocking_push_session_id'] !== null
+            && $this->state['blocking_ownership_epoch'] !== null
+        ) {
+            $parameters['force_takeover'] = true;
+            $parameters['blocking_push_session_id'] = $this->state['blocking_push_session_id'];
+            $parameters['blocking_ownership_epoch'] = $this->state['blocking_ownership_epoch'];
+            $this->force_takeover_request_sent = true;
+        }
+        $request_result = $this->push_stream_client->send_push_request('POST', 'push_create', $parameters, ['created']);
+        if ($request_result['reason'] === 'sync_locked') {
+            /** @var array{blocking_push_session_id:mixed,blocking_ownership_epoch:mixed} $response */
+            $response = $request_result['response'];
+            if (
+                !is_string($response['blocking_push_session_id'])
+                || !is_int($response['blocking_ownership_epoch'])
+                || $response['blocking_ownership_epoch'] <= 0
+            ) {
+                $this->fail('unexpected_response', 'sync_locked did not return a valid blocking push owner.');
+                return;
+            }
+            $this->state['blocking_push_session_id'] = $response['blocking_push_session_id'];
+            $this->state['blocking_ownership_epoch'] = $response['blocking_ownership_epoch'];
+            $this->store_state($this->state);
+            if ($this->force_takeover && !$this->force_takeover_request_sent) {
+                return;
+            }
+        }
         if ($request_result['reason'] === 'commit_required') {
             /** @var array{blocking_push_session_id:string} $response */
             $response = $request_result['response'];
             $this->state['blocking_push_session_id'] = $response['blocking_push_session_id'];
+            $this->state['blocking_ownership_epoch'] = null;
             $this->state['phase'] = 'finishing_previous_commit';
             $this->store_state($this->state);
             return;
@@ -674,6 +717,8 @@ final class PushFilesSender
             return;
         }
         $this->state['ownership_epoch'] = $response['ownership_epoch'];
+        $this->state['blocking_push_session_id'] = null;
+        $this->state['blocking_ownership_epoch'] = null;
         if (count($response['excluded_paths_b64']) > 100) {
             $this->fail(
                 'unexpected_response',
@@ -1753,6 +1798,9 @@ final class PushFilesSender
             // Keep the sender single-pass when older state has no file byte total.
             $state['local_file_bytes_to_push'] = null;
             $state['local_file_bytes_pushed'] = 0;
+        }
+        if (!array_key_exists('blocking_ownership_epoch', $state)) {
+            $state['blocking_ownership_epoch'] = null;
         }
 
         /** @var State $state */

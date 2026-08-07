@@ -243,9 +243,10 @@ by file-index and file-fetch responses and exclusive for a bounded commit call.
 `push_status`, `push_commit`, and `push_remove` request supplies that epoch.
 A request whose `(push_session_id, ownership_epoch)` is no longer current
 receives `sync_overtaken`. A second owner receives `sync_locked` with the
-current identity unless it makes an explicit takeover request naming the same
-blocking identity. A completed target commit advances the document-root
-generation once before readers reopen. File-index and file-fetch metadata carry
+current identity unless `files-push --force-takeover` makes an explicit takeover
+request naming that same blocking identity. A completed target commit advances
+the document-root generation once before readers reopen. File-index and
+file-fetch metadata carry
 that generation in `document_root_generation` and the
 `X-Document-Root-Generation` header.
 

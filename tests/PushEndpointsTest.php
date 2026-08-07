@@ -793,7 +793,52 @@ final class PushEndpointsTest extends TestCase {
         $state = $this->loadActiveState($pushStateDirectory);
         $this->assertIsArray($state);
         $this->assertSame('creating', $state['phase']);
-        $this->assertSame($blockingPushSessionId, $create['response']['push_session_id']);
+        $this->assertSame($blockingPushSessionId, $state['blocking_push_session_id']);
+        $this->assertSame(1, $state['blocking_ownership_epoch']);
+    }
+
+    public function testHighLevelSenderTakesOverTheReportedPushOwner(): void
+    {
+        $client = $this->newClient(self::SECRET);
+        $blockingPushSessionId = str_repeat('5', 32);
+        $create = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $blockingPushSessionId,
+        ], ['created']);
+        $this->assertSame('complete', $create['status'], (string) json_encode($create));
+
+        $localDocroot = $this->root . '/next-local-docroot';
+        $pushStateDirectory = $this->root . '/next-sender-state';
+        mkdir($localDocroot, 0700, true);
+        file_put_contents($localDocroot . '/next.txt', 'next');
+        $senderOptions = $this->senderOptions($localDocroot, $pushStateDirectory);
+        $senderOptions['force_takeover'] = true;
+
+        $sender = $this->startSender($senderOptions);
+        try {
+            $this->assertTrue($sender->next_step());
+            $state = $this->loadActiveState($pushStateDirectory);
+            $this->assertIsArray($state);
+            $this->assertSame($blockingPushSessionId, $state['blocking_push_session_id']);
+            $this->assertSame(1, $state['blocking_ownership_epoch']);
+
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('starting_plan', $sender->get_phase());
+        } finally {
+            $this->closeSender($sender);
+        }
+
+        $state = $this->loadActiveState($pushStateDirectory);
+        $this->assertIsArray($state);
+        $this->assertSame(2, $state['ownership_epoch']);
+        $this->assertNull($state['blocking_push_session_id']);
+        $this->assertNull($state['blocking_ownership_epoch']);
+
+        $overtaken = $client->send_push_request('GET', 'push_status', [
+            'push_session_id' => $blockingPushSessionId,
+            'ownership_epoch' => 1,
+        ], ['status']);
+        $this->assertSame('failed', $overtaken['status'], (string) json_encode($overtaken));
+        $this->assertSame('sync_overtaken', $overtaken['reason']);
     }
 
     public function testUploadAndMissingPathStatusExposeOnlyDocumentedFields(): void
