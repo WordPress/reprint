@@ -2428,7 +2428,7 @@ class ImportClient
             if (
                 $abspath !== "" &&
                 $content_dir !== "" &&
-                $content_dir !== $abspath . "/wp-content"
+                $content_dir !== wp_join_unix_paths($abspath, "wp-content")
             ) {
                 $this->audit_log(
                     "NON-STANDARD LAYOUT | wp-content is at {$content_dir} " .
@@ -2615,7 +2615,7 @@ class ImportClient
             if ($entry === "." || $entry === "..") {
                 continue;
             }
-            $path = $dir . "/" . $entry;
+            $path = wp_join_unix_paths($dir, $entry);
             if (is_dir($path) && !is_link($path)) {
                 self::rmdir_recursive($path);
             } else {
@@ -4960,7 +4960,7 @@ class ImportClient
                     "Cannot resolve source path for symlink: {$source}",
                 );
             }
-            $abs_source = $parent_real . "/" . basename($source);
+            $abs_source = wp_join_unix_paths($parent_real, basename($source));
         }
 
         // The target's parent must exist (we create flatten-to before calling this).
@@ -5085,7 +5085,7 @@ class ImportClient
             if ($entry === "." || $entry === "..") {
                 continue;
             }
-            $path = $dir . "/" . $entry;
+            $path = wp_join_unix_paths($dir, $entry);
             if (is_dir($path) && !is_link($path)) {
                 $this->remove_directory_recursive($path);
             } else {
@@ -5233,7 +5233,12 @@ class ImportClient
                         "--target-sqlite-path option is required but was missing.",
                     );
                 }
-                $target_path = $this->filesystem_root . $content_dir . '/database/.ht.sqlite';
+                $target_path = wp_join_unix_paths(
+                    $this->filesystem_root,
+                    $content_dir,
+                    'database',
+                    '.ht.sqlite'
+                );
                 $this->audit_log("DB-APPLY | defaulting SQLite path to: {$target_path}");
                 $this->progress->show_lifecycle_line("SQLite path: {$target_path}\n");
             }
@@ -7232,7 +7237,7 @@ class ImportClient
                 }
                 if (
                     !$this->remove_local_absolute_path_without_following_symlinks(
-                        $local_absolute_path . "/" . $entry
+                        wp_join_unix_paths($local_absolute_path, $entry)
                     )
                 ) {
                     return false;
@@ -8543,7 +8548,7 @@ class ImportClient
             $resolved = normalize_path($target);
         } else {
             // Relative target: resolve against the symlink's parent directory
-            $resolved = normalize_path($symlink_parent_dir . "/" . $target);
+            $resolved = normalize_path(wp_join_unix_paths($symlink_parent_dir, $target));
         }
 
         if (!path_is_within_root($resolved, $root)) {
@@ -8597,7 +8602,7 @@ class ImportClient
         // the source symlink's remote directory).
         $remote_absolute_target = str_starts_with($target, "/")
             ? normalize_path($target)
-            : normalize_path(dirname($remote_absolute_path) . "/" . $target);
+            : normalize_path(wp_join_unix_paths(dirname($remote_absolute_path), $target));
 
         // Only rewrite a target whose subtree was actually followed and indexed;
         // everything else keeps its original (portable) spelling.
