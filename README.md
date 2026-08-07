@@ -628,6 +628,10 @@ The selected mode applies only to that invocation and is not retained in
 command state. Explicit `tty` and `jsonl` modes cannot be combined with
 `--verbose`.
 
+The selector governs progress, lifecycle, and status output. It does not
+reformat a command's data result, such as preflight or pull-metadata JSON,
+files-stats JSON, db-domains lines, or SQL written with `--sql-output=stdout`.
+
 The files-push terminal presentation uses one stage-weighted progress bar. The
 percentage comes first, followed by a major stage such as `Indexing`, `Pushing`,
 or `Committing`. While pushing local paths, the line also shows target-confirmed
@@ -771,7 +775,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 ```
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
-* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
+* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary in terminal mode or one structured result in JSONL mode. Exits with code 0 if migration looks feasible, code 1 if not.
 * `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
 * `pull-db` — Runs `preflight`, `db-pull`, and `db-apply` as one resumable high-level command.
 * `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.

@@ -2807,7 +2807,8 @@ class ImportClient
      *
      * Inspects the preflight response (already fetched by run_preflight())
      * and exits with code 0 if migration looks feasible, code 1 if not.
-     * Prints a human-readable pass/fail summary to stdout.
+     * Prints a human-readable pass/fail summary in terminal mode or one
+     * structured result in JSONL mode.
      */
     private function run_preflight_assert(): void
     {
@@ -2897,22 +2898,28 @@ class ImportClient
         // We do not check for any encoding issues here. We'll move over
         // the entire database as it is.
 
-        // Print summary
+        // Print the terminal summary or emit one structured result.
+        $human_summary = "";
         foreach ($checks as $check) {
             $icon = $check["pass"] ? "PASS" : "FAIL";
-            echo "[{$icon}] {$check["label"]}: {$check["detail"]}\n";
+            $human_summary .= "[{$icon}] {$check["label"]}: {$check["detail"]}\n";
         }
 
-        echo "\n";
-        if ($all_pass) {
-            echo "Migration looks feasible.\n";
-            $this->write_progress_file();
-            exit(0);
-        } else {
-            echo "Migration may not be feasible. Review the failures above.\n";
-            $this->write_progress_file("Preflight assertions failed");
-            exit(1);
-        }
+        $message = $all_pass
+            ? "Migration looks feasible."
+            : "Migration may not be feasible. Review the failures above.";
+        $human_summary .= "\n{$message}\n";
+        $this->progress->show_lifecycle_line($human_summary);
+        $this->output_progress([
+            "type" => "preflight_assertion",
+            "command" => "preflight-assert",
+            "status" => $all_pass ? "complete" : "error",
+            "checks" => $checks,
+            "message" => $message,
+        ], true);
+
+        $this->write_progress_file($all_pass ? null : "Preflight assertions failed");
+        exit($all_pass ? 0 : 1);
     }
 
     /**
@@ -4515,7 +4522,7 @@ class ImportClient
         }
 
         // Output the summary and manifest as structured JSON for callers,
-        // and print the human-readable summary to stderr.
+        // or print the human-readable terminal summary.
         $this->output_progress([
             "status" => "complete",
             "command" => "apply-runtime",
@@ -4529,18 +4536,15 @@ class ImportClient
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
 
-        if (!$this->progress->is_mode('pipeline')) {
-            fwrite(STDERR, "\n");
-            fwrite(STDERR, "Runtime: {$runtime}\n");
-            fwrite(STDERR, "Source host: {$webhost}\n");
-            if ($target_engine !== null) {
-                fwrite(STDERR, "Target database: {$target_engine}\n");
-            }
-            fwrite(STDERR, "\n");
-            foreach ($summary as $line) {
-                fwrite(STDERR, "{$line}\n");
-            }
+        $human_summary = "\nRuntime: {$runtime}\nSource host: {$webhost}\n";
+        if ($target_engine !== null) {
+            $human_summary .= "Target database: {$target_engine}\n";
         }
+        $human_summary .= "\n";
+        foreach ($summary as $line) {
+            $human_summary .= "{$line}\n";
+        }
+        $this->progress->show_lifecycle_line($human_summary);
     }
 
     /**
@@ -10955,15 +10959,12 @@ class ImportClient
                     $bytes_since_check = $bytes_received - $last_bytes_received;
                     $rate = $bytes_since_check / 5.0; // bytes per second
 
-                    // Only output progress_check in verbose mode or non-TTY
-                    if ($this->verbose_mode || !$this->is_tty) {
-                        fwrite($this->progress_fd, json_encode([
-                            "progress_check" => true,
-                            "bytes_received" => $bytes_received,
-                            "bytes_last_5s" => $bytes_since_check,
-                            "rate_bps" => round($rate),
-                        ]) . "\n");
-                    }
+                    $this->output_progress([
+                        "progress_check" => true,
+                        "bytes_received" => $bytes_received,
+                        "bytes_last_5s" => $bytes_since_check,
+                        "rate_bps" => round($rate),
+                    ], true);
 
                     // If we're receiving less than 1KB/s for 5 seconds, something is wrong
                     if ($bytes_since_check < 1024 && $bytes_received > 0) {
@@ -10977,24 +10978,23 @@ class ImportClient
                     $last_bytes_received = $bytes_received;
                 }
 
-                // Output heartbeat every second (only in verbose/non-TTY mode)
+                // Output a structured heartbeat every second when JSONL or
+                // verbose output is active.
                 if ($now - $last_heartbeat >= 1.0) {
-                    if ($this->verbose_mode || !$this->is_tty) {
-                        $heartbeat = [
-                            "heartbeat" => true,
-                            "bytes_received" => $bytes_received,
-                        ];
-                        // Only emit file counters when the fetch list has
-                        // been counted (fetch phase).  During indexing the
-                        // list doesn't exist yet and emitting files_done:0
-                        // without files_total confuses consumers.
-                        if ($this->fetch_list_total !== null) {
-                            $heartbeat["files_done"] =
-                                ($this->fetch_list_done ?? 0) + $this->files_pulled;
-                            $heartbeat["files_total"] = $this->fetch_list_total;
-                        }
-                        fwrite($this->progress_fd, json_encode($heartbeat) . "\n");
+                    $heartbeat = [
+                        "heartbeat" => true,
+                        "bytes_received" => $bytes_received,
+                    ];
+                    // Only emit file counters when the fetch list has
+                    // been counted (fetch phase).  During indexing the
+                    // list doesn't exist yet and emitting files_done:0
+                    // without files_total confuses consumers.
+                    if ($this->fetch_list_total !== null) {
+                        $heartbeat["files_done"] =
+                            ($this->fetch_list_done ?? 0) + $this->files_pulled;
+                        $heartbeat["files_total"] = $this->fetch_list_total;
                     }
+                    $this->output_progress($heartbeat, true);
                     $last_heartbeat = $now;
                 }
 
@@ -11540,7 +11540,13 @@ class ImportClient
                 "message" => "State saved successfully",
             ], true);
         } catch (Exception $e) {
-            fwrite($this->progress_fd, "Warning: Failed to save state: " . $e->getMessage() . "\n");
+            $message = "Warning: Failed to save state: " . $e->getMessage();
+            $this->progress->print_line($message . "\n");
+            $this->output_progress([
+                "type" => "state_save_error",
+                "error" => $e->getMessage(),
+                "message" => $message,
+            ], true);
         }
 
         $this->progress->show_lifecycle_line("Exiting...\n");
