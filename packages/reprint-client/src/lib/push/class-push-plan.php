@@ -5,6 +5,7 @@ use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
 use function WordPress\Reprint\Exporter\path_is_within_root;
 use function WordPress\Reprint\Exporter\relative_path_under;
+use function WordPress\Reprint\Exporter\trim_right_slash;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
 
@@ -350,7 +351,7 @@ class PushPlan
         if ($resolved_local_filesystem_root === false || !is_dir($resolved_local_filesystem_root) || is_link($filesystem_root)) {
             throw new InvalidArgumentException("PushPlan requires the filesystem root to be a real directory.");
         }
-        $this->filesystem_root = rtrim($resolved_local_filesystem_root, "/") ?: "/";
+        $this->filesystem_root = trim_right_slash($resolved_local_filesystem_root);
     }
 
     /**

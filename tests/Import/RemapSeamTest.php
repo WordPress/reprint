@@ -7,6 +7,7 @@ use function WordPress\Reprint\Exporter\path_is_within_root;
 use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 use function WordPress\Reprint\Exporter\relative_path_under;
+use function WordPress\Reprint\Exporter\trim_right_slash;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
@@ -150,6 +151,24 @@ class RemapSeamTest extends TestCase
             'trailing slash on path' => array('', '/home/adam/', '/home/adam'),
             'trailing slash on both' => array('', '/home/adam/', '/home/adam/'),
             'under, prefix has trailing slash' => array('/c', '/a/b/c', '/a/b/'),
+        );
+    }
+
+    /**
+     * @dataProvider provideTrailingSlashPathCases
+     */
+    public function testTrimRightSlash(string $expected, string $path): void
+    {
+        $this->assertSame($expected, trim_right_slash($path));
+    }
+
+    public static function provideTrailingSlashPathCases(): array
+    {
+        return array(
+            'path without trailing slashes' => array('/srv/site', '/srv/site'),
+            'path with trailing slashes' => array('/srv/site', '/srv/site///'),
+            'filesystem root' => array('/', '/'),
+            'empty input becomes filesystem root' => array('/', ''),
         );
     }
 

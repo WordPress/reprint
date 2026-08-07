@@ -9,6 +9,7 @@ use function WordPress\Reprint\Exporter\build_pdo_dsn;
 use function WordPress\Reprint\Exporter\json_encode_or_throw;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_within_root;
+use function WordPress\Reprint\Exporter\trim_right_slash;
 
 require_once __DIR__ . '/class-file-index-processor.php';
 
@@ -1685,13 +1686,13 @@ function endpoint_preflight(array $config): array
                         // find the directory at the resolved location where
                         // files are actually downloaded.
                         $abspath_raw = defined("ABSPATH")
-                            ? (rtrim(ABSPATH, "/") ?: "/")
+                            ? trim_right_slash(ABSPATH)
                             : null;
                         $abspath_resolved = null;
                         if ($abspath_raw !== null) {
                             $abspath_real = realpath($abspath_raw);
                             $abspath_resolved = $abspath_real !== false
-                                ? (rtrim($abspath_real, "/") ?: "/")
+                                ? trim_right_slash($abspath_real)
                                 : $abspath_raw;
                         }
 
@@ -1958,21 +1959,21 @@ function endpoint_preflight(array $config): array
     // Scan each directory to list installed plugins, mu-plugins, and themes.
     $wp_runtime_paths = null;
     if ($db["wp"]["wp_load_loaded"]) {
-        $runtime_root = defined("ABSPATH") ? (rtrim(ABSPATH, "/") ?: "/") : null;
+        $runtime_root = defined("ABSPATH") ? trim_right_slash(ABSPATH) : null;
         $content_dir = defined("WP_CONTENT_DIR")
-            ? (rtrim(WP_CONTENT_DIR, "/") ?: "/")
+            ? trim_right_slash(WP_CONTENT_DIR)
             : null;
         $plugins_dir = defined("WP_PLUGIN_DIR")
-            ? (rtrim(WP_PLUGIN_DIR, "/") ?: "/")
+            ? trim_right_slash(WP_PLUGIN_DIR)
             : null;
         $mu_plugins_dir = defined("WPMU_PLUGIN_DIR")
-            ? (rtrim(WPMU_PLUGIN_DIR, "/") ?: "/")
+            ? trim_right_slash(WPMU_PLUGIN_DIR)
             : null;
         $themes_dir = null;
         if (function_exists("get_theme_root")) {
             $themes_dir = get_theme_root();
             if (is_string($themes_dir)) {
-                $themes_dir = rtrim($themes_dir, "/") ?: "/";
+                $themes_dir = trim_right_slash($themes_dir);
             } else {
                 $themes_dir = null;
             }

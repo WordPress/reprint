@@ -2,6 +2,7 @@
 
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\relative_path_under;
+use function WordPress\Reprint\Exporter\trim_right_slash;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Sender failures are CLI/API values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
@@ -378,7 +379,7 @@ final class PushFilesSender
         if ($resolved_local_filesystem_root === false) {
             throw new InvalidArgumentException('PushFilesSender requires a real filesystem root directory.');
         }
-        $this->filesystem_root = rtrim($resolved_local_filesystem_root, '/') ?: '/';
+        $this->filesystem_root = trim_right_slash($resolved_local_filesystem_root);
         $this->document_root_local_relative_path = trim($document_root, '/');
         $this->process_lock = $process_lock;
         $this->push_state_directory = rtrim($push_state_directory, '/');

@@ -5,6 +5,7 @@
 use function WordPress\Reprint\Exporter\normalize_excluded_paths;
 use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\relative_path_under;
+use function WordPress\Reprint\Exporter\trim_right_slash;
 
 if (!class_exists('Site_Export_Multipart_Processor', false)) {
     require_once __DIR__ . '/class-multipart-processor.php';
@@ -133,7 +134,7 @@ final class Site_Export_Push_Session {
      */
     private function __construct(string $reprint_directory, string $docroot, string $push_session_id, array $excluded_paths) {
         $this->reprint_directory = rtrim($reprint_directory, '/');
-        $this->docroot = $docroot === '/' ? '/' : rtrim($docroot, '/');
+        $this->docroot = trim_right_slash($docroot);
         $this->push_session_id = $push_session_id;
         if ($reprint_directory === $this->docroot) {
             throw new InvalidArgumentException('The reprint directory must not be the document root itself.');
@@ -2789,7 +2790,7 @@ final class Site_Export_Push_Session {
         if ($real_path === false || !is_dir($real_path) || is_link($path)) {
             throw new InvalidArgumentException('The ' . $description . ' is not a real directory: ' . $path . '.');
         }
-        return $real_path === '/' ? '/' : rtrim($real_path, '/');
+        return trim_right_slash($real_path);
     }
 
     /**
