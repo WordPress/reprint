@@ -1,4 +1,7 @@
 <?php
+
+use function WordPress\Filesystem\wp_join_unix_paths;
+
 /**
  * Streams a provided list of filesystem paths in sorted order with
  * cursor-based resumption. The caller must pass the same paths array
@@ -182,10 +185,10 @@ class FileTreeProducer
     private function normalize_directories($directories): array
     {
         if (is_string($directories)) {
-            return [rtrim($directories, "/")];
+            return [rtrim($directories, "/") ?: "/"];
         }
         return array_map(function ($d) {
-            return rtrim($d, "/");
+            return rtrim($d, "/") ?: "/";
         }, $directories);
     }
 
@@ -373,7 +376,7 @@ class FileTreeProducer
         }
 
         foreach ($this->directories as $dir) {
-            $candidate = $dir . "/" . ltrim($path, "/");
+            $candidate = wp_join_unix_paths($dir, $path);
             clearstatcache(true, $candidate);
             if (file_exists($candidate) || is_link($candidate)) {
                 return $candidate;
