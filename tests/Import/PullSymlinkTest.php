@@ -287,7 +287,7 @@ class PullSymlinkTest extends TestCase
         $this->assertEquals(0, $count, 'No symlinks should be created for invalid chunks');
     }
 
-    public function testSymlinkReplacesExistingFile()
+    public function testSymlinkPreservesExistingFile()
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
@@ -297,7 +297,7 @@ class PullSymlinkTest extends TestCase
         file_put_contents($filePath, 'content');
         $this->assertTrue(is_file($filePath));
 
-        // Create symlink at same location
+        // Receive a symlink at the same location.
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
 
@@ -311,8 +311,8 @@ class PullSymlinkTest extends TestCase
 
         $method->invoke($client, $chunk);
 
-        // Should now be a symlink
-        $this->assertTrue(is_link($filePath), 'File should be replaced with symlink');
-        $this->assertEquals('target', readlink($filePath));
+        // The local file belongs to the user and is preserved.
+        $this->assertTrue(is_file($filePath), 'Local file should be preserved');
+        $this->assertSame('content', file_get_contents($filePath));
     }
 }
