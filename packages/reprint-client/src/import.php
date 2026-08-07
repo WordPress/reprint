@@ -3737,7 +3737,7 @@ class ImportClient
             $parent = dirname($local_absolute_path);
             if (!is_dir($parent)) {
                 try {
-                    $this->create_directory_if_missing($parent);
+                    $this->create_directory_if_missing($parent, true);
                 } catch (LocalPathConflictException $e) {
                     throw $e;
                 } catch (RuntimeException $e) {
@@ -9365,7 +9365,7 @@ class ImportClient
             if (!is_dir($dir)) {
                 // Check if any component of the path exists as a file and remove it
                 try {
-                    $this->create_directory_if_missing($dir);
+                    $this->create_directory_if_missing($dir, true);
                 } catch (PreserveLocalSkipException $e) {
                     $context->skip_current_file = true;
                     $this->audit_log($e->getMessage(), true);
@@ -9497,6 +9497,19 @@ class ImportClient
         if (is_dir($dir) && !is_writable($dir)) {
             return "PRESERVE-LOCAL skip file (dir not writable): {$remote_absolute_path}";
         }
+        $relative_parent_path = relative_path_under($dir, $this->filesystem_root);
+        if ($relative_parent_path !== null) {
+            $current = $this->filesystem_root;
+            foreach (explode("/", $relative_parent_path) as $part) {
+                if ($part === "") {
+                    continue;
+                }
+                $current = wp_join_unix_paths($current, $part);
+                if (is_file($current)) {
+                    return "PRESERVE-LOCAL skip file (file in path): {$remote_absolute_path}";
+                }
+            }
+        }
         if ($this->path_traverses_symlink($dir)) {
             return "PRESERVE-LOCAL skip file (symlink in path): {$remote_absolute_path}";
         }
@@ -9532,9 +9545,13 @@ class ImportClient
      * Create a directory path when missing, removing blockers.
      *
      * @param string $dir Directory path to create
+     * @param bool $replace_file_blockers Whether this pull already admitted the path.
      * @throws RuntimeException if directory cannot be created or is outside allowed path
      */
-    private function create_directory_if_missing(string $dir): void
+    private function create_directory_if_missing(
+        string $dir,
+        bool $replace_file_blockers = false
+    ): void
     {
         // Security: Ensure path is under the filesystem root
         $real_filesystem_root = $this->filesystem_root;
@@ -9600,11 +9617,25 @@ class ImportClient
                 );
             }
 
-            // Do not replace a file blocking directory creation.
+            // Only entries admitted by the index comparison may replace a
+            // blocker. A caller outside that workflow has a local conflict.
             if (is_file($current)) {
-                throw new LocalPathConflictException(
-                    "Cannot create directory because a local file blocks it: {$current}",
-                );
+                if ($replace_file_blockers) {
+                    $this->audit_log(
+                        "Removing file blocking directory: {$current}",
+                        true,
+                    );
+                    if (!unlink($current)) {
+                        throw new RuntimeException(
+                            "Failed to remove file blocking directory: {$current}",
+                        );
+                    }
+                }
+                if (!$replace_file_blockers) {
+                    throw new LocalPathConflictException(
+                        "Cannot create directory because a local file blocks it: {$current}",
+                    );
+                }
             }
 
             // Create directory if it doesn't exist
@@ -9692,7 +9723,7 @@ class ImportClient
 
         // Create directory, removing any files that block the path
         try {
-            $this->create_directory_if_missing($local_absolute_path);
+            $this->create_directory_if_missing($local_absolute_path, true);
         } catch (PreserveLocalSkipException $e) {
             $this->audit_log($e->getMessage(), true);
             $this->emit_skip_progress($remote_absolute_path);
@@ -9790,7 +9821,7 @@ class ImportClient
         $dir = dirname($local_absolute_path);
         if (!is_dir($dir)) {
             try {
-                $this->create_directory_if_missing($dir);
+                $this->create_directory_if_missing($dir, true);
             } catch (PreserveLocalSkipException $e) {
                 $this->audit_log($e->getMessage(), true);
                 $this->emit_skip_progress($path);

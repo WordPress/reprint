@@ -168,6 +168,29 @@ final class FilesPullLocalIndexTest extends TestCase
         );
     }
 
+    public function testPullPreservesAFileBlockingARemoteDescendant(): void
+    {
+        $this->writeRemoteOverrides([
+            'added_files' => [
+                'node_modules/pulled-package.js' => 'pulled dependency',
+            ],
+        ]);
+        mkdir($this->localTree, 0700, true);
+        file_put_contents($this->localTree . '/node_modules', 'local file');
+
+        $this->completeFilesPull();
+
+        $this->assertSame(
+            'local file',
+            file_get_contents($this->localTree . '/node_modules')
+        );
+        $index = $this->readIndex($this->localIndexPath());
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath('node_modules/pulled-package.js'),
+            $index
+        );
+    }
+
     public function testFilesPullRejectsAnUnfinishedFilesPush(): void
     {
         if (PHP_VERSION_ID < 80100 || !function_exists('curl_init')) {
