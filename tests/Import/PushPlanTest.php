@@ -583,6 +583,25 @@ final class PushPlanTest extends TestCase
         $plan->close();
     }
 
+    public function testCursorKeepsTheFilesystemRootSlash(): void
+    {
+        mkdir($this->planDirectory(), 0755, true);
+        file_put_contents($this->excludedPathsPath(), '[]');
+
+        $plan = PushPlan::start(
+            $this->planDirectory(),
+            '/',
+            $this->localIndexFile(),
+            $this->excludedPathsPath()
+        );
+
+        try {
+            $this->assertSame('/', $plan->get_cursor()['filesystem_root']);
+        } finally {
+            $plan->close();
+        }
+    }
+
     public function testNewInstanceResumesFromTheRetainedCursor(): void
     {
         $currentEntries = [];

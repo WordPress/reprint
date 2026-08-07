@@ -350,7 +350,7 @@ class PushPlan
         if ($resolved_local_filesystem_root === false || !is_dir($resolved_local_filesystem_root) || is_link($filesystem_root)) {
             throw new InvalidArgumentException("PushPlan requires the filesystem root to be a real directory.");
         }
-        $this->filesystem_root = rtrim($resolved_local_filesystem_root, "/");
+        $this->filesystem_root = rtrim($resolved_local_filesystem_root, "/") ?: "/";
     }
 
     /**

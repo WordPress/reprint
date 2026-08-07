@@ -2570,6 +2570,24 @@ final class PushEndpointsTest extends TestCase {
         );
     }
 
+    public function testHighLevelSenderKeepsTheFilesystemRootSlash(): void
+    {
+        $push_state_directory = $this->root . '/root-source-state';
+        $sender = $this->startSender(
+            $this->senderOptions('/', $push_state_directory)
+        );
+
+        try {
+            $filesystem_root_property = new ReflectionProperty(
+                PushFilesSender::class,
+                'filesystem_root'
+            );
+            $this->assertSame('/', $filesystem_root_property->getValue($sender));
+        } finally {
+            $this->closeSender($sender);
+        }
+    }
+
     /**
      * Leaves a missing local push state directory absent when there is nothing to resume.
      */
