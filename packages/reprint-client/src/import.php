@@ -424,25 +424,25 @@ class ImportClient
         }
 
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
-        $this->state_dir = rtrim($state_dir, "/");
+        $this->state_dir = trim_right_slash($state_dir);
         $this->filesystem_root = trim_right_slash($filesystem_root);
         $remote_state_directory = self::remote_state_directory_path(
             $this->remote_reprint_api_url,
             $this->state_dir
         );
-        $this->pull_state_directory = $remote_state_directory . "/pull";
-        $this->local_index_file = $remote_state_directory . "/local_index.jsonl";
-        $this->pull_state_file = $this->pull_state_directory . "/state.json";
-        $this->remote_index_file = $this->pull_state_directory . "/remote-index.jsonl";
+        $this->pull_state_directory = wp_join_unix_paths($remote_state_directory, "pull");
+        $this->local_index_file = wp_join_unix_paths($remote_state_directory, "local_index.jsonl");
+        $this->pull_state_file = wp_join_unix_paths($this->pull_state_directory, "state.json");
+        $this->remote_index_file = wp_join_unix_paths($this->pull_state_directory, "remote-index.jsonl");
         $this->pull_index_wal_path =
-            $this->pull_state_directory . "/index.wal";
+            wp_join_unix_paths($this->pull_state_directory, "index.wal");
         $this->next_remote_index_file =
-            $this->pull_state_directory . "/remote-index.next.jsonl";
+            wp_join_unix_paths($this->pull_state_directory, "remote-index.next.jsonl");
         $this->fetch_list_file =
-            $this->pull_state_directory . "/fetch-list.jsonl";
-        $this->audit_log_file = $this->state_dir . "/audit.log";
-        $this->volatile_files_file = $this->pull_state_directory . "/volatile-files.json";
-        $this->progress_file = $this->state_dir . "/progress.json";
+            wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl");
+        $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
+        $this->volatile_files_file = wp_join_unix_paths($this->pull_state_directory, "volatile-files.json");
+        $this->progress_file = wp_join_unix_paths($this->state_dir, "progress.json");
 
         // Detect TTY for progress display and terminal colors. In stdout mode
         // this is re-evaluated against STDERR in run() once the output mode is
@@ -2102,13 +2102,13 @@ class ImportClient
             $remote_reprint_api_url,
             $state_dir
         );
-        $push_state_directory = $remote_state_directory . '/push';
+        $push_state_directory = wp_join_unix_paths($remote_state_directory, 'push');
         if (strpos($push_state_directory, '/') !== 0) {
             $working_directory = getcwd();
             if ($working_directory === false) {
                 throw new RuntimeException('Could not resolve the current working directory.');
             }
-            $push_state_directory = $working_directory . '/' . $push_state_directory;
+            $push_state_directory = wp_join_unix_paths($working_directory, $push_state_directory);
         }
         $push_state_directory = realpath_with_missing_tail(
             $push_state_directory
@@ -2128,10 +2128,11 @@ class ImportClient
         string $remote_reprint_api_url,
         string $state_dir
     ): string {
-        return
-            rtrim($state_dir, '/')
-            . '/remotes/'
-            . md5(rtrim($remote_reprint_api_url, '?&'));
+        return wp_join_unix_paths(
+            trim_right_slash($state_dir),
+            'remotes',
+            md5(rtrim($remote_reprint_api_url, '?&'))
+        );
     }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
@@ -2231,7 +2232,7 @@ class ImportClient
                 $this->save_state();
 
                 if ($this->sql_output_mode === "file") {
-                    $sql_file = $this->state_dir . "/db.sql";
+                    $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
                     if (file_exists($sql_file)) {
                         unlink($sql_file);
                         $this->audit_log(
@@ -2239,14 +2240,14 @@ class ImportClient
                         );
                     }
                 }
-                $tables_file = $this->state_dir . "/db-tables.jsonl";
+                $tables_file = wp_join_unix_paths($this->state_dir, "db-tables.jsonl");
                 if (file_exists($tables_file)) {
                     unlink($tables_file);
                     $this->audit_log(
                         "FILE DELETE | {$tables_file} | abort db-pull",
                     );
                 }
-                $domains_file = $this->pull_state_directory . "/domains.json";
+                $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
                 if (file_exists($domains_file)) {
                     unlink($domains_file);
                     $this->audit_log(
@@ -2263,7 +2264,7 @@ class ImportClient
                 $this->reset_state();
                 $this->save_state();
 
-                $tables_file = $this->state_dir . "/db-tables.jsonl";
+                $tables_file = wp_join_unix_paths($this->state_dir, "db-tables.jsonl");
                 if (file_exists($tables_file)) {
                     unlink($tables_file);
                     $this->audit_log(
@@ -2460,7 +2461,7 @@ class ImportClient
      */
     private function fetch_runtime_files(): void
     {
-        $runtime_dir = $this->state_dir . "/runtime_files";
+        $runtime_dir = wp_join_unix_paths($this->state_dir, "runtime_files");
 
         // Always wipe and recreate so the directory reflects current state.
         if (is_dir($runtime_dir)) {
@@ -2927,8 +2928,11 @@ class ImportClient
      */
     public function run_files_pull(): void
     {
-        $sender_state_path = dirname($this->pull_state_directory)
-            . "/push/sender.json";
+        $sender_state_path = wp_join_unix_paths(
+            dirname($this->pull_state_directory),
+            "push",
+            "sender.json"
+        );
         if (is_file($sender_state_path)) {
             throw new RuntimeException(
                 "Finish the unfinished files-push before running files-pull."
@@ -3720,7 +3724,7 @@ class ImportClient
     public function run_db_sync(): void
     {
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
-        $sql_file = $this->state_dir . "/db.sql";
+        $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
 
         $has_progress =
             $state_command === "db-pull" &&
@@ -3878,8 +3882,8 @@ class ImportClient
      */
     private function run_db_domains(): void
     {
-        $domains_file = $this->pull_state_directory . "/domains.json";
-        $sql_file = $this->state_dir . "/db.sql";
+        $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
+        $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
 
         if (file_exists($domains_file)) {
             // Fast path: domains were already discovered during db-pull
@@ -4425,8 +4429,10 @@ class ImportClient
         $pull_state_directory =
             realpath($this->pull_state_directory)
             ?: $this->pull_state_directory;
-        $manifest->constants["REPRINT_PULL_STATE_FILE"] =
-            rtrim($pull_state_directory, "/") . "/state.json";
+        $manifest->constants["REPRINT_PULL_STATE_FILE"] = wp_join_unix_paths(
+            trim_right_slash($pull_state_directory),
+            "state.json"
+        );
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
@@ -5296,7 +5302,7 @@ class ImportClient
 
     public function run_db_apply(array $options): void
     {
-        $sql_file = $this->state_dir . "/db.sql";
+        $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
         if (!file_exists($sql_file)) {
             throw new RuntimeException(
                 "db.sql not found in {$this->state_dir}. Run db-pull first.",
@@ -5316,7 +5322,7 @@ class ImportClient
         }
 
         // Show discovered domains if available
-        $domains_file = $this->pull_state_directory . "/domains.json";
+        $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
         if (file_exists($domains_file)) {
             $domains = json_decode(file_get_contents($domains_file), true);
             if (is_array($domains) && !empty($domains)) {
@@ -5483,7 +5489,7 @@ class ImportClient
         $stmts_since_save = 0;
 
         // Load pre-computed statement count from db-pull for progress reporting
-        $sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
+        $sql_stats_file = wp_join_unix_paths($this->pull_state_directory, "sql-stats.json");
         $statements_total = null;
         if (file_exists($sql_stats_file)) {
             $stats = json_decode(file_get_contents($sql_stats_file), true);
@@ -5946,7 +5952,7 @@ class ImportClient
     private function run_db_index(): void
     {
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
-        $tables_file = $this->state_dir . "/db-tables.jsonl";
+        $tables_file = wp_join_unix_paths($this->state_dir, "db-tables.jsonl");
 
         $has_cursor =
             $state_command === "db-index" &&
@@ -7645,7 +7651,7 @@ class ImportClient
         $sql_buffer = "";
 
         if ($mode === "file") {
-            $sql_file = $this->state_dir . "/db.sql";
+            $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
 
             // Crash recovery: if SQL file is larger than expected, truncate it.
             // This happens if we crashed after writing but before saving the new cursor.
@@ -7717,7 +7723,7 @@ class ImportClient
             // Each SQL chunk is appended to this file as it arrives; when the
             // query completes and executes, the file is truncated. If the process
             // dies at any point, the next run reloads whatever was accumulated.
-            $sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
+            $sql_buffer_file = wp_join_unix_paths($this->pull_state_directory, "sql-buffer");
             if (file_exists($sql_buffer_file)) {
                 $sql_buffer = file_get_contents($sql_buffer_file);
                 $this->audit_log(
@@ -7740,8 +7746,8 @@ class ImportClient
         $domain_collector = class_exists('DomainCollector')
             ? new \DomainCollector()
             : null;
-        $domains_file = $this->pull_state_directory . "/domains.json";
-        $sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
+        $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
+        $sql_stats_file = wp_join_unix_paths($this->pull_state_directory, "sql-stats.json");
         $sql_statements_counted = (int) ($this->get_state()->sql_statements_counted ?? 0);
 
         // Auto-detect the remote site domain from the export URL so it
@@ -8079,7 +8085,7 @@ class ImportClient
                 $mysql_conn = null;
                 // Clean up buffer file — if we got here with an empty buffer,
                 // all queries were executed successfully.
-                $sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
+                $sql_buffer_file = wp_join_unix_paths($this->pull_state_directory, "sql-buffer");
                 if ($pending === "" && file_exists($sql_buffer_file)) {
                     unlink($sql_buffer_file);
                 }
@@ -8339,7 +8345,7 @@ class ImportClient
     {
         $cursor = $this->get_state()->active_resumable_command->remote_cursor ?? null;
         $complete = false;
-        $tables_file = $this->state_dir . "/db-tables.jsonl";
+        $tables_file = wp_join_unix_paths($this->state_dir, "db-tables.jsonl");
 
         $stats = $this->get_state()->db_index;
         $tables_written = $stats->tables;
