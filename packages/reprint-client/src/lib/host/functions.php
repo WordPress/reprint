@@ -5,7 +5,7 @@
  * Registry, detection logic, and shared preflight extraction helpers.
  */
 
-use function WordPress\Reprint\Exporter\path_is_within_root;
+use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Exporter\trim_right_slash;
 
 /**
@@ -112,7 +112,7 @@ function extract_constants(array $preflight_data): array
     if (
         $content_dir !== ''
         && $abspath !== ''
-        && !path_is_within_root($content_dir, $abspath)
+        && !path_is_same_as_or_descendant_of($content_dir, $abspath)
     ) {
         $result['WP_CONTENT_DIR'] = '{fs-root}/wp-content';
     }

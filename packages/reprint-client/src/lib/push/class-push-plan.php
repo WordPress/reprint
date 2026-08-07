@@ -3,7 +3,8 @@
 use function Reprint\Importer\sort_index_file;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
-use function WordPress\Reprint\Exporter\path_is_within_root;
+use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Exporter\path_is_descendant_of;
 use function WordPress\Reprint\Exporter\relative_path_under;
 use function WordPress\Reprint\Exporter\trim_right_slash;
 
@@ -695,7 +696,7 @@ class PushPlan
                 if ($this->deleted_directory_stack_entry !== null) {
                     $descendant_prefix = $this->deleted_directory_stack_entry["path"] . "/";
                     if (
-                        !path_is_within_root(
+                        !path_is_same_as_or_descendant_of(
                             $local_index_entry["path"],
                             $this->deleted_directory_stack_entry["path"]
                         )
@@ -712,8 +713,7 @@ class PushPlan
             if ($path_comparison < 0) {
                 // New files, symlinks, and empty directories need to be pushed.
                 $fresh_local_index_entry_replaces_local_subtree = $local_index_entry !== null
-                    && $local_index_entry["path"] !== $fresh_local_index_entry["path"]
-                    && path_is_within_root(
+                    && path_is_descendant_of(
                         $local_index_entry["path"],
                         $fresh_local_index_entry["path"]
                     );
@@ -1004,10 +1004,10 @@ class PushPlan
         $next_fresh_local_index_entry_path =
             $this->fresh_local_index_entry["path"] ?? "\0";
 
-        return path_is_within_root(
+        return path_is_same_as_or_descendant_of(
             $previous_fresh_local_index_entry_path,
             $local_relative_path
-        ) || path_is_within_root(
+        ) || path_is_same_as_or_descendant_of(
             $next_fresh_local_index_entry_path,
             $local_relative_path
         );
@@ -1171,8 +1171,7 @@ class PushPlan
     private function deleted_directory_stack_covers_path(string $path, ?array $entry): bool
     {
         return $entry !== null
-            && $path !== $entry["path"]
-            && path_is_within_root($path, $entry["path"]);
+            && path_is_descendant_of($path, $entry["path"]);
     }
 
     /**
@@ -1197,8 +1196,8 @@ class PushPlan
         }
         foreach ($this->excluded_paths as $excluded_path) {
             if (
-                path_is_within_root($document_root_relative_path, $excluded_path)
-                || path_is_within_root($excluded_path, $document_root_relative_path)
+                path_is_same_as_or_descendant_of($document_root_relative_path, $excluded_path)
+                || path_is_same_as_or_descendant_of($excluded_path, $document_root_relative_path)
             ) {
                 return true;
             }

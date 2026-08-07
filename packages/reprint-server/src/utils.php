@@ -319,42 +319,97 @@ function normalize_excluded_paths(array $excluded_paths): array
 // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
 /**
- * Returns true when one path is equal to or strictly under one root.
+ * Indicates whether a candidate path is the same as or a descendant of an
+ * ancestor.
  *
- * Either argument may be a list. The result is true when any path-and-root
- * pair matches. The filesystem root contains every absolute path, and cannot
- * use the normal root-plus-slash prefix because that would produce `//`.
+ * Either argument may be a list. The result is true when any candidate-and-
+ * ancestor pair matches. The filesystem root matches every absolute path and
+ * cannot use the normal ancestor-plus-slash prefix because that would produce
+ * `//`.
+ *
+ * Examples:
+ *
+ *     path_is_same_as_or_descendant_of('/srv/site', '/srv/site');            // true
+ *     path_is_same_as_or_descendant_of('/srv/site/wp-content', '/srv/site'); // true
+ *     path_is_same_as_or_descendant_of('/srv/site-old', '/srv/site');        // false
+ *     path_is_same_as_or_descendant_of('/', '/');                             // true
  *
  * @param string|list<string> $path Candidate path or paths.
- * @param string|list<string> $root Containing root or roots.
- * @return bool Whether a candidate path belongs to a root.
+ * @param string|list<string> $ancestor Ancestor path or paths.
+ * @return bool Whether a candidate is the same as or a descendant of an
+ *              ancestor.
  * @throws InvalidArgumentException If either scalar value is not a string.
  */
-function path_is_within_root($path, $root): bool
+function path_is_same_as_or_descendant_of($path, $ancestor): bool
 {
     if (is_array($path)) {
         foreach ($path as $candidate_path) {
-            if (path_is_within_root($candidate_path, $root)) {
+            if (path_is_same_as_or_descendant_of($candidate_path, $ancestor)) {
                 return true;
             }
         }
         return false;
     }
-    if (is_array($root)) {
-        foreach ($root as $candidate_root) {
-            if (path_is_within_root($path, $candidate_root)) {
+    if (is_array($ancestor)) {
+        foreach ($ancestor as $candidate_ancestor) {
+            if (path_is_same_as_or_descendant_of($path, $candidate_ancestor)) {
                 return true;
             }
         }
         return false;
     }
-    if (!is_string($path) || !is_string($root)) {
+    if (!is_string($path) || !is_string($ancestor)) {
         throw new InvalidArgumentException('Path containment expects strings or lists of strings.');
     }
-    if ($root === "/") {
+    if ($ancestor === "/") {
         return str_starts_with($path, "/");
     }
-    return $path === $root || str_starts_with($path, $root . "/");
+    return $path === $ancestor || str_starts_with($path, $ancestor . "/");
+}
+
+/**
+ * Indicates whether a candidate path is a descendant of an ancestor.
+ *
+ * Either argument may be a list. The result is true when any candidate-and-
+ * ancestor pair has a component-boundary match below the ancestor. Unlike
+ * path_is_same_as_or_descendant_of(), equal paths do not match. The
+ * filesystem root contains every absolute descendant, but not itself.
+ *
+ * Examples:
+ *
+ *     path_is_descendant_of('/srv/site/wp-content', '/srv/site'); // true
+ *     path_is_descendant_of('/srv/site', '/srv/site');            // false
+ *     path_is_descendant_of('/srv/site-old', '/srv/site');        // false
+ *     path_is_descendant_of('/wp-content', '/');                  // true
+ *     path_is_descendant_of('/', '/');                             // false
+ *
+ * @param string|list<string> $path Candidate path or paths.
+ * @param string|list<string> $ancestor Ancestor path or paths.
+ * @return bool Whether a candidate is a descendant of an ancestor.
+ * @throws InvalidArgumentException If either scalar value is not a string.
+ */
+function path_is_descendant_of($path, $ancestor): bool
+{
+    if (is_array($path)) {
+        foreach ($path as $candidate_path) {
+            if (path_is_descendant_of($candidate_path, $ancestor)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (is_array($ancestor)) {
+        foreach ($ancestor as $candidate_ancestor) {
+            if (path_is_descendant_of($path, $candidate_ancestor)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (!path_is_same_as_or_descendant_of($path, $ancestor)) {
+        return false;
+    }
+    return $path !== $ancestor;
 }
 
 /**
