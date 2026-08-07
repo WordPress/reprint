@@ -323,7 +323,7 @@ class PushPlan
         string $local_index_file,
         string $document_root_local_relative_path
     ) {
-        $plan_directory = rtrim($plan_directory, "/");
+        $plan_directory = trim_right_slash($plan_directory);
         if (!is_dir($plan_directory)) {
             throw new LogicException("Cannot open a push plan without its directory: {$plan_directory}");
         }
@@ -332,11 +332,11 @@ class PushPlan
         $this->local_index_file = $local_index_file;
         $this->document_root_local_relative_path =
             rtrim($document_root_local_relative_path, "/");
-        $this->local_paths_to_push = $plan_directory . "/local_paths_to_push.jsonl";
-        $this->local_paths_to_delete = $plan_directory . "/local_paths_to_delete";
-        $this->fresh_local_index_file = $plan_directory . "/fresh_local_index.jsonl";
-        $this->excluded_paths_file = $plan_directory . "/excluded_paths.json";
-        $this->deleted_directories_stack = $plan_directory . "/deleted_directories_stack.jsonl";
+        $this->local_paths_to_push = wp_join_unix_paths($plan_directory, "local_paths_to_push.jsonl");
+        $this->local_paths_to_delete = wp_join_unix_paths($plan_directory, "local_paths_to_delete");
+        $this->fresh_local_index_file = wp_join_unix_paths($plan_directory, "fresh_local_index.jsonl");
+        $this->excluded_paths_file = wp_join_unix_paths($plan_directory, "excluded_paths.json");
+        $this->deleted_directories_stack = wp_join_unix_paths($plan_directory, "deleted_directories_stack.jsonl");
     }
 
     /**

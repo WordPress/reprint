@@ -1,5 +1,8 @@
 <?php
 
+use function WordPress\Filesystem\wp_join_unix_paths;
+use function WordPress\Reprint\Exporter\trim_right_slash;
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain local filesystem paths, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
@@ -29,6 +32,7 @@ final class ReprintProcessLock
      */
     public function __construct(string $state_dir)
     {
+        $normalized_state_dir = trim_right_slash($state_dir);
         if (
             !is_dir($state_dir)
             && !mkdir($state_dir, 0755, true)
@@ -39,7 +43,7 @@ final class ReprintProcessLock
                 . $state_dir . '.'
             );
         }
-        $process_lock_path = rtrim($state_dir, '/') . '/process.lock';
+        $process_lock_path = wp_join_unix_paths($normalized_state_dir, 'process.lock');
         $this->handle = fopen($process_lock_path, 'c+b');
         if (!is_resource($this->handle)) {
             throw new RuntimeException('Failed to open the Reprint process lock: ' . $process_lock_path . '.');
@@ -49,7 +53,7 @@ final class ReprintProcessLock
             $this->handle = null;
             throw new RuntimeException(
                 'Another Reprint process is using the state directory: '
-                . rtrim($state_dir, '/') . '.'
+                . $normalized_state_dir . '.'
             );
         }
     }
