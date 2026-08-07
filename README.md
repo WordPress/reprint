@@ -286,10 +286,10 @@ The presets use the same repeatable path-prefix options available directly on
 
 ```bash
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
-    --only=:wp-content: --exclude=:wp-uploads:
+    --include=:wp-content: --exclude=:wp-uploads:
 ```
 
-`--only=SOURCE` supplies an included source prefix and `--exclude=SOURCE`
+`--include=SOURCE` supplies an included source prefix and `--exclude=SOURCE`
 supplies an excluded source prefix. Both accept WordPress path tokens or
 absolute source paths, and exclusions win when the prefixes overlap. Switching
 filters after a completed run starts a new filtered delta against the shared
@@ -311,11 +311,11 @@ php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 
 It accepts the `pull` file filters (`--filter=none` and
 `--filter=essential-files`) plus the same path selection options as
-`files-pull`, including repeated `--only` and `--exclude` values:
+`files-pull`, including repeated `--include` and `--exclude` values:
 
 ```bash
 php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
-    --only=:wp-content: --exclude=:wp-uploads:
+    --include=:wp-content: --exclude=:wp-uploads:
 ```
 
 #### Pull only the database.

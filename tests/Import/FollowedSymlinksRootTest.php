@@ -119,7 +119,7 @@ class FollowedSymlinksRootTest extends TestCase
 
     /**
      * @param string|null $followedSymlinksRootSub Root suffix under fs-root (null = filesystem root).
-     * @param array<int,string> $scopePrefixes Original export scope (--only prefixes).
+     * @param array<int,string> $scopePrefixes Original export scope (--include prefixes).
      * @param array<string,string> $remapRules source => absolute target.
      */
     private function placeClient(?string $followedSymlinksRootSub, array $scopePrefixes, array $remapRules = []): \ImportClient

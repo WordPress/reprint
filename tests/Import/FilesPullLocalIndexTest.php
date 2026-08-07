@@ -347,7 +347,7 @@ final class FilesPullLocalIndexTest extends TestCase
     public static function partialPullProvider(): iterable
     {
         yield 'selected directory' => [[
-            '--only=/var/www/html/selected',
+            '--include=/var/www/html/selected',
         ]];
         yield 'filtered files' => [[
             '--filter=essential-files',
@@ -404,7 +404,7 @@ final class FilesPullLocalIndexTest extends TestCase
 
         $this->abortFilesPull();
         $pull = $this->runFilesPull([
-            '--only=/var/www/html/folder',
+            '--include=/var/www/html/folder',
         ]);
 
         $this->assertSame(0, $pull['exit'], $pull['output']);

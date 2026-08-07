@@ -20,7 +20,8 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--state-dir=DIR', $output);
         $this->assertStringContainsString('--fs-root=DIR', $output);
         $this->assertStringContainsString('--remap SOURCE TARGET', $output);
-        $this->assertStringContainsString('--only=SOURCE', $output);
+        $this->assertStringContainsString('--include=SOURCE', $output);
+        $this->assertStringNotContainsString('--only', $output);
         $this->assertStringContainsString('--exclude=SOURCE', $output);
     }
 
