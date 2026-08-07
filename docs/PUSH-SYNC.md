@@ -129,9 +129,9 @@ A push plan is an internal part of the sender lifecycle:
    preflight document root. The sender enters `creating`, stores the document
    root's local relative path in `sender.json`, and requests
    at most 100 target exclusions from `push_create`. If another push session
-   has an active commit, the sender stores its `blocking_push_session_id`, enters
-   `finishing_previous_commit`, and sends one bounded `push_commit` request per
-   step until that commit finishes. It then returns to `creating`. A successful
+   owns the target, create returns `sync_locked` with its session ID and
+   ownership epoch. The sender does not advance that lifecycle; the caller
+   retries within its budget or requests an explicit takeover. A successful
    create stores the exclusions in `excluded_paths.json` after creating the
    active `plan/` directory.
 2. The sender starts one internal `PushPlan`. The plan copies the exclusions to
@@ -230,6 +230,29 @@ only.
 more cleanup remains and must be retried. A push with a commit in progress is
 not removable; its next commit request resumes the durable cursor instead.
 
+## Durable push coordination
+
+Each document root keeps coordination state beside its push sessions at
+`<reprint-directory>/.reprint/push/`. `state.json` records the current owner,
+its monotonically increasing ownership epoch, the document-root generation, and
+bounded terminal-owner records. `state.lock` protects only that metadata;
+`push-request.lock` serializes one owner request; and `file-read.lock` is shared
+by file-index and file-fetch responses and exclusive for a bounded commit call.
+
+`push_create` grants a session an ownership epoch. Every later `push_upload`,
+`push_status`, `push_commit`, and `push_remove` request supplies that epoch.
+A request whose `(push_session_id, ownership_epoch)` is no longer current
+receives `sync_overtaken`. A second owner receives `sync_locked` with the
+current identity unless it makes an explicit takeover request naming the same
+blocking identity. A completed target commit advances the document-root
+generation once before readers reopen. File-index and file-fetch metadata carry
+that generation in `document_root_generation` and the
+`X-Document-Root-Generation` header.
+
+A completed sender removes its target push session after saving the local index.
+That releases durable ownership only after private-work cleanup has finished;
+repeated remove calls remain idempotent through the terminal-owner records.
+
 ## Push HTTP operations
 
 The production exporter router exposes five authenticated push operations.
@@ -247,9 +270,9 @@ complete request for authentication.
   sorted, immutable server policy stored for the push session; base64 preserves
   arbitrary path bytes which JSON cannot represent directly. A sender
   consuming this field must omit indexed paths equal to, below, or ancestors
-  of any advertised exclusion. When another push session has an active commit,
-  the endpoint returns `commit_required` with its `blocking_push_session_id`
-  before creating the requested push session.
+  of any advertised exclusion. When another push session owns the target,
+  the endpoint returns `sync_locked` with `blocking_push_session_id` and
+  `blocking_ownership_epoch` before creating the requested push session.
 - `POST push_upload` accepts `multipart/mixed`. A successful response contains
   `status`, `push_session_id`, `changes_accepted`, and `last_change`. The last
   change is null for an empty request. Otherwise it contains `state`, `type`,

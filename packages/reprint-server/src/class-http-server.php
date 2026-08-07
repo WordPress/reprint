@@ -323,6 +323,17 @@ final class Site_Export_HTTP_Server {
             $budget = $this->create_resource_budget($config);
         }
 
+        if (
+            $this->push_endpoints !== null
+            && ($endpoint === 'file_index' || $endpoint === 'file_fetch')
+        ) {
+            $this->push_endpoints->with_file_read(function (int $document_root_generation) use ($handler, $config, $budget) {
+                $config['document_root_generation'] = $document_root_generation;
+                return call_user_func($handler, $config, $budget);
+            });
+            return;
+        }
+
         call_user_func($handler, $config, $budget);
     }
 

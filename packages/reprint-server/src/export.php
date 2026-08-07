@@ -2249,6 +2249,7 @@ function stream_file_producer(
                 $filesystem_root = $producer->get_filesystem_root();
                 $metadata = [
                     "filesystem_root" => base64_encode($filesystem_root ?? ""),
+                    "document_root_generation" => (int) ($config["document_root_generation"] ?? 0),
                 ];
                 $metadata_json = json_encode_or_throw($metadata);
 
@@ -2258,6 +2259,7 @@ function stream_file_producer(
                     "Content-Length: " . strlen($metadata_json) . "\r\n" .
                     "X-Chunk-Type: metadata\r\n" .
                     "X-Filesystem-Root: " . base64_encode($filesystem_root ?? "") . "\r\n" .
+                    "X-Document-Root-Generation: " . (int) ($config["document_root_generation"] ?? 0) . "\r\n" .
                     "\r\n" .
                     $metadata_json . "\r\n"
                 );
@@ -2592,6 +2594,7 @@ function endpoint_file_index(
         $metadata = [
             "filesystem_root" => base64_encode($filesystem_root),
             "list_dir" => base64_encode($list_directory),
+            "document_root_generation" => (int) ($config["document_root_generation"] ?? 0),
         ];
         $metadata_json = json_encode_or_throw($metadata);
         $gz->write(
@@ -2601,6 +2604,7 @@ function endpoint_file_index(
             "X-Chunk-Type: metadata\r\n" .
             "X-Filesystem-Root: " . base64_encode($filesystem_root) . "\r\n" .
             "X-Index-Dir: " . base64_encode($list_directory) . "\r\n" .
+            "X-Document-Root-Generation: " . (int) ($config["document_root_generation"] ?? 0) . "\r\n" .
             "\r\n" .
             $metadata_json . "\r\n"
         );

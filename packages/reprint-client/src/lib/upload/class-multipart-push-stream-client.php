@@ -17,7 +17,7 @@ use function Reprint\Importer\apply_curl_proxy_from_environment;
  *
  * Example:
  *
- *     if (!$client->start_upload_request($push_session_id)) {
+ *     if (!$client->start_upload_request($push_session_id, $ownership_epoch)) {
  *         throw new RuntimeException($client->get_last_error());
  *     }
  *
@@ -249,7 +249,7 @@ class MultipartPushStreamClient
      * @throws InvalidArgumentException If the push session ID is malformed.
      * @throws RuntimeException If another upload request is already open.
      */
-    public function start_upload_request(string $push_session_id): bool
+    public function start_upload_request(string $push_session_id, int $ownership_epoch): bool
     {
         if ($this->curl_handle !== null) {
             throw new RuntimeException('An upload request is already open; call finish_request() first.');
@@ -273,7 +273,7 @@ class MultipartPushStreamClient
         $this->response_body = '';
         $this->response_too_large = false;
 
-        $request_url = $this->endpoint_url('push_upload', ['push_session_id' => $push_session_id]);
+        $request_url = $this->endpoint_url('push_upload', ['push_session_id' => $push_session_id, 'ownership_epoch' => $ownership_epoch]);
         $headers = $this->hmac_client->get_envelope_auth_headers('POST', $request_url);
         $headers['Content-Type'] = 'multipart/mixed; boundary=' . $this->boundary;
         $header_lines = [];

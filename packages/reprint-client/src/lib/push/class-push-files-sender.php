@@ -129,7 +129,7 @@ use function WordPress\Reprint\Exporter\trim_right_slash;
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{local_relative_path:string,document_root_relative_path:string,document_root_relative_path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
- * @phpstan-type State array{push_session_id:string,blocking_push_session_id:string|null,phase:'creating'|'finishing_previous_commit'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',document_root_local_relative_path:string,push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
+ * @phpstan-type State array{push_session_id:string,ownership_epoch:int|null,blocking_push_session_id:string|null,phase:'creating'|'finishing_previous_commit'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',document_root_local_relative_path:string,push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
 {
@@ -278,6 +278,7 @@ final class PushFilesSender
             $sender->push_stream_client = $sender->create_push_stream_client(null);
             $sender->state = [
                 'push_session_id' => bin2hex(random_bytes(16)),
+                'ownership_epoch' => null,
                 'blocking_push_session_id' => null,
                 'phase' => 'creating',
                 'document_root_local_relative_path' => $sender->document_root_local_relative_path,
@@ -578,6 +579,17 @@ final class PushFilesSender
     }
 
     /**
+     * Returns the target identity established by push_create.
+     */
+    private function require_ownership_epoch(): int
+    {
+        if (!is_int($this->state['ownership_epoch']) || $this->state['ownership_epoch'] <= 0) {
+            throw new LogicException('The active push sender has no ownership epoch.');
+        }
+        return $this->state['ownership_epoch'];
+    }
+
+    /**
      * Creates the push session and stores the policy returned by the target.
      */
     private function create_push_session(): void
@@ -597,8 +609,13 @@ final class PushFilesSender
             return;
         }
 
-        /** @var array{max_part_bytes:int,post_max_bytes:?int,excluded_paths_b64:list<string>} $response */
+        /** @var array{ownership_epoch:int,max_part_bytes:int,post_max_bytes:?int,excluded_paths_b64:list<string>} $response */
         $response = $request_result['response'];
+        if (!is_int($response['ownership_epoch'] ?? null) || $response['ownership_epoch'] <= 0) {
+            $this->fail('unexpected_response', 'push_create did not return a positive ownership_epoch.');
+            return;
+        }
+        $this->state['ownership_epoch'] = $response['ownership_epoch'];
         if (count($response['excluded_paths_b64']) > 100) {
             $this->fail(
                 'unexpected_response',
@@ -823,6 +840,7 @@ final class PushFilesSender
         } else {
             $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
                 'push_session_id' => $this->state['push_session_id'],
+                'ownership_epoch' => $this->require_ownership_epoch(),
                 'path_b64' => $local_path_to_push['document_root_relative_path_b64'],
             ], ['accepted']);
             if ($this->handle_request_failure($request_result)) {
@@ -1003,7 +1021,7 @@ final class PushFilesSender
         // cancellation return to the last target-confirmed sender boundary.
         if ($this->upload_request_stage === 'closed') {
             $this->state_before_upload_request = $this->state;
-            if (!$this->push_stream_client->start_upload_request($this->state['push_session_id'])) {
+            if (!$this->push_stream_client->start_upload_request($this->state['push_session_id'], $this->require_ownership_epoch())) {
                 $this->state_before_upload_request = null;
                 $this->fail('request_failed', $this->push_stream_client->get_last_error());
                 return;
@@ -1066,6 +1084,7 @@ final class PushFilesSender
                 if ($this->receiver_confirmed_deleted_paths_byte_offset === null) {
                     $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
                         'push_session_id' => $this->state['push_session_id'],
+                        'ownership_epoch' => $this->require_ownership_epoch(),
                     ], ['accepted']);
                     if ($this->handle_request_failure($request_result)) {
                         return;
@@ -1161,7 +1180,7 @@ final class PushFilesSender
         // Open a request only after the next complete part is ready.
         if ($this->upload_request_stage === 'closed') {
             $this->state_before_upload_request = $this->state;
-            if (!$this->push_stream_client->start_upload_request($this->state['push_session_id'])) {
+            if (!$this->push_stream_client->start_upload_request($this->state['push_session_id'], $this->require_ownership_epoch())) {
                 $this->state_before_upload_request = null;
                 $this->fail('request_failed', $this->push_stream_client->get_last_error());
                 return;
@@ -1291,6 +1310,7 @@ final class PushFilesSender
     {
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_commit', [
             'push_session_id' => $this->state['push_session_id'],
+            'ownership_epoch' => $this->require_ownership_epoch(),
         ], ['accepted']);
         if ($this->handle_request_failure($request_result)) {
             return;
@@ -1325,7 +1345,7 @@ final class PushFilesSender
             return;
         }
         $this->state['push_plan_cursor'] = null;
-        $this->state['phase'] = 'completing';
+        $this->state['phase'] = 'removing';
         $this->store_state($this->state);
     }
 
@@ -1368,6 +1388,7 @@ final class PushFilesSender
     {
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_remove', [
             'push_session_id' => $this->state['push_session_id'],
+            'ownership_epoch' => $this->require_ownership_epoch(),
         ], ['accepted']);
         if ($this->handle_request_failure($request_result)) {
             return;
@@ -1375,6 +1396,10 @@ final class PushFilesSender
         /** @var array{removed:bool} $response */
         $response = $request_result['response'];
         if (!$response['removed']) {
+            return;
+        }
+        if ($this->state['push_plan_cursor'] === null) {
+            $this->complete_push();
             return;
         }
         $this->state['push_plan_cursor'] = null;

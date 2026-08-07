@@ -243,6 +243,7 @@ final class PushEndpointsTest extends TestCase {
         $push_session_id = str_repeat('6', 32);
         $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
 
@@ -287,6 +288,7 @@ final class PushEndpointsTest extends TestCase {
         $push_session_id = str_repeat('7', 32);
         $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
 
@@ -311,6 +313,7 @@ final class PushEndpointsTest extends TestCase {
         for ($request = 0; $request < 10; ++$request) {
             $commit_before_revocation = $client->send_push_request('POST', 'push_commit', [
                 'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             ], ['accepted']);
             $this->assertSame('complete', $commit_before_revocation['status'], (string) json_encode($commit_before_revocation));
             if (is_file($this->docroot . '/installed.txt')) {
@@ -326,6 +329,7 @@ final class PushEndpointsTest extends TestCase {
         do {
             $commit = $client->send_push_request('POST', 'push_commit', [
                 'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             ], ['accepted']);
             $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
         } while ($commit['response']['send_next_request']);
@@ -342,6 +346,7 @@ final class PushEndpointsTest extends TestCase {
 
         $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
         $this->assertSame('created', $create['response']['status']);
@@ -352,7 +357,7 @@ final class PushEndpointsTest extends TestCase {
         $client->set_max_part_bytes($create['response']['max_part_bytes']);
         $client->apply_reported_limits([$create['response']['post_max_bytes']]);
 
-        $this->assertTrue($client->start_upload_request($push_session_id));
+        $this->assertTrue($client->start_upload_request($push_session_id, 1));
         $this->assertTrue($client->send_part([
             'type' => 'file',
             'path' => 'nested/file.bin',
@@ -399,6 +404,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame([
             'status' => 'accepted',
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             'changes_accepted' => 8,
             'last_change' => [
                 'state' => 'complete',
@@ -410,12 +416,15 @@ final class PushEndpointsTest extends TestCase {
 
         $status = $client->send_push_request('GET', 'push_status', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             'path_b64' => base64_encode('nested/file.bin'),
         ], ['accepted']);
         $this->assertSame('complete', $status['status'], (string) json_encode($status));
         $this->assertSame([
             'status' => 'accepted',
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
+            'document_root_generation' => 0,
             'phase' => 'receiving_work',
             'work_deletes_bytes' => strlen($delete_payload),
             'work_deletes_complete' => true,
@@ -432,11 +441,14 @@ final class PushEndpointsTest extends TestCase {
         do {
             $commit = $client->send_push_request('POST', 'push_commit', [
                 'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             ], ['accepted']);
             $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
             $this->assertSame([
                 'status',
                 'push_session_id',
+                'ownership_epoch',
+                'document_root_generation',
                 'phase',
                 'send_next_request',
                 'entries_processed',
@@ -468,11 +480,13 @@ final class PushEndpointsTest extends TestCase {
         do {
             $remove = $client->send_push_request('POST', 'push_remove', [
                 'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             ], ['accepted']);
             $this->assertSame('complete', $remove['status'], (string) json_encode($remove));
             $this->assertSame([
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
+                'ownership_epoch' => 1,
                 'removed' => $remove['response']['removed'],
                 'http_code' => 200,
             ], $remove['response']);
@@ -488,6 +502,7 @@ final class PushEndpointsTest extends TestCase {
         $push_session_id = str_repeat('c', 32);
         $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
         $push_directory = $this->reprint_directory . '/.reprint/push/' . $push_session_id;
@@ -497,6 +512,7 @@ final class PushEndpointsTest extends TestCase {
         try {
             $remove = $client->send_push_request('POST', 'push_remove', [
                 'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             ], ['accepted']);
         } finally {
             $this->stopLockProcess($lock_process);
@@ -516,6 +532,7 @@ final class PushEndpointsTest extends TestCase {
         $push_session_id = str_repeat('d', 32);
         $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
 
@@ -539,11 +556,13 @@ final class PushEndpointsTest extends TestCase {
         $tombstone = $push_sessions_directory . '/.removing-' . $push_session_id;
         $first_remove = $client->send_push_request('POST', 'push_remove', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['accepted']);
         $this->assertSame('complete', $first_remove['status'], (string) json_encode($first_remove));
         $this->assertSame([
             'status' => 'accepted',
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             'removed' => false,
             'http_code' => 200,
         ], $first_remove['response']);
@@ -554,6 +573,7 @@ final class PushEndpointsTest extends TestCase {
 
         $blocked_create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('retry', $blocked_create['status'], (string) json_encode($blocked_create));
         $this->assertSame('lock_acquisition_failure', $blocked_create['reason']);
@@ -567,6 +587,7 @@ final class PushEndpointsTest extends TestCase {
         try {
             $blocked_remove = $client->send_push_request('POST', 'push_remove', [
                 'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             ], ['accepted']);
         } finally {
             $this->stopLockProcess($lock_process);
@@ -581,6 +602,7 @@ final class PushEndpointsTest extends TestCase {
         do {
             $remove = $client->send_push_request('POST', 'push_remove', [
                 'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             ], ['accepted']);
             ++$remove_requests;
             $this->assertLessThan(10, $remove_requests, 'Bounded HTTP removal did not converge.');
@@ -588,6 +610,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame([
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
+                'ownership_epoch' => 1,
                 'removed' => $remove['response']['removed'],
                 'http_code' => 200,
             ], $remove['response']);
@@ -595,11 +618,13 @@ final class PushEndpointsTest extends TestCase {
 
         $repeated_remove = $client->send_push_request('POST', 'push_remove', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['accepted']);
         $this->assertSame('complete', $repeated_remove['status'], (string) json_encode($repeated_remove));
         $this->assertSame([
             'status' => 'accepted',
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             'removed' => true,
             'http_code' => 200,
         ], $repeated_remove['response']);
@@ -608,6 +633,7 @@ final class PushEndpointsTest extends TestCase {
 
         $recreated = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('complete', $recreated['status'], (string) json_encode($recreated));
         $this->assertSame(200, $recreated['response']['http_code']);
@@ -634,14 +660,18 @@ final class PushEndpointsTest extends TestCase {
 
         $created = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $reopened = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
 
         $expected_response = [
             'status' => 'created',
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
+            'document_root_generation' => 0,
             'max_part_bytes' => 4,
             'post_max_bytes' => self::POST_MAX_BYTES,
             'excluded_paths_b64' => $expected_excluded_paths_b64,
@@ -668,6 +698,7 @@ final class PushEndpointsTest extends TestCase {
 
         $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $committing_push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
         $upload = $this->sendUploadRequest($client, $committing_push_session_id, [
@@ -688,22 +719,24 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('complete', $upload['status'], (string) json_encode($upload));
         $commit = $client->send_push_request('POST', 'push_commit', [
             'push_session_id' => $committing_push_session_id,
+            'ownership_epoch' => 1,
         ], ['accepted']);
         $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
         $this->assertTrue($commit['response']['send_next_request']);
 
         $create_while_committing = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $next_push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
 
         $this->assertSame('failed', $create_while_committing['status'], (string) json_encode($create_while_committing));
-        $this->assertSame('commit_required', $create_while_committing['reason']);
+        $this->assertSame('sync_locked', $create_while_committing['reason']);
         $this->assertSame(
             $committing_push_session_id,
             $create_while_committing['response']['blocking_push_session_id']
         );
         $this->assertSame(
-            'Push session ' . $committing_push_session_id . ' must finish committing this document root before another push session can start.',
+            'Push session ' . $committing_push_session_id . ' owns this document root at ownership epoch 1.',
             $create_while_committing['detail']
         );
         $this->assertSame(409, $create_while_committing['response']['http_code']);
@@ -722,6 +755,7 @@ final class PushEndpointsTest extends TestCase {
         $push_session_id = str_repeat('4', 32);
         $result = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
 
         $this->assertSame('failed', $result['status'], (string) json_encode($result));
@@ -733,75 +767,33 @@ final class PushEndpointsTest extends TestCase {
         $this->assertDirectoryDoesNotExist($push_sessions_directory . '/' . $push_session_id);
     }
 
-    public function testHighLevelSenderFinishesPreviousCommitBeforeCreatingItsPushSession(): void
+    public function testHighLevelSenderLeavesAnotherPushOwnerInControl(): void
     {
         $client = $this->newClient(self::SECRET);
-        $blocking_push_session_id = str_repeat('5', 32);
-
+        $blockingPushSessionId = str_repeat('5', 32);
         $create = $client->send_push_request('POST', 'push_create', [
-            'push_session_id' => $blocking_push_session_id,
+            'push_session_id' => $blockingPushSessionId,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
-        $upload = $this->sendUploadRequest($client, $blocking_push_session_id, [
-            [
-                'type' => 'file',
-                'path' => 'blocking.txt',
-                'total_bytes' => 4,
-                'offset' => 0,
-                'payload' => 'hold',
-            ],
-            [
-                'type' => 'delete-list',
-                'offset' => 0,
-                'complete' => true,
-                'payload' => '',
-            ],
-        ]);
-        $this->assertSame('complete', $upload['status'], (string) json_encode($upload));
-        $commit = $client->send_push_request('POST', 'push_commit', [
-            'push_session_id' => $blocking_push_session_id,
-        ], ['accepted']);
-        $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
-        $this->assertTrue($commit['response']['send_next_request']);
 
-        $local_docroot = $this->root . '/next-local-docroot';
-        $push_state_directory = $this->root . '/next-sender-state';
-        mkdir($local_docroot, 0700, true);
-        file_put_contents($local_docroot . '/next.txt', 'next');
-        $options = $this->senderOptions($local_docroot, $push_state_directory);
+        $localDocroot = $this->root . '/next-local-docroot';
+        $pushStateDirectory = $this->root . '/next-sender-state';
+        mkdir($localDocroot, 0700, true);
+        file_put_contents($localDocroot . '/next.txt', 'next');
 
-        $sender = $this->startSender($options);
-        $initial_state = $this->loadActiveState($push_state_directory);
-        $this->assertIsArray($initial_state);
-        $current_push_session_id = $initial_state['push_session_id'];
+        $sender = $this->startSender($this->senderOptions($localDocroot, $pushStateDirectory));
         try {
-            $this->assertTrue($sender->next_step());
-            $this->assertSame('finishing_previous_commit', $sender->get_phase());
-            $state = $this->loadActiveState($push_state_directory);
-            $this->assertIsArray($state);
-            $this->assertSame($current_push_session_id, $state['push_session_id']);
-            $this->assertSame($blocking_push_session_id, $state['blocking_push_session_id']);
+            $this->assertFalse($sender->next_step());
+            $this->assertSame('failed', $sender->get_status());
+            $this->assertSame('sync_locked', $sender->get_reason());
         } finally {
             $this->closeSender($sender);
         }
 
-        $resumed_sender = $this->resumeSender($options);
-        try {
-            $this->assertTrue($resumed_sender->next_step());
-            $this->assertSame('finishing_previous_commit', $resumed_sender->get_phase());
-        } finally {
-            $this->closeSender($resumed_sender);
-        }
-
-        $state = $this->loadActiveState($push_state_directory);
+        $state = $this->loadActiveState($pushStateDirectory);
         $this->assertIsArray($state);
-        $this->assertSame($blocking_push_session_id, $state['blocking_push_session_id']);
-        $result = $this->runSender($local_docroot, $push_state_directory);
-
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
-        $this->assertSame('hold', file_get_contents($this->docroot . '/blocking.txt'));
-        $this->assertSame('next', file_get_contents($this->docroot . '/next.txt'));
-        $this->assertNull($this->loadActiveState($push_state_directory));
+        $this->assertSame('creating', $state['phase']);
+        $this->assertSame($blockingPushSessionId, $create['response']['push_session_id']);
     }
 
     public function testUploadAndMissingPathStatusExposeOnlyDocumentedFields(): void
@@ -810,6 +802,7 @@ final class PushEndpointsTest extends TestCase {
         $push_session_id = str_repeat('b', 32);
         $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
 
@@ -824,6 +817,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame([
             'status' => 'accepted',
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             'changes_accepted' => 1,
             'last_change' => [
                 'path_b64' => base64_encode('value.txt'),
@@ -836,12 +830,15 @@ final class PushEndpointsTest extends TestCase {
 
         $status = $client->send_push_request('GET', 'push_status', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             'path_b64' => base64_encode('missing.txt'),
         ], ['accepted']);
         $this->assertSame('complete', $status['status'], (string) json_encode($status));
         $this->assertSame([
             'status' => 'accepted',
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
+            'document_root_generation' => 0,
             'phase' => 'receiving_work',
             'work_deletes_bytes' => 0,
             'work_deletes_complete' => false,
@@ -857,7 +854,7 @@ final class PushEndpointsTest extends TestCase {
     public function testUploadReportsDeclaredRequestBodyLimitOn413(): void
     {
         $push_session_id = str_repeat('d', 32);
-        $url = $this->remote_reprint_api_url . '&endpoint=push_upload&push_session_id=' . $push_session_id;
+        $url = $this->remote_reprint_api_url . '&endpoint=push_upload&push_session_id=' . $push_session_id . '&ownership_epoch=1';
         $headers = ( new Site_Export_HMAC_Client(self::SECRET) )->get_envelope_auth_headers('POST', $url);
         $curl_headers = ['Content-Type: multipart/mixed; boundary=oversized-endpoint-test'];
         foreach ($headers as $name => $value) {
@@ -889,13 +886,14 @@ final class PushEndpointsTest extends TestCase {
         $push_session_id = str_repeat('f', 32);
         $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
         $this->assertSame(self::POST_MAX_BYTES, $create['response']['post_max_bytes']);
 
         // MultipartPushStreamClient uses CURLOPT_UPLOAD without a known body
         // length, so this reaches the production router as chunked transport.
-        $this->assertTrue($client->start_upload_request($push_session_id));
+        $this->assertTrue($client->start_upload_request($push_session_id, 1));
         for ($part = 0; $part < 200; ++$part) {
             if (!$client->send_part([
                 'type' => 'directory',
@@ -933,6 +931,7 @@ final class PushEndpointsTest extends TestCase {
             $clean_push_session_id = str_repeat('0', 32);
             $clean_create = $client->send_push_request('POST', 'push_create', [
                 'push_session_id' => $clean_push_session_id,
+            'ownership_epoch' => 1,
             ], ['created']);
             $this->assertSame('complete', $clean_create['status'], (string) json_encode($clean_create));
             $this->assertSame($maximum_request_body_bytes, $clean_create['response']['post_max_bytes']);
@@ -961,10 +960,18 @@ final class PushEndpointsTest extends TestCase {
             );
             $this->assertSame(200, $clean_upload['http_code'], (string) json_encode($clean_upload));
             $this->assertSame('accepted', $clean_upload['response']['status']);
+            do {
+                $clean_remove = $client->send_push_request('POST', 'push_remove', [
+                    'push_session_id' => $clean_push_session_id,
+                    'ownership_epoch' => 1,
+                ], ['accepted']);
+                $this->assertSame('complete', $clean_remove['status'], (string) json_encode($clean_remove));
+            } while (!$clean_remove['response']['removed']);
 
             $over_limit_push_session_id = str_repeat('1', 32);
             $over_limit_create = $client->send_push_request('POST', 'push_create', [
                 'push_session_id' => $over_limit_push_session_id,
+            'ownership_epoch' => 1,
             ], ['created']);
             $this->assertSame('complete', $over_limit_create['status'], (string) json_encode($over_limit_create));
             $over_limit_upload = $this->sendChunkedUploadRequest(
@@ -972,13 +979,21 @@ final class PushEndpointsTest extends TestCase {
                 $over_limit_push_session_id,
                 $boundary,
                 $multipart_body,
-                'y'
+                'y',
+                $over_limit_create['response']['ownership_epoch']
             );
             $this->assertSame(413, $over_limit_upload['http_code'], (string) json_encode($over_limit_upload));
             $this->assertSame('rejected', $over_limit_upload['response']['status']);
             $this->assertSame('request_too_large', $over_limit_upload['response']['reason']);
             $this->assertSame($maximum_request_body_bytes + 1, $over_limit_upload['response']['observed_request_body_bytes']);
             $this->assertSame($maximum_request_body_bytes, $over_limit_upload['response']['post_max_bytes']);
+            do {
+                $overLimitRemove = $client->send_push_request('POST', 'push_remove', [
+                    'push_session_id' => $over_limit_push_session_id,
+                    'ownership_epoch' => $over_limit_create['response']['ownership_epoch'],
+                ], ['accepted']);
+                $this->assertSame('complete', $overLimitRemove['status'], (string) json_encode($overLimitRemove));
+            } while (!$overLimitRemove['response']['removed']);
         } finally {
             $this->stopServer($server_process, $server_pipes);
         }
@@ -990,6 +1005,7 @@ final class PushEndpointsTest extends TestCase {
             $trailing_byte_push_session_id = str_repeat('2', 32);
             $create = $client->send_push_request('POST', 'push_create', [
                 'push_session_id' => $trailing_byte_push_session_id,
+            'ownership_epoch' => 1,
             ], ['created']);
             $this->assertSame('complete', $create['status'], (string) json_encode($create));
             $this->assertSame($larger_maximum_request_body_bytes, $create['response']['post_max_bytes']);
@@ -999,7 +1015,8 @@ final class PushEndpointsTest extends TestCase {
                 $trailing_byte_push_session_id,
                 $boundary,
                 $multipart_body,
-                'y'
+                'y',
+                $create['response']['ownership_epoch']
             );
             $this->assertSame(400, $trailing_byte_upload['http_code'], (string) json_encode($trailing_byte_upload));
             $this->assertSame('rejected', $trailing_byte_upload['response']['status']);
@@ -1154,6 +1171,7 @@ final class PushEndpointsTest extends TestCase {
 
         $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
 
         $this->assertSame('failed', $response['status'], (string) json_encode($response));
@@ -1179,6 +1197,7 @@ final class PushEndpointsTest extends TestCase {
 
         $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
 
         $this->assertSame('complete', $response['status'], (string) json_encode($response));
@@ -1203,6 +1222,7 @@ final class PushEndpointsTest extends TestCase {
         $push_session_id = str_repeat('7', 32);
         $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
 
         $this->assertSame('complete', $response['status'], (string) json_encode($response));
@@ -1263,11 +1283,14 @@ final class PushEndpointsTest extends TestCase {
 
         $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
         $this->assertSame([
             'status' => 'created',
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
+            'document_root_generation' => 0,
             'max_part_bytes' => 1024,
             'post_max_bytes' => self::POST_MAX_BYTES,
             'excluded_paths_b64' => [base64_encode($logical_plugin_path)],
@@ -1323,6 +1346,7 @@ final class PushEndpointsTest extends TestCase {
         do {
             $commit = $client->send_push_request('POST', 'push_commit', [
                 'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
             ], ['accepted']);
             $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
         } while ($commit['response']['send_next_request']);
@@ -1360,17 +1384,21 @@ final class PushEndpointsTest extends TestCase {
         $push_session_id = str_repeat('2', 32);
         $create = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
 
         $status = $this->sendPushRequestWithHeaders('GET', 'push_status', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], self::SECRET);
 
         $this->assertSame(200, $status['http_code'], $status['body']);
         $this->assertSame([
             'status' => 'accepted',
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
+            'document_root_generation' => 0,
             'phase' => 'receiving_work',
             'work_deletes_bytes' => 0,
             'work_deletes_complete' => false,
@@ -1397,6 +1425,7 @@ final class PushEndpointsTest extends TestCase {
 
         $wrong_method = $client->send_push_request('GET', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('failed', $wrong_method['status']);
         $this->assertSame('invalid_request', $wrong_method['reason']);
@@ -1405,6 +1434,7 @@ final class PushEndpointsTest extends TestCase {
         $wrong_secret = $this->newClient('not-the-server-secret');
         $authentication = $wrong_secret->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('failed', $authentication['status']);
         $this->assertSame('auth_failed', $authentication['reason']);
@@ -1412,6 +1442,7 @@ final class PushEndpointsTest extends TestCase {
 
         $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['created']);
         $this->assertSame('complete', $create['status']);
         $push_lock = fopen($this->reprint_directory . '/.reprint/push/' . $push_session_id . '/push.lock', 'c+b');
@@ -1419,13 +1450,14 @@ final class PushEndpointsTest extends TestCase {
         $this->assertTrue(flock($push_lock, LOCK_EX | LOCK_NB));
         $lock_contention = $client->send_push_request('GET', 'push_status', [
             'push_session_id' => $push_session_id,
+            'ownership_epoch' => 1,
         ], ['accepted']);
         $this->assertSame('retry', $lock_contention['status']);
         $this->assertSame('lock_acquisition_failure', $lock_contention['reason']);
         flock($push_lock, LOCK_UN);
         fclose($push_lock);
 
-        $url = $this->remote_reprint_api_url . '&endpoint=push_upload&push_session_id=' . $push_session_id;
+        $url = $this->remote_reprint_api_url . '&endpoint=push_upload&push_session_id=' . $push_session_id . '&ownership_epoch=1';
         $headers = ( new Site_Export_HMAC_Client(self::SECRET) )->get_envelope_auth_headers('POST', $url);
         $curl_headers = ['Content-Type: application/json'];
         foreach ($headers as $name => $value) {
@@ -1521,7 +1553,7 @@ final class PushEndpointsTest extends TestCase {
                 $this->assertSame($initial_local_index_contents, file_get_contents($local_index_file));
                 $saw_saving_local_index = true;
             }
-            if (is_array($state) && $state['phase'] === 'completing') {
+            if (is_array($state) && $state['phase'] === 'removing') {
                 $this->assertNull($state['push_plan_cursor']);
                 $this->assertDirectoryExists($push_state_directory . '/plan');
                 $fresh_local_index_file = $push_state_directory . '/plan/fresh_local_index.jsonl';
@@ -1649,7 +1681,7 @@ final class PushEndpointsTest extends TestCase {
             }
             $this->assertSame(
                 [
-                    'phase' => 'completing',
+                    'phase' => 'removing',
                     'files_done' => 2,
                     'files_total' => 2,
                 ],
@@ -2801,7 +2833,7 @@ final class PushEndpointsTest extends TestCase {
             . "Content-Length: 0\r\n\r\n\r\n"
             . '--' . $boundary . "--\r\n";
         $this->sendPostAndDiscardResponse(
-            $this->remote_reprint_api_url . '&endpoint=push_upload&push_session_id=' . $state['push_session_id'],
+            $this->remote_reprint_api_url . '&endpoint=push_upload&push_session_id=' . $state['push_session_id'] . '&ownership_epoch=1',
             'multipart/mixed; boundary=' . $boundary,
             $delete_body
         );
@@ -3047,7 +3079,7 @@ final class PushEndpointsTest extends TestCase {
             }
         ));
         $this->assertNotEmpty($files_push_lines);
-        $this->assertStringContainsString('COMPLETE files-push | phase=completing', $audit);
+        $this->assertStringContainsString('COMPLETE files-push | phase=removing', $audit);
         preg_match_all('/PHASE files-push .* from=([^ ]+) \| to=([^ ]+)/', $audit, $phase_matches);
         $phase_transitions = array_map(
             static function (string $from, string $to): string {
@@ -3538,9 +3570,10 @@ final class PushEndpointsTest extends TestCase {
         string $push_session_id,
         string $boundary,
         string $multipart_body,
-        string $trailing_bytes = ''
+        string $trailing_bytes = '',
+        int $ownership_epoch = 1
     ): array {
-        $request_url = $remote_reprint_api_url . '&endpoint=push_upload&push_session_id=' . $push_session_id;
+        $request_url = $remote_reprint_api_url . '&endpoint=push_upload&push_session_id=' . $push_session_id . '&ownership_epoch=' . $ownership_epoch;
         $url = parse_url($request_url);
         $this->assertIsArray($url);
         $this->assertSame('http', $url['scheme'] ?? null);
@@ -4032,7 +4065,7 @@ final class PushEndpointsTest extends TestCase {
      */
     private function sendUploadRequest(MultipartPushStreamClient $client, string $push_session_id, array $parts): array
     {
-        $this->assertTrue($client->start_upload_request($push_session_id));
+        $this->assertTrue($client->start_upload_request($push_session_id, 1));
         foreach ($parts as $part) {
             $client->send_part($part);
         }
@@ -4108,7 +4141,8 @@ final class PushEndpointsTest extends TestCase {
     ): array {
         $url = $this->remote_reprint_api_url
             . '&endpoint=' . rawurlencode($endpoint)
-            . '&push_session_id=' . rawurlencode($push_session_id);
+            . '&push_session_id=' . rawurlencode($push_session_id)
+            . '&ownership_epoch=1';
         $curl_headers = [];
         if ($content_type !== null) {
             $curl_headers[] = 'Content-Type: ' . $content_type;
