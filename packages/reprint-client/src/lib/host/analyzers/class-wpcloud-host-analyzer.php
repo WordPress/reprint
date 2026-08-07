@@ -1,4 +1,7 @@
 <?php
+
+use function WordPress\Filesystem\wp_join_unix_paths;
+
 /**
  * Host analyzer for WP Cloud (wpcom) sites.
  *
@@ -31,7 +34,7 @@ class WpcloudHostAnalyzer implements HostAnalyzer
         // WP Cloud sites have a __wp__ symlink in the document root pointing
         // to the WordPress core installation.
         if (is_string($doc_root) && $doc_root !== '') {
-            $wp_dir = rtrim($doc_root, '/') . '/__wp__';
+            $wp_dir = wp_join_unix_paths($doc_root, '__wp__');
             $dir_checks = $preflight_data['filesystem']['directories'] ?? [];
             foreach ($dir_checks as $check) {
                 $path = $check['path'] ?? '';
@@ -46,7 +49,7 @@ class WpcloudHostAnalyzer implements HostAnalyzer
         // WP Cloud typically has WordPress installed at doc_root/__wp__/.
         $wp_roots = $preflight_data['wp_detect']['roots'] ?? [];
         if (is_string($doc_root) && $doc_root !== '') {
-            $wp_subdir = rtrim($doc_root, '/') . '/__wp__';
+            $wp_subdir = wp_join_unix_paths($doc_root, '__wp__');
             foreach ($wp_roots as $root) {
                 $path = $root['path'] ?? '';
                 if ($path === $wp_subdir) {
