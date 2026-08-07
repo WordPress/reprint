@@ -294,7 +294,18 @@ export function runImporter(url, outputDir, command, options = {}) {
             // No state file or invalid JSON — need preflight
         }
         if (needsPreflight) {
-            const preflightResult = runImporterOnce('preflight');
+            let preflightResult;
+            let preflightAttempts = 0;
+            do {
+                preflightResult = runImporterOnce('preflight');
+                preflightAttempts += 1;
+                // Preflight is read-only. Retry only when cURL received no HTTP
+                // response, which is the transient PHP-FPM stall seen in CI.
+            } while (
+                preflightResult.exitCode !== 0 &&
+                preflightAttempts < 3 &&
+                preflightResult.stdout.includes('"http_code":0')
+            );
             if (preflightResult.exitCode !== 0) {
                 return preflightResult;
             }
