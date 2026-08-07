@@ -33,6 +33,20 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertStringContainsString('endpoint-handlers-loaded', $result['output']);
     }
 
+    public function testNormalizePathListKeepsTheFilesystemRoot(): void
+    {
+        $export_path = realpath(self::EXPORT_PATH);
+        $this->assertNotFalse($export_path, 'export.php must exist');
+
+        $result = $this->runPhpCode(
+            "<?php\nrequire " . var_export($export_path, true) . ";\n"
+            . "echo json_encode(normalize_path_list(['/']), JSON_UNESCAPED_SLASHES);\n"
+        );
+
+        $this->assertSame(0, $result['status'], $result['output']);
+        $this->assertSame('["/"]', trim($result['output']));
+    }
+
     public function testPluginRuntimeLoaderSkipsAutoloadAlreadyLoadedThroughSymlinkedPluginDirectory(): void
     {
         $tmp_dir = sys_get_temp_dir() . '/export-runtime-loader-test-' . uniqid('', true);

@@ -733,7 +733,7 @@ function normalize_path_list(array $paths): array
         }
         $real = realpath($path);
         $final = $real !== false ? $real : $path;
-        $final = rtrim($final, "/");
+        $final = $final === "/" ? "/" : rtrim($final, "/");
         if ($final === "") {
             continue;
         }
