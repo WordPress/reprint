@@ -4876,15 +4876,18 @@ class ImportClient
     }
 
     /**
-     * Clean a path value from preflight data: trim, strip trailing slash.
-     * Returns null if the value is not a non-empty string.
+     * Clean a path value from preflight data.
+     *
+     * Blank and non-string values become null. Other paths lose trailing
+     * slashes, except that the filesystem root remains `/` rather than an
+     * empty path.
      */
     private function clean_preflight_path($value): ?string
     {
         if (!is_string($value) || trim($value) === "") {
             return null;
         }
-        return rtrim($value, "/");
+        return rtrim($value, "/") ?: "/";
     }
 
     /**
@@ -9086,7 +9089,9 @@ class ImportClient
             $resolved = $value . substr($resolved, strlen($token));
         }
 
-        $resolved = rtrim($resolved, "/");
+        if ($resolved !== "") {
+            $resolved = rtrim($resolved, "/") ?: "/";
+        }
         assert_valid_path($resolved, "path \"{$raw}\"");
 
         return $resolved;
@@ -9915,9 +9920,9 @@ class ImportClient
         }
         $dirs = [];
         foreach ($roots as $root) {
-            $path = $root["path"] ?? null;
-            if (is_string($path) && $path !== "") {
-                $dirs[] = rtrim($path, "/");
+            $path = $this->clean_preflight_path($root["path"] ?? null);
+            if ($path !== null) {
+                $dirs[] = $path;
             }
         }
         $dirs = array_values(array_unique($dirs));
@@ -9982,12 +9987,16 @@ class ImportClient
 
         // Collect extra paths that may live outside the wp_detect roots.
         $extra_paths = [
-            "document_root" => rtrim($state->get('preflight.runtime.document_root'), "/"),
-            "content_dir" => rtrim($state->get('preflight.database.wp.paths_urls.content_dir') ?? "", "/"),
+            "document_root" => $this->clean_preflight_path(
+                $state->get('preflight.runtime.document_root')
+            ),
+            "content_dir" => $this->clean_preflight_path(
+                $state->get('preflight.database.wp.paths_urls.content_dir')
+            ),
         ];
 
         if ($this->extra_directory !== null && $this->extra_directory !== "") {
-            $extra_paths["extra_directory"] = rtrim($this->extra_directory, "/");
+            $extra_paths["extra_directory"] = rtrim($this->extra_directory, "/") ?: "/";
         }
 
         // Ensure every --remap source is enumerated — including plugins or
@@ -10014,7 +10023,7 @@ class ImportClient
         }
 
         foreach ($extra_paths as $label => $path) {
-            if ($path === "") {
+            if ($path === null || $path === "") {
                 continue;
             }
             // Check if this path is already covered by an existing dir.
