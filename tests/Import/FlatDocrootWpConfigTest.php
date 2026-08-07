@@ -135,6 +135,46 @@ class FlatDocrootWpConfigTest extends TestCase
         );
     }
 
+    public function testFlattensFilesystemRootAbspath(): void
+    {
+        mkdir($this->fsRoot . '/wp-admin', 0755, true);
+        mkdir($this->fsRoot . '/wp-includes', 0755, true);
+        mkdir($this->fsRoot . '/wp-content', 0755, true);
+        file_put_contents($this->fsRoot . '/wp-load.php', '<?php // wp-load at root');
+        file_put_contents($this->fsRoot . '/wp-content/theme.txt', 'theme');
+
+        $this->writeState([
+            'preflight' => [
+                'data' => [
+                    'database' => [
+                        'wp' => [
+                            'table_prefix' => 'wp_',
+                            'paths_urls' => [
+                                'abspath' => '/',
+                                'wp_admin_path' => '/wp-admin',
+                                'wp_includes_path' => '/wp-includes',
+                                'content_dir' => '/wp-content',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $flattenTo = $this->tempDir . '/flat';
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->callPrivate($client, 'run_flat_document_root', [
+            ['flatten_to' => $flattenTo, 'force' => false],
+        ]);
+
+        $this->assertTrue(is_link($flattenTo . '/wp-load.php'));
+        $this->assertTrue(is_link($flattenTo . '/wp-admin'));
+        $this->assertTrue(is_link($flattenTo . '/wp-includes'));
+        $this->assertTrue(is_link($flattenTo . '/wp-content'));
+        $this->assertSame('theme', file_get_contents($flattenTo . '/wp-content/theme.txt'));
+    }
+
     // ---- helpers ----
 
     private function writeState(array $state): void

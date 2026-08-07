@@ -4511,7 +4511,7 @@ class ImportClient
             );
         }
 
-        $flatten_to = rtrim($flatten_to, "/");
+        $flatten_to = rtrim($flatten_to, "/") ?: "/";
         $force = $options["force"] ?? false;
 
         // Ensure the filesystem root exists
@@ -4550,7 +4550,7 @@ class ImportClient
         }
 
         // Map remote absolute paths to local absolute paths within filesystem root
-        $local_abspath = $this->filesystem_root . $abspath;
+        $local_abspath = wp_join_unix_paths($this->filesystem_root, $abspath);
         if (!is_dir($local_abspath)) {
             throw new RuntimeException(
                 "WordPress ABSPATH directory not found in filesystem root: {$local_abspath} " .
@@ -4559,22 +4559,22 @@ class ImportClient
         }
 
         $local_wp_admin = $wp_admin_path !== null
-            ? $this->filesystem_root . $wp_admin_path
+            ? wp_join_unix_paths($this->filesystem_root, $wp_admin_path)
             : null;
         $local_wp_includes = $wp_includes_path !== null
-            ? $this->filesystem_root . $wp_includes_path
+            ? wp_join_unix_paths($this->filesystem_root, $wp_includes_path)
             : null;
         $local_content_dir = $content_dir !== null
-            ? $this->filesystem_root . $content_dir
+            ? wp_join_unix_paths($this->filesystem_root, $content_dir)
             : null;
         $local_plugins_dir = $plugins_dir !== null
-            ? $this->filesystem_root . $plugins_dir
+            ? wp_join_unix_paths($this->filesystem_root, $plugins_dir)
             : null;
         $local_mu_plugins_dir = $mu_plugins_dir !== null
-            ? $this->filesystem_root . $mu_plugins_dir
+            ? wp_join_unix_paths($this->filesystem_root, $mu_plugins_dir)
             : null;
         $local_uploads_basedir = $uploads_basedir !== null
-            ? $this->filesystem_root . $uploads_basedir
+            ? wp_join_unix_paths($this->filesystem_root, $uploads_basedir)
             : null;
 
         // Determine which components are "detached" — located outside
@@ -4583,9 +4583,9 @@ class ImportClient
         // differs from the ABSPATH/wp-admin or ABSPATH/wp-includes path
         // (e.g. WP Cloud where they live behind __wp__/).
         $wp_admin_detached = $wp_admin_path !== null
-            && $wp_admin_path !== $abspath . "/wp-admin";
+            && $wp_admin_path !== wp_join_unix_paths($abspath, "wp-admin");
         $wp_includes_detached = $wp_includes_path !== null
-            && $wp_includes_path !== $abspath . "/wp-includes";
+            && $wp_includes_path !== wp_join_unix_paths($abspath, "wp-includes");
         $content_detached = $content_dir !== null
             && (
                 $content_dir === $abspath
@@ -4683,8 +4683,8 @@ class ImportClient
                 continue;
             }
 
-            $source = $local_abspath . "/" . $entry;
-            $target = $flatten_to . "/" . $entry;
+            $source = wp_join_unix_paths($local_abspath, $entry);
+            $target = wp_join_unix_paths($flatten_to, $entry);
             $this->flatten_place_symlink(
                 $source,
                 $target,
@@ -4700,7 +4700,7 @@ class ImportClient
         if ($wp_admin_detached && $local_wp_admin !== null && is_dir($local_wp_admin)) {
             $this->flatten_place_symlink(
                 $local_wp_admin,
-                $flatten_to . "/wp-admin",
+                wp_join_unix_paths($flatten_to, "wp-admin"),
                 $force,
                 $created,
                 $refreshed,
@@ -4710,7 +4710,7 @@ class ImportClient
         if ($wp_includes_detached && $local_wp_includes !== null && is_dir($local_wp_includes)) {
             $this->flatten_place_symlink(
                 $local_wp_includes,
-                $flatten_to . "/wp-includes",
+                wp_join_unix_paths($flatten_to, "wp-includes"),
                 $force,
                 $created,
                 $refreshed,
@@ -4723,10 +4723,14 @@ class ImportClient
         // wp-load.php checks dirname(ABSPATH) as a fallback. On WP Cloud
         // the typical layout is /srv/htdocs/wp-config.php with ABSPATH at
         // /srv/htdocs/wordpress/, so Phase 1's ABSPATH scan won't find it.
-        $wp_config_in_flatten = $flatten_to . "/wp-config.php";
+        $wp_config_in_flatten = wp_join_unix_paths($flatten_to, "wp-config.php");
         if (!file_exists($wp_config_in_flatten)) {
             $parent_of_abspath = dirname($abspath);
-            $local_parent_wp_config = $this->filesystem_root . $parent_of_abspath . "/wp-config.php";
+            $local_parent_wp_config = wp_join_unix_paths(
+                $this->filesystem_root,
+                $parent_of_abspath,
+                "wp-config.php"
+            );
             if (file_exists($local_parent_wp_config)) {
                 $this->flatten_place_symlink(
                     $local_parent_wp_config,
@@ -4738,7 +4742,7 @@ class ImportClient
                 );
                 $this->audit_log(
                     "FLAT-DOCUMENT-ROOT | Symlinked wp-config.php from ABSPATH parent: " .
-                        "{$parent_of_abspath}/wp-config.php",
+                        wp_join_unix_paths($parent_of_abspath, "wp-config.php"),
                 );
             }
         }
@@ -4748,7 +4752,7 @@ class ImportClient
         if ($need_exploded_content && $local_content_dir !== null) {
             // wp-content must be a real directory because some sub-components
             // (plugins, mu-plugins, or uploads) live outside content_dir.
-            $wp_content_target = $flatten_to . "/wp-content";
+            $wp_content_target = wp_join_unix_paths($flatten_to, "wp-content");
             $this->flatten_ensure_real_directory(
                 $wp_content_target,
                 $force,
@@ -4777,8 +4781,8 @@ class ImportClient
                     if (isset($skip_from_content[$entry])) {
                         continue;
                     }
-                    $source = $local_content_dir . "/" . $entry;
-                    $target = $wp_content_target . "/" . $entry;
+                    $source = wp_join_unix_paths($local_content_dir, $entry);
+                    $target = wp_join_unix_paths($wp_content_target, $entry);
                     $this->flatten_place_symlink(
                         $source,
                         $target,
@@ -4792,7 +4796,7 @@ class ImportClient
 
             // Symlink detached sub-components into wp-content
             if ($plugins_detached && is_dir($local_plugins_dir)) {
-                $target = $wp_content_target . "/plugins";
+                $target = wp_join_unix_paths($wp_content_target, "plugins");
                 $this->flatten_place_symlink(
                     $local_plugins_dir,
                     $target,
@@ -4803,7 +4807,7 @@ class ImportClient
                 );
             }
             if ($mu_plugins_detached && is_dir($local_mu_plugins_dir)) {
-                $target = $wp_content_target . "/mu-plugins";
+                $target = wp_join_unix_paths($wp_content_target, "mu-plugins");
                 $this->flatten_place_symlink(
                     $local_mu_plugins_dir,
                     $target,
@@ -4814,7 +4818,7 @@ class ImportClient
                 );
             }
             if ($uploads_detached && is_dir($local_uploads_basedir)) {
-                $target = $wp_content_target . "/uploads";
+                $target = wp_join_unix_paths($wp_content_target, "uploads");
                 $this->flatten_place_symlink(
                     $local_uploads_basedir,
                     $target,
@@ -4828,7 +4832,7 @@ class ImportClient
             // Content dir is outside ABSPATH but sub-components are inside it.
             // Simple case: just symlink the whole content_dir as wp-content.
             if (is_dir($local_content_dir)) {
-                $target = $flatten_to . "/wp-content";
+                $target = wp_join_unix_paths($flatten_to, "wp-content");
                 $this->flatten_place_symlink(
                     $local_content_dir,
                     $target,
