@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../client/cli.php';
+require_once __DIR__ . '/../packages/reprint-client/bin/reprint-client';
 require_once __DIR__ . '/../packages/reprint-client/src/lib/upload/class-multipart-push-stream-client.php';
 
 final class PushEndpointsTest extends TestCase {
@@ -2876,7 +2876,7 @@ final class PushEndpointsTest extends TestCase {
         $process = proc_open(
             [
                 PHP_BINARY,
-                __DIR__ . '/../client/cli.php',
+                __DIR__ . '/../packages/reprint-client/bin/reprint-client',
                 'files-diff',
                 $this->remote_reprint_api_url,
                 '--state-dir=' . $state_directory,
@@ -3328,7 +3328,7 @@ final class PushEndpointsTest extends TestCase {
             $command[] = $name . '=' . $value;
         }
         $command = array_merge($command, [
-            __DIR__ . '/../client/cli.php',
+            __DIR__ . '/../packages/reprint-client/bin/reprint-client',
             'files-push',
             $this->remote_reprint_api_url,
             '--state-dir=' . $state_directory,

@@ -5,10 +5,10 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The rename to client/ and bin/reprint-client kept compatibility entry
- * points behind the old names. Each one must stay executable and produce
- * exactly the output of its canonical counterpart, and the install-exporter
- * command alias must render the same guide as install-server.
+ * The reprint-importer → reprint-client rename kept a compatibility binary
+ * behind the old name. It must stay executable and produce exactly the
+ * output of the canonical binary, and the install-exporter command alias
+ * must render the same guide as install-server.
  */
 class CompatibilityEntryPointsTest extends TestCase
 {
@@ -23,27 +23,13 @@ class CompatibilityEntryPointsTest extends TestCase
         return [implode("\n", $output_lines), $exit_code];
     }
 
-    public function testImporterShimMatchesClientEntryPoint(): void
-    {
-        $shim = __DIR__ . '/../../importer/import.php';
-        $canonical = __DIR__ . '/../../client/cli.php';
-
-        $this->assertTrue(is_executable($shim), 'importer/import.php must stay executable');
-
-        [$shim_output, $shim_exit] = $this->runCli($shim, ['--help']);
-        [$canonical_output, $canonical_exit] = $this->runCli($canonical, ['--help']);
-
-        $this->assertSame($canonical_output, $shim_output);
-        $this->assertSame($canonical_exit, $shim_exit);
-        $this->assertStringContainsString('Usage: reprint', $shim_output);
-    }
-
     public function testReprintImporterBinMatchesReprintClientBin(): void
     {
         $legacy_bin = __DIR__ . '/../../packages/reprint-client/bin/reprint-importer';
         $canonical_bin = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
         $this->assertTrue(is_executable($legacy_bin), 'bin/reprint-importer must stay executable');
+        $this->assertTrue(is_executable($canonical_bin), 'bin/reprint-client must stay executable');
 
         [$legacy_output, $legacy_exit] = $this->runCli($legacy_bin, ['--help']);
         [$canonical_output, $canonical_exit] = $this->runCli($canonical_bin, ['--help']);
@@ -55,7 +41,7 @@ class CompatibilityEntryPointsTest extends TestCase
 
     public function testInstallExporterAliasRendersTheInstallServerGuide(): void
     {
-        $entry = __DIR__ . '/../../client/cli.php';
+        $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
         [$canonical_output, $canonical_exit] = $this->runCli($entry, ['install-server']);
         [$alias_output, $alias_exit] = $this->runCli($entry, ['install-exporter']);
@@ -68,7 +54,7 @@ class CompatibilityEntryPointsTest extends TestCase
 
     public function testMainHelpPresentsInstallServerWithoutTheLegacyAlias(): void
     {
-        [$help_output] = $this->runCli(__DIR__ . '/../../client/cli.php', ['--help']);
+        [$help_output] = $this->runCli(__DIR__ . '/../../packages/reprint-client/bin/reprint-client', ['--help']);
 
         $this->assertStringContainsString('install-server', $help_output);
         $this->assertStringNotContainsString('install-exporter', $help_output);
