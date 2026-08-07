@@ -304,8 +304,8 @@ class Pull
                 $state->files_pull_path_selection_fingerprint = null;
                 $this->client->save_state();
                 foreach ([
-                    "{$pull_state_directory}/remote-index.next.jsonl",
-                    "{$pull_state_directory}/fetch-list.jsonl",
+                    wp_join_unix_paths($pull_state_directory, 'remote-index.next.jsonl'),
+                    wp_join_unix_paths($pull_state_directory, 'fetch-list.jsonl'),
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -323,9 +323,10 @@ class Pull
                 $state->db_index = new DatabaseTableIndexState();
                 $this->client->save_state();
                 foreach ([
-                    "{$state_dir}/db.sql",
-                    "{$state_dir}/db-session-setup.sql",
-                    "{$state_dir}/db-tables.jsonl",
+                    wp_join_unix_paths($state_dir, 'db.sql'),
+                    wp_join_unix_paths($state_dir, 'db-session-setup.sql'),
+                    wp_join_unix_paths($state_dir, 'db-tables.jsonl'),
+                    wp_join_unix_paths($pull_state_directory, 'domains.json'),
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -832,6 +833,7 @@ class Pull
             $paths[] = wp_join_unix_paths($state_dir, 'db.sql');
             $paths[] = wp_join_unix_paths($state_dir, 'db-session-setup.sql');
             $paths[] = wp_join_unix_paths($state_dir, 'db-tables.jsonl');
+            $paths[] = wp_join_unix_paths($pull_state_directory, 'domains.json');
         }
 
         foreach ($paths as $path) {
