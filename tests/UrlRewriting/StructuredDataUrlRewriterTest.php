@@ -48,7 +48,7 @@ class StructuredDataUrlRewriterTest extends TestCase
     {
         $rewriter = $this->createRewriter();
         $input = '<!-- wp:image {"src":"https://old-site.com/img.jpg"} --><figure><img src="https://old-site.com/img.jpg"/></figure><!-- /wp:image -->';
-        $result = $rewriter->rewrite($input);
+        $result = $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
         $this->assertStringNotContainsString('old-site.com', $result);
         $this->assertStringContainsString('new-site.com', $result);
     }
@@ -131,13 +131,12 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame('https://new-site.com/api', json_decode($result, true));
     }
 
-    public function testJsonOutputUsesUnescapedSlashes(): void
+    public function testJsonRewritePreservesUnescapedSlashes(): void
     {
         $rewriter = $this->createRewriter();
         $input = '{"url":"https://old-site.com/path"}';
         $result = $rewriter->rewrite($input);
-        // Should not contain escaped slashes like \/
-        $this->assertStringNotContainsString('\\/', $result);
+        $this->assertSame('{"url":"https://new-site.com/path"}', $result);
     }
 
     // --- Serialized PHP ---
@@ -197,16 +196,12 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($input, $result, 'Serialized PHP with no matching URLs should be byte-identical');
     }
 
-    public function testMalformedSerializedPhpFallsBackToText(): void
+    public function testMalformedSerializedPhpRemainsUnchanged(): void
     {
         $rewriter = $this->createRewriter();
-        // SerializedPhpFormat::is_serialized() triggers on 's:...' ending with ';'
-        // but this is truncated/malformed — the walker will return false,
-        // falling back to text rewriting
         $input = 's:999:"https://old-site.com";';
         $result = $rewriter->rewrite($input);
-        // Should have attempted text rewriting, replacing the URL
-        $this->assertStringContainsString('new-site.com', $result);
+        $this->assertSame($input, $result);
     }
 
     // --- Base64 ---
@@ -384,7 +379,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $result = $rewriter->rewrite_known_block_markup_value($input);
 
         $this->assertStringContainsString('https://new-site.com/literal', $result);
-        $this->assertStringContainsString('https://new-site.com/case-variant', $result);
+        $this->assertStringContainsString('HTTPS://new-site.com/case-variant', $result);
         $this->assertStringNotContainsString('old-site.com', strtolower($result));
     }
 
@@ -424,7 +419,10 @@ class StructuredDataUrlRewriterTest extends TestCase
 
         $result = $rewriter->rewrite_known_block_markup_value($input);
 
-        $this->assertStringContainsString('https:\/\/new.example\/unicode', $result);
+        $this->assertSame(
+            '<!-- wp:image {"src":"https://new.example/unicode"} -->',
+            $result
+        );
         $this->assertStringNotContainsString('bücher.example', $result);
     }
 
@@ -438,20 +436,22 @@ class StructuredDataUrlRewriterTest extends TestCase
         $result = $rewriter->rewrite_known_block_markup_value($input);
 
         $this->assertStringContainsString('https:\/\/new-site.com\/img.jpg', $result);
-        $this->assertStringContainsString('src="https://new-site.com/img.jpg"', $result);
+        $this->assertStringContainsString('src="HTTPS://new-site.com/img.jpg"', $result);
         $this->assertStringNotContainsString('old-site.com', strtolower($result));
     }
 
     public function testRewriteCacheSeparatesPlainTextAndBlockMarkupSemantics(): void
     {
-        $rewriter = $this->createRewriter();
-        $input = '<div data-note="https://old-site.com/not-a-url-attribute">Content</div>';
+        $rewriter = $this->createRewriter([
+            'https://old-site.com/old' => 'https://new-site.com/new',
+        ]);
+        $input = '<!-- wp:image {"url":"/old/page"} /-->';
 
         $plain_result = $rewriter->rewrite($input);
         $block_result = $rewriter->rewrite($input, 'block_markup');
 
-        $this->assertStringContainsString('https://new-site.com/not-a-url-attribute', $plain_result);
-        $this->assertSame($input, $block_result);
+        $this->assertSame($input, $plain_result);
+        $this->assertSame('<!-- wp:image {"url":"/new/page"} /-->', $block_result);
     }
 
     // --- Content type hint: null (default) uses plain text URL scanning ---
@@ -459,7 +459,7 @@ class StructuredDataUrlRewriterTest extends TestCase
     public function testDefaultHintUsesPlainTextUrlScanning(): void
     {
         $rewriter = $this->createRewriter();
-        // A plain URL string is handled by URLInTextProcessor.
+        // A plain URL string uses the literal fallback.
         $input = 'Visit https://old-site.com/about for more.';
         $result = $rewriter->rewrite($input);
         $this->assertStringContainsString('https://new-site.com/about', $result);

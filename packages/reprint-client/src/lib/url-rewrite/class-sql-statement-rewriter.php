@@ -10,10 +10,9 @@
  * Column-aware: for each FROM_BASE64() match, determines which column it belongs
  * to and passes the appropriate content type hint to StructuredDataUrlRewriter.
  * WordPress core columns known to contain block markup (post_content, comment_content,
- * etc.) get the 'block_markup' hint so BlockMarkupUrlProcessor handles HTML
- * attributes, block comment JSON, and CSS url(). All other columns default to
- * auto-detect with URLInTextProcessor for leaf text, which is simpler and more
- * predictable for columns that contain serialized PHP, JSON, or plain strings.
+ * etc.) get the 'block_markup' hint so parser-owned block comment JSON, markup,
+ * and CSS URL spans can be rewritten. All other columns default to structured
+ * auto-detection, with non-cascading literal replacement for ambiguous text.
  *
  * Column resolution walks the lexer output directly. Both INSERT and UPDATE
  * statements emitted by MySQLDumpProducer follow a constrained set of shapes
@@ -30,10 +29,10 @@ class SqlStatementRewriter
     private array $db_columns_with_block_markup;
 
     /**
-     * WordPress core columns that contain block markup and benefit from
-     * BlockMarkupUrlProcessor over plain-text URL scanning. Keyed by table suffix
-     * (without prefix) — the constructor prepends the actual table_prefix to
-     * build full table names for exact matching.
+     * WordPress core columns that contain block markup and benefit from the
+     * block-aware rewrite path. Keyed by table suffix (without prefix) — the
+     * constructor prepends the actual table_prefix to build full table names
+     * for exact matching.
      *
      * @TODO: Make this extensible, find a way to treat the relevant columns from plugin tables.
      */
@@ -82,10 +81,10 @@ class SqlStatementRewriter
     /**
      * Rewrite URLs in a SQL statement.
      *
-     * NOTE: base64-encoded values that do not contain the string "http" are
-     * skipped entirely — column resolution and the StructuredDataUrlRewriter
-     * pipeline are never run for them. This means URLs stored in base64
-     * without an http/https scheme will not be rewritten.
+     * FROM_BASE64() values are decoded before source filtering because JSON,
+     * CSS, and HTML can spell every source byte through escapes or character
+     * references. Filtering the encoded statement cannot safely rule those
+     * representations out.
      *
      * @param string $sql The SQL statement.
      * @return string The modified SQL statement.
@@ -94,41 +93,6 @@ class SqlStatementRewriter
     {
         // Quick check: if no base64 values, nothing to rewrite
         if (strpos($sql, "FROM_BASE64(") === false) {
-            return $sql;
-        }
-
-        // Quick check: if none of the base64 encodings of "http" appear in
-        // the statement, no value can carry a rewritable URL.
-        //
-        // base64 encodes 3 source bytes into 4 output chars, so the encoding
-        // of "http://" or "https://" depends on which byte boundary the
-        // scheme starts on. Across both schemes and all three alignments,
-        // the encoded payload always contains at least one of these
-        // substrings:
-        //
-        //   aHR0  encodes "htt"  — "http" / "https" at offset 0 mod 3
-        //   dHA6  encodes "tp:"  — "http://" at offset 1 mod 3
-        //   dHBz  encodes "tps"  — "https://" at offset 1 mod 3
-        //   dHRw  encodes "ttp"  — "http"/"https" at offset 2 mod 3
-        //
-        // If none appear in the SQL, no FROM_BASE64() payload can decode to
-        // a string containing "http", so the per-value strpos('http') check
-        // inside rewrite_with_scanner() would short-circuit every value
-        // anyway. Skipping the value-walk altogether is ~280× faster on
-        // dumps that carry no URLs (microbench: 3.7 s → 13 ms on a 30k-post,
-        // 15 MB dump). On URL-heavy dumps the four strpos calls hit on the
-        // first match and stay within measurement noise.
-        //
-        // False positives are tolerable — they cost an extra rewrite pass
-        // that finds nothing. False negatives would silently leave URLs
-        // un-rewritten; the four prefixes above are the minimum set that
-        // covers every alignment×scheme combination, so no real URL escapes.
-        if (
-            strpos($sql, 'aHR0') === false
-            && strpos($sql, 'dHA6') === false
-            && strpos($sql, 'dHBz') === false
-            && strpos($sql, 'dHRw') === false
-        ) {
             return $sql;
         }
 
@@ -185,11 +149,7 @@ class SqlStatementRewriter
 
     private function rewrite_value_for_column(string $value, string $table, ?string $column): string
     {
-        if (strpos($value, 'http') === false) {
-            return $value;
-        }
-
-        if (!$this->url_rewriter->value_might_contain_source_domain($value)) {
+        if (!$this->value_might_contain_rewritable_reference($value)) {
             return $value;
         }
 
@@ -197,10 +157,9 @@ class SqlStatementRewriter
             ? $this->get_content_type($table, $column)
             : null;
 
-        // Rewrite URLs in the value. Known block-markup columns go through
-        // the structured block parser so alternate URL spellings (for example
-        // escaped JSON, uppercase schemes/hosts, and IDNs) are handled by the
-        // URL model instead of byte-level replacement.
+        // Known block-markup columns use their parser-owned spans. Other
+        // values retain the structured rewriter's complete-document detection
+        // and literal fallback.
         return $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
             ? $this->url_rewriter->rewrite_known_block_markup_value($value)
             : $this->url_rewriter->rewrite($value, $content_type);
@@ -222,19 +181,7 @@ class SqlStatementRewriter
     private function rewrite_with_scanner(Base64ValueScanner $scanner, ?array $value_to_column_map): string
     {
         while ($scanner->next_value()) {
-            if (!$scanner->encoded_payload_could_contain_http_scheme()) {
-                continue;
-            }
-
             $value = $scanner->get_value();
-
-            if (strpos($value, 'http') === false) {
-                continue;
-            }
-
-            if (!$this->url_rewriter->value_might_contain_source_domain($value)) {
-                continue;
-            }
 
             // Determine content type hint for this column.
             $column_name = null;
@@ -258,6 +205,18 @@ class SqlStatementRewriter
         }
 
         return $scanner->get_result();
+    }
+
+    /**
+     * Return whether a decoded value may contain a configured URL reference.
+     *
+     * A slash also admits root-relative references for origin mappings whose
+     * source path is empty, where no source domain or path bytes are present.
+     */
+    private function value_might_contain_rewritable_reference(string $value): bool
+    {
+        return $this->url_rewriter->value_might_contain_source_domain($value)
+            || strpos($value, '/') !== false;
     }
 
     /**
@@ -354,7 +313,7 @@ class SqlStatementRewriter
     private static function walk_insert(array $tokens, int $token_count, int $cursor): ?array
     {
         // Step past the leading INSERT or REPLACE.
-        $cursor++;
+        ++$cursor;
 
         // Optional priority + IGNORE modifiers in any order MySQL accepts.
         // An unrecognised modifier drops us out of the fast path.
@@ -366,7 +325,7 @@ class SqlStatementRewriter
                 || $modifier_id === WP_MySQL_Lexer::HIGH_PRIORITY_SYMBOL
                 || $modifier_id === WP_MySQL_Lexer::IGNORE_SYMBOL
             ) {
-                $cursor++;
+                ++$cursor;
                 continue;
             }
             break;
@@ -376,7 +335,7 @@ class SqlStatementRewriter
         if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::INTO_SYMBOL) {
             return null;
         }
-        $cursor++;
+        ++$cursor;
 
         // Table identifier. Reject qualified names — `db`.`t` would mean we
         // got the database wrong, and the column_map keys are matched by
@@ -391,7 +350,7 @@ class SqlStatementRewriter
         if ($table_name === null) {
             return null;
         }
-        $cursor++;
+        ++$cursor;
         if ($cursor < $token_count && $tokens[$cursor]->id === WP_MySQL_Lexer::DOT_SYMBOL) {
             return null;
         }
@@ -401,7 +360,7 @@ class SqlStatementRewriter
         if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
             return null;
         }
-        $cursor++;
+        ++$cursor;
 
         $column_names = [];
         while ($cursor < $token_count && $tokens[$cursor]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
@@ -413,9 +372,9 @@ class SqlStatementRewriter
                 return null;
             }
             $column_names[] = $column_name;
-            $cursor++;
+            ++$cursor;
             if ($cursor < $token_count && $tokens[$cursor]->id === WP_MySQL_Lexer::COMMA_SYMBOL) {
-                $cursor++;
+                ++$cursor;
                 continue;
             }
             break;
@@ -423,7 +382,7 @@ class SqlStatementRewriter
         if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
             return null;
         }
-        $cursor++;
+        ++$cursor;
 
         // VALUES (or its singular alias VALUE).
         if (
@@ -435,14 +394,14 @@ class SqlStatementRewriter
         ) {
             return null;
         }
-        $cursor++;
+        ++$cursor;
 
         $column_count = count($column_names);
         $column_map = [];
         while ($cursor < $token_count) {
             // Optional ROW prefix (MySQL 8.0+ explicit row constructor).
             if ($tokens[$cursor]->id === WP_MySQL_Lexer::ROW_SYMBOL) {
-                $cursor++;
+                ++$cursor;
                 if ($cursor >= $token_count) {
                     return null;
                 }
@@ -451,7 +410,7 @@ class SqlStatementRewriter
             if ($tokens[$cursor]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
                 return null;
             }
-            $cursor++; // step past `(`
+            ++$cursor; // step past `(`
 
             $column_index_in_row = 0;
             $expression_starts_at_token = $cursor;
@@ -460,7 +419,7 @@ class SqlStatementRewriter
             while ($cursor < $token_count) {
                 $current_token_id = $tokens[$cursor]->id;
                 if ($current_token_id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
-                    $paren_depth_inside_tuple++;
+                    ++$paren_depth_inside_tuple;
                 } elseif ($current_token_id === WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
                     if ($paren_depth_inside_tuple === 0) {
                         if ($column_index_in_row < $column_count && $expression_starts_at_token < $cursor) {
@@ -475,7 +434,7 @@ class SqlStatementRewriter
                         $tuple_was_closed = true;
                         break;
                     }
-                    $paren_depth_inside_tuple--;
+                    --$paren_depth_inside_tuple;
                 } elseif ($current_token_id === WP_MySQL_Lexer::COMMA_SYMBOL && $paren_depth_inside_tuple === 0) {
                     if ($column_index_in_row < $column_count && $expression_starts_at_token < $cursor) {
                         $expression_first_token = $tokens[$expression_starts_at_token];
@@ -486,23 +445,23 @@ class SqlStatementRewriter
                             $column_names[$column_index_in_row],
                         ];
                     }
-                    $column_index_in_row++;
+                    ++$column_index_in_row;
                     $expression_starts_at_token = $cursor + 1;
                 }
-                $cursor++;
+                ++$cursor;
             }
             if (!$tuple_was_closed) {
                 return null;
             }
-            $cursor++; // step past `)`
+            ++$cursor; // step past `)`
 
             // Another tuple, statement terminator, or trailer keyword.
             if ($cursor < $token_count && $tokens[$cursor]->id === WP_MySQL_Lexer::COMMA_SYMBOL) {
-                $cursor++;
+                ++$cursor;
                 continue;
             }
             if ($cursor < $token_count && $tokens[$cursor]->id === WP_MySQL_Lexer::SEMICOLON_SYMBOL) {
-                $cursor++;
+                ++$cursor;
             }
             if ($cursor < $token_count && $tokens[$cursor]->id === WP_MySQL_Lexer::ON_SYMBOL) {
                 // ON DUPLICATE KEY UPDATE … — anything past here is the
@@ -540,7 +499,7 @@ class SqlStatementRewriter
     private static function walk_update(array $tokens, int $token_count, int $cursor): ?array
     {
         // Step past UPDATE.
-        $cursor++;
+        ++$cursor;
 
         while ($cursor < $token_count) {
             $modifier_id = $tokens[$cursor]->id;
@@ -548,7 +507,7 @@ class SqlStatementRewriter
                 $modifier_id === WP_MySQL_Lexer::LOW_PRIORITY_SYMBOL
                 || $modifier_id === WP_MySQL_Lexer::IGNORE_SYMBOL
             ) {
-                $cursor++;
+                ++$cursor;
                 continue;
             }
             break;
@@ -564,7 +523,7 @@ class SqlStatementRewriter
         if ($table_name === null) {
             return null;
         }
-        $cursor++;
+        ++$cursor;
         if ($cursor < $token_count && $tokens[$cursor]->id === WP_MySQL_Lexer::DOT_SYMBOL) {
             return null;
         }
@@ -573,7 +532,7 @@ class SqlStatementRewriter
         if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::SET_SYMBOL) {
             return null;
         }
-        $cursor++;
+        ++$cursor;
 
         // Reject multi-table UPDATEs by refusing anything that looks like a
         // join after the table name. (The walk above already accepts only a
@@ -589,7 +548,7 @@ class SqlStatementRewriter
             if ($assigned_column_name === null) {
                 return null;
             }
-            $cursor++;
+            ++$cursor;
             if ($cursor < $token_count && $tokens[$cursor]->id === WP_MySQL_Lexer::DOT_SYMBOL) {
                 // `t.col = …` form — qualified column ref, give up on the fast
                 // path so the rewriter falls back to plain-text rewriting.
@@ -600,7 +559,7 @@ class SqlStatementRewriter
             if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::EQUAL_OPERATOR) {
                 return null;
             }
-            $cursor++;
+            ++$cursor;
 
             // Walk the expression until comma at depth 0, or a clause keyword.
             $expression_starts_at_token = $cursor;
@@ -608,14 +567,14 @@ class SqlStatementRewriter
             while ($cursor < $token_count) {
                 $current_token_id = $tokens[$cursor]->id;
                 if ($current_token_id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
-                    $paren_depth_in_expression++;
+                    ++$paren_depth_in_expression;
                 } elseif ($current_token_id === WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
                     if ($paren_depth_in_expression === 0) {
                         // Stray `)` at depth 0 means the statement is malformed
                         // or shaped in a way we don't understand.
                         return null;
                     }
-                    $paren_depth_in_expression--;
+                    --$paren_depth_in_expression;
                 } elseif ($paren_depth_in_expression === 0) {
                     if (
                         $current_token_id === WP_MySQL_Lexer::COMMA_SYMBOL
@@ -627,7 +586,7 @@ class SqlStatementRewriter
                         break;
                     }
                 }
-                $cursor++;
+                ++$cursor;
             }
 
             if ($cursor === $expression_starts_at_token) {
@@ -644,7 +603,7 @@ class SqlStatementRewriter
             ];
 
             if ($cursor < $token_count && $tokens[$cursor]->id === WP_MySQL_Lexer::COMMA_SYMBOL) {
-                $cursor++;
+                ++$cursor;
                 continue;
             }
             break;

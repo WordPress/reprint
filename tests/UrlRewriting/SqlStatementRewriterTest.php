@@ -193,6 +193,21 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $values[0]);
     }
 
+    public function testPostContentRootRelativeUrlUsesTargetSubpath(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com' => 'https://new-site.com/subsite',
+        ]);
+        $markup = '<a href="/page">Page</a>';
+        $encoded = base64_encode($markup);
+        $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = $rewriter->rewrite($sql);
+        $values = $this->collectValues($result);
+
+        $this->assertSame(['<a href="/subsite/page">Page</a>'], $values);
+    }
+
     public function testUnknownColumnUsesPlainTextUrlScanning(): void
     {
         $rewriter = $this->createRewriter();
@@ -236,7 +251,7 @@ class SqlStatementRewriterTest extends TestCase
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
         $this->assertStringContainsString('https://new-site.com/literal', $values[0]);
-        $this->assertStringContainsString('https://new-site.com/case-variant', $values[0]);
+        $this->assertStringContainsString('HTTPS://new-site.com/case-variant', $values[0]);
         $this->assertStringNotContainsString('old-site.com', strtolower($values[0]));
     }
 
@@ -288,7 +303,10 @@ class SqlStatementRewriterTest extends TestCase
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
-        $this->assertStringContainsString('https:\/\/new.example\/unicode', $values[0]);
+        $this->assertSame(
+            '<!-- wp:image {"src":"https://new.example/unicode"} -->',
+            $values[0]
+        );
         $this->assertStringNotContainsString('bücher.example', $values[0]);
     }
 
@@ -541,9 +559,8 @@ class SqlStatementRewriterTest extends TestCase
     }
 
     /**
-     * A block comment JSON attribute lets us distinguish block_markup from
-     * plain text rewriting. block_markup parses the JSON inside
-     * <!-- wp:image {"url":"..."} --> and rewrites it with the block parser.
+     * A root-relative block attribute distinguishes block markup from plain
+     * text because only the known block attribute supplies URL context.
      *
      * We use this to prove that "wp_posts".post_content gets block_markup
      * while a spoofed table does NOT.
@@ -551,37 +568,26 @@ class SqlStatementRewriterTest extends TestCase
     public function testBlockMarkupVsPlainTextDistinction(): void
     {
         $rewriter = $this->createRewriter([
-            'https://old-site.com' => 'https://new-longer-domain-site.com',
+            'https://old-site.com/old' => 'https://new-site.com/new',
         ]);
 
-        $block = '<!-- wp:image {"url":"https://old-site.com/img.jpg"} -->'
-               . '<img src="https://old-site.com/img.jpg"/>'
-               . '<!-- /wp:image -->';
+        $block = '<!-- wp:image {"url":"/old/img.jpg"} /-->';
         $encoded = base64_encode($block);
 
-        // wp_posts.post_content → block_markup: rewrites both the JSON
-        // attribute and the <img> src correctly.
+        // wp_posts.post_content receives block URL context.
         $sql_real = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
         $result_real = $rewriter->rewrite($sql_real);
         $values_real = $this->collectValues($result_real);
-        $this->assertStringContainsString('new-longer-domain-site.com/img.jpg', $values_real[0]);
-        // The JSON attribute should still be valid inside the block comment.
-        // The block parser JSON-encodes attribute values, so slashes are escaped.
-        $this->assertStringContainsString(
-            '"url":"https:\/\/new-longer-domain-site.com\/img.jpg"',
-            $values_real[0],
-            'block_markup should correctly rewrite the JSON attribute inside the block comment'
+        $this->assertSame(
+            '<!-- wp:image {"url":"/new/img.jpg"} /-->',
+            $values_real[0]
         );
 
-        // spoofed_posts.post_content → auto-detect (not block_markup): the
-        // column name matches but the table doesn't, so it falls through to
-        // plain-text URL scanning.
+        // The spoofed table receives no block URL context.
         $sql_spoof = "INSERT INTO `spoofed_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
         $result_spoof = $rewriter->rewrite($sql_spoof);
         $values_spoof = $this->collectValues($result_spoof);
-        // The URL is still rewritten (auto-detect handles it). The key point:
-        // the spoofed table was NOT given the block_markup hint.
-        $this->assertStringContainsString('new-longer-domain-site.com', $values_spoof[0]);
+        $this->assertSame($block, $values_spoof[0]);
     }
 
     public function testConsumerHintForUnprefixedPluginTable(): void
