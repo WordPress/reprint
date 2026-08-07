@@ -8,7 +8,7 @@ require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Path selection: the diff must reconcile only within the selected path
- * prefixes. --only scopes the downloaded next remote index, while --exclude
+ * prefixes. --include scopes the downloaded next remote index, while --exclude
  * is applied locally to that index. The delete drains in
  * compare_remote_indexes_and_build_fetch_list() must keep unselected local
  * files and remote index entries while still deleting selected orphans.
@@ -139,9 +139,9 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
     public function testOnlyFilesPrefixDiffKeepsUnselectedAndDeletesSelectedOrphan(): void
     {
         // Remote index (sorted): an unselected entry, a matched selected file,
-        // and a selected orphan absent from the --only next remote index. The
-        // delete drains must reconcile only within the --only file prefixes, so the remote index
-        // accumulates as a union across files-pull --only runs.
+        // and a selected orphan absent from the --include next remote index. The
+        // delete drains must reconcile only within the --include file prefixes, so the remote index
+        // accumulates as a union across files-pull --include runs.
         $this->writeIndex('remote-index.jsonl',
             $this->indexLine('/wp-config.php', 1000, 10)               // unselected
             . $this->indexLine('/wp-content/keep.txt', 1000, 10)       // matched
@@ -227,9 +227,9 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 
     public function testRemoteFollowedPathOutsideOnlyScopeIsFetched(): void
     {
-        // The exporter applies the --only roots before building this index, but
+        // The exporter applies the --include roots before building this index, but
         // following a selected symlink may add its target outside those roots.
-        // The importer must fetch that target while still using --only to scope
+        // The importer must fetch that target while still using --include to scope
         // deletions from the prior remote index.
         $this->writeIndex('remote-index.jsonl', '');
         $this->writeIndex(
@@ -252,8 +252,8 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 
     public function testOnlyRootItselfSurvivesTheDeleteDrains(): void
     {
-        // A next remote index built with --only lists each selected directory's
-        // *contents* but never the directory itself, so the --only roots
+        // A next remote index built with --include lists each selected directory's
+        // *contents* but never the directory itself, so the --include roots
         // always look deleted-on-remote to the diff. The drains must not
         // delete them: that would recursively remove the very directories
         // the user asked to pull, while the matched children keep the

@@ -5,6 +5,9 @@
  * Registry, detection logic, and shared preflight extraction helpers.
  */
 
+use function WordPress\Reprint\Exporter\path_is_within_root;
+use function WordPress\Reprint\Exporter\trim_right_slash;
+
 /**
  * All known host analyzers.
  *
@@ -95,7 +98,10 @@ function extract_php_ini(array $preflight_data): array
 function extract_constants(array $preflight_data): array
 {
     $paths_urls = $preflight_data['database']['wp']['paths_urls'] ?? [];
-    $abspath = rtrim($paths_urls['abspath'] ?? '', '/');
+    $abspath = $paths_urls['abspath'] ?? '';
+    if ($abspath !== '') {
+        $abspath = trim_right_slash($abspath);
+    }
     $content_dir = $paths_urls['content_dir'] ?? '';
 
     $result = [];
@@ -106,7 +112,7 @@ function extract_constants(array $preflight_data): array
     if (
         $content_dir !== ''
         && $abspath !== ''
-        && !\WordPress\Reprint\Exporter\path_is_within_root($content_dir, $abspath)
+        && !path_is_within_root($content_dir, $abspath)
     ) {
         $result['WP_CONTENT_DIR'] = '{fs-root}/wp-content';
     }

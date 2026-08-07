@@ -350,6 +350,21 @@ final class PushSessionTest extends TestCase {
         $this->assertSame($root_session->get_push_directory(), $reopened->get_push_directory());
     }
 
+    public function testRootReprintDirectoryKeepsPushSessionPathsAbsolute(): void {
+        $push_session_id = str_repeat('c', 32);
+        $push_session = Site_Export_Push_Session::open(
+            '/',
+            $this->docroot,
+            $push_session_id,
+            []
+        );
+
+        $this->assertSame(
+            '/.reprint/push/' . $push_session_id,
+            $push_session->get_push_directory()
+        );
+    }
+
     public function testCompletedWorkSymlinkCannotBecomeAnotherWorkPathsParent(): void {
         $push_session = $this->push_session('33333333333333333333333333333333');
         $this->push_parts($push_session, [[

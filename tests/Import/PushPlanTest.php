@@ -119,7 +119,8 @@ final class PushPlanTest extends TestCase
         $this->planToCompletion($plan);
 
         $this->assertPathCounts(2, 0);
-        $this->assertSame(2, $plan->get_local_paths_to_push_count());
+        $this->assertSame(2, $this->planCursor()['local_paths_to_push_count']);
+        $this->assertSame(10, $this->planCursor()['local_file_bytes_to_push']);
         $this->assertSame(
             ['index.php', 'wp-content/themes/foo/style.css'],
             $this->listPaths($this->planPath('local_paths_to_push.jsonl'))
@@ -307,6 +308,7 @@ final class PushPlanTest extends TestCase
             [
                 'phase' => 'complete',
                 'local_paths_to_push_count' => 0,
+                'local_file_bytes_to_push' => 0,
             ],
             $complete_cursor
         );
@@ -467,7 +469,32 @@ final class PushPlanTest extends TestCase
         $this->assertCount(2, $this->indexEntries($this->planPath('fresh_local_index.jsonl')));
     }
 
-    public function testResumesCursorWrittenBeforeDocumentRootMappingAndProgressCount(): void
+    public function testReportsDiffProgressAcrossResume(): void
+    {
+        $this->saveLocalIndex($this->writeIndex([
+            'deleted-1.txt' => [1, 1, 'file'],
+            'deleted-2.txt' => [1, 1, 'file'],
+        ]));
+        $plan = $this->startPlan($this->writeIndex($this->manyFileEntries(3)));
+
+        $progress = $plan->get_progress();
+        $this->assertSame('diffing', $progress['phase']);
+        $this->assertSame(0, $progress['index_bytes_done']);
+        $this->assertGreaterThan(0, $progress['index_bytes_total']);
+
+        $this->assertTrue($this->nextPlanStep($plan));
+        $progress = $plan->get_progress();
+        $this->assertSame('diffing', $progress['phase']);
+        $this->assertGreaterThan(0, $progress['index_bytes_done']);
+        $this->assertLessThan($progress['index_bytes_total'], $progress['index_bytes_done']);
+        $plan->close();
+
+        $resumedPlan = $this->resumePlan();
+        $this->assertSame($progress, $resumedPlan->get_progress());
+        $resumedPlan->close();
+    }
+
+    public function testResumesCursorWrittenBeforeDocumentRootMappingAndProgressTotals(): void
     {
         $entries = $this->manyFileEntries(2);
         $current = $this->writeIndex($entries);
@@ -478,12 +505,14 @@ final class PushPlanTest extends TestCase
 
         unset($this->cursor['document_root_local_relative_path']);
         unset($this->cursor['position']['local_paths_to_push_count']);
+        unset($this->cursor['position']['local_file_bytes_to_push']);
 
         $resumedPlan = $this->resumePlan();
         $this->planToCompletion($resumedPlan);
 
         $this->assertCount(2, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertNull($resumedPlan->get_local_paths_to_push_count());
+        $this->assertNull($this->planCursor()['local_paths_to_push_count']);
+        $this->assertNull($this->planCursor()['local_file_bytes_to_push']);
     }
 
     public function testResumeDiscardsACompletedStepWhoseCursorWasNotStored(): void
@@ -567,10 +596,12 @@ final class PushPlanTest extends TestCase
             'byte_offset_in_local_paths_to_push',
             'byte_offset_in_local_paths_to_delete',
             'local_paths_to_push_count',
+            'local_file_bytes_to_push',
             'deleted_directory_stack_top_byte_offset',
             'previous_fresh_local_index_entry_path',
         ], array_keys($cursor['position']));
         $this->assertSame(1, $cursor['position']['local_paths_to_push_count']);
+        $this->assertSame(1, $cursor['position']['local_file_bytes_to_push']);
         $this->assertSame(
             filesize($this->planPath('local_paths_to_push.jsonl')),
             $cursor['position']['byte_offset_in_local_paths_to_push']
@@ -635,7 +666,8 @@ final class PushPlanTest extends TestCase
         $this->planToCompletion($reopened);
 
         $this->assertPathCounts(3, 3);
-        $this->assertSame(3, $reopened->get_local_paths_to_push_count());
+        $this->assertSame(3, $this->planCursor()['local_paths_to_push_count']);
+        $this->assertSame(3, $this->planCursor()['local_file_bytes_to_push']);
         $this->assertSame(array_keys($currentEntries), $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
         $this->assertSame(array_keys($localIndexEntries), $this->localPathsToDelete($this->planPath('local_paths_to_delete')));
         $this->assertCount(3, $this->indexEntries($this->planPath('fresh_local_index.jsonl')));

@@ -393,19 +393,18 @@ final class FilesDiffCommandTest extends TestCase
         );
     }
 
-    public function testOtherCommandsRejectTheFilesDiffProgressOption(): void
+    public function testOtherCommandsAcceptTheProgressOption(): void
     {
         $result = $this->runCli([
-            'files-pull',
+            'pull-metadata',
             $this->remoteReprintApiUrl,
             '--state-dir=' . $this->stateDirectory,
-            '--fs-root=' . $this->filesystemRoot,
             '--progress=jsonl',
         ]);
 
-        $this->assertSame(1, $result['exit'], $result['output']);
-        $this->assertSame('', $result['stdout']);
-        $this->assertSame("Error: --progress is accepted only by files-diff.\n", $result['stderr']);
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertStringContainsString('"hasCompletedOnce": false', $result['stdout']);
+        $this->assertSame('', $result['stderr']);
     }
 
     public function testInterruptedFilesDiffReportsTheCompleteDiffWhenItIsRunAgain(): void

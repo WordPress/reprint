@@ -143,4 +143,104 @@ class SqliteRuntimeConfigTest extends TestCase
         $this->assertStringContainsString("define('DB_FILE'", $runtime);
         $this->assertStringContainsString("Constant already defined", $runtime);
     }
+
+    public function testDefaultSqlitePathKeepsTheRootContentDirectory(): void
+    {
+        if (!extension_loaded('pdo_sqlite')) {
+            $this->markTestSkipped('pdo_sqlite extension required');
+        }
+
+        $this->writeState([
+            'preflight' => [
+                'data' => [
+                    'database' => [
+                        'wp' => [
+                            'paths_urls' => [
+                                'content_dir' => '/',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $client = new \ImportClient(
+            'https://source.example/export.php',
+            $this->stateDir,
+            $this->fsRoot,
+        );
+        $this->loadClientState($client);
+        [$connection] = $this->callPrivate(
+            $client,
+            'create_target_db_apply_connection',
+            [['target_engine' => 'sqlite']],
+        );
+        $resolved_filesystem_root = realpath($this->fsRoot);
+        $this->assertIsString($resolved_filesystem_root);
+
+        $this->assertIsObject($connection);
+        $this->assertSame(
+            $resolved_filesystem_root . '/database/.ht.sqlite',
+            $this->callPrivate($client, 'get_state')->apply->target_sqlite_path,
+        );
+    }
+
+    public function testApplyRuntimeUsesTheSelectedProgressOutput(): void
+    {
+        $this->writeState([]);
+
+        $ttyResult = $this->runApplyRuntimeCli('tty', $this->outputDir . '-tty');
+        $this->assertSame(0, $ttyResult['exit'], $ttyResult['stderr']);
+        $this->assertStringContainsString("Runtime: php-builtin\n", $ttyResult['stdout']);
+        $this->assertStringContainsString("Source host: other\n", $ttyResult['stdout']);
+        $this->assertStringNotContainsString('{"status":', $ttyResult['stdout']);
+        $this->assertSame('', $ttyResult['stderr']);
+
+        $jsonlResult = $this->runApplyRuntimeCli('jsonl', $this->outputDir . '-jsonl');
+        $this->assertSame(0, $jsonlResult['exit'], $jsonlResult['stderr']);
+        $this->assertSame('', $jsonlResult['stderr']);
+        $record = json_decode(trim($jsonlResult['stdout']), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('complete', $record['status'] ?? null);
+        $this->assertSame('apply-runtime', $record['command'] ?? null);
+        $this->assertSame('php-builtin', $record['runtime'] ?? null);
+    }
+
+    /** @return array{exit:int,stdout:string,stderr:string} */
+    private function runApplyRuntimeCli(string $progressMode, string $outputDir): array
+    {
+        $process = proc_open(
+            [
+                PHP_BINARY,
+                __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
+                'apply-runtime',
+                'https://source.example/export.php',
+                '--state-dir=' . $this->stateDir,
+                '--flat-document-root=' . $this->fsRoot,
+                '--output-dir=' . $outputDir,
+                '--runtime=php-builtin',
+                '--progress=' . $progressMode,
+            ],
+            [
+                ['pipe', 'r'],
+                ['pipe', 'w'],
+                ['pipe', 'w'],
+            ],
+            $pipes
+        );
+        $this->assertIsResource($process);
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exit = proc_close($process);
+        $this->assertIsString($stdout);
+        $this->assertIsString($stderr);
+
+        return [
+            'exit' => $exit,
+            'stdout' => $stdout,
+            'stderr' => $stderr,
+        ];
+    }
 }

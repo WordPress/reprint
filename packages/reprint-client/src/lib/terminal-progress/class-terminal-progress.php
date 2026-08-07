@@ -15,14 +15,14 @@
  *   suppressed so the parent command can provide its own framing
  *   without sub-command noise.
  *
- * Both methods are no-ops when stdout is not a TTY (so machine
- * consumers reading JSONL don't get progress noise interleaved) or
- * when verbose_mode is on (so debug output isn't visually disturbed).
+ * Both methods are no-ops when terminal output is disabled (so machine
+ * consumers reading JSONL don't get progress noise interleaved) or when
+ * verbose_mode is on (so debug output isn't visually disturbed).
  */
 class TerminalProgress
 {
-    /** @var bool Whether the progress stream is a TTY. */
-    private bool $is_tty;
+    /** @var bool Whether terminal progress output is enabled. */
+    private bool $terminal_output_enabled;
 
     /** @var resource Stream to write progress to (STDOUT or STDERR). */
     private $progress_fd;
@@ -55,16 +55,16 @@ class TerminalProgress
     /** @var float|null Fraction from the last progress call, or null for no bar. */
     private ?float $last_progress_fraction = null;
 
-    public function __construct(bool $is_tty, $progress_fd, bool $verbose_mode = false)
+    public function __construct(bool $terminal_output_enabled, $progress_fd, bool $verbose_mode = false)
     {
-        $this->is_tty = $is_tty;
+        $this->terminal_output_enabled = $terminal_output_enabled;
         $this->progress_fd = $progress_fd;
         $this->verbose_mode = $verbose_mode;
     }
 
-    public function set_is_tty(bool $is_tty): void
+    public function set_terminal_output_enabled(bool $terminal_output_enabled): void
     {
-        $this->is_tty = $is_tty;
+        $this->terminal_output_enabled = $terminal_output_enabled;
     }
 
     public function set_progress_fd($progress_fd): void
@@ -115,7 +115,7 @@ class TerminalProgress
      */
     public function show_progress_line(string $message, ?float $fraction = null): void
     {
-        if (!$this->is_tty || $this->verbose_mode) {
+        if (!$this->terminal_output_enabled || $this->verbose_mode) {
             return;
         }
         if ($this->is_mode('pipeline')) {
@@ -148,7 +148,7 @@ class TerminalProgress
      */
     public function show_lifecycle_line(string $message): void
     {
-        if (!$this->is_tty || $this->verbose_mode || $this->is_mode('pipeline')) {
+        if (!$this->terminal_output_enabled || $this->verbose_mode || $this->is_mode('pipeline')) {
             return;
         }
         fwrite($this->progress_fd, $message);
@@ -160,7 +160,7 @@ class TerminalProgress
      */
     public function print_line(string $message): void
     {
-        if (!$this->is_tty || $this->verbose_mode) {
+        if (!$this->terminal_output_enabled || $this->verbose_mode) {
             return;
         }
         fwrite($this->progress_fd, $message);
@@ -171,7 +171,7 @@ class TerminalProgress
      */
     public function clear_progress_line(): void
     {
-        if (!$this->is_tty || $this->verbose_mode) {
+        if (!$this->terminal_output_enabled || $this->verbose_mode) {
             return;
         }
         fwrite($this->progress_fd, "\r\033[K");
@@ -185,7 +185,7 @@ class TerminalProgress
      */
     public function tick_spinner(): void
     {
-        if (!$this->is_mode('pipeline') || !$this->is_tty || $this->verbose_mode) {
+        if (!$this->is_mode('pipeline') || !$this->terminal_output_enabled || $this->verbose_mode) {
             return;
         }
         if ($this->active_label === null && $this->last_progress_message === null) {
@@ -225,7 +225,7 @@ class TerminalProgress
 
     /**
      * Render a progress bar line:
-     *   ━━━━━━━━━━━━░░░░░░  Downloading files — 1,234 / 5,091 24%
+     *   ━━━━━━━━━━━━░░░░░░  24% Downloading files — 1,234 / 5,091
      */
     public function render_progress_bar(string $label, float $fraction): string
     {
@@ -235,7 +235,7 @@ class TerminalProgress
         $empty = $bar_width - $filled;
         $bar = str_repeat("━", $filled) . str_repeat("░", $empty);
         $pct = (int) round($fraction * 100);
-        return "  \033[36m{$bar}\033[0m  {$label} \033[2m{$pct}%\033[0m";
+        return "  \033[36m{$bar}\033[0m  {$pct}% {$label}";
     }
 
     /**

@@ -1,6 +1,7 @@
 <?php
 
 use function WordPress\Filesystem\wp_join_unix_paths;
+use function WordPress\Reprint\Exporter\trim_right_slash;
 
 /**
  * Host analyzer for WP Cloud (wpcom) sites.
@@ -135,8 +136,8 @@ class WpcloudHostAnalyzer implements HostAnalyzer
             if (!is_string($path) || $path === '' || $path[0] !== '/') {
                 continue;
             }
-            $dir = rtrim(dirname($path), '/');
-            if ($dir !== '' && $dir !== '/') {
+            $dir = trim_right_slash(dirname($path));
+            if ($dir !== '/') {
                 $dirs[] = $dir;
             }
         }

@@ -2,7 +2,10 @@
 
 namespace ImportTests;
 
+use ImportClient;
 use PHPUnit\Framework\TestCase;
+
+require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
 
 class CliHelpTest extends TestCase
 {
@@ -20,7 +23,8 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--state-dir=DIR', $output);
         $this->assertStringContainsString('--fs-root=DIR', $output);
         $this->assertStringContainsString('--remap SOURCE TARGET', $output);
-        $this->assertStringContainsString('--only=SOURCE', $output);
+        $this->assertStringContainsString('--include=SOURCE', $output);
+        $this->assertStringNotContainsString('--only', $output);
         $this->assertStringContainsString('--exclude=SOURCE', $output);
     }
 
@@ -127,6 +131,8 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--fs-root=DIR', $output);
         $this->assertStringContainsString('--secret=TOKEN', $output);
         $this->assertStringContainsString('--force-http', $output);
+        $this->assertStringContainsString('--progress=MODE', $output);
+        $this->assertStringContainsString('auto, tty, or jsonl', $output);
         $this->assertStringContainsString('--verbose, -v', $output);
         $this->assertStringContainsString('low-level, files-only command', $output);
         $this->assertStringContainsString("document root's local tree beneath --fs-root", $output);
@@ -172,9 +178,21 @@ class CliHelpTest extends TestCase
 
         $this->assertStringContainsString('files-push', $output);
         $this->assertStringContainsString('files-diff', $output);
+        $this->assertStringContainsString('--progress=MODE', $output);
         $this->assertStringContainsString('Low-level commands:', $output);
         $this->assertStringNotContainsString('Low-level commands (used by pull internally):', $output);
         $this->assertStringNotContainsString('State is stored in --state-dir/pull/state.json', $output);
         $this->assertStringNotContainsString('Use --abort to abort the current', $output);
+    }
+
+    public function testProgressOutputModeAppearsInEveryCommandHelp(): void
+    {
+        foreach (ImportClient::COMMANDS as $command) {
+            $this->assertStringContainsString(
+                '--progress=MODE',
+                $this->runHelp($command),
+                $command
+            );
+        }
     }
 }

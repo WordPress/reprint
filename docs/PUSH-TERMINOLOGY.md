@@ -279,8 +279,16 @@ Use these names verbatim:
 | Deleted-directory stack | `deleted_directories_stack.jsonl`, `$deleted_directories_stack` |
 | Active state | `sender.json`, `$state_path` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
-| Selected local-path count | `local_paths_to_push_count`, `$local_paths_to_push_count`, `get_local_paths_to_push_count()` |
+| Selected local-path count | `local_paths_to_push_count`, `$local_paths_to_push_count` |
 | Target-confirmed local-path count | `local_paths_pushed`, `$local_paths_pushed` |
+| Selected local file bytes | `local_file_bytes_to_push`, `$local_file_bytes_to_push` |
+| Target-confirmed completed local file bytes | `local_file_bytes_pushed`, `$local_file_bytes_pushed` |
+| Consumed index bytes in progress | `index_bytes_done`, `$index_bytes_done` |
+| Combined index bytes in progress | `index_bytes_total`, `$index_bytes_total` |
+| Target-confirmed file bytes in progress | `file_bytes_done`, `$file_bytes_done` |
+| Selected file bytes in progress | `file_bytes_total`, `$file_bytes_total` |
+| Target-confirmed deletion-list bytes in progress | `deleted_paths_bytes_done`, `$deleted_paths_bytes_done` |
+| Deletion-list bytes in progress | `deleted_paths_bytes_total`, `$deleted_paths_bytes_total` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
 `sender.json` and `excluded_paths.json` live directly under the local push
@@ -308,17 +316,17 @@ links to the preceding active directory. The exclusions have a maximum of 100
 paths. The `sender.json` phases are `creating`, `finishing_previous_commit`,
 `starting_plan`, `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
 `saving_local_index`, `completing`, `removing`, and `discarding_plan`. It stores
-both the current and blocking push session IDs, selected
-path-list cursor, selected local-path count, target-confirmed local-path count,
-receiver part limit, and request-sizing state. The index diff cursor retains
-the selected local-path count as it builds the path list, and its complete
-cursor retains the final count. The index diff completes before local paths
-are sent. The index copy after a target-confirmed commit
-has no separate copy cursor and is repeated after interruption. After the index
-is saved or the remote confirms removal, the sender clears the PushPlan
-cursor, then removes the entire plan directory and its exclusions file. It
-does not ask PushPlan to manage terminal cleanup; PushPlan only closes its open
-handles.
+both the current and blocking push session IDs, selected path-list cursor,
+selected local-path count and file byte total, target-confirmed local-path
+count and completed file bytes, receiver part limit, and request-sizing state.
+The index diff cursor retains the selected local-path count and file byte total
+as it builds the path list, and its complete cursor retains both final totals.
+The index diff completes before local paths are sent. The index copy after a
+target-confirmed commit has no separate copy cursor and is repeated after
+interruption. After the index is saved or the remote confirms removal, the
+sender clears the PushPlan cursor, then removes the entire plan directory and
+its exclusions file. It does not ask PushPlan to manage terminal cleanup;
+PushPlan only closes its open handles.
 
 A request failure ends the current sender run. The active state remains in
 place so a later push command can resume from the last durable boundary. Only
@@ -346,6 +354,17 @@ request. In `pushing_paths` or
 `pushing_deletes`, one step sends at most one multipart part. `next_step()`
 returns true while another step may be performed and false when `get_status()`
 reports `complete`, `restart`, or `failed`.
+
+## CLI progress output names
+
+The **progress output mode** is the invocation-only `--progress` value accepted
+by every command executed by `ImportClient`: `auto`, `tty`, or `jsonl`. `auto`
+selects the terminal presentation when the current progress stream is a TTY and
+the JSONL presentation otherwise. `tty` and `jsonl` force those presentations.
+Never store the progress output mode in command state. Explicit `tty` and
+`jsonl` modes do not combine with `--verbose`. The progress output mode governs
+progress, lifecycle, and status output; it does not reformat a command's data
+result.
 
 ## Files-diff CLI names
 
@@ -385,6 +404,9 @@ root as a path beneath that filesystem root. Local relative paths beneath the do
 become push or delete work. It also requires `--secret=TOKEN`; `--force-http`
 is the explicit plain-HTTP opt-in.
 
+`files-push` uses the shared progress output mode. It never stores that mode in
+sender state.
+
 The **local push state directory** is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash
 directory name is:
@@ -401,11 +423,26 @@ positions remain receiver-owned; they are not a files-push cursor and are not
 copied into `<remote-state-directory>/pull/state.json` or the state-directory-wide
 `progress.json`.
 
-Terminal output names the active phase and uses `Uploading — N / T files`
-while local paths are sent. Non-interactive output emits `push_progress` JSONL
-records. `files_done` and `files_total` appear together after planning in those
-records, the final result, and `progress.json`; they are absent while the plan
-is still being built. `files_total` is the selected local-path count.
+The terminal presentation uses one stage-weighted progress bar. The percentage
+precedes a label which changes only between `Preparing`, `Indexing`,
+`Pushing`, `Pushing deletions`, `Committing`, `Saving index`, and `Finishing`.
+Durable index byte offsets and target-confirmed upload boundaries advance the
+bounded parts of the bar; indexing and commit advance at phase milestones
+because neither has a bounded total. During `Pushing`, the line shows
+target-confirmed file bytes against the selected local file byte total when
+that total is nonzero. The percentage describes lifecycle progress, not time
+remaining. The overall bar is terminal-only.
+
+`PushPlan::get_progress()` reports its internal phase and durable index byte
+counts. `PushFilesSender::get_progress()` folds those counts into one sender
+snapshot alongside target-confirmed path, file-byte, and deletion-list-byte
+counts. The CLI maps that snapshot onto labels and stage weights. PushPlan and
+PushFilesSender do not calculate terminal percentages or choose output format.
+
+The JSONL presentation emits `push_progress` records. `files_done` and
+`files_total` appear together after planning in those records, the final
+result, and `progress.json`; they are absent while the plan is still being
+built. `files_total` is the selected local-path count.
 `files_done` is the target-confirmed local-path count, so an open, failed, or
 canceled request does not advance it. Both counts survive resume.
 
@@ -459,6 +496,7 @@ Use these names verbatim inside `PushFilesSender`:
 | Open directory handle | `$directory_handle` |
 | Open local paths-to-push handle | `$local_paths_to_push_handle` |
 | Open local paths-to-delete handle | `$local_paths_to_delete_handle` |
+| Local paths-to-delete byte total | `$local_paths_to_delete_bytes` |
 | Open local file handle | `$local_file_handle` |
 | Local path stat result | `$path_stat` |
 | File type bits | `$file_type_bits` |
@@ -485,7 +523,9 @@ Use these names verbatim inside `PushPlan`:
 | Fresh local index byte offset | `$fresh_local_index_byte_offset` |
 | Byte offset in the fresh local index during diff | `$byte_offset_in_fresh_local_index` |
 | Open fresh local index | `$fresh_local_index_handle` |
+| Combined index bytes | `$index_bytes_total` |
 | Index diff cursor | `IndexDiffCursor` |
+| Plan progress | `get_progress()` |
 | Start index diff | `start_index_diff()` |
 | Seek an index file | `seek_index_file_to_byte_offset()`, `$index_file_handle` |
 | Open push-plan output file | `open_push_plan_output_file_at_byte_offset()`, `$push_plan_output_file_handle` |

@@ -134,7 +134,7 @@ final class Site_Export_Push_Session {
      *                                      must never receive, delete, or replace.
      */
     private function __construct(string $reprint_directory, string $docroot, string $push_session_id, array $excluded_paths) {
-        $this->reprint_directory = rtrim($reprint_directory, '/');
+        $this->reprint_directory = trim_right_slash($reprint_directory);
         $this->docroot = trim_right_slash($docroot);
         $this->push_session_id = $push_session_id;
         if ($reprint_directory === $this->docroot) {
@@ -2563,7 +2563,7 @@ final class Site_Export_Push_Session {
      * @return string Absolute path in the document root.
      */
     private function docroot_path(string $relative_path): string {
-        return $this->docroot . ( $this->docroot === '/' ? '' : '/' ) . $relative_path;
+        return wp_join_unix_paths($this->docroot, $relative_path);
     }
 
     /**
@@ -2588,7 +2588,7 @@ final class Site_Export_Push_Session {
         }
         $current = $this->work_files_directory;
         foreach (explode('/', $relative) as $segment) {
-            $current .= '/' . $segment;
+            $current = wp_join_unix_paths($current, $segment);
             $identity = $this->lstat_path($current);
             if ($identity === null) {
                 if (!$create_missing) {

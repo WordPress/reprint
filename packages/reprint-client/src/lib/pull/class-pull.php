@@ -8,6 +8,8 @@ use Reprint\Importer\State\FileDiffProgressState;
 use Reprint\Importer\State\FilesPullSummaryState;
 use Reprint\Importer\State\RemoteFileIndexCursorState;
 
+use function WordPress\Filesystem\wp_join_unix_paths;
+
 require_once __DIR__ . '/class-pull-failure-reported-exception.php';
 
 /**
@@ -458,7 +460,7 @@ class Pull
                 if (
                     $state->active_resumable_command->command_name !== 'db-pull' ||
                     $state->active_resumable_command->completion_state !== 'complete' ||
-                    !file_exists($this->client->state_dir . '/db.sql')
+                    !file_exists(wp_join_unix_paths($this->client->state_dir, 'db.sql'))
                 ) {
                     $this->run_until_complete('db-pull', function () {
                         $this->client->run_db_sync();
@@ -562,7 +564,10 @@ class Pull
         $options = $this->validate_database_target_options($options);
 
         if (empty($options['output_dir'])) {
-            $options['output_dir'] = $this->client->state_dir . '/runtime';
+            $options['output_dir'] = wp_join_unix_paths(
+                $this->client->state_dir,
+                'runtime'
+            );
         }
 
         if (!isset($options['filter'])) {
@@ -871,8 +876,11 @@ class Pull
      */
     private function start_server(array $options): void
     {
-        $output_dir = $options['output_dir'] ?? $this->client->state_dir . '/runtime';
-        $start_sh = $output_dir . '/start.sh';
+        $output_dir = $options['output_dir'] ?? wp_join_unix_paths(
+            $this->client->state_dir,
+            'runtime'
+        );
+        $start_sh = wp_join_unix_paths($output_dir, 'start.sh');
 
         if (!file_exists($start_sh)) {
             throw new RuntimeException(
