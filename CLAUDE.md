@@ -174,6 +174,10 @@ During the file fetch phase, progress and heartbeat records include `files_done`
 
 During files-push, progress records include `files_done` and `files_total` together after planning. The completed count advances only at target-confirmed request boundaries and survives resume.
 
+Interactive non-verbose files-push output uses one stage-weighted progress bar for the complete lifecycle. The percentage precedes a label which changes only at major lifecycle stages; while pushing local paths, target-confirmed file bytes appear beside the planned file byte total. These terminal-only details are not added to JSONL or `progress.json`.
+
+`files-push --progress=auto|tty|jsonl` selects that invocation's progress presentation. `auto` uses terminal output on a TTY and JSONL otherwise; `tty` and `jsonl` force either presentation without changing sender state. Explicit `tty` and `jsonl` modes cannot be combined with `--verbose`.
+
 ## File Organization
 
 - packages/reprint-server/: Packagist server package (previously reprint-exporter)

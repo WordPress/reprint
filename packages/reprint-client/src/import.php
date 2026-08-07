@@ -137,6 +137,9 @@ register_shutdown_function(function () {
 class ImportClient
 {
 
+    /** Progress output modes accepted by files-diff and files-push. */
+    public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl'];
+
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
@@ -206,11 +209,11 @@ class ImportClient
     /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
     private $verbose_mode = false;
 
-    /**
-     * @var bool Whether the progress stream is a TTY, enabling interactive
-     *           progress and terminal colors.
-     */
+    /** @var bool Whether the current progress stream is a TTY. */
     private $is_tty;
+
+    /** @var string Progress output mode for this invocation: auto, tty, or jsonl. */
+    private $progress_output_mode = 'auto';
 
     /** @var int Running count of files pulled in the current invocation. */
     private $files_pulled = 0;
@@ -920,6 +923,7 @@ class ImportClient
      *   - command: Required. One of the entries in $valid_commands below.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
+     *   - progress: Optional files-diff or files-push progress output mode: auto, tty, or jsonl
      * @param ReprintProcessLock|null $process_lock Optional lock already held
      *                                               for this state directory.
      */
@@ -936,6 +940,10 @@ class ImportClient
         }
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
+        if ($this->progress_output_mode !== 'auto') {
+            $this->progress_output_mode = 'auto';
+            $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
+        }
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
         $this->include_caches = $options["include_caches"] ?? false;
         $this->extra_directory = $options["extra_directory"] ?? null;
@@ -1010,6 +1018,29 @@ class ImportClient
             return;
         }
         if ($command === "files-push") {
+            $progress_output_mode = $options['progress'] ?? 'auto';
+            if (
+                !is_string($progress_output_mode)
+                || !in_array($progress_output_mode, self::PROGRESS_OUTPUT_MODES, true)
+            ) {
+                $invalid_progress_output_mode = is_string($progress_output_mode)
+                    ? $progress_output_mode
+                    : gettype($progress_output_mode);
+                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option errors are not HTML.
+                throw new InvalidArgumentException(
+                    "Invalid --progress value: {$invalid_progress_output_mode}. Valid values: "
+                    . implode(', ', self::PROGRESS_OUTPUT_MODES)
+                );
+            }
+            if ($this->verbose_mode && $progress_output_mode !== 'auto') {
+                throw new InvalidArgumentException(
+                    "files-push does not accept --verbose with --progress={$progress_output_mode}. "
+                    . 'Use --progress=auto with --verbose.'
+                );
+            }
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+            $this->progress_output_mode = $progress_output_mode;
+            $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
             if (is_file($this->pull_index_wal_path)) {
                 throw new RuntimeException(
                     "Finish or abort the interrupted files-pull before running files-push."
@@ -1144,7 +1175,7 @@ class ImportClient
             $this->progress_fd = STDERR;
             $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
             $this->progress->set_progress_fd($this->progress_fd);
-            $this->progress->set_is_tty($this->is_tty);
+            $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
         }
 
         // MySQL connection parameters for --sql-output=mysql.
@@ -1376,13 +1407,20 @@ class ImportClient
     private function run_files_diff(array $options): void
     {
         $progress_mode = $options['progress'] ?? ( $this->is_tty ? 'tty' : 'jsonl' );
+        if (
+            !is_string($progress_mode)
+            || !in_array($progress_mode, self::PROGRESS_OUTPUT_MODES, true)
+        ) {
+            $invalid_progress_mode = is_string($progress_mode)
+                ? $progress_mode
+                : gettype($progress_mode);
+            throw new InvalidArgumentException(
+                'Invalid files-diff progress mode: ' . $invalid_progress_mode . '. Valid modes: '
+                . implode(', ', self::PROGRESS_OUTPUT_MODES) . '.'
+            );
+        }
         if ($progress_mode === 'auto') {
             $progress_mode = $this->is_tty ? 'tty' : 'jsonl';
-        }
-        if (!in_array($progress_mode, ['tty', 'jsonl'], true)) {
-            throw new InvalidArgumentException(
-                'Invalid files-diff progress mode: ' . $progress_mode . '. Valid modes: auto, tty, jsonl.'
-            );
         }
         $push_state_directory = $options['files_diff_push_state_directory'] ?? self::resolve_push_state_directory(
             $this->remote_reprint_api_url,
@@ -1647,6 +1685,7 @@ class ImportClient
      *
      *     @type string $secret             HMAC shared secret.
      *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
+     *     @type string $progress           Progress output mode: auto, tty, or jsonl.
      *     @type array  $files_push_context Optional context already validated by the CLI entry point.
      * }
      * @param ReprintProcessLock $process_lock Lock held for the command's state directory.
@@ -1705,9 +1744,9 @@ class ImportClient
         $status = null;
         $reason = null;
         $detail = null;
-        $phase = $sender->get_phase();
-        $previous_phase = $phase;
         $reported_progress = $sender->get_progress();
+        $phase = $reported_progress['phase'];
+        $previous_phase = $phase;
 
         try {
             $this->audit_log(
@@ -1739,7 +1778,8 @@ class ImportClient
                 }
 
                 $has_next_sender_step = $sender->next_step();
-                $phase = $sender->get_phase();
+                $sender_progress = $sender->get_progress();
+                $phase = $sender_progress['phase'];
                 $phase_changed = $phase !== $previous_phase;
                 if ($phase_changed) {
                     $this->audit_log(
@@ -1748,7 +1788,6 @@ class ImportClient
                     );
                     $previous_phase = $phase;
                 }
-                $sender_progress = $sender->get_progress();
                 if ($sender_progress !== $reported_progress) {
                     $this->report_files_push_progress($sender_progress, $phase_changed);
                     $reported_progress = $sender_progress;
@@ -1779,8 +1818,8 @@ class ImportClient
                         . $throwable->getMessage();
                 }
             }
-            $phase = $sender->get_phase();
             $sender_progress = $sender->get_progress();
+            $phase = $sender_progress['phase'];
             try {
                 $sender->close();
             } catch (\Throwable $throwable) {
@@ -1867,7 +1906,7 @@ class ImportClient
         $this->write_files_push_progress_file($progress_payload);
 
         // Emit the final JSON line after any preceding progress records.
-        if ($this->is_tty && !$this->verbose_mode) {
+        if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             $this->progress->clear_progress_line();
             $this->progress->show_lifecycle_line($result['message'] . "\n");
             return;
@@ -1880,25 +1919,135 @@ class ImportClient
         @flush();
     }
 
+    /** Returns whether progress uses the interactive terminal presentation. */
+    private function uses_terminal_progress(): bool
+    {
+        return $this->progress_output_mode === 'tty'
+            || ( $this->progress_output_mode === 'auto' && $this->is_tty );
+    }
+
     /**
      * Reports one files-push progress snapshot.
      *
      * @param array $sender_progress {
-     *     Target-confirmed sender progress.
+     *     Progress through the sender lifecycle.
      *
-     *     @type string $phase       Current sender phase.
-     *     @type int    $files_done  Target-confirmed local paths. Present after planning.
-     *     @type int    $files_total Total local paths selected by the plan. Present after planning.
+     *     @type string $phase                     Current sender phase.
+     *     @type string $planning_phase            Current PushPlan phase. Present while planning.
+     *     @type int    $index_bytes_done          Index bytes consumed. Present while diffing indexes.
+     *     @type int    $index_bytes_total         Combined index size. Present while diffing indexes.
+     *     @type int    $files_done                Target-confirmed local paths. Present after planning.
+     *     @type int    $files_total               Total local paths selected by the plan. Present after planning.
+     *     @type int    $file_bytes_done           Target-confirmed file bytes. Present while pushing local paths.
+     *     @type int    $file_bytes_total          File bytes selected by the plan. Present while pushing local paths.
+     *     @type int    $deleted_paths_bytes_done  Target-confirmed deletion-list bytes. Present while pushing deletions.
+     *     @type int    $deleted_paths_bytes_total Total deletion-list bytes. Present while pushing deletions.
      * }
      * @param bool $force_output Whether to bypass the JSONL progress throttle.
-     * @phpstan-param array{phase:string,files_done?:int,files_total?:int} $sender_progress
+     * @phpstan-param array{phase:string,planning_phase?:string,index_bytes_done?:int,index_bytes_total?:int,files_done?:int,files_total?:int,file_bytes_done?:int,file_bytes_total?:int,deleted_paths_bytes_done?:int,deleted_paths_bytes_total?:int} $sender_progress
      */
     private function report_files_push_progress(
         array $sender_progress,
         bool $force_output
     ): void {
+        if ($this->uses_terminal_progress() && !$this->verbose_mode) {
+            // Indexing and commit have no bounded total. Their milestones divide
+            // the bar around the byte-bounded diff and deletion stages and the
+            // exact target-confirmed local-path stage.
+            switch ($sender_progress['phase']) {
+                case 'creating':
+                case 'finishing_previous_commit':
+                    $terminal_label = 'Preparing';
+                    $terminal_fraction = 0.0;
+                    break;
+                case 'starting_plan':
+                    $terminal_label = 'Indexing';
+                    $terminal_fraction = 0.15;
+                    break;
+                case 'planning':
+                    $terminal_label = 'Indexing';
+                    switch ($sender_progress['planning_phase'] ?? null) {
+                        case 'starting_diff':
+                            $terminal_fraction = 0.2;
+                            break;
+                        case 'diffing':
+                            $stage_fraction = isset(
+                                $sender_progress['index_bytes_done'],
+                                $sender_progress['index_bytes_total']
+                            )
+                                ? $this->files_push_stage_fraction(
+                                    $sender_progress['index_bytes_done'],
+                                    $sender_progress['index_bytes_total']
+                                )
+                                : 0.0;
+                            $terminal_fraction = 0.2 + 0.2 * $stage_fraction;
+                            break;
+                        case 'complete':
+                            $terminal_fraction = 0.4;
+                            break;
+                        case 'indexing':
+                        default:
+                            $terminal_fraction = 0.15;
+                            break;
+                    }
+                    break;
+                case 'pushing_paths':
+                    $terminal_label = 'Pushing';
+                    if (
+                        isset($sender_progress['file_bytes_done'], $sender_progress['file_bytes_total'])
+                        && $sender_progress['file_bytes_total'] > 0
+                    ) {
+                        $terminal_label .= ' — ' . $this->format_bytes($sender_progress['file_bytes_done'])
+                            . ' / ' . $this->format_bytes($sender_progress['file_bytes_total']);
+                    }
+                    $stage_fraction = isset($sender_progress['files_done'], $sender_progress['files_total'])
+                        ? $this->files_push_stage_fraction(
+                            $sender_progress['files_done'],
+                            $sender_progress['files_total']
+                        )
+                        : 0.0;
+                    $terminal_fraction = 0.4 + 0.4 * $stage_fraction;
+                    break;
+                case 'pushing_deletes':
+                    $terminal_label = 'Pushing deletions';
+                    $stage_fraction = isset(
+                        $sender_progress['deleted_paths_bytes_done'],
+                        $sender_progress['deleted_paths_bytes_total']
+                    )
+                        ? $this->files_push_stage_fraction(
+                            $sender_progress['deleted_paths_bytes_done'],
+                            $sender_progress['deleted_paths_bytes_total']
+                        )
+                        : 0.0;
+                    $terminal_fraction = 0.8 + 0.1 * $stage_fraction;
+                    break;
+                case 'committing':
+                    $terminal_label = 'Committing';
+                    $terminal_fraction = 0.9;
+                    break;
+                case 'saving_local_index':
+                    $terminal_label = 'Saving index';
+                    $terminal_fraction = 0.97;
+                    break;
+                case 'completing':
+                case 'removing':
+                case 'discarding_plan':
+                    $terminal_label = 'Finishing';
+                    $terminal_fraction = 0.99;
+                    break;
+                default:
+                    $terminal_label = 'Preparing';
+                    $terminal_fraction = 0.0;
+                    break;
+            }
+            $terminal_message = $this->progress->render_progress_bar(
+                $terminal_label,
+                $terminal_fraction
+            );
+            $this->progress->show_progress_line($terminal_message);
+        }
+
         $phase = $sender_progress['phase'];
-        $fraction = null;
         switch ($phase) {
             case 'creating':
                 $message = 'Starting files push';
@@ -1910,7 +2059,6 @@ class ImportClient
             case 'pushing_paths':
                 $files_done = $sender_progress['files_done'];
                 $files_total = $sender_progress['files_total'];
-                $fraction = $files_total > 0 ? $files_done / $files_total : null;
                 $message = sprintf(
                     'Uploading — %s / %s files',
                     number_format($files_done),
@@ -1943,7 +2091,6 @@ class ImportClient
                 break;
         }
 
-        $this->progress->show_progress_line($message, $fraction);
         $progress_record = [
             'type' => 'push_progress',
             'command' => 'files-push',
@@ -1967,6 +2114,17 @@ class ImportClient
         $this->output_progress($progress_record, $force_output);
         $progress_payload['ts'] = microtime(true);
         $this->write_files_push_progress_file($progress_payload);
+    }
+
+    /**
+     * Returns a bounded fraction for one files-push stage.
+     */
+    private function files_push_stage_fraction(int $done, int $total): float
+    {
+        if ($total === 0) {
+            return 1.0;
+        }
+        return max(0.0, min(1.0, $done / $total));
     }
 
     /**
@@ -11418,16 +11576,16 @@ class ImportClient
     }
 
     /**
-     * Output progress as JSON line.
-     * Only outputs in verbose mode or non-TTY mode (for programmatic consumption).
+     * Output progress as a JSON line.
+     * Suppressed when the terminal presentation is active without verbose logs.
      *
      * @param array $data Progress data to output
      * @param bool $force Force output regardless of throttle
      */
     public function output_progress(array $data, bool $force = false): void
     {
-        // In TTY non-verbose mode, suppress JSON output (use show_progress_line instead)
-        if ($this->is_tty && !$this->verbose_mode) {
+        // The non-verbose terminal presentation uses show_progress_line() instead.
+        if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             return;
         }
 
@@ -11567,6 +11725,15 @@ if (
             'commands' => ['files-push'],
         ],
         [
+            'name' => 'progress',
+            'type' => 'value',
+            'target' => 'progress',
+            'placeholder' => 'MODE',
+            'help' => 'Progress output: auto, tty, or jsonl (default: auto)',
+            'commands' => ['files-diff', 'files-push'],
+            'valid_values' => ImportClient::PROGRESS_OUTPUT_MODES,
+        ],
+        [
             'name' => 'abort',
             'type' => 'flag',
             'target' => 'abort',
@@ -11665,17 +11832,6 @@ if (
             'help' => 'Total pipeline steps (for progress file)',
             'help_section' => 'global',
             'commands' => [],
-        ],
-
-        // ── files-diff options ──────────────────────────────────
-        [
-            'name' => 'progress',
-            'type' => 'value',
-            'target' => 'progress',
-            'placeholder' => 'MODE',
-            'valid_values' => ['auto', 'tty', 'jsonl'],
-            'help' => 'Output mode (auto|tty|jsonl); auto selects from stdout',
-            'commands' => ['files-diff'],
         ],
 
         // ── files-pull options ───────────────────────────────────
@@ -12531,7 +12687,7 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--progress=MODE] [--verbose]",
             "description" =>
                 "Sends the remote document root's local tree beneath --fs-root.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
@@ -12543,6 +12699,12 @@ if (
                 "Re-run the same command after exit 2.\n" .
                 "After a restart result, the next run starts a fresh plan.\n",
             "extra" =>
+                "Progress output:\n" .
+                "  auto   Use tty on a terminal and jsonl otherwise (default)\n" .
+                "  tty    Force the single interactive progress bar\n" .
+                "  jsonl  Force one JSON object per line\n" .
+                "Explicit tty and jsonl modes cannot be combined with --verbose.\n" .
+                "\n" .
                 "Exit outcomes:\n" .
                 "  0  File push complete\n" .
                 "  2  Partial, interrupted, or restart; run the command again\n" .
@@ -12792,7 +12954,8 @@ if (
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_push_command_argument, '--fs-root=') === 0
-                || strpos($reprint_files_push_command_argument, '--secret=') === 0;
+                || strpos($reprint_files_push_command_argument, '--secret=') === 0
+                || strpos($reprint_files_push_command_argument, '--progress=') === 0;
             if (!$reprint_files_push_option_allowed) {
                 $reprint_files_push_option_name = explode('=', $reprint_files_push_command_argument, 2)[0];
                 fwrite(STDERR, "Error: files-push does not accept {$reprint_files_push_option_name}.\n");
@@ -12822,7 +12985,7 @@ if (
         fwrite(STDERR, "Error: --force-http is accepted only by files-push.\n");
         exit(1);
     } elseif (isset($options['progress'])) {
-        fwrite(STDERR, "Error: --progress is accepted only by files-diff.\n");
+        fwrite(STDERR, "Error: --progress is accepted only by files-diff and files-push.\n");
         exit(1);
     }
 
