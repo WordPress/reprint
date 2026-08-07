@@ -3,7 +3,7 @@ name: Performance History
 # After each commit lands on trunk, run the pull-pipeline benchmark and
 # publish a new data point to GitHub Pages (gh-pages branch).
 #
-# The page itself lives in `perf-site/` on trunk and is copied to gh-pages
+# The page itself lives in `.github/perf-site/` on trunk and is copied to gh-pages
 # on each run, so edits to the visualization happen via normal PRs.
 
 on:
@@ -141,7 +141,7 @@ jobs:
           mkdir -p pages/data
           # Refresh static site files from trunk on every run, but never
           # clobber the accumulated history.json that lives only on gh-pages.
-          rsync -a --exclude='data/history.json' perf-site/ pages/
+          rsync -a --exclude='data/history.json' .github/perf-site/ pages/
           touch pages/.nojekyll
           node tests/e2e/benchmark/append-history.mjs
 
