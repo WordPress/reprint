@@ -841,6 +841,44 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('sync_overtaken', $overtaken['reason']);
     }
 
+    public function testPushCreateDoesNotTakeOverANewerOwner(): void
+    {
+        $client = $this->newClient(self::SECRET);
+        $firstPushSessionId = str_repeat('5', 32);
+        $secondPushSessionId = str_repeat('6', 32);
+        $thirdPushSessionId = str_repeat('7', 32);
+        $first = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $firstPushSessionId,
+        ], ['created']);
+        $this->assertSame('complete', $first['status'], (string) json_encode($first));
+
+        $blocked = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $secondPushSessionId,
+        ], ['created']);
+        $this->assertSame('failed', $blocked['status'], (string) json_encode($blocked));
+        $this->assertSame('sync_locked', $blocked['reason']);
+
+        $takeover = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $thirdPushSessionId,
+            'force_takeover' => true,
+            'blocking_push_session_id' => $firstPushSessionId,
+            'blocking_ownership_epoch' => 1,
+        ], ['created']);
+        $this->assertSame('complete', $takeover['status'], (string) json_encode($takeover));
+        $this->assertSame(2, $takeover['response']['ownership_epoch']);
+
+        $stale_takeover = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $secondPushSessionId,
+            'force_takeover' => true,
+            'blocking_push_session_id' => $firstPushSessionId,
+            'blocking_ownership_epoch' => 1,
+        ], ['created']);
+        $this->assertSame('failed', $stale_takeover['status'], (string) json_encode($stale_takeover));
+        $this->assertSame('sync_locked', $stale_takeover['reason']);
+        $this->assertSame($thirdPushSessionId, $stale_takeover['response']['blocking_push_session_id']);
+        $this->assertSame(2, $stale_takeover['response']['blocking_ownership_epoch']);
+    }
+
     public function testUploadAndMissingPathStatusExposeOnlyDocumentedFields(): void
     {
         $client = $this->newClient(self::SECRET);
@@ -3182,6 +3220,70 @@ final class PushEndpointsTest extends TestCase {
         $this->assertFileExists($this->localIndexFile(dirname($push_state_directory)));
         $this->assertFileDoesNotExist($push_state_directory . '/sender.json');
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
+    }
+
+    public function testFilesPushCliReportsTheCurrentOwnerWithoutTakeover(): void
+    {
+        $client = $this->newClient(self::SECRET);
+        $blocking_push_session_id = str_repeat('8', 32);
+        $create = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $blocking_push_session_id,
+        ], ['created']);
+        $this->assertSame('complete', $create['status'], (string) json_encode($create));
+
+        $local_docroot = $this->root . '/cli-locked-local-docroot';
+        $state_directory = $this->root . '/cli-locked-state';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/value.txt', 'new value');
+
+        $blocked = $this->runFilesPushCli($local_docroot, $state_directory);
+
+        $this->assertSame(1, $blocked['exit'], $blocked['output']);
+        $result = $this->lastCliJsonLine($blocked['stdout']);
+        $this->assertSame('failed', $result['status'] ?? null);
+        $this->assertSame('sync_locked', $result['reason'] ?? null);
+        $state = $this->loadActiveState($this->filesPushStateDirectory($state_directory));
+        $this->assertIsArray($state);
+        $this->assertSame('creating', $state['phase']);
+        $this->assertSame($blocking_push_session_id, $state['blocking_push_session_id']);
+        $this->assertSame(1, $state['blocking_ownership_epoch']);
+        $this->assertFileDoesNotExist($this->docroot . '/value.txt');
+    }
+
+    public function testFilesPushCliTakesOverTheCurrentOwner(): void
+    {
+        $client = $this->newClient(self::SECRET);
+        $blocking_push_session_id = str_repeat('9', 32);
+        $create = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $blocking_push_session_id,
+        ], ['created']);
+        $this->assertSame('complete', $create['status'], (string) json_encode($create));
+
+        $local_docroot = $this->root . '/cli-takeover-local-docroot';
+        $state_directory = $this->root . '/cli-takeover-state';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/value.txt', 'new value');
+        $push_create_requests = $this->countEndpointRequests('push_create');
+
+        $completed = $this->runFilesPushCli(
+            $local_docroot,
+            $state_directory,
+            [],
+            '/',
+            ['--force-takeover']
+        );
+
+        $this->assertSame(0, $completed['exit'], $completed['output']);
+        $this->assertSame('complete', $this->lastCliJsonLine($completed['stdout'])['status'] ?? null);
+        $this->assertSame($push_create_requests + 2, $this->countEndpointRequests('push_create'));
+        $this->assertSame('new value', file_get_contents($this->docroot . '/value.txt'));
+
+        $overtaken = $client->send_push_request('GET', 'push_status', [
+            'push_session_id' => $blocking_push_session_id,
+            'ownership_epoch' => 1,
+        ], ['status']);
+        $this->assertSame('failed', $overtaken['status'], (string) json_encode($overtaken));
+        $this->assertSame('sync_overtaken', $overtaken['reason']);
     }
 
     public function testFilesPushCliCanSelectTerminalOrJsonlProgress(): void
