@@ -1,11 +1,11 @@
 includes:
-    - phpstan-baseline.neon
+    - tests/phpstan/phpstan-baseline.neon
 
 parameters:
     bootstrapFiles:
-        - phpstan-bootstrap.php
+        - tests/phpstan/phpstan-bootstrap.php
     stubFiles:
-        - phpstan-stubs.php
+        - tests/phpstan/phpstan-stubs.php
     phpVersion: 70400
     level: 5
     paths:

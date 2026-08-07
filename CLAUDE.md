@@ -188,7 +188,7 @@ During files-push, progress records include `files_done` and `files_total` toget
   - index.php: WordPress plugin entry point — intercepts `?reprint-api` requests (and the legacy `?site-export-api` alias) during plugin load, requires lib.php
   - lib.php: Standalone library — constants, auth functions, and request handler. Can be required without index.php by projects that want to embed the export engine with their own URL routing and authentication (pass a custom `authenticate` callable in the `$options` array to `_site_export_handle_api_request()`)
   - wordpress/: WordPress admin UI (site-export.php)
-- markdown/: Architecture documentation (read these for deep understanding)
+- docs/: Architecture documentation (read these for deep understanding) and project logos (docs/assets/)
 - tests/: PHPUnit test suite organized by component
 - tests/e2e/: End-to-end Docker-based integration tests
 - exports/: Git-ignored directory for test exports
@@ -228,11 +228,9 @@ The exporter must scan both roots (document root + ABSPATH) without infinite loo
 
 ## Documentation
 
-Comprehensive architecture docs are in markdown/:
-- ARCHITECTURE.md: MySQL export component diagram and data flow
-- FILESYNC-USAGE.md: Complete FileTreeProducer API guide
-- SYMLINKS.md: Symlink handling and security model
-- MYSQL-DUMP-PRODUCER.md: MySQLDumpProducer architecture and usage
+Architecture docs are in docs/:
+- PUSH-SYNC.md: Push synchronization delivery plan
+- PUSH-TERMINOLOGY.md: Push language contract (see AGENTS.md — read before push work)
 
 Always consult these when working on the respective components.
 
