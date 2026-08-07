@@ -47,6 +47,27 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertSame('["/"]', trim($result['output']));
     }
 
+    public function testPreflightKeepsFilesystemRootInContentInventory(): void
+    {
+        $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
+        $this->assertNotFalse($autoload_path, 'Composer autoloader must exist');
+        $export_path = realpath(self::EXPORT_PATH);
+        $this->assertNotFalse($export_path, 'export.php must exist');
+
+        $result = $this->runPhpCode(
+            "<?php\nrequire " . var_export($autoload_path, true) . ";\n"
+            . "require " . var_export($export_path, true) . ";\n"
+            . "ob_start();\n"
+            . "\$preflight = endpoint_preflight(['directory' => '/']);\n"
+            . "ob_end_clean();\n"
+            . "echo json_encode(\$preflight['stats']['wp_content']['roots'], JSON_UNESCAPED_SLASHES);\n"
+        );
+
+        $this->assertSame(0, $result['status'], $result['output']);
+        $roots = json_decode(trim($result['output']), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('/', $roots[0]['root']);
+    }
+
     public function testPluginRuntimeLoaderSkipsAutoloadAlreadyLoadedThroughSymlinkedPluginDirectory(): void
     {
         $tmp_dir = sys_get_temp_dir() . '/export-runtime-loader-test-' . uniqid('', true);
