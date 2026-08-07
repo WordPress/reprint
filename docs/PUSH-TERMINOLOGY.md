@@ -362,7 +362,9 @@ by every command executed by `ImportClient`: `auto`, `tty`, or `jsonl`. `auto`
 selects the terminal presentation when the current progress stream is a TTY and
 the JSONL presentation otherwise. `tty` and `jsonl` force those presentations.
 Never store the progress output mode in command state. Explicit `tty` and
-`jsonl` modes do not combine with `--verbose`.
+`jsonl` modes do not combine with `--verbose`. The progress output mode governs
+progress, lifecycle, and status output; it does not reformat a command's data
+result.
 
 ## Files-diff CLI names
 

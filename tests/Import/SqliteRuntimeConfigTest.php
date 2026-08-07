@@ -184,4 +184,63 @@ class SqliteRuntimeConfigTest extends TestCase
             $this->callPrivate($client, 'get_state')->apply->target_sqlite_path,
         );
     }
+
+    public function testApplyRuntimeUsesTheSelectedProgressOutput(): void
+    {
+        $this->writeState([]);
+
+        $ttyResult = $this->runApplyRuntimeCli('tty', $this->outputDir . '-tty');
+        $this->assertSame(0, $ttyResult['exit'], $ttyResult['stderr']);
+        $this->assertStringContainsString("Runtime: php-builtin\n", $ttyResult['stdout']);
+        $this->assertStringContainsString("Source host: other\n", $ttyResult['stdout']);
+        $this->assertStringNotContainsString('{"status":', $ttyResult['stdout']);
+        $this->assertSame('', $ttyResult['stderr']);
+
+        $jsonlResult = $this->runApplyRuntimeCli('jsonl', $this->outputDir . '-jsonl');
+        $this->assertSame(0, $jsonlResult['exit'], $jsonlResult['stderr']);
+        $this->assertSame('', $jsonlResult['stderr']);
+        $record = json_decode(trim($jsonlResult['stdout']), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('complete', $record['status'] ?? null);
+        $this->assertSame('apply-runtime', $record['command'] ?? null);
+        $this->assertSame('php-builtin', $record['runtime'] ?? null);
+    }
+
+    /** @return array{exit:int,stdout:string,stderr:string} */
+    private function runApplyRuntimeCli(string $progressMode, string $outputDir): array
+    {
+        $process = proc_open(
+            [
+                PHP_BINARY,
+                __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
+                'apply-runtime',
+                'https://source.example/export.php',
+                '--state-dir=' . $this->stateDir,
+                '--flat-document-root=' . $this->fsRoot,
+                '--output-dir=' . $outputDir,
+                '--runtime=php-builtin',
+                '--progress=' . $progressMode,
+            ],
+            [
+                ['pipe', 'r'],
+                ['pipe', 'w'],
+                ['pipe', 'w'],
+            ],
+            $pipes
+        );
+        $this->assertIsResource($process);
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exit = proc_close($process);
+        $this->assertIsString($stdout);
+        $this->assertIsString($stderr);
+
+        return [
+            'exit' => $exit,
+            'stdout' => $stdout,
+            'stderr' => $stderr,
+        ];
+    }
 }
