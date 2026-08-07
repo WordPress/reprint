@@ -143,4 +143,45 @@ class SqliteRuntimeConfigTest extends TestCase
         $this->assertStringContainsString("define('DB_FILE'", $runtime);
         $this->assertStringContainsString("Constant already defined", $runtime);
     }
+
+    public function testDefaultSqlitePathKeepsTheRootContentDirectory(): void
+    {
+        if (!extension_loaded('pdo_sqlite')) {
+            $this->markTestSkipped('pdo_sqlite extension required');
+        }
+
+        $this->writeState([
+            'preflight' => [
+                'data' => [
+                    'database' => [
+                        'wp' => [
+                            'paths_urls' => [
+                                'content_dir' => '/',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $client = new \ImportClient(
+            'https://source.example/export.php',
+            $this->stateDir,
+            $this->fsRoot,
+        );
+        $this->loadClientState($client);
+        [$connection] = $this->callPrivate(
+            $client,
+            'create_target_db_apply_connection',
+            [['target_engine' => 'sqlite']],
+        );
+        $resolved_filesystem_root = realpath($this->fsRoot);
+        $this->assertIsString($resolved_filesystem_root);
+
+        $this->assertIsObject($connection);
+        $this->assertSame(
+            $resolved_filesystem_root . '/database/.ht.sqlite',
+            $this->callPrivate($client, 'get_state')->apply->target_sqlite_path,
+        );
+    }
 }

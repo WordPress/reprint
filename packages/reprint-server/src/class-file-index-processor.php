@@ -311,7 +311,7 @@ final class FileIndexProcessor {
         // a cache path or a path that disappears between scandir() and lstat(),
         // or every resumed request would inspect that same name again.
         $this->directory_stack[$frame_index]["after"] = $entry_name;
-        $path = $this->current_directory . "/" . $entry_name;
+        $path = wp_join_unix_paths($this->current_directory, $entry_name);
 
         // Apply omissions before lstat() and before a directory can enter the
         // stack. Omitted subtrees therefore cost no extra filesystem calls.
