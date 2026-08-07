@@ -112,7 +112,7 @@ final class Site_Export_Push_Endpoints {
         if ($canonical_docroot === false) {
             $canonical_docroot = normalize_path($docroot);
         }
-        if ($canonical_docroot === '/' || path_is_within_root($canonical_reprint_directory, $canonical_docroot)) {
+        if (path_is_within_root($canonical_reprint_directory, $canonical_docroot)) {
             throw new InvalidArgumentException(
                 'Push endpoints require reprint_directory ' . json_encode($reprint_directory)
                 . ' to be outside docroot ' . json_encode($docroot) . '; observed it inside that document root.'
