@@ -27,4 +27,21 @@ class FilesystemRootTest extends FileSyncProducerTestBase
         // Should be the scan directory itself (or its real path)
         $this->assertEquals(realpath($dir), $fsRoot);
     }
+
+    public function testRootDirectoryResolvesRelativePaths()
+    {
+        $dir = $this->createTestDirectory('filesystem-root', [
+            'from-root.txt' => 'Content from the filesystem root',
+        ]);
+        $path = $dir . '/from-root.txt';
+
+        $sync = new \FileTreeProducer('/', [
+            'paths' => [ltrim($path, '/')],
+        ]);
+        $chunks = $this->processAllChunks($sync);
+
+        $this->assertSame('/', $sync->get_filesystem_root());
+        $this->assertSame($path, $chunks[0]['path']);
+        $this->assertSame('Content from the filesystem root', $chunks[0]['data']);
+    }
 }
