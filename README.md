@@ -240,13 +240,11 @@ The command returns one of three exit codes:
 
 Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
 
-**Non-empty local fs-root**
+**Existing local files**
 
-By default, `files-pull` refuses to start if `--fs-root` is non-empty. If you need to use a non-empty local fs-root,
-the `--on-fs-root-nonempty` flag controls this behavior. It takes the following values:
-
-- `--on-fs-root-nonempty=error` (default): throw an error and abort.
-- `--on-fs-root-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
+`files-pull` preserves files, symlinks, and directories that already exist in
+`--fs-root`. It skips a remote path that conflicts with local content instead
+of overwriting it.
 
 **Filtering files**
 

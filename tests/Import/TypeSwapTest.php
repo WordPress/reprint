@@ -57,10 +57,8 @@ class TypeSwapTest extends TestCase
         rmdir($dir);
     }
 
-    /**
-     * create_directory_if_missing should remove a symlink that blocks directory creation.
-     */
-    public function testEnsureDirectoryPathRemovesBlockingSymlink()
+    /** create_directory_if_missing should keep a symlink that blocks directory creation. */
+    public function testEnsureDirectoryPathKeepsBlockingSymlink()
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
@@ -78,12 +76,23 @@ class TypeSwapTest extends TestCase
         symlink($targetDir, $symlinkPath);
         $this->assertTrue(is_link($symlinkPath), 'Precondition: symlink exists');
 
-        // create_directory_if_missing for a child should replace the symlink with a real dir
+        $this->expectException(\Reprint\Importer\PreserveLocalSkipException::class);
         $method->invoke($client, $fsRoot . '/some-dir/child');
+    }
 
-        $this->assertFalse(is_link($symlinkPath), 'Symlink should be removed');
-        $this->assertTrue(is_dir($symlinkPath), 'Should be a real directory now');
-        $this->assertTrue(is_dir($fsRoot . '/some-dir/child'), 'Child directory should exist');
+    /** create_directory_if_missing should report a file that blocks a directory. */
+    public function testEnsureDirectoryPathReportsBlockingFileConflict()
+    {
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+
+        $reflection = new \ReflectionClass($client);
+        $method = $reflection->getMethod('create_directory_if_missing');
+        $fsRoot = realpath($this->tempDir . '/fs-root');
+        $blockingFile = $fsRoot . '/some-dir';
+        file_put_contents($blockingFile, 'local file');
+
+        $this->expectException(\Reprint\Importer\LocalPathConflictException::class);
+        $method->invoke($client, $fsRoot . '/some-dir/child');
     }
 
     /**
@@ -130,10 +139,8 @@ class TypeSwapTest extends TestCase
         $this->assertEquals('hello', file_get_contents($symlinkPath));
     }
 
-    /**
-     * A directory chunk should replace a symlink-to-file with a real directory.
-     */
-    public function testDirectoryChunkReplacesSymlinkToFile()
+    /** A directory chunk should keep a symlink-to-file. */
+    public function testDirectoryChunkKeepsSymlinkToFile()
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
@@ -159,17 +166,12 @@ class TypeSwapTest extends TestCase
 
         $method->invoke($client, $chunk);
 
-        $this->assertFalse(is_link($symlinkPath), 'Symlink should be removed');
-        $this->assertTrue(is_dir($symlinkPath), 'Should be a real directory now');
+        $this->assertTrue(is_link($symlinkPath), 'Symlink should remain');
+        $this->assertSame($realFile, readlink($symlinkPath));
     }
 
-    /**
-     * After replacing a symlink with a directory, nested files should be writable.
-     *
-     * Simulates the scenario: symlink at path A is replaced by a directory chunk,
-     * then a file chunk arrives at A/sub/file.txt.
-     */
-    public function testFileChunkUnderFormerSymlink()
+    /** A directory chunk should keep a symlink that blocks a nested path. */
+    public function testDirectoryChunkKeepsSymlinkBlockingNestedPath()
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
@@ -184,7 +186,7 @@ class TypeSwapTest extends TestCase
 
         $reflection = new \ReflectionClass($client);
 
-        // Step 1: directory chunk replaces the symlink
+        // A directory chunk cannot replace the symlink.
         $dirMethod = $reflection->getMethod('handle_directory_chunk');
         $dirMethod->invoke($client, [
             'headers' => [
@@ -193,36 +195,12 @@ class TypeSwapTest extends TestCase
             ],
         ]);
 
-        $this->assertTrue(is_dir($symlinkPath), 'Should be a real directory after dir chunk');
-
-        // Step 2: file chunk writes a nested file
-        $fileMethod = $reflection->getMethod('handle_file_chunk');
-        $context = new StreamingContext();
-        $fileMethod->invoke($client, [
-            'headers' => [
-                'x-file-path' => base64_encode('/parent/sub/file.txt'),
-                'x-first-chunk' => '1',
-                'x-last-chunk' => '1',
-                'x-file-ctime' => '1234567890',
-                'x-file-size' => '7',
-            ],
-            'body' => 'content',
-        ], $context);
-
-        if ($context->file_handle) {
-            fclose($context->file_handle);
-        }
-
-        $nestedFile = $fsRoot . '/parent/sub/file.txt';
-        $this->assertTrue(file_exists($nestedFile), 'Nested file should exist');
-        $this->assertEquals('content', file_get_contents($nestedFile));
+        $this->assertTrue(is_link($symlinkPath), 'Symlink should remain');
+        $this->assertFalse(file_exists($fsRoot . '/parent/sub/file.txt'));
     }
 
-    /**
-     * create_directory_if_missing should replace a symlink with a full real directory
-     * hierarchy when creating deeply nested paths.
-     */
-    public function testNestedFileUnderExistingSymlinkViaEnsureDirectory()
+    /** create_directory_if_missing should keep a symlink blocking nested paths. */
+    public function testEnsureDirectoryPathKeepsNestedBlockingSymlink()
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
@@ -237,14 +215,10 @@ class TypeSwapTest extends TestCase
         symlink($targetDir, $symlinkPath);
         $this->assertTrue(is_link($symlinkPath), 'Precondition: symlink exists');
 
-        // Call create_directory_if_missing for a deeply nested path
+        // A deeply nested path cannot replace the symlink.
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('create_directory_if_missing');
+        $this->expectException(\Reprint\Importer\PreserveLocalSkipException::class);
         $method->invoke($client, $fsRoot . '/top/sub/deep');
-
-        $this->assertFalse(is_link($symlinkPath), 'Symlink should be removed');
-        $this->assertTrue(is_dir($symlinkPath), 'top should be a real directory');
-        $this->assertTrue(is_dir($fsRoot . '/top/sub'), 'sub should exist');
-        $this->assertTrue(is_dir($fsRoot . '/top/sub/deep'), 'deep should exist');
     }
 }

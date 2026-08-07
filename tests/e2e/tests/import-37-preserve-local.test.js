@@ -1,5 +1,5 @@
 /**
- * Test 37: --preserve-local mode
+ * Test 37: default local preservation
  *
  * Tests importing into a pre-existing WordPress hosting environment that uses
  * symlinks for shared infrastructure: WP core, plugins, themes, drop-ins, and
@@ -45,7 +45,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 import { buildAtomicHostingFixture, unlockSharedDir } from '../lib/atomic-hosting-fixture.js';
 
-describe('Import: --preserve-local', () => {
+describe('Import: local preservation', () => {
     const site = 'preserve-local';
     let siteDir;
 
@@ -97,9 +97,9 @@ describe('Import: --preserve-local', () => {
     }
 
     // ------------------------------------------------------------------
-    // Test: non-empty directory without --preserve-local errors
+    // Test: non-empty directory preserves local content by default
     // ------------------------------------------------------------------
-    describe('non-empty directory without --preserve-local errors', () => {
+    describe('non-empty directory preserves local content by default', () => {
         let tempDir;
 
         beforeAll(() => {
@@ -112,25 +112,21 @@ describe('Import: --preserve-local', () => {
             cleanupTempDir(tempDir);
         });
 
-        it('errors on non-empty directory without --preserve-local', () => {
+        it('completes without a local-preservation option', () => {
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 autoResume: false,
             });
-            assert.equal(result.exitCode, 1,
-                `Expected exit code 1, got ${result.exitCode}\n` +
+            assert.equal(result.exitCode, 0,
+                `Expected exit code 0, got ${result.exitCode}\n` +
                 `signal: ${result.signal}, killed: ${result.killed}, errorCode: ${result.errorCode}\n` +
                 `stdout (${result.stdout.length} bytes): ${result.stdout}\n` +
                 `stderr (${result.stderr.length} bytes): ${result.stderr}`);
-            assert.ok(
-                result.stderr.includes('not empty'),
-                `Expected error about non-empty directory, got: ${result.stderr}`,
-            );
         });
     });
 
     // ------------------------------------------------------------------
-    // Test: realistic hosting import with --preserve-local
+    // Test: realistic hosting import with default local preservation
     // ------------------------------------------------------------------
     describe('hosting environment with symlinked infrastructure', () => {
         let tempDir;
@@ -149,10 +145,9 @@ describe('Import: --preserve-local', () => {
             cleanupTempDir(tempDir);
         });
 
-        it('files-pull completes with --preserve-local', () => {
+        it('files-pull completes with default local preservation', () => {
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--on-fs-root-nonempty=preserve-local'],
             });
             assert.equal(
                 result.exitCode, 0,
@@ -160,11 +155,10 @@ describe('Import: --preserve-local', () => {
             );
         });
 
-        it('state shows complete with preserve_local persisted', () => {
+        it('state shows complete', () => {
             const stateFile = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.active_resumable_command.completion_state, 'complete');
-            assert.equal(state.fs_root_nonempty_behavior, 'preserve-local');
         });
 
         // -- file symlinks preserved ----------------------------------
@@ -295,9 +289,9 @@ describe('Import: --preserve-local', () => {
     });
 
     // ------------------------------------------------------------------
-    // Test: --preserve-local survives resume
+    // Test: local preservation survives resume
     // ------------------------------------------------------------------
-    describe('--preserve-local survives resume', () => {
+    describe('local preservation survives resume', () => {
         let tempDir;
         let wpShared;
         let localSiteRoot;
@@ -317,7 +311,7 @@ describe('Import: --preserve-local', () => {
         it('completes after forced resume with --max-exec=3', () => {
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--on-fs-root-nonempty=preserve-local', '--max-exec=3'],
+                extraArgs: ['--max-exec=3'],
                 timeout: 120000,
             });
             assert.equal(
@@ -333,19 +327,18 @@ describe('Import: --preserve-local', () => {
             assert.ok(lstatSync(join(localSiteRoot, 'wp-content', 'object-cache.php')).isSymbolicLink());
         });
 
-        it('state preserves preserve_local across resume cycles', () => {
+        it('state remains complete across resume cycles', () => {
             const state = JSON.parse(readFileSync(
                 join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
                 'utf-8',
             ));
-            assert.equal(state.fs_root_nonempty_behavior, 'preserve-local');
         });
     });
 
     // ------------------------------------------------------------------
     // Test: delta sync preserves hosting symlinks
     // ------------------------------------------------------------------
-    describe('delta sync after --preserve-local', () => {
+    describe('delta sync after local preservation', () => {
         let tempDir;
         let wpShared;
         let localSiteRoot;
@@ -365,7 +358,6 @@ describe('Import: --preserve-local', () => {
         it('initial import completes', () => {
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--on-fs-root-nonempty=preserve-local'],
             });
             assert.equal(result.exitCode, 0,
                 `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -381,7 +373,7 @@ describe('Import: --preserve-local', () => {
 
         it('delta sync completes', () => {
             // Abort previous completion, then re-run — triggers delta.
-            // preserve_local is restored from persisted state.
+            // Local preservation is part of every files-pull run.
             const abort = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--abort'],
@@ -485,7 +477,6 @@ describe('Import: --preserve-local', () => {
         it('files-pull completes without security errors', () => {
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--on-fs-root-nonempty=preserve-local'],
             });
             assert.equal(
                 result.exitCode, 0,

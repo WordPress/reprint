@@ -11,6 +11,7 @@
  */
 
 use Reprint\Importer\CurlTimeoutException;
+use Reprint\Importer\LocalPathConflictException;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\Pull\PullFailureReportedException;
 use Reprint\Importer\State\DatabaseApplyCommandState;
@@ -266,27 +267,6 @@ class ImportClient
      * with no source).
      */
     private $include_caches = false;
-
-    /**
-     * @var string Controls behavior when the filesystem root is non-empty at pull start.
-     *
-     * 'error' (default): throw an error if the filesystem root is non-empty.
-     * 'preserve-local': preserve existing files, symlinks, and directories in the
-     * filesystem root instead of overwriting them; non-writable directories are skipped
-     * gracefully and logged to the audit log.
-     *
-     * On the first sync, existing filesystem root content is left untouched — any file,
-     * symlink, or directory that already exists at a path the remote tries to write
-     * is skipped and never added to the remote index.
-     *
-     * On subsequent delta syncs, preserved paths survive because the importer compares
-     * the next remote index only with paths it previously added to the remote index.
-     * A preserved local path was never added to that baseline, so its absence from the
-     * next remote index cannot schedule it for deletion.
-     *
-     * Set via --on-fs-root-nonempty, persisted in state so it survives across invocations.
-     */
-    private $fs_root_nonempty_behavior = 'error';
 
     /**
      * Selects a path-filter preset for files-pull.
@@ -939,15 +919,6 @@ class ImportClient
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
         $this->include_caches = $options["include_caches"] ?? false;
         $this->extra_directory = $options["extra_directory"] ?? null;
-        if (isset($options["fs_root_nonempty_behavior"])) {
-            $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
-            if (!in_array($this->fs_root_nonempty_behavior, ['error', 'preserve-local'])) {
-                throw new InvalidArgumentException(
-                    "Invalid --on-fs-root-nonempty value: {$this->fs_root_nonempty_behavior}. " .
-                        "Valid values: error, preserve-local",
-                );
-            }
-        }
         $command = $options["command"] ?? null;
 
         // Map accepted command aliases to the canonical command names.
@@ -1051,16 +1022,6 @@ class ImportClient
             $this->follow_symlinks = true;
             $this->get_state()->follow_symlinks = true;
             $this->save_state();
-        }
-
-        // Persist fs_root_nonempty_behavior in state so it survives across invocations.
-        // 'preserve-local' preserves existing local files instead of overwriting
-        // them, and gracefully skips non-writable directories.
-        if (isset($options["fs_root_nonempty_behavior"])) {
-            $this->get_state()->fs_root_nonempty_behavior = $this->fs_root_nonempty_behavior;
-            $this->save_state();
-        } else {
-            $this->fs_root_nonempty_behavior = $this->get_state()->fs_root_nonempty_behavior ?? 'error';
         }
 
         // Persist the path-filter preset in state so it survives across resume cycles.
@@ -3023,16 +2984,6 @@ class ImportClient
                 "message" => "Resuming files-pull (stage: {$stage}, remote index entries: {$remote_index_entry_count})",
             ], true);
         } else {
-            // Starting fresh — validate that the filesystem root is empty.
-            // A delta sync ($is_delta) naturally has a non-empty filesystem root
-            // because we put those files there during the initial sync.
-            if (!$is_empty && !$is_delta && $this->fs_root_nonempty_behavior === 'error') {
-                throw new RuntimeException(
-                    "Filesystem root is not empty and no cursor found. " .
-                        "Either clear the filesystem root, use --abort flag, or use --on-fs-root-nonempty=preserve-local to sync while preserving the existing content.",
-                );
-            }
-
             // The marker blocks files-diff and files-push before the first
             // pull checkpoint can make this lifecycle resumable.
             $this->open_pull_index_wal();
@@ -3069,7 +3020,7 @@ class ImportClient
                 ], true);
             } else {
                 $this->audit_log(
-                    "START files-pull ({$this->fs_root_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
+                    "START files-pull (local preservation, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
                     true,
                 );
 
@@ -3640,6 +3591,8 @@ class ImportClient
             if (!is_dir($parent)) {
                 try {
                     $this->create_directory_if_missing($parent);
+                } catch (LocalPathConflictException $e) {
+                    throw $e;
                 } catch (RuntimeException $e) {
                     $this->audit_log(
                         "INTERMEDIATE SYMLINK SKIP: failed to prepare parent for {$remote_absolute_path}: " .
@@ -6720,12 +6673,12 @@ class ImportClient
                     strcmp($remote_index_entry["path"], $next_remote_index_entry["path"]) > 0
                 )
             ) {
-                $preserve_local_skip_reason =
-                    $this->should_skip_for_preserve_local(
+                $local_preservation_skip_reason =
+                    $this->should_skip_for_local_preservation(
                         $next_remote_index_entry["path"],
                     );
-                if ($preserve_local_skip_reason) {
-                    $this->audit_log($preserve_local_skip_reason, true);
+                if ($local_preservation_skip_reason) {
+                    $this->audit_log($local_preservation_skip_reason, true);
                     $this->emit_skip_progress($next_remote_index_entry["path"]);
                 } else {
                     $this->append_to_fetch_list(
@@ -9377,18 +9330,12 @@ class ImportClient
     }
 
     /**
-     * Check whether any component of the path (between the filesystem root
-     * and the remote absolute path) is a symlink. In preserve-local mode this is used
-     * to prevent creating new content through symlinked directories — their
-     * contents belong to shared hosting infrastructure and must not be
-     * modified.
+     * Preserve a local file path instead of overwriting it. A directory
+     * symlink or a non-writable parent is also skipped because its contents
+     * belong to local hosting infrastructure.
      */
-    private function should_skip_for_preserve_local(string $remote_absolute_path): ?string
+    private function should_skip_for_local_preservation(string $remote_absolute_path): ?string
     {
-        if ($this->fs_root_nonempty_behavior !== 'preserve-local') {
-            return null;
-        }
-
         $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
             $remote_absolute_path
         );
@@ -9466,23 +9413,17 @@ class ImportClient
                 $real_check === false ||
                 !path_is_within_root($real_check, $real_filesystem_root)
             ) {
-                // In preserve-local mode, a path that resolves outside the
-                // filesystem root is expected when a directory like wp-content/plugins
-                // is symlinked to a shared hosting location.  Skip gracefully
-                // instead of treating it as a security violation.
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: path resolves outside filesystem root via symlink: {$dir}",
-                    );
-                }
-                throw new RuntimeException(
-                    "Security: Refusing to create directory outside filesystem root: {$dir}",
+                // A path that resolves outside the filesystem root belongs to
+                // local hosting infrastructure. Skip it rather than following
+                // the symlink into that infrastructure.
+                throw new PreserveLocalSkipException(
+                    "PRESERVE-LOCAL: path resolves outside filesystem root via symlink: {$dir}",
                 );
             }
         }
 
         if (is_dir($dir) && !is_link($dir)) {
-            if ($this->fs_root_nonempty_behavior === 'preserve-local' && !is_writable($dir)) {
+            if (!is_writable($dir)) {
                 throw new PreserveLocalSkipException(
                     "PRESERVE-LOCAL: directory not writable: {$dir}",
                 );
@@ -9509,49 +9450,24 @@ class ImportClient
             $current .= "/" . $part;
 
             if (is_link($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    // Never create directories through symlinks — the symlink
-                    // and its target contents are shared hosting infrastructure
-                    // that must not be modified.
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: symlink in directory path: {$current}",
-                    );
-                }
-                $this->audit_log(
-                    "Removing symlink blocking directory: {$current}",
-                    true,
+                // Never create directories through symlinks — the symlink
+                // and its target contents are shared hosting infrastructure
+                // that must not be modified.
+                throw new PreserveLocalSkipException(
+                    "PRESERVE-LOCAL: symlink in directory path: {$current}",
                 );
-                if (!unlink($current)) {
-                    throw new RuntimeException(
-                        "Failed to remove symlink blocking directory: {$current}",
-                    );
-                }
-                // Clear cached realpath so the subsequent realpath() check
-                // sees the new directory instead of the removed symlink.
-                clearstatcache(true, $current);
             }
 
-            // Remove file if blocking directory creation
+            // Do not replace a file blocking directory creation.
             if (is_file($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: file blocks directory creation: {$current}",
-                    );
-                }
-                $this->audit_log(
-                    "Removing file blocking directory: {$current}",
-                    true,
+                throw new LocalPathConflictException(
+                    "Cannot create directory because a local file blocks it: {$current}",
                 );
-                if (!unlink($current)) {
-                    throw new RuntimeException(
-                        "Failed to remove file blocking directory: {$current}",
-                    );
-                }
             }
 
             // Create directory if it doesn't exist
             if (is_dir($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local' && !is_writable($current)) {
+                if (!is_writable($current)) {
                     throw new PreserveLocalSkipException(
                         "PRESERVE-LOCAL: directory not writable: {$current}",
                     );
@@ -9598,27 +9514,25 @@ class ImportClient
             $remote_absolute_path
         );
 
-        // In preserve-local mode, if the directory already exists (as a real
-        // directory or via a symlink to a directory), keep it as-is.
+        // If the directory already exists (as a real directory or via a
+        // symlink to a directory), keep it as-is.
         // Also skip if any parent component is a symlink — we never create
         // new directories through symlinked paths.
-        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (is_dir($local_absolute_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$remote_absolute_path}", true);
-                $this->emit_skip_progress($remote_absolute_path);
-                if ($ctime > 0) {
-                    $this->upsert_remote_index_entry($remote_absolute_path, $ctime, 0, "dir");
-                }
-                return;
+        if (is_dir($local_absolute_path)) {
+            $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$remote_absolute_path}", true);
+            $this->emit_skip_progress($remote_absolute_path);
+            if ($ctime > 0) {
+                $this->upsert_remote_index_entry($remote_absolute_path, $ctime, 0, "dir");
             }
-            if ($this->path_traverses_symlink($local_absolute_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip directory (symlink in path): {$remote_absolute_path}", true);
-                $this->emit_skip_progress($remote_absolute_path);
-                if ($ctime > 0) {
-                    $this->upsert_remote_index_entry($remote_absolute_path, $ctime, 0, "dir");
-                }
-                return;
+            return;
+        }
+        if ($this->path_traverses_symlink($local_absolute_path)) {
+            $this->audit_log("PRESERVE-LOCAL skip directory (symlink in path): {$remote_absolute_path}", true);
+            $this->emit_skip_progress($remote_absolute_path);
+            if ($ctime > 0) {
+                $this->upsert_remote_index_entry($remote_absolute_path, $ctime, 0, "dir");
             }
+            return;
         }
 
         if (
@@ -9695,21 +9609,19 @@ class ImportClient
             $target,
         );
 
-        // In preserve-local mode, if something already exists at the symlink
-        // path, keep it — whether it's a file, directory, or another symlink.
+        // If something already exists at the symlink path, keep it — whether
+        // it's a file, directory, or another symlink.
         // Also skip if any parent component is a symlink — we never create
         // new content through symlinked directories.
-        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
-                $this->emit_skip_progress($path);
-                return;
-            }
-            if ($this->path_traverses_symlink(dirname($local_absolute_path))) {
-                $this->audit_log("PRESERVE-LOCAL skip symlink (symlink in path): {$path} -> {$target}", true);
-                $this->emit_skip_progress($path);
-                return;
-            }
+        if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
+            $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
+            $this->emit_skip_progress($path);
+            return;
+        }
+        if ($this->path_traverses_symlink(dirname($local_absolute_path))) {
+            $this->audit_log("PRESERVE-LOCAL skip symlink (symlink in path): {$path} -> {$target}", true);
+            $this->emit_skip_progress($path);
+            return;
         }
 
         // Validate that the symlink target doesn't escape the filesystem root.
@@ -9761,6 +9673,8 @@ class ImportClient
                 $this->audit_log($e->getMessage(), true);
                 $this->emit_skip_progress($path);
                 return;
+            } catch (LocalPathConflictException $e) {
+                throw $e;
             } catch (RuntimeException $e) {
                 // Log error and skip this symlink
                 $this->audit_log(
@@ -10954,7 +10868,6 @@ class ImportClient
         $this->state->version = $previous_state->version;
         $this->state->webhost = $previous_state->webhost;
         $this->state->follow_symlinks = $previous_state->follow_symlinks;
-        $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
         $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
         $this->state->resolved_path_mappings_fingerprint = $previous_state->resolved_path_mappings_fingerprint;
         $this->state->pull_pipeline = $previous_state->pull_pipeline;
@@ -11609,16 +11522,6 @@ if (
                 '(a :fs-root: path or an absolute path within --fs-root), nested by source path. ' .
                 'Bare --follow-symlinks is equivalent to --follow-symlinks=:fs-root:.',
             'commands' => ['pull', 'pull-files', 'files-pull'],
-        ],
-        [
-            'name' => 'on-fs-root-nonempty',
-            'type' => 'value',
-            'target' => 'fs_root_nonempty_behavior',
-            'placeholder' => 'MODE',
-            'help' => 'What to do when filesystem root is non-empty (error|preserve-local)',
-            'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'files-pull'],
-            'aliases' => ['on-docroot-nonempty'],
         ],
         [
             'name' => 'include-caches',

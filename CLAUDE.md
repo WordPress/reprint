@@ -115,19 +115,14 @@ Symlinks ARE automatically recreated during import. This is safe because all pat
 
 The file indexer (`endpoint_file_index` in `export.php`) prevents duplicate traversal of directories that overlap with configured roots. The `should_skip_index_root()` function checks each directory's `realpath()` against the scheduled root list — if a directory is a duplicate or parent of an already-scheduled root, traversal skips it. This is critical for WP.com Atomic sites where symlinks create overlapping paths (e.g. `/srv/htdocs/srv` → `/srv` creating infinite cycles, or `/wordpress/` and `/srv/htdocs/wordpress/` resolving to the same location).
 
-### Non-Empty fs-root Handling (`--on-fs-root-nonempty`)
+### Local fs-root Preservation
 
-By default, `files-pull` refuses to start if `--fs-root` is non-empty (to prevent accidental overwrites). The `--on-fs-root-nonempty` flag controls this behavior:
-
-- `--on-fs-root-nonempty=error` (default): throw an error and abort.
-- `--on-fs-root-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
-
-In `preserve-local` mode:
+`files-pull` always preserves existing local content:
 - Existing files are never overwritten — if anything (regular file, symlink, directory) already exists at a remote file's path, the remote file is skipped.
 - Pre-existing symlinks in directory paths are kept, and no new content is ever created through them. If any component of a file's directory path is a symlink, the entire operation is skipped. This is critical for hosting environments where plugins, themes, and WP core are symlinked from a shared location — their contents must not be modified.
 - Non-writable directories are skipped gracefully instead of causing errors.
 - All skipped operations are logged to the audit log with a `PRESERVE-LOCAL` prefix.
-- The setting persists in state, so it survives across resume cycles and delta syncs. During delta sync, previously-skipped files remain protected.
+- During delta sync, previously-skipped files remain protected.
 
 ### SQL Dump Batching
 

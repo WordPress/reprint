@@ -352,9 +352,7 @@ final class FilesPullLocalIndexTest extends TestCase
         yield 'filtered files' => [[
             '--filter=essential-files',
         ]];
-        yield 'preserve local files' => [[
-            '--on-fs-root-nonempty=preserve-local',
-        ]];
+        yield 'default local preservation' => [[]];
     }
 
     public function testRemappedPullKeepsUnrelatedLocalIndexEntries(): void

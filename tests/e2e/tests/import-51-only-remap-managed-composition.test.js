@@ -6,7 +6,7 @@
  * invocation —
  *
  *   files-pull --only :wp-content: --remap :wp-content: :fs-root:/wp-content \
- *     --on-fs-root-nonempty=preserve-local --no-follow-symlinks
+ *     --no-follow-symlinks
  *
  * — against a fs-root pre-populated with the realistic managed hosting layout
  * (shared read-only wordpress/ tree + hosting symlinks; see
@@ -107,9 +107,9 @@ describe('Import: --only + --remap onto a managed Atomic docroot', () => {
         return `${getSiteUrl(site)}&directory=${siteDir}`;
     }
 
-    // Shared remap + preserve flags; the --only scope varies per run.
+    // Shared remap and symlink flags; the --only scope varies per run.
     const remap = ['--remap', ':wp-content:', ':fs-root:/wp-content'];
-    const preserve = ['--on-fs-root-nonempty=preserve-local', '--no-follow-symlinks'];
+    const symlinkOptions = ['--no-follow-symlinks'];
 
     let tempDir;
     let fsRoot;
@@ -134,10 +134,10 @@ describe('Import: --only + --remap onto a managed Atomic docroot', () => {
     // ================================================================
     // Phase 1 — first migration: --only :wp-content:
     // ================================================================
-    it('files-pull completes with --only + --remap + preserve-local', () => {
+    it('files-pull completes with --only + --remap and default local preservation', () => {
         const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
-            extraArgs: ['--only', ':wp-content:', ...remap, ...preserve],
+            extraArgs: ['--only', ':wp-content:', ...remap, ...symlinkOptions],
         });
         assert.equal(
             result.exitCode, 0,
@@ -231,7 +231,7 @@ describe('Import: --only + --remap onto a managed Atomic docroot', () => {
     it('scoped delta re-sync completes (--only :wp-content:/plugins)', () => {
         const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
-            extraArgs: ['--only', ':wp-content:/plugins', ...remap, ...preserve],
+            extraArgs: ['--only', ':wp-content:/plugins', ...remap, ...symlinkOptions],
         });
         assert.equal(
             result.exitCode, 0,

@@ -120,7 +120,7 @@ class FilesPullStateTest extends TestCase
     }
 
     /**
-     * Set up a client with state loaded and preserve-local mode.
+     * Set up a client with state loaded.
      */
     private function prepareClient(): array
     {
@@ -133,9 +133,6 @@ class FilesPullStateTest extends TestCase
 
         $ttyProperty = $reflection->getProperty('is_tty');
         $ttyProperty->setValue($client, false);
-
-        $behaviorProp = $reflection->getProperty('fs_root_nonempty_behavior');
-        $behaviorProp->setValue($client, 'preserve-local');
 
         return [$client, $reflection];
     }

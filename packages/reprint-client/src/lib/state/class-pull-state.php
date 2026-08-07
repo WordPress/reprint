@@ -51,7 +51,6 @@ class PullState
     public bool $follow_symlinks = true;
     /** @var string|null Fingerprint of the local followed symlinks root; guards resume. */
     public ?string $local_followed_symlinks_root_fingerprint = null;
-    public string $fs_root_nonempty_behavior = 'error';
     public string $filter = 'none';
     /** @var string|null User-Agent that worked during preflight. */
     public ?string $user_agent = null;
@@ -111,6 +110,10 @@ class PullState
     public static function from_array(array $data): self
     {
         $state = new self();
+        // Older state files selected the non-empty filesystem-root behavior.
+        // Files-pull now always preserves local paths, so that choice no
+        // longer changes resume behavior.
+        unset($data['fs_root_nonempty_behavior']);
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
         $state->preflight = $data['preflight'];
@@ -119,7 +122,6 @@ class PullState
         $state->webhost = $data['webhost'];
         $state->follow_symlinks = $data['follow_symlinks'];
         $state->local_followed_symlinks_root_fingerprint = $data['local_followed_symlinks_root_fingerprint'];
-        $state->fs_root_nonempty_behavior = $data['fs_root_nonempty_behavior'];
         $state->filter = $data['filter'];
         $state->user_agent = $data['user_agent'];
         $state->max_allowed_packet = $data['max_allowed_packet'];
@@ -223,7 +225,6 @@ class PullState
             'webhost' => $this->webhost,
             'follow_symlinks' => $this->follow_symlinks,
             'local_followed_symlinks_root_fingerprint' => $this->local_followed_symlinks_root_fingerprint,
-            'fs_root_nonempty_behavior' => $this->fs_root_nonempty_behavior,
             'filter' => $this->filter,
             'user_agent' => $this->user_agent,
             'max_allowed_packet' => $this->max_allowed_packet,

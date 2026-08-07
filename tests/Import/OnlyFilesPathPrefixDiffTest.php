@@ -131,7 +131,6 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $r = new \ReflectionClass($client);
         $r->getProperty('state')->setValue($client, $r->getMethod('load_state')->invoke($client));
         $r->getProperty('is_tty')->setValue($client, false);
-        $r->getProperty('fs_root_nonempty_behavior')->setValue($client, 'preserve-local');
         $r->getProperty('pull_only_files_with_path_prefixes')->setValue($client, $pull_only_files_with_path_prefixes);
         $r->getProperty('pull_excluded_files_with_path_prefixes')->setValue($client, $pull_excluded_files_with_path_prefixes);
         return [$client, $r];

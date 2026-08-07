@@ -46,6 +46,14 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('Next remote index', $output);
     }
 
+    public function testFilesPullHelpDoesNotListTheRemovedNonEmptyRootOption(): void
+    {
+        $this->assertStringNotContainsString(
+            '--on-fs-root-nonempty',
+            $this->runHelp('files-pull')
+        );
+    }
+
     public function testFilterOptionIsHiddenFromCommandHelp(): void
     {
         foreach (array('pull', 'pull-files', 'files-pull') as $command) {
