@@ -302,10 +302,12 @@ class Pull
                 $state->fetch = new FetchListProgressState();
                 $state->files_pull_summary = new FilesPullSummaryState();
                 $state->files_pull_path_selection_fingerprint = null;
+                $state->reset_files_pull_intent_progress();
                 $this->client->save_state();
                 foreach ([
                     "{$pull_state_directory}/remote-index.next.jsonl",
                     "{$pull_state_directory}/fetch-list.jsonl",
+                    "{$pull_state_directory}/local-index.next.jsonl",
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -810,6 +812,7 @@ class Pull
             $state->diff = new FileDiffProgressState();
             $state->fetch = new FetchListProgressState();
             $state->files_pull_summary = new FilesPullSummaryState();
+            $state->reset_files_pull_intent_progress();
         }
         if ($reset_file_selection_state) {
             $state->index = new RemoteFileIndexCursorState();
@@ -827,6 +830,7 @@ class Pull
         if ($reset_file_transfer_state) {
             $paths[] = wp_join_unix_paths($pull_state_directory, 'remote-index.next.jsonl');
             $paths[] = wp_join_unix_paths($pull_state_directory, 'fetch-list.jsonl');
+            $paths[] = wp_join_unix_paths($pull_state_directory, 'local-index.next.jsonl');
         }
         if ($reset_db_state) {
             $paths[] = wp_join_unix_paths($state_dir, 'db.sql');

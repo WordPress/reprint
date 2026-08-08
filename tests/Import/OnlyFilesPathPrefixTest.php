@@ -121,6 +121,7 @@ class OnlyFilesPathPrefixTest extends TestCase
             'follow_symlinks' => false,
             'fs_root_nonempty_behavior' => 'preserve-local',
             'filter' => 'none',
+            'files_pull_intent' => 'copy-changes',
         );
 
         \write_current_pull_state(
@@ -140,7 +141,10 @@ class OnlyFilesPathPrefixTest extends TestCase
 
         try {
             $c->run(array_merge(
-                array('command' => 'files-pull'),
+                array(
+                    'command' => 'files-pull',
+                    'intent' => 'copy-changes',
+                ),
                 $fileSelectionOptions
             ));
         } finally {

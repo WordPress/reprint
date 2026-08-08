@@ -56,8 +56,15 @@ local relative path to a document-root-relative path.
   state directory. Files-pull advances only the entries for completed local
   mutations; files-push atomically replaces the local index only after the
   target confirms commit. Use `$local_index_file`.
-- A **fresh local index** is the current filesystem-root scan created while
-  planning a push. Use `$fresh_local_index_file`.
+- A **fresh local index** is the current filesystem-root scan created by a
+  `PushPlan` for files-push, files-diff, or make-identical files-pull. Use
+  `$fresh_local_index_file`.
+- A **mapped next local index** is the selected next remote index projected
+  into sorted local relative paths for a make-identical files-pull. Use
+  `$next_local_index_file`.
+- A **file-index diff processor** retains one entry from each of two sorted
+  indexes and exposes one aligned local path until its caller completes and
+  consumes that path. Use `FileIndexDiffProcessor`.
 - An **index entry** records one path, type, size, and ctime. Use
   `$index_entry`.
 - The **pull index WAL** records completed pull mutations awaiting application
@@ -184,6 +191,8 @@ their parent directories.
         │   ├── remote-index.jsonl
         │   ├── index.wal
         │   ├── remote-index.next.jsonl
+        │   ├── local-index.next.jsonl
+        │   ├── make-identical-plan/
         │   ├── fetch-list.jsonl
         │   ├── volatile-files.json
         │   ├── domains.json
@@ -204,6 +213,7 @@ Use these path names:
 | Remote index file | `$remote_index_file` |
 | Pull index WAL | `$pull_index_wal_path` |
 | Next remote index file | `$next_remote_index_file` |
+| Mapped next local index file | `$next_local_index_file` |
 | Fetch list file | `$fetch_list_file` |
 | Volatile files file | `$volatile_files_file` |
 | Domains file | `$domains_file` |

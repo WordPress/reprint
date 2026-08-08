@@ -26,6 +26,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--include=SOURCE', $output);
         $this->assertStringNotContainsString('--only', $output);
         $this->assertStringContainsString('--exclude=SOURCE', $output);
+        $this->assertStringContainsString('--intent=INTENT', $output);
     }
 
     public function testFilesIndexHelpNamesTheNextRemoteIndexFile(): void
@@ -48,6 +49,8 @@ class CliHelpTest extends TestCase
         );
         $this->assertStringContainsString('Remote index', $output);
         $this->assertStringContainsString('Next remote index', $output);
+        $this->assertStringContainsString('--intent=INTENT', $output);
+        $this->assertStringContainsString('copy-changes|make-identical', $output);
     }
 
     public function testFilterOptionIsHiddenFromCommandHelp(): void

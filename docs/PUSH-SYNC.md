@@ -110,6 +110,32 @@ sorted path mutations directly and removes an indexed subtree when its root is
 deleted or replaced. Non-empty directories remain implicit. A successful
 initial pull with no local mutations creates an empty local index.
 
+Files-pull has two intents. `--intent=copy-changes` is the default. Explicit
+`--intent=make-identical` uses a resumable `PushPlan` to build a fresh local
+index after the next remote index is complete. The same
+`FileIndexDiffProcessor` used by `PushPlan`
+compares the retained and fresh local indexes one path at a time. Files-pull
+merges those local differences with the selected next remote index mapped into
+local relative paths. Each locally changed selected root is removed, and every
+current remote entry at or below that root enters the fetch list. Local-only
+selected paths therefore disappear, while local edits and deletions are
+restored from the current remote tree. `--intent=copy-changes` skips the local
+plan and retains the remote-index comparison: only changes between the remote
+index and next remote index are applied locally.
+
+Remote and local indexes cannot be compared directly because ctime is
+machine-local. Make-identical therefore combines the remote-index difference
+with the inverse of the retained-to-fresh local-index difference, with the
+current remote tree supplying every replacement.
+
+The intent is durable files-pull state. A resumed lifecycle must use the same
+intent. `make-identical` is incompatible with `preserve-local`, whose purpose
+is to retain local paths; callers which need that behavior use
+`--intent=copy-changes`. Path selection still limits both intents, and
+make-identical leaves local changes outside the selected paths untouched.
+One files-pull plan cursor owns local indexing, index comparison, mapped-index,
+fetch-list, and active changed-root positions.
+
 `PushPlan` first builds a path-sorted fresh local index, then derives the local
 paths to push and delete by diffing it against the local index its caller
 supplies. The indexer marks physical emptiness while
@@ -318,6 +344,8 @@ state:
   local_index.jsonl                     retained filesystem-root snapshot for pull, diff, and push
   pull/
     index.wal                           completed pull mutations awaiting application to both indexes
+    local-index.next.jsonl              selected next remote index mapped to local relative paths
+    make-identical-plan/                resumable local plan owned by files-pull
   push/
     excluded_paths.json                 sender-owned target exclusions
     sender.json                         active push state

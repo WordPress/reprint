@@ -25,6 +25,7 @@ use Reprint\Importer\Tuning\AdaptiveTuner;
 
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
+use function Reprint\Importer\decode_local_index_entry;
 use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
@@ -169,7 +170,6 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
-
     /**
      * Maximum number of consecutive interrupted responses with no cursor
      * progress before the importer gives up. This prevents endless resumption
@@ -225,6 +225,12 @@ class ImportClient
 
     /** @var string Path to pull/fetch-list.jsonl — files to download, computed by comparing the next remote index with the remote index. */
     private $fetch_list_file;
+
+    /** @var string Current remote index mapped into sorted local relative paths for make-identical. */
+    private $next_local_index_file;
+
+    /** @var string Caller-owned local plan directory for make-identical. */
+    private $files_pull_local_plan_directory;
 
     /** @var string Path to audit.log — append-only log of every operation for debugging. */
     private $audit_log_file;
@@ -330,6 +336,9 @@ class ImportClient
      * run.
      */
     private $filter = "none";
+
+    /** @var string Whether files-pull copies remote changes or makes selected paths identical. */
+    private $files_pull_intent = "copy-changes";
 
     /** @var string|null Extra remote directory to include in the export (--extra-directory). */
     private $extra_directory = null;
@@ -469,6 +478,10 @@ class ImportClient
             wp_join_unix_paths($this->pull_state_directory, "remote-index.next.jsonl");
         $this->fetch_list_file =
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl");
+        $this->next_local_index_file =
+            wp_join_unix_paths($this->pull_state_directory, "local-index.next.jsonl");
+        $this->files_pull_local_plan_directory =
+            wp_join_unix_paths($this->pull_state_directory, "make-identical-plan");
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
         $this->volatile_files_file = wp_join_unix_paths($this->pull_state_directory, "volatile-files.json");
         $this->progress_file = wp_join_unix_paths($this->state_dir, "progress.json");
@@ -850,6 +863,27 @@ class ImportClient
         // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         $this->progress_output_mode = $progress_output_mode;
         $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
+
+        if (in_array($command, ["pull", "pull-files", "files-pull"], true)) {
+            $this->files_pull_intent = $options["intent"] ?? "copy-changes";
+            if (!in_array($this->files_pull_intent, ["copy-changes", "make-identical"], true)) {
+                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option value, never HTML output.
+                throw new InvalidArgumentException(
+                    "Invalid --intent value: {$this->files_pull_intent}. " .
+                        "Valid values: copy-changes, make-identical",
+                );
+                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+            }
+            if (
+                $this->files_pull_intent === "make-identical" &&
+                $this->fs_root_nonempty_behavior === "preserve-local"
+            ) {
+                throw new InvalidArgumentException(
+                    "--intent=make-identical cannot preserve local paths. " .
+                        "Use --intent=copy-changes with --on-fs-root-nonempty=preserve-local.",
+                );
+            }
+        }
 
         // files-diff uses local push state and must not load or write the
         // pull command's pull/state.json file.
@@ -2266,6 +2300,7 @@ class ImportClient
         // Replay the pull index WAL before clearing the cursor which made its records durable.
         $this->pull_index_journal->apply_pending_records();
         $this->pull_index_journal->remove_empty_wal();
+        $this->remove_local_plan_directory($this->files_pull_local_plan_directory);
         $this->reset_state();
 
         if (file_exists($this->next_remote_index_file)) {
@@ -2275,6 +2310,10 @@ class ImportClient
         if (file_exists($this->fetch_list_file)) {
             @unlink($this->fetch_list_file);
             $this->audit_log("FILE DELETE | {$this->fetch_list_file}");
+        }
+        if (file_exists($this->next_local_index_file)) {
+            @unlink($this->next_local_index_file);
+            $this->audit_log("FILE DELETE | {$this->next_local_index_file}");
         }
         if (file_exists($this->volatile_files_file)) {
             @unlink($this->volatile_files_file);
@@ -2894,7 +2933,8 @@ class ImportClient
      * - Prior completed files-pull → delta mode (re-index, diff, fetch changes)
      * - In-progress files-pull → resume from saved state
      *
-     * Both modes share the same pipeline: index → diff → fetch.
+     * Both modes share index → diff → fetch. Make-identical inserts a local
+     * plan and reconciliation between index and the remote-index diff.
      */
     public function run_files_pull(): void
     {
@@ -2919,6 +2959,25 @@ class ImportClient
             $state_command === "files-pull" &&
             $current_status !== null &&
             $current_status !== "complete";
+
+        $previous_intent = $this->get_state()->files_pull_intent ?? "copy-changes";
+        if ($has_progress && $previous_intent !== $this->files_pull_intent) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option values, never HTML output.
+            throw new RuntimeException(
+                "Cannot change --intent from {$previous_intent} to {$this->files_pull_intent} " .
+                    "while resuming files-pull. Use the original intent, or use --abort first.",
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
+        if (
+            $this->files_pull_intent === "make-identical" &&
+            $this->fs_root_nonempty_behavior === "preserve-local"
+        ) {
+            throw new InvalidArgumentException(
+                "--intent=make-identical cannot preserve local paths. " .
+                    "Use --intent=copy-changes with --on-fs-root-nonempty=preserve-local.",
+            );
+        }
 
         $this->pull_index_journal->apply_pending_records();
         $this->assert_files_pull_path_selection_unchanged_while_resuming($has_progress);
@@ -2955,12 +3014,16 @@ class ImportClient
             [".", ".."]
         )) === 0;
 
-        // A remote index from a prior completed sync means the next run is a delta:
-        // create the next remote index, compare it with the remote index, and fetch
-        // only changes.
+        // A local index or non-empty remote index means a prior pull completed.
+        // The local index also marks a completed empty remote tree.
+        // Copy-changes applies the next remote-index delta. Make-identical also
+        // reconciles changes found by a current local scan.
         $is_delta =
-            file_exists($this->remote_index_file) &&
-            filesize($this->remote_index_file) > 0;
+            is_file($this->local_index_file) ||
+            (
+                file_exists($this->remote_index_file) &&
+                filesize($this->remote_index_file) > 0
+            );
 
         // Resuming an in-progress sync
         if ($has_progress) {
@@ -3011,6 +3074,8 @@ class ImportClient
             $this->get_state()->active_resumable_command->current_stage = "index";
             $this->get_state()->files_pull_path_selection_fingerprint =
                 $this->files_pull_path_selection_fingerprint();
+            $this->get_state()->reset_files_pull_intent_progress();
+            $this->get_state()->files_pull_intent = $this->files_pull_intent;
             $this->get_state()->diff = new FileDiffProgressState();
             $this->get_state()->index = new RemoteFileIndexCursorState();
             $this->get_state()->fetch = new FetchListProgressState();
@@ -3076,7 +3141,10 @@ class ImportClient
                 }
             }
             $this->sort_next_remote_index_file();
-            $this->get_state()->active_resumable_command->current_stage = "diff";
+            $this->get_state()->active_resumable_command->current_stage =
+                $this->files_pull_intent === "make-identical" && is_file($this->local_index_file)
+                    ? "local-plan"
+                    : "diff";
             $this->get_state()->diff = new FileDiffProgressState();
             if (file_exists($this->fetch_list_file)) {
                 @unlink($this->fetch_list_file);
@@ -3084,6 +3152,32 @@ class ImportClient
                     "FILE DELETE | {$this->fetch_list_file} | clearing before diff stage",
                 );
             }
+            $this->save_state();
+            $stage = $this->get_state()->active_resumable_command->current_stage;
+        }
+
+        if ($stage === "local-plan") {
+            $complete = $this->advance_files_pull_local_plan();
+            if (!$complete) {
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
+                return;
+            }
+            $this->build_next_local_index_file();
+            $this->get_state()->active_resumable_command->current_stage = "reconcile";
+            $this->save_state();
+            $stage = "reconcile";
+        }
+
+        if ($stage === "reconcile") {
+            $complete = $this->reconcile_local_changes_with_next_remote_index();
+            if (!$complete) {
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
+                return;
+            }
+            $this->get_state()->active_resumable_command->current_stage = "diff";
+            $this->get_state()->diff = new FileDiffProgressState();
             $this->save_state();
             $stage = "diff";
         }
@@ -3094,6 +3188,10 @@ class ImportClient
                 $this->get_state()->active_resumable_command->completion_state = "partial";
                 $this->save_state();
                 return;
+            }
+
+            if ($this->get_state()->files_pull_plan_cursor !== null) {
+                sort_index_file($this->fetch_list_file);
             }
 
             $has_files_to_fetch =
@@ -3155,6 +3253,11 @@ class ImportClient
             $this->recreate_intermediate_symlinks();
         }
         $this->pull_index_journal->apply_pending_records();
+        $this->remove_local_plan_directory($this->files_pull_local_plan_directory);
+        if (is_file($this->next_local_index_file)) {
+            @unlink($this->next_local_index_file);
+        }
+        $this->get_state()->files_pull_plan_cursor = null;
 
         $this->ensure_local_index_exists();
         $this->get_state()->active_resumable_command->completion_state = "complete";
@@ -3183,6 +3286,523 @@ class ImportClient
         ], true);
 
         $this->report_volatile_files();
+    }
+
+    /** Builds the fresh local index through bounded PushPlan steps. */
+    private function advance_files_pull_local_plan(): bool
+    {
+        $files_pull_plan_cursor = $this->get_state()->files_pull_plan_cursor;
+        $push_plan_cursor = $files_pull_plan_cursor["push_plan_cursor"] ?? null;
+        if (
+            $push_plan_cursor !== null
+            && in_array(
+                $push_plan_cursor["position"]["phase"],
+                ["diffing", "complete"],
+                true
+            )
+        ) {
+            return true;
+        }
+        if ($push_plan_cursor === null) {
+            $this->remove_local_plan_directory($this->files_pull_local_plan_directory);
+            if (!mkdir($this->files_pull_local_plan_directory, 0755, true)) {
+                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem path, never HTML output.
+                throw new RuntimeException(
+                    "Failed to create the files-pull local plan directory: "
+                        . $this->files_pull_local_plan_directory . "."
+                );
+                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+            }
+            $excluded_paths_file =
+                $this->files_pull_local_plan_directory . "/no-target-exclusions.json";
+            if (file_put_contents($excluded_paths_file, "[]\n") === false) {
+                throw new RuntimeException(
+                    "Failed to create the files-pull local plan exclusions."
+                );
+            }
+            if (
+                file_put_contents(
+                    $this->files_pull_local_plan_directory
+                        . "/changed_local_roots.jsonl",
+                    ""
+                ) !== 0
+            ) {
+                throw new RuntimeException(
+                    "Failed to initialize the files-pull changed-root stack."
+                );
+            }
+            $plan = PushPlan::start(
+                $this->files_pull_local_plan_directory,
+                $this->filesystem_root,
+                $this->local_index_file,
+                $excluded_paths_file
+            );
+            $files_pull_plan_cursor = [
+                "push_plan_cursor" => $plan->get_cursor(),
+                "index_diff_cursor" => null,
+                "next_local_index_byte_offset" => 0,
+                "fetch_list_byte_offset" => 0,
+                "changed_local_root_stack_top_byte_offset" => null,
+            ];
+        } else {
+            $plan = PushPlan::resume($push_plan_cursor);
+        }
+
+        try {
+            while (!$this->shutdown_requested) {
+                $push_plan_cursor = $plan->get_cursor();
+                if (
+                    in_array(
+                        $push_plan_cursor["position"]["phase"],
+                        ["diffing", "complete"],
+                        true
+                    )
+                ) {
+                    return true;
+                }
+                $plan->next_step();
+                $plan->flush_pending_outputs();
+                $files_pull_plan_cursor["push_plan_cursor"] = $plan->get_cursor();
+                $this->get_state()->files_pull_plan_cursor = $files_pull_plan_cursor;
+                $this->save_state();
+            }
+        } finally {
+            $plan->close();
+        }
+
+        return false;
+    }
+
+    /** Maps the selected next remote index into local-relative path order. */
+    private function build_next_local_index_file(): void
+    {
+        $next_local_index_file_handle = fopen($this->next_local_index_file, "wb");
+        if (!is_resource($next_local_index_file_handle)) {
+            throw new RuntimeException("Failed to create the mapped next local index.");
+        }
+        $next_remote_index_reader = new RemoteIndexReader($this->next_remote_index_file);
+        try {
+            $next_remote_index_reader->open();
+            while (true) {
+                $next_remote_index_entry = $next_remote_index_reader->next_entry();
+                if ($next_remote_index_entry === null) {
+                    break;
+                }
+                if (!$this->is_selected_for_pulling($next_remote_index_entry["path"], true)) {
+                    continue;
+                }
+                $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
+                    $next_remote_index_entry["path"]
+                );
+                $local_relative_path = relative_path_under(
+                    $local_absolute_path,
+                    $this->filesystem_root
+                );
+                if ($local_relative_path === null || $local_relative_path === "") {
+                    throw new RuntimeException(
+                        "Cannot map the selected remote path beneath the filesystem root: " .
+                            $next_remote_index_entry["path"] . "."
+                    );
+                }
+                $next_local_index_entry = $next_remote_index_entry;
+                $next_local_index_entry["path"] = base64_encode($local_relative_path);
+                $next_local_index_entry["remote_absolute_path"] = base64_encode(
+                    $next_remote_index_entry["path"]
+                );
+                $line = json_encode(
+                    $next_local_index_entry,
+                    JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+                ) . "\n";
+                if (fwrite($next_local_index_file_handle, $line) !== strlen($line)) {
+                    throw new RuntimeException("Failed to write the mapped next local index.");
+                }
+            }
+            if (!fflush($next_local_index_file_handle)) {
+                throw new RuntimeException("Failed to flush the mapped next local index.");
+            }
+        } finally {
+            $next_remote_index_reader->close();
+            fclose($next_local_index_file_handle);
+        }
+        sort_index_file($this->next_local_index_file);
+    }
+
+    /**
+     * Reconciles local-index differences with the selected remote tree.
+     *
+     * FileIndexDiffProcessor compares the retained and fresh local indexes.
+     * Each locally changed selected root is removed when still present, then
+     * matching entries from the mapped current remote index enter the fetch
+     * list. The processor cursor and the two output offsets remain one plan
+     * cursor in PullState.
+     */
+    private function reconcile_local_changes_with_next_remote_index(): bool
+    {
+        $files_pull_plan_cursor = $this->get_state()->files_pull_plan_cursor;
+        if ($files_pull_plan_cursor === null) {
+            throw new LogicException("Cannot reconcile files without a files-pull plan cursor.");
+        }
+        $fresh_local_index_file =
+            $this->files_pull_local_plan_directory . "/fresh_local_index.jsonl";
+        $index_diff_processor = $files_pull_plan_cursor["index_diff_cursor"] === null
+            ? FileIndexDiffProcessor::start(
+                $this->local_index_file,
+                $fresh_local_index_file
+            )
+            : FileIndexDiffProcessor::resume(
+                $this->local_index_file,
+                $fresh_local_index_file,
+                $files_pull_plan_cursor["index_diff_cursor"]
+            );
+
+        $next_local_index_file_handle = fopen($this->next_local_index_file, "rb");
+        if (!is_resource($next_local_index_file_handle)) {
+            $index_diff_processor->close();
+            throw new RuntimeException("Failed to open the mapped next local index.");
+        }
+        $fetch_list_file_handle = fopen($this->fetch_list_file, "c+b");
+        if (!is_resource($fetch_list_file_handle)) {
+            $index_diff_processor->close();
+            fclose($next_local_index_file_handle);
+            throw new RuntimeException("Failed to open the files-pull fetch list.");
+        }
+        $changed_local_roots_file_handle = fopen(
+            $this->files_pull_local_plan_directory . "/changed_local_roots.jsonl",
+            "a+b"
+        );
+        if (!is_resource($changed_local_roots_file_handle)) {
+            $index_diff_processor->close();
+            fclose($next_local_index_file_handle);
+            fclose($fetch_list_file_handle);
+            throw new RuntimeException("Failed to open the files-pull changed-root stack.");
+        }
+
+        $next_local_index_byte_offset =
+            $files_pull_plan_cursor["next_local_index_byte_offset"];
+        $fetch_list_byte_offset = $files_pull_plan_cursor["fetch_list_byte_offset"];
+        $changed_local_root_stack_top_byte_offset =
+            $files_pull_plan_cursor["changed_local_root_stack_top_byte_offset"];
+
+        try {
+            $changed_local_root = $this->read_files_pull_changed_local_root(
+                $changed_local_roots_file_handle,
+                $changed_local_root_stack_top_byte_offset
+            );
+            if (
+                fseek(
+                    $next_local_index_file_handle,
+                    $next_local_index_byte_offset
+                ) !== 0
+                || !ftruncate($fetch_list_file_handle, $fetch_list_byte_offset)
+                || fseek($fetch_list_file_handle, $fetch_list_byte_offset) !== 0
+            ) {
+                throw new RuntimeException("Failed to restore the files-pull plan offsets.");
+            }
+
+            $next_local_index_record = $this->read_files_pull_reconcile_index_record(
+                $next_local_index_file_handle,
+                true
+            );
+            while (!$this->shutdown_requested) {
+                $local_index_diff = $index_diff_processor->get_current_path();
+                if ($local_index_diff === null && $next_local_index_record === null) {
+                    return true;
+                }
+
+                $local_relative_path = $next_local_index_record === null
+                    ? null
+                    : $next_local_index_record["entry"]["path"];
+                $local_diff_path = null;
+                if ($local_index_diff !== null) {
+                    $local_diff_entry = $local_index_diff["after"]
+                        ?? $local_index_diff["before"];
+                    $local_diff_path = $local_diff_entry["path"];
+                    if (
+                        $local_relative_path === null
+                        || strcmp($local_diff_path, $local_relative_path) < 0
+                    ) {
+                        $local_relative_path = $local_diff_path;
+                    }
+                }
+
+                while (
+                    $changed_local_root !== null
+                    && !path_is_within_root(
+                        $local_relative_path,
+                        $changed_local_root["path"]
+                    )
+                    && strcmp(
+                        $local_relative_path,
+                        $changed_local_root["path"] . "/"
+                    ) > 0
+                ) {
+                    $changed_local_root_stack_top_byte_offset =
+                        $changed_local_root["previous_byte_offset"];
+                    $changed_local_root = $this->read_files_pull_changed_local_root(
+                        $changed_local_roots_file_handle,
+                        $changed_local_root_stack_top_byte_offset
+                    );
+                }
+
+                if ($local_diff_path === $local_relative_path) {
+                    $local_path_changed = !$this->files_pull_local_index_entries_match(
+                        $local_index_diff["before"],
+                        $local_index_diff["after"]
+                    );
+                    if (
+                        $local_path_changed
+                        && $this->is_local_relative_path_selected_for_make_identical(
+                            $local_relative_path
+                        )
+                    ) {
+                        if ($local_index_diff["after"] !== null) {
+                            $local_absolute_path = wp_join_unix_paths(
+                                $this->filesystem_root,
+                                $local_relative_path
+                            );
+                            if (
+                                ( file_exists($local_absolute_path)
+                                    || is_link($local_absolute_path) )
+                                && !$this->remove_local_absolute_path_without_following_symlinks(
+                                    $local_absolute_path
+                                )
+                            ) {
+                                throw new RuntimeException(
+                                    "Failed to remove the local change before making files identical: "
+                                        . $local_absolute_path . "."
+                                );
+                            }
+                        }
+                        if (
+                            $changed_local_root === null
+                            || !path_is_within_root(
+                                $local_relative_path,
+                                $changed_local_root["path"]
+                            )
+                        ) {
+                            if (fseek($changed_local_roots_file_handle, 0, SEEK_END) !== 0) {
+                                throw new RuntimeException(
+                                    "Failed to seek in the files-pull changed-root stack."
+                                );
+                            }
+                            $changed_local_root_stack_top_byte_offset =
+                                ftell($changed_local_roots_file_handle);
+                            if (!is_int($changed_local_root_stack_top_byte_offset)) {
+                                throw new RuntimeException(
+                                    "Failed to read the files-pull changed-root stack offset."
+                                );
+                            }
+                            $line = json_encode(
+                                [
+                                    "path_b64" => base64_encode($local_relative_path),
+                                    "previous_byte_offset" =>
+                                        $changed_local_root["byte_offset"] ?? null,
+                                ],
+                                JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+                            ) . "\n";
+                            if (
+                                fwrite($changed_local_roots_file_handle, $line)
+                                !== strlen($line)
+                            ) {
+                                throw new RuntimeException(
+                                    "Failed to append to the files-pull changed-root stack."
+                                );
+                            }
+                            $changed_local_root = [
+                                "path" => $local_relative_path,
+                                "byte_offset" =>
+                                    $changed_local_root_stack_top_byte_offset,
+                                "previous_byte_offset" =>
+                                    $changed_local_root["byte_offset"] ?? null,
+                            ];
+                        }
+                    }
+                    $index_diff_processor->consume_current_path();
+                }
+
+                if (
+                    $next_local_index_record !== null
+                    && $next_local_index_record["entry"]["path"] === $local_relative_path
+                ) {
+                    if (
+                        $changed_local_root !== null
+                        && path_is_within_root(
+                            $local_relative_path,
+                            $changed_local_root["path"]
+                        )
+                    ) {
+                        $this->append_to_fetch_list(
+                            $next_local_index_record["entry"]["remote_absolute_path"],
+                            $fetch_list_file_handle
+                        );
+                    }
+                    $next_local_index_byte_offset =
+                        $next_local_index_record["next_byte_offset"];
+                    $next_local_index_record =
+                        $this->read_files_pull_reconcile_index_record(
+                            $next_local_index_file_handle,
+                            true
+                        );
+                }
+
+                if (
+                    !fflush($fetch_list_file_handle)
+                    || !fflush($changed_local_roots_file_handle)
+                ) {
+                    throw new RuntimeException("Failed to flush the files-pull plan outputs.");
+                }
+                $fetch_list_byte_offset = ftell($fetch_list_file_handle);
+                if (!is_int($fetch_list_byte_offset)) {
+                    throw new RuntimeException("Failed to read the files-pull fetch-list offset.");
+                }
+                $files_pull_plan_cursor["index_diff_cursor"] =
+                    $index_diff_processor->get_cursor();
+                $files_pull_plan_cursor["next_local_index_byte_offset"] =
+                    $next_local_index_byte_offset;
+                $files_pull_plan_cursor["fetch_list_byte_offset"] =
+                    $fetch_list_byte_offset;
+                $files_pull_plan_cursor[
+                    "changed_local_root_stack_top_byte_offset"
+                ] = $changed_local_root_stack_top_byte_offset;
+                $this->get_state()->files_pull_plan_cursor =
+                    $files_pull_plan_cursor;
+                $this->save_state();
+            }
+        } finally {
+            $index_diff_processor->close();
+            fclose($next_local_index_file_handle);
+            fclose($fetch_list_file_handle);
+            fclose($changed_local_roots_file_handle);
+        }
+
+        return false;
+    }
+
+    /**
+     * Reads one changed local root addressed by the files-pull plan cursor.
+     *
+     * @param resource $changed_local_roots_file_handle Open append-only root stack.
+     * @return array|null {
+     *     Decoded stack entry, or null for an empty stack.
+     *
+     *     @type string   $path                 Local relative changed root.
+     *     @type int      $byte_offset          Offset of this stack entry.
+     *     @type int|null $previous_byte_offset Offset of the preceding active root.
+     * }
+     * @phpstan-return array{path:string,byte_offset:int,previous_byte_offset:int|null}|null
+     */
+    private function read_files_pull_changed_local_root(
+        $changed_local_roots_file_handle,
+        ?int $byte_offset
+    ): ?array {
+        if ($byte_offset === null) {
+            return null;
+        }
+        if (fseek($changed_local_roots_file_handle, $byte_offset) !== 0) {
+            throw new RuntimeException("Failed to seek in the files-pull changed-root stack.");
+        }
+        $line = fgets($changed_local_roots_file_handle);
+        if (!is_string($line)) {
+            throw new RuntimeException("Failed to read a files-pull changed-root stack entry.");
+        }
+        $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+        $path = base64_decode($entry["path_b64"] ?? "", true);
+        if ($path === false || $path === "") {
+            throw new RuntimeException("The files-pull changed-root stack has an invalid path.");
+        }
+        return [
+            "path" => $path,
+            "byte_offset" => $byte_offset,
+            "previous_byte_offset" => $entry["previous_byte_offset"],
+        ];
+    }
+
+    /**
+     * Reads one local-coordinate index record and its following byte offset.
+     *
+     * @param resource $index_file_handle Open local-coordinate index.
+     * @return array{entry:array<string,mixed>,next_byte_offset:int}|null
+     */
+    private function read_files_pull_reconcile_index_record(
+        $index_file_handle,
+        bool $has_remote_absolute_path
+    ): ?array {
+        $line = fgets($index_file_handle);
+        if ($line === false) {
+            if (!feof($index_file_handle)) {
+                throw new RuntimeException("Failed to read a files-pull reconciliation index.");
+            }
+            return null;
+        }
+        $next_byte_offset = ftell($index_file_handle);
+        if ($next_byte_offset === false) {
+            throw new RuntimeException("Failed to read a files-pull reconciliation index offset.");
+        }
+        $entry = decode_local_index_entry($line);
+        if ($has_remote_absolute_path) {
+            $encoded_entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+            $remote_absolute_path = base64_decode(
+                $encoded_entry["remote_absolute_path"] ?? "",
+                true
+            );
+            if ($remote_absolute_path === false || $remote_absolute_path === "") {
+                throw new RuntimeException(
+                    "The mapped next local index has an invalid remote absolute path."
+                );
+            }
+            $entry["remote_absolute_path"] = $remote_absolute_path;
+        }
+        return [
+            "entry" => $entry,
+            "next_byte_offset" => $next_byte_offset,
+        ];
+    }
+
+    /** Whether retained and fresh local index entries describe the same local path state. */
+    private function files_pull_local_index_entries_match(?array $retained, ?array $fresh): bool
+    {
+        if ($retained === null || $fresh === null) {
+            return $retained === $fresh;
+        }
+        return $retained["type"] === $fresh["type"] &&
+            $retained["size"] === $fresh["size"] &&
+            $retained["ctime"] === $fresh["ctime"];
+    }
+
+    /** Whether make-identical may change one local relative path in this selection. */
+    private function is_local_relative_path_selected_for_make_identical(
+        string $local_relative_path
+    ): bool {
+        $local_absolute_path = wp_join_unix_paths(
+            $this->filesystem_root,
+            $local_relative_path
+        );
+        if (path_is_within_root($local_absolute_path, $this->state_dir)) {
+            return false;
+        }
+
+        $selected = empty($this->pull_only_files_with_path_prefixes);
+        foreach ($this->pull_only_files_with_path_prefixes as $remote_prefix) {
+            $local_prefix = $this->map_remote_absolute_path_to_local_absolute_path(
+                $remote_prefix
+            );
+            if (path_is_within_root($local_absolute_path, $local_prefix)) {
+                $selected = true;
+                break;
+            }
+        }
+        if (!$selected) {
+            return false;
+        }
+        foreach ($this->pull_excluded_files_with_path_prefixes as $remote_prefix) {
+            $local_prefix = $this->map_remote_absolute_path_to_local_absolute_path(
+                $remote_prefix
+            );
+            if (path_is_within_root($local_absolute_path, $local_prefix)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Creates an empty local index when files-pull recorded no local paths. */
@@ -6536,7 +7156,14 @@ class ImportClient
             $file_diff_progress_state->last_consumed_remote_index_entry_path;
         $last_processed_next_remote_index_entry_path =
             $file_diff_progress_state->last_processed_next_remote_index_entry_path;
-        $fetch_list_file_mode = $next_remote_index_byte_offset > 0 ? "a" : "w";
+        $fetch_list_file_mode =
+            $next_remote_index_byte_offset > 0 ||
+            (
+                $this->get_state()->files_pull_plan_cursor["fetch_list_byte_offset"]
+                    ?? 0
+            ) > 0
+                ? "a"
+                : "w";
         if ($fetch_list_file_mode === "w") {
             $this->audit_log(
                 "FILE CREATE | {$this->fetch_list_file} | building fetch list",
@@ -11160,7 +11787,7 @@ if (
             'type' => 'value',
             'target' => 'fs_root_nonempty_behavior',
             'placeholder' => 'MODE',
-            'help' => 'What to do when filesystem root is non-empty (error|preserve-local)',
+            'help' => 'What to do when filesystem root is non-empty (error|preserve-local); preserve-local requires --intent=copy-changes',
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'files-pull'],
             'aliases' => ['on-docroot-nonempty'],
@@ -11213,6 +11840,15 @@ if (
         ],
 
         // ── files-pull options ───────────────────────────────────
+        [
+            'name' => 'intent',
+            'type' => 'value',
+            'target' => 'intent',
+            'placeholder' => 'INTENT',
+            'valid_values' => ['copy-changes', 'make-identical'],
+            'help' => 'Pull intent (copy-changes|make-identical; default: copy-changes)',
+            'commands' => ['pull', 'pull-files', 'files-pull'],
+        ],
         [
             'name' => 'filter',
             'type' => 'value',
@@ -12007,13 +12643,15 @@ if (
         ],
         "files-pull" => [
             "level" => "low",
-            "short" => "Pull all files (initial) or only changes (delta)",
+            "short" => "Pull files to match the remote or copy its changes",
             "description" =>
                 "Downloads files from the remote site into --fs-root.\n" .
                 "\n" .
                 "On the first run, indexes the full remote directory tree and then\n" .
-                "downloads every file. On subsequent runs, writes the next remote index,\n" .
-                "compares it with the remote index, and downloads only what changed.\n" .
+                "downloads every file. On subsequent runs, --intent=make-identical\n" .
+                "reconciles remote and local changes so selected paths match the current\n" .
+                "remote tree. --intent=copy-changes applies only changes recorded between\n" .
+                "the previous and current remote indexes.\n" .
                 "Interrupted pulls resume from the last saved cursor.\n" .
                 "\n" .
                 "Runs files-index internally to write the next remote index.\n",

@@ -75,6 +75,7 @@ class FilesPullStateTest extends TestCase
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "follow_symlinks" => false,
             "fs_root_nonempty_behavior" => "preserve-local",
+            "files_pull_intent" => "copy-changes",
         ], $state));
     }
 
@@ -136,6 +137,9 @@ class FilesPullStateTest extends TestCase
 
         $behaviorProp = $reflection->getProperty('fs_root_nonempty_behavior');
         $behaviorProp->setValue($client, 'preserve-local');
+
+        $intentProperty = $reflection->getProperty('files_pull_intent');
+        $intentProperty->setValue($client, 'copy-changes');
 
         return [$client, $reflection];
     }

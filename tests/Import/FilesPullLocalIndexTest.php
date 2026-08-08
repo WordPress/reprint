@@ -221,7 +221,7 @@ final class FilesPullLocalIndexTest extends TestCase
         ]);
 
         $this->abortFilesPull();
-        $delta = $this->runFilesPull();
+        $delta = $this->runFilesPull(['--intent=copy-changes']);
 
         $this->assertSame(0, $delta['exit'], $delta['output']);
         $this->assertSame('longer local edit', file_get_contents($this->localTree . '/edited.txt'));
@@ -248,6 +248,62 @@ final class FilesPullLocalIndexTest extends TestCase
                 ),
             ],
         ], $records);
+    }
+
+    public function testMakeIdenticalRestoresLocalChanges(): void
+    {
+        $this->completeFilesPull();
+        file_put_contents($this->localTree . '/edited.txt', 'longer local edit');
+        unlink($this->localTree . '/deleted.txt');
+        file_put_contents($this->localTree . '/local-only.txt', 'remove me');
+        mkdir($this->localTree . '/local-only-directory');
+        file_put_contents(
+            $this->localTree . '/local-only-directory/child.txt',
+            'remove me too'
+        );
+
+        $this->abortFilesPull();
+        $pull = $this->runFilesPull(['--intent=make-identical']);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertSame('old', file_get_contents($this->localTree . '/edited.txt'));
+        $this->assertSame('delete me', file_get_contents($this->localTree . '/deleted.txt'));
+        $this->assertFileDoesNotExist($this->localTree . '/local-only.txt');
+        $this->assertDirectoryDoesNotExist($this->localTree . '/local-only-directory');
+
+        $diff = $this->runFilesDiff();
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $this->assertSame([[
+            'command' => 'files-diff',
+            'status' => 'complete',
+            'local_paths_to_push' => 0,
+            'local_paths_to_delete' => 0,
+        ]], $this->filesDiffRecords($diff['stdout']));
+    }
+
+    public function testMakeIdenticalLeavesChangesOutsideIncludeSelectionAlone(): void
+    {
+        $this->completeFilesPull();
+        file_put_contents($this->localTree . '/edited.txt', 'outside selection');
+        file_put_contents(
+            $this->localTree . '/selected/local-only.txt',
+            'inside selection'
+        );
+
+        $this->abortFilesPull();
+        $pull = $this->runFilesPull([
+            '--intent=make-identical',
+            '--include=/var/www/html/selected',
+        ]);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertSame(
+            'outside selection',
+            file_get_contents($this->localTree . '/edited.txt')
+        );
+        $this->assertFileDoesNotExist(
+            $this->localTree . '/selected/local-only.txt'
+        );
     }
 
     public function testResumeReplaysTheWALIntoTheLocalIndex(): void
@@ -353,6 +409,7 @@ final class FilesPullLocalIndexTest extends TestCase
             '--filter=essential-files',
         ]];
         yield 'preserve local files' => [[
+            '--intent=copy-changes',
             '--on-fs-root-nonempty=preserve-local',
         ]];
     }

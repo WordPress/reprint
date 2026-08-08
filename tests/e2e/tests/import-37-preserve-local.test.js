@@ -152,7 +152,7 @@ describe('Import: --preserve-local', () => {
         it('files-pull completes with --preserve-local', () => {
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--on-fs-root-nonempty=preserve-local'],
+                extraArgs: ['--intent=copy-changes', '--on-fs-root-nonempty=preserve-local'],
             });
             assert.equal(
                 result.exitCode, 0,
@@ -317,7 +317,7 @@ describe('Import: --preserve-local', () => {
         it('completes after forced resume with --max-exec=3', () => {
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--on-fs-root-nonempty=preserve-local', '--max-exec=3'],
+                extraArgs: ['--intent=copy-changes', '--on-fs-root-nonempty=preserve-local', '--max-exec=3'],
                 timeout: 120000,
             });
             assert.equal(
@@ -365,7 +365,7 @@ describe('Import: --preserve-local', () => {
         it('initial import completes', () => {
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--on-fs-root-nonempty=preserve-local'],
+                extraArgs: ['--intent=copy-changes', '--on-fs-root-nonempty=preserve-local'],
             });
             assert.equal(result.exitCode, 0,
                 `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -485,7 +485,7 @@ describe('Import: --preserve-local', () => {
         it('files-pull completes without security errors', () => {
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--on-fs-root-nonempty=preserve-local'],
+                extraArgs: ['--intent=copy-changes', '--on-fs-root-nonempty=preserve-local'],
             });
             assert.equal(
                 result.exitCode, 0,
