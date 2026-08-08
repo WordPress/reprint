@@ -9782,15 +9782,18 @@ class ImportClient
             $target,
         );
 
-        // If something already exists at the symlink path, keep it — whether
-        // it's a file, directory, or another symlink.
-        // Also skip if any parent component is a symlink — we never create
-        // new content through symlinked directories.
+        // The index comparison excludes local-owned paths before this handler
+        // runs. An existing path here belongs to an earlier pull and may be
+        // replaced by the incoming symlink.
         if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
-            $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
-            $this->emit_skip_progress($path);
-            return;
+            if (!$this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)) {
+                throw new RuntimeException(
+                    "Failed to replace path with symlink: {$path}",
+                );
+            }
         }
+
+        // Never create new content through symlinked directories.
         if ($this->path_traverses_symlink(dirname($local_absolute_path))) {
             $this->audit_log("PRESERVE-LOCAL skip symlink (symlink in path): {$path} -> {$target}", true);
             $this->emit_skip_progress($path);
