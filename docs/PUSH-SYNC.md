@@ -110,10 +110,9 @@ sorted path mutations directly and removes an indexed subtree when its root is
 deleted or replaced. Non-empty directories remain implicit. A successful
 initial pull with no local mutations creates an empty local index.
 
-Files-pull has two intents. `--intent=copy-changes` is the default. Explicit
-`--intent=make-identical` uses a resumable `PushPlan` to build a fresh local
-index after the next remote index is complete. The same
-`FileIndexDiffProcessor` used by `PushPlan`
+Files-pull has two intents. `--intent=make-identical` is the default. After
+the next remote index is complete, it uses a resumable `PushPlan` to build a
+fresh local index. The same `FileIndexDiffProcessor` used by `PushPlan`
 compares the retained and fresh local indexes one path at a time. Files-pull
 merges those local differences with the selected next remote index mapped into
 local relative paths. Each locally changed selected root is removed, and every

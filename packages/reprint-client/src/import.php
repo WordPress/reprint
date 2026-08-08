@@ -338,7 +338,7 @@ class ImportClient
     private $filter = "none";
 
     /** @var string Whether files-pull copies remote changes or makes selected paths identical. */
-    private $files_pull_intent = "copy-changes";
+    private $files_pull_intent = "make-identical";
 
     /** @var string|null Extra remote directory to include in the export (--extra-directory). */
     private $extra_directory = null;
@@ -865,7 +865,7 @@ class ImportClient
         $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
 
         if (in_array($command, ["pull", "pull-files", "files-pull"], true)) {
-            $this->files_pull_intent = $options["intent"] ?? "copy-changes";
+            $this->files_pull_intent = $options["intent"] ?? "make-identical";
             if (!in_array($this->files_pull_intent, ["copy-changes", "make-identical"], true)) {
                 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option value, never HTML output.
                 throw new InvalidArgumentException(
@@ -2960,7 +2960,7 @@ class ImportClient
             $current_status !== null &&
             $current_status !== "complete";
 
-        $previous_intent = $this->get_state()->files_pull_intent ?? "copy-changes";
+        $previous_intent = $this->get_state()->files_pull_intent ?? "make-identical";
         if ($has_progress && $previous_intent !== $this->files_pull_intent) {
             // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option values, never HTML output.
             throw new RuntimeException(
@@ -11850,7 +11850,7 @@ if (
             'target' => 'intent',
             'placeholder' => 'INTENT',
             'valid_values' => ['copy-changes', 'make-identical'],
-            'help' => 'Pull intent (copy-changes|make-identical; default: copy-changes)',
+            'help' => 'Pull intent (copy-changes|make-identical; default: make-identical)',
             'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
         [

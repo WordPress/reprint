@@ -51,6 +51,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('Next remote index', $output);
         $this->assertStringContainsString('--intent=INTENT', $output);
         $this->assertStringContainsString('copy-changes|make-identical', $output);
+        $this->assertStringContainsString('default: make-identical', $output);
     }
 
     public function testFilterOptionIsHiddenFromCommandHelp(): void

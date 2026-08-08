@@ -263,7 +263,7 @@ final class FilesPullLocalIndexTest extends TestCase
         );
 
         $this->abortFilesPull();
-        $pull = $this->runFilesPull(['--intent=make-identical']);
+        $pull = $this->runFilesPull();
 
         $this->assertSame(0, $pull['exit'], $pull['output']);
         $this->assertSame('old', file_get_contents($this->localTree . '/edited.txt'));
@@ -292,7 +292,6 @@ final class FilesPullLocalIndexTest extends TestCase
 
         $this->abortFilesPull();
         $pull = $this->runFilesPull([
-            '--intent=make-identical',
             '--include=/var/www/html/selected',
         ]);
 
