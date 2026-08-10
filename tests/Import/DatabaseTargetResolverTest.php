@@ -8,7 +8,7 @@ use Reprint\Importer\DatabaseTargetResolutionPolicy;
 use Reprint\Importer\DatabaseTargetResolver;
 use Reprint\Importer\State\DatabaseApplyCommandState;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
 
 class DatabaseTargetResolverTest extends TestCase {
 
