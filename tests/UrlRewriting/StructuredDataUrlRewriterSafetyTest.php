@@ -480,6 +480,242 @@ class StructuredDataUrlRewriterSafetyTest extends TestCase {
         $this->assertSame($expected, $this->createRewriter()->rewrite($input));
     }
 
+    public function testNestedShortcodeSerializationRemainsUnchangedWhenTargetContainsDelimiter(): void
+    {
+        $source_base = self::SOURCE_ORIGIN . '/base';
+        $target_base = self::TARGET_ORIGIN . "/o'reilly";
+        $serialized_source = serialize(['url' => $source_base . '/item']);
+        $input = '[builder settings=\'' . $serialized_source . '\']';
+
+        $this->assertFalse(( new ShortcodeSpanProcessor($input) )->is_malformed());
+
+        $result = $this->createRewriter([
+            $source_base => $target_base,
+        ])->rewrite($input);
+
+        $this->assertFalse(
+            ( new ShortcodeSpanProcessor($result) )->is_malformed(),
+            'A rewrite must not turn a valid shortcode into malformed syntax.'
+        );
+        $this->assertSame($input, $result);
+    }
+
+    /**
+     * @dataProvider unsafeShortcodeTargetCases
+     */
+    public function testShortcodeTokenRemainsUnchangedWhenTargetChangesAttributeBoundaries(
+        string $attribute_value,
+        string $target_base
+    ): void {
+        $source_base = self::SOURCE_ORIGIN . '/base';
+        $input = '[builder image=' . $attribute_value . ' data-note=keep]';
+
+        $this->assertFalse(( new ShortcodeSpanProcessor($input) )->is_malformed());
+        $this->assertSame(
+            $input,
+            $this->createRewriter([
+                $source_base => $target_base,
+            ])->rewrite($input)
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function unsafeShortcodeTargetCases(): iterable
+    {
+        yield 'double quote closes a double-quoted value' => [
+            '"' . self::SOURCE_ORIGIN . '/base/item"',
+            self::TARGET_ORIGIN . '/contains"quote',
+        ];
+        yield 'space splits an unquoted value' => [
+            self::SOURCE_ORIGIN . '/base/item',
+            self::TARGET_ORIGIN . '/contains space',
+        ];
+        yield 'opening bracket invalidates an unquoted value' => [
+            self::SOURCE_ORIGIN . '/base/item',
+            self::TARGET_ORIGIN . '/contains[bracket',
+        ];
+        yield 'closing bracket ends an unquoted value' => [
+            self::SOURCE_ORIGIN . '/base/item',
+            self::TARGET_ORIGIN . '/contains]bracket',
+        ];
+        yield 'double quote invalidates a named unquoted value under WordPress grammar' => [
+            self::SOURCE_ORIGIN . '/base/item',
+            self::TARGET_ORIGIN . '/contains"quote',
+        ];
+        yield 'closing bracket ends a quoted value under WordPress grammar' => [
+            '\'' . self::SOURCE_ORIGIN . '/base/item\'',
+            self::TARGET_ORIGIN . '/contains]bracket',
+        ];
+        yield 'apostrophe invalidates a named unquoted value under WordPress grammar' => [
+            self::SOURCE_ORIGIN . '/base/item',
+            self::TARGET_ORIGIN . "/o'reilly",
+        ];
+        yield 'IPv6 closing bracket ends a quoted value under WordPress grammar' => [
+            '\'' . self::SOURCE_ORIGIN . '/base/item\'',
+            'https://[::1]/new',
+        ];
+        yield 'vertical tab splits a named unquoted value under WordPress grammar' => [
+            self::SOURCE_ORIGIN . '/base/item',
+            self::TARGET_ORIGIN . "/has\vsplit",
+        ];
+        yield 'non-breaking space is normalized before WordPress attribute parsing' => [
+            '\'' . self::SOURCE_ORIGIN . '/base/item\'',
+            self::TARGET_ORIGIN . "/has\xC2\xA0split",
+        ];
+        yield 'zero-width space is normalized before WordPress attribute parsing' => [
+            '\'' . self::SOURCE_ORIGIN . '/base/item\'',
+            self::TARGET_ORIGIN . "/has\xE2\x80\x8Bsplit",
+        ];
+        yield 'unbalanced HTML-like text is cleared by WordPress attribute parsing' => [
+            '\'' . self::SOURCE_ORIGIN . '/base/item\'',
+            self::TARGET_ORIGIN . '/<broken',
+        ];
+        yield 'target cannot balance HTML-like text cleared by WordPress' => [
+            '"<broken ' . self::SOURCE_ORIGIN . '/base/item"',
+            self::TARGET_ORIGIN . '/>',
+        ];
+        yield 'backslash is decoded by WordPress attribute parsing' => [
+            '\'' . self::SOURCE_ORIGIN . '/base/item\'',
+            self::TARGET_ORIGIN . '/has\\slash',
+        ];
+        yield 'malformed UTF-8 prevents WordPress attribute parsing' => [
+            '\'' . self::SOURCE_ORIGIN . '/base/item\'',
+            self::TARGET_ORIGIN . "/has\xFFbyte",
+        ];
+    }
+
+    /**
+     * @dataProvider unsafeShortcodeSourceCases
+     */
+    public function testShortcodeTokenRemainsUnchangedWhenSourceHasUnsafeGrammar(
+        string $source_base,
+        string $attribute_value
+    ): void {
+        $input = '[builder image=' . $attribute_value . ' data-note=keep]';
+
+        $this->assertFalse(( new ShortcodeSpanProcessor($input) )->is_malformed());
+        $this->assertSame(
+            $input,
+            $this->createRewriter([
+                $source_base => self::TARGET_ORIGIN . '/safe',
+            ])->rewrite($input)
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function unsafeShortcodeSourceCases(): iterable
+    {
+        $source_base = self::SOURCE_ORIGIN . '/has"quote';
+        yield 'quote changes a named unquoted source value' => [
+            $source_base,
+            $source_base . '/item',
+        ];
+
+        $source_base = self::SOURCE_ORIGIN . '/has]bracket';
+        yield 'closing bracket ends a quoted source value' => [
+            $source_base,
+            '\'' . $source_base . '/item\'',
+        ];
+
+        $source_base = self::SOURCE_ORIGIN . "/has\vsplit";
+        yield 'vertical tab splits a named unquoted source value' => [
+            $source_base,
+            $source_base . '/item',
+        ];
+    }
+
+    /**
+     * @dataProvider preexistingNormalizedShortcodeSpaceCases
+     */
+    public function testPreexistingNormalizedShortcodeSpaceDoesNotBlockRewrite(
+        string $space
+    ): void {
+        $input = '[builder image=\'' . self::SOURCE_ORIGIN . '/base/item'
+            . $space . 'suffix\']';
+        $expected = '[builder image=\'' . self::TARGET_ORIGIN . '/base/item'
+            . $space . 'suffix\']';
+
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function preexistingNormalizedShortcodeSpaceCases(): iterable
+    {
+        yield 'non-breaking space' => ["\xC2\xA0"];
+        yield 'zero-width space' => ["\xE2\x80\x8B"];
+    }
+
+    /**
+     * @dataProvider normalizedShortcodeSeparatorCases
+     */
+    public function testNormalizedSpaceCannotHideUnquotedShortcodeBoundary(
+        string $space
+    ): void {
+        $source_base = self::SOURCE_ORIGIN . '/has' . $space . 'split';
+        $input = '[builder image=' . $source_base . '/item]';
+
+        $this->assertSame(
+            $input,
+            $this->createRewriter([
+                $source_base => self::TARGET_ORIGIN . '/safe',
+                self::SOURCE_ORIGIN . '/has split' => self::TARGET_ORIGIN . '/safe',
+            ])->rewrite($input)
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function normalizedShortcodeSeparatorCases(): iterable
+    {
+        yield 'non-breaking space' => ["\xC2\xA0"];
+        yield 'zero-width space' => ["\xE2\x80\x8B"];
+    }
+
+    public function testPositionalShortcodeValueCanReceiveApostropheInTargetBase(): void
+    {
+        $source_base = self::SOURCE_ORIGIN . '/base';
+        $target_base = self::TARGET_ORIGIN . "/o'reilly";
+        $input = '[builder ' . $source_base . '/item]';
+        $expected = '[builder ' . $target_base . '/item]';
+
+        $this->assertSame(
+            $expected,
+            $this->createRewriter([
+                $source_base => $target_base,
+            ])->rewrite($input)
+        );
+    }
+
+    public function testUnsafeShortcodeTokenDoesNotBlockIndependentRewrites(): void
+    {
+        $source_base = self::SOURCE_ORIGIN . '/base';
+        $target_base = self::TARGET_ORIGIN . "/o'reilly";
+        $input = 'before ' . $source_base . '/outside '
+            . '[builder safe="' . $source_base . '/safe" unsafe=\''
+            . $source_base . '/unsafe\'] between '
+            . '[builder image="' . $source_base . '/safe"] after '
+            . $source_base . '/outside-again';
+        $expected = 'before ' . $target_base . '/outside '
+            . '[builder safe="' . $source_base . '/safe" unsafe=\''
+            . $source_base . '/unsafe\'] between '
+            . '[builder image="' . $target_base . '/safe"] after '
+            . $target_base . '/outside-again';
+
+        $this->assertSame(
+            $expected,
+            $this->createRewriter([
+                $source_base => $target_base,
+            ])->rewrite($input)
+        );
+    }
+
     /**
      * @dataProvider shortcodeTagNameCases
      */
@@ -964,12 +1200,12 @@ class StructuredDataUrlRewriterSafetyTest extends TestCase {
         );
     }
 
-    public function testCssRewritePreservesEscapesBetweenTwoMappedBases(): void
+    public function testCssRewritePreservesEscapesAfterLeadingMappedBase(): void
     {
         $input = '.asset{src:url("https://source.example/a\20 '
             . 'https://source.example/b")}';
         $expected = '.asset{src:url("https://destination.example/a\20 '
-            . 'https://destination.example/b")}';
+            . 'https://source.example/b")}';
 
         $this->assertSame($expected, $this->createRewriter()->rewrite($input));
     }
@@ -1071,6 +1307,45 @@ class StructuredDataUrlRewriterSafetyTest extends TestCase {
         );
     }
 
+    /**
+     * @dataProvider targetBaseMarkupDelimiterCases
+     */
+    public function testBlockMarkupRewriteFailsClosedWhenTargetBaseCreatesMarkup(
+        string $target_base,
+        string $input
+    ): void {
+        $this->assertSame(
+            $input,
+            $this->createRewriter([
+                self::SOURCE_ORIGIN . '/base' => $target_base,
+            ])->rewrite_known_block_markup_value($input)
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function targetBaseMarkupDelimiterCases(): iterable
+    {
+        yield 'block text element closer' => [
+            self::TARGET_ORIGIN . '/</p><script>',
+            '<p>' . self::SOURCE_ORIGIN . '/base/item</p>',
+        ];
+        yield 'style raw-text closer' => [
+            self::TARGET_ORIGIN . '/</style>',
+            '<style>.x{background:url("' . self::SOURCE_ORIGIN
+                . '/base/item")}</style>',
+        ];
+        yield 'inserted comment steals an existing token boundary' => [
+            self::TARGET_ORIGIN . '/<!-- injected',
+            '<p>' . self::SOURCE_ORIGIN . '/base/item<!-- existing --></p>',
+        ];
+        yield 'inserted HTML tag is skipped by the block parser' => [
+            self::TARGET_ORIGIN . '/<html>',
+            '<p>' . self::SOURCE_ORIGIN . '/base</p>',
+        ];
+    }
+
     public function testButtonBrowsingContextNameIsNotRewrittenAsAUrl(): void
     {
         $input = '<!-- wp:button {"linkTarget":"/old","url":"/old"} /-->';
@@ -1162,6 +1437,44 @@ class StructuredDataUrlRewriterSafetyTest extends TestCase {
                 self::SOURCE_ORIGIN => self::TARGET_ORIGIN . '/subsite',
             ])->rewrite_known_block_markup_value($input)
         );
+    }
+
+    /**
+     * @dataProvider parserOwnedUrlPayloadCases
+     */
+    public function testParserOwnedUrlRewritesOnlyItsLeadingBase(
+        string $input,
+        string $expected
+    ): void {
+        $this->assertSame(
+            $expected,
+            $this->createRewriter()->rewrite_known_block_markup_value($input)
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function parserOwnedUrlPayloadCases(): iterable
+    {
+        yield 'HTML URL attribute' => [
+            '<a href="https://source.example/page?note= '
+                . '&quot;https://source.example/quoted&quot;">Page</a>',
+            '<a href="https://destination.example/page?note= '
+                . '&quot;https://source.example/quoted&quot;">Page</a>',
+        ];
+        yield 'CSS URL token' => [
+            '.x{background:url("https://source.example/page?note= '
+                . '\'https://source.example/quoted\'")}',
+            '.x{background:url("https://destination.example/page?note= '
+                . '\'https://source.example/quoted\'")}',
+        ];
+        yield 'block URL attribute' => [
+            '<!-- wp:image {"url":"https://source.example/page?note= '
+                . '\'https://source.example/quoted\'"} /-->',
+            '<!-- wp:image {"url":"https://destination.example/page?note= '
+                . '\'https://source.example/quoted\'"} /-->',
+        ];
     }
 
     /**

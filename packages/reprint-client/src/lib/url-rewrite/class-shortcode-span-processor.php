@@ -23,7 +23,7 @@ class ShortcodeSpanProcessor {
      * @var array<int, array{
      *     start: int,
      *     length: int,
-     *     values: array<int, array{start: int, length: int, quoted: bool}>
+     *     values: array<int, array{start: int, length: int, quoted: bool, named: bool}>
      * }>
      */
     private array $tokens = [];
@@ -53,7 +53,7 @@ class ShortcodeSpanProcessor {
      * @return array<int, array{
      *     start: int,
      *     length: int,
-     *     values: array<int, array{start: int, length: int, quoted: bool}>
+     *     values: array<int, array{start: int, length: int, quoted: bool, named: bool}>
      * }>
      */
     public function get_tokens(): array
@@ -138,7 +138,7 @@ class ShortcodeSpanProcessor {
      * @return array{
      *     start: int,
      *     length: int,
-     *     values: array<int, array{start: int, length: int, quoted: bool}>
+     *     values: array<int, array{start: int, length: int, quoted: bool, named: bool}>
      * }|null
      */
     private function scan_claimed_token(
@@ -199,7 +199,7 @@ class ShortcodeSpanProcessor {
                 $value_position = $position;
             }
 
-            $value = $this->scan_attribute_value($value_position);
+            $value = $this->scan_attribute_value($value_position, $is_named_attribute);
             if ($value === null) {
                 return null;
             }
@@ -224,11 +224,11 @@ class ShortcodeSpanProcessor {
      * Scan a quoted or unquoted attribute value from its actual start.
      *
      * @return array{
-     *     span: array{start: int, length: int, quoted: bool},
+     *     span: array{start: int, length: int, quoted: bool, named: bool},
      *     next: int
      * }|null
      */
-    private function scan_attribute_value(int $position): ?array
+    private function scan_attribute_value(int $position, bool $is_named_attribute): ?array
     {
         $input_length = strlen($this->input);
         if ($position >= $input_length) {
@@ -248,6 +248,7 @@ class ShortcodeSpanProcessor {
                     'start' => $value_start,
                     'length' => $value_end - $value_start,
                     'quoted' => true,
+                    'named' => $is_named_attribute,
                 ],
                 'next' => $value_end + 1,
             ];
@@ -283,6 +284,7 @@ class ShortcodeSpanProcessor {
                 'start' => $value_start,
                 'length' => $value_end - $value_start,
                 'quoted' => false,
+                'named' => $is_named_attribute,
             ],
             'next' => $position,
         ];

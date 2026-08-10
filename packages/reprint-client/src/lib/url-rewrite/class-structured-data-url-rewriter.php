@@ -487,6 +487,8 @@ class StructuredDataUrlRewriter
 
             $raw_token = substr($value, $token['start'], $token['length']);
             $replacements = [];
+            $rewritten_attribute_values = [];
+            $kept_wordpress_attribute_values = true;
             foreach ($token['values'] as $value_span) {
                 $raw_attribute_value = substr(
                     $value,
@@ -505,7 +507,101 @@ class StructuredDataUrlRewriter
                         $allow_relative
                     );
                 }
+                $rewritten_attribute_values[] = $rewritten_attribute_value;
                 if ($rewritten_attribute_value !== $raw_attribute_value) {
+                    $raw_value_has_normalized_space =
+                        strpos($raw_attribute_value, "\xC2\xA0") !== false
+                        || strpos($raw_attribute_value, "\xE2\x80\x8B") !== false;
+                    $rewritten_value_has_normalized_space =
+                        strpos($rewritten_attribute_value, "\xC2\xA0") !== false
+                        || strpos($rewritten_attribute_value, "\xE2\x80\x8B") !== false;
+                    $normalized_raw_attribute_value = preg_replace(
+                        '/[\x{00a0}\x{200b}]+/u',
+                        ' ',
+                        $raw_attribute_value
+                    );
+                    $normalized_rewritten_attribute_value = preg_replace(
+                        '/[\x{00a0}\x{200b}]+/u',
+                        ' ',
+                        $rewritten_attribute_value
+                    );
+                    $kept_wordpress_decoded_value =
+                        is_string($normalized_raw_attribute_value)
+                        && is_string($normalized_rewritten_attribute_value);
+                    if ($kept_wordpress_decoded_value) {
+                        $wordpress_raw_attribute_value = stripcslashes(
+                            $normalized_raw_attribute_value
+                        );
+                        $wordpress_rewritten_attribute_value = stripcslashes(
+                            $normalized_rewritten_attribute_value
+                        );
+                        $raw_attribute_html_is_unbalanced =
+                            strpos($wordpress_raw_attribute_value, '<') !== false
+                            && preg_match(
+                                '/\A[^<]*+(?:<[^>]*+>[^<]*+)*+\z/',
+                                $wordpress_raw_attribute_value
+                            ) !== 1;
+                        $rewritten_attribute_html_is_unbalanced =
+                            strpos($wordpress_rewritten_attribute_value, '<') !== false
+                            && preg_match(
+                                '/\A[^<]*+(?:<[^>]*+>[^<]*+)*+\z/',
+                                $wordpress_rewritten_attribute_value
+                            ) !== 1;
+                        if (
+                            $raw_attribute_html_is_unbalanced
+                            || $rewritten_attribute_html_is_unbalanced
+                        ) {
+                            $kept_wordpress_decoded_value = false;
+                        } elseif (
+                            $wordpress_raw_attribute_value !== $raw_attribute_value
+                            || $wordpress_rewritten_attribute_value
+                                !== $rewritten_attribute_value
+                        ) {
+                            if ($value_span['quoted']) {
+                                $expected_wordpress_attribute_value = $this->rewrite(
+                                    $wordpress_raw_attribute_value,
+                                    self::PLAIN_TEXT
+                                );
+                            } else {
+                                $expected_wordpress_attribute_value =
+                                    $this->rewrite_literal_urls(
+                                        $wordpress_raw_attribute_value,
+                                        $this->find_embedded_structured_spans(
+                                            $wordpress_raw_attribute_value
+                                        ),
+                                        $allow_relative
+                                    );
+                            }
+                            $kept_wordpress_decoded_value =
+                                $wordpress_rewritten_attribute_value
+                                === $expected_wordpress_attribute_value;
+                        }
+                    }
+                    if (
+                        strpos($raw_attribute_value, ']') !== false
+                        || strpos($rewritten_attribute_value, ']') !== false
+                        || !$kept_wordpress_decoded_value
+                        || ( !$value_span['quoted']
+                            && ( $raw_value_has_normalized_space
+                                || $rewritten_value_has_normalized_space
+                                || strpbrk(
+                                    $raw_attribute_value,
+                                    " \t\f\r\n\v"
+                                ) !== false
+                                || strpbrk(
+                                    $rewritten_attribute_value,
+                                    " \t\f\r\n\v"
+                                ) !== false ) )
+                        || ( !$value_span['quoted']
+                            && $value_span['named']
+                            && ( strpbrk($raw_attribute_value, "'\"") !== false
+                                || strpbrk(
+                                    $rewritten_attribute_value,
+                                    "'\""
+                                ) !== false ) )
+                    ) {
+                        $kept_wordpress_attribute_values = false;
+                    }
                     $replacements[] = [
                         'start' => $value_span['start'] - $token['start'],
                         'length' => $value_span['length'],
@@ -513,7 +609,38 @@ class StructuredDataUrlRewriter
                     ];
                 }
             }
-            $output .= $this->apply_replacements($raw_token, $replacements);
+            $rewritten_token = $this->apply_replacements($raw_token, $replacements);
+            if ($rewritten_token !== $raw_token) {
+                $rewritten_shortcodes = new ShortcodeSpanProcessor($rewritten_token);
+                $rewritten_tokens = $rewritten_shortcodes->get_tokens();
+                $kept_attribute_boundaries = $kept_wordpress_attribute_values
+                    && !$rewritten_shortcodes->is_malformed()
+                    && count($rewritten_tokens) === 1
+                    && $rewritten_tokens[0]['start'] === 0
+                    && $rewritten_tokens[0]['length'] === strlen($rewritten_token)
+                    && count($rewritten_tokens[0]['values']) === count($token['values']);
+                if ($kept_attribute_boundaries) {
+                    foreach ($rewritten_tokens[0]['values'] as $index => $rewritten_value_span) {
+                        if (
+                            $rewritten_value_span['quoted'] !== $token['values'][$index]['quoted']
+                            || $rewritten_value_span['named']
+                                !== $token['values'][$index]['named']
+                            || substr(
+                                $rewritten_token,
+                                $rewritten_value_span['start'],
+                                $rewritten_value_span['length']
+                            ) !== $rewritten_attribute_values[$index]
+                        ) {
+                            $kept_attribute_boundaries = false;
+                            break;
+                        }
+                    }
+                }
+                if (!$kept_attribute_boundaries) {
+                    $rewritten_token = $raw_token;
+                }
+            }
+            $output .= $rewritten_token;
             $cursor = $token['start'] + $token['length'];
         }
 
@@ -2130,6 +2257,14 @@ class StructuredDataUrlRewriter
             if ($span === null) {
                 continue;
             }
+            $attributes = $processor->get_current_attribute_value_spans();
+            $attribute_quotes = null;
+            if ($attributes !== null) {
+                $attribute_quotes = [];
+                foreach ($attributes as $name => $attribute) {
+                    $attribute_quotes[$name] = $attribute['quote'];
+                }
+            }
             $tokens[] = [
                 'start' => $span['start'],
                 'length' => $span['length'],
@@ -2137,7 +2272,10 @@ class StructuredDataUrlRewriter
                 'tag' => (string) ( $processor->get_tag() ?? '' ),
                 'tag_closer' => $processor->is_tag_closer(),
                 'block_name' => (string) ( $processor->get_block_name() ?: '' ),
-                'attributes' => $processor->get_current_attribute_value_spans(),
+                'block_closer' => $processor->is_block_closer(),
+                'block_self_closing' => $processor->is_self_closing_block(),
+                'attributes' => $attributes,
+                'attribute_quotes' => $attribute_quotes,
             ];
         }
 
@@ -2156,7 +2294,8 @@ class StructuredDataUrlRewriter
         }
 
         $replacements = [];
-        foreach ($tokens as $token) {
+        $rewritten_position_delta = 0;
+        foreach ($tokens as $index => $token) {
             $raw_token = substr($content, $token['start'], $token['length']);
             $rewritten_token = $raw_token;
 
@@ -2189,9 +2328,79 @@ class StructuredDataUrlRewriter
                     'text' => $rewritten_token,
                 ];
             }
+            $tokens[$index]['rewritten_start'] = $token['start'] + $rewritten_position_delta;
+            $tokens[$index]['rewritten_length'] = strlen($rewritten_token);
+            $rewritten_position_delta += strlen($rewritten_token) - $token['length'];
         }
 
-        return $this->apply_replacements($content, $replacements);
+        $rewritten_content = $this->apply_replacements($content, $replacements);
+        if ($rewritten_content === $content) {
+            return $content;
+        }
+
+        $rewritten_processor = new BlockMarkupSpanProcessor($rewritten_content);
+        $rewritten_tokens = [];
+        while ($rewritten_processor->next_token()) {
+            $span = $rewritten_processor->get_current_token_span();
+            if ($span === null) {
+                return $content;
+            }
+            $attributes = $rewritten_processor->get_current_attribute_value_spans();
+            $attribute_quotes = null;
+            if ($attributes !== null) {
+                $attribute_quotes = [];
+                foreach ($attributes as $name => $attribute) {
+                    $attribute_quotes[$name] = $attribute['quote'];
+                }
+            }
+            $rewritten_tokens[] = [
+                'start' => $span['start'],
+                'length' => $span['length'],
+                'type' => (string) $rewritten_processor->get_token_type(),
+                'tag' => (string) ( $rewritten_processor->get_tag() ?? '' ),
+                'tag_closer' => $rewritten_processor->is_tag_closer(),
+                'block_name' => (string) ( $rewritten_processor->get_block_name() ?: '' ),
+                'block_closer' => $rewritten_processor->is_block_closer(),
+                'block_self_closing' => $rewritten_processor->is_self_closing_block(),
+                'attribute_quotes' => $attribute_quotes,
+            ];
+        }
+
+        if ($rewritten_processor->paused_at_incomplete_token()) {
+            return $content;
+        }
+        $rewritten_block_error = $rewritten_processor->get_last_error();
+        $rewritten_block_error_code = null;
+        if ($rewritten_block_error !== null) {
+            $rewritten_block_error_code = method_exists($rewritten_block_error, 'get_error_code')
+                ? $rewritten_block_error->get_error_code()
+                : ( $rewritten_block_error->code ?? null );
+        }
+        if (
+            $rewritten_block_error_code !== $block_error_code
+            || count($rewritten_tokens) !== count($tokens)
+        ) {
+            return $content;
+        }
+
+        foreach ($rewritten_tokens as $index => $rewritten_token) {
+            $token = $tokens[$index];
+            if (
+                $rewritten_token['start'] !== $token['rewritten_start']
+                || $rewritten_token['length'] !== $token['rewritten_length']
+                || $rewritten_token['type'] !== $token['type']
+                || $rewritten_token['tag'] !== $token['tag']
+                || $rewritten_token['tag_closer'] !== $token['tag_closer']
+                || $rewritten_token['block_name'] !== $token['block_name']
+                || $rewritten_token['block_closer'] !== $token['block_closer']
+                || $rewritten_token['block_self_closing'] !== $token['block_self_closing']
+                || $rewritten_token['attribute_quotes'] !== $token['attribute_quotes']
+            ) {
+                return $content;
+            }
+        }
+
+        return $rewritten_content;
     }
 
     /**
@@ -2644,7 +2853,7 @@ class StructuredDataUrlRewriter
         );
         foreach ($replacements as $replacement) {
             if ($replacement['start'] === $url_start) {
-                return $replacements;
+                return [$replacement];
             }
         }
 
