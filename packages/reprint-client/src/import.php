@@ -3503,20 +3503,22 @@ class ImportClient
                 $next_local_index_file_handle,
                 true
             );
+            $local_index_path_selected = false;
             while (!$this->shutdown_requested) {
-                $local_index_diff = $index_diff_processor->get_current_path();
-                if ($local_index_diff === null && $next_local_index_record === null) {
+                if (!$local_index_path_selected) {
+                    $local_index_path_selected = $index_diff_processor->next_path();
+                }
+                if (!$local_index_path_selected && $next_local_index_record === null) {
                     return true;
                 }
 
                 $local_relative_path = $next_local_index_record === null
                     ? null
                     : $next_local_index_record["entry"]["path"];
-                $local_diff_path = null;
-                if ($local_index_diff !== null) {
-                    $local_diff_entry = $local_index_diff["after"]
-                        ?? $local_index_diff["before"];
-                    $local_diff_path = $local_diff_entry["path"];
+                $local_diff_path = $local_index_path_selected
+                    ? $index_diff_processor->get_path()
+                    : null;
+                if ($local_diff_path !== null) {
                     if (
                         $local_relative_path === null
                         || strcmp($local_diff_path, $local_relative_path) < 0
@@ -3545,17 +3547,25 @@ class ImportClient
                 }
 
                 if ($local_diff_path === $local_relative_path) {
-                    $local_path_changed = !$this->files_pull_local_index_entries_match(
-                        $local_index_diff["before"],
-                        $local_index_diff["after"]
-                    );
+                    $before_path_type = $index_diff_processor->get_before_path_type();
+                    $after_path_type = $index_diff_processor->get_after_path_type();
+                    $local_path_changed = $before_path_type !== $after_path_type
+                        || (
+                            $before_path_type !== null
+                            && (
+                                $index_diff_processor->get_before_size()
+                                    !== $index_diff_processor->get_after_size()
+                                || $index_diff_processor->get_before_ctime()
+                                    !== $index_diff_processor->get_after_ctime()
+                            )
+                        );
                     if (
                         $local_path_changed
                         && $this->is_local_relative_path_selected_for_make_identical(
                             $local_relative_path
                         )
                     ) {
-                        if ($local_index_diff["after"] !== null) {
+                        if ($after_path_type !== null) {
                             $local_absolute_path = wp_join_unix_paths(
                                 $this->filesystem_root,
                                 $local_relative_path
@@ -3618,6 +3628,7 @@ class ImportClient
                         }
                     }
                     $index_diff_processor->consume_current_path();
+                    $local_index_path_selected = false;
                 }
 
                 if (
@@ -3756,17 +3767,6 @@ class ImportClient
             "entry" => $entry,
             "next_byte_offset" => $next_byte_offset,
         ];
-    }
-
-    /** Whether retained and fresh local index entries describe the same local path state. */
-    private function files_pull_local_index_entries_match(?array $retained, ?array $fresh): bool
-    {
-        if ($retained === null || $fresh === null) {
-            return $retained === $fresh;
-        }
-        return $retained["type"] === $fresh["type"] &&
-            $retained["size"] === $fresh["size"] &&
-            $retained["ctime"] === $fresh["ctime"];
     }
 
     /** Whether make-identical may change one local relative path in this selection. */
