@@ -7,6 +7,12 @@ require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.
 
 class SQLitePreparedInsertBuilderTest extends TestCase
 {
+    private function completeTextExpression(string $value): string
+    {
+        return "FROM_BASE64(/*reprint:complete-text-v1*/CONCAT('"
+            . base64_encode($value) . "',''))";
+    }
+
     /**
      * @return string[]
      */
@@ -97,8 +103,8 @@ class SQLitePreparedInsertBuilderTest extends TestCase
     public function testRewriteCallbackReceivesTableAndColumn(): void
     {
         $sql = sprintf(
-            "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('%s'));",
-            base64_encode('before')
+            "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, %s);",
+            $this->completeTextExpression('before')
         );
 
         $prepared = SQLitePreparedInsertBuilder::build(
@@ -113,6 +119,47 @@ class SQLitePreparedInsertBuilderTest extends TestCase
 
         $this->assertNotNull($prepared);
         $this->assertSame(['1', 'after'], $prepared['params']);
+    }
+
+    public function testRewriteCallbackDoesNotReceiveUnmarkedPayload(): void
+    {
+        $binary = "\x89PNG\0 https://old-site.com/file \0\xff";
+        $sql = "INSERT INTO `wp_posts` (`blob`) VALUES(FROM_BASE64(CONCAT('"
+            . base64_encode($binary) . "','')));";
+        $called = false;
+
+        $prepared = SQLitePreparedInsertBuilder::build(
+            $sql,
+            static function (string $value) use (&$called): string {
+                $called = true;
+                return $value;
+            }
+        );
+
+        $this->assertNotNull($prepared);
+        $this->assertFalse($called);
+        $this->assertSame([$binary], $prepared['params']);
+    }
+
+    public function testRewriteCallbackSkipsUnmarkedPayloadBesideMarkedText(): void
+    {
+        $binary = "\x89PNG\0 https://old-site.com/file \0\xff";
+        $sql = "INSERT INTO `wp_posts` (`post_content`, `blob`) VALUES("
+            . $this->completeTextExpression('https://old-site.com/page')
+            . ", FROM_BASE64(CONCAT('" . base64_encode($binary) . "','')));";
+        $calls = [];
+
+        $prepared = SQLitePreparedInsertBuilder::build(
+            $sql,
+            static function (string $value) use (&$calls): string {
+                $calls[] = $value;
+                return str_replace('old-site.com', 'new-site.com', $value);
+            }
+        );
+
+        $this->assertNotNull($prepared);
+        $this->assertSame(['https://old-site.com/page'], $calls);
+        $this->assertSame(['https://new-site.com/page', $binary], $prepared['params']);
     }
 
     public function testBuildsPreparedInsertForEscapedIdentifiersAndMixedParams(): void
@@ -323,8 +370,8 @@ class SQLitePreparedInsertBuilderTest extends TestCase
             ])
         );
         $sql = sprintf(
-            "INSERT LOW_PRIORITY IGNORE INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('%s'));",
-            base64_encode('<a href="https://old-site.com/page">Link</a>')
+            "INSERT LOW_PRIORITY IGNORE INTO `wp_posts` (`ID`, `post_content`) VALUES(1, %s);",
+            $this->completeTextExpression('<a href="https://old-site.com/page">Link</a>')
         );
 
         $this->assertNull($rewriter->build_sqlite_prepared_insert($sql));
@@ -343,8 +390,8 @@ class SQLitePreparedInsertBuilderTest extends TestCase
             ])
         );
         $sql = sprintf(
-            "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('%s'));",
-            base64_encode('<a href="https://old-site.com/page">Link</a>')
+            "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, %s);",
+            $this->completeTextExpression('<a href="https://old-site.com/page">Link</a>')
         );
 
         $prepared = $rewriter->build_sqlite_prepared_insert($sql);
@@ -366,9 +413,9 @@ class SQLitePreparedInsertBuilderTest extends TestCase
             ])
         );
         $sql = sprintf(
-            "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`) VALUES(7, FROM_BASE64('%s'), FROM_BASE64('%s'));",
-            base64_encode('Title https://old-site.com/title'),
-            base64_encode('<a href="https://old-site.com/body">Body</a>')
+            "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`) VALUES(7, %s, %s);",
+            $this->completeTextExpression('Title https://old-site.com/title'),
+            $this->completeTextExpression('<a href="https://old-site.com/body">Body</a>')
         );
 
         $prepared = $rewriter->build_sqlite_prepared_insert($sql);

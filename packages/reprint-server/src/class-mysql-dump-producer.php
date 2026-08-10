@@ -42,6 +42,8 @@ use PDOStatement;
  */
 class MySQLDumpProducer
 {
+    private const URL_REWRITE_TEXT_MARKER = '/*reprint:complete-text-v1*/';
+
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
     const STATE_NEXT_TABLE = "next_table";
@@ -735,7 +737,7 @@ class MySQLDumpProducer
     }
 
     /** Builds one primary key comparison without re-encoding database bytes. */
-    private function build_comparison($column, $value, $operator)
+    private function build_comparison($column, $value, $operator, $for_dump = false)
     {
         $column_expression = $this->build_primary_key_column_expression($column);
         if ($value === null) {
@@ -744,13 +746,18 @@ class MySQLDumpProducer
                 : "{$column_expression} IS NOT NULL";
         }
 
-        if ($this->is_numeric_type($this->get_data_type($column))) {
+        $data_type = $this->get_data_type($column);
+        if ($this->is_numeric_type($data_type)) {
             return "{$column_expression} {$operator} {$value}";
         }
 
+        if ($for_dump) {
+            return "{$column_expression} {$operator} " .
+                $this->format_base64_value($value, $data_type, true);
+        }
+
         return "{$column_expression} {$operator} FROM_BASE64('" .
-            base64_encode($value) .
-            "')";
+            base64_encode($value) . "')";
     }
 
     /**
@@ -1143,15 +1150,15 @@ class MySQLDumpProducer
      * Formats a single column value as a SQL literal.
      *
      * Numeric types are emitted as bare literals. Everything else — strings,
-     * binary, dates, enums — goes through FROM_BASE64(). JSON is special:
-     * MySQL rejects binary-charset input for JSON columns, so we wrap with
-     * CONVERT(... USING utf8mb4) to decode the base64 into a utf8mb4 string.
-     * JSON can only be encoded as UTF-8 or UTF-16, and it's typically UTF-8.
-     * As of this version, we do not support UTF-16-encoded JSON data strings.
+     * binary, dates, enums — goes through FROM_BASE64(CONCAT()). The CONCAT()
+     * wrapper distinguishes current producer output from older dumps. Complete
+     * text values carry a marker which permits URL rewriting; binary values
+     * and oversized fragments do not. JSON is converted to utf8mb4 because
+     * MySQL rejects binary-charset input for JSON columns.
      *
      * @TODO: Support UTF-16-encoded JSON data strings.
      */
-    private function format_value($value, $data_type)
+    private function format_value($value, $data_type, $is_complete_value = true)
     {
         if ($value === null) {
             return "NULL";
@@ -1161,20 +1168,52 @@ class MySQLDumpProducer
             return (string) $value;
         }
 
-        if (strtoupper($data_type) === "JSON") {
-            if ($value === "") {
-                return "''";
-            }
-            $base64 = base64_encode($value);
-            return "CONVERT(FROM_BASE64('" . $base64 . "') USING utf8mb4)";
-        }
-
-        // Treat all other data types as strings and encode them as base64. This
-        // allows us to express all possible text encodings and arbitrary binary values.
         if ($value === "") {
             return "''";
         }
-        return "FROM_BASE64('" . base64_encode($value) . "')";
+
+        return $this->format_base64_value(
+            $value,
+            $data_type,
+            $is_complete_value
+        );
+    }
+
+    /** Format bytes so only complete text values are eligible for URL rewriting. */
+    private function format_base64_value($value, $data_type, $is_complete_value)
+    {
+        $argument = "CONCAT('" . base64_encode($value) . "','')";
+        if (
+            $is_complete_value &&
+            $this->is_url_rewrite_eligible_text_type($data_type)
+        ) {
+            $argument = self::URL_REWRITE_TEXT_MARKER . $argument;
+        }
+
+        $expression = "FROM_BASE64({$argument})";
+        if (strtoupper($data_type) === "JSON") {
+            return "CONVERT({$expression} USING utf8mb4)";
+        }
+
+        return $expression;
+    }
+
+    /** Whether complete values of this type are safe for literal URL splicing. */
+    private function is_url_rewrite_eligible_text_type($data_type)
+    {
+        return in_array(
+            strtoupper($data_type),
+            [
+                "CHAR",
+                "VARCHAR",
+                "TINYTEXT",
+                "TEXT",
+                "MEDIUMTEXT",
+                "LONGTEXT",
+                "JSON",
+            ],
+            true
+        );
     }
 
     /**
@@ -1199,8 +1238,16 @@ class MySQLDumpProducer
 
         /** Base64 output is always ceil(n/3)*4 bytes. */
         $estimated_base64_length = 4 * intdiv($len + 2, 3);
-        // FROM_BASE64('<data>') => 15 bytes overhead + base64 length
-        return 15 + $estimated_base64_length;
+        $argument = "CONCAT('','')";
+        if ($this->is_url_rewrite_eligible_text_type($data_type)) {
+            $argument = self::URL_REWRITE_TEXT_MARKER . $argument;
+        }
+        $expression = "FROM_BASE64({$argument})";
+        if (strtoupper($data_type) === "JSON") {
+            $expression = "CONVERT({$expression} USING utf8mb4)";
+        }
+
+        return strlen($expression) + $estimated_base64_length;
     }
 
     /** Numeric types are emitted as bare literals (no quoting, no base64). */
@@ -1416,7 +1463,7 @@ class MySQLDumpProducer
 
     /**
      * Computes the maximum raw byte size of each chunk for the given column,
-     * such that an UPDATE ... SET col = CONCAT(col, FROM_BASE64('...'))
+     * such that an UPDATE ... SET col = CONCAT(col, FROM_BASE64(CONCAT(...)))
      * statement stays within max_statement_size.
      */
     private function compute_chunk_size($column)
@@ -1429,8 +1476,17 @@ class MySQLDumpProducer
 
         $max_chunk_raw_size = ($this->max_statement_size - $total_overhead);
 
-        // Base64 inflates by ~1.33x, plus FROM_BASE64('') wrapper overhead
-        $max_chunk_raw_size = (int)(($max_chunk_raw_size - 20) / 1.34);
+        // Base64 inflates by ~1.33x, plus the unmarked expression overhead.
+        $base64_expression_overhead = strlen(
+            $this->format_base64_value(
+                '',
+                $this->get_data_type($column),
+                false
+            )
+        );
+        $max_chunk_raw_size = (int)(
+            ($max_chunk_raw_size - $base64_expression_overhead) / 1.34
+        );
         return max($max_chunk_raw_size, 1000);
     }
 
@@ -1447,7 +1503,7 @@ class MySQLDumpProducer
 
         $size = 0;
         foreach ($this->oversized_pk_values as $col => $value) {
-            $size += strlen($this->build_comparison($col, $value, "="));
+            $size += strlen($this->build_comparison($col, $value, "=", true));
             $size += 5; // AND
         }
 
@@ -1497,11 +1553,16 @@ class MySQLDumpProducer
             $chunk_size
         );
 
-        $formatted_chunk = $this->format_value($chunk, $data_type);
+        $formatted_chunk = $this->format_value($chunk, $data_type, false);
 
         $where_parts = [];
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
-            $where_parts[] = $this->build_comparison($pk_col, $pk_value, "=");
+            $where_parts[] = $this->build_comparison(
+                $pk_col,
+                $pk_value,
+                "=",
+                true
+            );
         }
         $where_clause = implode(" AND ", $where_parts);
 

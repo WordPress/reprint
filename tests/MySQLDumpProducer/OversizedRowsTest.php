@@ -92,6 +92,15 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
 
         // Should contain UPDATE statements
         $this->assertStringContainsString('UPDATE', $sql);
+        foreach (explode("\n", $sql) as $line) {
+            if (strpos($line, 'UPDATE `large_text`') === 0) {
+                $this->assertStringNotContainsString(
+                    '/*reprint:complete-text-v1*/',
+                    $line,
+                    'An oversized append fragment is not a complete text value'
+                );
+            }
+        }
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);

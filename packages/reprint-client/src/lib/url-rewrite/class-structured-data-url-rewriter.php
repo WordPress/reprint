@@ -69,27 +69,25 @@ class StructuredDataUrlRewriter
             );
         }
 
-        try {
-            $parts = parse_url($url);
-        } catch (ValueError $error) {
-            $parts = false;
-        }
+        $matches = [];
+        $matched = preg_match(
+            '~\A(?<scheme>https?)://(?<host>[A-Za-z0-9.-]+)(?::(?<port>[0-9]{1,5}))?(?<path>/[^?#]*)?\z~',
+            $url,
+            $matches,
+            PREG_UNMATCHED_AS_NULL
+        );
+        $port = $matches['port'] ?? null;
         if (
-            !is_array($parts)
-            || !isset($parts['scheme'], $parts['host'])
-            || !in_array( (string) $parts['scheme'], ['http', 'https'], true)
-            || !self::is_valid_ascii_domain( (string) $parts['host'] )
-            || isset($parts['user'])
-            || isset($parts['pass'])
-            || isset($parts['query'])
-            || isset($parts['fragment'])
+            $matched !== 1
+            || !self::is_valid_ascii_domain( (string) ( $matches['host'] ?? '' ) )
+            || ( $port !== null && ( (int) $port < 1 || (int) $port > 65535 ) )
         ) {
             throw new InvalidArgumentException(
-                "The {$role} URL must be an absolute ASCII HTTP URL with a lower-case scheme and without credentials, a query, or a fragment; got {$url}."
+                "The {$role} URL must be an absolute ASCII HTTP URL with a lower-case scheme, a DNS host, an optional port from 1 through 65535, and without credentials, a query, or a fragment; got {$url}."
             );
         }
 
-        $path = (string) ( $parts['path'] ?? '' );
+        $path = (string) ( $matches['path'] ?? '' );
         if ($is_target && $path !== '' && $path !== '/') {
             throw new InvalidArgumentException(
                 "The target URL must be an origin without a path; got {$url}."
@@ -99,7 +97,7 @@ class StructuredDataUrlRewriter
             !$is_target
             && $path !== ''
             && preg_match(
-                '#\A/(?:[A-Za-z0-9._~:/@!$&*+,;=-]|%[0-9A-Fa-f]{2})*\z#',
+                "#\A/(?:[A-Za-z0-9._~:/@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*\z#",
                 $path
             ) !== 1
         ) {
@@ -185,7 +183,7 @@ class StructuredDataUrlRewriter
      */
     private function might_contain_php_serialization(string $value): bool
     {
-        return preg_match('/(?:a|s|O|C):[0-9]+:/', $value) === 1;
+        return preg_match('/(?:a|s|S|O|C|E):[0-9]+:/', $value) === 1;
     }
 
     /**
@@ -211,7 +209,7 @@ class StructuredDataUrlRewriter
                     if (!$starts_at_boundary) {
                         $previous_byte = $content[$position - 1];
                         $starts_at_boundary = strpos(" \t\r\n\f\v", $previous_byte) !== false
-                            || strpos("\"'([{<>", $previous_byte) !== false;
+                            || strpos('"[{<>', $previous_byte) !== false;
                     }
 
                     $match_end = $position + strlen($source_base);
@@ -219,7 +217,7 @@ class StructuredDataUrlRewriter
                     if (!$ends_at_boundary) {
                         $next_byte = $content[$match_end];
                         $ends_at_boundary = strpos(" \t\r\n\f\v", $next_byte) !== false
-                            || strpos("/?#\"'[]{}<>", $next_byte) !== false;
+                            || strpos('/?#"[]{}<>', $next_byte) !== false;
                     }
 
                     if ($starts_at_boundary && $ends_at_boundary) {

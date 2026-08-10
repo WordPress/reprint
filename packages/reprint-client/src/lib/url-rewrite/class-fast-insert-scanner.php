@@ -16,8 +16,9 @@
  *     NULL
  *     '' (empty string literal)
  *     bare numeric literal (-?123, -?1.5, 1e-3, etc.)
- *     FROM_BASE64('<base64chars>')
- *     CONVERT(FROM_BASE64('<base64chars>') USING utf8mb4)
+ *     FROM_BASE64(CONCAT('<base64chars>',''))
+ *     FROM_BASE64(/*reprint:complete-text-v1*\/CONCAT('<base64chars>',''))
+ *     CONVERT(FROM_BASE64(…) USING utf8mb4)
  *
  * Inside FROM_BASE64() the payload is [A-Za-z0-9+/=]*, so it cannot contain
  * the punctuation that would confuse top-level parsing (',', '(', ')', "'").
@@ -51,8 +52,8 @@ class FastInsertScanner
      *   columns: list<string>,
      *   column_map: list<array{int, int, string}>,
      *   has_base64: bool,
-     *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>,
-     *   value_entries: list<array{kind: string, column: string, start?: int, end?: int, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>
+     *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, complete_text: bool, value: ?string, new_value: ?string}>,
+     *   value_entries: list<array{kind: string, column: string, start?: int, end?: int, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string, complete_text?: bool}>
      * }|null
      */
     public static function scan(string $sql, bool $include_column_map = true, bool $include_base64_entries = true): ?array
@@ -169,6 +170,7 @@ class FastInsertScanner
                             'quote_start' => $value_kind['quote_start'],
                             'quote_length' => $value_kind['quote_length'],
                             'encoded_value' => $value_kind['encoded_value'],
+                            'complete_text' => $value_kind['complete_text'],
                             'value' => null,
                             'new_value' => null,
                         ];
@@ -237,6 +239,7 @@ class FastInsertScanner
      *     @type int    $quote_start   Optional. Quoted payload start byte offset.
      *     @type int    $quote_length  Optional. Quoted payload length in bytes.
      *     @type string $encoded_value Optional. Base64 payload.
+     *     @type bool   $complete_text Optional. Whether this is one complete text value.
      * }
      * @phpstan-return null|array{
      *     kind: string,
@@ -245,7 +248,8 @@ class FastInsertScanner
      *     expr_length?: int,
      *     quote_start?: int,
      *     quote_length?: int,
-     *     encoded_value?: string
+     *     encoded_value?: string,
+     *     complete_text?: bool
      * }
      */
     private static function scan_value(string $sql, int $sql_len, int &$cursor, bool $include_base64_offsets = true)
@@ -291,11 +295,13 @@ class FastInsertScanner
                     'quote_start' => $entry[2],
                     'quote_length' => $entry[3],
                     'encoded_value' => $entry[4],
+                    'complete_text' => $entry[5],
                 ];
             }
             return [
                 'kind' => 'base64',
                 'encoded_value' => $entry[4],
+                'complete_text' => $entry[5],
             ];
         }
 
@@ -352,11 +358,13 @@ class FastInsertScanner
                     'quote_start' => $entry[2],
                     'quote_length' => $entry[3],
                     'encoded_value' => $entry[4],
+                    'complete_text' => $entry[5],
                 ];
             }
             return [
                 'kind' => 'base64',
                 'encoded_value' => $entry[4],
+                'complete_text' => $entry[5],
             ];
         }
 
@@ -412,19 +420,45 @@ class FastInsertScanner
      *     @type int    $2 Quoted payload start byte offset.
      *     @type int    $3 Quoted payload length in bytes.
      *     @type string $4 Base64 payload.
+     *     @type bool   $5 Whether the payload is one complete text value.
      * }
-     * @phpstan-return array{int,int,int,int,string}|null
+     * @phpstan-return array{int,int,int,int,string,bool}|null
      */
     private static function consume_base64_call(string $sql, int $sql_len, int &$cursor, int $expr_start)
     {
         while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-            $cursor++;
+            ++$cursor;
         }
+
+        $complete_text = false;
+        $marker = '/*reprint:complete-text-v1*/';
+        if (substr_compare($sql, $marker, $cursor, strlen($marker)) === 0) {
+            $complete_text = true;
+            $cursor += strlen($marker);
+            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
+                ++$cursor;
+            }
+        }
+
+        $uses_concat = false;
+        if (
+            $cursor + 7 <= $sql_len &&
+            substr_compare($sql, 'CONCAT(', $cursor, 7, true) === 0
+        ) {
+            $uses_concat = true;
+            $cursor += 7;
+            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
+                ++$cursor;
+            }
+        } elseif ($complete_text) {
+            return null;
+        }
+
         if ($cursor >= $sql_len || $sql[$cursor] !== "'") {
             return null;
         }
         $quote_start = $cursor;
-        $cursor++;
+        ++$cursor;
         $payload_start = $cursor;
         // Producer payload is base64: [A-Za-z0-9+/=]. Find closing quote via
         // strpos. If anything outside that set appears before it, fall back
@@ -440,16 +474,48 @@ class FastInsertScanner
         }
         $cursor = $close + 1;
         $quote_length = $cursor - $quote_start;
-        // The closing paren of FROM_BASE64( … ). CONVERT(...) callers still
-        // need this consumed before they can verify the USING charset wrapper.
+
+        if ($uses_concat) {
+            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
+                ++$cursor;
+            }
+            if ($cursor >= $sql_len || $sql[$cursor] !== ',') {
+                return null;
+            }
+            ++$cursor;
+            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
+                ++$cursor;
+            }
+            if (substr_compare($sql, "''", $cursor, 2) !== 0) {
+                return null;
+            }
+            $cursor += 2;
+            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
+                ++$cursor;
+            }
+            if ($cursor >= $sql_len || $sql[$cursor] !== ')') {
+                return null;
+            }
+            ++$cursor;
+        }
+
+        // Consume FROM_BASE64's closing parenthesis. CONVERT callers then
+        // verify their USING utf8mb4 wrapper.
         while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-            $cursor++;
+            ++$cursor;
         }
         if ($cursor >= $sql_len || $sql[$cursor] !== ')') {
             return null;
         }
-        $cursor++;
-        return [$expr_start, $cursor - $expr_start, $quote_start, $quote_length, $payload];
+        ++$cursor;
+        return [
+            $expr_start,
+            $cursor - $expr_start,
+            $quote_start,
+            $quote_length,
+            $payload,
+            $complete_text,
+        ];
     }
 
     private static function is_ws(string $c): bool

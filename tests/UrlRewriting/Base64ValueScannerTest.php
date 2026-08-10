@@ -45,6 +45,23 @@ class Base64ValueScannerTest extends TestCase
         $this->assertEquals($value, $values[0]);
     }
 
+    public function testRecognizesOnlyCanonicalCompleteTextMarker(): void
+    {
+        $marked = base64_encode('marked');
+        $legacy = base64_encode('legacy');
+        $sql = "INSERT INTO t VALUES("
+            . "FROM_BASE64(/*reprint:complete-text-v1*/CONCAT('{$marked}','')), "
+            . "FROM_BASE64('{$legacy}'));";
+        $scanner = new Base64ValueScanner($sql);
+
+        $this->assertTrue($scanner->next_value());
+        $this->assertTrue($scanner->current_value_is_complete_text());
+        $this->assertSame('marked', $scanner->get_value());
+        $this->assertTrue($scanner->next_value());
+        $this->assertFalse($scanner->current_value_is_complete_text());
+        $this->assertSame('legacy', $scanner->get_value());
+    }
+
     public function testFindsMixedValueTypes(): void
     {
         $text = 'some text';

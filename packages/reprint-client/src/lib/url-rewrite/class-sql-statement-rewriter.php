@@ -1,10 +1,10 @@
 <?php
 
 /**
- * Rewrites exact URL-base bytes inside FROM_BASE64() SQL values.
+ * Rewrites exact URL-base bytes inside marked, complete text values.
  *
- * DDL and statements without FROM_BASE64() expressions pass through
- * unchanged. The decoded value remains opaque to this class.
+ * Binary values, oversized append fragments, legacy unmarked values, DDL, and
+ * statements without the producer marker pass through unchanged.
  */
 class SqlStatementRewriter
 {
@@ -21,6 +21,10 @@ class SqlStatementRewriter
     public function rewrite(string $sql): string
     {
         if (strpos($sql, 'FROM_BASE64(') === false) {
+            return $sql;
+        }
+
+        if (strpos($sql, '/*reprint:complete-text-v1*/') === false) {
             return $sql;
         }
 
@@ -74,6 +78,9 @@ class SqlStatementRewriter
     private function rewrite_with_scanner(Base64ValueScanner $scanner): string
     {
         while ($scanner->next_value()) {
+            if (!$scanner->current_value_is_complete_text()) {
+                continue;
+            }
             if (!$scanner->encoded_payload_could_contain_http_scheme()) {
                 continue;
             }

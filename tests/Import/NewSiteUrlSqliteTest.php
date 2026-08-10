@@ -75,29 +75,37 @@ class NewSiteUrlSqliteTest extends TestCase
             . "UNIQUE KEY `option_name` (`option_name`)"
             . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
 
-        // INSERT with FROM_BASE64 — mirrors real dump output
+        // INSERT with the complete-text wrapper used by the dump producer.
         $stmts[] = sprintf(
             "INSERT INTO `wp_options` VALUES "
-            . "(1, FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s')), "
-            . "(2, FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s'));",
-            base64_encode('siteurl'),
-            base64_encode($siteUrl),
-            base64_encode('yes'),
-            base64_encode('home'),
-            base64_encode($siteUrl),
-            base64_encode('yes'),
+            . "(1, %s, %s, %s), "
+            . "(2, %s, %s, %s);",
+            $this->completeTextExpression('siteurl'),
+            $this->completeTextExpression($siteUrl),
+            $this->completeTextExpression('yes'),
+            $this->completeTextExpression('home'),
+            $this->completeTextExpression($siteUrl),
+            $this->completeTextExpression('yes'),
         );
 
         // Add a non-URL option to make sure it's not clobbered
         $stmts[] = sprintf(
             "INSERT INTO `wp_options` VALUES "
-            . "(3, FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s'));",
-            base64_encode('blogname'),
-            base64_encode('My Test Blog'),
-            base64_encode('yes'),
+            . "(3, %s, %s, %s);",
+            $this->completeTextExpression('blogname'),
+            $this->completeTextExpression('My Test Blog'),
+            $this->completeTextExpression('yes'),
         );
 
         return implode("\n", $stmts) . "\n";
+    }
+
+    /** Format one complete text value exactly like the dump producer. */
+    private function completeTextExpression(string $value): string
+    {
+        return "FROM_BASE64(/*reprint:complete-text-v1*/CONCAT('"
+            . base64_encode($value)
+            . "',''))";
     }
 
     /**
@@ -274,9 +282,9 @@ class NewSiteUrlSqliteTest extends TestCase
         $content = '<p>Visit <a href="https://old-site.example.com/about">About</a></p>'
             . '<!-- wp:image {"url":"https://old-site.example.com/wp-content/uploads/photo.jpg"} -->';
         $sql .= sprintf(
-            "INSERT INTO `wp_posts` VALUES (1, FROM_BASE64('%s'), FROM_BASE64('%s'));\n",
-            base64_encode($content),
-            base64_encode('Test Post'),
+            "INSERT INTO `wp_posts` VALUES (1, %s, %s);\n",
+            $this->completeTextExpression($content),
+            $this->completeTextExpression('Test Post'),
         );
 
         file_put_contents($this->tempDir . '/db.sql', $sql);

@@ -873,7 +873,7 @@ class BasicDumpTest extends MySQLDumpProducerTestBase
 
         // Verify NULLs are properly handled (strings are base64-encoded)
         $this->assertMatchesRegularExpression('/NULL,FROM_BASE64\(/', $sql);
-        $this->assertMatchesRegularExpression('/FROM_BASE64\([^)]+\),NULL/', $sql);
+        $this->assertMatchesRegularExpression('/FROM_BASE64\([^\n]+\),NULL/', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);

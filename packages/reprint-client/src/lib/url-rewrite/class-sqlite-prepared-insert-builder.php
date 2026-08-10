@@ -17,6 +17,8 @@
  * SQL parser sees only `?`, and SQLite receives the exact PHP string through
  * PDO binding. Numeric literals stay numeric through SQLite's NUMERIC cast,
  * including large values that cannot be represented as PHP integers.
+ * The optional URL callback runs only for values carrying the dump producer's
+ * complete-text marker.
  */
 class SQLitePreparedInsertBuilder
 {
@@ -113,7 +115,10 @@ class SQLitePreparedInsertBuilder
                         return null;
                     }
                     $value = $decoded;
-                    if ($rewrite_value !== null) {
+                    if (
+                        $rewrite_value !== null &&
+                        ( $entry['complete_text'] ?? false )
+                    ) {
                         $value = $rewrite_value($value, $fast['table'], $entry['column']);
                     }
                     $params[] = $value;

@@ -31,6 +31,23 @@ class SqlStatementRewriterTest extends TestCase
         return $values;
     }
 
+    /** Mark direct test fixtures as producer-confirmed complete text values. */
+    private function rewriteCompleteText(
+        SqlStatementRewriter $rewriter,
+        string $sql
+    ): string {
+        $marked_sql = preg_replace_callback(
+            "~FROM_BASE64\\('([A-Za-z0-9+/=]*)'\\)~",
+            static function (array $matches): string {
+                return "FROM_BASE64(/*reprint:complete-text-v1*/CONCAT('"
+                    . $matches[1] . "',''))";
+            },
+            $sql
+        );
+        $this->assertNotNull($marked_sql);
+        return $rewriter->rewrite($marked_sql);
+    }
+
     public function testRewritesUrlInInsertStatement(): void
     {
         $rewriter = $this->createRewriter();
@@ -38,7 +55,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($html);
         $sql = "INSERT INTO `wp_posts` VALUES(1, FROM_BASE64('{$encoded}'));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         // Verify the rewritten SQL contains new-site.com
         $values = $this->collectValues($result);
@@ -68,11 +85,47 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($serialized);
         $sql = "INSERT INTO `wp_options` VALUES(1, FROM_BASE64('{$encoded}'));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
         $this->assertSame($serialized, $values[0]);
+    }
+
+    public function testUnmarkedBinaryPayloadIsByteIdentical(): void
+    {
+        $rewriter = $this->createRewriter();
+        $binary = "\x89PNG\0 https://old-site.com/file \0\xff";
+        $sql = "INSERT INTO `t` (`blob`) VALUES(FROM_BASE64(CONCAT('"
+            . base64_encode($binary) . "','')));";
+
+        $this->assertSame($sql, $rewriter->rewrite($sql));
+    }
+
+    public function testUnmarkedBinaryPayloadIsUnchangedBesideMarkedText(): void
+    {
+        $rewriter = $this->createRewriter();
+        $text = 'https://old-site.com/page';
+        $binary = "\x89PNG\0 https://old-site.com/file \0\xff";
+        $encoded_binary = base64_encode($binary);
+        $sql = "INSERT INTO `t` (`text`, `blob`) VALUES("
+            . "FROM_BASE64(/*reprint:complete-text-v1*/CONCAT('"
+            . base64_encode($text) . "','')), "
+            . "FROM_BASE64(CONCAT('{$encoded_binary}','')));";
+
+        $result = $rewriter->rewrite($sql);
+
+        $this->assertStringContainsString(base64_encode('https://new-site.com/page'), $result);
+        $this->assertStringContainsString($encoded_binary, $result);
+    }
+
+    public function testLegacyUnmarkedTextIsUnchanged(): void
+    {
+        $rewriter = $this->createRewriter();
+        $encoded = base64_encode('https://old-site.com/page');
+        $sql = "INSERT INTO `t` (`text`) VALUES(FROM_BASE64('{$encoded}'));";
+
+        $this->assertSame($sql, $rewriter->rewrite($sql));
     }
 
     public function testRewritesJsonValues(): void
@@ -82,7 +135,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($json);
         $sql = "INSERT INTO `wp_postmeta` VALUES(1, CONVERT(FROM_BASE64('{$encoded}') USING utf8mb4));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
@@ -105,7 +158,7 @@ class SqlStatementRewriterTest extends TestCase
             base64_encode($plain)
         );
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(3, $values);
@@ -127,7 +180,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($text);
         $sql = "INSERT INTO `t` VALUES(FROM_BASE64('{$encoded}'));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
@@ -146,7 +199,7 @@ class SqlStatementRewriterTest extends TestCase
             base64_encode($url2)
         );
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(2, $values);
@@ -161,13 +214,16 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($html);
         $sql = "INSERT INTO `wp_posts` (`id`, `content`) VALUES(1, FROM_BASE64('{$encoded}'));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         // Verify the result still has proper SQL structure
         $this->assertStringStartsWith('INSERT INTO', $result);
         $this->assertStringEndsWith(');', $result);
-        $this->assertStringContainsString("FROM_BASE64('", $result);
-        $this->assertStringContainsString("')", $result);
+        $this->assertStringContainsString(
+            'FROM_BASE64(/*reprint:complete-text-v1*/CONCAT(',
+            $result
+        );
+        $this->assertStringContainsString("',''))", $result);
     }
 
     // --- Literal behavior across SQL columns ---
@@ -181,7 +237,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($markup);
         $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertSame(
@@ -198,7 +254,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($value);
         $sql = "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('" . base64_encode('siteurl') . "'), FROM_BASE64('{$encoded}'));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertStringContainsString('new-site.com/api/endpoint', $values[1]);
@@ -212,7 +268,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($markup);
         $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
@@ -230,7 +286,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($markup);
         $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
@@ -247,7 +303,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($markup);
         $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
@@ -267,7 +323,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($markup);
         $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
@@ -281,7 +337,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($markup);
         $sql = "INSERT INTO `wp_comments` (`comment_ID`, `comment_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
@@ -297,7 +353,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($value);
         $sql = "INSERT INTO `wp_posts` VALUES(1, FROM_BASE64('{$encoded}'));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
@@ -313,14 +369,14 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($markup);
         $sql = "UPDATE `wp_posts` SET `post_content` = FROM_BASE64('{$encoded}') WHERE `ID` = 1;";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
         $this->assertStringContainsString('new-site.com/page', $values[0]);
     }
 
-    public function testUpdateConcatUsesLiteralWriter(): void
+    public function testUnmarkedUpdateConcatFragmentIsUnchanged(): void
     {
         $rewriter = $this->createRewriter();
         $markup = '<a href="https://old-site.com/page">Link</a>';
@@ -331,7 +387,19 @@ class SqlStatementRewriterTest extends TestCase
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
-        $this->assertStringContainsString('new-site.com/page', $values[0]);
+        $this->assertSame($markup, $values[0]);
+    }
+
+    public function testChunkBoundaryCannotCreateAPartialPathReplacement(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com/shop' => 'https://new-site.com',
+        ]);
+        $chunk = 'https://old-site.com/shop';
+        $sql = "UPDATE `t` SET `value` = CONCAT(`value`, FROM_BASE64(CONCAT('"
+            . base64_encode($chunk) . "',''))) WHERE `id` = 1;";
+
+        $this->assertSame($sql, $rewriter->rewrite($sql));
     }
 
     // --- Multi-row INSERT with mixed columns ---
@@ -351,7 +419,7 @@ class SqlStatementRewriterTest extends TestCase
             base64_encode($content)
         );
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(4, $values);
@@ -372,7 +440,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($json);
         $sql = "INSERT INTO `wp_postmeta` (`meta_id`, `meta_value`) VALUES(1, CONVERT(FROM_BASE64('{$encoded}') USING utf8mb4));";
 
-        $result = $rewriter->rewrite($sql);
+        $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
@@ -392,7 +460,7 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($block);
 
         $sql_real = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-        $result_real = $rewriter->rewrite($sql_real);
+        $result_real = $this->rewriteCompleteText($rewriter, $sql_real);
         $values_real = $this->collectValues($result_real);
         $expected = '<!-- wp:image {"url":"https://new-longer-domain-site.com/img.jpg"} -->'
             . '<img src="https://new-longer-domain-site.com/img.jpg"/>'
@@ -400,7 +468,7 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertSame($expected, $values_real[0]);
 
         $sql_spoof = "INSERT INTO `spoofed_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-        $result_spoof = $rewriter->rewrite($sql_spoof);
+        $result_spoof = $this->rewriteCompleteText($rewriter, $sql_spoof);
         $values_spoof = $this->collectValues($result_spoof);
         $this->assertSame($expected, $values_spoof[0]);
     }

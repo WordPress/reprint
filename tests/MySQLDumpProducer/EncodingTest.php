@@ -1338,9 +1338,9 @@ class EncodingTest extends MySQLDumpProducerTestBase
 
         $this->assertGreaterThan(3, $resume_count);
 
-        $letter_b_position = strpos($sql, "FROM_BASE64('Yg==')");
-        $letter_z_position = strpos($sql, "FROM_BASE64('eg==')");
-        $umlaut_a_position = strpos($sql, "FROM_BASE64('5A==')");
+        $letter_b_position = strpos($sql, "'Yg=='");
+        $letter_z_position = strpos($sql, "'eg=='");
+        $umlaut_a_position = strpos($sql, "'5A=='");
         $this->assertNotFalse($letter_b_position);
         $this->assertNotFalse($letter_z_position);
         $this->assertNotFalse($umlaut_a_position);
@@ -1393,7 +1393,7 @@ class EncodingTest extends MySQLDumpProducerTestBase
         foreach (["umlaut-1", "ae-2", "umlaut-3", "b-1", "z-1"] as $data) {
             $position = strpos(
                 $sql,
-                "FROM_BASE64('" . base64_encode($data) . "')"
+                "'" . base64_encode($data) . "'"
             );
             $this->assertNotFalse($position);
             $this->assertGreaterThan(

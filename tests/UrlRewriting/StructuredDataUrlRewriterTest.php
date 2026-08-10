@@ -47,15 +47,16 @@ class StructuredDataUrlRewriterTest extends TestCase
         );
     }
 
-    public function testAcceptsSafeAsciiPathPunctuation(): void
+    public function testAcceptsRfc3986PathPunctuation(): void
     {
+        $source = 'https://old-site.com/scope(a):slug/a;b@c';
         $rewriter = $this->createRewriter([
-            'https://old-site.com/scope:slug/a;b@c' => 'https://new-site.com',
+            $source => 'https://new-site.com',
         ]);
 
         $this->assertSame(
             'https://new-site.com/page',
-            $rewriter->rewrite('https://old-site.com/scope:slug/a;b@c/page')
+            $rewriter->rewrite($source . '/page')
         );
     }
 
@@ -90,6 +91,16 @@ class StructuredDataUrlRewriterTest extends TestCase
         ]);
 
         $this->assertSame($expected, $rewriter->rewrite($input));
+    }
+
+    public function testApostropheDoesNotEndASourcePath(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com/shop' => 'https://new-site.com',
+        ]);
+        $input = "https://old-site.com/shop'per";
+
+        $this->assertSame($input, $rewriter->rewrite($input));
     }
 
     public function testSourceOriginRequiresExactBoundaries(): void
@@ -155,6 +166,14 @@ class StructuredDataUrlRewriterTest extends TestCase
             'url' => 'https://old-site.com/path',
             'nested' => serialize('https://old-site.com/other'),
         ]);
+
+        $this->assertSame($input, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testLeavesUppercaseSerializedStringUnchanged(): void
+    {
+        $url = 'https://old-site.com/path';
+        $input = 'S:' . strlen($url) . ':"' . $url . '";';
 
         $this->assertSame($input, $this->createRewriter()->rewrite($input));
     }
@@ -273,10 +292,20 @@ class StructuredDataUrlRewriterTest extends TestCase
             'https://new-site.com',
             'source URL path contains unsupported bytes',
         ];
-        yield 'parenthesis in source path' => [
-            'https://old-site.com/path(value)',
+        yield 'non-numeric target port suffix' => [
+            'https://old-site.com',
+            'https://new-site.com:80x',
+            'target URL must be an absolute ASCII HTTP URL',
+        ];
+        yield 'empty source port' => [
+            'https://old-site.com:/path',
             'https://new-site.com',
-            'source URL path contains unsupported bytes',
+            'source URL must be an absolute ASCII HTTP URL',
+        ];
+        yield 'zero target port' => [
+            'https://old-site.com',
+            'https://new-site.com:0',
+            'target URL must be an absolute ASCII HTTP URL',
         ];
     }
 }

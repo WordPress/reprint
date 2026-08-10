@@ -1,13 +1,14 @@
 <?php
 
 /**
- * Cursor-based processor that iterates over FROM_BASE64('...') values in a SQL
- * statement, letting the caller read and replace each decoded value.
+ * Cursor-based processor that iterates over producer-shaped FROM_BASE64()
+ * values in a SQL statement, letting the caller read and replace each decoded
+ * value. Only the canonical marker identifies a complete text value.
  *
  * Uses WP_MySQL_Lexer for proper tokenization instead of string scanning.
- * Detects CONVERT(FROM_BASE64('...') USING utf8mb4) wrappers automatically —
+ * Detects CONVERT(FROM_BASE64(...) USING utf8mb4) wrappers automatically.
  * set_value() only replaces the base64 payload inside the quotes, so wrappers
- * are preserved without the caller needing to know about them.
+ * and markers are preserved without the caller needing to know about them.
  *
  * Values are decoded lazily. The scanner keeps the original encoded payload
  * until get_value() is called, so callers can skip obviously irrelevant values
@@ -35,10 +36,11 @@ class Base64ValueScanner
      *   'quote_start'  => int    Offset of the quoted string token (including quotes)
      *   'quote_length' => int    Length of the quoted string token
      *   'encoded_value'=> string The base64 payload
+     *   'complete_text'=> bool   Whether the producer marked a complete text value
      *   'value'        => ?string The base64-decoded value, cached on demand
      *   'new_value'    => ?string Non-null when set_value() has been called
      *
-     * @var array<int, array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>
+     * @var array<int, array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, complete_text: bool, value: ?string, new_value: ?string}>
      */
     private array $entries = [];
 
@@ -77,6 +79,7 @@ class Base64ValueScanner
      *     @type int         $quote_start   Byte offset where the quoted payload starts.
      *     @type int         $quote_length  Quoted payload length in bytes.
      *     @type string      $encoded_value Base64 payload.
+     *     @type bool        $complete_text Whether the producer marked a complete text value.
      *     @type string|null $value         Decoded value, when already decoded.
      *     @type string|null $new_value     Rewritten value, when already set.
      * }
@@ -85,6 +88,7 @@ class Base64ValueScanner
      *     quote_start: int,
      *     quote_length: int,
      *     encoded_value: string,
+     *     complete_text: bool,
      *     value: ?string,
      *     new_value: ?string
      * }> $entries
@@ -116,6 +120,12 @@ class Base64ValueScanner
         }
 
         return $this->entries[$this->cursor]['value'];
+    }
+
+    /** Whether the current payload is one producer-confirmed complete text value. */
+    public function current_value_is_complete_text(): bool
+    {
+        return $this->entries[$this->cursor]['complete_text'];
     }
 
     /**
@@ -221,26 +231,36 @@ class Base64ValueScanner
                     $expr_start = $prev[0]->start;
                 }
 
-                // Advance past ( to find the quoted base64 string
-                while ($lexer->next_token()) {
-                    $inner = $lexer->get_token();
-                    if (
-                        $inner->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
-                        || $inner->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
-                    ) {
-                        $this->entries[] = [
-                            'expr_start' => $expr_start,
-                            'quote_start' => $inner->start,
-                            'quote_length' => $inner->length,
-                            'encoded_value' => $inner->get_value(),
-                            'value' => null,
-                            'new_value' => null,
-                        ];
-                        break;
-                    }
-                    // Skip the opening parenthesis of FROM_BASE64(
-                    if ($inner->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
-                        break;
+                $marked_entry = self::scan_marked_complete_text_value(
+                    $this->sql,
+                    $token->start,
+                    $expr_start
+                );
+                if ($marked_entry !== null) {
+                    $this->entries[] = $marked_entry;
+                } else {
+                    // Legacy direct payloads remain visible to non-rewrite
+                    // callers but are never eligible for URL rewriting.
+                    while ($lexer->next_token()) {
+                        $inner = $lexer->get_token();
+                        if (
+                            $inner->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
+                            || $inner->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
+                        ) {
+                            $this->entries[] = [
+                                'expr_start' => $expr_start,
+                                'quote_start' => $inner->start,
+                                'quote_length' => $inner->length,
+                                'encoded_value' => $inner->get_value(),
+                                'complete_text' => false,
+                                'value' => null,
+                                'new_value' => null,
+                            ];
+                            break;
+                        }
+                        if ($inner->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+                            break;
+                        }
                     }
                 }
             }
@@ -288,27 +308,34 @@ class Base64ValueScanner
                     $expr_start = $prev[0]->start;
                 }
 
-                // Walk forward to find the quoted base64 payload, mirroring
-                // scan(): step past the opening parenthesis, accept either
-                // SINGLE_ or DOUBLE_QUOTED_TEXT, abort on anything else.
-                for ($j = $i + 1; $j < $token_count; $j++) {
-                    $inner = $tokens[$j];
-                    if (
-                        $inner->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
-                        || $inner->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
-                    ) {
-                        $this->entries[] = [
-                            'expr_start' => $expr_start,
-                            'quote_start' => $inner->start,
-                            'quote_length' => $inner->length,
-                            'encoded_value' => $inner->get_value(),
-                            'value' => null,
-                            'new_value' => null,
-                        ];
-                        break;
-                    }
-                    if ($inner->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
-                        break;
+                $marked_entry = self::scan_marked_complete_text_value(
+                    $this->sql,
+                    $token->start,
+                    $expr_start
+                );
+                if ($marked_entry !== null) {
+                    $this->entries[] = $marked_entry;
+                } else {
+                    for ($j = $i + 1; $j < $token_count; $j++) {
+                        $inner = $tokens[$j];
+                        if (
+                            $inner->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
+                            || $inner->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
+                        ) {
+                            $this->entries[] = [
+                                'expr_start' => $expr_start,
+                                'quote_start' => $inner->start,
+                                'quote_length' => $inner->length,
+                                'encoded_value' => $inner->get_value(),
+                                'complete_text' => false,
+                                'value' => null,
+                                'new_value' => null,
+                            ];
+                            break;
+                        }
+                        if ($inner->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+                            break;
+                        }
                     }
                 }
             }
@@ -324,5 +351,44 @@ class Base64ValueScanner
             || strpos($payload, 'dHA6') !== false
             || strpos($payload, 'dHBz') !== false
             || strpos($payload, 'dHRw') !== false;
+    }
+
+    /**
+     * Recognize only the canonical producer marker and wrapper.
+     *
+     * @return array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, complete_text: bool, value: ?string, new_value: ?string}|null
+     */
+    private static function scan_marked_complete_text_value(
+        string $sql,
+        int $from_base64_start,
+        int $expr_start
+    ): ?array {
+        $pattern = "~\\G(?i:FROM_BASE64)\\s*\\(\\s*"
+            . "/\\*reprint:complete-text-v1\\*/\\s*"
+            . "(?i:CONCAT)\\s*\\(\\s*'(?<payload>[A-Za-z0-9+/=]*)'"
+            . "\\s*,\\s*''\\s*\\)\\s*\\)~";
+        if (
+            preg_match(
+                $pattern,
+                $sql,
+                $matches,
+                PREG_OFFSET_CAPTURE,
+                $from_base64_start
+            ) !== 1
+        ) {
+            return null;
+        }
+
+        $payload = $matches['payload'][0];
+        $payload_start = $matches['payload'][1];
+        return [
+            'expr_start' => $expr_start,
+            'quote_start' => $payload_start - 1,
+            'quote_length' => strlen($payload) + 2,
+            'encoded_value' => $payload,
+            'complete_text' => true,
+            'value' => null,
+            'new_value' => null,
+        ];
     }
 }

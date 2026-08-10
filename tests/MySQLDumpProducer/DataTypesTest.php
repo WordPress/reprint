@@ -8,6 +8,47 @@ require_once __DIR__ . '/MySQLDumpProducerTestBase.php';
  */
 class DataTypesTest extends MySQLDumpProducerTestBase
 {
+    public function testOnlyCompleteTextValuesReceiveRewriteMarker(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE rewrite_types (
+                id INT PRIMARY KEY,
+                text_value TEXT,
+                binary_value BLOB,
+                enum_value ENUM('https://old-site.com', 'other')
+            )"
+        );
+        $statement = $this->pdo->prepare(
+            "INSERT INTO rewrite_types VALUES (1, ?, ?, ?)"
+        );
+        $url = 'https://old-site.com/file';
+        $statement->execute([$url, $url, 'https://old-site.com']);
+
+        $sql = $this->getDumpSQL();
+        $encoded_url = base64_encode($url);
+        $encoded_enum = base64_encode('https://old-site.com');
+
+        $this->assertStringContainsString(
+            "FROM_BASE64(/*reprint:complete-text-v1*/CONCAT('{$encoded_url}',''))",
+            $sql
+        );
+        $this->assertSame(
+            1,
+            substr_count(
+                $sql,
+                "/*reprint:complete-text-v1*/CONCAT('{$encoded_url}','')"
+            )
+        );
+        $this->assertStringContainsString(
+            "FROM_BASE64(CONCAT('{$encoded_url}',''))",
+            $sql
+        );
+        $this->assertStringContainsString(
+            "FROM_BASE64(CONCAT('{$encoded_enum}',''))",
+            $sql
+        );
+    }
+
     public function testBlobTypes(): void
     {
         $this->pdo->exec("

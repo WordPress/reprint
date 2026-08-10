@@ -5,7 +5,7 @@
  * 1. Create site with known content containing source URLs in various formats
  * 2. Run db-pull → verify pull/domains.json contains the source domain
  * 3. Run db-apply with --rewrite-url to apply SQL to target database
- * 4. Verify URLs are rewritten in all value types, including serialized PHP
+ * 4. Verify literal URLs are rewritten while serialized PHP remains unchanged
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -38,7 +38,7 @@ describe('Import: URL Rewriting', () => {
                     ['html_option', `<a href="${SOURCE_DOMAIN}/about">About</a> <img src="${SOURCE_DOMAIN}/logo.png"/>`]
                 );
 
-                // Serialized PHP with URLs (SHOULD be rewritten with updated s:N: prefixes)
+                // Serialized PHP is opaque to the literal first-pass rewriter.
                 const serialized = `a:2:{s:7:"siteurl";s:${SOURCE_DOMAIN.length}:"${SOURCE_DOMAIN}";s:4:"home";s:${SOURCE_DOMAIN.length}:"${SOURCE_DOMAIN}";}`;
                 await conn.query(
                     `INSERT INTO wp_options (option_name, option_value) VALUES (?, ?)`,
@@ -180,7 +180,7 @@ describe('Import: URL Rewriting', () => {
         );
     });
 
-    it('serialized PHP values ARE rewritten with correct s:N: lengths', async () => {
+    it('serialized PHP values remain byte-identical', async () => {
         const conn = await createMysqlConnection(importDb);
         const [[row]] = await conn.query(
             "SELECT option_value FROM wp_options WHERE option_name = 'serialized_option'"
@@ -188,29 +188,11 @@ describe('Import: URL Rewriting', () => {
         await conn.end();
 
         assert.ok(row, 'Expected serialized_option row');
-        const val = row.option_value;
-        // Target domain should be present, source domain should be gone
-        assert.ok(
-            val.includes('target.example.com'),
-            `Expected serialized PHP to contain target domain, got: ${val}`
-        );
-        assert.ok(
-            !val.includes(SOURCE_DOMAIN),
-            `Expected serialized PHP to NOT contain source domain, got: ${val}`
-        );
-        // Verify it still starts with serialized array format
-        assert.ok(
-            val.startsWith('a:'),
-            `Expected serialized PHP format, got: ${val.substring(0, 10)}`
-        );
-        // Verify s:N: byte lengths are correct for the target domain URL.
-        // The rewriter preserves the original URL's trailing-slash style,
-        // so a bare origin like "https://target.example.com" stays without
-        // a trailing slash.
-        const targetLen = TARGET_DOMAIN.length;
-        assert.ok(
-            val.includes(`s:${targetLen}:"${TARGET_DOMAIN}"`),
-            `Expected correct s:N: prefix for target URL (s:${targetLen}:), got: ${val}`
+        const expected = `a:2:{s:7:"siteurl";s:${SOURCE_DOMAIN.length}:"${SOURCE_DOMAIN}";s:4:"home";s:${SOURCE_DOMAIN.length}:"${SOURCE_DOMAIN}";}`;
+        assert.equal(
+            row.option_value,
+            expected,
+            'Expected serialized PHP to remain byte-identical'
         );
     });
 

@@ -435,21 +435,25 @@ php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" -
 ```
 
 This reads `db.sql` from the state directory and executes each statement against
-the target database. For every data-bearing statement (`INSERT`, `UPDATE`), it
-decodes the base64-encoded column values and replaces only exact URL-base bytes.
-`FROM` must be a printable ASCII HTTP URL with a lower-case scheme and an
-optional path; `TO` must be a printable ASCII HTTP origin without a path. A
-non-root `FROM` path must not end in `/`. Escaped, case-variant, and encoded
-spellings are left unchanged; a single root slash on either base is normalized.
-JSON, block markup, and CSS are never decoded or re-encoded. Values containing
-PHP serialization tokens are left unchanged so a byte-length prefix cannot
-become stale. Source paths accept a conservative ASCII URL-path alphabet;
-quotes, backslashes, brackets, braces, angle brackets, and parentheses are not
-supported.
+the target database. The current dump producer marks complete values from text
+columns; URL rewriting is limited to those marked values. Binary columns,
+oversized-value fragments, and older unmarked dumps pass through unchanged.
+Re-pull the database with the current exporter before applying it when URL
+rewriting is required.
+
+Within an eligible value, `FROM` must be an ASCII HTTP URL with a lower-case
+scheme, a DNS host, an optional port from 1 through 65535, and an optional path;
+`TO` must be an ASCII HTTP origin without a path. A non-root `FROM` path must not
+end in `/`. Escaped, case-variant, and encoded spellings are left unchanged; a
+single root slash on either base is normalized. JSON, block markup, and CSS are
+not parsed or re-encoded. Values containing PHP serialization tokens are left
+unchanged so a byte-length prefix cannot become stale. Source paths accept ASCII
+RFC 3986 path characters and percent escapes; a backslash is not a path
+separator.
 
 Only occurrences with conservative URL boundaries are changed. Ambiguous
-occurrences, including an unquoted URL immediately after `=` or a configured
-base ending immediately before `)`, are left alone.
+occurrences, including an unquoted URL immediately after `=` or beside an
+apostrophe or parenthesis, are left alone.
 
 You can map multiple domains by repeating the flag:
 

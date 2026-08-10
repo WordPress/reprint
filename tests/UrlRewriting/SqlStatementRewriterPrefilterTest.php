@@ -57,9 +57,10 @@ class SqlStatementRewriterPrefilterTest extends TestCase
 
     private function buildInsertSql(string $value): string
     {
-        return "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('"
+        return "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, "
+            . "FROM_BASE64(/*reprint:complete-text-v1*/CONCAT('"
             . base64_encode($value)
-            . "'));";
+            . "','')));";
     }
 
     private function statementHasAnyPrefix(string $sql): bool
@@ -312,7 +313,9 @@ class SqlStatementRewriterPrefilterTest extends TestCase
         for ($alignment = 0; $alignment < 3; $alignment++) {
             $padding = str_repeat(' ', $alignment);
             $value = $padding . 'https://old-site.com/row-' . $alignment;
-            $rows[] = "($alignment, FROM_BASE64('" . base64_encode($value) . "'))";
+            $rows[] = "($alignment, FROM_BASE64(/*reprint:complete-text-v1*/CONCAT('"
+                . base64_encode($value)
+                . "','')))";
         }
         $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES " . implode(',', $rows) . ";";
 

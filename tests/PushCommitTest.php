@@ -730,12 +730,20 @@ final class PushCommitTest extends TestCase {
 
         $commit_state_lock_path = $this->reprint_directory . '/.reprint/push/commit-state.lock';
         $deleted_docroot_path = $this->docroot . '/' . $deleted_path;
+        $watching_path = $this->root . '/release-lock-watching';
         $ready_path = $this->root . '/release-lock-ready';
         $script = '$lock_path = base64_decode(' . json_encode(base64_encode($commit_state_lock_path), JSON_THROW_ON_ERROR) . ');'
             . '$deleted = base64_decode(' . json_encode(base64_encode($deleted_docroot_path), JSON_THROW_ON_ERROR) . ');'
+            . '$watching = base64_decode(' . json_encode(base64_encode($watching_path), JSON_THROW_ON_ERROR) . ');'
             . '$ready = base64_decode(' . json_encode(base64_encode($ready_path), JSON_THROW_ON_ERROR) . ');'
             . '$deadline = microtime(true) + 10;'
-            . 'while (is_file($deleted) && microtime(true) < $deadline) { usleep(100); }'
+            . 'file_put_contents($watching, "watching");'
+            . 'while (microtime(true) < $deadline) {'
+            . 'clearstatcache(true, $deleted);'
+            . 'if (!is_file($deleted)) { break; }'
+            . 'usleep(100);'
+            . '}'
+            . 'clearstatcache(true, $deleted);'
             . '$lock = fopen($lock_path, "c+b");'
             . 'if (is_file($deleted) || $lock === false || !flock($lock, LOCK_EX)) { exit(1); }'
             . 'file_put_contents($ready, "ready");'
@@ -746,6 +754,7 @@ final class PushCommitTest extends TestCase {
         foreach ($pipes as $pipe) {
             fclose($pipe);
         }
+        $this->wait_for_file($watching_path);
         try {
             $push_session->commit(1000);
             $this->fail('Commit reported success while another request held the commit-state lock.');
@@ -796,12 +805,20 @@ final class PushCommitTest extends TestCase {
 
         $commit_state_lock_path = $this->reprint_directory . '/.reprint/push/commit-state.lock';
         $deleted_docroot_path = $this->docroot . '/' . $deleted_path;
+        $completion_watching_path = $this->root . '/remove-completion-lock-watching';
         $completion_ready_path = $this->root . '/remove-completion-lock-ready';
         $completion_script = '$lock_path = base64_decode(' . json_encode(base64_encode($commit_state_lock_path), JSON_THROW_ON_ERROR) . ');'
             . '$deleted = base64_decode(' . json_encode(base64_encode($deleted_docroot_path), JSON_THROW_ON_ERROR) . ');'
+            . '$watching = base64_decode(' . json_encode(base64_encode($completion_watching_path), JSON_THROW_ON_ERROR) . ');'
             . '$ready = base64_decode(' . json_encode(base64_encode($completion_ready_path), JSON_THROW_ON_ERROR) . ');'
             . '$deadline = microtime(true) + 10;'
-            . 'while (is_file($deleted) && microtime(true) < $deadline) { usleep(100); }'
+            . 'file_put_contents($watching, "watching");'
+            . 'while (microtime(true) < $deadline) {'
+            . 'clearstatcache(true, $deleted);'
+            . 'if (!is_file($deleted)) { break; }'
+            . 'usleep(100);'
+            . '}'
+            . 'clearstatcache(true, $deleted);'
             . '$lock = fopen($lock_path, "c+b");'
             . 'if (is_file($deleted) || $lock === false || !flock($lock, LOCK_EX)) { exit(1); }'
             . 'file_put_contents($ready, "ready");'
@@ -812,6 +829,7 @@ final class PushCommitTest extends TestCase {
         foreach ($completion_pipes as $pipe) {
             fclose($pipe);
         }
+        $this->wait_for_file($completion_watching_path);
         try {
             $push_session->commit(1000);
             $this->fail('Commit release was not blocked by valid commit-state lock contention.');
@@ -837,11 +855,7 @@ final class PushCommitTest extends TestCase {
         foreach ($remove_pipes as $pipe) {
             fclose($pipe);
         }
-        $deadline = microtime(true) + 10;
-        while (!is_file($remove_ready_path) && microtime(true) < $deadline) {
-            usleep(100);
-        }
-        $this->assertFileExists($remove_ready_path);
+        $this->wait_for_file($remove_ready_path);
         try {
             $push_session->remove_push_directory();
             $this->fail('Push removal reported success while the commit-state lock was held.');
@@ -954,6 +968,19 @@ final class PushCommitTest extends TestCase {
             ],
             'body' => '',
         ]]);
+    }
+
+    private function wait_for_file(string $path): void {
+        $deadline = microtime(true) + 10;
+        do {
+            clearstatcache(true, $path);
+            if (is_file($path)) {
+                break;
+            }
+            usleep(100);
+        } while (microtime(true) < $deadline);
+        clearstatcache(true, $path);
+        $this->assertFileExists($path);
     }
 
     /** @return string[] */
