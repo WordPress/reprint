@@ -21,12 +21,12 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  *
  * A caller performs its work before consuming the current path:
  *
- *     $processor = FileIndexDiffProcessor::start($before_index, $after_index);
+ *     $processor = FileIndexDiffProcessor::start($earlier_index, $later_index);
  *     while ($processor->next_path()) {
  *         apply_path_operation(
  *             $processor->get_path(),
- *             $processor->get_before_path_type(),
- *             $processor->get_after_path_type()
+ *             $processor->get_earlier_path_type(),
+ *             $processor->get_later_path_type()
  *         );
  *         $processor->consume_current_path();
  *         save_cursor($processor->get_cursor());
@@ -44,30 +44,30 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  *
  * Each selected path has one of three relationships:
  *
- * | Before path type | After path type | Meaning                         |
- * |------------------|-----------------|---------------------------------|
- * | non-null         | null            | The path occurs only before.    |
- * | null             | non-null        | The path occurs only after.     |
+ * | Earlier path type | Later path type | Meaning                         |
+ * |-------------------|-----------------|---------------------------------|
+ * | non-null          | null            | Only the earlier index has it.  |
+ * | null              | non-null        | Only the later index has it.    |
  * | non-null         | non-null        | Both indexes contain the path.  |
  *
  * The two lookahead-path getters expose the entries currently retained from
  * the underlying streams even when one belongs to a later path. For example,
- * an after-only path may retain the next before-side path as lookahead. Callers
+ * a later-only path may retain the next earlier-index path as lookahead. Callers
  * use this to recognize subtree replacements without reading ahead or moving
  * either cursor themselves.
  *
- * `previous_after_path` is the most recently consumed path from the after
- * index. Consuming a before-only path does not change it. This gives callers
- * the preceding after-side path while they process gaps in sparse indexes.
+ * `previous_later_path` is the most recently consumed path from the later
+ * index. Consuming an earlier-only path does not change it. This gives callers
+ * the preceding later-index path while they process gaps in sparse indexes.
  *
  * ## Index and cursor requirements
  *
  * Both JSONL indexes must be sorted by decoded path bytes, not by their base64
- * representation. The after index must exist. A missing before index represents
+ * representation. The later index must exist. A missing earlier index represents
  * an empty earlier snapshot.
  *
  * The cursor contains the byte offset after the last consumed entry in each
- * index and the previous consumed after-side path. It identifies positions
+ * index and the previous consumed later-index path. It identifies positions
  * within the same immutable index files; it does not identify or validate the
  * files themselves. A caller which resumes with different index contents has
  * violated the processor contract.
@@ -78,36 +78,36 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * cursor returned after `consume_current_path()` is a continuation boundary.
  *
  * @phpstan-type IndexEntry array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool}
- * @phpstan-type Cursor array{before_index_byte_offset:int,after_index_byte_offset:int,previous_after_index_entry_path_b64:string|null}
+ * @phpstan-type Cursor array{earlier_index_byte_offset:int,later_index_byte_offset:int,previous_later_index_entry_path_b64:string|null}
  */
 final class FileIndexDiffProcessor
 {
     /** @var resource|null Open earlier index, or null when the earlier index is absent. */
-    private $before_index_handle = null;
+    private $earlier_index_handle = null;
 
     /** @var resource|null Open later index. */
-    private $after_index_handle = null;
+    private $later_index_handle = null;
 
     /** @var IndexEntry|null Earlier entry retained until its aligned path is consumed. */
-    private ?array $before_index_entry = null;
+    private ?array $earlier_index_entry = null;
 
     /** Whether the earlier entry has been read, including an EOF result. */
-    private bool $before_index_entry_loaded = false;
+    private bool $earlier_index_entry_loaded = false;
 
     /** @var IndexEntry|null Later entry retained until its aligned path is consumed. */
-    private ?array $after_index_entry = null;
+    private ?array $later_index_entry = null;
 
     /** Whether the later entry has been read, including an EOF result. */
-    private bool $after_index_entry_loaded = false;
+    private bool $later_index_entry_loaded = false;
 
     /** @var Cursor Position immediately after the last consumed aligned path. */
     private array $cursor;
 
-    /** @var 'before'|'after'|'both'|null Relationship of the selected path. */
+    /** @var 'earlier'|'later'|'both'|null Relationship of the selected path. */
     private ?string $current_path_order = null;
 
-    /** Most recently consumed after-side path restored for the selected path. */
-    private ?string $previous_after_path = null;
+    /** Most recently consumed later-index path restored for the selected path. */
+    private ?string $previous_later_path = null;
 
     /** Whether both indexes reached EOF. */
     private bool $complete = false;
@@ -118,23 +118,23 @@ final class FileIndexDiffProcessor
     /**
      * Starts a new comparison at the beginning of both indexes.
      *
-     * The before index may be absent, which is equivalent to an empty earlier
-     * snapshot. The after index must be an existing readable file. Both files
+     * The earlier index may be absent, which is equivalent to an empty earlier
+     * snapshot. The later index must be an existing readable file. Both files
      * remain open until `close()`.
      *
-     * @param string $before_index_file Earlier index, or a missing path for an empty index.
-     * @param string $after_index_file  Later index.
+     * @param string $earlier_index_file Earlier index, or a missing path for an empty index.
+     * @param string $later_index_file   Later index.
      * @return self Open processor positioned before the first aligned path.
      */
-    public static function start(string $before_index_file, string $after_index_file): self
+    public static function start(string $earlier_index_file, string $later_index_file): self
     {
         return self::resume(
-            $before_index_file,
-            $after_index_file,
+            $earlier_index_file,
+            $later_index_file,
             [
-                "before_index_byte_offset" => 0,
-                "after_index_byte_offset" => 0,
-                "previous_after_index_entry_path_b64" => null,
+                "earlier_index_byte_offset" => 0,
+                "later_index_byte_offset" => 0,
+                "previous_later_index_entry_path_b64" => null,
             ]
         );
     }
@@ -142,53 +142,53 @@ final class FileIndexDiffProcessor
     /**
      * Resumes a comparison after the last consumed aligned path.
      *
-     * The byte offsets address the next unread entries. The previous after-side
-     * path restores the context returned as `previous_after_path`. Entries read
+     * The byte offsets address the next unread entries. The previous later-index
+     * path restores the context returned as `previous_later_path`. Entries read
      * before an interruption but not consumed are deliberately read again.
      *
      * The caller must provide the same immutable index contents used to produce
      * the cursor. This method restores positions; it does not fingerprint the
      * files or check that they still describe the same snapshots.
      *
-     * @param string $before_index_file Earlier index, or a missing path for an empty index.
-     * @param string $after_index_file  Later index.
+     * @param string $earlier_index_file Earlier index, or a missing path for an empty index.
+     * @param string $later_index_file   Later index.
      * @param array  $cursor {
      *     Cursor returned by get_cursor().
      *
-     *     @type int         $before_index_byte_offset             Next byte in the earlier index.
-     *     @type int         $after_index_byte_offset              Next byte in the later index.
-     *     @type string|null $previous_after_index_entry_path_b64  Last consumed later-index path.
+     *     @type int         $earlier_index_byte_offset            Next byte in the earlier index.
+     *     @type int         $later_index_byte_offset              Next byte in the later index.
+     *     @type string|null $previous_later_index_entry_path_b64  Last consumed later-index path.
      * }
      * @phpstan-param Cursor $cursor
      * @return self Open processor restored at the supplied continuation boundary.
      */
     public static function resume(
-        string $before_index_file,
-        string $after_index_file,
+        string $earlier_index_file,
+        string $later_index_file,
         array $cursor
     ): self {
         $processor = new self();
         $processor->cursor = $cursor;
-        if (is_file($before_index_file)) {
-            $processor->before_index_handle = @fopen($before_index_file, "rb");
-            if (!is_resource($processor->before_index_handle)) {
-                throw new RuntimeException("Failed to open the before file index: {$before_index_file}.");
+        if (is_file($earlier_index_file)) {
+            $processor->earlier_index_handle = @fopen($earlier_index_file, "rb");
+            if (!is_resource($processor->earlier_index_handle)) {
+                throw new RuntimeException("Failed to open the earlier file index: {$earlier_index_file}.");
             }
         }
-        $processor->after_index_handle = @fopen($after_index_file, "rb");
-        if (!is_resource($processor->after_index_handle)) {
+        $processor->later_index_handle = @fopen($later_index_file, "rb");
+        if (!is_resource($processor->later_index_handle)) {
             $processor->close();
-            throw new RuntimeException("Failed to open the after file index: {$after_index_file}.");
+            throw new RuntimeException("Failed to open the later file index: {$later_index_file}.");
         }
         if (
-            ( is_resource($processor->before_index_handle)
+            ( is_resource($processor->earlier_index_handle)
                 && fseek(
-                    $processor->before_index_handle,
-                    $cursor["before_index_byte_offset"]
+                    $processor->earlier_index_handle,
+                    $cursor["earlier_index_byte_offset"]
                 ) !== 0 )
             || fseek(
-                $processor->after_index_handle,
-                $cursor["after_index_byte_offset"]
+                $processor->later_index_handle,
+                $cursor["later_index_byte_offset"]
             ) !== 0
         ) {
             $processor->close();
@@ -218,50 +218,50 @@ final class FileIndexDiffProcessor
         if ($this->complete) {
             return false;
         }
-        if (!$this->before_index_entry_loaded) {
-            $this->before_index_entry = $this->read_next_index_entry(
-                $this->before_index_handle
+        if (!$this->earlier_index_entry_loaded) {
+            $this->earlier_index_entry = $this->read_next_index_entry(
+                $this->earlier_index_handle
             );
-            $this->before_index_entry_loaded = true;
+            $this->earlier_index_entry_loaded = true;
         }
-        if (!$this->after_index_entry_loaded) {
-            $this->after_index_entry = $this->read_next_index_entry(
-                $this->after_index_handle
+        if (!$this->later_index_entry_loaded) {
+            $this->later_index_entry = $this->read_next_index_entry(
+                $this->later_index_handle
             );
-            $this->after_index_entry_loaded = true;
+            $this->later_index_entry_loaded = true;
         }
-        if ($this->before_index_entry === null && $this->after_index_entry === null) {
+        if ($this->earlier_index_entry === null && $this->later_index_entry === null) {
             $this->complete = true;
             return false;
         }
 
-        if ($this->before_index_entry === null) {
-            $current_path_order = "after";
-        } elseif ($this->after_index_entry === null) {
-            $current_path_order = "before";
+        if ($this->earlier_index_entry === null) {
+            $current_path_order = "later";
+        } elseif ($this->later_index_entry === null) {
+            $current_path_order = "earlier";
         } else {
             // Base64 text order does not preserve arbitrary path-byte order.
             $path_comparison = strcmp(
-                $this->after_index_entry["path"],
-                $this->before_index_entry["path"]
+                $this->later_index_entry["path"],
+                $this->earlier_index_entry["path"]
             );
             $current_path_order = $path_comparison < 0
-                ? "after"
-                : ( $path_comparison > 0 ? "before" : "both" );
+                ? "later"
+                : ( $path_comparison > 0 ? "earlier" : "both" );
         }
 
-        $previous_after_path = null;
-        if ($this->cursor["previous_after_index_entry_path_b64"] !== null) {
-            $previous_after_path = base64_decode(
-                $this->cursor["previous_after_index_entry_path_b64"],
+        $previous_later_path = null;
+        if ($this->cursor["previous_later_index_entry_path_b64"] !== null) {
+            $previous_later_path = base64_decode(
+                $this->cursor["previous_later_index_entry_path_b64"],
                 true
             );
-            if ($previous_after_path === false) {
+            if ($previous_later_path === false) {
                 throw new RuntimeException("The file-index diff cursor has an invalid previous path.");
             }
         }
         $this->current_path_order = $current_path_order;
-        $this->previous_after_path = $previous_after_path;
+        $this->previous_later_path = $previous_later_path;
         return true;
     }
 
@@ -269,120 +269,120 @@ final class FileIndexDiffProcessor
     public function get_path(): string
     {
         $this->assert_current_path();
-        return $this->current_path_order === "after"
-            ? $this->after_index_entry["path"]
-            : $this->before_index_entry["path"];
+        return $this->current_path_order === "later"
+            ? $this->later_index_entry["path"]
+            : $this->earlier_index_entry["path"];
     }
 
-    /** Returns the earlier local path type, or null when the path occurs only after. */
-    public function get_before_path_type(): ?string
+    /** Returns the earlier local path type, or null when only the later index has the path. */
+    public function get_earlier_path_type(): ?string
     {
-        $entry = $this->get_before_entry();
+        $entry = $this->get_earlier_index_entry_for_current_path();
         return $entry["type"] ?? null;
     }
 
-    /** Returns the later local path type, or null when the path occurs only before. */
-    public function get_after_path_type(): ?string
+    /** Returns the later local path type, or null when only the earlier index has the path. */
+    public function get_later_path_type(): ?string
     {
-        $entry = $this->get_after_entry();
+        $entry = $this->get_later_index_entry_for_current_path();
         return $entry["type"] ?? null;
     }
 
-    /** Returns the earlier size. The selected path must occur in the before index. */
-    public function get_before_size(): int
+    /** Returns the earlier size. The selected path must occur in the earlier index. */
+    public function get_earlier_size(): int
     {
-        return $this->get_required_before_entry()["size"];
+        return $this->get_required_earlier_index_entry()["size"];
     }
 
-    /** Returns the later size. The selected path must occur in the after index. */
-    public function get_after_size(): int
+    /** Returns the later size. The selected path must occur in the later index. */
+    public function get_later_size(): int
     {
-        return $this->get_required_after_entry()["size"];
+        return $this->get_required_later_index_entry()["size"];
     }
 
-    /** Returns the earlier ctime. The selected path must occur in the before index. */
-    public function get_before_ctime(): int
+    /** Returns the earlier ctime. The selected path must occur in the earlier index. */
+    public function get_earlier_ctime(): int
     {
-        return $this->get_required_before_entry()["ctime"];
+        return $this->get_required_earlier_index_entry()["ctime"];
     }
 
-    /** Returns the later ctime. The selected path must occur in the after index. */
-    public function get_after_ctime(): int
+    /** Returns the later ctime. The selected path must occur in the later index. */
+    public function get_later_ctime(): int
     {
-        return $this->get_required_after_entry()["ctime"];
+        return $this->get_required_later_index_entry()["ctime"];
     }
 
     /** Returns the earlier directory empty marker, or null when it is not recorded. */
-    public function get_before_directory_is_empty(): ?bool
+    public function get_earlier_directory_is_empty(): ?bool
     {
-        $entry = $this->get_before_entry();
+        $entry = $this->get_earlier_index_entry_for_current_path();
         return $entry["empty"] ?? null;
     }
 
     /** Returns the later directory empty marker, or null when it is not recorded. */
-    public function get_after_directory_is_empty(): ?bool
+    public function get_later_directory_is_empty(): ?bool
     {
-        $entry = $this->get_after_entry();
+        $entry = $this->get_later_index_entry_for_current_path();
         return $entry["empty"] ?? null;
     }
 
     /** Returns the earlier entry retained as lookahead, which may follow the selected path. */
-    public function get_before_lookahead_path(): ?string
+    public function get_earlier_lookahead_path(): ?string
     {
         $this->assert_current_path();
-        return $this->before_index_entry["path"] ?? null;
+        return $this->earlier_index_entry["path"] ?? null;
     }
 
     /** Returns the later entry retained as lookahead, which may follow the selected path. */
-    public function get_after_lookahead_path(): ?string
+    public function get_later_lookahead_path(): ?string
     {
         $this->assert_current_path();
-        return $this->after_index_entry["path"] ?? null;
+        return $this->later_index_entry["path"] ?? null;
     }
 
     /** Returns the most recently consumed later-index path. */
-    public function get_previous_after_path(): ?string
+    public function get_previous_later_path(): ?string
     {
         $this->assert_current_path();
-        return $this->previous_after_path;
+        return $this->previous_later_path;
     }
 
     /**
      * Consumes the current path after its caller completes the associated work.
      *
-     * A before-only or after-only path advances one index. A path present in
+     * An earlier-only or later-only path advances one index. A path present in
      * both indexes advances both. The cursor is updated only after the relevant
-     * file positions are known, and consuming an after-side entry also records
-     * that entry as the next result's `previous_after_path`.
+     * file positions are known, and consuming a later-index entry also records
+     * that entry as the next result's `previous_later_path`.
      *
      * Calling this method after both indexes reached EOF is a logic error.
      */
     public function consume_current_path(): void
     {
         $this->assert_current_path();
-        if ($this->current_path_order !== "after") {
-            $before_index_byte_offset = ftell($this->before_index_handle);
-            if (!is_int($before_index_byte_offset)) {
-                throw new RuntimeException("Failed to read the before file-index byte offset.");
+        if ($this->current_path_order !== "later") {
+            $earlier_index_byte_offset = ftell($this->earlier_index_handle);
+            if (!is_int($earlier_index_byte_offset)) {
+                throw new RuntimeException("Failed to read the earlier file-index byte offset.");
             }
-            $this->cursor["before_index_byte_offset"] = $before_index_byte_offset;
-            $this->before_index_entry = null;
-            $this->before_index_entry_loaded = false;
+            $this->cursor["earlier_index_byte_offset"] = $earlier_index_byte_offset;
+            $this->earlier_index_entry = null;
+            $this->earlier_index_entry_loaded = false;
         }
-        if ($this->current_path_order !== "before") {
-            $after_index_byte_offset = ftell($this->after_index_handle);
-            if (!is_int($after_index_byte_offset)) {
-                throw new RuntimeException("Failed to read the after file-index byte offset.");
+        if ($this->current_path_order !== "earlier") {
+            $later_index_byte_offset = ftell($this->later_index_handle);
+            if (!is_int($later_index_byte_offset)) {
+                throw new RuntimeException("Failed to read the later file-index byte offset.");
             }
-            $this->cursor["after_index_byte_offset"] = $after_index_byte_offset;
-            $this->cursor["previous_after_index_entry_path_b64"] = base64_encode(
-                $this->after_index_entry["path"]
+            $this->cursor["later_index_byte_offset"] = $later_index_byte_offset;
+            $this->cursor["previous_later_index_entry_path_b64"] = base64_encode(
+                $this->later_index_entry["path"]
             );
-            $this->after_index_entry = null;
-            $this->after_index_entry_loaded = false;
+            $this->later_index_entry = null;
+            $this->later_index_entry_loaded = false;
         }
         $this->current_path_order = null;
-        $this->previous_after_path = null;
+        $this->previous_later_path = null;
     }
 
     /**
@@ -395,9 +395,9 @@ final class FileIndexDiffProcessor
      * @return array {
      *     Cursor for `resume()`.
      *
-     *     @type int         $before_index_byte_offset            Next byte in the earlier index.
-     *     @type int         $after_index_byte_offset             Next byte in the later index.
-     *     @type string|null $previous_after_index_entry_path_b64 Last consumed later-index path.
+     *     @type int         $earlier_index_byte_offset            Next byte in the earlier index.
+     *     @type int         $later_index_byte_offset              Next byte in the later index.
+     *     @type string|null $previous_later_index_entry_path_b64  Last consumed later-index path.
      * }
      *
      * @phpstan-return Cursor
@@ -415,17 +415,17 @@ final class FileIndexDiffProcessor
      */
     public function close(): void
     {
-        if (is_resource($this->before_index_handle)) {
-            fclose($this->before_index_handle);
+        if (is_resource($this->earlier_index_handle)) {
+            fclose($this->earlier_index_handle);
         }
-        if (is_resource($this->after_index_handle)) {
-            fclose($this->after_index_handle);
+        if (is_resource($this->later_index_handle)) {
+            fclose($this->later_index_handle);
         }
-        $this->before_index_handle = null;
-        $this->before_index_entry = null;
-        $this->after_index_entry = null;
+        $this->earlier_index_handle = null;
+        $this->earlier_index_entry = null;
+        $this->later_index_entry = null;
         $this->current_path_order = null;
-        $this->previous_after_path = null;
+        $this->previous_later_path = null;
         $this->closed = true;
     }
 
@@ -447,39 +447,39 @@ final class FileIndexDiffProcessor
     }
 
     /** @phpstan-return IndexEntry|null */
-    private function get_before_entry(): ?array
+    private function get_earlier_index_entry_for_current_path(): ?array
     {
         $this->assert_current_path();
-        return $this->current_path_order === "after"
+        return $this->current_path_order === "later"
             ? null
-            : $this->before_index_entry;
+            : $this->earlier_index_entry;
     }
 
     /** @phpstan-return IndexEntry|null */
-    private function get_after_entry(): ?array
+    private function get_later_index_entry_for_current_path(): ?array
     {
         $this->assert_current_path();
-        return $this->current_path_order === "before"
+        return $this->current_path_order === "earlier"
             ? null
-            : $this->after_index_entry;
+            : $this->later_index_entry;
     }
 
     /** @phpstan-return IndexEntry */
-    private function get_required_before_entry(): array
+    private function get_required_earlier_index_entry(): array
     {
-        $entry = $this->get_before_entry();
+        $entry = $this->get_earlier_index_entry_for_current_path();
         if ($entry === null) {
-            throw new LogicException("The current path has no before-index entry.");
+            throw new LogicException("The current path has no earlier-index entry.");
         }
         return $entry;
     }
 
     /** @phpstan-return IndexEntry */
-    private function get_required_after_entry(): array
+    private function get_required_later_index_entry(): array
     {
-        $entry = $this->get_after_entry();
+        $entry = $this->get_later_index_entry_for_current_path();
         if ($entry === null) {
-            throw new LogicException("The current path has no after-index entry.");
+            throw new LogicException("The current path has no later-index entry.");
         }
         return $entry;
     }

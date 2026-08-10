@@ -424,9 +424,9 @@ class PushPlan
             $this->local_index_file,
             $this->fresh_local_index_file,
             [
-                "before_index_byte_offset" => $cursor["byte_offset_in_local_index"],
-                "after_index_byte_offset" => $cursor["byte_offset_in_fresh_local_index"],
-                "previous_after_index_entry_path_b64" =>
+                "earlier_index_byte_offset" => $cursor["byte_offset_in_local_index"],
+                "later_index_byte_offset" => $cursor["byte_offset_in_fresh_local_index"],
+                "previous_later_index_entry_path_b64" =>
                     $cursor["previous_fresh_local_index_entry_path"] === null
                         ? null
                         : base64_encode($cursor["previous_fresh_local_index_entry_path"]),
@@ -648,8 +648,8 @@ class PushPlan
         $this->index_diff_path_selected = true;
 
         $local_relative_path = $this->index_diff_processor->get_path();
-        $local_index_path_type = $this->index_diff_processor->get_before_path_type();
-        $fresh_local_index_path_type = $this->index_diff_processor->get_after_path_type();
+        $local_index_path_type = $this->index_diff_processor->get_earlier_path_type();
+        $fresh_local_index_path_type = $this->index_diff_processor->get_later_path_type();
         $path_comparison = $local_index_path_type === null
             ? -1
             : ( $fresh_local_index_path_type === null ? 1 : 0 );
@@ -686,7 +686,7 @@ class PushPlan
         if ($path_comparison < 0) {
             // New files, symlinks, and empty directories need to be pushed.
             $local_index_lookahead_path =
-                $this->index_diff_processor->get_before_lookahead_path();
+                $this->index_diff_processor->get_earlier_lookahead_path();
             $fresh_local_index_entry_replaces_local_subtree =
                 $local_index_lookahead_path !== null
                 && $local_index_lookahead_path !== $local_relative_path
@@ -710,12 +710,12 @@ class PushPlan
                     );
             }
             if (!$this->path_conflicts_with_excluded_paths($local_relative_path)) {
-                $fresh_local_index_size = $this->index_diff_processor->get_after_size();
+                $fresh_local_index_size = $this->index_diff_processor->get_later_size();
                 $this->append_local_path_to_push(
                     $local_relative_path,
                     $fresh_local_index_path_type,
                     $fresh_local_index_size,
-                    $this->index_diff_processor->get_after_ctime()
+                    $this->index_diff_processor->get_later_ctime()
                 );
                 if ($local_paths_to_push_count !== null) {
                     ++$local_paths_to_push_count;
@@ -729,9 +729,9 @@ class PushPlan
             }
         } elseif ($path_comparison > 0) {
             $previous_fresh_local_index_entry_path =
-                $this->index_diff_processor->get_previous_after_path();
+                $this->index_diff_processor->get_previous_later_path();
             $next_fresh_local_index_entry_path =
-                $this->index_diff_processor->get_after_lookahead_path();
+                $this->index_diff_processor->get_later_lookahead_path();
             $local_empty_directory_is_implied_by_fresh_descendant =
                 $local_index_entry_shape === "empty_directory"
                 && $this->fresh_index_contains_path_or_descendant(
@@ -778,10 +778,10 @@ class PushPlan
             $changed_file_or_symlink_needs_push =
                 $fresh_local_index_entry_is_file_or_symlink
                 && (
-                    $this->index_diff_processor->get_after_ctime()
-                        !== $this->index_diff_processor->get_before_ctime()
-                    || $this->index_diff_processor->get_after_size()
-                        !== $this->index_diff_processor->get_before_size()
+                    $this->index_diff_processor->get_later_ctime()
+                        !== $this->index_diff_processor->get_earlier_ctime()
+                    || $this->index_diff_processor->get_later_size()
+                        !== $this->index_diff_processor->get_earlier_size()
                     || $fresh_local_index_path_type !== $local_index_path_type
                 );
             $needs_delete =
@@ -804,12 +804,12 @@ class PushPlan
                 $this->append_local_path_to_delete($local_relative_path);
             }
             if ($needs_push && !$path_is_excluded) {
-                $fresh_local_index_size = $this->index_diff_processor->get_after_size();
+                $fresh_local_index_size = $this->index_diff_processor->get_later_size();
                 $this->append_local_path_to_push(
                     $local_relative_path,
                     $fresh_local_index_path_type,
                     $fresh_local_index_size,
-                    $this->index_diff_processor->get_after_ctime()
+                    $this->index_diff_processor->get_later_ctime()
                 );
                 if ($local_paths_to_push_count !== null) {
                     ++$local_paths_to_push_count;
@@ -840,9 +840,9 @@ class PushPlan
         }
         $index_diff_cursor = $this->index_diff_processor->get_cursor();
         $previous_fresh_local_index_entry_path = null;
-        if ($index_diff_cursor["previous_after_index_entry_path_b64"] !== null) {
+        if ($index_diff_cursor["previous_later_index_entry_path_b64"] !== null) {
             $previous_fresh_local_index_entry_path = base64_decode(
-                $index_diff_cursor["previous_after_index_entry_path_b64"],
+                $index_diff_cursor["previous_later_index_entry_path_b64"],
                 true
             );
             if ($previous_fresh_local_index_entry_path === false) {
@@ -858,9 +858,9 @@ class PushPlan
             : [
                 "phase" => "diffing",
                 "byte_offset_in_fresh_local_index" =>
-                    $index_diff_cursor["after_index_byte_offset"],
+                    $index_diff_cursor["later_index_byte_offset"],
                 "byte_offset_in_local_index" =>
-                    $index_diff_cursor["before_index_byte_offset"],
+                    $index_diff_cursor["earlier_index_byte_offset"],
                 "byte_offset_in_local_paths_to_push" =>
                     ftell($this->local_paths_to_push_handle),
                 "byte_offset_in_local_paths_to_delete" =>

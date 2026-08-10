@@ -39,33 +39,33 @@ final class FileIndexDiffProcessorTest extends TestCase
         parent::tearDown();
     }
 
-    public function testAlignsBeforeAfterAndSharedPaths(): void
+    public function testAlignsEarlierLaterAndSharedPaths(): void
     {
-        $before_index_file = $this->write_index('before.jsonl', [
-            $this->entry('before-only.txt', 10),
+        $earlier_index_file = $this->write_index('earlier.jsonl', [
+            $this->entry('b-earlier-only.txt', 10),
             $this->entry('shared.txt', 20),
         ]);
-        $after_index_file = $this->write_index('after.jsonl', [
-            $this->entry('after-only.txt', 30),
+        $later_index_file = $this->write_index('later.jsonl', [
+            $this->entry('a-later-only.txt', 30),
             $this->entry('shared.txt', 40),
         ]);
-        $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $processor = FileIndexDiffProcessor::start($earlier_index_file, $later_index_file);
 
         $this->assertTrue($processor->next_path());
         $this->assertSame(
-            ['after-only.txt', null, 'file', 'before-only.txt', 'after-only.txt', null],
+            ['a-later-only.txt', null, 'file', 'b-earlier-only.txt', 'a-later-only.txt', null],
             $this->current_path_summary($processor)
         );
         $processor->consume_current_path();
         $this->assertTrue($processor->next_path());
         $this->assertSame(
-            ['before-only.txt', 'file', null, 'before-only.txt', 'shared.txt', 'after-only.txt'],
+            ['b-earlier-only.txt', 'file', null, 'b-earlier-only.txt', 'shared.txt', 'a-later-only.txt'],
             $this->current_path_summary($processor)
         );
         $processor->consume_current_path();
         $this->assertTrue($processor->next_path());
         $this->assertSame(
-            ['shared.txt', 'file', 'file', 'shared.txt', 'shared.txt', 'after-only.txt'],
+            ['shared.txt', 'file', 'file', 'shared.txt', 'shared.txt', 'a-later-only.txt'],
             $this->current_path_summary($processor)
         );
         $processor->consume_current_path();
@@ -77,40 +77,40 @@ final class FileIndexDiffProcessorTest extends TestCase
 
     public function testComparesDecodedPathBytesInsteadOfBase64Text(): void
     {
-        $before_index_file = $this->write_index('before.jsonl', [
-            $this->entry("\xD0-before"),
+        $earlier_index_file = $this->write_index('earlier.jsonl', [
+            $this->entry("\xD0-earlier"),
         ]);
-        $after_index_file = $this->write_index('after.jsonl', [
-            $this->entry('A-after'),
+        $later_index_file = $this->write_index('later.jsonl', [
+            $this->entry('A-later'),
         ]);
         $this->assertLessThan(
             0,
-            strcmp(base64_encode("\xD0-before"), base64_encode('A-after'))
+            strcmp(base64_encode("\xD0-earlier"), base64_encode('A-later'))
         );
-        $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $processor = FileIndexDiffProcessor::start($earlier_index_file, $later_index_file);
 
         $this->assertTrue($processor->next_path());
-        $this->assertSame('A-after', $processor->get_path());
-        $this->assertNull($processor->get_before_path_type());
-        $this->assertSame('file', $processor->get_after_path_type());
+        $this->assertSame('A-later', $processor->get_path());
+        $this->assertNull($processor->get_earlier_path_type());
+        $this->assertSame('file', $processor->get_later_path_type());
         $processor->consume_current_path();
         $this->assertTrue($processor->next_path());
-        $this->assertSame("\xD0-before", $processor->get_path());
-        $this->assertSame('file', $processor->get_before_path_type());
-        $this->assertNull($processor->get_after_path_type());
+        $this->assertSame("\xD0-earlier", $processor->get_path());
+        $this->assertSame('file', $processor->get_earlier_path_type());
+        $this->assertNull($processor->get_later_path_type());
 
         $processor->close();
     }
 
     public function testCurrentPathAndCursorRemainStableUntilConsumption(): void
     {
-        $before_index_file = $this->write_index('before.jsonl', [
+        $earlier_index_file = $this->write_index('earlier.jsonl', [
             $this->entry('same.txt', 10),
         ]);
-        $after_index_file = $this->write_index('after.jsonl', [
+        $later_index_file = $this->write_index('later.jsonl', [
             $this->entry('same.txt', 20),
         ]);
-        $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $processor = FileIndexDiffProcessor::start($earlier_index_file, $later_index_file);
         $initial_cursor = $processor->get_cursor();
 
         $this->assertTrue($processor->next_path());
@@ -125,67 +125,67 @@ final class FileIndexDiffProcessorTest extends TestCase
 
     public function testConsumptionAdvancesOnlyTheIndexesRepresentedByTheCurrentPath(): void
     {
-        $before_index_file = $this->write_index('before.jsonl', [
-            $this->entry('a-before'),
+        $earlier_index_file = $this->write_index('earlier.jsonl', [
+            $this->entry('a-earlier'),
             $this->entry('c-shared'),
         ]);
-        $after_index_file = $this->write_index('after.jsonl', [
-            $this->entry('b-after'),
+        $later_index_file = $this->write_index('later.jsonl', [
+            $this->entry('b-later'),
             $this->entry('c-shared'),
         ]);
-        $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $processor = FileIndexDiffProcessor::start($earlier_index_file, $later_index_file);
 
         $this->assertTrue($processor->next_path());
-        $this->assertSame('file', $processor->get_before_path_type());
-        $this->assertNull($processor->get_after_path_type());
+        $this->assertSame('file', $processor->get_earlier_path_type());
+        $this->assertNull($processor->get_later_path_type());
         $processor->consume_current_path();
-        $after_before_only = $processor->get_cursor();
-        $this->assertGreaterThan(0, $after_before_only['before_index_byte_offset']);
-        $this->assertSame(0, $after_before_only['after_index_byte_offset']);
-        $this->assertNull($after_before_only['previous_after_index_entry_path_b64']);
+        $cursor_after_earlier_only_path = $processor->get_cursor();
+        $this->assertGreaterThan(0, $cursor_after_earlier_only_path['earlier_index_byte_offset']);
+        $this->assertSame(0, $cursor_after_earlier_only_path['later_index_byte_offset']);
+        $this->assertNull($cursor_after_earlier_only_path['previous_later_index_entry_path_b64']);
 
         $this->assertTrue($processor->next_path());
-        $this->assertNull($processor->get_before_path_type());
-        $this->assertSame('file', $processor->get_after_path_type());
+        $this->assertNull($processor->get_earlier_path_type());
+        $this->assertSame('file', $processor->get_later_path_type());
         $processor->consume_current_path();
-        $after_after_only = $processor->get_cursor();
+        $cursor_after_later_only_path = $processor->get_cursor();
         $this->assertSame(
-            $after_before_only['before_index_byte_offset'],
-            $after_after_only['before_index_byte_offset']
+            $cursor_after_earlier_only_path['earlier_index_byte_offset'],
+            $cursor_after_later_only_path['earlier_index_byte_offset']
         );
-        $this->assertGreaterThan(0, $after_after_only['after_index_byte_offset']);
+        $this->assertGreaterThan(0, $cursor_after_later_only_path['later_index_byte_offset']);
         $this->assertSame(
-            base64_encode('b-after'),
-            $after_after_only['previous_after_index_entry_path_b64']
+            base64_encode('b-later'),
+            $cursor_after_later_only_path['previous_later_index_entry_path_b64']
         );
 
         $this->assertTrue($processor->next_path());
-        $this->assertSame('file', $processor->get_before_path_type());
-        $this->assertSame('file', $processor->get_after_path_type());
+        $this->assertSame('file', $processor->get_earlier_path_type());
+        $this->assertSame('file', $processor->get_later_path_type());
         $processor->consume_current_path();
-        $after_shared = $processor->get_cursor();
+        $cursor_after_shared_path = $processor->get_cursor();
         $this->assertGreaterThan(
-            $after_after_only['before_index_byte_offset'],
-            $after_shared['before_index_byte_offset']
+            $cursor_after_later_only_path['earlier_index_byte_offset'],
+            $cursor_after_shared_path['earlier_index_byte_offset']
         );
         $this->assertGreaterThan(
-            $after_after_only['after_index_byte_offset'],
-            $after_shared['after_index_byte_offset']
+            $cursor_after_later_only_path['later_index_byte_offset'],
+            $cursor_after_shared_path['later_index_byte_offset']
         );
         $processor->close();
     }
 
     public function testResumeRepeatsTheCurrentPathWhoseConsumptionWasNotStored(): void
     {
-        $before_index_file = $this->write_index('before.jsonl', [
+        $earlier_index_file = $this->write_index('earlier.jsonl', [
             $this->entry('a.txt'),
             $this->entry('c.txt'),
         ]);
-        $after_index_file = $this->write_index('after.jsonl', [
+        $later_index_file = $this->write_index('later.jsonl', [
             $this->entry('b.txt'),
             $this->entry('c.txt'),
         ]);
-        $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $processor = FileIndexDiffProcessor::start($earlier_index_file, $later_index_file);
         $this->assertTrue($processor->next_path());
         $processor->consume_current_path();
         $stored_cursor = $processor->get_cursor();
@@ -194,8 +194,8 @@ final class FileIndexDiffProcessorTest extends TestCase
         $processor->close();
 
         $resumed_processor = FileIndexDiffProcessor::resume(
-            $before_index_file,
-            $after_index_file,
+            $earlier_index_file,
+            $later_index_file,
             $stored_cursor
         );
         $this->assertTrue($resumed_processor->next_path());
@@ -204,59 +204,59 @@ final class FileIndexDiffProcessorTest extends TestCase
         $resumed_processor->close();
     }
 
-    public function testPreviousAfterPathSurvivesBeforeOnlyPathsAndResume(): void
+    public function testPreviousLaterPathSurvivesEarlierOnlyPathsAndResume(): void
     {
-        $before_index_file = $this->write_index('before.jsonl', [
-            $this->entry('b-before'),
+        $earlier_index_file = $this->write_index('earlier.jsonl', [
+            $this->entry('b-earlier'),
             $this->entry('c-shared'),
         ]);
-        $after_index_file = $this->write_index('after.jsonl', [
-            $this->entry('a-after'),
+        $later_index_file = $this->write_index('later.jsonl', [
+            $this->entry('a-later'),
             $this->entry('c-shared'),
         ]);
-        $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $processor = FileIndexDiffProcessor::start($earlier_index_file, $later_index_file);
         $this->assertTrue($processor->next_path());
         $processor->consume_current_path();
 
         $this->assertTrue($processor->next_path());
-        $this->assertSame('a-after', $processor->get_previous_after_path());
+        $this->assertSame('a-later', $processor->get_previous_later_path());
         $processor->consume_current_path();
         $cursor = $processor->get_cursor();
         $processor->close();
 
         $resumed_processor = FileIndexDiffProcessor::resume(
-            $before_index_file,
-            $after_index_file,
+            $earlier_index_file,
+            $later_index_file,
             $cursor
         );
         $this->assertTrue($resumed_processor->next_path());
-        $this->assertSame('file', $resumed_processor->get_before_path_type());
-        $this->assertSame('file', $resumed_processor->get_after_path_type());
+        $this->assertSame('file', $resumed_processor->get_earlier_path_type());
+        $this->assertSame('file', $resumed_processor->get_later_path_type());
         $this->assertSame(
-            'a-after',
-            $resumed_processor->get_previous_after_path()
+            'a-later',
+            $resumed_processor->get_previous_later_path()
         );
         $resumed_processor->close();
     }
 
-    public function testMissingBeforeIndexRepresentsAnEmptyEarlierSnapshot(): void
+    public function testMissingEarlierIndexRepresentsAnEmptyEarlierSnapshot(): void
     {
-        $after_index_file = $this->write_index('after.jsonl', [
+        $later_index_file = $this->write_index('later.jsonl', [
             $this->entry('first.txt'),
             $this->entry('second.txt'),
         ]);
         $processor = FileIndexDiffProcessor::start(
-            $this->temp_dir . '/missing-before.jsonl',
-            $after_index_file
+            $this->temp_dir . '/missing-earlier.jsonl',
+            $later_index_file
         );
 
         $this->assertTrue($processor->next_path());
-        $this->assertNull($processor->get_before_path_type());
-        $this->assertSame('file', $processor->get_after_path_type());
+        $this->assertNull($processor->get_earlier_path_type());
+        $this->assertSame('file', $processor->get_later_path_type());
         $processor->consume_current_path();
         $this->assertTrue($processor->next_path());
-        $this->assertNull($processor->get_before_path_type());
-        $this->assertSame('file', $processor->get_after_path_type());
+        $this->assertNull($processor->get_earlier_path_type());
+        $this->assertSame('file', $processor->get_later_path_type());
         $processor->consume_current_path();
         $this->assertFalse($processor->next_path());
         $processor->close();
@@ -264,40 +264,40 @@ final class FileIndexDiffProcessorTest extends TestCase
 
     public function testDirectoryEntryKeepsItsEmptyMarker(): void
     {
-        $after_index_file = $this->write_index('after.jsonl', [
+        $later_index_file = $this->write_index('later.jsonl', [
             $this->entry('empty-directory', 10, 0, 'dir', true),
         ]);
         $processor = FileIndexDiffProcessor::start(
-            $this->temp_dir . '/missing-before.jsonl',
-            $after_index_file
+            $this->temp_dir . '/missing-earlier.jsonl',
+            $later_index_file
         );
 
         $this->assertTrue($processor->next_path());
         $this->assertSame('empty-directory', $processor->get_path());
-        $this->assertSame('dir', $processor->get_after_path_type());
-        $this->assertSame(0, $processor->get_after_size());
-        $this->assertSame(10, $processor->get_after_ctime());
-        $this->assertTrue($processor->get_after_directory_is_empty());
+        $this->assertSame('dir', $processor->get_later_path_type());
+        $this->assertSame(0, $processor->get_later_size());
+        $this->assertSame(10, $processor->get_later_ctime());
+        $this->assertTrue($processor->get_later_directory_is_empty());
         $processor->close();
     }
 
-    public function testMissingAfterIndexIsRejected(): void
+    public function testMissingLaterIndexIsRejected(): void
     {
-        $before_index_file = $this->write_index('before.jsonl', []);
+        $earlier_index_file = $this->write_index('earlier.jsonl', []);
 
         $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('Failed to open the after file index');
+        $this->expectExceptionMessage('Failed to open the later file index');
         FileIndexDiffProcessor::start(
-            $before_index_file,
-            $this->temp_dir . '/missing-after.jsonl'
+            $earlier_index_file,
+            $this->temp_dir . '/missing-later.jsonl'
         );
     }
 
-    public function testConsumingAfterBothIndexesReachEofIsRejected(): void
+    public function testConsumingWhenBothIndexesReachedEofIsRejected(): void
     {
-        $before_index_file = $this->write_index('before.jsonl', []);
-        $after_index_file = $this->write_index('after.jsonl', []);
-        $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $earlier_index_file = $this->write_index('earlier.jsonl', []);
+        $later_index_file = $this->write_index('later.jsonl', []);
+        $processor = FileIndexDiffProcessor::start($earlier_index_file, $later_index_file);
         $this->assertFalse($processor->next_path());
 
         $this->expectException(LogicException::class);
@@ -311,11 +311,11 @@ final class FileIndexDiffProcessorTest extends TestCase
 
     public function testCloseIsIdempotentAndMakesTheProcessorTerminal(): void
     {
-        $before_index_file = $this->write_index('before.jsonl', []);
-        $after_index_file = $this->write_index('after.jsonl', [
-            $this->entry('after.txt'),
+        $earlier_index_file = $this->write_index('earlier.jsonl', []);
+        $later_index_file = $this->write_index('later.jsonl', [
+            $this->entry('later.txt'),
         ]);
-        $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $processor = FileIndexDiffProcessor::start($earlier_index_file, $later_index_file);
         $this->assertTrue($processor->next_path());
         $processor->close();
         $processor->close();
@@ -327,11 +327,11 @@ final class FileIndexDiffProcessorTest extends TestCase
 
     public function testGettersDoNotSelectAPath(): void
     {
-        $before_index_file = $this->write_index('before.jsonl', []);
-        $after_index_file = $this->write_index('after.jsonl', [
-            $this->entry('after.txt'),
+        $earlier_index_file = $this->write_index('earlier.jsonl', []);
+        $later_index_file = $this->write_index('later.jsonl', [
+            $this->entry('later.txt'),
         ]);
-        $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $processor = FileIndexDiffProcessor::start($earlier_index_file, $later_index_file);
 
         $this->expectException(LogicException::class);
         $this->expectExceptionMessage('Call next_path() first');
@@ -344,11 +344,11 @@ final class FileIndexDiffProcessorTest extends TestCase
 
     public function testNextPathRejectsAnUnconsumedCurrentPath(): void
     {
-        $before_index_file = $this->write_index('before.jsonl', []);
-        $after_index_file = $this->write_index('after.jsonl', [
-            $this->entry('after.txt'),
+        $earlier_index_file = $this->write_index('earlier.jsonl', []);
+        $later_index_file = $this->write_index('later.jsonl', [
+            $this->entry('later.txt'),
         ]);
-        $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $processor = FileIndexDiffProcessor::start($earlier_index_file, $later_index_file);
         $this->assertTrue($processor->next_path());
 
         $this->expectException(LogicException::class);
@@ -406,11 +406,11 @@ final class FileIndexDiffProcessorTest extends TestCase
     {
         return [
             $processor->get_path(),
-            $processor->get_before_path_type(),
-            $processor->get_after_path_type(),
-            $processor->get_before_lookahead_path(),
-            $processor->get_after_lookahead_path(),
-            $processor->get_previous_after_path(),
+            $processor->get_earlier_path_type(),
+            $processor->get_later_path_type(),
+            $processor->get_earlier_lookahead_path(),
+            $processor->get_later_lookahead_path(),
+            $processor->get_previous_later_path(),
         ];
     }
 }

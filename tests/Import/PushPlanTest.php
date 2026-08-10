@@ -543,19 +543,19 @@ final class PushPlanTest extends TestCase
             PushPlan::class,
             'index_diff_processor'
         );
-        $after_index_handle_property = new ReflectionProperty(
+        $later_index_handle_property = new ReflectionProperty(
             FileIndexDiffProcessor::class,
-            'after_index_handle'
+            'later_index_handle'
         );
-        $after_index_entry_property = new ReflectionProperty(
+        $later_index_entry_property = new ReflectionProperty(
             FileIndexDiffProcessor::class,
-            'after_index_entry'
+            'later_index_entry'
         );
 
         $this->assertTrue($this->nextPlanStep($plan));
         $first_plan_cursor = $this->planCursor();
         $index_diff_processor = $index_diff_processor_property->getValue($plan);
-        $fresh_local_index_handle = $after_index_handle_property->getValue(
+        $fresh_local_index_handle = $later_index_handle_property->getValue(
             $index_diff_processor
         );
         $this->assertIsResource($fresh_local_index_handle);
@@ -563,7 +563,7 @@ final class PushPlanTest extends TestCase
             $first_plan_cursor['byte_offset_in_fresh_local_index'],
             ftell($fresh_local_index_handle)
         );
-        $retained_fresh_local_index_entry = $after_index_entry_property->getValue(
+        $retained_fresh_local_index_entry = $later_index_entry_property->getValue(
             $index_diff_processor
         );
         $this->assertIsArray($retained_fresh_local_index_entry);
