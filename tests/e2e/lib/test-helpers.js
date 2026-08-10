@@ -16,7 +16,7 @@ const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
 
 const SITE_ROOT = REGISTRY.siteRoot;
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
+const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
@@ -294,7 +294,18 @@ export function runImporter(url, outputDir, command, options = {}) {
             // No state file or invalid JSON — need preflight
         }
         if (needsPreflight) {
-            const preflightResult = runImporterOnce('preflight');
+            let preflightResult;
+            let preflightAttempts = 0;
+            do {
+                preflightResult = runImporterOnce('preflight');
+                preflightAttempts += 1;
+                // Preflight is read-only. Retry only when cURL received no HTTP
+                // response, which is the transient PHP-FPM stall seen in CI.
+            } while (
+                preflightResult.exitCode !== 0 &&
+                preflightAttempts < 3 &&
+                preflightResult.stdout.includes('"http_code":0')
+            );
             if (preflightResult.exitCode !== 0) {
                 return preflightResult;
             }

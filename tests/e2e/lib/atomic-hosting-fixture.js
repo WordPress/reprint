@@ -3,7 +3,7 @@
  * core, plugins, themes, drop-ins, and mu-plugins live in a shared, read-only
  * directory and are symlinked into the site root.
  *
- * Used by the preserve-local tests (import-37) and the --only/--remap managed
+ * Used by the preserve-local tests (import-37) and the --include/--remap managed
  * composition test (import-51).
  *
  * Layout produced (relative to `siteRoot`):

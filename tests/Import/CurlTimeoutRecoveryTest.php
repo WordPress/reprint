@@ -8,7 +8,7 @@ use Reprint\Importer\InterruptedResponseException;
 use Reprint\Importer\StreamingContext;
 use Reprint\Importer\TransientInterruptionException;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Verify recovery from cURL timeouts during streaming fetches.

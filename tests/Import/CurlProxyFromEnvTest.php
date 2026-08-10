@@ -5,7 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Spawns a minimal HTTP forward proxy on an ephemeral port and confirms

@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
 
 class PullStartModeTest extends TestCase
 {

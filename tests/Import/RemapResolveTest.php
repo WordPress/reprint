@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * --remap: resolving template-string SOURCE TARGET mappings into remap rules.
@@ -74,10 +74,33 @@ class RemapResolveTest extends TestCase
     private function client(array $pathsUrls): \ImportClient
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
-        $c->get_state()->preflight = array('data' => array(
+        $c->get_state()->set_preflight_record(array('data' => array(
             'database' => array('wp' => array('paths_urls' => $pathsUrls)),
-        ));
+        )));
         return $c;
+    }
+
+    private function filesystemRootClient(array $pathsUrls): \ImportClient
+    {
+        $c = new \ImportClient('https://src.example/export.php', $this->stateDir, '/');
+        $c->get_state()->set_preflight_record(array('data' => array(
+            'database' => array('wp' => array('paths_urls' => $pathsUrls)),
+        )));
+        return $c;
+    }
+
+    public function testConstructorNormalizesFilesystemRoot(): void
+    {
+        $symlinkedFilesystemRoot = $this->tempDir . '/fs-root-symlink';
+        symlink($this->fsRoot, $symlinkedFilesystemRoot);
+
+        $client = new \ImportClient(
+            'https://src.example/export.php',
+            $this->stateDir,
+            $symlinkedFilesystemRoot
+        );
+
+        $this->assertSame($this->root, $client->filesystem_root);
     }
 
     private function resolve($c, array ...$mappings): array
@@ -172,6 +195,19 @@ class RemapResolveTest extends TestCase
         $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
         $rules = $this->resolve($c, array(':wp-content:', $this->root . '/wp-content'));
         $this->assertSame($this->root . '/wp-content', $rules['/var/www/html/wp-content']);
+    }
+
+    public function testResolvesRootTokensWithFilesystemRoot(): void
+    {
+        $rules = $this->resolve(
+            $this->filesystemRootClient(array(
+                'abspath' => '/',
+                'content_dir' => '/',
+            )),
+            array(':abspath:', ':fs-root:')
+        );
+
+        $this->assertSame(['/' => '/'], $rules);
     }
 
     // --- detached-component expansion --------------------------------------

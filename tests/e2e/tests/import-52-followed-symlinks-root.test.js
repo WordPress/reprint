@@ -2,11 +2,11 @@
  * Test 52: followed symlinks root — --follow-symlinks=<dir> places escaping paths under a local root (ARC-1814).
  *
  * Covers the {in-scope, escaping} x {relative, absolute} matrix of directory
- * symlinks under --only + --remap: escaping targets are consolidated into the
+ * symlinks under --include + --remap: escaping targets are consolidated into the
  * local followed symlinks root (nested by source path, deduped), in-scope paths are left in place.
  * (Escaping *file* symlinks are a known limitation — not covered here.)
  *
- * Run: files-pull --only :wp-content: --remap :wp-content: :fs-root:/wp-content
+ * Run: files-pull --include :wp-content: --remap :wp-content: :fs-root:/wp-content
  *                 --follow-symlinks=:fs-root:/.followed-symlinks-root
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -60,9 +60,9 @@ describe('Import: local followed symlinks root (--follow-symlinks=<dir>) places 
                     rmSync(p, { recursive: true, force: true });
                     symlinkSync(target, p);
                 }
-                // A plugin that symlinks into themes — for the narrow `--only
+                // A plugin that symlinks into themes — for the narrow `--include
                 // :wp-content:/plugins` run, themes/indice-real is OUTSIDE the
-                // --only scope but INSIDE the remapped wp-content, so remap (checked
+                // --include scope but INSIDE the remapped wp-content, so remap (checked
                 // before the local followed symlinks root) should place it at wp-content/themes.
                 const plugin = join(siteDir, 'wp-content', 'plugins', 'cross-plugin');
                 mkdirSync(plugin, { recursive: true });
@@ -90,7 +90,7 @@ describe('Import: local followed symlinks root (--follow-symlinks=<dir>) places 
         const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: [
-                '--only', ':wp-content:',
+                '--include', ':wp-content:',
                 '--remap', ':wp-content:', ':fs-root:/wp-content',
                 '--follow-symlinks=:fs-root:/.followed-symlinks-root',
             ],
@@ -140,15 +140,15 @@ describe('Import: local followed symlinks root (--follow-symlinks=<dir>) places 
             'in-scope paths must not use the local followed symlinks root');
     });
 
-    // ── Narrow --only: a plugin symlinks into themes (in wp-content, out of --only) ──
-    // themes is OUTSIDE --only :wp-content:/plugins but INSIDE the remapped
+    // ── Narrow --include: a plugin symlinks into themes (in wp-content, out of --include) ──
+    // themes is OUTSIDE --include :wp-content:/plugins but INSIDE the remapped
     // wp-content, so remap (checked before followed-symlink placement) must place it
     // at wp-content/themes for both relative and absolute spellings.
-    it('narrow --only :wp-content:/plugins files-pull completes', () => {
+    it('narrow --include :wp-content:/plugins files-pull completes', () => {
         const result = runImporter(importUrl(), tempDir2, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: [
-                '--only', ':wp-content:/plugins',
+                '--include', ':wp-content:/plugins',
                 '--remap', ':wp-content:', ':fs-root:/wp-content',
                 '--follow-symlinks=:fs-root:/.followed-symlinks-root',
             ],
@@ -157,7 +157,7 @@ describe('Import: local followed symlinks root (--follow-symlinks=<dir>) places 
     });
 
     it('cross-scope theme path lands under wp-content/themes through remap', () => {
-        // Followed from a plugin symlink; themes is out of --only but in wp-content.
+        // Followed from a plugin symlink; themes is out of --include but in wp-content.
         const themeStyle = join(fsRoot2(), 'wp-content', 'themes', 'indice-real', 'style.css');
         assert.ok(existsSync(themeStyle), `expected remapped theme at ${themeStyle}`);
         assert.ok(readFileSync(themeStyle, 'utf-8').includes('in-scope local theme'));
@@ -175,9 +175,9 @@ describe('Import: local followed symlinks root (--follow-symlinks=<dir>) places 
         }
     });
 
-    it('narrow --only pulls only plugins — unfollowed themes are absent', () => {
+    it('narrow --include pulls only plugins — unfollowed themes are absent', () => {
         // themes/indice-real is present (followed via the plugin symlink), but the
-        // other themes (indice, esc-rel, …) live outside --only=plugins and are not
+        // other themes (indice, esc-rel, …) live outside --include=plugins and are not
         // reachable, so they must not be pulled.
         assert.ok(existsSync(join(fsRoot2(), 'wp-content', 'themes', 'indice-real')),
             'the followed theme is present');

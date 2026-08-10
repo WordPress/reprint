@@ -18,10 +18,10 @@ class PushClientPhpCompatibilityTest extends TestCase
     {
         $phpcs_path = realpath(__DIR__ . '/../../vendor/bin/phpcs');
         $process_lock_path = realpath(
-            __DIR__ . '/../../packages/reprint-importer/src/lib/class-reprint-process-lock.php'
+            __DIR__ . '/../../packages/reprint-client/src/lib/class-reprint-process-lock.php'
         );
-        $upload_lib_path = realpath(__DIR__ . '/../../packages/reprint-importer/src/lib/upload');
-        $push_lib_path = realpath(__DIR__ . '/../../packages/reprint-importer/src/lib/push');
+        $upload_lib_path = realpath(__DIR__ . '/../../packages/reprint-client/src/lib/upload');
+        $push_lib_path = realpath(__DIR__ . '/../../packages/reprint-client/src/lib/push');
         $this->assertNotFalse($phpcs_path, 'vendor/bin/phpcs is missing; run composer install');
         $this->assertNotFalse($process_lock_path);
         $this->assertNotFalse($upload_lib_path);

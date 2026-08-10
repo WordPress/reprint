@@ -8,7 +8,7 @@ is about how to work.
 
 ## Push language contract
 
-Read `markdown/PUSH-TERMINOLOGY.md` before proposing or changing push work.
+Read `docs/PUSH-TERMINOLOGY.md` before proposing or changing push work.
 Use its terms verbatim in identifiers, comments, tests, documentation, plans,
 review replies, commit messages, and pull-request descriptions. Do not replace
 them with near-synonyms.
@@ -40,7 +40,7 @@ have exact meanings:
 | **Resume** | Open a new processor at its last durable boundary after an earlier process stopped. |
 | **Restart** | End the current attempt because its plan no longer describes the local tree; the caller must begin again with a fresh local index. |
 
-Prefer the exact nouns above and those in `markdown/PUSH-TERMINOLOGY.md` over
+Prefer the exact nouns above and those in `docs/PUSH-TERMINOLOGY.md` over
 generic placeholders. Say `local index entry`, `local path type, size, and
 ctime`, `push request`, `target response`, `file chunk`, `chunk of deleted
 paths`, `byte offset`, and `lock handle`. Internal method names say which unit
@@ -294,13 +294,16 @@ Inside a class, omit the class name when context already supplies it: use
 
 ## Repo mechanics that will bite you
 
-- Composer's classmap autoloads exporter classes from
-  `vendor/wp-php-toolkit/reprint-exporter/` — a stale mirror silently runs
-  old code under the tests. After editing anything in
-  `packages/reprint-exporter/src/`, copy the file to BOTH
-  `vendor/wp-php-toolkit/reprint-exporter/src/` and
-  `reprint-exporter-wp/vendor/wp-php-toolkit/reprint-exporter/src/`.
-- `packages/reprint-importer/src/lib/upload/` must stay PHP 7.4-PARSEABLE:
+- The root Composer install uses Composer's default path-repository strategy,
+  which symlinks the local server and client packages when the platform
+  supports it. Tests then run the files under `packages/` without a copied
+  `vendor/` tree drifting behind them. The PHAR build temporarily mirrors
+  those packages because the archive must be self-contained, then restores
+  the development links. The `reprint-server-wp/vendor/` tree remains a
+  physical copy for the same reason; install it afresh or run
+  `composer reinstall wp-php-toolkit/reprint-server` in that directory before
+  testing a local plugin bundle.
+- `packages/reprint-client/src/lib/upload/` must stay PHP 7.4-PARSEABLE:
   import.php loads it for pull users on 7.4, and the push client's 8.1
   requirement is a runtime check in its constructor.
   PushClientPhpCompatibilityTest enforces this; do not "clean up" the
@@ -321,7 +324,7 @@ Inside a class, omit the class name when context already supplies it: use
 - Comments state the mundane real reason, tightly, and must match actual
   behavior — a docblock that prescribes a courtesy no caller performs is a
   defect. Update docs in the same commit as the behavior they describe,
-  including the delivery plan (markdown/PUSH-SYNC.md) when a decision
+  including the delivery plan (docs/PUSH-SYNC.md) when a decision
   changes it.
 - Keep PHPDoc array shapes readable. Prefer WordPress hash notation for
   human-facing docs: put the summary on the `@param array $args {` or

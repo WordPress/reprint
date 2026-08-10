@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Verify run_flat_document_root() picks up wp-config.php when it lives
@@ -133,6 +133,46 @@ class FlatDocrootWpConfigTest extends TestCase
             file_get_contents($wpConfigFlat),
             'ABSPATH wp-config.php should take precedence over parent',
         );
+    }
+
+    public function testFlattensFilesystemRootAbspath(): void
+    {
+        mkdir($this->fsRoot . '/wp-admin', 0755, true);
+        mkdir($this->fsRoot . '/wp-includes', 0755, true);
+        mkdir($this->fsRoot . '/wp-content', 0755, true);
+        file_put_contents($this->fsRoot . '/wp-load.php', '<?php // wp-load at root');
+        file_put_contents($this->fsRoot . '/wp-content/theme.txt', 'theme');
+
+        $this->writeState([
+            'preflight' => [
+                'data' => [
+                    'database' => [
+                        'wp' => [
+                            'table_prefix' => 'wp_',
+                            'paths_urls' => [
+                                'abspath' => '/',
+                                'wp_admin_path' => '/wp-admin',
+                                'wp_includes_path' => '/wp-includes',
+                                'content_dir' => '/wp-content',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $flattenTo = $this->tempDir . '/flat';
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->callPrivate($client, 'run_flat_document_root', [
+            ['flatten_to' => $flattenTo, 'force' => false],
+        ]);
+
+        $this->assertTrue(is_link($flattenTo . '/wp-load.php'));
+        $this->assertTrue(is_link($flattenTo . '/wp-admin'));
+        $this->assertTrue(is_link($flattenTo . '/wp-includes'));
+        $this->assertTrue(is_link($flattenTo . '/wp-content'));
+        $this->assertSame('theme', file_get_contents($flattenTo . '/wp-content/theme.txt'));
     }
 
     // ---- helpers ----

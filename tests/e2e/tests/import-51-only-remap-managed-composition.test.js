@@ -1,11 +1,11 @@
 /**
- * Test 51: --only + --remap onto a managed Atomic docroot (v1 composition)
+ * Test 51: --include + --remap onto a managed Atomic docroot (v1 composition)
  *
  * The committed Docker twin of the real "first migration onto a managed Atomic
  * site" flow, plus the scoped re-sync that follows it. It exercises the v1
  * invocation —
  *
- *   files-pull --only :wp-content: --remap :wp-content: :fs-root:/wp-content \
+ *   files-pull --include :wp-content: --remap :wp-content: :fs-root:/wp-content \
  *     --on-fs-root-nonempty=preserve-local --no-follow-symlinks
  *
  * — against a fs-root pre-populated with the realistic managed hosting layout
@@ -19,9 +19,9 @@
  * :fs-root:/wp-content` flattens it to fs-root/wp-content — which is why the
  * managed fixture here lives at the fs-root ROOT (the docroot), unlike test 37.
  *
- * Phase 1 — first migration (--only :wp-content:). Verifies the four contracts
+ * Phase 1 — first migration (--include :wp-content:). Verifies the four contracts
  * of the composition:
- *   1. Core excluded (--only)        — no wp-admin/wp-includes pulled.
+ *   1. Core excluded (--include)        — no wp-admin/wp-includes pulled.
  *   2. Direct placement (--remap)    — wp-content at fs-root/wp-content, no nesting.
  *   3. Managed layer preserved       — hosting symlinks intact, read-only dirs
  *                                      don't crash, shared content untouched.
@@ -29,7 +29,7 @@
  *                                      files colliding with the managed layer
  *                                      are skipped (target wins).
  *
- * Phase 2 — scoped delta re-sync (--only :wp-content:/plugins). Verifies the
+ * Phase 2 — scoped delta re-sync (--include :wp-content:/plugins). Verifies the
  * re-sync behavior against the same managed target:
  *   A. Delta-delete   — a file the SOURCE removed that is IN the current scope
  *                       and was previously synced is deleted on the target.
@@ -54,7 +54,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 import { buildAtomicHostingFixture, unlockSharedDir } from '../lib/atomic-hosting-fixture.js';
 
-describe('Import: --only + --remap onto a managed Atomic docroot', () => {
+describe('Import: --include + --remap onto a managed Atomic docroot', () => {
     const site = 'only-remap-managed';
     let siteDir;
 
@@ -107,7 +107,7 @@ describe('Import: --only + --remap onto a managed Atomic docroot', () => {
         return `${getSiteUrl(site)}&directory=${siteDir}`;
     }
 
-    // Shared remap + preserve flags; the --only scope varies per run.
+    // Shared remap + preserve flags; the --include scope varies per run.
     const remap = ['--remap', ':wp-content:', ':fs-root:/wp-content'];
     const preserve = ['--on-fs-root-nonempty=preserve-local', '--no-follow-symlinks'];
 
@@ -132,12 +132,12 @@ describe('Import: --only + --remap onto a managed Atomic docroot', () => {
     const tgtTheme = (name) => join(fsRoot, 'wp-content', 'themes', name);
 
     // ================================================================
-    // Phase 1 — first migration: --only :wp-content:
+    // Phase 1 — first migration: --include :wp-content:
     // ================================================================
-    it('files-pull completes with --only + --remap + preserve-local', () => {
+    it('files-pull completes with --include + --remap + preserve-local', () => {
         const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
-            extraArgs: ['--only', ':wp-content:', ...remap, ...preserve],
+            extraArgs: ['--include', ':wp-content:', ...remap, ...preserve],
         });
         assert.equal(
             result.exitCode, 0,
@@ -145,12 +145,12 @@ describe('Import: --only + --remap onto a managed Atomic docroot', () => {
         );
     });
 
-    // -- 1. Core excluded (--only) --------------------------------
+    // -- 1. Core excluded (--include) --------------------------------
     it('source WP core is never pulled', () => {
         assert.ok(!existsSync(join(fsRoot, 'wp-admin')),
-            'wp-admin should not be pulled (--only :wp-content:)');
+            'wp-admin should not be pulled (--include :wp-content:)');
         assert.ok(!existsSync(join(fsRoot, 'wp-includes')),
-            'wp-includes should not be pulled (--only :wp-content:)');
+            'wp-includes should not be pulled (--include :wp-content:)');
     });
 
     // -- 2. Direct placement (--remap) ----------------------------
@@ -212,7 +212,7 @@ describe('Import: --only + --remap onto a managed Atomic docroot', () => {
     });
 
     // ================================================================
-    // Phase 2 — scoped delta re-sync: --only :wp-content:/plugins
+    // Phase 2 — scoped delta re-sync: --include :wp-content:/plugins
     // ================================================================
     it('removes custom-plugin from source, then aborts to force a fresh delta', () => {
         // The source tree is owned by nginx:nginx (site-setup chowns it), so
@@ -228,10 +228,10 @@ describe('Import: --only + --remap onto a managed Atomic docroot', () => {
         assert.equal(abort.exitCode, 0, `abort expected exit 0\nstderr: ${abort.stderr}`);
     });
 
-    it('scoped delta re-sync completes (--only :wp-content:/plugins)', () => {
+    it('scoped delta re-sync completes (--include :wp-content:/plugins)', () => {
         const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
-            extraArgs: ['--only', ':wp-content:/plugins', ...remap, ...preserve],
+            extraArgs: ['--include', ':wp-content:/plugins', ...remap, ...preserve],
         });
         assert.equal(
             result.exitCode, 0,

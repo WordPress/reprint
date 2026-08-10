@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Verify that get_export_directories() auto-includes directories from
@@ -197,6 +197,39 @@ class ExportDirectoryAutoDetectTest extends TestCase
         // auto_prepend_file (/srv/htdocs) should not be added twice.
         $count = array_count_values($dirs);
         $this->assertSame(1, $count['/srv/htdocs'] ?? 0);
+    }
+
+    public function testKeepsFilesystemRootFromPreflight(): void
+    {
+        $this->writeState([
+            'preflight' => [
+                'data' => [
+                    'wp_detect' => [
+                        'roots' => [
+                            ['path' => '/'],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+
+        $this->assertSame(['/'], $this->getExportDirectories($client));
+    }
+
+    public function testAddsExtraDirectoryBesideAConfiguredRoot(): void
+    {
+        $this->writeState([]);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->setPrivate($client, 'extra_directory', '/srv/htdocs-old');
+
+        $dirs = $this->getExportDirectories($client);
+
+        $this->assertContains('/srv/htdocs-old', $dirs);
     }
 
     public function testIgnoresEmptyAutoPrependFile(): void

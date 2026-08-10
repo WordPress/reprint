@@ -66,7 +66,7 @@ if ($reprint_push_test_managed_state !== '') {
 }
 
 function plugin_dir_path(string $file): string {
-    return $file === '' ? '' : dirname(__DIR__, 2) . '/reprint-exporter-wp/';
+    return $file === '' ? '' : dirname(__DIR__, 2) . '/reprint-server-wp/';
 }
 
 function plugin_basename(string $file): string {
@@ -130,4 +130,4 @@ function apply_filters(string $hook_name, $value) {
     return $value;
 }
 
-require_once dirname(__DIR__, 2) . '/reprint-exporter-wp/index.php';
+require_once dirname(__DIR__, 2) . '/reprint-server-wp/index.php';

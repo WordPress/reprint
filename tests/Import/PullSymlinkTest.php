@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Test pull symlink recreation
@@ -74,6 +74,32 @@ class PullSymlinkTest extends TestCase
         $symlinkPath = $this->tempDir . '/fs-root/test/link';
         $this->assertTrue(is_link($symlinkPath), 'Symlink should be created');
         $this->assertEquals('target', readlink($symlinkPath), 'Symlink target should match');
+    }
+
+    public function testSymlinkTargetBesideVisitedRootRemainsQueued()
+    {
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $indexPath = $this->tempDir . '/remote-index.jsonl';
+        file_put_contents($indexPath, implode("\n", [
+            json_encode([
+                'type' => 'link',
+                'target' => base64_encode('/srv/site/covered'),
+            ]),
+            json_encode([
+                'type' => 'link',
+                'target' => base64_encode('/srv/site-old/queued'),
+            ]),
+            '',
+        ]));
+
+        $reflection = new \ReflectionClass($client);
+        $reflection->getProperty('next_remote_index_file')->setValue($client, $indexPath);
+        $targets = $reflection->getMethod('extract_symlink_directories_from_next_remote_index')->invoke(
+            $client,
+            ['/srv/site' => true]
+        );
+
+        $this->assertSame(['/srv/site-old/queued'], $targets);
     }
 
     /**

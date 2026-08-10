@@ -4,16 +4,16 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * File-prefix resolution and enumeration (pure, preflight-injected):
  *   - resolve_remote_paths(): :token: templates / absolute paths → remote absolute
  *     prefixes (sharing --remap's WordPress path token table), with expansion for plugins, mu-plugins, and uploads
  *     directories outside WP_CONTENT_DIR and covered-prefix collapse.
- *   - is_selected_for_pulling(): per-path --only/--exclude membership.
- *   - get_export_directories(): with --only, a *replace* of the export roots.
- * Orthogonal to --remap (--only file prefixes decide what gets pulled, not where it lands).
+ *   - is_selected_for_pulling(): per-path --include/--exclude membership.
+ *   - get_export_directories(): with --include, a *replace* of the export roots.
+ * Orthogonal to --remap (--include file prefixes decide what gets pulled, not where it lands).
  */
 class OnlyFilesPathPrefixTest extends TestCase
 {
@@ -73,12 +73,12 @@ class OnlyFilesPathPrefixTest extends TestCase
     private function client(array $preflightData): \ImportClient
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
-        $c->get_state()->preflight = array('data' => $preflightData);
+        $c->get_state()->set_preflight_record(array('data' => $preflightData));
         $this->set($c, 'audit_log_file', $this->tempDir . '/audit.log');
         return $c;
     }
 
-    /** Preflight carrying only the wp paths_urls needed by the --only file-prefix helpers. */
+    /** Preflight carrying only the wp paths_urls needed by the --include file-prefix helpers. */
     private function withPaths(array $pathsUrls): \ImportClient
     {
         return $this->client(array('database' => array('wp' => array('paths_urls' => $pathsUrls))));
@@ -155,7 +155,7 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     public function testResolvePullOnlyFilesPrefixAddsDirectoriesOutsideWpContent(): void
     {
-        // Selecting :wp-content: with --only yields WP_CONTENT_DIR plus any plugins,
+        // Selecting :wp-content: with --include yields WP_CONTENT_DIR plus any plugins,
         // mu-plugins, or uploads directory outside it (uploads here); a nested
         // directory is already covered.
         $c = $this->withPaths(array(
@@ -163,7 +163,7 @@ class OnlyFilesPathPrefixTest extends TestCase
             'plugins_dir' => '/var/www/html/wp-content/plugins', // nested → not added
             'uploads' => array('basedir' => '/mnt/uploads'),     // outside WP_CONTENT_DIR → added
         ));
-        $pull_only_files_with_path_prefixes = $this->call($c, 'resolve_remote_paths', array(array(':wp-content:'), 'only'));
+        $pull_only_files_with_path_prefixes = $this->call($c, 'resolve_remote_paths', array(array(':wp-content:'), 'include'));
         sort($pull_only_files_with_path_prefixes);
         $this->assertSame(array('/mnt/uploads', '/var/www/html/wp-content'), $pull_only_files_with_path_prefixes);
     }
@@ -173,7 +173,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         // :wp-content:/plugins is nested under :wp-content: → dropped, so the
         // exporter never walks the subtree twice.
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
-        $pull_only_files_with_path_prefixes = $this->call($c, 'resolve_remote_paths', array(array(':wp-content:', ':wp-content:/plugins'), 'only'));
+        $pull_only_files_with_path_prefixes = $this->call($c, 'resolve_remote_paths', array(array(':wp-content:', ':wp-content:/plugins'), 'include'));
         $this->assertSame(array('/var/www/html/wp-content'), $pull_only_files_with_path_prefixes);
     }
 
@@ -193,7 +193,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         ))));
         $this->assertSame(
             array('/custom/plugins/woocommerce'),
-            $this->call($c, 'resolve_remote_paths', array(array(':wp-plugins:/woocommerce'), 'only'))
+            $this->call($c, 'resolve_remote_paths', array(array(':wp-plugins:/woocommerce'), 'include'))
         );
     }
 
@@ -203,17 +203,17 @@ class OnlyFilesPathPrefixTest extends TestCase
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
         $this->assertSame(
             array('/var/custom/data'),
-            $this->call($c, 'resolve_remote_paths', array(array('/var/custom/data'), 'only'))
+            $this->call($c, 'resolve_remote_paths', array(array('/var/custom/data'), 'include'))
         );
     }
 
     public function testResolvePullOnlyFilesPrefixRejectsBlankSource(): void
     {
-        // Strict input hygiene: a blank source (e.g. `--only ""`) is an error,
+        // Strict input hygiene: a blank source (e.g. `--include ""`) is an error,
         // not silently ignored.
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
         $this->expectException(\InvalidArgumentException::class);
-        $this->call($c, 'resolve_remote_paths', array(array(':wp-content:', ''), 'only'));
+        $this->call($c, 'resolve_remote_paths', array(array(':wp-content:', ''), 'include'));
     }
 
     public function testResolvePullOnlyFilesPrefixRejectsUnavailableToken(): void
@@ -223,13 +223,13 @@ class OnlyFilesPathPrefixTest extends TestCase
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('preflight');
-        $this->call($c, 'resolve_remote_paths', array(array(':abspath:/wp-admin'), 'only'));
+        $this->call($c, 'resolve_remote_paths', array(array(':abspath:/wp-admin'), 'include'));
     }
 
     public function testPullOnlyFilesPrefixSelectionDefaultsToTrueAndIsSlashAware(): void
     {
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
-        // No --only: every file path is selected (keeps the diff deleting orphans).
+        // No --include: every file path is selected (keeps the diff deleting orphans).
         $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/anything/at/all.php', false)));
 
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content'));
@@ -283,7 +283,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --only or --exclude while resuming files-pull');
+        $this->expectExceptionMessage('Cannot change --include or --exclude while resuming files-pull');
         $this->call($c, 'assert_files_pull_path_selection_unchanged_while_resuming', array(true));
     }
 
@@ -297,7 +297,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->set($c, 'pull_excluded_files_with_path_prefixes', array('/var/www/html/wp-content/plugins'));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --only or --exclude while resuming files-pull');
+        $this->expectExceptionMessage('Cannot change --include or --exclude while resuming files-pull');
         $this->call($c, 'assert_files_pull_path_selection_unchanged_while_resuming', array(true));
     }
 
@@ -320,8 +320,8 @@ class OnlyFilesPathPrefixTest extends TestCase
         ));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --only or --exclude while resuming files-pull');
-        $this->runFilesPull(array('only' => array(':wp-uploads:')));
+        $this->expectExceptionMessage('Cannot change --include or --exclude while resuming files-pull');
+        $this->runFilesPull(array('include' => array(':wp-uploads:')));
     }
 
     public function testRunAllowsSameOnlyPrefixesWhileFilesPullIsInProgress(): void
@@ -331,7 +331,7 @@ class OnlyFilesPathPrefixTest extends TestCase
             'files_pull_path_selection_fingerprint' => $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
 
-        $this->runFilesPull(array('only' => array(':wp-content:/plugins')));
+        $this->runFilesPull(array('include' => array(':wp-content:/plugins')));
 
         $state = $this->readState();
         $this->assertSame('complete', $state['active_resumable_command']['completion_state'] ?? null);
@@ -351,7 +351,7 @@ class OnlyFilesPathPrefixTest extends TestCase
             'files_pull_path_selection_fingerprint' => $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
 
-        $this->runFilesPull(array('only' => array(':wp-uploads:')));
+        $this->runFilesPull(array('include' => array(':wp-uploads:')));
 
         $state = $this->readState();
         $this->assertSame('complete', $state['active_resumable_command']['completion_state'] ?? null);
@@ -364,7 +364,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         ));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --only or --exclude while resuming files-pull');
+        $this->expectExceptionMessage('Cannot change --include or --exclude while resuming files-pull');
         $this->runFilesPull(array('exclude' => array(':wp-uploads:')));
     }
 
@@ -395,7 +395,7 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     public function testPullOnlyFilesPrefixesReplaceRootsAndIgnoreUnselectedRemap(): void
     {
-        // With --only, export roots ARE the selected file prefixes: core/abspath/document_root
+        // With --include, export roots ARE the selected file prefixes: core/abspath/document_root
         // are dropped, and an unselected --remap source stays inert.
         $c = $this->client(array(
             'wp_detect' => array('roots' => array(array('path' => '/var/www/html'))),

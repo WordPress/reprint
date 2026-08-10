@@ -3,8 +3,9 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use function WordPress\Reprint\Exporter\relative_path_under;
 
-require_once dirname(__DIR__) . '/packages/reprint-exporter/src/class-file-index-processor.php';
+require_once dirname(__DIR__) . '/packages/reprint-server/src/class-file-index-processor.php';
 
 final class FileIndexProcessorTest extends TestCase {
 
@@ -129,6 +130,67 @@ final class FileIndexProcessorTest extends TestCase {
         $processor->close();
     }
 
+    public function testFilesystemRootCanAuthorizeAnIndexedDirectory(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        file_put_contents($docroot . '/index.php', '<?php');
+
+        $processor = FileIndexProcessor::start(
+            ['/'],
+            $docroot,
+            false,
+            true,
+            ''
+        );
+
+        $this->assertTrue($processor->next_index_step());
+        $this->assertSame(FileIndexProcessor::STATUS_INDEXED, $processor->get_step_status());
+        $processor->close();
+    }
+
+    public function testFollowedRelativeSymlinkIndexesAnIntermediateLink(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        $real_target = $this->tempDir . '/real/target';
+        $alias = $this->tempDir . '/alias';
+        mkdir($docroot, 0755, true);
+        mkdir($real_target, 0755, true);
+        symlink($this->tempDir . '/real', $alias);
+        symlink('../alias/./target', $docroot . '/link');
+
+        $processor = FileIndexProcessor::start(
+            [ (string) realpath($docroot) ],
+            $docroot,
+            true,
+            true,
+            ''
+        );
+        $entries = [];
+        while ($processor->next_index_step()) {
+            foreach ($processor->get_index_entries() as $entry) {
+                $entries[] = $entry;
+            }
+        }
+        $processor->close();
+
+        $intermediate_entries = array_values(array_filter(
+            $entries,
+            static fn(array $entry): bool => ( $entry['intermediate'] ?? false ) === true
+        ));
+        $this->assertCount(1, $intermediate_entries);
+        $this->assertSame('link', $intermediate_entries[0]['type']);
+        $link_entries = array_values(array_filter(
+            $entries,
+            static fn(array $entry): bool => $entry['path'] === (string) realpath($docroot) . '/link'
+        ));
+        $this->assertCount(1, $link_entries);
+        $this->assertSame(
+            (string) realpath($real_target),
+            $link_entries[0]['target']
+        );
+    }
+
     public function testResumeWithACompletedCursorRemainsComplete(): void
     {
         $docroot = $this->tempDir . '/site';
@@ -242,11 +304,12 @@ final class FileIndexProcessorTest extends TestCase {
      */
     private function relativePaths(array $entries, string $docroot): array
     {
-        $prefix = rtrim( (string) realpath($docroot), '/') . '/';
+        $root = (string) realpath($docroot);
         $paths = [];
         foreach ($entries as $entry) {
-            if (strpos($entry['path'], $prefix) === 0) {
-                $paths[] = substr($entry['path'], strlen($prefix));
+            $relativePath = relative_path_under($entry['path'], $root);
+            if ($relativePath !== null && $relativePath !== '') {
+                $paths[] = $relativePath;
             }
         }
         return $paths;

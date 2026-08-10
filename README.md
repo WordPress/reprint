@@ -4,10 +4,10 @@ Clone any WordPress site over HTTP. One command pulls the files, database, and s
 
 ## Quick start
 
-### 1. Install the exporter plugin on the source site
+### 1. Install the Reprint Server plugin on the source site
 
 ```bash
-php reprint.phar install-exporter
+php reprint.phar install-server
 ```
 
 This prints the download URL and step-by-step instructions for installing the WordPress plugin on the site you want to clone. The plugin exposes the HTTP API that reprint connects to.
@@ -83,26 +83,34 @@ php reprint.phar pull https://example.com --secret=TOKEN \
 
 ## Composer packages
 
-The exporter and importer are published as separate Composer packages:
+The server and client are published as separate Composer packages:
 
-- [`wp-php-toolkit/reprint-exporter`](https://packagist.org/packages/wp-php-toolkit/reprint-exporter) — Streaming export engine (SQL dumps, file trees, cursor-based resumption).
-- [`wp-php-toolkit/reprint-importer`](https://packagist.org/packages/wp-php-toolkit/reprint-importer) — Streaming site importer with CLI and PHAR support.
+- [`wp-php-toolkit/reprint-server`](https://packagist.org/packages/wp-php-toolkit/reprint-server) — Streaming export engine (SQL dumps, file trees, cursor-based resumption) that backs the Reprint Server plugin.
+- [`wp-php-toolkit/reprint-client`](https://packagist.org/packages/wp-php-toolkit/reprint-client) — Streaming site importer with CLI and PHAR support.
 
 Install whichever you need:
 
 ```bash
-composer require wp-php-toolkit/reprint-exporter
-composer require wp-php-toolkit/reprint-importer
+composer require wp-php-toolkit/reprint-server
+composer require wp-php-toolkit/reprint-client
 ```
+
+These packages were previously published as `wp-php-toolkit/reprint-exporter`
+and `wp-php-toolkit/reprint-importer`. Each renamed package replaces its
+predecessor at `self.version`, so the old and new names cannot be installed
+side by side; consumers migrate by changing the requirement name.
 
 Both packages depend on [`wp-php-toolkit/data-liberation`](https://packagist.org/packages/wp-php-toolkit/data-liberation) and [`wp-php-toolkit/html`](https://packagist.org/packages/wp-php-toolkit/html), which Composer pulls in automatically.
 
 ## Repository layout
 
-- `packages/reprint-exporter` — Source for the `wp-php-toolkit/reprint-exporter` Composer package.
-- `packages/reprint-importer` — Source for the `wp-php-toolkit/reprint-importer` Composer package.
-- `reprint-exporter-wp` — WordPress plugin distribution that bundles `reprint-exporter`.
-- `importer/import.php` — thin compatibility wrapper for the importer package entrypoint.
+- `packages/reprint-server` — Source for the `wp-php-toolkit/reprint-server` Composer package (the HTTP endpoint on the WordPress host).
+- `packages/reprint-client` — Source for the `wp-php-toolkit/reprint-client` Composer package (the CLI). `packages/reprint-client/bin/reprint-client` is the entry point for repo checkouts; Composer installs it as `vendor/bin/reprint-client`.
+- `reprint-server-wp` — WordPress plugin distribution that bundles `reprint-server`. The release ZIP keeps the legacy `reprint-exporter-wp.zip` name so upgrades land in the existing installed plugin directory.
+- `tests` — PHPUnit suite (`tests/`), Docker-based e2e scenarios (`tests/e2e/`), and PHPStan support files (`tests/phpstan/`).
+- `docs` — architecture documentation and project logos.
+- `bin` — build tooling (PHAR build, plugin version stamping).
+- `lib` — the `sqlite-database-integration` git submodule used by the MySQL query parser.
 
 ### Technical requirements
 
@@ -278,10 +286,10 @@ The presets use the same repeatable path-prefix options available directly on
 
 ```bash
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
-    --only=:wp-content: --exclude=:wp-uploads:
+    --include=:wp-content: --exclude=:wp-uploads:
 ```
 
-`--only=SOURCE` supplies an included source prefix and `--exclude=SOURCE`
+`--include=SOURCE` supplies an included source prefix and `--exclude=SOURCE`
 supplies an excluded source prefix. Both accept WordPress path tokens or
 absolute source paths, and exclusions win when the prefixes overlap. Switching
 filters after a completed run starts a new filtered delta against the shared
@@ -303,11 +311,11 @@ php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 
 It accepts the `pull` file filters (`--filter=none` and
 `--filter=essential-files`) plus the same path selection options as
-`files-pull`, including repeated `--only` and `--exclude` values:
+`files-pull`, including repeated `--include` and `--exclude` values:
 
 ```bash
 php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
-    --only=:wp-content: --exclude=:wp-uploads:
+    --include=:wp-content: --exclude=:wp-uploads:
 ```
 
 #### Pull only the database.
@@ -620,6 +628,41 @@ Both fields are emitted together only when the fetch list exists — they
 are absent during the index and diff phases. `files_done` grows monotonically
 up to `files_total` and survives exit-code-2 restarts.
 
+Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl`. The
+default `auto` mode uses terminal progress when its output stream is a TTY and
+JSONL otherwise. Use `--progress=tty` to force the terminal presentation when
+output is captured, or `--progress=jsonl` to force structured progress in a
+terminal:
+
+```bash
+php reprint.phar files-push "$URL" --state-dir="$STATE_DIR" \
+    --fs-root="$FS_ROOT" --secret="$SECRET" --progress=jsonl
+```
+
+The selected mode applies only to that invocation and is not retained in
+command state. Explicit `tty` and `jsonl` modes cannot be combined with
+`--verbose`.
+
+The selector governs progress, lifecycle, and status output. It does not
+reformat a command's data result, such as preflight or pull-metadata JSON,
+files-stats JSON, db-domains lines, or SQL written with `--sql-output=stdout`.
+
+The files-push terminal presentation uses one stage-weighted progress bar. The
+percentage comes first, followed by a major stage such as `Indexing`, `Pushing`,
+or `Committing`. While pushing local paths, the line also shows target-confirmed
+file bytes against the file byte total collected by the plan. Durable index byte
+offsets, target-confirmed counts and byte offsets, and phase milestones advance
+the bar. The percentage describes lifecycle progress, not elapsed time or an
+estimated completion time.
+
+These terminal-only details do not change machine output. The JSONL
+presentation emits `push_progress` records. After planning completes, those
+records, the final result, and `progress.json` include `files_done` and
+`files_total` together. `files_total` is the number of local paths selected by
+the plan; `files_done` advances only after the target confirms the request
+containing each path, and both counts survive exit-code-2 restarts. The fields
+are absent while the plan is still being built.
+
 #### `<remote-state-directory>/pull/state.json` — the pull state store
 
 This is the pull state store. Pull commands read it on startup and write it
@@ -747,7 +790,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 ```
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
-* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
+* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary in terminal mode or one structured result in JSONL mode. Exits with code 0 if migration looks feasible, code 1 if not.
 * `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
 * `pull-db` — Runs `preflight`, `db-pull`, and `db-apply` as one resumable high-level command.
 * `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.

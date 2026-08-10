@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 class PullFilterFakeClient extends \ImportClient
 {
@@ -46,7 +46,7 @@ class PullFilterFakeClient extends \ImportClient
         $progress = $property->getValue($this);
 
         $this->terminal_progress_stream = fopen('php://temp', 'w+');
-        $progress->set_is_tty(true);
+        $progress->set_terminal_output_enabled(true);
         $progress->set_progress_fd($this->terminal_progress_stream);
     }
 
@@ -70,7 +70,7 @@ class PullFilterFakeClient extends \ImportClient
     {
         $this->preflight_runs++;
         $state = $this->get_state();
-        $state->preflight = [
+        $state->set_preflight_record([
             "http_code" => 200,
             "data" => [
                 "ok" => true,
@@ -89,7 +89,7 @@ class PullFilterFakeClient extends \ImportClient
                     "phpversion" => "8.2",
                 ],
             ],
-        ];
+        ]);
         $state->active_resumable_command->completion_state = "complete";
         $this->save_state();
     }
@@ -144,10 +144,10 @@ class PullFailingPreflightFakeClient extends PullFilterFakeClient
         $this->preflight_runs++;
         $this->last_error_code = 'HTTP_ERROR';
         $state = $this->get_state();
-        $state->preflight = [
+        $state->set_preflight_record([
             "http_code" => 500,
             "error" => "Exporter unavailable",
-        ];
+        ]);
         $state->active_resumable_command->completion_state = "complete";
         $this->save_state();
     }
@@ -432,6 +432,7 @@ class PullFilterOptionTest extends TestCase
 
         $client->run([
             "command" => "pull-files",
+            "progress" => "tty",
         ]);
 
         $output = $client->terminalProgressOutput();
@@ -447,6 +448,7 @@ class PullFilterOptionTest extends TestCase
 
         $client->run([
             "command" => "pull-files",
+            "progress" => "tty",
             "only" => ["/var/www/html/wp-content/uploads/reprint-demo"],
         ]);
 

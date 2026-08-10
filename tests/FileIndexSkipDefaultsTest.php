@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use function WordPress\Reprint\Exporter\relative_path_under;
 
 /**
  * Coverage for the default deny-list applied by endpoint_file_index().
@@ -54,7 +55,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
      */
     public function testPathIsDefaultSkippedClassifier(string $path, bool $expected): void
     {
-        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+        require_once __DIR__ . '/../packages/reprint-server/src/export.php';
         $this->assertSame($expected, path_is_default_skipped($path), "classifier for '$path'");
     }
 
@@ -460,12 +461,11 @@ final class FileIndexSkipDefaultsTest extends TestCase
         // endpoint_file_index() reports canonical paths. macOS exposes /tmp
         // and /var through /private symlinks, so compare against the same form.
         $siteRoot = realpath($siteDir) ?: $siteDir;
-        $prefix = rtrim($siteRoot, '/') . '/';
         $out = [];
         foreach ($entries as $e) {
-            $p = $e['path'];
-            if (strpos($p, $prefix) === 0) {
-                $out[substr($p, strlen($prefix))] = $e;
+            $relativePath = relative_path_under($e['path'], $siteRoot);
+            if ($relativePath !== null && $relativePath !== '') {
+                $out[$relativePath] = $e;
             }
         }
         ksort($out);
@@ -494,11 +494,13 @@ final class FileIndexSkipDefaultsTest extends TestCase
 <?php
 declare(strict_types=1);
 require_once %s;
+require_once %s;
 $config = json_decode(file_get_contents(%s), true, 512, JSON_THROW_ON_ERROR);
 $budget = new ResourceBudget(microtime(true), 10, 128 * 1024 * 1024, 0.9);
 endpoint_file_index($config, $budget);
 PHP,
-                var_export(dirname(__DIR__) . '/packages/reprint-exporter/src/export.php', true),
+                var_export(dirname(__DIR__) . '/vendor/autoload.php', true),
+                var_export(dirname(__DIR__) . '/packages/reprint-server/src/export.php', true),
                 var_export($configPath, true),
             ),
         );

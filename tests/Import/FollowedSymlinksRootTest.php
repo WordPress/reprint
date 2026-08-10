@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * --follow-symlinks=<directory> local followed symlinks root: resolving the
@@ -52,6 +52,11 @@ class FollowedSymlinksRootTest extends TestCase
     private function newClient(): \ImportClient
     {
         return new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
+    }
+
+    private function newRootClient(): \ImportClient
+    {
+        return new \ImportClient('https://src.example/export.php', $this->stateDir, '/');
     }
 
     // ── Resolving the local followed symlinks root (:fs-root: grammar, within-root) ──
@@ -114,7 +119,7 @@ class FollowedSymlinksRootTest extends TestCase
 
     /**
      * @param string|null $followedSymlinksRootSub Root suffix under fs-root (null = filesystem root).
-     * @param array<int,string> $scopePrefixes Original export scope (--only prefixes).
+     * @param array<int,string> $scopePrefixes Original export scope (--include prefixes).
      * @param array<string,string> $remapRules source => absolute target.
      */
     private function placeClient(?string $followedSymlinksRootSub, array $scopePrefixes, array $remapRules = []): \ImportClient
@@ -156,6 +161,28 @@ class FollowedSymlinksRootTest extends TestCase
         $this->assertSame(
             $this->root . '/tmp/shared/foo/style.css',
             $this->place($c, '/tmp/shared/foo/style.css')
+        );
+    }
+
+    public function testFilesystemRootPlacementKeepsOneLeadingSlash(): void
+    {
+        $client = $this->newRootClient();
+        $reflection = new \ReflectionClass($client);
+        $reflection->getProperty('pull_only_files_with_path_prefixes')->setValue($client, []);
+
+        $this->assertSame(
+            '/tmp/shared/foo/style.css',
+            $this->place($client, '/tmp/shared/foo/style.css')
+        );
+
+        $reflection->getProperty('local_followed_symlinks_root')->setValue($client, '/');
+        $reflection->getProperty('pull_only_files_with_path_prefixes')->setValue(
+            $client,
+            ['/var/www/html']
+        );
+        $this->assertSame(
+            '/tmp/shared/foo/style.css',
+            $this->place($client, '/tmp/shared/foo/style.css')
         );
     }
 
@@ -229,6 +256,16 @@ class FollowedSymlinksRootTest extends TestCase
         $this->assertGuard($c, null, hash('sha256', $this->root));
         $this->assertGuard($c, $this->root, hash('sha256', $this->root));
         $this->addToAssertionCount(1); // no exception == pass
+    }
+
+    public function testDefaultFollowedSymlinksRootFingerprintKeepsFilesystemRoot(): void
+    {
+        $client = $this->newRootClient();
+        $fingerprint = (new \ReflectionClass($client))
+            ->getMethod('local_followed_symlinks_root_fingerprint')
+            ->invoke($client);
+
+        $this->assertSame(hash('sha256', '/'), $fingerprint);
     }
 
     // ── Repoint routes via remap even when the target is spelled within fs-root ──

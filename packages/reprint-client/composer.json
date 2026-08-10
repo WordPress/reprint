@@ -1,0 +1,21 @@
+{
+    "name": "wp-php-toolkit/reprint-client",
+    "description": "Streaming site importer with CLI and PHAR distribution support",
+    "type": "library",
+    "license": "GPL-2.0-or-later",
+    "replace": {
+        "wp-php-toolkit/reprint-importer": "self.version"
+    },
+    "require": {
+        "php": ">=7.4",
+        "ext-pdo": "*",
+        "ext-pdo_mysql": "*",
+        "wp-php-toolkit/data-liberation": "^0.8.0",
+        "wp-php-toolkit/html": "^0.8.0",
+        "wp-php-toolkit/reprint-server": "*@dev"
+    },
+    "bin": [
+        "bin/reprint-client",
+        "bin/reprint-importer"
+    ]
+}

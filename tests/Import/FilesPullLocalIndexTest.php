@@ -7,7 +7,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * The local index used by files-pull, files-push, and files-diff.
@@ -187,6 +187,7 @@ final class FilesPullLocalIndexTest extends TestCase
         try {
             $sender = \PushFilesSender::start([
                 'filesystem_root' => $this->rawFileRoot,
+                'document_root' => '/',
                 'push_state_directory' => $pushStateDirectory,
                 'remote_reprint_api_url' =>
                     $remoteReprintApiUrl,
@@ -346,7 +347,7 @@ final class FilesPullLocalIndexTest extends TestCase
     public static function partialPullProvider(): iterable
     {
         yield 'selected directory' => [[
-            '--only=/var/www/html/selected',
+            '--include=/var/www/html/selected',
         ]];
         yield 'filtered files' => [[
             '--filter=essential-files',
@@ -403,7 +404,7 @@ final class FilesPullLocalIndexTest extends TestCase
 
         $this->abortFilesPull();
         $pull = $this->runFilesPull([
-            '--only=/var/www/html/folder',
+            '--include=/var/www/html/folder',
         ]);
 
         $this->assertSame(0, $pull['exit'], $pull['output']);
@@ -564,7 +565,11 @@ final class FilesPullLocalIndexTest extends TestCase
         ], $extraArguments));
     }
 
-    /** @return array{exit:int,stdout:string,stderr:string,output:string} */
+    /**
+     * Runs files-diff with explicit JSONL output for record-level assertions.
+     *
+     * @return array{exit:int,stdout:string,stderr:string,output:string}
+     */
     private function runFilesDiff(): array
     {
         return $this->runCli([
@@ -572,6 +577,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->targetUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->rawFileRoot,
+            '--progress=jsonl',
         ]);
     }
 
@@ -602,7 +608,7 @@ final class FilesPullLocalIndexTest extends TestCase
     private function startCliProcess(array $arguments): array
     {
         $process = proc_open(
-            array_merge([PHP_BINARY, __DIR__ . '/../../importer/import.php'], $arguments),
+            array_merge([PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client'], $arguments),
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
             $pipes,
             $this->root
@@ -667,7 +673,7 @@ final class FilesPullLocalIndexTest extends TestCase
     {
         mkdir($this->pullStateDirectory, 0700, true);
         $state = new \PullState();
-        $state->preflight = [
+        $state->set_preflight_record([
             'http_code' => 200,
             'data' => [
                 'ok' => true,
@@ -694,7 +700,7 @@ final class FilesPullLocalIndexTest extends TestCase
                     ],
                 ],
             ],
-        ];
+        ]);
         file_put_contents(
             $this->pullStateDirectory . '/state.json',
             json_encode(
