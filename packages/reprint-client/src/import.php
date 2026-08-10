@@ -5091,7 +5091,8 @@ class ImportClient
     /**
      * If --new-site-url is set, derive the source origin from the export URL
      * and append implicit --rewrite-url mappings for both HTTP and HTTPS
-     * variants of the old URL to $options. The new URL is used verbatim.
+     * variants of the old URL to $options. The new URL must be a pathless
+     * target origin supported by the literal URL writer.
      */
     private function resolve_new_site_url_option(array &$options): void
     {
@@ -5115,10 +5116,12 @@ class ImportClient
             $options["rewrite_url"] = [];
         }
 
-        // Rewrite both http:// and https:// variants of the old origin
-        // to the new URL verbatim, so we catch references stored with
-        // either scheme in the database.
-        $new_url = $options["new_site_url"];
+        // Rewrite both http:// and https:// variants of the old origin so we
+        // catch references stored with either scheme in the database.
+        $new_url = StructuredDataUrlRewriter::normalize_target_origin(
+            (string) $options["new_site_url"]
+        );
+        $options["new_site_url"] = $new_url;
         $options["rewrite_url"][] = ['https://' . $host_with_port, $new_url];
         $options["rewrite_url"][] = ['http://' . $host_with_port, $new_url];
     }
@@ -5314,6 +5317,16 @@ class ImportClient
             }
         }
 
+        // Validate a persisted mapping before changing db-apply state. A run
+        // created by an older version may contain a now-unsupported mapping.
+        $apply_state = $this->get_state()->apply;
+        if (empty($url_mapping) && !empty($apply_state->rewrite_url)) {
+            $url_mapping = $apply_state->rewrite_url;
+        }
+        $url_rewriter = empty($url_mapping)
+            ? null
+            : new StructuredDataUrlRewriter($url_mapping);
+
         // Show discovered domains if available
         $domains_file = $this->pull_state_directory . "/domains.json";
         if (file_exists($domains_file)) {
@@ -5351,7 +5364,6 @@ class ImportClient
             );
         }
 
-        $apply_state = $this->get_state()->apply;
         $statements_executed = $apply_state->statements_executed;
         $bytes_read = $apply_state->bytes_read;
         $is_resume = $current_status === "in_progress" && $statements_executed > 0;
@@ -5395,19 +5407,10 @@ class ImportClient
             ], true);
         }
 
-        // On resume, use the persisted URL mapping if none provided on CLI
-        if (empty($url_mapping) && !empty($apply_state->rewrite_url)) {
-            $url_mapping = $apply_state->rewrite_url;
-        }
-
         // Set up SQL statement rewriter if we have URL mappings
         $stmt_rewriter = null;
-        if (!empty($url_mapping)) {
-            $table_prefix = $this->get_state()->get('preflight.database.wp.table_prefix');
-            $stmt_rewriter = new SqlStatementRewriter(
-                new StructuredDataUrlRewriter($url_mapping),
-                $table_prefix,
-            );
+        if ($url_rewriter !== null) {
+            $stmt_rewriter = new SqlStatementRewriter($url_rewriter);
             $this->audit_log(
                 sprintf(
                     "URL MAPPING | %d mapping(s): %s",
@@ -5689,17 +5692,6 @@ class ImportClient
                     $this->audit_log("DB-APPLY | deactivated plugin {$basename} (host-specific)");
                 }
 
-                // Drop plugins whose URL builders break when the site
-                // URL has a non-/ path segment (e.g. WordPress Playground's
-                // /scope:<slug>/ iframe scope).
-                $deactivated = $this->deactivate_path_incompatible_plugins(
-                    $pdo,
-                    (string) ($options["new_site_url"] ?? ""),
-                );
-                foreach ($deactivated as $basename) {
-                    $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
-                }
-
                 // Mark complete
                 $this->get_state()->apply->statements_executed = $statements_executed;
                 $this->get_state()->apply->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
@@ -5817,41 +5809,6 @@ class ImportClient
         }
 
         return $this->deactivate_plugins_by_dir($pdo, $plugin_dirs, "host-specific");
-    }
-
-    /**
-     * Deactivate plugins whose URL builders break when the new site URL
-     * has a non-/ path segment.
-     *
-     * page-optimize's concat-css/js builds asset URLs by concatenating
-     * `$siteurl . $path`, which produces doubled prefixes (e.g.
-     * `/scope:abc/scope:abc/wp-content/...`) when `$siteurl` already
-     * carries a path component like WordPress Playground's
-     * `/scope:<slug>/` iframe scope.
-     *
-     * wpcomsh has the same shape but lives on WP Cloud, where
-     * WpcloudHostAnalyzer's paths_to_remove already feeds it through
-     * deactivate_host_plugins().
-     *
-     * Skipped when the new site URL is empty or has no path beyond `/`.
-     *
-     * @return string[]  Plugin basenames actually removed.
-     */
-    private function deactivate_path_incompatible_plugins(PDO $pdo, string $new_site_url): array
-    {
-        if ($new_site_url === "") {
-            return [];
-        }
-        $path = parse_url($new_site_url, PHP_URL_PATH);
-        if ($path === null || $path === "" || $path === "/") {
-            return [];
-        }
-
-        return $this->deactivate_plugins_by_dir(
-            $pdo,
-            ['page-optimize'],
-            "path-incompatible siteurl",
-        );
     }
 
     /**
@@ -11807,7 +11764,7 @@ if (
             'type' => 'two-arguments',
             'target' => 'rewrite_url',
             'argument_labels' => 'FROM TO',
-            'help' => 'Rewrite FROM to TO (repeatable)',
+            'help' => 'Splice ASCII FROM base to pathless ASCII TO origin (repeatable)',
             'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
@@ -11815,7 +11772,7 @@ if (
             'type' => 'value-or-next',
             'target' => 'new_site_url',
             'placeholder' => 'URL',
-            'help' => 'New site URL (auto-creates --rewrite-url from export URL origin)',
+            'help' => 'New pathless site origin (auto-creates --rewrite-url from export URL origin)',
             'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [

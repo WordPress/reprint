@@ -24,8 +24,8 @@ parameters:
             - reprint-server-wp/vendor/
     ignoreErrors:
         -
-            message: '#^Class BlockMarkupSpanProcessor does not have a constructor and must be instantiated without any parameters\.$#'
-            path: packages/reprint-client/src/lib/url-rewrite/class-structured-data-url-rewriter.php
+            message: '#^Call to an undefined method WordPress\\DataLiberation\\BlockMarkup\\BlockMarkupUrlProcessor::get_tag\(\)\.$#'
+            path: packages/reprint-client/src/lib/url-rewrite/class-domain-collector.php
     treatPhpDocTypesAsCertain: false
     scanDirectories:
         - packages/reprint-server/src

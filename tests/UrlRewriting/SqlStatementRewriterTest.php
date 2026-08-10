@@ -7,14 +7,12 @@ require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.
 
 class SqlStatementRewriterTest extends TestCase
 {
-    private function createRewriter(?array $mapping = null, string $table_prefix = 'wp_', array $column_hints = []): SqlStatementRewriter
+    private function createRewriter(?array $mapping = null): SqlStatementRewriter
     {
         return new SqlStatementRewriter(
             new StructuredDataUrlRewriter($mapping ?? [
                 'https://old-site.com' => 'https://new-site.com',
-            ]),
-            $table_prefix,
-            $column_hints
+            ])
         );
     }
 
@@ -63,7 +61,7 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertEquals($sql, $rewriter->rewrite($sql));
     }
 
-    public function testRewritesSerializedPhpValues(): void
+    public function testLeavesSerializedPhpValuesUnchanged(): void
     {
         $rewriter = $this->createRewriter();
         $serialized = serialize(['siteurl' => 'https://old-site.com/site']);
@@ -72,11 +70,9 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        // Serialized PHP should now be rewritten with updated s:N: prefixes
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
-        $unserialized = unserialize($values[0]);
-        $this->assertSame('https://new-site.com/site', $unserialized['siteurl']);
+        $this->assertSame($serialized, $values[0]);
     }
 
     public function testRewritesJsonValues(): void
@@ -117,9 +113,8 @@ class SqlStatementRewriterTest extends TestCase
         // HTML should be rewritten
         $this->assertStringContainsString('new-site.com', $values[0]);
 
-        // Serialized PHP should be rewritten with URLs updated
-        $unserialized = unserialize($values[1]);
-        $this->assertSame('https://new-site.com/home', $unserialized['url']);
+        // Serialized PHP remains opaque so its byte-length prefixes stay valid.
+        $this->assertSame($serialized, $values[1]);
 
         // Plain text should be rewritten
         $this->assertStringContainsString('new-site.com', $values[2]);
@@ -175,44 +170,30 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringContainsString("')", $result);
     }
 
-    // --- Column awareness: WordPress defaults ---
+    // --- Literal behavior across SQL columns ---
 
-    public function testPostContentColumnUsesBlockMarkupRewriting(): void
-    {
-        $rewriter = $this->createRewriter();
-        // Block markup in post_content — the WP default should trigger block_markup processing
-        $markup = '<!-- wp:paragraph --><p>Visit <a href="https://old-site.com/page">us</a></p><!-- /wp:paragraph -->';
-        $encoded = base64_encode($markup);
-        $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-
-        $result = $rewriter->rewrite($sql);
-
-        $values = $this->collectValues($result);
-        $this->assertCount(1, $values);
-        $this->assertStringContainsString('new-site.com/page', $values[0]);
-        $this->assertStringNotContainsString('old-site.com', $values[0]);
-    }
-
-    public function testPostContentRootRelativeUrlUsesTargetSubpath(): void
+    public function testPostContentUsesLiteralBaseSpliceWithoutNormalizingSuffix(): void
     {
         $rewriter = $this->createRewriter([
-            'https://old-site.com' => 'https://new-site.com/subsite',
+            'https://old-site.com/shop' => 'https://new-site.com',
         ]);
-        $markup = '<a href="/page">Page</a>';
+        $markup = '<img src="https://old-site.com/shop/a/%2F/../b?next=%2f#part=%2E">';
         $encoded = base64_encode($markup);
         $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
 
         $result = $rewriter->rewrite($sql);
-        $values = $this->collectValues($result);
 
-        $this->assertSame(['<a href="/subsite/page">Page</a>'], $values);
+        $values = $this->collectValues($result);
+        $this->assertSame(
+            '<img src="https://new-site.com/a/%2F/../b?next=%2f#part=%2E">',
+            $values[0]
+        );
     }
 
     public function testUnknownColumnUsesPlainTextUrlScanning(): void
     {
         $rewriter = $this->createRewriter();
-        // A plain URL in a non-block-markup column should use the plain-text
-        // URL scanner.
+        // A plain URL in an arbitrary column uses the literal writer.
         $value = 'https://old-site.com/api/endpoint';
         $encoded = base64_encode($value);
         $sql = "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('" . base64_encode('siteurl') . "'), FROM_BASE64('{$encoded}'));";
@@ -223,22 +204,7 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringContainsString('new-site.com/api/endpoint', $values[1]);
     }
 
-    public function testWpDefaultsWorkWithCustomTablePrefix(): void
-    {
-        $rewriter = $this->createRewriter(null, 'mysite_');
-        // Custom prefix — "mysite_posts" is matched exactly via the prefix
-        $markup = '<a href="https://old-site.com/page">Link</a>';
-        $encoded = base64_encode($markup);
-        $sql = "INSERT INTO `mysite_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-
-        $result = $rewriter->rewrite($sql);
-
-        $values = $this->collectValues($result);
-        $this->assertCount(1, $values);
-        $this->assertStringContainsString('new-site.com/page', $values[0]);
-    }
-
-    public function testPostContentUsesStructuredParserForMixedUrlSpellings(): void
+    public function testPostContentOnlyRewritesTheExactSourceSpelling(): void
     {
         $rewriter = $this->createRewriter();
         $markup = '<a href="https://old-site.com/literal">Literal</a>'
@@ -250,12 +216,14 @@ class SqlStatementRewriterTest extends TestCase
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
-        $this->assertStringContainsString('https://new-site.com/literal', $values[0]);
-        $this->assertStringContainsString('HTTPS://new-site.com/case-variant', $values[0]);
-        $this->assertStringNotContainsString('old-site.com', strtolower($values[0]));
+        $this->assertSame(
+            '<a href="https://new-site.com/literal">Literal</a>'
+                . '<a href="HTTPS://OLD-SITE.COM/case-variant">Case variant</a>',
+            $values[0]
+        );
     }
 
-    public function testPostContentUsesStructuredParserForCaseVariantHostWithoutLiteralSourceDomain(): void
+    public function testPostContentLeavesCaseVariantSourceUnchanged(): void
     {
         $rewriter = $this->createRewriter();
         $markup = '<a href=\'https://OLD-SITE.COM/case-variant\'>Case variant</a>';
@@ -266,11 +234,10 @@ class SqlStatementRewriterTest extends TestCase
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
-        $this->assertStringContainsString('https://new-site.com/case-variant', $values[0]);
-        $this->assertStringNotContainsString('old-site.com', strtolower($values[0]));
+        $this->assertSame($markup, $values[0]);
     }
 
-    public function testPostContentUsesStructuredParserForPunycodeAndUnicodeHostSpellings(): void
+    public function testPostContentDoesNotConvertUnicodeHostSpellings(): void
     {
         $rewriter = $this->createRewriter([
             'https://xn--bcher-kva.example' => 'https://new.example',
@@ -284,13 +251,14 @@ class SqlStatementRewriterTest extends TestCase
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
-        $this->assertStringContainsString('https://new.example/punycode', $values[0]);
-        $this->assertStringContainsString('https://new.example/unicode', $values[0]);
-        $this->assertStringNotContainsString('xn--bcher-kva.example', $values[0]);
-        $this->assertStringNotContainsString('bücher.example', $values[0]);
+        $this->assertSame(
+            '<a href="https://new.example/punycode">Punycode</a>'
+                . '<a href="https://bücher.example/unicode">Unicode</a>',
+            $values[0]
+        );
     }
 
-    public function testPostContentUsesStructuredParserForUnicodeHostInBlockCommentJson(): void
+    public function testPostContentLeavesUnicodeHostInBlockCommentUnchanged(): void
     {
         $rewriter = $this->createRewriter([
             'https://xn--bcher-kva.example' => 'https://new.example',
@@ -303,14 +271,10 @@ class SqlStatementRewriterTest extends TestCase
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
-        $this->assertSame(
-            '<!-- wp:image {"src":"https://new.example/unicode"} -->',
-            $values[0]
-        );
-        $this->assertStringNotContainsString('bücher.example', $values[0]);
+        $this->assertSame($markup, $values[0]);
     }
 
-    public function testCommentContentUsesBlockMarkup(): void
+    public function testCommentContentUsesLiteralWriter(): void
     {
         $rewriter = $this->createRewriter();
         $markup = '<p>Check <a href="https://old-site.com/post">this post</a></p>';
@@ -324,49 +288,11 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringContainsString('new-site.com/post', $values[0]);
     }
 
-    // --- Column awareness: consumer-provided hints ---
+    // --- INSERT without a column list ---
 
-    public function testConsumerHintOverridesDefault(): void
-    {
-        // Consumer says to skip post_content
-        $rewriter = $this->createRewriter(null, 'wp_', [
-            'posts' => ['post_content' => 'skip'],
-        ]);
-        $markup = '<a href="https://old-site.com/page">Link</a>';
-        $encoded = base64_encode($markup);
-        $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-
-        $result = $rewriter->rewrite($sql);
-
-        // Value should be unchanged because consumer said 'skip'
-        $values = $this->collectValues($result);
-        $this->assertCount(1, $values);
-        $this->assertSame($markup, $values[0]);
-    }
-
-    public function testConsumerHintForCustomTable(): void
-    {
-        // Consumer declares a custom plugin table column as block_markup
-        $rewriter = $this->createRewriter(null, 'wp_', [
-            'my_plugin_data' => ['html_content' => 'block_markup'],
-        ]);
-        $markup = '<a href="https://old-site.com/page">Link</a>';
-        $encoded = base64_encode($markup);
-        $sql = "INSERT INTO `wp_my_plugin_data` (`id`, `html_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-
-        $result = $rewriter->rewrite($sql);
-
-        $values = $this->collectValues($result);
-        $this->assertCount(1, $values);
-        $this->assertStringContainsString('new-site.com/page', $values[0]);
-    }
-
-    // --- Column awareness: INSERT without column list ---
-
-    public function testInsertWithoutColumnListFallsBackToAutoDetect(): void
+    public function testInsertWithoutColumnListUsesLiteralWriter(): void
     {
         $rewriter = $this->createRewriter();
-        // No column list — can't determine column position, falls back to null (auto-detect)
         $value = 'https://old-site.com/page';
         $encoded = base64_encode($value);
         $sql = "INSERT INTO `wp_posts` VALUES(1, FROM_BASE64('{$encoded}'));";
@@ -378,9 +304,9 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringContainsString('new-site.com/page', $values[0]);
     }
 
-    // --- Column awareness: UPDATE statements ---
+    // --- UPDATE statements ---
 
-    public function testUpdateStatementWithColumnAwareness(): void
+    public function testUpdateStatementUsesLiteralWriter(): void
     {
         $rewriter = $this->createRewriter();
         $markup = '<a href="https://old-site.com/page">Link</a>';
@@ -394,7 +320,7 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringContainsString('new-site.com/page', $values[0]);
     }
 
-    public function testUpdateConcatWithColumnAwareness(): void
+    public function testUpdateConcatUsesLiteralWriter(): void
     {
         $rewriter = $this->createRewriter();
         $markup = '<a href="https://old-site.com/page">Link</a>';
@@ -408,12 +334,12 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringContainsString('new-site.com/page', $values[0]);
     }
 
-    // --- Column awareness: multi-row INSERT with mixed columns ---
+    // --- Multi-row INSERT with mixed columns ---
 
-    public function testMultiRowInsertAppliesCorrectHintPerColumn(): void
+    public function testMultiRowInsertRewritesEveryLiteralUrl(): void
     {
         $rewriter = $this->createRewriter();
-        // post_content gets block_markup, post_title gets auto-detect (plain text)
+        // Every decoded value uses the same literal writer.
         $title = 'Visit https://old-site.com/about';
         $content = '<a href="https://old-site.com/page">Link</a>';
 
@@ -437,9 +363,9 @@ class SqlStatementRewriterTest extends TestCase
         }
     }
 
-    // --- Column awareness: CONVERT wrapper ---
+    // --- CONVERT wrapper ---
 
-    public function testColumnAwarenessWorksWithConvertWrapper(): void
+    public function testConvertWrapperUsesLiteralWriter(): void
     {
         $rewriter = $this->createRewriter();
         $json = json_encode(['url' => 'https://old-site.com/api'], JSON_UNESCAPED_SLASHES);
@@ -454,158 +380,28 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringContainsString('new-site.com', $decoded['url']);
     }
 
-    // --- Unprefixed tables (plugin tables without the WP prefix) ---
-
-    public function testUnprefixedTableMatchesSuffixDirectly(): void
-    {
-        // A plugin that creates a bare "posts" table (no prefix). The suffix
-        // entry added at construction time should match it.
-        $rewriter = $this->createRewriter(null, 'wp_');
-        $markup = '<a href="https://old-site.com/page">Link</a>';
-        $encoded = base64_encode($markup);
-        $sql = "INSERT INTO `posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-
-        $result = $rewriter->rewrite($sql);
-
-        $values = $this->collectValues($result);
-        $this->assertCount(1, $values);
-        $this->assertStringContainsString('new-site.com/page', $values[0]);
-    }
-
-    // --- Adversarial table names ---
-    //
-    // A malicious exporter could craft table names designed to trick the
-    // suffix-matching heuristic that this code replaced. These tests confirm
-    // that exact prefix+suffix matching is not fooled.
-
-    public function testTableNameThatEndsWithPostsButIsNotWpPosts(): void
-    {
-        // "evil_fakeposts" ends with "posts" but is NOT prefix+"posts".
-        // The old suffix heuristic would have matched it; exact matching must not.
-        $rewriter = $this->createRewriter(null, 'wp_');
-        $value = 'https://old-site.com/page';
-        $encoded = base64_encode($value);
-        $sql = "INSERT INTO `evil_fakeposts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-
-        $result = $rewriter->rewrite($sql);
-
-        // post_content in this unknown table should NOT get the block_markup
-        // hint — it falls back to auto-detect and uses the plain-text URL
-        // scanner for leaf text. This confirms the URL is still rewritten
-        // without matching the table as "posts".
-        $values = $this->collectValues($result);
-        $this->assertCount(1, $values);
-        $this->assertStringContainsString('new-site.com/page', $values[0]);
-    }
-
-    public function testTableNameWithExtraUnderscoreSegmentIsNotMatched(): void
-    {
-        // "wp_not_posts" has the right prefix and ends with _posts, but the
-        // suffix is "not_posts", not "posts". Must not match.
-        $rewriter = $this->createRewriter(null, 'wp_');
-        $markup = '<!-- wp:paragraph --><p><a href="https://old-site.com/page">x</a></p><!-- /wp:paragraph -->';
-        $encoded = base64_encode($markup);
-        $sql = "INSERT INTO `wp_not_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-
-        $result = $rewriter->rewrite($sql);
-
-        // The value still gets rewritten through the auto-detect path, but it
-        // must NOT have been treated as block_markup. With a simple URL both
-        // paths produce the same output, so this primarily guards table-name
-        // matching rather than parser behavior.
-        $values = $this->collectValues($result);
-        $this->assertCount(1, $values);
-        $this->assertStringContainsString('new-site.com', $values[0]);
-    }
-
-    public function testTableNameMimickingPrefixInsideName(): void
-    {
-        // "malicious_wp_posts" — contains "wp_posts" but the configured
-        // prefix is "wp_", so the full name "wp_posts" is expected. This table
-        // has a different prefix ("malicious_") so it must not match.
-        $rewriter = $this->createRewriter(null, 'wp_');
-        $value = 'https://old-site.com/page';
-        $encoded = base64_encode($value);
-        $sql = "INSERT INTO `malicious_wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-
-        $result = $rewriter->rewrite($sql);
-
-        $values = $this->collectValues($result);
-        $this->assertCount(1, $values);
-        // Still rewritten via auto-detect, but not via block_markup
-        $this->assertStringContainsString('new-site.com/page', $values[0]);
-    }
-
-    public function testEmptyPrefixOnlyMatchesBareTableNames(): void
-    {
-        // Some setups use an empty table prefix. Only the bare suffix should
-        // match — "wp_posts" must NOT match when the prefix is "".
-        $rewriter = $this->createRewriter(null, '');
-        $markup = '<a href="https://old-site.com/page">Link</a>';
-        $encoded = base64_encode($markup);
-
-        // Bare "posts" — should match
-        $sql_bare = "INSERT INTO `posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-        $result_bare = $rewriter->rewrite($sql_bare);
-        $values_bare = $this->collectValues($result_bare);
-        $this->assertStringContainsString('new-site.com/page', $values_bare[0]);
-
-        // "wp_posts" with empty prefix — should NOT be recognised as the posts
-        // table; it's an unknown table, falls back to auto-detect.
-        $sql_prefixed = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-        $result_prefixed = $rewriter->rewrite($sql_prefixed);
-        $values_prefixed = $this->collectValues($result_prefixed);
-        $this->assertStringContainsString('new-site.com/page', $values_prefixed[0]);
-    }
-
-    /**
-     * A root-relative block attribute distinguishes block markup from plain
-     * text because only the known block attribute supplies URL context.
-     *
-     * We use this to prove that "wp_posts".post_content gets block_markup
-     * while a spoofed table does NOT.
-     */
-    public function testBlockMarkupVsPlainTextDistinction(): void
+    public function testTableNameDoesNotChangeLiteralWriter(): void
     {
         $rewriter = $this->createRewriter([
-            'https://old-site.com/old' => 'https://new-site.com/new',
+            'https://old-site.com' => 'https://new-longer-domain-site.com',
         ]);
 
-        $block = '<!-- wp:image {"url":"/old/img.jpg"} /-->';
+        $block = '<!-- wp:image {"url":"https://old-site.com/img.jpg"} -->'
+               . '<img src="https://old-site.com/img.jpg"/>'
+               . '<!-- /wp:image -->';
         $encoded = base64_encode($block);
 
-        // wp_posts.post_content receives block URL context.
         $sql_real = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
         $result_real = $rewriter->rewrite($sql_real);
         $values_real = $this->collectValues($result_real);
-        $this->assertSame(
-            '<!-- wp:image {"url":"/new/img.jpg"} /-->',
-            $values_real[0]
-        );
+        $expected = '<!-- wp:image {"url":"https://new-longer-domain-site.com/img.jpg"} -->'
+            . '<img src="https://new-longer-domain-site.com/img.jpg"/>'
+            . '<!-- /wp:image -->';
+        $this->assertSame($expected, $values_real[0]);
 
-        // The spoofed table receives no block URL context.
         $sql_spoof = "INSERT INTO `spoofed_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
         $result_spoof = $rewriter->rewrite($sql_spoof);
         $values_spoof = $this->collectValues($result_spoof);
-        $this->assertSame($block, $values_spoof[0]);
-    }
-
-    public function testConsumerHintForUnprefixedPluginTable(): void
-    {
-        // A plugin creates an unprefixed table "analytics_events". The
-        // consumer hint uses the suffix "analytics_events" and the prefix is
-        // "wp_". The unprefixed entry should match the bare table name.
-        $rewriter = $this->createRewriter(null, 'wp_', [
-            'analytics_events' => ['event_data' => 'block_markup'],
-        ]);
-        $markup = '<a href="https://old-site.com/page">Link</a>';
-        $encoded = base64_encode($markup);
-        $sql = "INSERT INTO `analytics_events` (`id`, `event_data`) VALUES(1, FROM_BASE64('{$encoded}'));";
-
-        $result = $rewriter->rewrite($sql);
-
-        $values = $this->collectValues($result);
-        $this->assertCount(1, $values);
-        $this->assertStringContainsString('new-site.com/page', $values[0]);
+        $this->assertSame($expected, $values_spoof[0]);
     }
 }

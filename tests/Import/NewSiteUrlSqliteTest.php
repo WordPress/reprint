@@ -375,6 +375,54 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertSame(strtoupper(bin2hex($bytes)), $rows[0]['hex_value']);
     }
 
+    public function testPersistedInvalidRewriteMappingDoesNotChangeState(): void
+    {
+        $remoteReprintApiUrl = 'https://old-site.example.com/?reprint-api';
+        file_put_contents($this->tempDir . '/db.sql', "SELECT 1;\n");
+        $this->writeState($remoteReprintApiUrl, [
+            'active_resumable_command' => [
+                'command_name' => 'db-apply',
+                'completion_state' => 'in_progress',
+            ],
+            'apply' => [
+                'statements_executed' => 0,
+                'bytes_read' => 0,
+                'rewrite_url' => [
+                    'https://old-site.example.com' => 'https://new-site.example.com/subsite',
+                ],
+            ],
+        ]);
+
+        $client = new \ImportClient(
+            $remoteReprintApiUrl,
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+        $state_file = $client->pull_state_directory . '/state.json';
+        $state_before = file_get_contents($state_file);
+
+        try {
+            $client->run([
+                'command' => 'db-apply',
+                'abort' => false,
+                'verbose' => false,
+                'secret' => null,
+                'tuning_config' => [],
+                'target_engine' => 'sqlite',
+                'target_sqlite_path' => $this->tempDir . '/database/wordpress.sqlite',
+                'target_db' => 'wp_test',
+            ]);
+            $this->fail('Expected the persisted pathful target to be rejected.');
+        } catch (\InvalidArgumentException $error) {
+            $this->assertStringContainsString(
+                'target URL must be an origin without a path',
+                $error->getMessage()
+            );
+        }
+
+        $this->assertSame($state_before, file_get_contents($state_file));
+    }
+
     public function testSqlitePragmasDoNotChangeProgressCounters(): void
     {
         $remoteReprintApiUrl = 'https://old-site.example.com/?reprint-api';

@@ -192,4 +192,29 @@ class Base64ValueScannerTest extends TestCase
         $this->assertCount(1, $values);
         $this->assertEquals($value, $values[0]);
     }
+
+    public function testEncodedPayloadCouldContainHttpSchemeUsesEncodedPayload(): void
+    {
+        $sql = sprintf(
+            "INSERT INTO t VALUES(FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode('plain text'),
+            base64_encode('https://example.com/zero'),
+            base64_encode('xhttps://example.com/one'),
+            base64_encode('xxhttps://example.com/two')
+        );
+
+        $scanner = new Base64ValueScanner($sql);
+
+        $this->assertTrue($scanner->next_value());
+        $this->assertFalse($scanner->encoded_payload_could_contain_http_scheme());
+
+        $this->assertTrue($scanner->next_value());
+        $this->assertTrue($scanner->encoded_payload_could_contain_http_scheme());
+
+        $this->assertTrue($scanner->next_value());
+        $this->assertTrue($scanner->encoded_payload_could_contain_http_scheme());
+
+        $this->assertTrue($scanner->next_value());
+        $this->assertTrue($scanner->encoded_payload_could_contain_http_scheme());
+    }
 }

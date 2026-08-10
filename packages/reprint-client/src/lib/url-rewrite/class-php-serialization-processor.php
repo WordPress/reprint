@@ -37,17 +37,6 @@ class PhpSerializationProcessor
     private $malformed = false;
 
     /**
-     * Byte length consumed by one valid serialized value at the start.
-     *
-     * This remains available when trailing ordinary text makes the complete
-     * input malformed. It is null when the first serialized value is itself
-     * malformed or unsupported.
-     *
-     * @var int|null
-     */
-    private $serialized_prefix_byte_length = null;
-
-    /**
      * Bookmarks recording the position of each string value in the input.
      *
      * Each entry records the byte offsets needed to locate and replace the
@@ -75,15 +64,6 @@ class PhpSerializationProcessor
     /** @var int Current cursor position. -1 means before the first value. */
     private $cursor = -1;
 
-    /** @var int Number of value slots encountered while parsing. */
-    private $parsed_value_count = 0;
-
-    /** @var array<int, bool> Direct values and object aliases available to references. */
-    private $referenceable_value_identifiers = [];
-
-    /** @var array<int, bool> Value identifiers which contain objects. */
-    private $object_value_identifiers = [];
-
     /**
      * Parse the input upfront, recording the position of every string value.
      *
@@ -109,8 +89,6 @@ class PhpSerializationProcessor
             return;
         }
 
-        $this->serialized_prefix_byte_length = $pos;
-
         // If there's trailing data, the input is malformed
         if ($pos !== $this->data_length) {
             $this->malformed = true;
@@ -128,7 +106,7 @@ class PhpSerializationProcessor
         if ($this->malformed) {
             return false;
         }
-        ++$this->cursor;
+        $this->cursor++;
         return $this->cursor < count($this->bookmarks);
     }
 
@@ -168,43 +146,6 @@ class PhpSerializationProcessor
     public function is_malformed(): bool
     {
         return $this->malformed;
-    }
-
-    /**
-     * Whether input starts with a token prefix supported by PHP serialization.
-     *
-     * This is deliberately lexical. A true result claims serialization-shaped
-     * input for validation, but does not say that the complete value is valid.
-     *
-     * @param string $data Input bytes.
-     * @return bool True when the first bytes are a supported token prefix.
-     */
-    public static function has_serialization_token_prefix(string $data): bool
-    {
-        if (!isset($data[1])) {
-            return false;
-        }
-
-        if ($data[0] === 'N') {
-            return $data[1] === ';';
-        }
-
-        return strpos('sidbaOCrRE', $data[0]) !== false
-            && $data[1] === ':';
-    }
-
-    /**
-     * Return the bytes consumed by one valid serialized value at the start.
-     *
-     * Full-value validation remains available through is_malformed(). A
-     * serialized prefix followed by ordinary text therefore has a byte length
-     * here while is_malformed() still returns true.
-     *
-     * @return int|null Consumed bytes, or null when no valid prefix was parsed.
-     */
-    public function get_serialized_prefix_byte_length(): ?int
-    {
-        return $this->serialized_prefix_byte_length;
     }
 
     /**
@@ -269,72 +210,30 @@ class PhpSerializationProcessor
         if (!isset($this->data[$pos])) {
             return false;
         }
-        $value_identifier = null;
-        if ($is_value) {
-            ++$this->parsed_value_count;
-            $value_identifier = $this->parsed_value_count;
-        }
 
-        $type = $this->data[$pos];
-        if (
-            $value_identifier !== null
-            && $type !== 'r'
-            && $type !== 'R'
-        ) {
-            // Direct values are targetable immediately; r aliases are added after validation.
-            $this->referenceable_value_identifiers[$value_identifier] = true;
-        }
-        if (
-            $value_identifier !== null
-            && ( $type === 'O' || $type === 'C' || $type === 'E' )
-        ) {
-            // Register before descending so an object may refer to itself.
-            $this->object_value_identifiers[$value_identifier] = true;
-        }
-
-        switch ($type) {
+        switch ($this->data[$pos]) {
             case 's':
-                $parsed = $this->parse_string($pos, $is_value);
-                break;
+                return $this->parse_string($pos, $is_value);
             case 'i':
-                $parsed = $this->parse_integer($pos);
-                break;
+                return $this->parse_integer($pos);
             case 'd':
-                $parsed = $this->parse_double($pos);
-                break;
+                return $this->parse_double($pos);
             case 'b':
-                $parsed = $this->parse_boolean($pos);
-                break;
+                return $this->parse_boolean($pos);
             case 'N':
-                $parsed = $this->parse_null($pos);
-                break;
+                return $this->parse_null($pos);
             case 'a':
-                $parsed = $this->parse_array($pos);
-                break;
+                return $this->parse_array($pos);
             case 'O':
-                $parsed = $this->parse_object($pos);
-                break;
+                return $this->parse_object($pos);
             case 'C':
-                $parsed = $this->parse_custom($pos);
-                break;
-            case 'E':
-                $parsed = $this->parse_enum($pos);
-                break;
+                return $this->parse_custom($pos);
             case 'r':
             case 'R':
-                $parsed = $this->parse_reference($pos, $value_identifier);
-                break;
+                return $this->parse_reference($pos);
             default:
-                $parsed = false;
-                break;
+                return false;
         }
-
-        if (!$parsed && $value_identifier !== null) {
-            unset($this->referenceable_value_identifiers[$value_identifier]);
-            unset($this->object_value_identifiers[$value_identifier]);
-        }
-
-        return $parsed;
     }
 
     /**
@@ -402,7 +301,7 @@ class PhpSerializationProcessor
 
         // Optional leading minus
         if (isset($this->data[$pos]) && $this->data[$pos] === '-') {
-            ++$pos;
+            $pos++;
         }
         $digit_len = strspn($this->data, self::DIGITS, $pos);
         if ($digit_len === 0) {
@@ -413,7 +312,7 @@ class PhpSerializationProcessor
         if (!isset($this->data[$pos]) || $this->data[$pos] !== ';') {
             return false;
         }
-        ++$pos; // skip ';'
+        $pos++; // skip ';'
 
         return true;
     }
@@ -429,17 +328,9 @@ class PhpSerializationProcessor
         }
         $pos += 2; // skip 'd:'
 
-        // Read and validate the exact float spellings emitted by serialize().
+        // Read until semicolon — PHP serialize can produce various float representations
         $span = strcspn($this->data, ';', $pos);
         if ($span === 0 || $pos + $span >= $this->data_length) {
-            return false;
-        }
-        $number = substr($this->data, $pos, $span);
-        if ($number !== 'NAN'
-            && $number !== 'INF'
-            && $number !== '-INF'
-            && preg_match('/\A-?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?\z/', $number) !== 1
-        ) {
             return false;
         }
         $pos += $span + 1; // skip value + ';'
@@ -506,12 +397,7 @@ class PhpSerializationProcessor
 
         for ($i = 0; $i < $count; $i++) {
             // Parse key (string or integer, not a value)
-            $key_type = $this->data[$pos] ?? '';
-            if (
-                ( $key_type === 's' && !$this->parse_string($pos, false) )
-                || ( $key_type === 'i' && !$this->parse_integer($pos) )
-                || ( $key_type !== 's' && $key_type !== 'i' )
-            ) {
+            if (!$this->parse_value($pos, false)) {
                 return false;
             }
 
@@ -525,7 +411,7 @@ class PhpSerializationProcessor
         if (!isset($this->data[$pos]) || $this->data[$pos] !== '}') {
             return false;
         }
-        ++$pos; // skip '}'
+        $pos++; // skip '}'
 
         return true;
     }
@@ -562,14 +448,9 @@ class PhpSerializationProcessor
             return false;
         }
         $pos += 2; // skip ':"'
-        $class_name_start = $pos;
         $pos += $name_len; // skip class name
 
-        if (
-            !$this->is_valid_class_identifier($class_name_start, $name_len)
-            || $this->data[$pos] !== '"'
-            || $this->data[$pos + 1] !== ':'
-        ) {
+        if ($this->data[$pos] !== '"' || $this->data[$pos + 1] !== ':') {
             return false;
         }
         $pos += 2; // skip '":'
@@ -590,7 +471,7 @@ class PhpSerializationProcessor
 
         for ($i = 0; $i < $prop_count; $i++) {
             // Parse property name (not a value — structural)
-            if (( $this->data[$pos] ?? '' ) !== 's' || !$this->parse_string($pos, false)) {
+            if (!$this->parse_value($pos, false)) {
                 return false;
             }
 
@@ -604,7 +485,7 @@ class PhpSerializationProcessor
         if (!isset($this->data[$pos]) || $this->data[$pos] !== '}') {
             return false;
         }
-        ++$pos; // skip '}'
+        $pos++; // skip '}'
 
         return true;
     }
@@ -615,26 +496,15 @@ class PhpSerializationProcessor
      * r:N; is a value reference, R:N; is a pointer reference.
      * Both are passed through unchanged.
      */
-    private function parse_reference(int &$pos, ?int $value_identifier): bool
+    private function parse_reference(int &$pos): bool
     {
         if (!isset($this->data[$pos + 1]) || $this->data[$pos + 1] !== ':') {
             return false;
         }
-        $reference_type = $this->data[$pos];
         $pos += 2; // skip 'r:' or 'R:'
 
         $digit_len = strspn($this->data, self::DIGITS, $pos);
         if ($digit_len === 0) {
-            return false;
-        }
-        $reference_identifier = (int) substr($this->data, $pos, $digit_len);
-        if (
-            !isset($this->referenceable_value_identifiers[$reference_identifier])
-            || (
-                $reference_type === 'r'
-                && !isset($this->object_value_identifiers[$reference_identifier])
-            )
-        ) {
             return false;
         }
         $pos += $digit_len;
@@ -642,12 +512,7 @@ class PhpSerializationProcessor
         if (!isset($this->data[$pos]) || $this->data[$pos] !== ';') {
             return false;
         }
-        ++$pos; // skip ';'
-
-        if ($reference_type === 'r' && $value_identifier !== null) {
-            $this->referenceable_value_identifiers[$value_identifier] = true;
-            $this->object_value_identifiers[$value_identifier] = true;
-        }
+        $pos++; // skip ';'
 
         return true;
     }
@@ -679,14 +544,9 @@ class PhpSerializationProcessor
             return false;
         }
         $pos += 2; // skip ':"'
-        $class_name_start = $pos;
         $pos += $name_len; // skip class name
 
-        if (
-            !$this->is_valid_class_identifier($class_name_start, $name_len)
-            || $this->data[$pos] !== '"'
-            || $this->data[$pos + 1] !== ':'
-        ) {
+        if ($this->data[$pos] !== '"' || $this->data[$pos + 1] !== ':') {
             return false;
         }
         $pos += 2; // skip '":'
@@ -709,87 +569,7 @@ class PhpSerializationProcessor
         if ($this->data[$pos] !== '}') {
             return false;
         }
-        ++$pos; // skip '}'
-
-        return true;
-    }
-
-    /**
-     * Validate the lexical class-name bytes accepted in serialized objects.
-     *
-     * Class lookup is deliberately excluded. Data for an unloaded class is
-     * still valid serialization and must remain parseable.
-     */
-    private function is_valid_class_identifier(int $start, int $length): bool
-    {
-        if ($length === 0 || $this->data[$start] === '\\') {
-            return false;
-        }
-
-        for ($offset = 0; $offset < $length; ++$offset) {
-            $character = $this->data[$start + $offset];
-            $byte = ord($character);
-            if (
-                $byte >= 128
-                || ( $byte >= 48 && $byte <= 57 )
-                || ( $byte >= 65 && $byte <= 90 )
-                || ( $byte >= 97 && $byte <= 122 )
-                || $character === '\\'
-                || $character === '_'
-            ) {
-                continue;
-            }
-
-            return false;
-        }
-
-        return true;
-    }
-
-    /**
-     * Parse an enum case: E:N:"EnumClass:Case";.
-     *
-     * The enum identifier is structural metadata. It is validated by its
-     * declared byte length and preserved opaquely rather than exposed as a
-     * rewritable string value.
-     */
-    private function parse_enum(int &$pos): bool
-    {
-        if (!isset($this->data[$pos + 1]) || $this->data[$pos] !== 'E' || $this->data[$pos + 1] !== ':') {
-            return false;
-        }
-        $pos += 2; // skip 'E:'
-
-        $digit_length = strspn($this->data, self::DIGITS, $pos);
-        if ($digit_length === 0) {
-            return false;
-        }
-        $identifier_length = (int) substr($this->data, $pos, $digit_length);
-        $pos += $digit_length;
-
-        if (
-            $pos + $identifier_length + 4 > $this->data_length
-            || $this->data[$pos] !== ':'
-            || $this->data[$pos + 1] !== '"'
-        ) {
-            return false;
-        }
-        $pos += 2; // skip ':"'
-
-        if (
-            $identifier_length < 3
-            || $this->data[$pos] === ':'
-            || $this->data[$pos + $identifier_length - 1] === ':'
-            || substr_count($this->data, ':', $pos, $identifier_length) !== 1
-        ) {
-            return false;
-        }
-        $pos += $identifier_length;
-
-        if ($this->data[$pos] !== '"' || $this->data[$pos + 1] !== ';') {
-            return false;
-        }
-        $pos += 2; // skip '";'
+        $pos++; // skip '}'
 
         return true;
     }

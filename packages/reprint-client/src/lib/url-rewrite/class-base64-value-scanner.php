@@ -101,7 +101,7 @@ class Base64ValueScanner
      */
     public function next_value(): bool
     {
-        ++$this->cursor;
+        $this->cursor++;
         return $this->cursor < count($this->entries);
     }
 
@@ -116,6 +116,29 @@ class Base64ValueScanner
         }
 
         return $this->entries[$this->cursor]['value'];
+    }
+
+    /**
+     * Return whether the current encoded payload could decode to a value
+     * containing an http:// or https:// scheme.
+     *
+     * This is a conservative base64 prefilter over the encoded text, not proof
+     * that the decoded value contains a URL. false means the payload cannot
+     * decode to a lowercase http/https scheme under the checked alignments.
+     * true only means it could, so the caller still needs to decode and inspect
+     * the value. It mirrors the statement-level prefilter in SqlStatementRewriter,
+     * but applies it per payload so one URL-bearing column does not force every
+     * neighboring FROM_BASE64() value in the same INSERT batch through
+     * base64_decode().
+     */
+    public function encoded_payload_could_contain_http_scheme(): bool
+    {
+        $value = $this->entries[$this->cursor]['value'];
+        if ($value !== null) {
+            return strpos($value, 'http') !== false;
+        }
+
+        return self::encoded_payload_could_decode_to_http_scheme($this->entries[$this->cursor]['encoded_value']);
     }
 
     /**
@@ -293,5 +316,13 @@ class Base64ValueScanner
             $prev[0] = $prev[1];
             $prev[1] = $token;
         }
+    }
+
+    private static function encoded_payload_could_decode_to_http_scheme(string $payload): bool
+    {
+        return strpos($payload, 'aHR0') !== false
+            || strpos($payload, 'dHA6') !== false
+            || strpos($payload, 'dHBz') !== false
+            || strpos($payload, 'dHRw') !== false;
     }
 }

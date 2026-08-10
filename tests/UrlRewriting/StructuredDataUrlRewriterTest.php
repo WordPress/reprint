@@ -14,520 +14,269 @@ class StructuredDataUrlRewriterTest extends TestCase
         ]);
     }
 
-    // --- HTML content ---
-
-    public function testRewritesUrlInHrefAttribute(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '<a href="https://old-site.com/page">Link</a>';
-        $result = $rewriter->rewrite($input);
-        $this->assertStringContainsString('https://new-site.com/page', $result);
-        $this->assertStringNotContainsString('old-site.com', $result);
-    }
-
-    public function testRewritesUrlInImgSrc(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '<img src="https://old-site.com/wp-content/uploads/photo.jpg" />';
-        $result = $rewriter->rewrite($input);
-        $this->assertStringContainsString('https://new-site.com/wp-content/uploads/photo.jpg', $result);
-    }
-
-    public function testRewritesMultipleHtmlAttributes(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '<a href="https://old-site.com/page1">Link 1</a><a href="https://old-site.com/page2">Link 2</a>';
-        $result = $rewriter->rewrite($input);
-        $this->assertStringContainsString('https://new-site.com/page1', $result);
-        $this->assertStringContainsString('https://new-site.com/page2', $result);
-    }
-
-    // --- Block markup ---
-
-    public function testRewritesBlockMarkupJsonAttributes(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '<!-- wp:image {"src":"https://old-site.com/img.jpg"} --><figure><img src="https://old-site.com/img.jpg"/></figure><!-- /wp:image -->';
-        $result = $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
-        $this->assertStringNotContainsString('old-site.com', $result);
-        $this->assertStringContainsString('new-site.com', $result);
-    }
-
-    // --- Plain text with URLs ---
-
-    public function testRewritesBareUrlInText(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = 'Visit us at https://old-site.com/about for more info.';
-        $result = $rewriter->rewrite($input);
-        $this->assertStringContainsString('https://new-site.com/about', $result);
-    }
-
-    public function testDoesNotRewriteNonUrlsInText(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = 'Visit us at do-you-knowhttps://old-site.com/about for more info.';
-        $result = $rewriter->rewrite($input);
-        $this->assertEquals($input, $result);
-    }
-
-    public function testDoesNotRewriteQueryString(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = 'Visit us at https://webarchive.org?url=https://old-site.com/about for more info.';
-        $result = $rewriter->rewrite($input);
-        $this->assertEquals($input, $result);
-    }
-
-    // --- JSON content ---
-
-    public function testRewritesUrlsInJsonStringValues(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = json_encode([
-            'home' => 'https://old-site.com',
-            'logo' => 'https://old-site.com/wp-content/uploads/logo.png',
-        ], JSON_UNESCAPED_SLASHES);
-
-        $result = $rewriter->rewrite($input);
-        $decoded = json_decode($result, true);
-
-        $this->assertNotNull($decoded);
-        $this->assertStringContainsString('new-site.com', $decoded['home']);
-        $this->assertStringContainsString('new-site.com/wp-content/uploads/logo.png', $decoded['logo']);
-    }
-
-    public function testRewritesUrlsInNestedJson(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = json_encode([
-            'settings' => [
-                'url' => 'https://old-site.com/api',
-                'nested' => [
-                    'image' => 'https://old-site.com/img.jpg',
-                ],
-            ],
-            'count' => 42,
-            'active' => true,
-        ], JSON_UNESCAPED_SLASHES);
-
-        $result = $rewriter->rewrite($input);
-        $decoded = json_decode($result, true);
-
-        $this->assertNotNull($decoded);
-        $this->assertStringContainsString('new-site.com', $decoded['settings']['url']);
-        $this->assertStringContainsString('new-site.com', $decoded['settings']['nested']['image']);
-        $this->assertEquals(42, $decoded['count']);
-        $this->assertTrue($decoded['active']);
-    }
-
-    public function testRewritesUrlInJsonStringScalar(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '"https:\/\/old-site.com\/api"';
-
-        $result = $rewriter->rewrite($input);
-
-        $this->assertSame('https://new-site.com/api', json_decode($result, true));
-    }
-
-    public function testJsonRewritePreservesUnescapedSlashes(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '{"url":"https://old-site.com/path"}';
-        $result = $rewriter->rewrite($input);
-        $this->assertSame('{"url":"https://new-site.com/path"}', $result);
-    }
-
-    // --- Serialized PHP ---
-
-    public function testRewritesUrlInSerializedArray(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = serialize([
-            'siteurl' => 'https://old-site.com/site',
-            'blogname' => 'My Old Site',
-        ]);
-        $result = $rewriter->rewrite($input);
-        $unserialized = unserialize($result);
-        $this->assertSame('https://new-site.com/site', $unserialized['siteurl']);
-        $this->assertSame('My Old Site', $unserialized['blogname']);
-    }
-
-    public function testRewritesUrlInSerializedString(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = serialize('https://old-site.com/page');
-        $result = $rewriter->rewrite($input);
-        $this->assertSame('https://new-site.com/page', unserialize($result));
-    }
-
-    public function testRewritesUrlsInDoubleSerializedPhp(): void
-    {
-        $rewriter = $this->createRewriter();
-        $inner = serialize(['url' => 'https://old-site.com/deep']);
-        $input = serialize($inner);
-        $result = $rewriter->rewrite($input);
-        $inner_result = unserialize($result);
-        $deep_result = unserialize($inner_result);
-        $this->assertSame('https://new-site.com/deep', $deep_result['url']);
-    }
-
-    public function testRewritesJsonInsideSerializedPhp(): void
-    {
-        $rewriter = $this->createRewriter();
-        $json_value = json_encode(['link' => 'https://old-site.com/api'], JSON_UNESCAPED_SLASHES);
-        $input = serialize(['config' => $json_value]);
-        $result = $rewriter->rewrite($input);
-        $unserialized = unserialize($result);
-        $decoded = json_decode($unserialized['config'], true);
-        $this->assertSame('https://new-site.com/api', $decoded['link']);
-    }
-
-    public function testSerializedPhpWithNoUrlsIsUnchanged(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = serialize([
-            'setting' => 'no urls here',
-            'count' => 42,
-            'nested' => ['inner' => 'also no urls'],
-        ]);
-        $result = $rewriter->rewrite($input);
-        $this->assertSame($input, $result, 'Serialized PHP with no matching URLs should be byte-identical');
-    }
-
-    public function testMalformedSerializedPhpRemainsUnchanged(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = 's:999:"https://old-site.com";';
-        $result = $rewriter->rewrite($input);
-        $this->assertSame($input, $result);
-    }
-
-    // --- Base64 ---
-
-    // Base64 processing is temporarily disabled for performance.
-    // These tests document the expected behavior when it's re-enabled.
-
-    public function testRewritesBase64EncodedHtml(): void
-    {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
-    }
-
-    public function testRewritesBase64EncodedJson(): void
-    {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
-    }
-
-    public function testRewritesBase64EncodedSerializedPhp(): void
-    {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
-    }
-
-    public function testRewritesBase64EncodedBlockMarkup(): void
-    {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
-    }
-
-    // --- Combinations: formats nested inside other formats ---
-
-    public function testBase64InsideSerializedPhp(): void
-    {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
-    }
-
-    public function testSerializedPhpInsideJson(): void
-    {
-        $rewriter = $this->createRewriter();
-        $serialized = serialize(['url' => 'https://old-site.com/deep']);
-        $input = json_encode(['data' => $serialized], JSON_UNESCAPED_SLASHES);
-        $result = $rewriter->rewrite($input);
-        $json_decoded = json_decode($result, true);
-        $unserialized = unserialize($json_decoded['data']);
-        $this->assertSame('https://new-site.com/deep', $unserialized['url']);
-    }
-
-    public function testBase64InsideJsonInsideSerializedPhp(): void
-    {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
-    }
-
-    public function testBase64WithNoUrlsIsUnchanged(): void
-    {
-        $rewriter = $this->createRewriter();
-        // JSON with no matching URLs, base64-encoded
-        $json = json_encode(['key' => 'no urls here'], JSON_UNESCAPED_SLASHES);
-        $input = base64_encode($json);
-        $result = $rewriter->rewrite($input);
-        $this->assertSame($input, $result, 'Base64 with no matching URLs should be byte-identical');
-    }
-
-    public function testShortBase64LikeStringNotDecoded(): void
-    {
-        $rewriter = $this->createRewriter();
-        // "TRUE" is valid base64 but too short to be treated as encoded data
-        $result = $rewriter->rewrite('TRUE');
-        $this->assertSame('TRUE', $result);
-    }
-
-    // --- No-change cases ---
-
-    public function testValueWithNoUrlsReturnsUnchanged(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = 'Just a regular string with no URLs.';
-        $result = $rewriter->rewrite($input);
-        $this->assertEquals($input, $result);
-    }
-
-    public function testEmptyStringReturnsUnchanged(): void
-    {
-        $rewriter = $this->createRewriter();
-        $this->assertEquals('', $rewriter->rewrite(''));
-    }
-
-    public function testUrlFromDifferentDomainIsNotRewritten(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '<a href="https://other-site.com/page">Link</a>';
-        $result = $rewriter->rewrite($input);
-        $this->assertStringContainsString('other-site.com', $result);
-        $this->assertStringNotContainsString('new-site.com', $result);
-    }
-
-    // --- Multiple URL mappings ---
-
-    public function testMultipleUrlMappings(): void
+    public function testSplicesLiteralBaseBytesWithoutChangingTheSuffix(): void
     {
         $rewriter = $this->createRewriter([
-            'https://old-site.com' => 'https://new-site.com',
-            'https://cdn.old-site.com' => 'https://cdn.new-site.com',
+            'https://old-site.com/shop' => 'https://new-site.com',
         ]);
-        $input = '<img src="https://cdn.old-site.com/img.jpg"/><a href="https://old-site.com/page">Link</a>';
-        $result = $rewriter->rewrite($input);
-        $this->assertStringContainsString('cdn.new-site.com', $result);
-        $this->assertStringContainsString('new-site.com/page', $result);
+        $input = '<a href="https://old-site.com/shop/a/%2F/../b?next=%2f#part=%2E">Link</a>';
+        $expected = '<a href="https://new-site.com/a/%2F/../b?next=%2f#part=%2E">Link</a>';
+
+        $this->assertSame($expected, $rewriter->rewrite($input));
     }
 
-    // --- Content type hint: 'skip' ---
-
-    public function testSkipContentTypeReturnsValueUnchanged(): void
+    public function testPreservesArbitrarySuffixBytes(): void
     {
-        $rewriter = $this->createRewriter();
-        $input = 'https://old-site.com/page';
-        $result = $rewriter->rewrite($input, 'skip');
-        $this->assertSame($input, $result, "'skip' hint should return the value unchanged");
-    }
-
-    public function testSkipContentTypeWorksOnSerializedPhp(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = serialize(['url' => 'https://old-site.com/page']);
-        $result = $rewriter->rewrite($input, 'skip');
-        $this->assertSame($input, $result);
-    }
-
-    // --- Content type hint: 'block_markup' ---
-
-    public function testBlockMarkupHintUsesStructuredBlockParser(): void
-    {
-        $rewriter = $this->createRewriter();
-        // Block markup with JSON attribute — the block parser handles the JSON
-        // inside the block comment.
-        $input = '<!-- wp:image {"src":"https://old-site.com/img.jpg"} --><figure><img src="https://old-site.com/img.jpg"/></figure><!-- /wp:image -->';
-        $result = $rewriter->rewrite($input, 'block_markup');
-        $this->assertStringNotContainsString('old-site.com', $result);
-        $this->assertStringContainsString('new-site.com', $result);
-    }
-
-    public function testBlockMarkupHintRewritesHtmlAttributes(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '<a href="https://old-site.com/page">Link</a>';
-        $result = $rewriter->rewrite($input, 'block_markup');
-        $this->assertStringContainsString('https://new-site.com/page', $result);
-    }
-
-    public function testKnownBlockMarkupRewritesEscapedBlockJsonAndHtml(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '<!-- wp:image {"src":"https:\/\/old-site.com\/img.jpg"} -->'
-            . '<figure><img src="https://old-site.com/img.jpg"/></figure>'
-            . '<!-- /wp:image -->';
-
-        $result = $rewriter->rewrite_known_block_markup_value($input);
-
-        $this->assertStringContainsString('https:\/\/new-site.com\/img.jpg', $result);
-        $this->assertStringContainsString('src="https://new-site.com/img.jpg"', $result);
-        $this->assertStringNotContainsString('old-site.com', $result);
-    }
-
-    public function testKnownBlockMarkupDoesNotRewriteEmbeddedQueryUrl(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '<a href="https://webarchive.org?url=https://old-site.com/about">Archive</a>';
-
-        $this->assertSame($input, $rewriter->rewrite_known_block_markup_value($input));
-    }
-
-    public function testKnownBlockMarkupRewritesMixedLiteralAndCaseVariantUrls(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '<a href="https://old-site.com/literal">Literal</a>'
-            . '<a href="HTTPS://OLD-SITE.COM/case-variant">Case variant</a>';
-
-        $result = $rewriter->rewrite_known_block_markup_value($input);
-
-        $this->assertStringContainsString('https://new-site.com/literal', $result);
-        $this->assertStringContainsString('HTTPS://new-site.com/case-variant', $result);
-        $this->assertStringNotContainsString('old-site.com', strtolower($result));
-    }
-
-    public function testKnownBlockMarkupRewritesCaseVariantHostWithoutLiteralSourceDomain(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '<a href=\'https://OLD-SITE.COM/case-variant\'>Case variant</a>';
-
-        $result = $rewriter->rewrite_known_block_markup_value($input);
-
-        $this->assertStringContainsString('https://new-site.com/case-variant', $result);
-        $this->assertStringNotContainsString('old-site.com', strtolower($result));
-    }
-
-    public function testKnownBlockMarkupRewritesPunycodeAndUnicodeHostSpellings(): void
-    {
-        $rewriter = $this->createRewriter([
-            'https://xn--bcher-kva.example' => 'https://new.example',
-        ]);
-        $input = '<a href="https://xn--bcher-kva.example/punycode">Punycode</a>'
-            . '<a href="https://bücher.example/unicode">Unicode</a>';
-
-        $result = $rewriter->rewrite_known_block_markup_value($input);
-
-        $this->assertStringContainsString('https://new.example/punycode', $result);
-        $this->assertStringContainsString('https://new.example/unicode', $result);
-        $this->assertStringNotContainsString('xn--bcher-kva.example', $result);
-        $this->assertStringNotContainsString('bücher.example', $result);
-    }
-
-    public function testKnownBlockMarkupRewritesUnicodeHostInBlockCommentJson(): void
-    {
-        $rewriter = $this->createRewriter([
-            'https://xn--bcher-kva.example' => 'https://new.example',
-        ]);
-        $input = '<!-- wp:image {"src":"https://bücher.example/unicode"} -->';
-
-        $result = $rewriter->rewrite_known_block_markup_value($input);
+        $suffix = "/path\0\xff%2f";
 
         $this->assertSame(
-            '<!-- wp:image {"src":"https://new.example/unicode"} -->',
-            $result
+            'https://new-site.com' . $suffix,
+            $this->createRewriter()->rewrite('https://old-site.com' . $suffix)
         );
-        $this->assertStringNotContainsString('bücher.example', $result);
     }
 
-    public function testKnownBlockMarkupRewritesEscapedJsonAndCaseVariantHtmlTogether(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = '<!-- wp:image {"src":"https:\/\/old-site.com\/img.jpg"} -->'
-            . '<figure><img src="HTTPS://OLD-SITE.COM/img.jpg"/></figure>'
-            . '<!-- /wp:image -->';
-
-        $result = $rewriter->rewrite_known_block_markup_value($input);
-
-        $this->assertStringContainsString('https:\/\/new-site.com\/img.jpg', $result);
-        $this->assertStringContainsString('src="HTTPS://new-site.com/img.jpg"', $result);
-        $this->assertStringNotContainsString('old-site.com', strtolower($result));
-    }
-
-    public function testRewriteCacheSeparatesPlainTextAndBlockMarkupSemantics(): void
+    public function testNormalizesOneRootSlashOnEitherBase(): void
     {
         $rewriter = $this->createRewriter([
-            'https://old-site.com/old' => 'https://new-site.com/new',
+            'https://old-site.com/' => 'https://new-site.com/',
         ]);
-        $input = '<!-- wp:image {"url":"/old/page"} /-->';
 
-        $plain_result = $rewriter->rewrite($input);
-        $block_result = $rewriter->rewrite($input, 'block_markup');
-
-        $this->assertSame($input, $plain_result);
-        $this->assertSame('<!-- wp:image {"url":"/new/page"} /-->', $block_result);
-    }
-
-    // --- Content type hint: null (default) uses plain text URL scanning ---
-
-    public function testDefaultHintUsesPlainTextUrlScanning(): void
-    {
-        $rewriter = $this->createRewriter();
-        // A plain URL string uses the literal fallback.
-        $input = 'Visit https://old-site.com/about for more.';
-        $result = $rewriter->rewrite($input);
-        $this->assertStringContainsString('https://new-site.com/about', $result);
-        $this->assertStringNotContainsString('old-site.com', $result);
-    }
-
-    public function testDefaultHintStillHandlesSerializedPhp(): void
-    {
-        $rewriter = $this->createRewriter();
-        // Serialized PHP is auto-detected regardless of content type hint
-        $input = serialize(['url' => 'https://old-site.com/page']);
-        $result = $rewriter->rewrite($input);
-        $unserialized = unserialize($result);
-        $this->assertSame('https://new-site.com/page', $unserialized['url']);
-    }
-
-    public function testDefaultHintStillHandlesJson(): void
-    {
-        $rewriter = $this->createRewriter();
-        $input = json_encode(['url' => 'https://old-site.com/api'], JSON_UNESCAPED_SLASHES);
-        $result = $rewriter->rewrite($input);
-        $decoded = json_decode($result, true);
-        $this->assertSame('https://new-site.com/api', $decoded['url']);
-    }
-
-    // --- Content type hint propagation through nested formats ---
-
-    public function testBlockMarkupHintPropagatesThroughSerializedPhp(): void
-    {
-        $rewriter = $this->createRewriter();
-        // Serialized PHP containing a block markup string — the block_markup
-        // hint should propagate so the inner text gets the block parser.
-        $markup = '<!-- wp:image {"src":"https://old-site.com/img.jpg"} --><figure><img src="https://old-site.com/img.jpg"/></figure><!-- /wp:image -->';
-        $input = serialize(['content' => $markup]);
-        $result = $rewriter->rewrite($input, 'block_markup');
-        $unserialized = unserialize($result);
-        $this->assertStringNotContainsString('old-site.com', $unserialized['content']);
-        $this->assertStringContainsString('new-site.com', $unserialized['content']);
-    }
-
-    public function testBlockMarkupHintPropagatesThroughJson(): void
-    {
-        $rewriter = $this->createRewriter();
-        $markup = '<a href="https://old-site.com/page">Link</a>';
-        $input = json_encode(['html' => $markup], JSON_UNESCAPED_SLASHES);
-        $result = $rewriter->rewrite($input, 'block_markup');
-        $decoded = json_decode($result, true);
-        $this->assertStringContainsString('new-site.com/page', $decoded['html']);
-        $this->assertStringNotContainsString('old-site.com', $decoded['html']);
-    }
-
-    public function testBlockMarkupHintPropagatesThroughBase64(): void
-    {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
-    }
-
-    public function testValueMightContainSourceDomainIgnoresSchemeEscaping(): void
-    {
-        $rewriter = $this->createRewriter();
-
-        $this->assertTrue(
-            $rewriter->value_might_contain_source_domain('{"url":"https:\/\/old-site.com\/page"}')
+        $this->assertSame(
+            'https://new-site.com/path',
+            $rewriter->rewrite('https://old-site.com/path')
         );
-        $this->assertTrue(
-            $rewriter->value_might_contain_source_domain('<a href="HTTPS://OLD-SITE.COM/page">Link</a>')
+    }
+
+    public function testAcceptsSafeAsciiPathPunctuation(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com/scope:slug/a;b@c' => 'https://new-site.com',
+        ]);
+
+        $this->assertSame(
+            'https://new-site.com/page',
+            $rewriter->rewrite('https://old-site.com/scope:slug/a;b@c/page')
         );
-        $this->assertFalse(
-            $rewriter->value_might_contain_source_domain('<a href="https://other-site.com/page">Link</a>')
+    }
+
+    public function testSourcePathRequiresAnExactEndBoundary(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com/shop' => 'https://new-site.com',
+        ]);
+        $input = implode(' ', [
+            'https://old-site.com/shop',
+            'https://old-site.com/shop/child',
+            'https://old-site.com/shop?view=all',
+            'https://old-site.com/shop#details',
+            'https://old-site.com/shopper',
+            'https://old-site.com/shop;param',
+            'https://old-site.com/shop,more',
+            'https://old-site.com/shop(copy)',
+            'https://old-site.com/shop.more',
+            'https://old-site.com/shop%2Fmore',
+        ]);
+        $expected = implode(' ', [
+            'https://new-site.com',
+            'https://new-site.com/child',
+            'https://new-site.com?view=all',
+            'https://new-site.com#details',
+            'https://old-site.com/shopper',
+            'https://old-site.com/shop;param',
+            'https://old-site.com/shop,more',
+            'https://old-site.com/shop(copy)',
+            'https://old-site.com/shop.more',
+            'https://old-site.com/shop%2Fmore',
+        ]);
+
+        $this->assertSame($expected, $rewriter->rewrite($input));
+    }
+
+    public function testSourceOriginRequiresExactBoundaries(): void
+    {
+        $input = 'xhttps://old-site.com/path https://old-site.com.evil/path '
+            . 'https://archive.example/?url=https://old-site.com/path';
+
+        $this->assertSame($input, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testRewritesEveryLiteralUrlInMinifiedJson(): void
+    {
+        $input = '["https://old-site.com/a","https://old-site.com/b"]';
+        $expected = '["https://new-site.com/a","https://new-site.com/b"]';
+
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testUsesTheMostSpecificMappingWithoutCascading(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com' => 'https://middle.example',
+            'https://old-site.com/shop' => 'https://shop.example',
+            'https://middle.example' => 'https://final.example',
+        ]);
+        $input = 'https://old-site.com/shop/item https://old-site.com/other '
+            . 'https://middle.example/direct';
+        $expected = 'https://shop.example/item https://middle.example/other '
+            . 'https://final.example/direct';
+
+        $this->assertSame($expected, $rewriter->rewrite($input));
+    }
+
+    public function testDoesNotDecodeAlternateSourceSpellings(): void
+    {
+        $input = 'HTTPS://OLD-SITE.COM/path https:\/\/old-site.com\/path '
+            . 'https://old&#45;site.com/path';
+
+        $this->assertSame($input, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testCopiesJsonBytesAroundALiteralMatchExactly(): void
+    {
+        $input = "{\n"
+            . '  "url" : "https://old-site.com/a/%2F/../b?next=%2f",' . "\n"
+            . '  "escaped" : "https:\/\/old-site.com\/untouched",' . "\n"
+            . '  "unicode" : "\u0061",' . "\n"
+            . '  "large" : 12345678901234567890' . "\n"
+            . '}';
+        $expected = "{\n"
+            . '  "url" : "https://new-site.com/a/%2F/../b?next=%2f",' . "\n"
+            . '  "escaped" : "https:\/\/old-site.com\/untouched",' . "\n"
+            . '  "unicode" : "\u0061",' . "\n"
+            . '  "large" : 12345678901234567890' . "\n"
+            . '}';
+
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testLeavesCompletePhpSerializationUnchanged(): void
+    {
+        $input = serialize([
+            'url' => 'https://old-site.com/path',
+            'nested' => serialize('https://old-site.com/other'),
+        ]);
+
+        $this->assertSame($input, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testLeavesSerializationEmbeddedInJsonUnchanged(): void
+    {
+        $serialized = serialize('prefix https://old-site.com/path');
+        $input = json_encode(['data' => $serialized], JSON_UNESCAPED_SLASHES);
+
+        $this->assertSame($input, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testLeavesMultiplyEscapedSerializationUnchanged(): void
+    {
+        $serialized = serialize('prefix https://old-site.com/path');
+        $once_encoded = json_encode($serialized, JSON_UNESCAPED_SLASHES);
+        $input = json_encode($once_encoded, JSON_UNESCAPED_SLASHES);
+
+        $this->assertSame($input, $this->createRewriter()->rewrite($input));
+        $this->assertSame(
+            'prefix https://old-site.com/path',
+            unserialize(json_decode(json_decode($input, true), true))
         );
+    }
+
+    public function testSerializationShapedTextFailsClosed(): void
+    {
+        $input = 'note s:999: then https://old-site.com/path';
+
+        $this->assertSame($input, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testReturnsUnmatchedValuesByteIdentically(): void
+    {
+        $rewriter = $this->createRewriter();
+
+        $this->assertSame('', $rewriter->rewrite(''));
+        $this->assertSame('no URL', $rewriter->rewrite('no URL'));
+        $this->assertSame(
+            'https://different-site.com/path',
+            $rewriter->rewrite('https://different-site.com/path')
+        );
+    }
+
+    /**
+     * @dataProvider unsupportedLiteralMappingCases
+     */
+    public function testRejectsMappingsOutsideTheLiteralContract(
+        string $source_url,
+        string $target_url,
+        string $message
+    ): void {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage($message);
+
+        new StructuredDataUrlRewriter([$source_url => $target_url]);
+    }
+
+    /**
+     * @return iterable<string, array{string, string, string}>
+     */
+    public static function unsupportedLiteralMappingCases(): iterable
+    {
+        yield 'non-ASCII source' => [
+            'https://bücher.example',
+            'https://new-site.com',
+            'source URL must contain only printable ASCII bytes',
+        ];
+        yield 'target path' => [
+            'https://old-site.com',
+            'https://new-site.com/subsite',
+            'target URL must be an origin without a path',
+        ];
+        yield 'source query' => [
+            'https://old-site.com?view=all',
+            'https://new-site.com',
+            'source URL must be an absolute ASCII HTTP URL',
+        ];
+        yield 'target credentials' => [
+            'https://old-site.com',
+            'https://user@example.com',
+            'target URL must be an absolute ASCII HTTP URL',
+        ];
+        yield 'source path with trailing slash' => [
+            'https://old-site.com/shop/',
+            'https://new-site.com',
+            'source URL path must not end with a slash',
+        ];
+        yield 'uppercase source scheme' => [
+            'HTTPS://old-site.com',
+            'https://new-site.com',
+            'source URL must be an absolute ASCII HTTP URL',
+        ];
+        yield 'empty domain label' => [
+            'https://old..example/path',
+            'https://new-site.com',
+            'source URL must be an absolute ASCII HTTP URL',
+        ];
+        yield 'hyphen-only domain label' => [
+            'https://-/path',
+            'https://new-site.com',
+            'source URL must be an absolute ASCII HTTP URL',
+        ];
+        yield 'quote in source path' => [
+            'https://old-site.com/path"',
+            'https://new-site.com',
+            'source URL path contains unsupported bytes',
+        ];
+        yield 'backslash in source path' => [
+            'https://old-site.com/path\\segment',
+            'https://new-site.com',
+            'source URL path contains unsupported bytes',
+        ];
+        yield 'malformed percent escape in source path' => [
+            'https://old-site.com/path%2',
+            'https://new-site.com',
+            'source URL path contains unsupported bytes',
+        ];
+        yield 'parenthesis in source path' => [
+            'https://old-site.com/path(value)',
+            'https://new-site.com',
+            'source URL path contains unsupported bytes',
+        ];
     }
 }

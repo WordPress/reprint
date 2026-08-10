@@ -274,18 +274,9 @@ class PhpSerializationProcessorTest extends TestCase
 
     public function testValueReferencePassthrough(): void
     {
-        // Lowercase r:N; points to an object value.
-        $input = 'a:2:{i:0;O:8:"stdClass":0:{}i:1;r:2;}';
-        $this->assertSame($input, $this->processIdentity($input));
-    }
-
-    public function testValueReferenceToScalarIsMalformed(): void
-    {
+        // r:N; reference
         $input = 'a:2:{i:0;s:5:"hello";i:1;r:2;}';
-        $processor = new PhpSerializationProcessor($input);
-
-        $this->assertTrue($processor->is_malformed());
-        $this->assertSame($input, $processor->get_updated_serialization());
+        $this->assertSame($input, $this->processIdentity($input));
     }
 
     public function testPointerReferencePassthrough(): void
@@ -293,76 +284,6 @@ class PhpSerializationProcessorTest extends TestCase
         // R:N; reference
         $input = 'a:2:{i:0;s:5:"hello";i:1;R:2;}';
         $this->assertSame($input, $this->processIdentity($input));
-    }
-
-    /**
-     * @dataProvider directObjectReferenceProvider
-     */
-    public function testValueReferenceMayTargetDirectObjectValues(string $serialized_object): void
-    {
-        $input = 'a:2:{i:0;' . $serialized_object . 'i:1;r:2;}';
-        $processor = new PhpSerializationProcessor($input);
-
-        $this->assertFalse($processor->is_malformed());
-        $this->assertSame($input, $this->processIdentity($input));
-    }
-
-    /**
-     * @return iterable<string, array{string}>
-     */
-    public static function directObjectReferenceProvider(): iterable
-    {
-        yield 'ordinary object' => ['O:15:"Unloaded_Object":0:{}'];
-        yield 'custom serialized object' => ['C:17:"Unloaded_Custom_1":0:{}'];
-        yield 'enum case' => ['E:20:"Unloaded_Enum_1:Case";'];
-    }
-
-    /**
-     * @dataProvider referenceToReferenceSlotProvider
-     */
-    public function testReferenceSlotsCannotBeReferencedLater(string $input): void
-    {
-        $processor = new PhpSerializationProcessor($input);
-
-        $this->assertTrue($processor->is_malformed());
-        $this->assertSame($input, $processor->get_updated_serialization());
-    }
-
-    /**
-     * @return iterable<string, array{string}>
-     */
-    public static function referenceToReferenceSlotProvider(): iterable
-    {
-        yield 'pointer reference to pointer reference slot' => [
-            'a:3:{i:0;s:5:"hello";i:1;R:2;i:2;R:3;}',
-        ];
-        yield 'value reference to pointer reference slot' => [
-            'a:3:{i:0;O:8:"stdClass":0:{}i:1;R:2;i:2;r:3;}',
-        ];
-    }
-
-    /**
-     * @dataProvider referenceToObjectAliasProvider
-     */
-    public function testObjectAliasSlotsMayBeReferencedLater(string $input): void
-    {
-        $processor = new PhpSerializationProcessor($input);
-
-        $this->assertFalse($processor->is_malformed());
-        $this->assertSame($input, $this->processIdentity($input));
-    }
-
-    /**
-     * @return iterable<string, array{string}>
-     */
-    public static function referenceToObjectAliasProvider(): iterable
-    {
-        yield 'value reference to object alias slot' => [
-            'a:3:{i:0;O:8:"stdClass":0:{}i:1;r:2;i:2;r:3;}',
-        ];
-        yield 'pointer reference to object alias slot' => [
-            'a:3:{i:0;O:8:"stdClass":0:{}i:1;r:2;i:2;R:3;}',
-        ];
     }
 
     // ---------------------------------------------------------------
@@ -375,141 +296,6 @@ class PhpSerializationProcessorTest extends TestCase
         $result = $this->processWithTransform($input, fn($v) => strtoupper($v));
         // Custom serializable payload is opaque — passed through unchanged
         $this->assertSame($input, $result);
-    }
-
-    /**
-     * @dataProvider validUnloadedClassIdentifierProvider
-     */
-    public function testUnloadedClassIdentifiersAreValidatedLexically(string $input): void
-    {
-        $processor = new PhpSerializationProcessor($input);
-
-        $this->assertFalse($processor->is_malformed());
-        $this->assertSame($input, $this->processIdentity($input));
-    }
-
-    /**
-     * @return iterable<string, array{string}>
-     */
-    public static function validUnloadedClassIdentifierProvider(): iterable
-    {
-        yield 'ordinary unloaded object' => ['O:22:"Vendor\\Package\\Missing":0:{}'];
-        yield 'custom unloaded object' => ['C:22:"Vendor\\Package\\Missing":0:{}'];
-    }
-
-    /**
-     * @dataProvider malformedClassIdentifierProvider
-     */
-    public function testMalformedClassIdentifiersAreRejected(string $input): void
-    {
-        $processor = new PhpSerializationProcessor($input);
-
-        $this->assertTrue($processor->is_malformed());
-        $this->assertNull($processor->get_serialized_prefix_byte_length());
-    }
-
-    /**
-     * @return iterable<string, array{string}>
-     */
-    public static function malformedClassIdentifierProvider(): iterable
-    {
-        yield 'empty ordinary object class' => ['O:0:"":0:{}'];
-        yield 'punctuation in ordinary object class' => ['O:7:"Bad-Cls":0:{}'];
-        yield 'null byte in ordinary object class' => ["O:3:\"A\0B\":0:{}"];
-        yield 'empty custom object class' => ['C:0:"":0:{}'];
-        yield 'punctuation in custom object class' => ['C:7:"Bad-Cls":0:{}'];
-        yield 'null byte in custom object class' => ["C:3:\"A\0B\":0:{}"];
-    }
-
-    /**
-     * @dataProvider serializedSpecialDoubleProvider
-     */
-    public function testSpecialDoublesRequireUppercaseSpelling(
-        string $input,
-        bool $malformed
-    ): void {
-        $processor = new PhpSerializationProcessor($input);
-
-        $this->assertSame($malformed, $processor->is_malformed());
-        $this->assertSame($input, $processor->get_updated_serialization());
-    }
-
-    /**
-     * @return iterable<string, array{string, bool}>
-     */
-    public static function serializedSpecialDoubleProvider(): iterable
-    {
-        yield 'positive infinity' => ['d:INF;', false];
-        yield 'negative infinity' => ['d:-INF;', false];
-        yield 'not a number' => ['d:NAN;', false];
-        yield 'lowercase numeric exponent' => ['d:1e+20;', false];
-        yield 'lowercase positive infinity' => ['d:inf;', true];
-        yield 'mixed case negative infinity' => ['d:-Inf;', true];
-        yield 'lowercase not a number' => ['d:nan;', true];
-    }
-
-    public function testEnumIdentifierIsOpaqueWhileSurroundingValuesChange(): void
-    {
-        $enum_identifier = 'Example\\Münich_Status:Published';
-        $serialized_enum = 'E:' . strlen($enum_identifier) . ':"' . $enum_identifier . '";';
-        $input = 'a:3:{'
-            . serialize('before') . serialize('old')
-            . serialize('status') . $serialized_enum
-            . serialize('after') . serialize('keep')
-            . '}';
-        $expected = 'a:3:{'
-            . serialize('before') . serialize('a longer replacement')
-            . serialize('status') . $serialized_enum
-            . serialize('after') . serialize('keep')
-            . '}';
-
-        $this->assertSame(
-            $expected,
-            $this->processWithTransform(
-                $input,
-                static fn(string $value): string => $value === 'old'
-                    ? 'a longer replacement'
-                    : $value
-            )
-        );
-    }
-
-    /**
-     * @dataProvider malformedEnumSerializationProvider
-     */
-    public function testMalformedEnumSerializationIsRejected(string $input): void
-    {
-        $processor = new PhpSerializationProcessor($input);
-
-        $this->assertTrue(PhpSerializationProcessor::has_serialization_token_prefix($input));
-        $this->assertTrue($processor->is_malformed());
-        $this->assertNull($processor->get_serialized_prefix_byte_length());
-    }
-
-    /**
-     * @return iterable<string, array{string}>
-     */
-    public static function malformedEnumSerializationProvider(): iterable
-    {
-        yield 'empty identifier' => ['E:0:"";'];
-        yield 'missing class and case separator' => ['E:3:"abc";'];
-        yield 'empty class' => ['E:2:":A";'];
-        yield 'empty case' => ['E:2:"A:";'];
-        yield 'multiple separators' => ['E:5:"A:B:C";'];
-        yield 'declared length exceeds payload' => ['E:4:"A:B";'];
-        yield 'missing semicolon' => ['E:3:"A:B"'];
-    }
-
-    public function testValidSerializedPrefixReportsItsConsumedByteLength(): void
-    {
-        $serialization = serialize(['url' => 'https://old-site.com/article']);
-        $processor = new PhpSerializationProcessor($serialization . '; ordinary text');
-
-        $this->assertTrue($processor->is_malformed());
-        $this->assertSame(
-            strlen($serialization),
-            $processor->get_serialized_prefix_byte_length()
-        );
     }
 
     // ---------------------------------------------------------------

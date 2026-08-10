@@ -185,7 +185,7 @@ class NewSiteUrlTest extends TestCase
         $this->callResolve($client, $options);
     }
 
-    public function testNewUrlUsedVerbatim(): void
+    public function testNewUrlWithPathIsRejected(): void
     {
         $client = new \ImportClient(
             'https://old-site.example.com/export',
@@ -193,13 +193,28 @@ class NewSiteUrlTest extends TestCase
             $this->tempDir . '/fs-root'
         );
 
-        // The new URL should be used exactly as-is, even with a trailing path
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('target URL must be an origin without a path');
+
         $options = ['new_site_url' => 'http://localhost:8080/subdir'];
+        $this->callResolve($client, $options);
+    }
+
+    public function testNewOriginRootSlashIsNormalized(): void
+    {
+        $client = new \ImportClient(
+            'https://old-site.example.com/export',
+            $this->tempDir,
+            $this->tempDir . '/fs-root'
+        );
+
+        $options = ['new_site_url' => 'https://new-site.example.com/'];
         $options = $this->callResolve($client, $options);
 
-        $this->assertCount(2, $options['rewrite_url']);
-        // Both variants map to the exact same verbatim new URL
-        $this->assertSame('http://localhost:8080/subdir', $options['rewrite_url'][0][1]);
-        $this->assertSame('http://localhost:8080/subdir', $options['rewrite_url'][1][1]);
+        $this->assertSame('https://new-site.example.com', $options['new_site_url']);
+        $this->assertSame(
+            ['https://old-site.example.com', 'https://new-site.example.com'],
+            $options['rewrite_url'][0]
+        );
     }
 }

@@ -436,10 +436,20 @@ php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" -
 
 This reads `db.sql` from the state directory and executes each statement against
 the target database. For every data-bearing statement (`INSERT`, `UPDATE`), it
-decodes the base64-encoded column values, detects the data format (serialized PHP,
-JSON, block markup, plain text), and rewrites URLs through the appropriate parser
-so that surrounding structure stays intact. Serialized PHP `s:N:` length prefixes
-are recalculated, JSON is re-encoded, and block comment attributes are updated.
+decodes the base64-encoded column values and replaces only exact URL-base bytes.
+`FROM` must be a printable ASCII HTTP URL with a lower-case scheme and an
+optional path; `TO` must be a printable ASCII HTTP origin without a path. A
+non-root `FROM` path must not end in `/`. Escaped, case-variant, and encoded
+spellings are left unchanged; a single root slash on either base is normalized.
+JSON, block markup, and CSS are never decoded or re-encoded. Values containing
+PHP serialization tokens are left unchanged so a byte-length prefix cannot
+become stale. Source paths accept a conservative ASCII URL-path alphabet;
+quotes, backslashes, brackets, braces, angle brackets, and parentheses are not
+supported.
+
+Only occurrences with conservative URL boundaries are changed. Ambiguous
+occurrences, including an unquoted URL immediately after `=` or a configured
+base ending immediately before `)`, are left alone.
 
 You can map multiple domains by repeating the flag:
 
@@ -755,7 +765,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
-* `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
+* `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to splice an ASCII source origin and optional path into a pathless ASCII target origin.
 * `db-domains` — Lists domains discovered in the SQL dump. Reads `<remote-state-directory>/pull/domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 * `pull-metadata` — Prints pull lifecycle and source-site metadata as JSON. The remote Reprint API URL selects the pull state; no network calls are made.
