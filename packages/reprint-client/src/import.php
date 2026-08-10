@@ -3547,16 +3547,16 @@ class ImportClient
                 }
 
                 if ($local_diff_path === $local_relative_path) {
-                    $before_path_type = $index_diff_processor->get_before_path_type();
-                    $after_path_type = $index_diff_processor->get_after_path_type();
-                    $local_path_changed = $before_path_type !== $after_path_type
+                    $earlier_path_type = $index_diff_processor->get_earlier_path_type();
+                    $later_path_type = $index_diff_processor->get_later_path_type();
+                    $local_path_changed = $earlier_path_type !== $later_path_type
                         || (
-                            $before_path_type !== null
+                            $earlier_path_type !== null
                             && (
-                                $index_diff_processor->get_before_size()
-                                    !== $index_diff_processor->get_after_size()
-                                || $index_diff_processor->get_before_ctime()
-                                    !== $index_diff_processor->get_after_ctime()
+                                $index_diff_processor->get_earlier_size()
+                                    !== $index_diff_processor->get_later_size()
+                                || $index_diff_processor->get_earlier_ctime()
+                                    !== $index_diff_processor->get_later_ctime()
                             )
                         );
                     if (
@@ -3565,7 +3565,7 @@ class ImportClient
                             $local_relative_path
                         )
                     ) {
-                        if ($after_path_type !== null) {
+                        if ($later_path_type !== null) {
                             $local_absolute_path = wp_join_unix_paths(
                                 $this->filesystem_root,
                                 $local_relative_path
