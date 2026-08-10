@@ -3,13 +3,17 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\CurlTimeoutException;
+use Reprint\Importer\InterruptedResponseException;
+use Reprint\Importer\StreamingContext;
+use Reprint\Importer\TransientInterruptionException;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Verify recovery from cURL timeouts during streaming fetches.
  *
- * Each fetch method (fetch_sql, fetch_file_batch, fetch_remote_index,
+ * Each fetch method (fetch_sql, fetch_file_batch, fetch_next_remote_index,
  * fetch_database_index) is tested by injecting a CurlTimeoutException. SQL retries
  * in the same invocation; the other phases save partial state for a later run.
  *
@@ -20,6 +24,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
+    private $pullStateDirectory;
     private $filesystem_root;
 
     protected function setUp(): void
@@ -27,9 +32,11 @@ class CurlTimeoutRecoveryTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/curl-timeout-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
+        $this->pullStateDirectory =
+            $this->stateDir . '/remotes/' . md5('http://fake.url') . '/pull';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
+        mkdir($this->pullStateDirectory, 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
 
@@ -62,7 +69,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
     private function writeState(array $state): void
     {
-        \write_current_import_state($this->makeClient(), array_replace_recursive([
+        \write_current_pull_state($this->makeClient(), array_replace_recursive([
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "follow_symlinks" => false,
             "fs_root_nonempty_behavior" => "preserve-local",
@@ -76,7 +83,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
     private function readState(): array
     {
-        $contents = file_get_contents($this->stateDir . '/pull/state.json');
+        $contents = file_get_contents($this->pullStateDirectory . '/state.json');
         return json_decode($contents, true);
     }
 
@@ -279,10 +286,10 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // fetch_remote_index: timeout saves state and returns false
+    // fetch_next_remote_index: timeout saves state and returns false
     // ---------------------------------------------------------------
 
-    public function testRemoteIndexTimeoutSavesPartialState()
+    public function testNextRemoteIndexTimeoutSavesPartialState()
     {
         $this->writeState([
             "active_resumable_command" => [
@@ -308,12 +315,12 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $fetchRemoteIndex = $reflection->getMethod('fetch_remote_index');
-        $result = $fetchRemoteIndex->invoke($client);
+        $fetchNextRemoteIndex = $reflection->getMethod('fetch_next_remote_index');
+        $result = $fetchNextRemoteIndex->invoke($client);
 
         $this->assertFalse(
             $result,
-            "fetch_remote_index should return false on timeout"
+            "fetch_next_remote_index should return false on timeout"
         );
 
         $state = $this->readState();
@@ -369,18 +376,18 @@ class CurlTimeoutRecoveryTest extends TestCase
 
     public function testInterruptionExceptionHierarchy()
     {
-        $interrupted = new \InterruptedResponseException("Response ended early");
+        $interrupted = new InterruptedResponseException("Response ended early");
         $this->assertInstanceOf(\RuntimeException::class, $interrupted);
         $this->assertNotInstanceOf(
-            \TransientInterruptionException::class,
+            TransientInterruptionException::class,
             $interrupted,
         );
 
-        $transient = new \TransientInterruptionException("Connection reset");
-        $this->assertInstanceOf(\InterruptedResponseException::class, $transient);
+        $transient = new TransientInterruptionException("Connection reset");
+        $this->assertInstanceOf(InterruptedResponseException::class, $transient);
 
-        $timeout = new \CurlTimeoutException("Operation timed out");
-        $this->assertInstanceOf(\TransientInterruptionException::class, $timeout);
+        $timeout = new CurlTimeoutException("Operation timed out");
+        $this->assertInstanceOf(TransientInterruptionException::class, $timeout);
     }
 
     // ---------------------------------------------------------------
@@ -412,7 +419,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "sql_chunk",
             "abc",
             "abc",
-            new \TransientInterruptionException("Response ended early"),
+            new TransientInterruptionException("Response ended early"),
         );
         $this->assertEquals(
             1,
@@ -425,7 +432,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "sql_chunk",
             "abc",
             "abc",
-            new \TransientInterruptionException("Response ended early"),
+            new TransientInterruptionException("Response ended early"),
         );
         $this->assertEquals(
             2,
@@ -454,7 +461,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "sql_chunk",
             "abc",
             "def",
-            new \TransientInterruptionException("Response ended early"),
+            new TransientInterruptionException("Response ended early"),
         );
         $this->assertEquals(
             0,
@@ -485,7 +492,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "sql_chunk",
             "abc",
             "abc",
-            new \TransientInterruptionException("Response ended early"),
+            new TransientInterruptionException("Response ended early"),
         );
     }
 
@@ -550,8 +557,8 @@ class CurlTimeoutRecoveryTest extends TestCase
             SuccessTestClient::class,
         );
 
-        $fetchRemoteIndex = $reflection->getMethod('fetch_remote_index');
-        $fetchRemoteIndex->invoke($client);
+        $fetchNextRemoteIndex = $reflection->getMethod('fetch_next_remote_index');
+        $fetchNextRemoteIndex->invoke($client);
 
         $state = $this->readState();
         $this->assertEquals(
@@ -575,12 +582,12 @@ class TimeoutTestClient extends \ImportClient
     protected function fetch_streaming(
         string $url,
         ?string $cursor,
-        \StreamingContext $context,
+        StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
         ++$this->streaming_requests;
-        throw new \CurlTimeoutException(
+        throw new CurlTimeoutException(
             "cURL error: Operation timed out after 300001 milliseconds with 0 bytes received"
         );
     }
@@ -596,7 +603,7 @@ class InterruptedAfterStreamedPartCloseClient extends \ImportClient
     protected function fetch_streaming(
         string $url,
         ?string $cursor,
-        \StreamingContext $context,
+        StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
@@ -638,7 +645,7 @@ class SuccessTestClient extends \ImportClient
     protected function fetch_streaming(
         string $url,
         ?string $cursor,
-        \StreamingContext $context,
+        StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {

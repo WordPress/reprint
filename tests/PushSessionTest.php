@@ -342,9 +342,27 @@ final class PushSessionTest extends TestCase {
             $this->assertStringContainsString('Excluded', $exception->getMessage());
         }
 
+        $this->push_file($push_session, 'private-workshop/allowed.php', 'safe');
+        $this->assertSame('complete', $push_session->get_status('private-workshop/allowed.php')['path']['state']);
+
         $root_session = Site_Export_Push_Session::create($this->reprint_directory, '/', [], str_repeat('b', 32));
         $reopened = Site_Export_Push_Session::open($this->reprint_directory, '/', $root_session->get_push_session_id(), []);
         $this->assertSame($root_session->get_push_directory(), $reopened->get_push_directory());
+    }
+
+    public function testRootReprintDirectoryKeepsPushSessionPathsAbsolute(): void {
+        $push_session_id = str_repeat('c', 32);
+        $push_session = Site_Export_Push_Session::open(
+            '/',
+            $this->docroot,
+            $push_session_id,
+            []
+        );
+
+        $this->assertSame(
+            '/.reprint/push/' . $push_session_id,
+            $push_session->get_push_directory()
+        );
     }
 
     public function testCompletedWorkSymlinkCannotBecomeAnotherWorkPathsParent(): void {
@@ -844,7 +862,7 @@ final class PushSessionTest extends TestCase {
     }
 
     public function testSourceKeepsOnePathShapedWorkTreeAndSharedInFlightHelpers(): void {
-        $source = file_get_contents(__DIR__ . '/../packages/reprint-exporter/src/class-push-session.php');
+        $source = file_get_contents(__DIR__ . '/../packages/reprint-server/src/class-push-session.php');
         $this->assertIsString($source);
         $this->assertStringNotContainsString('work/partial', $source);
         $this->assertStringNotContainsString('work_partial', $source);

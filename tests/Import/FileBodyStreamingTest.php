@@ -4,8 +4,9 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Protocol\MultipartStreamParser;
+use Reprint\Importer\StreamingContext;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 class FileBodyStreamingTest extends TestCase
 {
@@ -37,7 +38,7 @@ class FileBodyStreamingTest extends TestCase
         $reflection->getProperty('is_tty')->setValue($client, true);
 
         $handleFileChunk = $reflection->getMethod('handle_file_chunk');
-        $context = new \StreamingContext();
+        $context = new StreamingContext();
         $bodyLengths = [];
         $context->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context, &$bodyLengths): void {
             if (($chunk['headers']['x-chunk-type'] ?? '') === 'file') {
@@ -117,7 +118,7 @@ class FileBodyStreamingTest extends TestCase
         // sending it — so on resume we re-receive the whole part body. To
         // mimic the *intended* behaviour (server cooperates and skips the
         // already-written prefix), pass 2 sends only the missing tail.
-        $context1 = new \StreamingContext();
+        $context1 = new StreamingContext();
         $handleFileChunk = $reflection->getMethod('handle_file_chunk');
         $context1->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context1): void {
             $handleFileChunk->invoke($client, $chunk, $context1);
@@ -166,7 +167,7 @@ class FileBodyStreamingTest extends TestCase
         }
         $trackedBytes = $context1->file_bytes_written;
 
-        $context2 = new \StreamingContext();
+        $context2 = new StreamingContext();
         $context2->file_handle = fopen($target, 'ab');
         $context2->file_path = $target;
         $context2->file_ctime = 1234567890;
@@ -207,6 +208,116 @@ class FileBodyStreamingTest extends TestCase
             'Final file size must equal source size — anything else means duplicated bytes (overlap) or missing bytes (gap).');
         $this->assertSame($body, $finalContents,
             'Final file must be byte-identical to source after mid-file resume.');
+    }
+
+    public function testStreamingHeartbeatsUseTheSelectedProgressOutput(): void
+    {
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
+            $this->markTestSkipped('Streaming progress coverage requires PHP curl and pcntl.');
+        }
+
+        $ttyOutput = $this->fetchSlowResponseWithProgressMode('tty', false);
+        $this->assertSame('', $ttyOutput);
+
+        $jsonlOutput = $this->fetchSlowResponseWithProgressMode('jsonl', true);
+        $records = array_map(
+            static fn(string $line): array => json_decode($line, true, 512, JSON_THROW_ON_ERROR),
+            array_values(array_filter(preg_split('/\R/', trim($jsonlOutput)) ?: []))
+        );
+        $heartbeatRecords = array_values(array_filter(
+            $records,
+            static fn(array $record): bool => ( $record['heartbeat'] ?? false ) === true
+        ));
+        $this->assertNotEmpty($heartbeatRecords, $jsonlOutput);
+    }
+
+    private function fetchSlowResponseWithProgressMode(
+        string $progressMode,
+        bool $progressStreamIsTty
+    ): string {
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errorNumber, $errorMessage);
+        $this->assertNotFalse($listener, $errorMessage);
+        $address = stream_socket_get_name($listener, false);
+        $this->assertIsString($address);
+
+        $child = pcntl_fork();
+        $this->assertNotSame(-1, $child);
+        if ($child === 0) {
+            $connection = stream_socket_accept($listener, 5);
+            if ($connection === false) {
+                exit(2);
+            }
+            stream_set_timeout($connection, 5);
+            $request = '';
+            while (strpos($request, "\r\n\r\n") === false) {
+                $requestChunk = fread($connection, 8192);
+                if ($requestChunk === false || $requestChunk === '') {
+                    fclose($connection);
+                    fclose($listener);
+                    exit(3);
+                }
+                $request .= $requestChunk;
+            }
+
+            $boundary = 'progress-output-test';
+            $body = "--{$boundary}\r\n"
+                . "X-Chunk-Type: completion\r\n"
+                . "Content-Length: 0\r\n\r\n\r\n"
+                . "--{$boundary}--\r\n";
+            $headers = "HTTP/1.1 200 OK\r\n"
+                . "Content-Type: multipart/mixed; boundary={$boundary}\r\n"
+                . 'Content-Length: ' . strlen($body) . "\r\n"
+                . "Connection: close\r\n\r\n";
+            $splitAt = (int) floor(strlen($body) / 2);
+            fwrite($connection, $headers . substr($body, 0, $splitAt));
+            fflush($connection);
+            usleep(1200000);
+            fwrite($connection, substr($body, $splitAt));
+            fclose($connection);
+            fclose($listener);
+            exit(0);
+        }
+
+        fclose($listener);
+        $output = fopen('php://temp', 'w+');
+        $this->assertIsResource($output);
+        $client = new \ImportClient(
+            'http://' . $address,
+            $this->tempDir . '/state',
+            $this->tempDir . '/fs-root'
+        );
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection->getProperty('is_tty')->setValue($client, $progressStreamIsTty);
+        $reflection->getProperty('progress_output_mode')->setValue($client, $progressMode);
+        $reflection->getProperty('progress_fd')->setValue($client, $output);
+        $progress = $reflection->getProperty('progress')->getValue($client);
+        $progress->set_progress_fd($output);
+        $progress->set_terminal_output_enabled($progressMode === 'tty');
+
+        $context = new StreamingContext();
+        $context->on_chunk = static function (array $chunk) use ($context): void {
+            if (( $chunk['headers']['x-chunk-type'] ?? '' ) === 'completion') {
+                $context->saw_completion = true;
+            }
+        };
+
+        try {
+            $reflection->getMethod('fetch_streaming')->invoke(
+                $client,
+                'http://' . $address . '/stream',
+                null,
+                $context
+            );
+        } finally {
+            pcntl_waitpid($child, $status);
+        }
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+        rewind($output);
+        $contents = stream_get_contents($output);
+        fclose($output);
+        $this->assertIsString($contents);
+        return $contents;
     }
 
     private function buildMultipart(string $boundary, array $parts): string

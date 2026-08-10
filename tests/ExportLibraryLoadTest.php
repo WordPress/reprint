@@ -12,7 +12,7 @@ use PHPUnit\Framework\TestCase;
  * error handlers at module level.
  */
 final class ExportLibraryLoadTest extends TestCase {
-    private const EXPORT_PATH = __DIR__ . '/../packages/reprint-exporter/src/export.php';
+    private const EXPORT_PATH = __DIR__ . '/../packages/reprint-server/src/export.php';
 
     public function testRequiringExportPhpDoesNotRejectMissingSecretKey(): void
     {
@@ -33,6 +33,41 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertStringContainsString('endpoint-handlers-loaded', $result['output']);
     }
 
+    public function testNormalizePathListKeepsTheFilesystemRoot(): void
+    {
+        $export_path = realpath(self::EXPORT_PATH);
+        $this->assertNotFalse($export_path, 'export.php must exist');
+
+        $result = $this->runPhpCode(
+            "<?php\nrequire " . var_export($export_path, true) . ";\n"
+            . "echo json_encode(normalize_path_list(['/']), JSON_UNESCAPED_SLASHES);\n"
+        );
+
+        $this->assertSame(0, $result['status'], $result['output']);
+        $this->assertSame('["/"]', trim($result['output']));
+    }
+
+    public function testPreflightKeepsFilesystemRootInContentInventory(): void
+    {
+        $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
+        $this->assertNotFalse($autoload_path, 'Composer autoloader must exist');
+        $export_path = realpath(self::EXPORT_PATH);
+        $this->assertNotFalse($export_path, 'export.php must exist');
+
+        $result = $this->runPhpCode(
+            "<?php\nrequire " . var_export($autoload_path, true) . ";\n"
+            . "require " . var_export($export_path, true) . ";\n"
+            . "ob_start();\n"
+            . "\$preflight = endpoint_preflight(['directory' => '/']);\n"
+            . "ob_end_clean();\n"
+            . "echo json_encode(\$preflight['stats']['wp_content']['roots'], JSON_UNESCAPED_SLASHES);\n"
+        );
+
+        $this->assertSame(0, $result['status'], $result['output']);
+        $roots = json_decode(trim($result['output']), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('/', $roots[0]['root']);
+    }
+
     public function testPluginRuntimeLoaderSkipsAutoloadAlreadyLoadedThroughSymlinkedPluginDirectory(): void
     {
         $tmp_dir = sys_get_temp_dir() . '/export-runtime-loader-test-' . uniqid('', true);
@@ -40,7 +75,7 @@ final class ExportLibraryLoadTest extends TestCase {
         $linked_plugin_directory = $tmp_dir . '/linked-plugin';
         $autoload_path = $physical_plugin_directory . '/vendor/autoload.php';
         $linked_autoload_path = $linked_plugin_directory . '/vendor/autoload.php';
-        $export_path = $physical_plugin_directory . '/vendor/wp-php-toolkit/reprint-exporter/src/export.php';
+        $export_path = $physical_plugin_directory . '/vendor/wp-php-toolkit/reprint-server/src/export.php';
         mkdir(dirname($export_path), 0755, true);
         file_put_contents($autoload_path, "<?php\n");
         file_put_contents($export_path, "<?php\n");
@@ -54,7 +89,7 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertNotFalse($canonical_export_path, 'export.php must exist');
         $canonical_autoload_path = realpath($autoload_path);
         $this->assertNotFalse($canonical_autoload_path, 'autoload.php must exist');
-        $lib_path = realpath(__DIR__ . '/../reprint-exporter-wp/lib.php');
+        $lib_path = realpath(__DIR__ . '/../reprint-server-wp/lib.php');
         $this->assertNotFalse($lib_path, 'lib.php must exist');
         $linked_autoload_path_encoded = base64_encode($linked_autoload_path);
         $linked_plugin_directory_encoded = base64_encode($linked_plugin_directory . '/');

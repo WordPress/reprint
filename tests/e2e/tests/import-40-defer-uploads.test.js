@@ -1,8 +1,8 @@
 /**
  * Test 40: --filter=essential-files / --filter=skipped-earlier
  *
- * Tests that --filter=essential-files skips uploads during files-pull
- * and that --filter=skipped-earlier downloads them in a separate run.
+ * Tests that --filter=essential-files excludes uploads during files-pull
+ * and that --filter=skipped-earlier selects uploads in a separate run.
  *
  * The remote site has:
  *   - Standard WordPress files (wp-admin, wp-includes, wp-content/themes, etc.)
@@ -16,8 +16,8 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    assertTreesMatch, readAuditLog,
-    fsRootDir,
+    assertTreesMatch,
+    fsRootDir, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -80,7 +80,10 @@ describe('Import: --filter', () => {
         });
 
         it('state shows complete with filter persisted', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+            const state = JSON.parse(readFileSync(
+                join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+                'utf-8',
+            ));
             assert.equal(state.active_resumable_command.command_name, 'files-pull');
             assert.equal(state.active_resumable_command.completion_state, 'complete');
             assert.equal(state.filter, 'essential-files');
@@ -104,18 +107,7 @@ describe('Import: --filter', () => {
                 'Expected test-data/hello.txt to exist');
         });
 
-        it('skipped fetch list remains on disk', () => {
-            assert.ok(existsSync(join(tempDir, 'pull/skipped-fetch-list.jsonl')),
-                'Expected skipped fetch list to remain on disk');
-        });
-
-        it('audit log shows essential files complete', () => {
-            const audit = readAuditLog(tempDir);
-            assert.ok(audit.includes('ESSENTIAL FILES COMPLETE'),
-                'Expected ESSENTIAL FILES COMPLETE in audit log');
-        });
-
-        // Now download the skipped files
+        // Now select and download uploads.
         it('--filter=skipped-earlier downloads the uploads', () => {
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
@@ -133,26 +125,18 @@ describe('Import: --filter', () => {
             }
         });
 
-        it('skipped fetch list was cleaned up', () => {
-            assert.ok(!existsSync(join(tempDir, 'pull/skipped-fetch-list.jsonl')),
-                'Expected skipped fetch list to be cleaned up');
-        });
-
-        it('state shows complete after skipped-earlier (not left in_progress)', () => {
-            // Regression: the skipped-earlier fetch must mark the sync
-            // complete. If it leaves status="in_progress", the filter-change
-            // guard blocks the next delta re-pull below.
-            const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        it('state shows the uploads-only filter completed', () => {
+            const state = JSON.parse(readFileSync(
+                join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+                'utf-8',
+            ));
             assert.equal(state.active_resumable_command.completion_state, 'complete',
                 `Expected completion_state=complete after skipped-earlier, got ${state.active_resumable_command?.completion_state}`);
+            assert.equal(state.filter, 'skipped-earlier');
         });
 
         it('a subsequent essential-files delta re-pull succeeds', () => {
-            // Regression: switching the filter back to essential-files after a
-            // completed skipped-earlier fetch must be allowed (the guard only
-            // blocks filter changes mid-sync). Previously this threw
-            // "Cannot change --filter from 'skipped-earlier' to
-            // 'essential-files' while a sync is in progress."
+            // Switching filters after completion starts another filtered delta.
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--filter=essential-files'],
@@ -192,7 +176,10 @@ describe('Import: --filter', () => {
         });
 
         it('state preserves filter across resume cycles', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+            const state = JSON.parse(readFileSync(
+                join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+                'utf-8',
+            ));
             assert.equal(state.filter, 'essential-files');
             assert.equal(state.active_resumable_command.completion_state, 'complete');
         });
@@ -205,10 +192,6 @@ describe('Import: --filter', () => {
             }
         });
 
-        it('skipped list remains on disk', () => {
-            assert.ok(existsSync(join(tempDir, 'pull/skipped-fetch-list.jsonl')),
-                'Expected skipped fetch list to remain');
-        });
     });
 
     // ------------------------------------------------------------------
@@ -233,11 +216,6 @@ describe('Import: --filter', () => {
                 `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
         });
 
-        it('no skipped fetch list was created', () => {
-            assert.ok(!existsSync(join(tempDir, 'pull/skipped-fetch-list.jsonl')),
-                'Expected no skipped fetch list without --filter');
-        });
-
         it('uploads were downloaded normally', () => {
             const importedRoot = join(fsRootDir(tempDir), siteDir);
             for (const f of UPLOAD_FILES) {
@@ -248,9 +226,9 @@ describe('Import: --filter', () => {
     });
 
     // ------------------------------------------------------------------
-    // Test: --filter=skipped-earlier without prior essential-files errors
+    // Test: --filter=skipped-earlier is an independent uploads-only preset
     // ------------------------------------------------------------------
-    describe('skipped-earlier without prior essential-files errors', () => {
+    describe('skipped-earlier without prior essential-files', () => {
         let tempDir;
 
         beforeAll(() => {
@@ -261,18 +239,23 @@ describe('Import: --filter', () => {
             cleanupTempDir(tempDir);
         });
 
-        it('errors when no prior essential-files run exists', () => {
+        it('downloads uploads without a prior filtered run', () => {
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--filter=skipped-earlier'],
-                autoResume: false,
             });
-            assert.equal(result.exitCode, 1,
-                `Expected exit 1\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
-            assert.ok(
-                result.stderr.includes('skipped-earlier') || result.stderr.includes('essential-files'),
-                `Expected error about missing essential-files run, got: ${result.stderr}`,
-            );
+            assert.equal(result.exitCode, 0,
+                `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+        });
+
+        it('downloads only uploads', () => {
+            const importedRoot = join(fsRootDir(tempDir), siteDir);
+            for (const f of UPLOAD_FILES) {
+                assert.ok(existsSync(join(importedRoot, f)),
+                    `Expected upload file to exist: ${f}`);
+            }
+            assert.ok(!existsSync(join(importedRoot, 'wp-load.php')),
+                'Expected wp-load.php to remain outside the uploads-only selection');
         });
     });
 });

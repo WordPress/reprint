@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Verify that diagnose_http_error() maps HTTP status codes and response
@@ -160,7 +160,7 @@ class DiagnoseHttpErrorTest extends TestCase
     {
         $result = $this->diagnose(404, '');
         $this->assertSame('NOT_FOUND', $result['code']);
-        $this->assertStringContainsString('install-exporter', $result['message']);
+        $this->assertStringContainsString('install-server', $result['message']);
     }
 
     // ── Server errors (500+) ─────────────────────────────────────

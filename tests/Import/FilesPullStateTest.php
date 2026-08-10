@@ -3,8 +3,9 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\StreamingContext;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Test files-pull state transitions and preserve-local diff behavior.
@@ -18,6 +19,7 @@ class FilesPullStateTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
+    private $pullStateDirectory;
     private $filesystem_root;
 
     protected function setUp(): void
@@ -25,8 +27,10 @@ class FilesPullStateTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/import-state-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
+        $this->pullStateDirectory =
+            $this->stateDir . '/remotes/' . md5('http://fake.url') . '/pull';
         $this->filesystem_root = $this->tempDir . '/fs-root';
-        mkdir($this->stateDir . '/pull', 0755, true);
+        mkdir($this->pullStateDirectory, 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
 
@@ -67,7 +71,7 @@ class FilesPullStateTest extends TestCase
      */
     private function writeState(array $state): void
     {
-        \write_current_import_state($this->makeClient(), array_replace_recursive([
+        \write_current_pull_state($this->makeClient(), array_replace_recursive([
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "follow_symlinks" => false,
             "fs_root_nonempty_behavior" => "preserve-local",
@@ -79,7 +83,7 @@ class FilesPullStateTest extends TestCase
      */
     private function readState(): array
     {
-        $contents = file_get_contents($this->stateDir . '/pull/state.json');
+        $contents = file_get_contents($this->pullStateDirectory . '/state.json');
         return json_decode($contents, true);
     }
 
@@ -101,12 +105,12 @@ class FilesPullStateTest extends TestCase
      */
     private function readFetchList(): array
     {
-        $file = $this->stateDir . '/pull/fetch-list.jsonl';
-        if (!file_exists($file)) {
+        $fetchListFilePath = $this->pullStateDirectory . '/fetch-list.jsonl';
+        if (!file_exists($fetchListFilePath)) {
             return [];
         }
         $paths = [];
-        foreach (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        foreach (file($fetchListFilePath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
             $data = json_decode($line, true);
             if (isset($data["path"])) {
                 $paths[] = base64_decode($data["path"]);
@@ -163,54 +167,12 @@ class FilesPullStateTest extends TestCase
     }
 
     /**
-     * The deferred skipped-files tail reopens a completed files-pull, and a
-     * successful tail must restore the completed status before returning.
-     */
-    public function testSkippedEarlierTailRestoresCompletedStatus()
-    {
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "complete",
-                "current_stage" => null,
-            ],
-            "filter" => "essential-files",
-        ]);
-        file_put_contents(
-            $this->stateDir . '/pull/skipped-fetch-list.jsonl',
-            json_encode([
-                "path" => base64_encode('/wp-content/uploads/2024/01/photo.jpg'),
-            ], JSON_UNESCAPED_SLASHES) . "\n",
-        );
-
-        $client = new CompletedFileFetchClient(
-            'http://fake.url',
-            $this->stateDir,
-            $this->filesystem_root,
-        );
-
-        ob_start();
-        $client->run([
-            "command" => "files-pull",
-            "filter" => "skipped-earlier",
-        ]);
-        ob_end_clean();
-
-        $state = $this->readState();
-        $this->assertEquals("complete", $state["active_resumable_command"]["completion_state"]);
-        $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
-        $this->assertNull($state["active_resumable_command"]["current_stage"]);
-        $this->assertEquals("skipped-earlier", $state["filter"]);
-        $this->assertFileDoesNotExist($this->stateDir . '/pull/skipped-fetch-list.jsonl');
-    }
-
-    /**
      * After --abort, the state should not be "complete".
      */
     public function testAbortClearsCompletedStatus()
     {
-        $indexFile = $this->stateDir . '/pull/local-index.jsonl';
-        file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
+        $remoteIndexFile = $this->pullStateDirectory . '/remote-index.jsonl';
+        file_put_contents($remoteIndexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
             "active_resumable_command" => [
@@ -239,8 +201,8 @@ class FilesPullStateTest extends TestCase
      */
     public function testAbortThenRerunStartsFresh()
     {
-        $indexFile = $this->stateDir . '/pull/local-index.jsonl';
-        file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
+        $remoteIndexFile = $this->pullStateDirectory . '/remote-index.jsonl';
+        file_put_contents($remoteIndexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
             "active_resumable_command" => [
@@ -271,73 +233,26 @@ class FilesPullStateTest extends TestCase
         $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
     }
 
-    /**
-     * After a full `pull`, active_resumable_command points at the last stage
-     * (db-apply), not files-pull, but pull_pipeline records a deferred tail. A
-     * standalone skipped-earlier run must recover the completed files-pull and
-     * fetch the tail rather than throwing "no completed sync with skipped
-     * files".
-     */
-    public function testSkippedEarlierAfterCompositePullAdoptsFilesPullState(): void
-    {
-        file_put_contents(
-            $this->stateDir . '/pull/skipped-fetch-list.jsonl',
-            $this->indexLine('/wp-content/uploads/2024/01/photo.jpg', 1000, 100),
-        );
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "db-apply",
-                "completion_state" => "complete",
-            ],
-            "filter" => "skipped-earlier",
-            "pull_pipeline" => [
-                "files_filter" => "essential-files",
-                "skipped_pending" => true,
-            ],
-        ]);
-
-        [$client, $reflection] = $this->prepareClient();
-        $filterProp = $reflection->getProperty('filter');
-        $filterProp->setValue($client, 'skipped-earlier');
-
-        try {
-            $reflection->getMethod('run_files_pull')->invoke($client);
-        } catch (\Exception $e) {
-            // Expected: the fetch fails against the fake URL. The point is that
-            // it got PAST the "no completed sync with skipped files" guard.
-            $this->assertStringNotContainsString(
-                'no completed sync with skipped files',
-                $e->getMessage(),
-            );
-        }
-
-        // The checkpoint was restored to the completed files-pull and the
-        // deferred-tail fetch started.
-        $state = $this->readState();
-        $this->assertSame('files-pull', $state["active_resumable_command"]["command_name"]);
-        $this->assertSame('fetch-skipped', $state["active_resumable_command"]["current_stage"]);
-    }
-
     // ---------------------------------------------------------------
     // Preserve-local diff tests
     // ---------------------------------------------------------------
 
     /**
-     * In preserve-local mode, a file that is in the local index and changed
+     * In preserve-local mode, a file that is in the remote index and changed
      * remotely (different ctime) must be added to the fetch list.
      *
      * Preserve-local protects pre-existing local files, not files we
-     * previously synced. A changed file in the local index is ours to update.
+     * previously synced. A changed file in the remote index is ours to update.
      */
     public function testDeltaDiffRedownloadsChangedIndexedFile()
     {
-        // Local index: file synced at ctime 1000
-        $localIndex = $this->stateDir . '/pull/local-index.jsonl';
-        file_put_contents($localIndex, $this->indexLine('/wp-content/themes/flavor/style.css', 1000, 200));
+        // Remote index: file synced at ctime 1000
+        $remoteIndexFile = $this->pullStateDirectory . '/remote-index.jsonl';
+        file_put_contents($remoteIndexFile, $this->indexLine('/wp-content/themes/flavor/style.css', 1000, 200));
 
-        // Remote index: same file at ctime 2000 (changed)
-        $remoteIndex = $this->stateDir . '/pull/remote-index.jsonl';
-        file_put_contents($remoteIndex, $this->indexLine('/wp-content/themes/flavor/style.css', 2000, 250));
+        // Next remote index: same file at ctime 2000 (changed)
+        $nextRemoteIndexFile = $this->pullStateDirectory . '/remote-index.next.jsonl';
+        file_put_contents($nextRemoteIndexFile, $this->indexLine('/wp-content/themes/flavor/style.css', 2000, 250));
 
         // The file exists locally (downloaded during the initial sync)
         $localFile = $this->filesystem_root . '/wp-content/themes/flavor/style.css';
@@ -354,30 +269,30 @@ class FilesPullStateTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
+        $diffMethod = $reflection->getMethod('compare_remote_indexes_and_build_fetch_list');
         $diffMethod->invoke($client);
 
         $downloads = $this->readFetchList();
         $this->assertContains(
             '/wp-content/themes/flavor/style.css',
             $downloads,
-            "A changed file in the local index must be re-downloaded, not skipped by preserve-local",
+            "A changed file in the remote index must be re-downloaded, not skipped by preserve-local",
         );
     }
 
     /**
-     * In preserve-local mode, a file that is NOT in the local index but
+     * In preserve-local mode, a file that is NOT in the remote index but
      * exists locally (pre-existing) must be skipped.
      */
     public function testDeltaDiffSkipsPreExistingLocalFile()
     {
-        // Local index: empty (file was never synced by us)
-        $localIndex = $this->stateDir . '/pull/local-index.jsonl';
-        file_put_contents($localIndex, '');
+        // Remote index: empty (file was never synced by us)
+        $remoteIndexFile = $this->pullStateDirectory . '/remote-index.jsonl';
+        file_put_contents($remoteIndexFile, '');
 
-        // Remote index: file exists on remote
-        $remoteIndex = $this->stateDir . '/pull/remote-index.jsonl';
-        file_put_contents($remoteIndex, $this->indexLine('/wp-content/object-cache.php', 1000, 500));
+        // Next remote index: file exists on remote
+        $nextRemoteIndexFile = $this->pullStateDirectory . '/remote-index.next.jsonl';
+        file_put_contents($nextRemoteIndexFile, $this->indexLine('/wp-content/object-cache.php', 1000, 500));
 
         // The file exists locally (pre-existing, e.g. hosting drop-in)
         $localFile = $this->filesystem_root . '/wp-content/object-cache.php';
@@ -394,7 +309,7 @@ class FilesPullStateTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
+        $diffMethod = $reflection->getMethod('compare_remote_indexes_and_build_fetch_list');
         $diffMethod->invoke($client);
 
         $downloads = $this->readFetchList();
@@ -434,7 +349,7 @@ class FilesPullStateTest extends TestCase
 
         // Send a file chunk with new content
         $method = $reflection->getMethod('handle_file_chunk');
-        $context = new \StreamingContext();
+        $context = new StreamingContext();
         $chunk = [
             'headers' => [
                 'x-file-path' => base64_encode('/wp-content/themes/flavor/style.css'),
@@ -457,27 +372,5 @@ class FilesPullStateTest extends TestCase
             file_get_contents($localFile),
             "Fetch stage must overwrite existing files that were placed in the fetch list",
         );
-    }
-}
-
-/**
- * Test double that completes a file_fetch request without real network I/O.
- */
-class CompletedFileFetchClient extends \ImportClient
-{
-    protected function fetch_streaming(
-        string $url,
-        ?string $cursor,
-        \StreamingContext $context,
-        ?array $post_data = null,
-        ?string $endpoint = null
-    ): void {
-        ($context->on_chunk)([
-            "headers" => [
-                "x-chunk-type" => "completion",
-                "x-status" => "complete",
-            ],
-            "body" => "",
-        ]);
     }
 }

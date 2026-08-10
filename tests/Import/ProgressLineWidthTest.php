@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
 
 /**
  * Verify that progress line output never exceeds terminal width.
@@ -80,6 +80,15 @@ class ProgressLineWidthTest extends TestCase
         $this->assertLessThanOrEqual(60, $this->displayWidth($result),
             "Progress bar line exceeds terminal width. Display width: " .
             $this->displayWidth($result) . ", max: 60. Output: " . $result);
+    }
+
+    public function testProgressBarPercentageComesFirstAndUsesDefaultOutputColor(): void
+    {
+        $progress = $this->createProgress();
+        $result = $progress->render_progress_bar('Pushing', 0.6);
+
+        $this->assertStringContainsString('60% Pushing', $result);
+        $this->assertStringNotContainsString("\033[2m", $result);
     }
 
     public function testUnicodeSpinnerWidth(): void

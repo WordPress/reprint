@@ -11,6 +11,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, compareDatabases, createMysqlConnection,
+    pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -47,7 +48,7 @@ describe('Import: Resume SQL', { timeout: 120000 }, () => {
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const stateFile = join(tempDir, 'pull/state.json');
+        const stateFile = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assert.equal(state.active_resumable_command.completion_state, 'complete', 'Expected status to be complete');
     });

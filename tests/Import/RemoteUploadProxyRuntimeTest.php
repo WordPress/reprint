@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 class RemoteUploadProxyRuntimeTest extends TestCase
 {
@@ -22,7 +22,6 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $this->outputDir = $this->tempDir . '/runtime';
 
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
     }
@@ -96,7 +95,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             'max_allowed_packet' => null,
         ];
 
-        \write_current_import_state($this->makeClient(), array_replace_recursive($defaults, $state));
+        \write_current_pull_state($this->makeClient(), array_replace_recursive($defaults, $state));
     }
 
     private function makeClient(): \ImportClient
@@ -124,14 +123,17 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $this->setPrivate($client, 'state', $state);
     }
 
-    private function runApplyRuntime(\ImportClient $client): string
+    private function runApplyRuntime(
+        \ImportClient $client,
+        ?string $flat_document_root = null
+    ): string
     {
         ob_start();
         try {
             $this->callPrivate($client, 'run_apply_runtime', [[
                 'runtime' => 'php-builtin',
                 'output_dir' => $this->outputDir,
-                'flat_document_root' => $this->fsRoot,
+                'flat_document_root' => $flat_document_root ?? $this->fsRoot,
             ]]);
         } finally {
             ob_end_clean();
@@ -140,8 +142,73 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         return file_get_contents($this->outputDir . '/runtime.php');
     }
 
-    public function testApplyRuntimeAddsProxyWhenSkippedUploadsRemain(): void
+    public function testApplyRuntimeKeepsTheFilesystemRootAsTheFlatDocumentRoot(): void
     {
+        $this->writeState([
+            'active_resumable_command' => [
+                'command_name' => 'files-pull',
+                'completion_state' => 'complete',
+            ],
+        ]);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client, '/');
+
+        $this->assertStringContainsString(
+            "-t '/'",
+            file_get_contents($this->outputDir . '/start.sh')
+        );
+    }
+
+    public function testApplyRuntimeFindsRootAbspathInTheRawDownload(): void
+    {
+        mkdir($this->fsRoot . '/remote-document-root');
+        file_put_contents(
+            $this->fsRoot . '/remote-document-root/index.php',
+            "<?php echo 'document root';\n",
+        );
+        $this->writeState([
+            'preflight' => [
+                'data' => [
+                    'runtime' => [
+                        'document_root' => '/remote-document-root',
+                    ],
+                    'database' => [
+                        'wp' => [
+                            'paths_urls' => [
+                                'abspath' => '/',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        ob_start();
+        try {
+            $this->callPrivate($client, 'run_apply_runtime', [[
+                'runtime' => 'php-builtin',
+                'output_dir' => $this->outputDir,
+            ]]);
+        } finally {
+            ob_end_clean();
+        }
+        $runtime = file_get_contents($this->outputDir . '/runtime.php');
+        $resolved_filesystem_root = realpath($this->fsRoot);
+        $this->assertIsString($resolved_filesystem_root);
+
+        $this->assertStringContainsString(
+            "\$wordpress_core_dir = '" . addslashes($resolved_filesystem_root) . "';",
+            $runtime,
+        );
+    }
+
+    public function testApplyRuntimeAddsProxyForEssentialFilesFilter(): void
+    {
+        $client = $this->makeClient();
         $this->writeState([
             'active_resumable_command' => [
                 'command_name' => 'db-apply',
@@ -149,24 +216,23 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             ],
             'filter' => 'essential-files',
         ]);
-        file_put_contents(
-            $this->stateDir . '/pull/skipped-fetch-list.jsonl',
-            json_encode(['path' => '/wp-content/uploads/2024/01/photo.jpg']) . "\n",
-        );
-
-        $client = $this->makeClient();
         $this->loadClientState($client);
         $runtime = $this->runApplyRuntime($client);
+        $resolvedPullStateDirectory =
+            realpath($client->pull_state_directory)
+            ?: $client->pull_state_directory;
 
         $this->assertStringContainsString(
             "REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL",
             $runtime,
         );
         $this->assertStringContainsString(
-            "REPRINT_PULL_STATE_FILE",
+            "define('REPRINT_PULL_STATE_FILE', '"
+                . $resolvedPullStateDirectory
+                . "/state.json');",
             $runtime,
         );
-        $this->assertStringContainsString(
+        $this->assertStringNotContainsString(
             "REPRINT_PULL_SKIPPED_FETCH_LIST_FILE",
             $runtime,
         );

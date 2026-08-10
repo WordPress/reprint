@@ -11,7 +11,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, assertTreesMatch, sha1File,
-    assertFileCount, assertSiteMirror,
+    assertRemoteIndexEntryCount, assertSiteMirror,
     fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -56,8 +56,8 @@ describe('Import: SHA1 Integrity', () => {
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
-    it('indexed at least 3000 files from remote', () => {
-        assertFileCount(tempDir);
+    it('accounted for at least 3000 remote index entries', () => {
+        assertRemoteIndexEntryCount(tempDir, importUrl());
     });
 
     it('imported files form a valid WordPress site mirror', () => {

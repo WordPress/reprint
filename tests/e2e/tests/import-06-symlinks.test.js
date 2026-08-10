@@ -11,8 +11,8 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch,
-    assertFileCount, assertSiteMirror,
-    fsRootDir,
+    assertRemoteIndexEntryCount, assertSiteMirror,
+    fsRootDir, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -57,8 +57,8 @@ describe('Import: Symlinks', () => {
             assertTreesMatch(getSiteDir(site), importedRoot);
         });
 
-        it('indexed at least 3000 files from remote', () => {
-            assertFileCount(tempDir);
+        it('accounted for at least 3000 remote index entries', () => {
+            assertRemoteIndexEntryCount(tempDir, importUrl());
         });
 
         it('imported files form a valid WordPress site mirror', () => {
@@ -66,7 +66,7 @@ describe('Import: Symlinks', () => {
         });
 
         it('sync completed without error despite symlinks', () => {
-            const stateFile = join(tempDir, 'pull/state.json');
+            const stateFile = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
             assert.ok(existsSync(stateFile), 'Expected pull/state.json to exist');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.active_resumable_command.completion_state, 'complete', 'Expected status to be complete');

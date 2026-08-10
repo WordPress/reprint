@@ -8,7 +8,7 @@ namespace ImportTests;
 use ImportClient;
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 final class FilesPushCommandTest extends TestCase
 {
@@ -54,7 +54,10 @@ final class FilesPushCommandTest extends TestCase
         );
         $trimmedRemoteReprintApiUrl = rtrim($remoteReprintApiUrl, '?&');
         $expectedPushStateDirectory =
-            realpath($this->stateDirectory) . '/push/' . md5($trimmedRemoteReprintApiUrl);
+            realpath($this->stateDirectory)
+            . '/remotes/'
+            . md5($trimmedRemoteReprintApiUrl)
+            . '/push';
 
         $this->assertSame($trimmedRemoteReprintApiUrl, $context['remote_reprint_api_url']);
         $this->assertSame(realpath($this->localTree), $context['filesystem_root']);
@@ -82,7 +85,10 @@ final class FilesPushCommandTest extends TestCase
             $differentQuery['push_state_directory']
         );
         $this->assertSame(
-            realpath($otherStateDirectory) . '/push/' . md5($trimmedRemoteReprintApiUrl),
+            realpath($otherStateDirectory)
+                . '/remotes/'
+                . md5($trimmedRemoteReprintApiUrl)
+                . '/push',
             $differentFilesystemRootContext['push_state_directory']
         );
     }
@@ -116,7 +122,7 @@ final class FilesPushCommandTest extends TestCase
 
         $rewriteUrlWithForceHttpSource = $this->runCli([
             'db-apply',
-            '-',
+            'https://example.test/?reprint-api=1',
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->localTree,
             '--rewrite-url',
@@ -127,6 +133,71 @@ final class FilesPushCommandTest extends TestCase
             '--force-http is accepted only by files-push.',
             $rewriteUrlWithForceHttpSource['output']
         );
+    }
+
+    public function testFilesPushRejectsAnInvalidProgressMode(): void
+    {
+        $result = $this->runFilesPush(
+            'https://example.test/?reprint-api=1',
+            ['--secret=token', '--progress=rich']
+        );
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertSame(
+            "Invalid --progress value: rich. Valid values: auto, tty, jsonl\n",
+            $result['stderr']
+        );
+        $this->assertNoSenderState($this->stateDirectory);
+    }
+
+    public function testDirectFilesPushRejectsAnInvalidProgressModeBeforePreflight(): void
+    {
+        $client = new ImportClient(
+            'https://example.test/?reprint-api=1',
+            $this->stateDirectory,
+            $this->localTree,
+            'files-push'
+        );
+        $processLock = new \ReprintProcessLock($this->stateDirectory);
+        try {
+            $client->run(
+                ['command' => 'files-push', 'progress' => 'rich'],
+                $processLock
+            );
+            $this->fail('The invalid progress mode was accepted.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertSame(
+                'Invalid --progress value: rich. Valid values: auto, tty, jsonl',
+                $exception->getMessage()
+            );
+        } finally {
+            $processLock->close();
+        }
+
+        $this->assertNoSenderState($this->stateDirectory);
+        $this->assertFileDoesNotExist(
+            $this->pullStateFileForRemoteReprintApiUrl(
+                'https://example.test/?reprint-api=1'
+            )
+        );
+    }
+
+    public function testFilesPushRejectsVerboseWithAnExplicitProgressMode(): void
+    {
+        foreach (['tty', 'jsonl'] as $progressMode) {
+            $result = $this->runFilesPush(
+                'https://example.test/?reprint-api=1',
+                ['--secret=token', '--progress=' . $progressMode, '--verbose']
+            );
+
+            $this->assertSame(1, $result['exit'], $progressMode . ': ' . $result['output']);
+            $this->assertStringContainsString(
+                'files-push does not accept --verbose with --progress=' . $progressMode . '.',
+                $result['output']
+            );
+        }
+
+        $this->assertNoSenderState($this->stateDirectory);
     }
 
     public function testFilesPushRejectsInvalidInputsBeforeStartingSender(): void
@@ -221,13 +292,29 @@ final class FilesPushCommandTest extends TestCase
         $this->assertStringContainsString( (string) realpath($this->localTree), $nestedStateError['error'] ?? '' );
 
         $this->assertNoSenderState($this->stateDirectory);
-        $this->assertFileDoesNotExist($this->stateDirectory . '/pull/state.json');
+        $this->assertFileDoesNotExist(
+            $this->pullStateFileForRemoteReprintApiUrl(
+                'https://example.test/?reprint-api=1'
+            )
+        );
+    }
+
+    public function testFilesPushRequiresPreflightBeforeStartingSender(): void
+    {
+        $remoteReprintApiUrl = 'https://127.0.0.1:1/?reprint-api=1';
+
+        $result = $this->runFilesPush($remoteReprintApiUrl, ['--secret=token']);
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertStringContainsString('No preflight data found', $result['output']);
+        $this->assertNoSenderState($remoteReprintApiUrl);
     }
 
     public function testFilesPushMasksTheSharedSecretInOutputAndStateFiles(): void
     {
         $secret = 'shared-secret-' . bin2hex(random_bytes(6));
         $remoteReprintApiUrl = 'https://127.0.0.1:1/?reprint-api=1';
+        $this->writePreflightState($remoteReprintApiUrl);
         $result = $this->runFilesPush($remoteReprintApiUrl, ['--secret=' . $secret]);
 
         $this->assertSame(1, $result['exit'], $result['output']);
@@ -238,12 +325,15 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame('files-push', $finalLine['command'] ?? null);
         $this->assertSame('failed', $finalLine['status'] ?? null);
         $this->assertSame(1, $result['exit']);
-        $this->assertFileDoesNotExist($this->stateDirectory . '/pull/state.json');
+        $this->assertFileExists(
+            $this->pullStateFileForRemoteReprintApiUrl($remoteReprintApiUrl)
+        );
     }
 
     public function testCorruptSenderStateUsesTheStructuredWorkflowErrorResult(): void
     {
         $remoteReprintApiUrl = 'https://127.0.0.1:1/?reprint-api=1';
+        $this->writePreflightState($remoteReprintApiUrl);
         $context = ImportClient::prepare_files_push_context(
             $remoteReprintApiUrl,
             $this->stateDirectory,
@@ -256,8 +346,11 @@ final class FilesPushCommandTest extends TestCase
             json_encode([
                 'push_session_id' => str_repeat('1', 32),
                 'phase' => 'starting_plan',
+                'document_root_local_relative_path' => '',
                 'push_plan_cursor' => null,
                 'local_paths_to_push_byte_offset' => 0,
+                'local_paths_to_push_count' => null,
+                'local_paths_pushed' => 0,
                 'max_part_bytes' => null,
                 'request_sizer_state' => [
                     'request_body_bytes' => 32 * 1024 * 1024,
@@ -296,6 +389,114 @@ final class FilesPushCommandTest extends TestCase
         );
     }
 
+    public function testFilesPushTerminalProgressUsesOneOverallBar(): void
+    {
+        $progressStream = fopen('php://memory', 'w+b');
+        $this->assertIsResource($progressStream);
+        $client = new ImportClient(
+            'https://example.test/?reprint-api=1',
+            $this->stateDirectory,
+            $this->localTree,
+            'files-diff'
+        );
+        $progressProperty = new \ReflectionProperty(ImportClient::class, 'progress');
+        $progressProperty->setValue($client, new \TerminalProgress(true, $progressStream));
+        $isTtyProperty = new \ReflectionProperty(ImportClient::class, 'is_tty');
+        $isTtyProperty->setValue($client, true);
+        $reportProgress = new \ReflectionMethod(
+            ImportClient::class,
+            'report_files_push_progress'
+        );
+
+        foreach ([
+            ['phase' => 'creating'],
+            [
+                'phase' => 'planning',
+                'planning_phase' => 'indexing',
+            ],
+            [
+                'phase' => 'planning',
+                'planning_phase' => 'diffing',
+                'index_bytes_done' => 1,
+                'index_bytes_total' => 2,
+            ],
+            [
+                'phase' => 'pushing_paths',
+                'files_done' => 1,
+                'files_total' => 2,
+                'file_bytes_done' => 14 * 1024 * 1024,
+                'file_bytes_total' => 112 * 1024 * 1024,
+            ],
+            [
+                'phase' => 'pushing_deletes',
+                'files_done' => 2,
+                'files_total' => 2,
+                'deleted_paths_bytes_done' => 1,
+                'deleted_paths_bytes_total' => 2,
+            ],
+            ['phase' => 'committing'],
+            ['phase' => 'saving_local_index'],
+            ['phase' => 'completing'],
+        ] as $senderProgress) {
+            $reportProgress->invoke($client, $senderProgress, false);
+        }
+
+        rewind($progressStream);
+        $output = stream_get_contents($progressStream);
+        fclose($progressStream);
+        $this->assertIsString($output);
+        foreach ([
+            '0% Preparing',
+            '15% Indexing',
+            '30% Indexing',
+            '60% Pushing — 14.0 MB / 112.0 MB',
+            '85% Pushing deletions',
+            '90% Committing',
+            '97% Saving index',
+            '99% Finishing',
+        ] as $progressText) {
+            $this->assertStringContainsString($progressText, $output);
+        }
+        $this->assertStringNotContainsString('Indexing and pushing files', $output);
+        $this->assertStringNotContainsString('Diffing', $output);
+        $this->assertStringNotContainsString('Uploading', $output);
+        $this->assertStringNotContainsString('Applying', $output);
+    }
+
+    public function testFilesPushProgressModeCanOverrideTtyDetection(): void
+    {
+        $client = new ImportClient(
+            'https://example.test/?reprint-api=1',
+            $this->stateDirectory,
+            $this->localTree,
+            'files-diff'
+        );
+        $isTty = new \ReflectionProperty(ImportClient::class, 'is_tty');
+        $progressOutputMode = new \ReflectionProperty(
+            ImportClient::class,
+            'progress_output_mode'
+        );
+        $usesTerminalProgress = new \ReflectionMethod(
+            ImportClient::class,
+            'uses_terminal_progress'
+        );
+
+        foreach ([
+            ['auto', false, false],
+            ['auto', true, true],
+            ['tty', false, true],
+            ['jsonl', true, false],
+        ] as [$mode, $stdoutIsTty, $expected]) {
+            $progressOutputMode->setValue($client, $mode);
+            $isTty->setValue($client, $stdoutIsTty);
+            $this->assertSame(
+                $expected,
+                $usesTerminalProgress->invoke($client),
+                $mode . ' with is_tty=' . ( $stdoutIsTty ? 'true' : 'false' )
+            );
+        }
+    }
+
     /** @param list<string> $extraOptions */
     private function runFilesPush(string $remoteReprintApiUrl, array $extraOptions): array
     {
@@ -307,13 +508,37 @@ final class FilesPushCommandTest extends TestCase
         ], $extraOptions));
     }
 
+    private function writePreflightState(
+        string $remoteReprintApiUrl,
+        string $documentRoot = '/'
+    ): void {
+        $pullStateFile = $this->pullStateFileForRemoteReprintApiUrl($remoteReprintApiUrl);
+        $pullStateDirectory = dirname($pullStateFile);
+        if (!is_dir($pullStateDirectory)) {
+            mkdir($pullStateDirectory, 0700, true);
+        }
+        $pullState = new \PullState();
+        $pullState->set_preflight_record([
+            'http_code' => 200,
+            'data' => [
+                'runtime' => [
+                    'document_root' => 'base64:' . base64_encode($documentRoot),
+                ],
+            ],
+        ]);
+        file_put_contents(
+            $pullStateFile,
+            json_encode($pullState->to_array(), JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR)
+        );
+    }
+
     /** @param list<string> $arguments
      *  @return array{exit:int,stdout:string,stderr:string,output:string}
      */
     private function runCli(array $arguments): array
     {
         $command = array_merge(
-            [PHP_BINARY, __DIR__ . '/../../importer/import.php'],
+            [PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client'],
             $arguments
         );
         $process = proc_open(
@@ -354,9 +579,19 @@ final class FilesPushCommandTest extends TestCase
 
     private function assertNoSenderState(string $stateDirectory): void
     {
-        $senderPaths = glob($stateDirectory . '/push/*/sender.json');
+        $senderPaths = glob($stateDirectory . '/remotes/*/push/sender.json');
         $this->assertIsArray($senderPaths);
         $this->assertSame([], $senderPaths);
+    }
+
+    private function pullStateFileForRemoteReprintApiUrl(
+        string $remoteReprintApiUrl
+    ): string
+    {
+        return $this->stateDirectory
+            . '/remotes/'
+            . md5(rtrim($remoteReprintApiUrl, '?&'))
+            . '/pull/state.json';
     }
 
     private function readTree(string $path): string

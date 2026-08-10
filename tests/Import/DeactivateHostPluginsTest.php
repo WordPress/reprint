@@ -5,8 +5,10 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use PDO;
 use PDOException;
+use function Reprint\Importer\register_sqlite_function;
+use function Reprint\Importer\resolve_sqlite_integration_path;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Verify deactivate_host_plugins() rewrites active_plugins identically on
@@ -28,7 +30,6 @@ class DeactivateHostPluginsTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->fsRoot = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
     }
 
@@ -253,7 +254,7 @@ class DeactivateHostPluginsTest extends TestCase
 
         // Mirror create_sqlite_target_pdo() — deactivate_host_plugins()
         // requires FROM_BASE64 on the SQLite connection.
-        \register_sqlite_function($pdo->get_connection()->get_pdo(), 'FROM_BASE64', function ($data) {
+        register_sqlite_function($pdo->get_connection()->get_pdo(), 'FROM_BASE64', function ($data) {
             return $data === null ? null : base64_decode($data);
         });
         return $pdo;
@@ -308,7 +309,7 @@ class DeactivateHostPluginsTest extends TestCase
 
     private function writeState(array $state): void
     {
-        \write_current_import_state($this->makeClient(), $state);
+        \write_current_pull_state($this->makeClient(), $state);
     }
 
     private function makeClient(): \ImportClient

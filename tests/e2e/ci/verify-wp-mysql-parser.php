@@ -14,7 +14,7 @@ if (!in_array($mode, array('lexer', 'parser'), true)) {
     exit(2);
 }
 
-$loader = rtrim($project_root, '/') . '/packages/reprint-importer/src/lib/mysql-query-stream/load.php';
+$loader = rtrim($project_root, '/') . '/packages/reprint-client/src/lib/mysql-query-stream/load.php';
 $grammar_path = rtrim($project_root, '/') . '/lib/sqlite-database-integration/packages/mysql-on-sqlite/src/mysql/mysql-grammar.php';
 if (!is_readable($loader)) {
     fwrite(STDERR, "Cannot read query-stream loader: {$loader}\n");

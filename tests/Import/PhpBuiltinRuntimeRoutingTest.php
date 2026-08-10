@@ -4,8 +4,8 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/class-runtime-manifest.php';
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/target-runtime/load.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/class-runtime-manifest.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/target-runtime/load.php';
 
 class PhpBuiltinRuntimeRoutingTest extends TestCase
 {

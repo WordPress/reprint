@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    createMysqlConnection,
+    createMysqlConnection, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -99,7 +99,7 @@ describe('Import: URL Rewriting', () => {
     });
 
     it('domain discovery produces pull/domains.json', () => {
-        const domainsFile = join(tempDir, 'pull/domains.json');
+        const domainsFile = join(pullStateDirectory(tempDir, importUrl()), 'domains.json');
         assert.ok(existsSync(domainsFile), 'Expected pull/domains.json to exist');
 
         const domains = JSON.parse(readFileSync(domainsFile, 'utf-8'));

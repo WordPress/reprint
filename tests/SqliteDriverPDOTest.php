@@ -5,7 +5,7 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php';
-require_once __DIR__ . '/../packages/reprint-exporter/src/class-sqlite-driver-pdo.php';
+require_once __DIR__ . '/../packages/reprint-server/src/class-sqlite-driver-pdo.php';
 
 final class SqliteDriverPDOTest extends TestCase
 {

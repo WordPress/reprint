@@ -62,7 +62,7 @@ jobs:
       - run: composer install --no-dev --no-interaction --prefer-dist
 
       - name: Install plugin runtime dependencies
-        run: composer install --no-dev --no-interaction --prefer-dist --working-dir=reprint-exporter-wp
+        run: composer install --no-dev --no-interaction --prefer-dist --working-dir=reprint-server-wp
 
       - name: Build reprint.phar
         run: ./bin/build-reprint-phar.sh
@@ -72,8 +72,17 @@ jobs:
           RELEASE_TAG: ${{ steps.release_ref.outputs.tag }}
         run: ./bin/stamp-plugin-version.sh "${RELEASE_TAG#v}"
 
+      # The ZIP filename is a distribution contract: released client binaries
+      # hardcode it in their download URL, and because the archive contents sit
+      # at its root, WordPress derives the installed plugin directory from the
+      # filename. Renaming it would install a second plugin beside the existing
+      # reprint-exporter-wp/ instead of upgrading it. The source directory is
+      # reprint-server-wp/; only the artifact keeps the legacy name.
+      # zip -r updates an existing archive in place, so remove any leftover
+      # first. The exclusion must be './secret.php': a '*/secret.php' pattern
+      # does not match the root-level entry this layout produces.
       - name: Package reprint-exporter-wp.zip
-        run: cd reprint-exporter-wp && zip -r ../reprint-exporter-wp.zip . -x '*/secret.php'
+        run: rm -f reprint-exporter-wp.zip && cd reprint-server-wp && zip -r ../reprint-exporter-wp.zip . -x './secret.php'
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3

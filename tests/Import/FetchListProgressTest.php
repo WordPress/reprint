@@ -4,18 +4,17 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
 
 /**
  * Verify that files_done and files_total progress counters are correct
- * across multiple invocations (exit-code-2 restarts), with and without
- * the essential-files filter (which splits the fetch list into a
- * main list and a skipped list).
+ * across multiple invocations (exit-code-2 restarts).
  */
 class FetchListProgressTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
+    private $pullStateDirectory;
     private $filesystem_root;
 
     protected function setUp(): void
@@ -23,9 +22,11 @@ class FetchListProgressTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/fetch-list-progress-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
+        $this->pullStateDirectory =
+            $this->stateDir . '/remotes/' . md5('http://fake.url') . '/pull';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
+        mkdir($this->pullStateDirectory, 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
 
@@ -64,20 +65,28 @@ class FetchListProgressTest extends TestCase
     /**
      * Build a fetch list JSONL file with N entries.
      */
-    private function writeFetchList(int $count, ?string $file = null): string
+    private function writeFetchList(
+        int $count,
+        ?string $fetchListFilePath = null
+    ): string
     {
-        $file = $file ?? $this->stateDir . '/pull/fetch-list.jsonl';
-        $handle = fopen($file, 'w');
+        $fetchListFilePath =
+            $fetchListFilePath
+            ?? $this->pullStateDirectory . '/fetch-list.jsonl';
+        $fetchListFileHandle = fopen($fetchListFilePath, 'w');
         for ($i = 0; $i < $count; $i++) {
-            fwrite($handle, json_encode(["path" => base64_encode("/file-{$i}.txt")]) . "\n");
+            fwrite(
+                $fetchListFileHandle,
+                json_encode(["path" => base64_encode("/file-{$i}.txt")]) . "\n"
+            );
         }
-        fclose($handle);
-        return $file;
+        fclose($fetchListFileHandle);
+        return $fetchListFilePath;
     }
 
     private function writeState(array $state): void
     {
-        \write_current_import_state($this->makeClient(), array_replace_recursive([
+        \write_current_pull_state($this->makeClient(), array_replace_recursive([
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "follow_symlinks" => false,
         ], $state));
@@ -109,15 +118,18 @@ class FetchListProgressTest extends TestCase
         ];
     }
 
-    private function byteOffsetAfterLines(string $file, int $n): int
+    private function byteOffsetAfterLines(
+        string $fetchListFilePath,
+        int $lineCount
+    ): int
     {
-        $handle = fopen($file, 'r');
-        for ($i = 0; $i < $n; $i++) {
-            fgets($handle);
+        $fetchListFileHandle = fopen($fetchListFilePath, 'r');
+        for ($lineNumber = 0; $lineNumber < $lineCount; $lineNumber++) {
+            fgets($fetchListFileHandle);
         }
-        $offset = ftell($handle);
-        fclose($handle);
-        return $offset;
+        $fetchListByteOffset = ftell($fetchListFileHandle);
+        fclose($fetchListFileHandle);
+        return $fetchListByteOffset;
     }
 
     // ---------------------------------------------------------------
@@ -140,7 +152,7 @@ class FetchListProgressTest extends TestCase
 
         $method = $reflection->getMethod('fetch_files_from_list');
         try {
-            $method->invoke($client, $listFile, 'fetch');
+            $method->invoke($client, $listFile);
         } catch (\Exception $e) {
             // Expected: network error
         }
@@ -174,7 +186,7 @@ class FetchListProgressTest extends TestCase
 
         try {
             $reflection->getMethod('fetch_files_from_list')
-                ->invoke($client, $listFile, 'fetch');
+                ->invoke($client, $listFile);
         } catch (\Exception $e) {
             // Expected
         }
@@ -210,7 +222,7 @@ class FetchListProgressTest extends TestCase
 
         try {
             $reflection->getMethod('fetch_files_from_list')
-                ->invoke($client, $listFile, 'fetch');
+                ->invoke($client, $listFile);
         } catch (\Exception $e) {
             // Expected
         }
@@ -238,7 +250,7 @@ class FetchListProgressTest extends TestCase
 
         [$client1, $ref1] = $this->prepareClient();
         try {
-            $ref1->getMethod('fetch_files_from_list')->invoke($client1, $listFile, 'fetch');
+            $ref1->getMethod('fetch_files_from_list')->invoke($client1, $listFile);
         } catch (\Exception $e) {}
 
         $c1 = $this->readCounters($client1, $ref1);
@@ -257,7 +269,7 @@ class FetchListProgressTest extends TestCase
 
         [$client2, $ref2] = $this->prepareClient();
         try {
-            $ref2->getMethod('fetch_files_from_list')->invoke($client2, $listFile, 'fetch');
+            $ref2->getMethod('fetch_files_from_list')->invoke($client2, $listFile);
         } catch (\Exception $e) {}
 
         $c2 = $this->readCounters($client2, $ref2);
@@ -266,34 +278,6 @@ class FetchListProgressTest extends TestCase
 
         // done only goes up
         $this->assertGreaterThan($c1['done'], $c2['done']);
-    }
-
-    public function testSkippedListHasOwnCounters()
-    {
-        $this->writeFetchList(50);
-        $skippedList = $this->stateDir . '/pull/skipped-fetch-list.jsonl';
-        $this->writeFetchList(200, $skippedList);
-        $offset20 = $this->byteOffsetAfterLines($skippedList, 20);
-
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "in_progress",
-                "current_stage" => "fetch-skipped",
-            ],
-            "fetch_skipped" => ["offset" => $offset20, "next_offset" => $offset20, "batch_file" => null, "batch_entries" => 0, "cursor" => null],
-        ]);
-
-        [$client, $reflection] = $this->prepareClient("skipped-earlier");
-
-        try {
-            $reflection->getMethod('fetch_files_from_list')
-                ->invoke($client, $skippedList, 'fetch_skipped');
-        } catch (\Exception $e) {}
-
-        $counters = $this->readCounters($client, $reflection);
-        $this->assertSame(200, $counters['total']);
-        $this->assertSame(20, $counters['done']);
     }
 
     public function testCountNewlinesMatchesLineCount()
@@ -335,7 +319,7 @@ class FetchListProgressTest extends TestCase
         }
     }
 
-    public function testFilesDoneIncludesFilesImported()
+    public function testFilesDoneIncludesFilesPulled()
     {
         $listFile = $this->writeFetchList(100);
         $offset40 = $this->byteOffsetAfterLines($listFile, 40);
@@ -353,19 +337,19 @@ class FetchListProgressTest extends TestCase
 
         try {
             $reflection->getMethod('fetch_files_from_list')
-                ->invoke($client, $listFile, 'fetch');
+                ->invoke($client, $listFile);
         } catch (\Exception $e) {}
 
         // Simulate 5 files written in this invocation
-        $reflection->getProperty('files_imported')->setValue($client, 5);
+        $reflection->getProperty('files_pulled')->setValue($client, 5);
 
         $done = $reflection->getProperty('fetch_list_done')->getValue($client);
-        $imported = $reflection->getProperty('files_imported')->getValue($client);
+        $pulled = $reflection->getProperty('files_pulled')->getValue($client);
         $total = $reflection->getProperty('fetch_list_total')->getValue($client);
 
-        // files_done as emitted in progress records = done + imported
-        $filesDone = $done + $imported;
-        $this->assertSame(45, $filesDone); // 40 from offset + 5 imported
+        // files_done as emitted in progress records = done + pulled
+        $filesDone = $done + $pulled;
+        $this->assertSame(45, $filesDone); // 40 from offset + 5 pulled
         $this->assertSame(100, $total);
         $this->assertLessThanOrEqual($total, $filesDone);
     }

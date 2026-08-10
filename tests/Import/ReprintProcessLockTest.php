@@ -7,7 +7,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 final class ReprintProcessLockTest extends TestCase
 {
@@ -27,28 +27,43 @@ final class ReprintProcessLockTest extends TestCase
 
     public function testLocalStateLayoutUsesMatchingDirectoriesAndFileNames(): void
     {
+        $remote_reprint_api_url = 'https://example.com/?site-export-api';
         $process_lock = new \ReprintProcessLock($this->root . '/state');
         $client = new \ImportClient(
-            'https://example.com/?site-export-api',
+            $remote_reprint_api_url,
             $this->root . '/state',
             $this->root . '/files'
         );
+        $remote_state_directory =
+            $this->root . '/state/remotes/' . md5($remote_reprint_api_url);
+        $pull_state_directory = $remote_state_directory . '/pull';
 
         $this->assertFileExists($this->root . '/state/process.lock');
-        $this->assertDirectoryExists($this->root . '/state/pull');
+        $this->assertDirectoryExists($pull_state_directory);
+        $this->assertDirectoryDoesNotExist($this->root . '/state/pull');
         $this->assertDirectoryDoesNotExist($this->root . '/state/.reprint');
         $this->assertFileDoesNotExist($this->root . '/state/.reprint.lock');
+        $this->assertSame(
+            realpath($remote_state_directory) . '/push',
+            \ImportClient::resolve_push_state_directory(
+                $remote_reprint_api_url,
+                $this->root . '/state',
+                $this->root . '/files',
+                'files-diff'
+            )
+        );
 
         $reflection = new \ReflectionClass($client);
         $expected_paths = [
             'state_dir' => $this->root . '/state',
-            'pull_state_file' => $this->root . '/state/pull/state.json',
-            'local_index_file' => $this->root . '/state/pull/local-index.jsonl',
-            'local_index_wal_path' => $this->root . '/state/pull/local-index.wal',
-            'remote_index_file' => $this->root . '/state/pull/remote-index.jsonl',
-            'fetch_list_file' => $this->root . '/state/pull/fetch-list.jsonl',
-            'skipped_fetch_list_file' => $this->root . '/state/pull/skipped-fetch-list.jsonl',
-            'volatile_files_file' => $this->root . '/state/pull/volatile-files.json',
+            'pull_state_directory' => $pull_state_directory,
+            'local_index_file' => $remote_state_directory . '/local_index.jsonl',
+            'pull_state_file' => $pull_state_directory . '/state.json',
+            'remote_index_file' => $pull_state_directory . '/remote-index.jsonl',
+            'pull_index_wal_path' => $pull_state_directory . '/index.wal',
+            'next_remote_index_file' => $pull_state_directory . '/remote-index.next.jsonl',
+            'fetch_list_file' => $pull_state_directory . '/fetch-list.jsonl',
+            'volatile_files_file' => $pull_state_directory . '/volatile-files.json',
             'audit_log_file' => $this->root . '/state/audit.log',
             'progress_file' => $this->root . '/state/progress.json',
         ];
@@ -59,6 +74,29 @@ final class ReprintProcessLockTest extends TestCase
         }
 
         $process_lock->close();
+    }
+
+    public function testPushStateDirectoryFollowsAnExistingStateDirectorySymlink(): void
+    {
+        $state_directory_target = $this->root . '/state-target';
+        $state_directory_link = $this->root . '/state-link';
+        mkdir($state_directory_target, 0700);
+        symlink($state_directory_target, $state_directory_link);
+        $canonical_state_directory_target = realpath($state_directory_target);
+        $this->assertIsString($canonical_state_directory_target);
+
+        $this->assertSame(
+            $canonical_state_directory_target
+                . '/remotes/'
+                . md5('https://example.com/?site-export-api')
+                . '/push',
+            \ImportClient::resolve_push_state_directory(
+                'https://example.com/?site-export-api',
+                $state_directory_link,
+                $this->root . '/files',
+                'files-diff'
+            )
+        );
     }
 
     public function testImportClientRejectsAConcurrentCommand(): void

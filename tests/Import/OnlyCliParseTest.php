@@ -5,11 +5,10 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 
 /**
- * --only reuses the existing `value-or-next` option type (like --new-site-url),
- * but is repeatable because commas are valid path bytes. The parser lives
- * inside the CLI bootstrap guard (not require-able), so this exercises the real
- * binary and asserts `--only` is recognized in both `--only=VAL` and
- * `--only VAL` forms.
+ * --include and --exclude reuse the existing `value-or-next` option type (like
+ * --new-site-url), but are repeatable because commas are valid path bytes. The
+ * parser lives inside the CLI bootstrap guard (not require-able), so this
+ * exercises the real binary.
  */
 class OnlyCliParseTest extends TestCase
 {
@@ -24,7 +23,6 @@ class OnlyCliParseTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/only-cli-' . uniqid();
         mkdir($this->tempDir . '/state', 0755, true);
-        mkdir($this->tempDir . '/state/pull', 0755, true);
         mkdir($this->tempDir . '/fs', 0755, true);
     }
 
@@ -42,8 +40,8 @@ class OnlyCliParseTest extends TestCase
             $this->serverPipes = array();
         }
 
-        // The real CLI run may drop state files (pull/state.json, audit log)
-        // into the state dir, so a plain rmdir wouldn't clear it — recurse.
+        // The real CLI run may write remote pull state and an audit log into
+        // the state directory, so a plain rmdir wouldn't clear it — recurse.
         $this->recursiveDelete($this->tempDir);
         parent::tearDown();
     }
@@ -65,7 +63,7 @@ class OnlyCliParseTest extends TestCase
 
     private function runCli(array $args): string
     {
-        $entry = __DIR__ . '/../../importer/import.php';
+        $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
         $cmd = 'php ' . escapeshellarg($entry);
         foreach ($args as $a) {
             $cmd .= ' ' . escapeshellarg($a);
@@ -96,6 +94,7 @@ $log = %s;
 file_put_contents($log, json_encode(array(
     'endpoint' => $_GET['endpoint'] ?? null,
     'directory' => $_GET['directory'] ?? null,
+    'exclude_path' => $_GET['exclude_path'] ?? null,
 ), JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND);
 
 $boundary = 'reprint-test-boundary';
@@ -152,7 +151,10 @@ PHP, var_export($requestsLog, true)));
         return $requests;
     }
 
-    private function writePreflightState(bool $includeRoots = false): void
+    private function writePreflightState(
+        string $remoteReprintApiUrl,
+        bool $includeRoots = false
+    ): void
     {
         $data = array(
             'ok' => true,
@@ -173,9 +175,9 @@ PHP, var_export($requestsLog, true)));
             );
         }
 
-        \write_current_import_state(
+        \write_current_pull_state(
             new \ImportClient(
-                'http://fake.invalid/',
+                $remoteReprintApiUrl,
                 $this->tempDir . '/state',
                 $this->tempDir . '/fs'
             ),
@@ -188,7 +190,7 @@ PHP, var_export($requestsLog, true)));
         );
     }
 
-    public function testOnlyOptionIsRecognizedAsRepeatableInBothForms(): void
+    public function testIncludeOptionIsRecognizedAsRepeatableInBothForms(): void
     {
         $tail = array(
             '--state-dir=' . $this->tempDir . '/state',
@@ -197,6 +199,27 @@ PHP, var_export($requestsLog, true)));
         );
         // Both forms fail later (unreachable host) but must not be rejected as
         // an unknown option.
+        $equals = $this->runCli(array_merge(
+            array('files-pull', 'http://fake.invalid/?site-export-api', '--include=:wp-content:', '--include=:wp-uploads:/2025'),
+            $tail
+        ));
+        $this->assertStringNotContainsString('Unknown option', $equals);
+
+        $space = $this->runCli(array_merge(
+            array('files-pull', 'http://fake.invalid/?site-export-api', '--include', ':wp-content:', '--include', ':wp-uploads:/2025'),
+            $tail
+        ));
+        $this->assertStringNotContainsString('Unknown option', $space);
+    }
+
+    public function testOnlyAliasIsRecognizedAsRepeatableInBothForms(): void
+    {
+        $tail = array(
+            '--state-dir=' . $this->tempDir . '/state',
+            '--fs-root=' . $this->tempDir . '/fs',
+            '--secret=x',
+        );
+
         $equals = $this->runCli(array_merge(
             array('files-pull', 'http://fake.invalid/?site-export-api', '--only=:wp-content:', '--only=:wp-uploads:/2025'),
             $tail
@@ -210,21 +233,20 @@ PHP, var_export($requestsLog, true)));
         $this->assertStringNotContainsString('Unknown option', $space);
     }
 
-
-    public function testRepeatedOnlyOptionsAreAllPreserved(): void
+    public function testRepeatedIncludeOptionsAreAllPreserved(): void
     {
-        // If repeated --only values are collapsed to the last one, this would
+        // If repeated --include values are collapsed to the last one, this would
         // succeed because :wp-content: is resolvable. Preserving both values
         // forces resolution of :abspath:, which this preflight intentionally
         // omits.
-        $this->writePreflightState();
+        $this->writePreflightState('http://fake.invalid/?site-export-api');
 
         $output = $this->runCli(array(
             'files-pull',
             'http://fake.invalid/?site-export-api',
-            '--only',
+            '--include',
             ':abspath:/wp-admin',
-            '--only',
+            '--include',
             ':wp-content:',
             '--abort',
             '--state-dir=' . $this->tempDir . '/state',
@@ -302,19 +324,18 @@ PHP, var_export($requestsLog, true)));
         $this->assertStringNotContainsString('PullFailureReportedException', $output);
     }
 
-    public function testRepeatedOnlyOptionsAreUsedByFilesPull(): void
+    public function testIncludeAndOnlyAliasValuesAreUsedByFilesPull(): void
     {
-        $this->writePreflightState(true);
-
         $requestsLog = $this->tempDir . '/requests.jsonl';
-        $remoteUrl = $this->startDirectoryCaptureServer($requestsLog);
+        $remoteReprintApiUrl = $this->startDirectoryCaptureServer($requestsLog);
+        $this->writePreflightState($remoteReprintApiUrl, true);
 
         $output = $this->runCli(array(
             'files-pull',
-            $remoteUrl,
-            '--only',
+            $remoteReprintApiUrl,
+            '--include',
             ':wp-content:/plugins',
-            '--only',
+            '--include',
             ':wp-uploads:/2025',
             '--only',
             ':wp-content:/themes',
@@ -340,16 +361,47 @@ PHP, var_export($requestsLog, true)));
         ), $fileIndexRequest['directory'] ?? null);
     }
 
-    public function testOnlyOptionKeepsCommaInsideSourcePath(): void
+    public function testRepeatedExcludeOptionsStayOutOfFileIndexRequest(): void
     {
-        // --abort runs after --only resolution, avoiding a network request while
+        $requestsLog = $this->tempDir . '/requests.jsonl';
+        $remoteUrl = $this->startDirectoryCaptureServer($requestsLog);
+        $this->writePreflightState($remoteUrl, true);
+
+        $output = $this->runCli(array(
+            'files-pull',
+            $remoteUrl,
+            '--exclude',
+            ':wp-content:/cache',
+            '--exclude',
+            ':wp-uploads:',
+            '--state-dir=' . $this->tempDir . '/state',
+            '--fs-root=' . $this->tempDir . '/fs',
+        ));
+
+        $this->assertStringNotContainsString('"status":"error"', $output);
+
+        $fileIndexRequest = null;
+        foreach ($this->capturedRequests($requestsLog) as $request) {
+            if (($request['endpoint'] ?? null) === 'file_index') {
+                $fileIndexRequest = $request;
+                break;
+            }
+        }
+
+        $this->assertNotNull($fileIndexRequest, "files-pull should request file_index. Output:\n{$output}");
+        $this->assertNull($fileIndexRequest['exclude_path'] ?? null);
+    }
+
+    public function testIncludeOptionKeepsCommaInsideSourcePath(): void
+    {
+        // --abort runs after --include resolution, avoiding a network request while
         // still proving the CLI did not split the SOURCE at the comma.
-        $this->writePreflightState();
+        $this->writePreflightState('http://fake.invalid/?site-export-api');
 
         $output = $this->runCli(array(
             'files-pull',
             'http://fake.invalid/?site-export-api',
-            '--only',
+            '--include',
             ':wp-content:/plugins,custom',
             '--abort',
             '--state-dir=' . $this->tempDir . '/state',

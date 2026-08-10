@@ -99,6 +99,6 @@ jobs:
           git checkout trunk
           ./bin/stamp-plugin-version.sh "$NEXT_DEV"
 
-          git add reprint-exporter-wp/index.php reprint-exporter-wp/lib.php
+          git add reprint-server-wp/index.php reprint-server-wp/lib.php
           git commit -m "Bump plugin version to $NEXT_DEV after v$VERSION release"
           git push origin trunk

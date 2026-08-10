@@ -15,12 +15,12 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir, PHP_BINARY,
+    fsRootDir, PHP_BINARY, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
+const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 const itWhenRustExtensionConfigured = process.env.WP_MYSQL_PARSER_EXTENSION_MANIFEST ? it : it.skip;
 
 describe('Import: Playground CLI runtime', () => {
@@ -71,7 +71,10 @@ describe('Import: Playground CLI runtime', () => {
         assert.equal(result.exitCode, 0,
             `files-pull failed (exit ${result.exitCode})\nstderr: ${result.stderr}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(
+            join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+            'utf-8',
+        ));
         assert.equal(state.active_resumable_command.completion_state, 'complete');
     });
 
@@ -103,6 +106,7 @@ describe('Import: Playground CLI runtime', () => {
         execFileSync(PHP_BINARY, [
             IMPORTER_PATH,
             'apply-runtime',
+            importUrl(),
             `--state-dir=${tempDir}`,
             `--fs-root=${fsRootDir(tempDir)}`,
             `--runtime=playground-cli`,

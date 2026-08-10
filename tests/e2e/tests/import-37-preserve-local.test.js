@@ -40,7 +40,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     readAuditLog,
-    fsRootDir,
+    fsRootDir, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { buildAtomicHostingFixture, unlockSharedDir } from '../lib/atomic-hosting-fixture.js';
@@ -161,7 +161,7 @@ describe('Import: --preserve-local', () => {
         });
 
         it('state shows complete with preserve_local persisted', () => {
-            const stateFile = join(tempDir, 'pull/state.json');
+            const stateFile = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.active_resumable_command.completion_state, 'complete');
             assert.equal(state.fs_root_nonempty_behavior, 'preserve-local');
@@ -334,7 +334,10 @@ describe('Import: --preserve-local', () => {
         });
 
         it('state preserves preserve_local across resume cycles', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+            const state = JSON.parse(readFileSync(
+                join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+                'utf-8',
+            ));
             assert.equal(state.fs_root_nonempty_behavior, 'preserve-local');
         });
     });
@@ -396,12 +399,12 @@ describe('Import: --preserve-local', () => {
         it('delta sync overwrites tampered synced file with remote version', () => {
             // wp-config.php was tampered locally but the remote version
             // changed (different ctime after our tampering is invisible to
-            // the remote, but the local index has the OLD ctime while the
+            // the remote, but the remote index has the OLD ctime while the
             // file on disk was rewritten).  The delta diff sees a ctime
             // mismatch and re-downloads it.
             //
             // Actually: the delta compares remote ctime against our local
-            // index (which recorded the original remote ctime).  If the
+            // remote index (which recorded the original remote ctime). If the
             // remote file's ctime hasn't changed, the diff sees no change
             // and skips it — which is correct behavior (no remote change).
             // To test that delta DOES overwrite, we'd need the remote to

@@ -23,6 +23,7 @@ import {
     assertTreesMatch, assertSiteMirror,
     fsRootDir, assertPullPipelineComplete,
     compareDatabases, createMysqlConnection, getDbName,
+    pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -70,7 +71,10 @@ describe('Import: Pull Abort and Resume', { timeout: 300000 }, () => {
         assert.equal(result.exitCode, 0,
             `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(
+            join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+            'utf-8',
+        ));
         assertPullPipelineComplete(state);
     });
 
@@ -84,13 +88,19 @@ describe('Import: Pull Abort and Resume', { timeout: 300000 }, () => {
             `Expected abort exit 0, got ${result.exitCode}`);
 
         // The completed-stage marker should be cleared.
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(
+            join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+            'utf-8',
+        ));
         assert.equal(state.pull_pipeline.last_completed_stage, null,
             'Expected pull_pipeline.last_completed_stage to be null after abort');
 
-        // Local index should be preserved (for delta sync)
-        assert.ok(existsSync(join(tempDir, 'pull/local-index.jsonl')),
-            'Expected local index to be preserved after abort');
+        // Remote index should be preserved (for delta sync)
+        assert.ok(existsSync(join(
+            pullStateDirectory(tempDir, importUrl()),
+            'remote-index.jsonl',
+        )),
+            'Expected remote index to be preserved after abort');
     });
 
     it('re-pull after abort performs delta sync', () => {
@@ -104,7 +114,10 @@ describe('Import: Pull Abort and Resume', { timeout: 300000 }, () => {
         assert.equal(result.exitCode, 0,
             `Expected re-pull exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(
+            join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+            'utf-8',
+        ));
         assertPullPipelineComplete(state);
     });
 
@@ -138,7 +151,10 @@ describe('Import: Pull Abort and Resume', { timeout: 300000 }, () => {
         assert.equal(result.exitCode, 0,
             `Expected auto re-pull exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(
+            join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+            'utf-8',
+        ));
         assertPullPipelineComplete(state);
     });
 });

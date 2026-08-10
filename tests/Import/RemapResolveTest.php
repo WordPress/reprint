@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * --remap: resolving template-string SOURCE TARGET mappings into remap rules.
@@ -18,6 +18,7 @@ class RemapResolveTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
+    private $pullStateDirectory;
     private $fsRoot;
     private $root; // realpath of fsRoot (targets are rooted under it)
 
@@ -26,9 +27,15 @@ class RemapResolveTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/remap-resolve-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
+        $remoteReprintApiUrl = 'https://src.example/export.php';
+        $this->pullStateDirectory =
+            $this->stateDir
+            . '/remotes/'
+            . md5(rtrim($remoteReprintApiUrl, '?&'))
+            . '/pull';
         $this->fsRoot = $this->tempDir . '/srv/htdocs';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
+        mkdir($this->pullStateDirectory, 0755, true);
         mkdir($this->fsRoot, 0755, true);
         $this->root = realpath($this->fsRoot);
     }
@@ -67,10 +74,33 @@ class RemapResolveTest extends TestCase
     private function client(array $pathsUrls): \ImportClient
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
-        $c->get_import_state()->preflight = array('data' => array(
+        $c->get_state()->set_preflight_record(array('data' => array(
             'database' => array('wp' => array('paths_urls' => $pathsUrls)),
-        ));
+        )));
         return $c;
+    }
+
+    private function filesystemRootClient(array $pathsUrls): \ImportClient
+    {
+        $c = new \ImportClient('https://src.example/export.php', $this->stateDir, '/');
+        $c->get_state()->set_preflight_record(array('data' => array(
+            'database' => array('wp' => array('paths_urls' => $pathsUrls)),
+        )));
+        return $c;
+    }
+
+    public function testConstructorNormalizesFilesystemRoot(): void
+    {
+        $symlinkedFilesystemRoot = $this->tempDir . '/fs-root-symlink';
+        symlink($this->fsRoot, $symlinkedFilesystemRoot);
+
+        $client = new \ImportClient(
+            'https://src.example/export.php',
+            $this->stateDir,
+            $symlinkedFilesystemRoot
+        );
+
+        $this->assertSame($this->root, $client->filesystem_root);
     }
 
     private function resolve($c, array ...$mappings): array
@@ -83,9 +113,9 @@ class RemapResolveTest extends TestCase
         $this->call($c, 'assert_resolved_path_mappings_consistent');
     }
 
-    private function writeLocalIndex(): void
+    private function writeRemoteIndex(): void
     {
-        file_put_contents($this->stateDir . '/pull/local-index.jsonl', "{}\n");
+        file_put_contents($this->pullStateDirectory . '/remote-index.jsonl', "{}\n");
     }
 
     // --- resolution: SOURCE TARGET → one source => target rule -------------
@@ -167,6 +197,19 @@ class RemapResolveTest extends TestCase
         $this->assertSame($this->root . '/wp-content', $rules['/var/www/html/wp-content']);
     }
 
+    public function testResolvesRootTokensWithFilesystemRoot(): void
+    {
+        $rules = $this->resolve(
+            $this->filesystemRootClient(array(
+                'abspath' => '/',
+                'content_dir' => '/',
+            )),
+            array(':abspath:', ':fs-root:')
+        );
+
+        $this->assertSame(['/' => '/'], $rules);
+    }
+
     // --- detached-component expansion --------------------------------------
 
     public function testDetachedComponentsExpandUnderTarget(): void
@@ -224,16 +267,16 @@ class RemapResolveTest extends TestCase
         $this->assertRemapConsistent($c);
     }
 
-    public function testRejectsRemapWithUntrackedExistingFilesIndex(): void
+    public function testRejectsRemapWithUntrackedExistingRemoteIndex(): void
     {
-        $this->writeLocalIndex();
+        $this->writeRemoteIndex();
         $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
         $this->set($c, 'resolved_path_mappings', array(
             '/var/www/html/wp-content' => $this->root . '/wp-content',
         ));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('existing files index');
+        $this->expectExceptionMessage('existing remote index');
         $this->assertRemapConsistent($c);
     }
 

@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Verify that run_apply_runtime removes production drop-ins declared in
@@ -26,7 +26,6 @@ class ProductionDropInRemovalTest extends TestCase
         $this->outputDir = $this->tempDir . '/runtime';
 
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
         mkdir($this->outputDir, 0755, true);
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
@@ -116,7 +115,7 @@ class ProductionDropInRemovalTest extends TestCase
             'max_allowed_packet' => null,
         ];
 
-        \write_current_import_state($this->makeClient(), array_replace_recursive($defaults, $state));
+        \write_current_pull_state($this->makeClient(), array_replace_recursive($defaults, $state));
     }
 
     private function makeClient(): \ImportClient
@@ -333,7 +332,7 @@ class ProductionDropInRemovalTest extends TestCase
 
         // Re-read the state file to verify paths_removed was persisted.
         $state = json_decode(
-            file_get_contents($this->stateDir . '/pull/state.json'),
+            file_get_contents($client->pull_state_directory . '/state.json'),
             true,
         );
 
@@ -498,7 +497,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->runApplyRuntime($client);
 
         $state = json_decode(
-            file_get_contents($this->stateDir . '/pull/state.json'),
+            file_get_contents($client->pull_state_directory . '/state.json'),
             true,
         );
 

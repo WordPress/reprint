@@ -1,6 +1,6 @@
 /**
  * Test 04: Files Index via import.php
- * Tests files-index command produces pull/remote-index.jsonl.
+ * Tests files-index command produces pull/remote-index.next.jsonl.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    countJsonlLines,
+    countJsonlLines, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -30,16 +30,27 @@ describe('Import: Files Index', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('files-index produces pull/remote-index.jsonl', () => {
+    it('files-index produces pull/remote-index.next.jsonl', () => {
         const result = runImporter(importUrl(), tempDir, 'files-index', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const indexFile = join(tempDir, 'pull/remote-index.jsonl');
-        assert.ok(existsSync(indexFile), 'Expected pull/remote-index.jsonl to exist');
+        const nextRemoteIndexFile = join(pullStateDirectory(tempDir, importUrl()), 'remote-index.next.jsonl');
+        const completion = result.stdout
+            .split('\n')
+            .map(line => {
+                try {
+                    return JSON.parse(line);
+                } catch {
+                    return null;
+                }
+            })
+            .find(event => event?.command === 'files-index' && event?.event === 'complete');
+        assert.equal(completion?.next_remote_index_file, nextRemoteIndexFile);
+        assert.ok(existsSync(nextRemoteIndexFile), 'Expected pull/remote-index.next.jsonl to exist');
 
-        const lines = readFileSync(indexFile, 'utf-8').trim().split('\n').filter(l => l);
+        const lines = readFileSync(nextRemoteIndexFile, 'utf-8').trim().split('\n').filter(l => l);
         assert.ok(lines.length > 0, 'Expected at least one index entry');
 
         // Entries should include paths from the site directory
@@ -51,20 +62,20 @@ describe('Import: Files Index', () => {
         assert.ok(hasPaths, `Expected entries with file paths, got: ${JSON.stringify(entries.slice(0, 2))}`);
 
         const directories = entries.filter(e => e.type === 'dir');
-        assert.ok(directories.length > 0, 'Expected directory entries in remote index');
+        assert.ok(directories.length > 0, 'Expected directory entries in next remote index');
         for (const directory of directories) {
             assert.equal(
                 typeof directory.empty,
                 'boolean',
-                `Expected directory emptiness in remote index: ${JSON.stringify(directory)}`,
+                `Expected directory emptiness in next remote index: ${JSON.stringify(directory)}`,
             );
         }
     });
 
-    it('remote index has at least 3000 entries', () => {
-        const indexFile = join(tempDir, 'pull/remote-index.jsonl');
-        const count = countJsonlLines(indexFile);
+    it('next remote index has at least 3000 entries', () => {
+        const nextRemoteIndexFile = join(pullStateDirectory(tempDir, importUrl()), 'remote-index.next.jsonl');
+        const count = countJsonlLines(nextRemoteIndexFile);
         assert.ok(count >= 3000,
-            `Expected at least 3000 entries in remote index, got ${count}`);
+            `Expected at least 3000 entries in next remote index, got ${count}`);
     });
 });

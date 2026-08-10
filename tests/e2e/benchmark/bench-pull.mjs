@@ -43,7 +43,7 @@ const SEED_POSTS = Number(process.env.BENCH_SEED_POSTS || 320_007);
 const SEED_POSTMETA = Number(process.env.BENCH_SEED_POSTMETA || 720_015);
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
+const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 const PREFLIGHT_IMPORTER_PATH = process.env.BENCH_PREFLIGHT_IMPORTER_PATH || IMPORTER_PATH;
 const PLAYGROUND_PHP_BINARY = process.env.BENCH_PLAYGROUND_PHP_BINARY || join(PROJECT_ROOT, 'tests', 'e2e', 'ci', 'playground-php.sh');
 const PLAYGROUND_PHP_VERSION = process.env.PLAYGROUND_PHP_VERSION || '8.3';
@@ -136,13 +136,13 @@ async function provisionDatabase() {
     await conn.end();
 }
 
-function runStage(stage, stateDir, extraArgs = [], { includeUrl = true, phpBinary = PHP_BINARY, env = {} } = {}) {
+function runStage(stage, stateDir, extraArgs = [], { phpBinary = PHP_BINARY, env = {} } = {}) {
     const url = `${getSiteUrl(SITE)}&directory=${getSiteDir(SITE)}`;
     const importerPath = stage === 'preflight' ? PREFLIGHT_IMPORTER_PATH : IMPORTER_PATH;
     const args = [
         importerPath,
         stage,
-        ...(includeUrl ? [url] : []),
+        url,
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
         `--secret=${getSiteSecret(SITE)}`,
@@ -629,15 +629,14 @@ async function main() {
         { name: 'files-pull', extra: [] },
         { name: 'db-pull', extra: [] },
         { name: 'db-apply', extra: dbApplyArgs },
-        // apply-runtime is local-only; it doesn't take a remote URL.
-        { name: 'apply-runtime', extra: runtimeArgs, includeUrl: false },
+        { name: 'apply-runtime', extra: runtimeArgs },
     ];
 
     const results = [];
-    for (const { name, extra, includeUrl } of stages) {
+    for (const { name, extra } of stages) {
         if (!shouldRun(name)) continue;
         console.log(`-> ${name}`);
-        const r = runStage(name, stateDir, extra, { includeUrl });
+        const r = runStage(name, stateDir, extra);
         results.push(r);
         console.log(`   ${r.ok ? 'ok' : 'FAIL'} in ${fmtMs(r.elapsedMs)} (attempts=${r.attempts})`);
         if (!r.ok) {

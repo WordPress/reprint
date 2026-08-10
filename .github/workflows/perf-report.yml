@@ -198,7 +198,11 @@ jobs:
           fi
 
       - name: Post sticky PR comment
-        if: always() && github.event_name == 'pull_request' && steps.check_md.outputs.exists == 'true'
+        if: >-
+          always() &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          steps.check_md.outputs.exists == 'true'
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: pull-pipeline-perf

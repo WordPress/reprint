@@ -17,6 +17,7 @@ import {
     assertTreesMatch, assertSiteMirror,
     fsRootDir, assertPullPipelineComplete,
     compareDatabases, createMysqlConnection, getDbName,
+    pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -74,7 +75,10 @@ describe('Import: Pull Multi-Request', { timeout: 300000 }, () => {
     });
 
     it('state shows pull complete', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(
+            join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+            'utf-8',
+        ));
         assertPullPipelineComplete(state);
     });
 

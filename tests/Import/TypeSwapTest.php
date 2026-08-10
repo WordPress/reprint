@@ -3,8 +3,9 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\StreamingContext;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Test type swap handling during delta sync.
@@ -105,7 +106,7 @@ class TypeSwapTest extends TestCase
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_file_chunk');
 
-        $context = new \StreamingContext();
+        $context = new StreamingContext();
         $chunk = [
             'headers' => [
                 'x-file-path' => base64_encode('/swapped-path'),
@@ -196,7 +197,7 @@ class TypeSwapTest extends TestCase
 
         // Step 2: file chunk writes a nested file
         $fileMethod = $reflection->getMethod('handle_file_chunk');
-        $context = new \StreamingContext();
+        $context = new StreamingContext();
         $fileMethod->invoke($client, [
             'headers' => [
                 'x-file-path' => base64_encode('/parent/sub/file.txt'),

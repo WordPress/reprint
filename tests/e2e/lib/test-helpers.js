@@ -16,7 +16,7 @@ const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
 
 const SITE_ROOT = REGISTRY.siteRoot;
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
+const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
@@ -213,6 +213,23 @@ export function fsRootDir(outputDir) {
 }
 
 /**
+ * Return the pull state directory for a remote Reprint API URL.
+ */
+export function pullStateDirectory(outputDirectory, remoteReprintApiUrl) {
+    return join(remoteStateDirectory(outputDirectory, remoteReprintApiUrl), 'pull');
+}
+
+/**
+ * Return the remote state directory for a remote Reprint API URL.
+ */
+export function remoteStateDirectory(outputDirectory, remoteReprintApiUrl) {
+    const remoteReprintApiUrlHash = createHash('md5')
+        .update(remoteReprintApiUrl.replace(/[?&]+$/, ''))
+        .digest('hex');
+    return join(outputDirectory, 'remotes', remoteReprintApiUrlHash);
+}
+
+/**
  * Run the importer CLI.
  * @param {string} url - Export URL
  * @param {string} outputDir - Local output directory (state files live here; fs-root is outputDir/fs-root)
@@ -266,7 +283,7 @@ export function runImporter(url, outputDir, command, options = {}) {
     // Non-preflight commands require a prior preflight run.
     // Automatically run one if the state file doesn't already have preflight data.
     if (command !== 'preflight' && command !== 'preflight-assert' && options.skipPreflight !== true) {
-        const stateFile = join(outputDir, 'pull/state.json');
+        const stateFile = join(pullStateDirectory(outputDir, url), 'state.json');
         let needsPreflight = true;
         try {
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
@@ -277,7 +294,18 @@ export function runImporter(url, outputDir, command, options = {}) {
             // No state file or invalid JSON — need preflight
         }
         if (needsPreflight) {
-            const preflightResult = runImporterOnce('preflight');
+            let preflightResult;
+            let preflightAttempts = 0;
+            do {
+                preflightResult = runImporterOnce('preflight');
+                preflightAttempts += 1;
+                // Preflight is read-only. Retry only when cURL received no HTTP
+                // response, which is the transient PHP-FPM stall seen in CI.
+            } while (
+                preflightResult.exitCode !== 0 &&
+                preflightAttempts < 3 &&
+                preflightResult.stdout.includes('"http_code":0')
+            );
             if (preflightResult.exitCode !== 0) {
                 return preflightResult;
             }
@@ -677,15 +705,18 @@ export function readAuditLog(outputDir) {
 }
 
 /**
- * Assert that the import indexed at least minCount files.
- * Checks pull/local-index.jsonl line count.
+ * Assert that the remote index contains at least minCount entries.
+ * Checks the remote-scoped pull/remote-index.jsonl line count.
  */
-export function assertFileCount(outputDir, minCount = 3000) {
-    const indexPath = join(outputDir, 'pull/local-index.jsonl');
-    assert.ok(existsSync(indexPath), `Expected ${indexPath} to exist`);
-    const count = countJsonlLines(indexPath);
-    assert.ok(count >= minCount,
-        `Expected at least ${minCount} files in index, got ${count}`);
+export function assertRemoteIndexEntryCount(outputDir, remoteReprintApiUrl, minCount = 3000) {
+    const remoteIndexFile = join(
+        pullStateDirectory(outputDir, remoteReprintApiUrl),
+        'remote-index.jsonl',
+    );
+    assert.ok(existsSync(remoteIndexFile), `Expected ${remoteIndexFile} to exist`);
+    const remoteIndexEntryCount = countJsonlLines(remoteIndexFile);
+    assert.ok(remoteIndexEntryCount >= minCount,
+        `Expected at least ${minCount} remote index entries, got ${remoteIndexEntryCount}`);
 }
 
 /**

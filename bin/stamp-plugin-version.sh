@@ -18,8 +18,8 @@ VERSION="$1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-INDEX="$PROJECT_ROOT/reprint-exporter-wp/index.php"
-LIB="$PROJECT_ROOT/reprint-exporter-wp/lib.php"
+INDEX="$PROJECT_ROOT/reprint-server-wp/index.php"
+LIB="$PROJECT_ROOT/reprint-server-wp/lib.php"
 
 # Match any version string (with or without -dev suffix) in both locations.
 # Use a temp-file suffix for sed -i portability (macOS vs GNU).

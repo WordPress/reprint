@@ -3,8 +3,13 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use function WordPress\Reprint\Exporter\path_is_within_root;
+use function WordPress\Reprint\Exporter\path_remainder_under;
+use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
+use function WordPress\Reprint\Exporter\relative_path_under;
+use function WordPress\Reprint\Exporter\trim_right_slash;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * --remap: the single write seam (map_remote_absolute_path_to_local_absolute_path)
@@ -133,8 +138,7 @@ class RemapSeamTest extends TestCase
      */
     public function testPathRemainderUnder(?string $expected, string $path, string $prefix): void
     {
-        $c = $this->clientWithRules(array());
-        $this->assertSame($expected, $this->call($c, 'path_remainder_under', array($path, $prefix)));
+        $this->assertSame($expected, path_remainder_under($path, $prefix));
     }
 
     public static function providePathRemainderCases(): array
@@ -148,5 +152,150 @@ class RemapSeamTest extends TestCase
             'trailing slash on both' => array('', '/home/adam/', '/home/adam/'),
             'under, prefix has trailing slash' => array('/c', '/a/b/c', '/a/b/'),
         );
+    }
+
+    /**
+     * @dataProvider provideTrailingSlashPathCases
+     */
+    public function testTrimRightSlash(string $expected, string $path): void
+    {
+        $this->assertSame($expected, trim_right_slash($path));
+    }
+
+    public static function provideTrailingSlashPathCases(): array
+    {
+        return array(
+            'path without trailing slashes' => array('/srv/site', '/srv/site'),
+            'path with trailing slashes' => array('/srv/site', '/srv/site///'),
+            'filesystem root' => array('/', '/'),
+            'empty input becomes filesystem root' => array('/', ''),
+        );
+    }
+
+    /**
+     * @dataProvider provideRelativePathCases
+     */
+    public function testRelativePathUnder(?string $expected, string $path, string $root): void
+    {
+        $this->assertSame($expected, relative_path_under($path, $root));
+    }
+
+    public static function provideRelativePathCases(): array
+    {
+        return array(
+            'empty relative root itself' => array('', '', ''),
+            'empty relative root child' => array('child/path', 'child/path', ''),
+            'empty relative root child with trailing slash' => array('child/path', 'child/path/', ''),
+            'absolute path outside empty relative root' => array(null, '/child/path', ''),
+            'relative path outside filesystem root' => array(null, 'child/path', '/'),
+            'filesystem root itself' => array('', '/', '/'),
+            'filesystem root child' => array('child', '/child', '/'),
+            'exact non-root match' => array('', '/a', '/a'),
+            'non-root descendant' => array('b', '/a/b', '/a'),
+            'sibling prefix' => array(null, '/ab', '/a'),
+            'trailing slashes' => array('b', '/a/b/', '/a/'),
+        );
+    }
+
+    /**
+     * @dataProvider providePathWithinRootCases
+     */
+    public function testPathIsWithinRoot(bool $expected, string $path, string $root): void
+    {
+        $this->assertSame($expected, path_is_within_root($path, $root));
+    }
+
+    public static function providePathWithinRootCases(): array
+    {
+        return array(
+            'filesystem root itself' => array(true, '/', '/'),
+            'filesystem root child' => array(true, '/child', '/'),
+            'relative path is outside filesystem root' => array(false, 'child', '/'),
+            'exact non-root match' => array(true, '/a', '/a'),
+            'non-root descendant' => array(true, '/a/b', '/a'),
+            'sibling prefix' => array(false, '/ab', '/a'),
+        );
+    }
+
+    public function testPathIsWithinRootMatchesAnyPathAndRoot(): void
+    {
+        $this->assertTrue(path_is_within_root('/a/b', ['/elsewhere', '/a']));
+        $this->assertTrue(path_is_within_root(['/elsewhere', '/a/b'], '/a'));
+        $this->assertTrue(path_is_within_root(
+            ['/elsewhere', '/a/b'],
+            ['/not-this-one', '/a']
+        ));
+        $this->assertFalse(path_is_within_root(
+            ['/elsewhere', '/other'],
+            ['/not-this-one', '/a']
+        ));
+    }
+
+    public function testRealpathWithMissingTail(): void
+    {
+        $existing_directory = $this->tempDir . '/existing';
+        mkdir($existing_directory);
+        $canonical_existing_directory = realpath($existing_directory);
+        $this->assertIsString($canonical_existing_directory);
+
+        $this->assertSame(
+            $canonical_existing_directory,
+            realpath_with_missing_tail($existing_directory)
+        );
+        $this->assertSame(
+            $canonical_existing_directory . '/missing',
+            realpath_with_missing_tail($existing_directory . '/missing')
+        );
+        $this->assertSame(
+            $canonical_existing_directory . '/missing/child',
+            realpath_with_missing_tail($existing_directory . '/missing/child')
+        );
+        $this->assertSame('/', realpath_with_missing_tail('/'));
+
+        $symlink = $this->tempDir . '/existing-link';
+        symlink($existing_directory, $symlink);
+        $this->assertSame(
+            $canonical_existing_directory . '/missing-through-link',
+            realpath_with_missing_tail($symlink . '/missing-through-link')
+        );
+
+        $broken_symlink = $this->tempDir . '/broken-link';
+        symlink($this->tempDir . '/missing-target', $broken_symlink);
+        $this->assertSame(
+            $broken_symlink . '/child',
+            realpath_with_missing_tail($broken_symlink . '/child')
+        );
+    }
+
+    public function testNextRemoteIndexMatchesFilesystemRootAndPathBoundaries(): void
+    {
+        $client = $this->clientWithRules(array());
+        $next_remote_index_file = $this->tempDir . '/remote-index.next.jsonl';
+        file_put_contents(
+            $next_remote_index_file,
+            json_encode([
+                'path' => base64_encode('/srv/site/child.txt'),
+                'ctime' => 0,
+                'size' => 1,
+                'type' => 'file',
+            ]) . "\n"
+        );
+        $this->set($client, 'next_remote_index_file', $next_remote_index_file);
+
+        $this->assertTrue($this->call(
+            $client,
+            'next_remote_index_contains_remote_absolute_path_prefix',
+            array('/')
+        ));
+        $this->assertTrue($this->call(
+            $client,
+            'next_remote_index_contains_remote_absolute_path_prefix',
+            array('/srv/site')
+        ));
+        $this->assertFalse($this->call(
+            $client,
+            'next_remote_index_contains_remote_absolute_path_prefix',
+            array('/srv/site-old')
+        ));
     }
 }

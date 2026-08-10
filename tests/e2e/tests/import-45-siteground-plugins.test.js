@@ -17,12 +17,12 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    getDbName, createMysqlConnection,
+    getDbName, createMysqlConnection, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
+const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 
 describe('Import: SiteGround plugin stripping', () => {
     const site = 'siteground-plugins';
@@ -111,7 +111,10 @@ describe('Import: SiteGround plugin stripping', () => {
         });
         assert.equal(result.exitCode, 0, `preflight failed:\n${result.stderr}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(
+            join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+            'utf-8',
+        ));
         assert.equal(state.webhost, 'siteground',
             `Expected webhost 'siteground', got '${state.webhost}'`);
     });
@@ -207,6 +210,7 @@ describe('Import: SiteGround plugin stripping', () => {
             execFileSync('php', [
                 IMPORTER_PATH,
                 'apply-runtime',
+                importUrl(),
                 `--state-dir=${tempDir}`,
                 `--flat-document-root=${flatDir}`,
                 `--runtime=php-builtin`,
