@@ -51,24 +51,27 @@ final class FileIndexDiffProcessorTest extends TestCase
         ]);
         $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
 
+        $this->assertTrue($processor->next_path());
         $this->assertSame(
-            ['after', null, 'after-only.txt', 'before-only.txt', 'after-only.txt', null],
+            ['after-only.txt', null, 'file', 'before-only.txt', 'after-only.txt', null],
             $this->current_path_summary($processor)
         );
         $processor->consume_current_path();
+        $this->assertTrue($processor->next_path());
         $this->assertSame(
-            ['before', 'before-only.txt', null, 'before-only.txt', 'shared.txt', 'after-only.txt'],
+            ['before-only.txt', 'file', null, 'before-only.txt', 'shared.txt', 'after-only.txt'],
             $this->current_path_summary($processor)
         );
         $processor->consume_current_path();
+        $this->assertTrue($processor->next_path());
         $this->assertSame(
-            ['both', 'shared.txt', 'shared.txt', 'shared.txt', 'shared.txt', 'after-only.txt'],
+            ['shared.txt', 'file', 'file', 'shared.txt', 'shared.txt', 'after-only.txt'],
             $this->current_path_summary($processor)
         );
         $processor->consume_current_path();
 
-        $this->assertNull($processor->get_current_path());
-        $this->assertNull($processor->get_current_path());
+        $this->assertFalse($processor->next_path());
+        $this->assertFalse($processor->next_path());
         $processor->close();
     }
 
@@ -86,10 +89,15 @@ final class FileIndexDiffProcessorTest extends TestCase
         );
         $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
 
-        $this->assertSame('A-after', $processor->get_current_path()['after']['path']);
-        $this->assertSame('after', $processor->get_current_path()['order']);
+        $this->assertTrue($processor->next_path());
+        $this->assertSame('A-after', $processor->get_path());
+        $this->assertNull($processor->get_before_path_type());
+        $this->assertSame('file', $processor->get_after_path_type());
         $processor->consume_current_path();
-        $this->assertSame("\xD0-before", $processor->get_current_path()['before']['path']);
+        $this->assertTrue($processor->next_path());
+        $this->assertSame("\xD0-before", $processor->get_path());
+        $this->assertSame('file', $processor->get_before_path_type());
+        $this->assertNull($processor->get_after_path_type());
 
         $processor->close();
     }
@@ -105,8 +113,9 @@ final class FileIndexDiffProcessorTest extends TestCase
         $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
         $initial_cursor = $processor->get_cursor();
 
-        $first_read = $processor->get_current_path();
-        $this->assertSame($first_read, $processor->get_current_path());
+        $this->assertTrue($processor->next_path());
+        $first_read = $this->current_path_summary($processor);
+        $this->assertSame($first_read, $this->current_path_summary($processor));
         $this->assertSame($initial_cursor, $processor->get_cursor());
 
         $processor->consume_current_path();
@@ -126,14 +135,18 @@ final class FileIndexDiffProcessorTest extends TestCase
         ]);
         $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
 
-        $this->assertSame('before', $processor->get_current_path()['order']);
+        $this->assertTrue($processor->next_path());
+        $this->assertSame('file', $processor->get_before_path_type());
+        $this->assertNull($processor->get_after_path_type());
         $processor->consume_current_path();
         $after_before_only = $processor->get_cursor();
         $this->assertGreaterThan(0, $after_before_only['before_index_byte_offset']);
         $this->assertSame(0, $after_before_only['after_index_byte_offset']);
         $this->assertNull($after_before_only['previous_after_index_entry_path_b64']);
 
-        $this->assertSame('after', $processor->get_current_path()['order']);
+        $this->assertTrue($processor->next_path());
+        $this->assertNull($processor->get_before_path_type());
+        $this->assertSame('file', $processor->get_after_path_type());
         $processor->consume_current_path();
         $after_after_only = $processor->get_cursor();
         $this->assertSame(
@@ -146,7 +159,9 @@ final class FileIndexDiffProcessorTest extends TestCase
             $after_after_only['previous_after_index_entry_path_b64']
         );
 
-        $this->assertSame('both', $processor->get_current_path()['order']);
+        $this->assertTrue($processor->next_path());
+        $this->assertSame('file', $processor->get_before_path_type());
+        $this->assertSame('file', $processor->get_after_path_type());
         $processor->consume_current_path();
         $after_shared = $processor->get_cursor();
         $this->assertGreaterThan(
@@ -171,9 +186,11 @@ final class FileIndexDiffProcessorTest extends TestCase
             $this->entry('c.txt'),
         ]);
         $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $this->assertTrue($processor->next_path());
         $processor->consume_current_path();
         $stored_cursor = $processor->get_cursor();
-        $unconsumed_path = $processor->get_current_path();
+        $this->assertTrue($processor->next_path());
+        $unconsumed_path = $this->current_path_summary($processor);
         $processor->close();
 
         $resumed_processor = FileIndexDiffProcessor::resume(
@@ -181,7 +198,8 @@ final class FileIndexDiffProcessorTest extends TestCase
             $after_index_file,
             $stored_cursor
         );
-        $this->assertSame($unconsumed_path, $resumed_processor->get_current_path());
+        $this->assertTrue($resumed_processor->next_path());
+        $this->assertSame($unconsumed_path, $this->current_path_summary($resumed_processor));
         $this->assertSame($stored_cursor, $resumed_processor->get_cursor());
         $resumed_processor->close();
     }
@@ -197,9 +215,11 @@ final class FileIndexDiffProcessorTest extends TestCase
             $this->entry('c-shared'),
         ]);
         $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $this->assertTrue($processor->next_path());
         $processor->consume_current_path();
 
-        $this->assertSame('a-after', $processor->get_current_path()['previous_after_path']);
+        $this->assertTrue($processor->next_path());
+        $this->assertSame('a-after', $processor->get_previous_after_path());
         $processor->consume_current_path();
         $cursor = $processor->get_cursor();
         $processor->close();
@@ -209,10 +229,12 @@ final class FileIndexDiffProcessorTest extends TestCase
             $after_index_file,
             $cursor
         );
-        $this->assertSame('both', $resumed_processor->get_current_path()['order']);
+        $this->assertTrue($resumed_processor->next_path());
+        $this->assertSame('file', $resumed_processor->get_before_path_type());
+        $this->assertSame('file', $resumed_processor->get_after_path_type());
         $this->assertSame(
             'a-after',
-            $resumed_processor->get_current_path()['previous_after_path']
+            $resumed_processor->get_previous_after_path()
         );
         $resumed_processor->close();
     }
@@ -228,11 +250,15 @@ final class FileIndexDiffProcessorTest extends TestCase
             $after_index_file
         );
 
-        $this->assertSame('after', $processor->get_current_path()['order']);
+        $this->assertTrue($processor->next_path());
+        $this->assertNull($processor->get_before_path_type());
+        $this->assertSame('file', $processor->get_after_path_type());
         $processor->consume_current_path();
-        $this->assertSame('after', $processor->get_current_path()['order']);
+        $this->assertTrue($processor->next_path());
+        $this->assertNull($processor->get_before_path_type());
+        $this->assertSame('file', $processor->get_after_path_type());
         $processor->consume_current_path();
-        $this->assertNull($processor->get_current_path());
+        $this->assertFalse($processor->next_path());
         $processor->close();
     }
 
@@ -246,7 +272,12 @@ final class FileIndexDiffProcessorTest extends TestCase
             $after_index_file
         );
 
-        $this->assertTrue($processor->get_current_path()['after']['empty']);
+        $this->assertTrue($processor->next_path());
+        $this->assertSame('empty-directory', $processor->get_path());
+        $this->assertSame('dir', $processor->get_after_path_type());
+        $this->assertSame(0, $processor->get_after_size());
+        $this->assertSame(10, $processor->get_after_ctime());
+        $this->assertTrue($processor->get_after_directory_is_empty());
         $processor->close();
     }
 
@@ -267,10 +298,10 @@ final class FileIndexDiffProcessorTest extends TestCase
         $before_index_file = $this->write_index('before.jsonl', []);
         $after_index_file = $this->write_index('after.jsonl', []);
         $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
-        $this->assertNull($processor->get_current_path());
+        $this->assertFalse($processor->next_path());
 
         $this->expectException(LogicException::class);
-        $this->expectExceptionMessage('Cannot consume a completed file-index diff');
+        $this->expectExceptionMessage('No current file-index path');
         try {
             $processor->consume_current_path();
         } finally {
@@ -285,13 +316,48 @@ final class FileIndexDiffProcessorTest extends TestCase
             $this->entry('after.txt'),
         ]);
         $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
-        $processor->get_current_path();
+        $this->assertTrue($processor->next_path());
         $processor->close();
         $processor->close();
 
         $this->expectException(LogicException::class);
         $this->expectExceptionMessage('Cannot use a closed file-index diff processor');
-        $processor->get_current_path();
+        $processor->next_path();
+    }
+
+    public function testGettersDoNotSelectAPath(): void
+    {
+        $before_index_file = $this->write_index('before.jsonl', []);
+        $after_index_file = $this->write_index('after.jsonl', [
+            $this->entry('after.txt'),
+        ]);
+        $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+
+        $this->expectException(LogicException::class);
+        $this->expectExceptionMessage('Call next_path() first');
+        try {
+            $processor->get_path();
+        } finally {
+            $processor->close();
+        }
+    }
+
+    public function testNextPathRejectsAnUnconsumedCurrentPath(): void
+    {
+        $before_index_file = $this->write_index('before.jsonl', []);
+        $after_index_file = $this->write_index('after.jsonl', [
+            $this->entry('after.txt'),
+        ]);
+        $processor = FileIndexDiffProcessor::start($before_index_file, $after_index_file);
+        $this->assertTrue($processor->next_path());
+
+        $this->expectException(LogicException::class);
+        $this->expectExceptionMessage('before consuming the current path');
+        try {
+            $processor->next_path();
+        } finally {
+            $processor->close();
+        }
     }
 
     /**
@@ -338,15 +404,13 @@ final class FileIndexDiffProcessorTest extends TestCase
     /** @return array{string,string|null,string|null,string|null,string|null,string|null} */
     private function current_path_summary(FileIndexDiffProcessor $processor): array
     {
-        $current_path = $processor->get_current_path();
-        $this->assertIsArray($current_path);
         return [
-            $current_path['order'],
-            $current_path['before']['path'] ?? null,
-            $current_path['after']['path'] ?? null,
-            $current_path['before_lookahead']['path'] ?? null,
-            $current_path['after_lookahead']['path'] ?? null,
-            $current_path['previous_after_path'],
+            $processor->get_path(),
+            $processor->get_before_path_type(),
+            $processor->get_after_path_type(),
+            $processor->get_before_lookahead_path(),
+            $processor->get_after_lookahead_path(),
+            $processor->get_previous_after_path(),
         ];
     }
 }
