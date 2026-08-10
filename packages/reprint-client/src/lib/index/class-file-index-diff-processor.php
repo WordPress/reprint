@@ -73,36 +73,36 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * index. Together they bracket the position where that missing path would
  * appear in the new index.
  *
- * ## Selection and consumption
+ * ## Traversal
  *
- * A caller selects, inspects, processes, and then consumes one path:
+ * The first call to `next_path()` selects a path. Each subsequent call consumes
+ * the current path, advances the cursor, and selects the following path:
  *
- *     $processor = FileIndexDiffProcessor::start($old_index, $new_index);
- *     while ($processor->next_path()) {
+ *     $processor = FileIndexDiffProcessor::create($old_index, $new_index);
+ *     $has_path = $processor->next_path();
+ *     while ($has_path) {
  *         apply_path_operation(
  *             $processor->get_path(),
  *             $processor->get_path_type_in_old_index(),
  *             $processor->get_path_type_in_new_index()
  *         );
- *         $processor->consume_current_path();
+ *         $has_path = $processor->next_path();
  *         save_cursor($processor->get_cursor());
  *     }
  *     $processor->close();
  *
  * `next_path()` is the only public method which reads index entries. Information
  * getters do not move either file handle and return stable values until the
- * current path is consumed. `consume_current_path()` advances the public cursor
- * past the index entries which supplied the current path.
+ * next call to `next_path()`.
  *
  * ## Resume boundaries
  *
  * The cursor records the byte offset after the last consumed entry in each
  * index and the new-index path preceding the next merge position. A selected
  * but unconsumed entry is deliberately not included. If a process stops before
- * storing the consumed cursor, `resume()` selects that path again. Work
- * performed for one path must
- * therefore tolerate replay, or its caller must store a separate durable
- * confirmation.
+ * advancing and storing the cursor, `resume()` selects that path again. Work
+ * performed for one path must therefore tolerate replay, or its caller must
+ * store a separate durable confirmation.
  *
  * Both JSONL indexes must remain immutable and sorted by decoded path bytes,
  * not by their base64 representation. The cursor identifies byte positions in
@@ -110,8 +110,8 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * index must exist. A missing old index represents an empty starting tree.
  *
  * Selecting a path may move the private file handles beyond the public cursor
- * while the processor retains unread entries. Only the cursor returned after
- * `consume_current_path()` is a continuation boundary.
+ * while the processor retains unread entries. The cursor still names only
+ * consumed entries and can always be passed to `resume()`.
  *
  * @phpstan-type IndexEntry array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool}
  * @phpstan-type Cursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
@@ -140,7 +140,7 @@ final class FileIndexDiffProcessor
     private array $cursor;
 
     /** @var 'old'|'new'|'both'|null Indexes which contain the current path. */
-    private ?string $current_path_membership = null;
+    private ?string $current_path_found_in = null;
 
     /** Closest consumed new-index path which sorts before the current path. */
     private ?string $preceding_path_in_new_index = null;
@@ -152,7 +152,7 @@ final class FileIndexDiffProcessor
     private bool $closed = false;
 
     /**
-     * Opens two filesystem indexes and starts before their first paths.
+     * Creates a processor positioned before either index's first path.
      *
      * The old file describes the starting tree and may be absent, which is
      * equivalent to an empty tree. The new file describes the ending tree and
@@ -162,7 +162,7 @@ final class FileIndexDiffProcessor
      * @param string $new_index_file New index.
      * @return self Open processor positioned before either index's first path.
      */
-    public static function start(string $old_index_file, string $new_index_file): self
+    public static function create(string $old_index_file, string $new_index_file): self
     {
         return self::resume(
             $old_index_file,
@@ -237,22 +237,43 @@ final class FileIndexDiffProcessor
     /**
      * Selects the next unconsumed path found in either snapshot.
      *
-     * This method retains at most one unread entry from each index, compares
-     * their paths, and makes the first path in decoded-byte order current. The
-     * current path may occur in the old index, the new index, or both.
-     * Information getters may be called only after this method returns true.
-     * The caller must consume the current path before selecting another one.
-     * False means both indexes reached EOF and remains false on subsequent calls.
+     * If a path is already current, this method first records it as consumed and
+     * advances the public cursor past the entries which supplied it. It then
+     * retains at most one unread entry from each index, compares their paths,
+     * and makes the first path in decoded-byte order current. The current path
+     * may occur in the old index, the new index, or both. Information getters
+     * may be called only after this method returns true. False means both indexes
+     * reached EOF and remains false on subsequent calls.
      *
      * @return bool Whether a path was selected.
      */
     public function next_path(): bool
     {
         $this->assert_open();
-        if ($this->current_path_membership !== null) {
-            throw new LogicException(
-                "Cannot select another file-index path before consuming the current path."
-            );
+        if ($this->current_path_found_in !== null) {
+            if ($this->current_path_found_in !== "new") {
+                $old_index_byte_offset = ftell($this->old_index_handle);
+                if (!is_int($old_index_byte_offset)) {
+                    throw new RuntimeException("Failed to read the old file-index byte offset.");
+                }
+                $this->cursor["old_index_byte_offset"] = $old_index_byte_offset;
+                $this->old_index_entry = null;
+                $this->old_index_entry_loaded = false;
+            }
+            if ($this->current_path_found_in !== "old") {
+                $new_index_byte_offset = ftell($this->new_index_handle);
+                if (!is_int($new_index_byte_offset)) {
+                    throw new RuntimeException("Failed to read the new file-index byte offset.");
+                }
+                $this->cursor["new_index_byte_offset"] = $new_index_byte_offset;
+                $this->cursor["preceding_new_index_entry_path_b64"] = base64_encode(
+                    $this->new_index_entry["path"]
+                );
+                $this->new_index_entry = null;
+                $this->new_index_entry_loaded = false;
+            }
+            $this->current_path_found_in = null;
+            $this->preceding_path_in_new_index = null;
         }
         if ($this->complete) {
             return false;
@@ -275,16 +296,16 @@ final class FileIndexDiffProcessor
         }
 
         if ($this->old_index_entry === null) {
-            $current_path_membership = "new";
+            $current_path_found_in = "new";
         } elseif ($this->new_index_entry === null) {
-            $current_path_membership = "old";
+            $current_path_found_in = "old";
         } else {
             // Base64 text order does not preserve arbitrary path-byte order.
             $path_comparison = strcmp(
                 $this->new_index_entry["path"],
                 $this->old_index_entry["path"]
             );
-            $current_path_membership = $path_comparison < 0
+            $current_path_found_in = $path_comparison < 0
                 ? "new"
                 : ( $path_comparison > 0 ? "old" : "both" );
         }
@@ -299,7 +320,7 @@ final class FileIndexDiffProcessor
                 throw new RuntimeException("The file-index diff cursor has an invalid preceding new-index path.");
             }
         }
-        $this->current_path_membership = $current_path_membership;
+        $this->current_path_found_in = $current_path_found_in;
         $this->preceding_path_in_new_index = $preceding_path_in_new_index;
         return true;
     }
@@ -308,12 +329,12 @@ final class FileIndexDiffProcessor
      * Returns the local relative path selected by next_path().
      *
      * This method does not read either index. The returned path remains current
-     * until `consume_current_path()`.
+     * until the next call to `next_path()`.
      */
     public function get_path(): string
     {
         $this->assert_current_path();
-        return $this->current_path_membership === "new"
+        return $this->current_path_found_in === "new"
             ? $this->new_index_entry["path"]
             : $this->old_index_entry["path"];
     }
@@ -424,7 +445,7 @@ final class FileIndexDiffProcessor
     public function get_following_path_in_old_index(): ?string
     {
         $this->assert_current_path();
-        if ($this->current_path_membership !== "new") {
+        if ($this->current_path_found_in !== "new") {
             throw new LogicException(
                 "The current path occurs in the old index, so its following old-index path has not been read."
             );
@@ -442,7 +463,7 @@ final class FileIndexDiffProcessor
     public function get_following_path_in_new_index(): ?string
     {
         $this->assert_current_path();
-        if ($this->current_path_membership !== "old") {
+        if ($this->current_path_found_in !== "old") {
             throw new LogicException(
                 "The current path occurs in the new index, so its following new-index path has not been read."
             );
@@ -464,52 +485,13 @@ final class FileIndexDiffProcessor
     }
 
     /**
-     * Records that the caller finished processing the current path.
-     *
-     * An old-only or new-only path consumes the entry from that index. A path
-     * present in both indexes consumes both entries. A retained following entry
-     * is not consumed. The cursor is updated only after the file positions of
-     * the consumed entries are known. Consuming a new entry also
-     * makes the current path a subsequent result's preceding new-index path.
-     *
-     * Calling this method after both indexes reached EOF is a logic error.
-     */
-    public function consume_current_path(): void
-    {
-        $this->assert_current_path();
-        if ($this->current_path_membership !== "new") {
-            $old_index_byte_offset = ftell($this->old_index_handle);
-            if (!is_int($old_index_byte_offset)) {
-                throw new RuntimeException("Failed to read the old file-index byte offset.");
-            }
-            $this->cursor["old_index_byte_offset"] = $old_index_byte_offset;
-            $this->old_index_entry = null;
-            $this->old_index_entry_loaded = false;
-        }
-        if ($this->current_path_membership !== "old") {
-            $new_index_byte_offset = ftell($this->new_index_handle);
-            if (!is_int($new_index_byte_offset)) {
-                throw new RuntimeException("Failed to read the new file-index byte offset.");
-            }
-            $this->cursor["new_index_byte_offset"] = $new_index_byte_offset;
-            $this->cursor["preceding_new_index_entry_path_b64"] = base64_encode(
-                $this->new_index_entry["path"]
-            );
-            $this->new_index_entry = null;
-            $this->new_index_entry_loaded = false;
-        }
-        $this->current_path_membership = null;
-        $this->preceding_path_in_new_index = null;
-    }
-
-    /**
      * Returns the positions from which another processor can continue.
      *
      * Each offset points immediately after the last entry consumed from its
      * index. Selecting a path and inspecting its information does not change
      * these offsets, even though private handles may have read retained entries.
-     * A caller should finish its work for the current path, consume the path,
-     * make its own output durable, and then store this cursor.
+     * Calling `next_path()` again advances the cursor past the current path
+     * before selecting another one.
      *
      * @return array {
      *     Cursor for `resume()`.
@@ -543,12 +525,12 @@ final class FileIndexDiffProcessor
         $this->old_index_handle = null;
         $this->old_index_entry = null;
         $this->new_index_entry = null;
-        $this->current_path_membership = null;
+        $this->current_path_found_in = null;
         $this->preceding_path_in_new_index = null;
         $this->closed = true;
     }
 
-    /** Rejects attempts to inspect or consume paths after close(). */
+    /** Rejects attempts to select or inspect paths after close(). */
     private function assert_open(): void
     {
         if ($this->closed) {
@@ -560,7 +542,7 @@ final class FileIndexDiffProcessor
     private function assert_current_path(): void
     {
         $this->assert_open();
-        if ($this->current_path_membership === null) {
+        if ($this->current_path_found_in === null) {
             throw new LogicException("No current file-index path. Call next_path() first.");
         }
     }
@@ -577,7 +559,7 @@ final class FileIndexDiffProcessor
     private function get_old_index_entry_for_current_path(): ?array
     {
         $this->assert_current_path();
-        return $this->current_path_membership === "new"
+        return $this->current_path_found_in === "new"
             ? null
             : $this->old_index_entry;
     }
@@ -594,7 +576,7 @@ final class FileIndexDiffProcessor
     private function get_new_index_entry_for_current_path(): ?array
     {
         $this->assert_current_path();
-        return $this->current_path_membership === "old"
+        return $this->current_path_found_in === "old"
             ? null
             : $this->new_index_entry;
     }
@@ -631,7 +613,7 @@ final class FileIndexDiffProcessor
      * Reads and decodes one entry, or returns null at EOF or for an absent index.
      *
      * The file handle advances when a line is read, but the public cursor does
-     * not advance until the caller consumes the current path containing it.
+     * does not advance until `next_path()` moves past the current path.
      *
      * @param resource|null $index_handle Open index or null for an empty index.
      * @phpstan-return IndexEntry|null

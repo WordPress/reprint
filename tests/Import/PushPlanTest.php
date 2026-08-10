@@ -539,9 +539,9 @@ final class PushPlanTest extends TestCase
     public function testStepRetainsTheFollowingFreshLocalIndexEntryUntilClose(): void
     {
         $plan = $this->startPlan($this->writeIndex($this->manyFileEntries(3)));
-        $index_diff_processor_property = new ReflectionProperty(
+        $index_diff_property = new ReflectionProperty(
             PushPlan::class,
-            'index_diff_processor'
+            'index_diff'
         );
         $new_index_handle_property = new ReflectionProperty(
             FileIndexDiffProcessor::class,
@@ -554,9 +554,9 @@ final class PushPlanTest extends TestCase
 
         $this->assertTrue($this->nextPlanStep($plan));
         $first_plan_cursor = $this->planCursor();
-        $index_diff_processor = $index_diff_processor_property->getValue($plan);
+        $index_diff = $index_diff_property->getValue($plan);
         $fresh_local_index_handle = $new_index_handle_property->getValue(
-            $index_diff_processor
+            $index_diff
         );
         $this->assertIsResource($fresh_local_index_handle);
         $this->assertGreaterThan(
@@ -564,7 +564,7 @@ final class PushPlanTest extends TestCase
             ftell($fresh_local_index_handle)
         );
         $retained_fresh_local_index_entry = $new_index_entry_property->getValue(
-            $index_diff_processor
+            $index_diff
         );
         $this->assertIsArray($retained_fresh_local_index_entry);
         $this->assertSame('file-0001.txt', $retained_fresh_local_index_entry['path']);
