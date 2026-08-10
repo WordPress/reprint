@@ -403,7 +403,9 @@ final class FilesDiffCommandTest extends TestCase
         ]);
 
         $this->assertSame(0, $result['exit'], $result['output']);
-        $this->assertStringContainsString('"hasCompletedOnce": false', $result['stdout']);
+        $this->assertCanonicalSingleJsonLine($result['stdout']);
+        $metadata = json_decode($result['stdout'], true, 512, JSON_THROW_ON_ERROR);
+        $this->assertFalse($metadata['hasCompletedOnce']);
         $this->assertSame('', $result['stderr']);
     }
 
