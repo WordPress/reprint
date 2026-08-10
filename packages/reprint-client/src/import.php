@@ -3444,8 +3444,8 @@ class ImportClient
         }
         $fresh_local_index_file =
             $this->files_pull_local_plan_directory . "/fresh_local_index.jsonl";
-        $index_diff_processor = $files_pull_plan_cursor["index_diff_cursor"] === null
-            ? FileIndexDiffProcessor::start(
+        $index_diff = $files_pull_plan_cursor["index_diff_cursor"] === null
+            ? FileIndexDiffProcessor::create(
                 $this->local_index_file,
                 $fresh_local_index_file
             )
@@ -3457,12 +3457,12 @@ class ImportClient
 
         $next_local_index_file_handle = fopen($this->next_local_index_file, "rb");
         if (!is_resource($next_local_index_file_handle)) {
-            $index_diff_processor->close();
+            $index_diff->close();
             throw new RuntimeException("Failed to open the mapped next local index.");
         }
         $fetch_list_file_handle = fopen($this->fetch_list_file, "c+b");
         if (!is_resource($fetch_list_file_handle)) {
-            $index_diff_processor->close();
+            $index_diff->close();
             fclose($next_local_index_file_handle);
             throw new RuntimeException("Failed to open the files-pull fetch list.");
         }
@@ -3471,7 +3471,7 @@ class ImportClient
             "a+b"
         );
         if (!is_resource($changed_local_roots_file_handle)) {
-            $index_diff_processor->close();
+            $index_diff->close();
             fclose($next_local_index_file_handle);
             fclose($fetch_list_file_handle);
             throw new RuntimeException("Failed to open the files-pull changed-root stack.");
@@ -3506,7 +3506,7 @@ class ImportClient
             $local_index_path_selected = false;
             while (!$this->shutdown_requested) {
                 if (!$local_index_path_selected) {
-                    $local_index_path_selected = $index_diff_processor->next_path();
+                    $local_index_path_selected = $index_diff->next_path();
                 }
                 if (!$local_index_path_selected && $next_local_index_record === null) {
                     return true;
@@ -3516,7 +3516,7 @@ class ImportClient
                     ? null
                     : $next_local_index_record["entry"]["path"];
                 $local_diff_path = $local_index_path_selected
-                    ? $index_diff_processor->get_path()
+                    ? $index_diff->get_path()
                     : null;
                 if ($local_diff_path !== null) {
                     if (
@@ -3547,16 +3547,16 @@ class ImportClient
                 }
 
                 if ($local_diff_path === $local_relative_path) {
-                    $old_path_type = $index_diff_processor->get_path_type_in_old_index();
-                    $new_path_type = $index_diff_processor->get_path_type_in_new_index();
+                    $old_path_type = $index_diff->get_path_type_in_old_index();
+                    $new_path_type = $index_diff->get_path_type_in_new_index();
                     $local_path_changed = $old_path_type !== $new_path_type
                         || (
                             $old_path_type !== null
                             && (
-                                $index_diff_processor->get_size_in_old_index()
-                                    !== $index_diff_processor->get_size_in_new_index()
-                                || $index_diff_processor->get_ctime_in_old_index()
-                                    !== $index_diff_processor->get_ctime_in_new_index()
+                                $index_diff->get_size_in_old_index()
+                                    !== $index_diff->get_size_in_new_index()
+                                || $index_diff->get_ctime_in_old_index()
+                                    !== $index_diff->get_ctime_in_new_index()
                             )
                         );
                     if (
@@ -3627,8 +3627,7 @@ class ImportClient
                             ];
                         }
                     }
-                    $index_diff_processor->consume_current_path();
-                    $local_index_path_selected = false;
+                    $local_index_path_selected = $index_diff->next_path();
                 }
 
                 if (
@@ -3667,7 +3666,7 @@ class ImportClient
                     throw new RuntimeException("Failed to read the files-pull fetch-list offset.");
                 }
                 $files_pull_plan_cursor["index_diff_cursor"] =
-                    $index_diff_processor->get_cursor();
+                    $index_diff->get_cursor();
                 $files_pull_plan_cursor["next_local_index_byte_offset"] =
                     $next_local_index_byte_offset;
                 $files_pull_plan_cursor["fetch_list_byte_offset"] =
@@ -3680,7 +3679,7 @@ class ImportClient
                 $this->save_state();
             }
         } finally {
-            $index_diff_processor->close();
+            $index_diff->close();
             fclose($next_local_index_file_handle);
             fclose($fetch_list_file_handle);
             fclose($changed_local_roots_file_handle);
