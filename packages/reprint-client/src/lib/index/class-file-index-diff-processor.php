@@ -9,17 +9,73 @@ require_once __DIR__ . '/../local-index-update-functions.php';
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Match the existing processor classes.
 
 /**
- * Aligns entries from two path-sorted file indexes without loading either index.
+ * Walks two filesystem indexes together in path order.
  *
- * `FileIndexDiffProcessor` provides the traversal shared by operations which
- * compare an earlier filesystem snapshot with a later one. It does not decide
- * whether two entries differ or what should happen to a path. Instead, it
- * presents the next path from the union of both indexes and lets its caller
- * inspect the entry from either side.
+ * ## What the indexes represent
  *
- * ## Usage
+ * A filesystem index is a path-sorted list describing a filesystem tree at one
+ * point in time. Each index entry records one local relative path, whether that
+ * path is a file, link, or directory, its size, its inode change time (ctime),
+ * and, for some directories, whether it was empty.
  *
- * A caller performs its work before consuming the current path:
+ * This processor opens two such lists:
+ *
+ * - The **earlier index** describes the tree at the starting point.
+ * - The **later index** describes the tree at the ending point.
+ *
+ * "Earlier" and "later" therefore identify the snapshot which supplied an
+ * entry. They do not mean the previously or subsequently visited path. This
+ * class uses "previous" only for traversal history.
+ *
+ * ## How paths are compared
+ *
+ * `next_path()` selects the first unconsumed path found in either index. That
+ * selected path becomes the **current path**. The current path can have:
+ *
+ * - an earlier entry and no later entry, meaning the path disappeared;
+ * - no earlier entry and a later entry, meaning the path appeared; or
+ * - an entry in both indexes, meaning the caller must compare their recorded
+ *   information to decide whether the path changed.
+ *
+ * For example, while `wp-content/a.txt` is current, its earlier entry is the
+ * record for `wp-content/a.txt` in the earlier index. It is not the record for
+ * the path visited immediately before it. If the earlier index does not contain
+ * `wp-content/a.txt`, the current path has no earlier entry and
+ * `get_earlier_path_type()` returns null.
+ *
+ * This class only aligns the two indexes. It does not classify a change or
+ * decide whether to copy, remove, or preserve a path. The caller makes that
+ * decision from the information exposed for the current path.
+ *
+ * ## Current entries and lookahead entries
+ *
+ * The indexes are already sorted, so they can be merged in a single pass. The
+ * processor retains at most one unread entry from each index and compares their
+ * decoded path bytes. The earlier and later retained entries do not always name
+ * the same path.
+ *
+ * Suppose the earlier index's retained entry is `b.txt` and the later index's
+ * retained entry is `a.txt`. `a.txt` becomes the current path because it sorts
+ * first. It has no earlier entry. The retained `b.txt` entry remains available
+ * as the earlier lookahead path for callers which need to reason about what
+ * follows without moving either stream.
+ *
+ * Therefore the information getters and lookahead getters answer different
+ * questions:
+ *
+ * - `get_earlier_path_type()` describes the current path in the earlier
+ *   snapshot, or returns null when that snapshot has no such path.
+ * - `get_earlier_lookahead_path()` returns the path of the entry retained from
+ *   the earlier stream, even when that entry belongs to a future current path.
+ *
+ * The corresponding later getters make the same distinction for the later
+ * index. `get_previous_later_path()` is different again: it returns the last
+ * path already consumed from the later index. Earlier-only paths may have been
+ * selected since then.
+ *
+ * ## Selection and consumption
+ *
+ * A caller selects, inspects, processes, and then consumes one path:
  *
  *     $processor = FileIndexDiffProcessor::start($earlier_index, $later_index);
  *     while ($processor->next_path()) {
@@ -33,80 +89,59 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  *     }
  *     $processor->close();
  *
- * `next_path()` is the only path-selection method which reads from the index
- * handles. The `get_*()` methods only inspect the selected path. If the process
- * stops after applying an operation but before storing the consumed cursor,
- * `resume()` selects that path again. The operation associated with one path
- * therefore needs to tolerate replay, or the caller needs its own durable
+ * `next_path()` is the only public method which reads index entries. Information
+ * getters do not move either file handle and return stable values until the
+ * current path is consumed. `consume_current_path()` advances the public cursor
+ * past the index entries which supplied the current path.
+ *
+ * ## Resume boundaries
+ *
+ * The cursor records the byte offset after the last consumed entry in each
+ * index and the last consumed later-index path. A selected but unconsumed entry
+ * is deliberately not included. If a process stops before storing the consumed
+ * cursor, `resume()` selects that path again. Work performed for one path must
+ * therefore tolerate replay, or its caller must store a separate durable
  * confirmation.
  *
- * ## Alignment
+ * Both JSONL indexes must remain immutable and sorted by decoded path bytes,
+ * not by their base64 representation. The cursor identifies byte positions in
+ * those same files; it does not identify or validate their contents. The later
+ * index must exist. A missing earlier index represents an empty starting tree.
  *
- * Each selected path has one of three relationships:
- *
- * | Earlier path type | Later path type | Meaning                         |
- * |-------------------|-----------------|---------------------------------|
- * | non-null          | null            | Only the earlier index has it.  |
- * | null              | non-null        | Only the later index has it.    |
- * | non-null         | non-null        | Both indexes contain the path.  |
- *
- * The two lookahead-path getters expose the entries currently retained from
- * the underlying streams even when one belongs to a later path. For example,
- * a later-only path may retain the next earlier-index path as lookahead. Callers
- * use this to recognize subtree replacements without reading ahead or moving
- * either cursor themselves.
- *
- * `previous_later_path` is the most recently consumed path from the later
- * index. Consuming an earlier-only path does not change it. This gives callers
- * the preceding later-index path while they process gaps in sparse indexes.
- *
- * ## Index and cursor requirements
- *
- * Both JSONL indexes must be sorted by decoded path bytes, not by their base64
- * representation. The later index must exist. A missing earlier index represents
- * an empty earlier snapshot.
- *
- * The cursor contains the byte offset after the last consumed entry in each
- * index and the previous consumed later-index path. It identifies positions
- * within the same immutable index files; it does not identify or validate the
- * files themselves. A caller which resumes with different index contents has
- * violated the processor contract.
- *
- * The processor keeps one current entry from each index in memory. Selecting a
- * path may move the file handles beyond the public cursor because the retained
- * entries are not consumed yet. Getter calls never move the handles. Only the
- * cursor returned after `consume_current_path()` is a continuation boundary.
+ * Selecting a path may move the private file handles beyond the public cursor
+ * while the processor retains lookahead. Only the cursor returned after
+ * `consume_current_path()` is a continuation boundary.
  *
  * @phpstan-type IndexEntry array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool}
  * @phpstan-type Cursor array{earlier_index_byte_offset:int,later_index_byte_offset:int,previous_later_index_entry_path_b64:string|null}
  */
 final class FileIndexDiffProcessor
 {
-    /** @var resource|null Open earlier index, or null when the earlier index is absent. */
+    /** @var resource|null Stream containing the starting tree, or null for an empty tree. */
     private $earlier_index_handle = null;
 
-    /** @var resource|null Open later index. */
+    /** @var resource|null Stream containing the ending tree. */
     private $later_index_handle = null;
 
-    /** @var IndexEntry|null Earlier entry retained until its aligned path is consumed. */
+    /** @var IndexEntry|null Unconsumed earlier entry, which may be current or lookahead. */
     private ?array $earlier_index_entry = null;
 
     /** Whether the earlier entry has been read, including an EOF result. */
     private bool $earlier_index_entry_loaded = false;
 
-    /** @var IndexEntry|null Later entry retained until its aligned path is consumed. */
+    /** @var IndexEntry|null Unconsumed later entry, which may be current or lookahead. */
     private ?array $later_index_entry = null;
 
     /** Whether the later entry has been read, including an EOF result. */
     private bool $later_index_entry_loaded = false;
 
-    /** @var Cursor Position immediately after the last consumed aligned path. */
+    /** @var Cursor Positions immediately after the entries consumed for the last current path. */
     private array $cursor;
 
-    /** @var 'earlier'|'later'|'both'|null Relationship of the selected path. */
+    /** @var 'earlier'|'later'|'both'|null Indexes which contain the current path. */
     private ?string $current_path_order = null;
 
-    /** Most recently consumed later-index path restored for the selected path. */
+    /** Later-index path consumed most recently before the current path. */
     private ?string $previous_later_path = null;
 
     /** Whether both indexes reached EOF. */
@@ -116,15 +151,15 @@ final class FileIndexDiffProcessor
     private bool $closed = false;
 
     /**
-     * Starts a new comparison at the beginning of both indexes.
+     * Opens two filesystem indexes and starts before their first paths.
      *
-     * The earlier index may be absent, which is equivalent to an empty earlier
-     * snapshot. The later index must be an existing readable file. Both files
-     * remain open until `close()`.
+     * The earlier file describes the starting tree and may be absent, which is
+     * equivalent to an empty tree. The later file describes the ending tree and
+     * must be readable. Both files remain open until `close()`.
      *
      * @param string $earlier_index_file Earlier index, or a missing path for an empty index.
      * @param string $later_index_file   Later index.
-     * @return self Open processor positioned before the first aligned path.
+     * @return self Open processor positioned before either index's first path.
      */
     public static function start(string $earlier_index_file, string $later_index_file): self
     {
@@ -140,11 +175,12 @@ final class FileIndexDiffProcessor
     }
 
     /**
-     * Resumes a comparison after the last consumed aligned path.
+     * Reopens the two filesystem indexes at the positions recorded by a cursor.
      *
-     * The byte offsets address the next unread entries. The previous later-index
-     * path restores the context returned as `previous_later_path`. Entries read
-     * before an interruption but not consumed are deliberately read again.
+     * Each byte offset points to the next entry not represented by the stored
+     * cursor. The previous later-index path restores the traversal information
+     * returned by `get_previous_later_path()`. An entry selected before an
+     * interruption but not consumed is deliberately selected again.
      *
      * The caller must provide the same immutable index contents used to produce
      * the cursor. This method restores positions; it does not fingerprint the
@@ -198,12 +234,14 @@ final class FileIndexDiffProcessor
     }
 
     /**
-     * Selects the next aligned path from the two indexes.
+     * Selects the next unconsumed path found in either snapshot.
      *
-     * This method reads at most one retained entry from each index. It returns
-     * true when the per-information getters may inspect a selected path. The
-     * caller must consume that path before selecting another one. False means
-     * both indexes reached EOF and remains false on later calls.
+     * This method retains at most one unread entry from each index, compares
+     * their paths, and makes the first path in decoded-byte order current. The
+     * current path may occur in the earlier index, the later index, or both.
+     * Information getters may be called only after this method returns true.
+     * The caller must consume the current path before selecting another one.
+     * False means both indexes reached EOF and remains false on later calls.
      *
      * @return bool Whether a path was selected.
      */
@@ -265,7 +303,12 @@ final class FileIndexDiffProcessor
         return true;
     }
 
-    /** Returns the selected local relative path. */
+    /**
+     * Returns the local relative path selected by next_path().
+     *
+     * This method does not read either index. The returned path remains current
+     * until `consume_current_path()`.
+     */
     public function get_path(): string
     {
         $this->assert_current_path();
@@ -274,73 +317,138 @@ final class FileIndexDiffProcessor
             : $this->earlier_index_entry["path"];
     }
 
-    /** Returns the earlier local path type, or null when only the later index has the path. */
+    /**
+     * Returns the current path's type in the starting tree.
+     *
+     * Null means the earlier index has no entry for the current path: the path
+     * did not exist in the starting tree. A retained earlier lookahead entry for
+     * another path does not affect this result.
+     */
     public function get_earlier_path_type(): ?string
     {
         $entry = $this->get_earlier_index_entry_for_current_path();
         return $entry["type"] ?? null;
     }
 
-    /** Returns the later local path type, or null when only the earlier index has the path. */
+    /**
+     * Returns the current path's type in the ending tree.
+     *
+     * Null means the later index has no entry for the current path: the path no
+     * longer exists in the ending tree. A retained later lookahead entry for
+     * another path does not affect this result.
+     */
     public function get_later_path_type(): ?string
     {
         $entry = $this->get_later_index_entry_for_current_path();
         return $entry["type"] ?? null;
     }
 
-    /** Returns the earlier size. The selected path must occur in the earlier index. */
+    /**
+     * Returns the size recorded for the current path in the starting tree.
+     *
+     * The current path must have an earlier entry. Call
+     * `get_earlier_path_type()` first when its presence is not already known.
+     */
     public function get_earlier_size(): int
     {
         return $this->get_required_earlier_index_entry()["size"];
     }
 
-    /** Returns the later size. The selected path must occur in the later index. */
+    /**
+     * Returns the size recorded for the current path in the ending tree.
+     *
+     * The current path must have a later entry. Call `get_later_path_type()`
+     * first when its presence is not already known.
+     */
     public function get_later_size(): int
     {
         return $this->get_required_later_index_entry()["size"];
     }
 
-    /** Returns the earlier ctime. The selected path must occur in the earlier index. */
+    /**
+     * Returns the ctime recorded for the current path in the starting tree.
+     *
+     * The current path must have an earlier entry. Call
+     * `get_earlier_path_type()` first when its presence is not already known.
+     */
     public function get_earlier_ctime(): int
     {
         return $this->get_required_earlier_index_entry()["ctime"];
     }
 
-    /** Returns the later ctime. The selected path must occur in the later index. */
+    /**
+     * Returns the ctime recorded for the current path in the ending tree.
+     *
+     * The current path must have a later entry. Call `get_later_path_type()`
+     * first when its presence is not already known.
+     */
     public function get_later_ctime(): int
     {
         return $this->get_required_later_index_entry()["ctime"];
     }
 
-    /** Returns the earlier directory empty marker, or null when it is not recorded. */
+    /**
+     * Returns whether the current path was an empty directory in the starting tree.
+     *
+     * Null means either that the current path has no earlier entry or that its
+     * earlier entry does not carry the optional empty-directory marker. Inspect
+     * `get_earlier_path_type()` when those cases need to be distinguished.
+     */
     public function get_earlier_directory_is_empty(): ?bool
     {
         $entry = $this->get_earlier_index_entry_for_current_path();
         return $entry["empty"] ?? null;
     }
 
-    /** Returns the later directory empty marker, or null when it is not recorded. */
+    /**
+     * Returns whether the current path is an empty directory in the ending tree.
+     *
+     * Null means either that the current path has no later entry or that its
+     * later entry does not carry the optional empty-directory marker. Inspect
+     * `get_later_path_type()` when those cases need to be distinguished.
+     */
     public function get_later_directory_is_empty(): ?bool
     {
         $entry = $this->get_later_index_entry_for_current_path();
         return $entry["empty"] ?? null;
     }
 
-    /** Returns the earlier entry retained as lookahead, which may follow the selected path. */
+    /**
+     * Returns the path of the entry retained from the earlier index.
+     *
+     * This is stream lookahead, not necessarily information about the current
+     * path. When only the later index contains the current path, the earlier
+     * retained entry names a path which sorts after it. Null means the earlier
+     * stream has no retained entry because it reached EOF or was absent.
+     */
     public function get_earlier_lookahead_path(): ?string
     {
         $this->assert_current_path();
         return $this->earlier_index_entry["path"] ?? null;
     }
 
-    /** Returns the later entry retained as lookahead, which may follow the selected path. */
+    /**
+     * Returns the path of the entry retained from the later index.
+     *
+     * This is stream lookahead, not necessarily information about the current
+     * path. When only the earlier index contains the current path, the later
+     * retained entry names a path which sorts after it. Null means the later
+     * stream has reached EOF.
+     */
     public function get_later_lookahead_path(): ?string
     {
         $this->assert_current_path();
         return $this->later_index_entry["path"] ?? null;
     }
 
-    /** Returns the most recently consumed later-index path. */
+    /**
+     * Returns the last path consumed from the later index before the current path.
+     *
+     * This reports traversal history, not an entry from the earlier snapshot.
+     * Consuming an earlier-only path leaves this value unchanged, so it may not
+     * be the path selected immediately before the current one. Null means no
+     * later-index path has been consumed yet.
+     */
     public function get_previous_later_path(): ?string
     {
         $this->assert_current_path();
@@ -348,12 +456,13 @@ final class FileIndexDiffProcessor
     }
 
     /**
-     * Consumes the current path after its caller completes the associated work.
+     * Records that the caller finished processing the current path.
      *
-     * An earlier-only or later-only path advances one index. A path present in
-     * both indexes advances both. The cursor is updated only after the relevant
-     * file positions are known, and consuming a later-index entry also records
-     * that entry as the next result's `previous_later_path`.
+     * An earlier-only or later-only path consumes the entry from that index. A
+     * path present in both indexes consumes both entries. Retained lookahead for
+     * a future path is not consumed. The cursor is updated only after the file
+     * positions of the consumed entries are known. Consuming a later entry also
+     * makes the current path the next result's `get_previous_later_path()`.
      *
      * Calling this method after both indexes reached EOF is a logic error.
      */
@@ -386,11 +495,13 @@ final class FileIndexDiffProcessor
     }
 
     /**
-     * Returns the continuation boundary after the last consumed path.
+     * Returns the positions from which another processor can continue.
      *
-     * Selecting a path and reading its information does not change this cursor.
-     * A caller should first complete its work for the current path, then consume
-     * the path, make its own output durable, and finally store this cursor.
+     * Each offset points immediately after the last entry consumed from its
+     * index. Selecting a path and inspecting its information does not change
+     * these offsets, even though private handles may have read retained entries.
+     * A caller should finish its work for the current path, consume the path,
+     * make its own output durable, and then store this cursor.
      *
      * @return array {
      *     Cursor for `resume()`.
@@ -446,7 +557,15 @@ final class FileIndexDiffProcessor
         }
     }
 
-    /** @phpstan-return IndexEntry|null */
+    /**
+     * Returns the current path's entry from the starting tree, when it has one.
+     *
+     * The retained earlier entry may instead be lookahead for a future path.
+     * In that case the current path exists only in the later index and this
+     * method returns null rather than exposing the unrelated retained entry.
+     *
+     * @phpstan-return IndexEntry|null
+     */
     private function get_earlier_index_entry_for_current_path(): ?array
     {
         $this->assert_current_path();
@@ -455,7 +574,15 @@ final class FileIndexDiffProcessor
             : $this->earlier_index_entry;
     }
 
-    /** @phpstan-return IndexEntry|null */
+    /**
+     * Returns the current path's entry from the ending tree, when it has one.
+     *
+     * The retained later entry may instead be lookahead for a future path. In
+     * that case the current path exists only in the earlier index and this
+     * method returns null rather than exposing the unrelated retained entry.
+     *
+     * @phpstan-return IndexEntry|null
+     */
     private function get_later_index_entry_for_current_path(): ?array
     {
         $this->assert_current_path();
@@ -464,7 +591,11 @@ final class FileIndexDiffProcessor
             : $this->later_index_entry;
     }
 
-    /** @phpstan-return IndexEntry */
+    /**
+     * Returns the current path's earlier entry when its presence is required.
+     *
+     * @phpstan-return IndexEntry
+     */
     private function get_required_earlier_index_entry(): array
     {
         $entry = $this->get_earlier_index_entry_for_current_path();
@@ -474,7 +605,11 @@ final class FileIndexDiffProcessor
         return $entry;
     }
 
-    /** @phpstan-return IndexEntry */
+    /**
+     * Returns the current path's later entry when its presence is required.
+     *
+     * @phpstan-return IndexEntry
+     */
     private function get_required_later_index_entry(): array
     {
         $entry = $this->get_later_index_entry_for_current_path();
@@ -488,7 +623,7 @@ final class FileIndexDiffProcessor
      * Reads and decodes one entry, or returns null at EOF or for an absent index.
      *
      * The file handle advances when a line is read, but the public cursor does
-     * not advance until the caller consumes the aligned path containing it.
+     * not advance until the caller consumes the current path containing it.
      *
      * @param resource|null $index_handle Open index or null for an empty index.
      * @phpstan-return IndexEntry|null
