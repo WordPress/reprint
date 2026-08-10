@@ -20,69 +20,69 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  *
  * This processor opens two such lists:
  *
- * - The **earlier index** describes the tree at the starting point.
- * - The **later index** describes the tree at the ending point.
+ * - The **old index** describes the tree at the starting point.
+ * - The **new index** describes the tree at the ending point.
  *
- * "Earlier" and "later" therefore identify the snapshot which supplied an
- * entry. They do not mean the previously or subsequently visited path. This
- * class uses "previous" only for traversal history.
+ * "Old" and "new" identify the snapshot which supplied an entry. They do not
+ * describe traversal order within either index.
  *
  * ## How paths are compared
  *
  * `next_path()` selects the first unconsumed path found in either index. That
  * selected path becomes the **current path**. The current path can have:
  *
- * - an earlier entry and no later entry, meaning the path disappeared;
- * - no earlier entry and a later entry, meaning the path appeared; or
+ * - an old entry and no new entry, meaning the path disappeared;
+ * - no old entry and a new entry, meaning the path appeared; or
  * - an entry in both indexes, meaning the caller must compare their recorded
  *   information to decide whether the path changed.
  *
- * For example, while `wp-content/a.txt` is current, its earlier entry is the
- * record for `wp-content/a.txt` in the earlier index. It is not the record for
- * the path visited immediately before it. If the earlier index does not contain
- * `wp-content/a.txt`, the current path has no earlier entry and
- * `get_earlier_path_type()` returns null.
+ * For example, while `wp-content/a.txt` is current, its old entry is the
+ * record for `wp-content/a.txt` in the old index. It is not the record for
+ * the path visited immediately before it. If the old index does not contain
+ * `wp-content/a.txt`, the current path has no old entry and
+ * `get_path_type_in_old_index()` returns null.
  *
  * This class only aligns the two indexes. It does not classify a change or
  * decide whether to copy, remove, or preserve a path. The caller makes that
  * decision from the information exposed for the current path.
  *
- * ## Current entries and lookahead entries
+ * ## Current, preceding, and following paths
  *
  * The indexes are already sorted, so they can be merged in a single pass. The
  * processor retains at most one unread entry from each index and compares their
- * decoded path bytes. The earlier and later retained entries do not always name
- * the same path.
+ * decoded path bytes. The retained old and new entries do not always name the
+ * same path.
  *
- * Suppose the earlier index's retained entry is `b.txt` and the later index's
+ * Suppose the old index's retained entry is `b.txt` and the new index's
  * retained entry is `a.txt`. `a.txt` becomes the current path because it sorts
- * first. It has no earlier entry. The retained `b.txt` entry remains available
- * as the earlier lookahead path for callers which need to reason about what
- * follows without moving either stream.
+ * first. It has no old entry. Relative to `a.txt`, `b.txt` is the following path
+ * in the old index.
  *
- * Therefore the information getters and lookahead getters answer different
- * questions:
+ * Current-path information and neighboring paths answer different questions:
  *
- * - `get_earlier_path_type()` describes the current path in the earlier
- *   snapshot, or returns null when that snapshot has no such path.
- * - `get_earlier_lookahead_path()` returns the path of the entry retained from
- *   the earlier stream, even when that entry belongs to a future current path.
+ * - `get_path_type_in_old_index()` describes the current path in the old index,
+ *   or returns null when that index has no such path.
+ * - When the current path is absent from the old index,
+ *   `get_following_path_in_old_index()` returns the first old-index path which
+ *   sorts after it.
  *
- * The corresponding later getters make the same distinction for the later
- * index. `get_previous_later_path()` is different again: it returns the last
- * path already consumed from the later index. Earlier-only paths may have been
- * selected since then.
+ * The corresponding new-index getters make the same distinction.
+ * `get_preceding_path_in_new_index()` returns the closest new-index path which
+ * sorts before the current path. `get_following_path_in_new_index()` returns the
+ * closest new-index path which sorts after a current path absent from that
+ * index. Together they bracket the position where that missing path would
+ * appear in the new index.
  *
  * ## Selection and consumption
  *
  * A caller selects, inspects, processes, and then consumes one path:
  *
- *     $processor = FileIndexDiffProcessor::start($earlier_index, $later_index);
+ *     $processor = FileIndexDiffProcessor::start($old_index, $new_index);
  *     while ($processor->next_path()) {
  *         apply_path_operation(
  *             $processor->get_path(),
- *             $processor->get_earlier_path_type(),
- *             $processor->get_later_path_type()
+ *             $processor->get_path_type_in_old_index(),
+ *             $processor->get_path_type_in_new_index()
  *         );
  *         $processor->consume_current_path();
  *         save_cursor($processor->get_cursor());
@@ -97,52 +97,53 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * ## Resume boundaries
  *
  * The cursor records the byte offset after the last consumed entry in each
- * index and the last consumed later-index path. A selected but unconsumed entry
- * is deliberately not included. If a process stops before storing the consumed
- * cursor, `resume()` selects that path again. Work performed for one path must
+ * index and the new-index path preceding the next merge position. A selected
+ * but unconsumed entry is deliberately not included. If a process stops before
+ * storing the consumed cursor, `resume()` selects that path again. Work
+ * performed for one path must
  * therefore tolerate replay, or its caller must store a separate durable
  * confirmation.
  *
  * Both JSONL indexes must remain immutable and sorted by decoded path bytes,
  * not by their base64 representation. The cursor identifies byte positions in
- * those same files; it does not identify or validate their contents. The later
- * index must exist. A missing earlier index represents an empty starting tree.
+ * those same files; it does not identify or validate their contents. The new
+ * index must exist. A missing old index represents an empty starting tree.
  *
  * Selecting a path may move the private file handles beyond the public cursor
- * while the processor retains lookahead. Only the cursor returned after
+ * while the processor retains unread entries. Only the cursor returned after
  * `consume_current_path()` is a continuation boundary.
  *
  * @phpstan-type IndexEntry array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool}
- * @phpstan-type Cursor array{earlier_index_byte_offset:int,later_index_byte_offset:int,previous_later_index_entry_path_b64:string|null}
+ * @phpstan-type Cursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
  */
 final class FileIndexDiffProcessor
 {
     /** @var resource|null Stream containing the starting tree, or null for an empty tree. */
-    private $earlier_index_handle = null;
+    private $old_index_handle = null;
 
     /** @var resource|null Stream containing the ending tree. */
-    private $later_index_handle = null;
+    private $new_index_handle = null;
 
-    /** @var IndexEntry|null Unconsumed earlier entry, which may be current or lookahead. */
-    private ?array $earlier_index_entry = null;
+    /** @var IndexEntry|null Unconsumed old entry, which may be current or following. */
+    private ?array $old_index_entry = null;
 
-    /** Whether the earlier entry has been read, including an EOF result. */
-    private bool $earlier_index_entry_loaded = false;
+    /** Whether the old entry has been read, including an EOF result. */
+    private bool $old_index_entry_loaded = false;
 
-    /** @var IndexEntry|null Unconsumed later entry, which may be current or lookahead. */
-    private ?array $later_index_entry = null;
+    /** @var IndexEntry|null Unconsumed new entry, which may be current or following. */
+    private ?array $new_index_entry = null;
 
-    /** Whether the later entry has been read, including an EOF result. */
-    private bool $later_index_entry_loaded = false;
+    /** Whether the new entry has been read, including an EOF result. */
+    private bool $new_index_entry_loaded = false;
 
     /** @var Cursor Positions immediately after the entries consumed for the last current path. */
     private array $cursor;
 
-    /** @var 'earlier'|'later'|'both'|null Indexes which contain the current path. */
-    private ?string $current_path_order = null;
+    /** @var 'old'|'new'|'both'|null Indexes which contain the current path. */
+    private ?string $current_path_membership = null;
 
-    /** Later-index path consumed most recently before the current path. */
-    private ?string $previous_later_path = null;
+    /** Closest consumed new-index path which sorts before the current path. */
+    private ?string $preceding_path_in_new_index = null;
 
     /** Whether both indexes reached EOF. */
     private bool $complete = false;
@@ -153,23 +154,23 @@ final class FileIndexDiffProcessor
     /**
      * Opens two filesystem indexes and starts before their first paths.
      *
-     * The earlier file describes the starting tree and may be absent, which is
-     * equivalent to an empty tree. The later file describes the ending tree and
+     * The old file describes the starting tree and may be absent, which is
+     * equivalent to an empty tree. The new file describes the ending tree and
      * must be readable. Both files remain open until `close()`.
      *
-     * @param string $earlier_index_file Earlier index, or a missing path for an empty index.
-     * @param string $later_index_file   Later index.
+     * @param string $old_index_file Old index, or a missing path for an empty index.
+     * @param string $new_index_file New index.
      * @return self Open processor positioned before either index's first path.
      */
-    public static function start(string $earlier_index_file, string $later_index_file): self
+    public static function start(string $old_index_file, string $new_index_file): self
     {
         return self::resume(
-            $earlier_index_file,
-            $later_index_file,
+            $old_index_file,
+            $new_index_file,
             [
-                "earlier_index_byte_offset" => 0,
-                "later_index_byte_offset" => 0,
-                "previous_later_index_entry_path_b64" => null,
+                "old_index_byte_offset" => 0,
+                "new_index_byte_offset" => 0,
+                "preceding_new_index_entry_path_b64" => null,
             ]
         );
     }
@@ -178,53 +179,53 @@ final class FileIndexDiffProcessor
      * Reopens the two filesystem indexes at the positions recorded by a cursor.
      *
      * Each byte offset points to the next entry not represented by the stored
-     * cursor. The previous later-index path restores the traversal information
-     * returned by `get_previous_later_path()`. An entry selected before an
+     * cursor. The preceding new-index path restores the lower neighbor returned
+     * by `get_preceding_path_in_new_index()`. An entry selected before an
      * interruption but not consumed is deliberately selected again.
      *
      * The caller must provide the same immutable index contents used to produce
      * the cursor. This method restores positions; it does not fingerprint the
      * files or check that they still describe the same snapshots.
      *
-     * @param string $earlier_index_file Earlier index, or a missing path for an empty index.
-     * @param string $later_index_file   Later index.
+     * @param string $old_index_file Old index, or a missing path for an empty index.
+     * @param string $new_index_file New index.
      * @param array  $cursor {
      *     Cursor returned by get_cursor().
      *
-     *     @type int         $earlier_index_byte_offset            Next byte in the earlier index.
-     *     @type int         $later_index_byte_offset              Next byte in the later index.
-     *     @type string|null $previous_later_index_entry_path_b64  Last consumed later-index path.
+     *     @type int         $old_index_byte_offset              Next byte in the old index.
+     *     @type int         $new_index_byte_offset              Next byte in the new index.
+     *     @type string|null $preceding_new_index_entry_path_b64 New-index path before the next position.
      * }
      * @phpstan-param Cursor $cursor
      * @return self Open processor restored at the supplied continuation boundary.
      */
     public static function resume(
-        string $earlier_index_file,
-        string $later_index_file,
+        string $old_index_file,
+        string $new_index_file,
         array $cursor
     ): self {
         $processor = new self();
         $processor->cursor = $cursor;
-        if (is_file($earlier_index_file)) {
-            $processor->earlier_index_handle = @fopen($earlier_index_file, "rb");
-            if (!is_resource($processor->earlier_index_handle)) {
-                throw new RuntimeException("Failed to open the earlier file index: {$earlier_index_file}.");
+        if (is_file($old_index_file)) {
+            $processor->old_index_handle = @fopen($old_index_file, "rb");
+            if (!is_resource($processor->old_index_handle)) {
+                throw new RuntimeException("Failed to open the old file index: {$old_index_file}.");
             }
         }
-        $processor->later_index_handle = @fopen($later_index_file, "rb");
-        if (!is_resource($processor->later_index_handle)) {
+        $processor->new_index_handle = @fopen($new_index_file, "rb");
+        if (!is_resource($processor->new_index_handle)) {
             $processor->close();
-            throw new RuntimeException("Failed to open the later file index: {$later_index_file}.");
+            throw new RuntimeException("Failed to open the new file index: {$new_index_file}.");
         }
         if (
-            ( is_resource($processor->earlier_index_handle)
+            ( is_resource($processor->old_index_handle)
                 && fseek(
-                    $processor->earlier_index_handle,
-                    $cursor["earlier_index_byte_offset"]
+                    $processor->old_index_handle,
+                    $cursor["old_index_byte_offset"]
                 ) !== 0 )
             || fseek(
-                $processor->later_index_handle,
-                $cursor["later_index_byte_offset"]
+                $processor->new_index_handle,
+                $cursor["new_index_byte_offset"]
             ) !== 0
         ) {
             $processor->close();
@@ -238,17 +239,17 @@ final class FileIndexDiffProcessor
      *
      * This method retains at most one unread entry from each index, compares
      * their paths, and makes the first path in decoded-byte order current. The
-     * current path may occur in the earlier index, the later index, or both.
+     * current path may occur in the old index, the new index, or both.
      * Information getters may be called only after this method returns true.
      * The caller must consume the current path before selecting another one.
-     * False means both indexes reached EOF and remains false on later calls.
+     * False means both indexes reached EOF and remains false on subsequent calls.
      *
      * @return bool Whether a path was selected.
      */
     public function next_path(): bool
     {
         $this->assert_open();
-        if ($this->current_path_order !== null) {
+        if ($this->current_path_membership !== null) {
             throw new LogicException(
                 "Cannot select another file-index path before consuming the current path."
             );
@@ -256,50 +257,50 @@ final class FileIndexDiffProcessor
         if ($this->complete) {
             return false;
         }
-        if (!$this->earlier_index_entry_loaded) {
-            $this->earlier_index_entry = $this->read_next_index_entry(
-                $this->earlier_index_handle
+        if (!$this->old_index_entry_loaded) {
+            $this->old_index_entry = $this->read_next_index_entry(
+                $this->old_index_handle
             );
-            $this->earlier_index_entry_loaded = true;
+            $this->old_index_entry_loaded = true;
         }
-        if (!$this->later_index_entry_loaded) {
-            $this->later_index_entry = $this->read_next_index_entry(
-                $this->later_index_handle
+        if (!$this->new_index_entry_loaded) {
+            $this->new_index_entry = $this->read_next_index_entry(
+                $this->new_index_handle
             );
-            $this->later_index_entry_loaded = true;
+            $this->new_index_entry_loaded = true;
         }
-        if ($this->earlier_index_entry === null && $this->later_index_entry === null) {
+        if ($this->old_index_entry === null && $this->new_index_entry === null) {
             $this->complete = true;
             return false;
         }
 
-        if ($this->earlier_index_entry === null) {
-            $current_path_order = "later";
-        } elseif ($this->later_index_entry === null) {
-            $current_path_order = "earlier";
+        if ($this->old_index_entry === null) {
+            $current_path_membership = "new";
+        } elseif ($this->new_index_entry === null) {
+            $current_path_membership = "old";
         } else {
             // Base64 text order does not preserve arbitrary path-byte order.
             $path_comparison = strcmp(
-                $this->later_index_entry["path"],
-                $this->earlier_index_entry["path"]
+                $this->new_index_entry["path"],
+                $this->old_index_entry["path"]
             );
-            $current_path_order = $path_comparison < 0
-                ? "later"
-                : ( $path_comparison > 0 ? "earlier" : "both" );
+            $current_path_membership = $path_comparison < 0
+                ? "new"
+                : ( $path_comparison > 0 ? "old" : "both" );
         }
 
-        $previous_later_path = null;
-        if ($this->cursor["previous_later_index_entry_path_b64"] !== null) {
-            $previous_later_path = base64_decode(
-                $this->cursor["previous_later_index_entry_path_b64"],
+        $preceding_path_in_new_index = null;
+        if ($this->cursor["preceding_new_index_entry_path_b64"] !== null) {
+            $preceding_path_in_new_index = base64_decode(
+                $this->cursor["preceding_new_index_entry_path_b64"],
                 true
             );
-            if ($previous_later_path === false) {
-                throw new RuntimeException("The file-index diff cursor has an invalid previous path.");
+            if ($preceding_path_in_new_index === false) {
+                throw new RuntimeException("The file-index diff cursor has an invalid preceding new-index path.");
             }
         }
-        $this->current_path_order = $current_path_order;
-        $this->previous_later_path = $previous_later_path;
+        $this->current_path_membership = $current_path_membership;
+        $this->preceding_path_in_new_index = $preceding_path_in_new_index;
         return true;
     }
 
@@ -312,186 +313,193 @@ final class FileIndexDiffProcessor
     public function get_path(): string
     {
         $this->assert_current_path();
-        return $this->current_path_order === "later"
-            ? $this->later_index_entry["path"]
-            : $this->earlier_index_entry["path"];
+        return $this->current_path_membership === "new"
+            ? $this->new_index_entry["path"]
+            : $this->old_index_entry["path"];
     }
 
     /**
      * Returns the current path's type in the starting tree.
      *
-     * Null means the earlier index has no entry for the current path: the path
-     * did not exist in the starting tree. A retained earlier lookahead entry for
+     * Null means the old index has no entry for the current path: the path
+     * did not exist in the starting tree. A retained following old entry for
      * another path does not affect this result.
      */
-    public function get_earlier_path_type(): ?string
+    public function get_path_type_in_old_index(): ?string
     {
-        $entry = $this->get_earlier_index_entry_for_current_path();
+        $entry = $this->get_old_index_entry_for_current_path();
         return $entry["type"] ?? null;
     }
 
     /**
      * Returns the current path's type in the ending tree.
      *
-     * Null means the later index has no entry for the current path: the path no
-     * longer exists in the ending tree. A retained later lookahead entry for
+     * Null means the new index has no entry for the current path: the path no
+     * longer exists in the ending tree. A retained following new entry for
      * another path does not affect this result.
      */
-    public function get_later_path_type(): ?string
+    public function get_path_type_in_new_index(): ?string
     {
-        $entry = $this->get_later_index_entry_for_current_path();
+        $entry = $this->get_new_index_entry_for_current_path();
         return $entry["type"] ?? null;
     }
 
     /**
      * Returns the size recorded for the current path in the starting tree.
      *
-     * The current path must have an earlier entry. Call
-     * `get_earlier_path_type()` first when its presence is not already known.
+     * The current path must have an old entry. Call
+     * `get_path_type_in_old_index()` first when its presence is not already known.
      */
-    public function get_earlier_size(): int
+    public function get_size_in_old_index(): int
     {
-        return $this->get_required_earlier_index_entry()["size"];
+        return $this->get_required_old_index_entry()["size"];
     }
 
     /**
      * Returns the size recorded for the current path in the ending tree.
      *
-     * The current path must have a later entry. Call `get_later_path_type()`
+     * The current path must have a new entry. Call `get_path_type_in_new_index()`
      * first when its presence is not already known.
      */
-    public function get_later_size(): int
+    public function get_size_in_new_index(): int
     {
-        return $this->get_required_later_index_entry()["size"];
+        return $this->get_required_new_index_entry()["size"];
     }
 
     /**
      * Returns the ctime recorded for the current path in the starting tree.
      *
-     * The current path must have an earlier entry. Call
-     * `get_earlier_path_type()` first when its presence is not already known.
+     * The current path must have an old entry. Call
+     * `get_path_type_in_old_index()` first when its presence is not already known.
      */
-    public function get_earlier_ctime(): int
+    public function get_ctime_in_old_index(): int
     {
-        return $this->get_required_earlier_index_entry()["ctime"];
+        return $this->get_required_old_index_entry()["ctime"];
     }
 
     /**
      * Returns the ctime recorded for the current path in the ending tree.
      *
-     * The current path must have a later entry. Call `get_later_path_type()`
+     * The current path must have a new entry. Call `get_path_type_in_new_index()`
      * first when its presence is not already known.
      */
-    public function get_later_ctime(): int
+    public function get_ctime_in_new_index(): int
     {
-        return $this->get_required_later_index_entry()["ctime"];
+        return $this->get_required_new_index_entry()["ctime"];
     }
 
     /**
      * Returns whether the current path was an empty directory in the starting tree.
      *
-     * Null means either that the current path has no earlier entry or that its
-     * earlier entry does not carry the optional empty-directory marker. Inspect
-     * `get_earlier_path_type()` when those cases need to be distinguished.
+     * Null means either that the current path has no old entry or that its
+     * old entry does not carry the optional empty-directory marker. Inspect
+     * `get_path_type_in_old_index()` when those cases need to be distinguished.
      */
-    public function get_earlier_directory_is_empty(): ?bool
+    public function get_directory_is_empty_in_old_index(): ?bool
     {
-        $entry = $this->get_earlier_index_entry_for_current_path();
+        $entry = $this->get_old_index_entry_for_current_path();
         return $entry["empty"] ?? null;
     }
 
     /**
      * Returns whether the current path is an empty directory in the ending tree.
      *
-     * Null means either that the current path has no later entry or that its
-     * later entry does not carry the optional empty-directory marker. Inspect
-     * `get_later_path_type()` when those cases need to be distinguished.
+     * Null means either that the current path has no new entry or that its
+     * new entry does not carry the optional empty-directory marker. Inspect
+     * `get_path_type_in_new_index()` when those cases need to be distinguished.
      */
-    public function get_later_directory_is_empty(): ?bool
+    public function get_directory_is_empty_in_new_index(): ?bool
     {
-        $entry = $this->get_later_index_entry_for_current_path();
+        $entry = $this->get_new_index_entry_for_current_path();
         return $entry["empty"] ?? null;
     }
 
     /**
-     * Returns the path of the entry retained from the earlier index.
+     * Returns the old-index path immediately following the current path.
      *
-     * This is stream lookahead, not necessarily information about the current
-     * path. When only the later index contains the current path, the earlier
-     * retained entry names a path which sorts after it. Null means the earlier
-     * stream has no retained entry because it reached EOF or was absent.
+     * The current path must be absent from the old index. Its insertion position
+     * then falls immediately before the retained old entry. Null means no old
+     * path follows it because the old index reached EOF or was absent.
      */
-    public function get_earlier_lookahead_path(): ?string
+    public function get_following_path_in_old_index(): ?string
     {
         $this->assert_current_path();
-        return $this->earlier_index_entry["path"] ?? null;
+        if ($this->current_path_membership !== "new") {
+            throw new LogicException(
+                "The current path occurs in the old index, so its following old-index path has not been read."
+            );
+        }
+        return $this->old_index_entry["path"] ?? null;
     }
 
     /**
-     * Returns the path of the entry retained from the later index.
+     * Returns the new-index path immediately following the current path.
      *
-     * This is stream lookahead, not necessarily information about the current
-     * path. When only the earlier index contains the current path, the later
-     * retained entry names a path which sorts after it. Null means the later
-     * stream has reached EOF.
+     * The current path must be absent from the new index. Its insertion position
+     * then falls immediately before the retained new entry. Null means no new
+     * path follows it because the new index reached EOF.
      */
-    public function get_later_lookahead_path(): ?string
+    public function get_following_path_in_new_index(): ?string
     {
         $this->assert_current_path();
-        return $this->later_index_entry["path"] ?? null;
+        if ($this->current_path_membership !== "old") {
+            throw new LogicException(
+                "The current path occurs in the new index, so its following new-index path has not been read."
+            );
+        }
+        return $this->new_index_entry["path"] ?? null;
     }
 
     /**
-     * Returns the last path consumed from the later index before the current path.
+     * Returns the new-index path immediately preceding the current path.
      *
-     * This reports traversal history, not an entry from the earlier snapshot.
-     * Consuming an earlier-only path leaves this value unchanged, so it may not
-     * be the path selected immediately before the current one. Null means no
-     * later-index path has been consumed yet.
+     * This is the closest new-index path which sorts before the current path,
+     * not necessarily the path selected immediately before it. Null means the
+     * current path sorts before every path in the new index.
      */
-    public function get_previous_later_path(): ?string
+    public function get_preceding_path_in_new_index(): ?string
     {
         $this->assert_current_path();
-        return $this->previous_later_path;
+        return $this->preceding_path_in_new_index;
     }
 
     /**
      * Records that the caller finished processing the current path.
      *
-     * An earlier-only or later-only path consumes the entry from that index. A
-     * path present in both indexes consumes both entries. Retained lookahead for
-     * a future path is not consumed. The cursor is updated only after the file
-     * positions of the consumed entries are known. Consuming a later entry also
-     * makes the current path the next result's `get_previous_later_path()`.
+     * An old-only or new-only path consumes the entry from that index. A path
+     * present in both indexes consumes both entries. A retained following entry
+     * is not consumed. The cursor is updated only after the file positions of
+     * the consumed entries are known. Consuming a new entry also
+     * makes the current path a subsequent result's preceding new-index path.
      *
      * Calling this method after both indexes reached EOF is a logic error.
      */
     public function consume_current_path(): void
     {
         $this->assert_current_path();
-        if ($this->current_path_order !== "later") {
-            $earlier_index_byte_offset = ftell($this->earlier_index_handle);
-            if (!is_int($earlier_index_byte_offset)) {
-                throw new RuntimeException("Failed to read the earlier file-index byte offset.");
+        if ($this->current_path_membership !== "new") {
+            $old_index_byte_offset = ftell($this->old_index_handle);
+            if (!is_int($old_index_byte_offset)) {
+                throw new RuntimeException("Failed to read the old file-index byte offset.");
             }
-            $this->cursor["earlier_index_byte_offset"] = $earlier_index_byte_offset;
-            $this->earlier_index_entry = null;
-            $this->earlier_index_entry_loaded = false;
+            $this->cursor["old_index_byte_offset"] = $old_index_byte_offset;
+            $this->old_index_entry = null;
+            $this->old_index_entry_loaded = false;
         }
-        if ($this->current_path_order !== "earlier") {
-            $later_index_byte_offset = ftell($this->later_index_handle);
-            if (!is_int($later_index_byte_offset)) {
-                throw new RuntimeException("Failed to read the later file-index byte offset.");
+        if ($this->current_path_membership !== "old") {
+            $new_index_byte_offset = ftell($this->new_index_handle);
+            if (!is_int($new_index_byte_offset)) {
+                throw new RuntimeException("Failed to read the new file-index byte offset.");
             }
-            $this->cursor["later_index_byte_offset"] = $later_index_byte_offset;
-            $this->cursor["previous_later_index_entry_path_b64"] = base64_encode(
-                $this->later_index_entry["path"]
+            $this->cursor["new_index_byte_offset"] = $new_index_byte_offset;
+            $this->cursor["preceding_new_index_entry_path_b64"] = base64_encode(
+                $this->new_index_entry["path"]
             );
-            $this->later_index_entry = null;
-            $this->later_index_entry_loaded = false;
+            $this->new_index_entry = null;
+            $this->new_index_entry_loaded = false;
         }
-        $this->current_path_order = null;
-        $this->previous_later_path = null;
+        $this->current_path_membership = null;
+        $this->preceding_path_in_new_index = null;
     }
 
     /**
@@ -506,9 +514,9 @@ final class FileIndexDiffProcessor
      * @return array {
      *     Cursor for `resume()`.
      *
-     *     @type int         $earlier_index_byte_offset            Next byte in the earlier index.
-     *     @type int         $later_index_byte_offset              Next byte in the later index.
-     *     @type string|null $previous_later_index_entry_path_b64  Last consumed later-index path.
+     *     @type int         $old_index_byte_offset              Next byte in the old index.
+     *     @type int         $new_index_byte_offset              Next byte in the new index.
+     *     @type string|null $preceding_new_index_entry_path_b64 New-index path before the next position.
      * }
      *
      * @phpstan-return Cursor
@@ -526,17 +534,17 @@ final class FileIndexDiffProcessor
      */
     public function close(): void
     {
-        if (is_resource($this->earlier_index_handle)) {
-            fclose($this->earlier_index_handle);
+        if (is_resource($this->old_index_handle)) {
+            fclose($this->old_index_handle);
         }
-        if (is_resource($this->later_index_handle)) {
-            fclose($this->later_index_handle);
+        if (is_resource($this->new_index_handle)) {
+            fclose($this->new_index_handle);
         }
-        $this->earlier_index_handle = null;
-        $this->earlier_index_entry = null;
-        $this->later_index_entry = null;
-        $this->current_path_order = null;
-        $this->previous_later_path = null;
+        $this->old_index_handle = null;
+        $this->old_index_entry = null;
+        $this->new_index_entry = null;
+        $this->current_path_membership = null;
+        $this->preceding_path_in_new_index = null;
         $this->closed = true;
     }
 
@@ -552,7 +560,7 @@ final class FileIndexDiffProcessor
     private function assert_current_path(): void
     {
         $this->assert_open();
-        if ($this->current_path_order === null) {
+        if ($this->current_path_membership === null) {
             throw new LogicException("No current file-index path. Call next_path() first.");
         }
     }
@@ -560,61 +568,61 @@ final class FileIndexDiffProcessor
     /**
      * Returns the current path's entry from the starting tree, when it has one.
      *
-     * The retained earlier entry may instead be lookahead for a future path.
-     * In that case the current path exists only in the later index and this
-     * method returns null rather than exposing the unrelated retained entry.
+     * The retained old entry may instead be the path following a current path
+     * found only in the new index. In that case this method returns null rather
+     * than exposing the unrelated retained entry.
      *
      * @phpstan-return IndexEntry|null
      */
-    private function get_earlier_index_entry_for_current_path(): ?array
+    private function get_old_index_entry_for_current_path(): ?array
     {
         $this->assert_current_path();
-        return $this->current_path_order === "later"
+        return $this->current_path_membership === "new"
             ? null
-            : $this->earlier_index_entry;
+            : $this->old_index_entry;
     }
 
     /**
      * Returns the current path's entry from the ending tree, when it has one.
      *
-     * The retained later entry may instead be lookahead for a future path. In
-     * that case the current path exists only in the earlier index and this
-     * method returns null rather than exposing the unrelated retained entry.
+     * The retained new entry may instead be the path following a current path
+     * found only in the old index. In that case this method returns null rather
+     * than exposing the unrelated retained entry.
      *
      * @phpstan-return IndexEntry|null
      */
-    private function get_later_index_entry_for_current_path(): ?array
+    private function get_new_index_entry_for_current_path(): ?array
     {
         $this->assert_current_path();
-        return $this->current_path_order === "earlier"
+        return $this->current_path_membership === "old"
             ? null
-            : $this->later_index_entry;
+            : $this->new_index_entry;
     }
 
     /**
-     * Returns the current path's earlier entry when its presence is required.
+     * Returns the current path's old entry when its presence is required.
      *
      * @phpstan-return IndexEntry
      */
-    private function get_required_earlier_index_entry(): array
+    private function get_required_old_index_entry(): array
     {
-        $entry = $this->get_earlier_index_entry_for_current_path();
+        $entry = $this->get_old_index_entry_for_current_path();
         if ($entry === null) {
-            throw new LogicException("The current path has no earlier-index entry.");
+            throw new LogicException("The current path has no old-index entry.");
         }
         return $entry;
     }
 
     /**
-     * Returns the current path's later entry when its presence is required.
+     * Returns the current path's new entry when its presence is required.
      *
      * @phpstan-return IndexEntry
      */
-    private function get_required_later_index_entry(): array
+    private function get_required_new_index_entry(): array
     {
-        $entry = $this->get_later_index_entry_for_current_path();
+        $entry = $this->get_new_index_entry_for_current_path();
         if ($entry === null) {
-            throw new LogicException("The current path has no later-index entry.");
+            throw new LogicException("The current path has no new-index entry.");
         }
         return $entry;
     }

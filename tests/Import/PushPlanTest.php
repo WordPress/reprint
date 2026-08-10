@@ -536,26 +536,26 @@ final class PushPlanTest extends TestCase
         );
     }
 
-    public function testStepRetainsTheNextFreshLocalIndexEntryUntilClose(): void
+    public function testStepRetainsTheFollowingFreshLocalIndexEntryUntilClose(): void
     {
         $plan = $this->startPlan($this->writeIndex($this->manyFileEntries(3)));
         $index_diff_processor_property = new ReflectionProperty(
             PushPlan::class,
             'index_diff_processor'
         );
-        $later_index_handle_property = new ReflectionProperty(
+        $new_index_handle_property = new ReflectionProperty(
             FileIndexDiffProcessor::class,
-            'later_index_handle'
+            'new_index_handle'
         );
-        $later_index_entry_property = new ReflectionProperty(
+        $new_index_entry_property = new ReflectionProperty(
             FileIndexDiffProcessor::class,
-            'later_index_entry'
+            'new_index_entry'
         );
 
         $this->assertTrue($this->nextPlanStep($plan));
         $first_plan_cursor = $this->planCursor();
         $index_diff_processor = $index_diff_processor_property->getValue($plan);
-        $fresh_local_index_handle = $later_index_handle_property->getValue(
+        $fresh_local_index_handle = $new_index_handle_property->getValue(
             $index_diff_processor
         );
         $this->assertIsResource($fresh_local_index_handle);
@@ -563,7 +563,7 @@ final class PushPlanTest extends TestCase
             $first_plan_cursor['byte_offset_in_fresh_local_index'],
             ftell($fresh_local_index_handle)
         );
-        $retained_fresh_local_index_entry = $later_index_entry_property->getValue(
+        $retained_fresh_local_index_entry = $new_index_entry_property->getValue(
             $index_diff_processor
         );
         $this->assertIsArray($retained_fresh_local_index_entry);
@@ -613,7 +613,7 @@ final class PushPlanTest extends TestCase
             'local_paths_to_push_count',
             'local_file_bytes_to_push',
             'deleted_directory_stack_top_byte_offset',
-            'previous_fresh_local_index_entry_path',
+            'preceding_fresh_local_index_entry_path',
         ], array_keys($cursor['position']));
         $this->assertSame(1, $cursor['position']['local_paths_to_push_count']);
         $this->assertSame(1, $cursor['position']['local_file_bytes_to_push']);

@@ -65,7 +65,7 @@ require_once __DIR__ . '/../index/class-file-index-diff-processor.php';
  * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
  * @phpstan-type IndexingCursor array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}
  * @phpstan-type StartingDiffCursor array{phase:'starting_diff'}
- * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_local_index:int,byte_offset_in_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int|null,local_file_bytes_to_push:int|null,deleted_directory_stack_top_byte_offset:int|null,previous_fresh_local_index_entry_path:string|null}
+ * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_local_index:int,byte_offset_in_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int|null,local_file_bytes_to_push:int|null,deleted_directory_stack_top_byte_offset:int|null,preceding_fresh_local_index_entry_path:string|null}
  * @phpstan-type CompleteCursor array{phase:'complete',local_paths_to_push_count:int|null,local_file_bytes_to_push:int|null}
  * @phpstan-type PushPlanPosition IndexingCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
  * @phpstan-type PushPlanCursor array{plan_directory:string,filesystem_root:string,local_index_file:string,document_root_local_relative_path:string,position:PushPlanPosition}
@@ -424,12 +424,12 @@ class PushPlan
             $this->local_index_file,
             $this->fresh_local_index_file,
             [
-                "earlier_index_byte_offset" => $cursor["byte_offset_in_local_index"],
-                "later_index_byte_offset" => $cursor["byte_offset_in_fresh_local_index"],
-                "previous_later_index_entry_path_b64" =>
-                    $cursor["previous_fresh_local_index_entry_path"] === null
+                "old_index_byte_offset" => $cursor["byte_offset_in_local_index"],
+                "new_index_byte_offset" => $cursor["byte_offset_in_fresh_local_index"],
+                "preceding_new_index_entry_path_b64" =>
+                    $cursor["preceding_fresh_local_index_entry_path"] === null
                         ? null
-                        : base64_encode($cursor["previous_fresh_local_index_entry_path"]),
+                        : base64_encode($cursor["preceding_fresh_local_index_entry_path"]),
             ]
         );
         $fresh_local_index_bytes = filesize($this->fresh_local_index_file);
@@ -550,7 +550,7 @@ class PushPlan
             "local_paths_to_push_count" => 0,
             "local_file_bytes_to_push" => 0,
             "deleted_directory_stack_top_byte_offset" => null,
-            "previous_fresh_local_index_entry_path" => null,
+            "preceding_fresh_local_index_entry_path" => null,
         ];
         $this->open_plan_files();
     }
@@ -648,8 +648,8 @@ class PushPlan
         $this->index_diff_path_selected = true;
 
         $local_relative_path = $this->index_diff_processor->get_path();
-        $local_index_path_type = $this->index_diff_processor->get_earlier_path_type();
-        $fresh_local_index_path_type = $this->index_diff_processor->get_later_path_type();
+        $local_index_path_type = $this->index_diff_processor->get_path_type_in_old_index();
+        $fresh_local_index_path_type = $this->index_diff_processor->get_path_type_in_new_index();
         $path_comparison = $local_index_path_type === null
             ? -1
             : ( $fresh_local_index_path_type === null ? 1 : 0 );
@@ -685,13 +685,12 @@ class PushPlan
 
         if ($path_comparison < 0) {
             // New files, symlinks, and empty directories need to be pushed.
-            $local_index_lookahead_path =
-                $this->index_diff_processor->get_earlier_lookahead_path();
+            $following_local_index_path =
+                $this->index_diff_processor->get_following_path_in_old_index();
             $fresh_local_index_entry_replaces_local_subtree =
-                $local_index_lookahead_path !== null
-                && $local_index_lookahead_path !== $local_relative_path
+                $following_local_index_path !== null
                 && path_is_within_root(
-                    $local_index_lookahead_path,
+                    $following_local_index_path,
                     $local_relative_path
                 );
             if (
@@ -710,12 +709,12 @@ class PushPlan
                     );
             }
             if (!$this->path_conflicts_with_excluded_paths($local_relative_path)) {
-                $fresh_local_index_size = $this->index_diff_processor->get_later_size();
+                $fresh_local_index_size = $this->index_diff_processor->get_size_in_new_index();
                 $this->append_local_path_to_push(
                     $local_relative_path,
                     $fresh_local_index_path_type,
                     $fresh_local_index_size,
-                    $this->index_diff_processor->get_later_ctime()
+                    $this->index_diff_processor->get_ctime_in_new_index()
                 );
                 if ($local_paths_to_push_count !== null) {
                     ++$local_paths_to_push_count;
@@ -728,24 +727,24 @@ class PushPlan
                 }
             }
         } elseif ($path_comparison > 0) {
-            $previous_fresh_local_index_entry_path =
-                $this->index_diff_processor->get_previous_later_path();
-            $next_fresh_local_index_entry_path =
-                $this->index_diff_processor->get_later_lookahead_path();
+            $preceding_fresh_local_index_entry_path =
+                $this->index_diff_processor->get_preceding_path_in_new_index();
+            $following_fresh_local_index_entry_path =
+                $this->index_diff_processor->get_following_path_in_new_index();
             $local_empty_directory_is_implied_by_fresh_descendant =
                 $local_index_entry_shape === "empty_directory"
                 && $this->fresh_index_contains_path_or_descendant(
                     $local_relative_path,
-                    $previous_fresh_local_index_entry_path,
-                    $next_fresh_local_index_entry_path
+                    $preceding_fresh_local_index_entry_path,
+                    $following_fresh_local_index_entry_path
                 );
             $local_path_to_delete = $this->local_path_to_delete(
                 $local_relative_path,
-                $previous_fresh_local_index_entry_path,
-                $next_fresh_local_index_entry_path
+                $preceding_fresh_local_index_entry_path,
+                $following_fresh_local_index_entry_path
             );
             // A sparse index entry derives one deleted root, covering its
-            // later descendant entries.
+            // following descendant entries.
             if (
                 !$local_empty_directory_is_implied_by_fresh_descendant
                 && !$this->path_conflicts_with_excluded_paths($local_path_to_delete)
@@ -778,10 +777,10 @@ class PushPlan
             $changed_file_or_symlink_needs_push =
                 $fresh_local_index_entry_is_file_or_symlink
                 && (
-                    $this->index_diff_processor->get_later_ctime()
-                        !== $this->index_diff_processor->get_earlier_ctime()
-                    || $this->index_diff_processor->get_later_size()
-                        !== $this->index_diff_processor->get_earlier_size()
+                    $this->index_diff_processor->get_ctime_in_new_index()
+                        !== $this->index_diff_processor->get_ctime_in_old_index()
+                    || $this->index_diff_processor->get_size_in_new_index()
+                        !== $this->index_diff_processor->get_size_in_old_index()
                     || $fresh_local_index_path_type !== $local_index_path_type
                 );
             $needs_delete =
@@ -804,12 +803,12 @@ class PushPlan
                 $this->append_local_path_to_delete($local_relative_path);
             }
             if ($needs_push && !$path_is_excluded) {
-                $fresh_local_index_size = $this->index_diff_processor->get_later_size();
+                $fresh_local_index_size = $this->index_diff_processor->get_size_in_new_index();
                 $this->append_local_path_to_push(
                     $local_relative_path,
                     $fresh_local_index_path_type,
                     $fresh_local_index_size,
-                    $this->index_diff_processor->get_later_ctime()
+                    $this->index_diff_processor->get_ctime_in_new_index()
                 );
                 if ($local_paths_to_push_count !== null) {
                     ++$local_paths_to_push_count;
@@ -839,14 +838,14 @@ class PushPlan
             $this->deleted_directory_stack_entry = null;
         }
         $index_diff_cursor = $this->index_diff_processor->get_cursor();
-        $previous_fresh_local_index_entry_path = null;
-        if ($index_diff_cursor["previous_later_index_entry_path_b64"] !== null) {
-            $previous_fresh_local_index_entry_path = base64_decode(
-                $index_diff_cursor["previous_later_index_entry_path_b64"],
+        $preceding_fresh_local_index_entry_path = null;
+        if ($index_diff_cursor["preceding_new_index_entry_path_b64"] !== null) {
+            $preceding_fresh_local_index_entry_path = base64_decode(
+                $index_diff_cursor["preceding_new_index_entry_path_b64"],
                 true
             );
-            if ($previous_fresh_local_index_entry_path === false) {
-                throw new RuntimeException("The local-index diff cursor has an invalid previous path.");
+            if ($preceding_fresh_local_index_entry_path === false) {
+                throw new RuntimeException("The local-index diff cursor has an invalid preceding path.");
             }
         }
         $this->cursor["position"] = $complete
@@ -858,9 +857,9 @@ class PushPlan
             : [
                 "phase" => "diffing",
                 "byte_offset_in_fresh_local_index" =>
-                    $index_diff_cursor["later_index_byte_offset"],
+                    $index_diff_cursor["new_index_byte_offset"],
                 "byte_offset_in_local_index" =>
-                    $index_diff_cursor["earlier_index_byte_offset"],
+                    $index_diff_cursor["old_index_byte_offset"],
                 "byte_offset_in_local_paths_to_push" =>
                     ftell($this->local_paths_to_push_handle),
                 "byte_offset_in_local_paths_to_delete" =>
@@ -869,8 +868,8 @@ class PushPlan
                 "local_file_bytes_to_push" => $local_file_bytes_to_push,
                 "deleted_directory_stack_top_byte_offset" =>
                     $deleted_directory_stack_top_byte_offset,
-                "previous_fresh_local_index_entry_path" =>
-                    $previous_fresh_local_index_entry_path,
+                "preceding_fresh_local_index_entry_path" =>
+                    $preceding_fresh_local_index_entry_path,
             ];
         return !$complete;
     }
@@ -956,16 +955,16 @@ class PushPlan
     /**
      * Returns the highest deleted directory without a fresh entry below it.
      *
-     * Only the previous fresh entry and the current lookahead can neighbor a
-     * path in byte order, so this derives one subtree root without retaining
-     * the tree.
+     * Only the preceding and following fresh entries can neighbor a path in
+     * byte order, so this derives one subtree root without retaining the tree.
      *
-     * @param string|null $next_fresh_local_index_entry_path Next fresh path, or null at EOF.
+     * @param string|null $preceding_fresh_local_index_entry_path Path immediately before this position.
+     * @param string|null $following_fresh_local_index_entry_path Path immediately after this position.
      */
     private function local_path_to_delete(
         string $local_relative_path,
-        ?string $previous_fresh_local_index_entry_path,
-        ?string $next_fresh_local_index_entry_path
+        ?string $preceding_fresh_local_index_entry_path,
+        ?string $following_fresh_local_index_entry_path
     ): string
     {
         $local_relative_path_components = wp_unix_path_segments($local_relative_path);
@@ -978,8 +977,8 @@ class PushPlan
             if (
                 !$this->fresh_index_contains_path_or_descendant(
                     $candidate_local_relative_path,
-                    $previous_fresh_local_index_entry_path,
-                    $next_fresh_local_index_entry_path
+                    $preceding_fresh_local_index_entry_path,
+                    $following_fresh_local_index_entry_path
                 )
             ) {
                 return $candidate_local_relative_path;
@@ -991,26 +990,27 @@ class PushPlan
     /**
      * Checks the adjacent fresh entries for a path or one of its descendants.
      *
-     * @param string|null $next_fresh_local_index_entry_path Next fresh path, or null at EOF.
+     * @param string|null $preceding_fresh_local_index_entry_path Path immediately before this position.
+     * @param string|null $following_fresh_local_index_entry_path Path immediately after this position.
      */
     private function fresh_index_contains_path_or_descendant(
         string $local_relative_path,
-        ?string $previous_fresh_local_index_entry_path,
-        ?string $next_fresh_local_index_entry_path
+        ?string $preceding_fresh_local_index_entry_path,
+        ?string $following_fresh_local_index_entry_path
     ): bool
     {
         // Use an invalid path that cannot match an indexed local relative path
         // so both comparisons below always receive strings.
-        $previous_fresh_local_index_entry_path =
-            $previous_fresh_local_index_entry_path ?? "\0";
-        $next_fresh_local_index_entry_path =
-            $next_fresh_local_index_entry_path ?? "\0";
+        $preceding_fresh_local_index_entry_path =
+            $preceding_fresh_local_index_entry_path ?? "\0";
+        $following_fresh_local_index_entry_path =
+            $following_fresh_local_index_entry_path ?? "\0";
 
         return path_is_within_root(
-            $previous_fresh_local_index_entry_path,
+            $preceding_fresh_local_index_entry_path,
             $local_relative_path
         ) || path_is_within_root(
-            $next_fresh_local_index_entry_path,
+            $following_fresh_local_index_entry_path,
             $local_relative_path
         );
     }
