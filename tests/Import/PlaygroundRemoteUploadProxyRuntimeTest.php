@@ -103,4 +103,26 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         $this->assertContains($this->pullStateFile, $mount_sources);
         $this->assertContains('/tmp/reprint/state.json', $mount_targets);
     }
+
+    public function testPlaygroundConfigNormalizesATrailingOutputDirectorySlash(): void
+    {
+        $manifest = new \RuntimeManifest('other');
+        $applier = new \PlaygroundCliApplier();
+        $applier->apply($manifest, $this->fsRoot, $this->outputDir . '/', [
+            'wordpress_index_php' => $this->fsRoot . '/index.php',
+        ]);
+
+        $config = json_decode(
+            file_get_contents($this->outputDir . '/start.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+
+        $this->assertSame($this->outputDir . '/blueprint.json', $config['blueprint']);
+        $this->assertSame(
+            $this->outputDir . '/runtime.php',
+            $config['mounts'][0]['source'],
+        );
+    }
 }

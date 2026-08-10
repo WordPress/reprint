@@ -466,7 +466,7 @@ class Pull
                         $this->client->run_db_sync();
                     });
                 }
-                $sql_file = $this->client->state_dir . "/db.sql";
+                $sql_file = wp_join_unix_paths($this->client->state_dir, 'db.sql');
                 $size = null;
                 if (file_exists($sql_file)) {
                     $bytes = filesize($sql_file);
@@ -825,13 +825,13 @@ class Pull
 
         $paths = [];
         if ($reset_file_transfer_state) {
-            $paths[] = $pull_state_directory . "/remote-index.next.jsonl";
-            $paths[] = $pull_state_directory . "/fetch-list.jsonl";
+            $paths[] = wp_join_unix_paths($pull_state_directory, 'remote-index.next.jsonl');
+            $paths[] = wp_join_unix_paths($pull_state_directory, 'fetch-list.jsonl');
         }
         if ($reset_db_state) {
-            $paths[] = $state_dir . "/db.sql";
-            $paths[] = $state_dir . "/db-tables.jsonl";
-            $paths[] = $pull_state_directory . "/domains.json";
+            $paths[] = wp_join_unix_paths($state_dir, 'db.sql');
+            $paths[] = wp_join_unix_paths($state_dir, 'db-tables.jsonl');
+            $paths[] = wp_join_unix_paths($pull_state_directory, 'domains.json');
         }
 
         foreach ($paths as $path) {
