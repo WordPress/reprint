@@ -391,6 +391,7 @@ describe('Import: --preserve-local', () => {
 
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
+                extraArgs: ['--intent=copy-changes'],
             });
             assert.equal(result.exitCode, 0,
                 `Expected exit 0 (delta)\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
