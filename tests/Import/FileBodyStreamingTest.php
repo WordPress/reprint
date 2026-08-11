@@ -102,16 +102,13 @@ class FileBodyStreamingTest extends TestCase
     }
 
     /**
-     * The PR's whole point is partial on-disk writes before a part completes.
-     * That means a request cut mid-body now leaves bytes already written —
-     * the previous behaviour discarded an in-flight buffer instead. The risk
-     * surface is double-counting (server resends bytes already on disk) or
-     * truncation (resume re-opens with "wb" and wipes the partial file). This
-     * test pins the contract: feed a part's first half, simulate a crash,
-     * reopen the file in append mode the way fetch_file_batch() does on
-     * resume, then feed the second half as a continuation part with
-     * x-first-chunk=0. The result must be byte-identical to the source —
-     * no gap, no duplication.
+     * A file may span several multipart parts, and one completed file part may
+     * become durable before the process stops. This test receives a complete
+     * non-final part, reopens its local file in a new context the way
+     * fetch_file_batch() does on resume, then receives the next part with
+     * x-first-chunk=0. The result must be byte-identical to the source — no
+     * gap, no duplication — and the completed file must be recorded in the
+     * pull index WAL using the remote ctime repeated by the continuation.
      */
     public function testMidFileResumeAppendsRemainingBytesWithoutDuplication(): void
     {
@@ -124,11 +121,8 @@ class FileBodyStreamingTest extends TestCase
         $firstHalf = substr($body, 0, $halfwayPoint);
         $secondHalf = substr($body, $halfwayPoint);
 
-        // Pass 1: stream the first half. The remote-side cursor would still
-        // point at the start of this part because the server never finished
-        // sending it — so on resume we re-receive the whole part body. To
-        // mimic the *intended* behaviour (server cooperates and skips the
-        // already-written prefix), pass 2 sends only the missing tail.
+        // Pass 1: receive one complete, non-final file part. Its cursor can be
+        // saved after the closing boundary because the full prefix is on disk.
         $context1 = new StreamingContext();
         $handleFileChunk = $reflection->getMethod('handle_file_chunk');
         $context1->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context1): void {
@@ -174,12 +168,13 @@ class FileBodyStreamingTest extends TestCase
             fclose($context1->file_handle);
             $context1->file_handle = null;
         }
+        $trackedFile = $context1->file_path;
+        $this->assertIsString($trackedFile);
         $trackedBytes = $context1->file_bytes_written;
 
         $context2 = new StreamingContext();
-        $context2->file_handle = fopen($target, 'ab');
-        $context2->file_path = $target;
-        $context2->file_ctime = 1234567890;
+        $context2->file_handle = fopen($trackedFile, 'ab');
+        $context2->file_path = $trackedFile;
         $context2->file_bytes_written = $trackedBytes;
         $context2->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context2): void {
             $handleFileChunk->invoke($client, $chunk, $context2);
@@ -216,6 +211,26 @@ class FileBodyStreamingTest extends TestCase
             'Final file size must equal source size — anything else means duplicated bytes (overlap) or missing bytes (gap).');
         $this->assertSame($body, $finalContents,
             'Final file must be byte-identical to source after mid-file resume.');
+
+        $pullIndexJournal = $reflection->getProperty('pull_index_journal')->getValue($client);
+        $pullIndexJournal->flush();
+        $pullIndexWalPath = $reflection->getProperty('pull_index_wal_path')->getValue($client);
+        $pullIndexWalRecords = file($pullIndexWalPath, FILE_IGNORE_NEW_LINES);
+        $this->assertIsArray($pullIndexWalRecords);
+        $this->assertCount(1, $pullIndexWalRecords);
+        $pullIndexWalRecord = json_decode(
+            $pullIndexWalRecords[0],
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        $this->assertSame('+', $pullIndexWalRecord['op']);
+        $this->assertSame(
+            base64_encode('/uploads/resume.bin'),
+            $pullIndexWalRecord['remote_absolute_path_b64'],
+        );
+        $this->assertSame(1234567890, $pullIndexWalRecord['remote_path_ctime']);
+        $this->assertSame(strlen($body), $pullIndexWalRecord['remote_path_size']);
     }
 
     public function testStreamingHeartbeatsUseTheSelectedProgressOutput(): void

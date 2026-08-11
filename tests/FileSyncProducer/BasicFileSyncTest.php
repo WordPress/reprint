@@ -45,6 +45,25 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
         $this->assertTrue($chunks[0]['is_last_chunk']);
     }
 
+    public function testSyncZeroByteFileEmitsOneFirstAndLastFileChunk()
+    {
+        $dir = $this->createTestDirectory('zero-byte-file', [
+            'empty.txt' => '',
+        ]);
+
+        $sync = new \FileTreeProducer($dir, [
+            'paths' => $this->enumerateFiles($dir),
+        ]);
+
+        $chunks = $this->processAllChunks($sync);
+
+        $this->assertCount(1, $chunks);
+        $this->assertSame('file', $chunks[0]['type']);
+        $this->assertSame('', $chunks[0]['data']);
+        $this->assertTrue($chunks[0]['is_first_chunk']);
+        $this->assertTrue($chunks[0]['is_last_chunk']);
+    }
+
     public function testDefaultChunkSizeIsFiveMegabytes()
     {
         $dir = $this->createTestDirectory('default-chunk-size', [
@@ -104,6 +123,34 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
         // Reconstruct and verify content
         $reconstructed = $this->reconstructFileFromChunks($chunks, $dir . '/large.txt');
         $this->assertEquals($largeContent, $reconstructed, 'Reconstructed content should match original');
+    }
+
+    public function testExactMultipleOfChunkSizeFinishesWithTheLastFileChunk()
+    {
+        $chunkSize = 4096;
+        $largeContent = str_repeat('A', 2 * $chunkSize);
+        $dir = $this->createTestDirectory('exact-chunk-multiple', [
+            'large.txt' => $largeContent,
+        ]);
+
+        $sync = new \FileTreeProducer($dir, [
+            'chunk_size' => $chunkSize,
+            'paths' => $this->enumerateFiles($dir),
+        ]);
+
+        $chunks = $this->processAllChunks($sync);
+
+        $this->assertCount(2, $chunks);
+        $this->assertSame('file', $chunks[0]['type']);
+        $this->assertSame('file', $chunks[1]['type']);
+        $this->assertTrue($chunks[0]['is_first_chunk']);
+        $this->assertFalse($chunks[0]['is_last_chunk']);
+        $this->assertFalse($chunks[1]['is_first_chunk']);
+        $this->assertTrue($chunks[1]['is_last_chunk']);
+        $this->assertSame($largeContent, $this->reconstructFileFromChunks(
+            $chunks,
+            $dir . '/large.txt'
+        ));
     }
 
     public function testNestedDirectories()

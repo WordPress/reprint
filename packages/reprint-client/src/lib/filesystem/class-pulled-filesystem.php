@@ -174,6 +174,7 @@ class PulledFilesystem {
 		$headers = $chunk['headers'];
 		$raw_path = $headers['x-file-path'] ?? '';
 		$remote_absolute_path = base64_decode( $raw_path, true );
+		$remote_file_ctime = (int) ( $headers['x-file-ctime'] ?? 0 );
 		$is_first = ( $headers['x-first-chunk'] ?? '0' ) === '1';
 		$is_last  = ( $headers['x-last-chunk'] ?? '0' ) === '1';
 
@@ -202,7 +203,7 @@ class PulledFilesystem {
 			$exists_locally = file_exists( $local_absolute_path );
 			$result['started'] = array(
 				'remote_size' => (int) ( $headers['x-file-size'] ?? 0 ),
-				'ctime'       => (int) ( $headers['x-file-ctime'] ?? 0 ),
+				'ctime'       => $remote_file_ctime,
 				'local_exists' => $exists_locally,
 				'local_size'  => $exists_locally ? (int) filesize( $local_absolute_path ) : 0,
 			);
@@ -245,8 +246,19 @@ class PulledFilesystem {
 				);
 			}
 			$context->file_path          = $local_absolute_path;
-			$context->file_ctime         = (int) ( $headers['x-file-ctime'] ?? 0 );
+			$context->file_ctime         = $remote_file_ctime;
 			$context->file_bytes_written = 0;
+		}
+
+		// A resumed files-pull reopens the tracked local file without the remote
+		// ctime. Each continuation part repeats that ctime.
+		if (
+			! $is_first
+			&& null === $context->file_ctime
+			&& $context->file_handle
+			&& $context->file_path === $local_absolute_path
+		) {
+			$context->file_ctime = $remote_file_ctime;
 		}
 
 		if ( isset( $chunk['body'] ) && '' !== $chunk['body'] && $context->file_handle ) {

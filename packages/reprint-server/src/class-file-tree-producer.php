@@ -454,7 +454,13 @@ class FileTreeProducer
         }
 
         $data = fread($this->streaming_file_handle, $this->chunk_size);
-        if (false === $data || ("" === $data && $file["size"] !== 0)) {
+        if (
+            false === $data
+            || (
+                "" === $data
+                && $this->streaming_file_offset !== $file["size"]
+            )
+        ) {
             fclose($this->streaming_file_handle);
             $this->streaming_file_handle = null;
             $this->streaming_file_offset = 0;
@@ -474,7 +480,7 @@ class FileTreeProducer
         $this->streaming_file_offset += strlen($data);
 
         $is_first = $offset === 0;
-        $is_last = feof($this->streaming_file_handle);
+        $is_last = $this->streaming_file_offset === $file["size"];
 
         $changed = false;
         $change_ctime = null;

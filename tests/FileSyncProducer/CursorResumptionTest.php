@@ -90,6 +90,101 @@ class CursorResumptionTest extends FileSyncProducerTestBase
         unlink($cursorFile);
     }
 
+    public function testResumeAtRemoteFileSizeEmitsEmptyLastPart()
+    {
+        $chunkSize = 4096;
+        $dir = $this->createTestDirectory('cursor-at-file-size', [
+            'large.txt' => str_repeat('X', 2 * $chunkSize),
+        ]);
+        $filePath = $dir . '/large.txt';
+        $cursor = json_encode([
+            'phase' => 'streaming',
+            'root' => base64_encode($dir),
+            'path' => base64_encode($filePath),
+            'ctime' => filectime($filePath),
+            'bytes' => filesize($filePath),
+        ]);
+        $this->assertIsString($cursor);
+
+        $sync = new \FileTreeProducer($dir, [
+            'chunk_size' => $chunkSize,
+            'cursor' => $cursor,
+            'paths' => $this->enumerateFiles($dir),
+        ]);
+
+        $chunks = $this->processAllChunks($sync);
+
+        $this->assertCount(1, $chunks);
+        $this->assertSame('file', $chunks[0]['type']);
+        $this->assertSame($filePath, $chunks[0]['path']);
+        $this->assertSame(filesize($filePath), $chunks[0]['offset']);
+        $this->assertSame('', $chunks[0]['data']);
+        $this->assertFalse($chunks[0]['is_first_chunk']);
+        $this->assertTrue($chunks[0]['is_last_chunk']);
+    }
+
+    public function testResumeOneChunkBeforeExactEndEmitsDataLastPart()
+    {
+        $chunkSize = 4096;
+        $fileContents = str_repeat('A', $chunkSize) . str_repeat('B', $chunkSize);
+        $dir = $this->createTestDirectory('cursor-before-exact-end', [
+            'large.txt' => $fileContents,
+        ]);
+        $filePath = $dir . '/large.txt';
+        $cursor = json_encode([
+            'phase' => 'streaming',
+            'root' => base64_encode($dir),
+            'path' => base64_encode($filePath),
+            'ctime' => filectime($filePath),
+            'bytes' => $chunkSize,
+        ]);
+        $this->assertIsString($cursor);
+
+        $sync = new \FileTreeProducer($dir, [
+            'chunk_size' => $chunkSize,
+            'cursor' => $cursor,
+            'paths' => $this->enumerateFiles($dir),
+        ]);
+
+        $chunks = $this->processAllChunks($sync);
+
+        $this->assertCount(1, $chunks);
+        $this->assertSame('file', $chunks[0]['type']);
+        $this->assertSame($filePath, $chunks[0]['path']);
+        $this->assertSame($chunkSize, $chunks[0]['offset']);
+        $this->assertSame(str_repeat('B', $chunkSize), $chunks[0]['data']);
+        $this->assertFalse($chunks[0]['is_first_chunk']);
+        $this->assertTrue($chunks[0]['is_last_chunk']);
+    }
+
+    public function testResumeBeyondFileSizeEmitsFileReadError()
+    {
+        $dir = $this->createTestDirectory('cursor-beyond-file-size', [
+            'file.txt' => 'contents',
+        ]);
+        $filePath = $dir . '/file.txt';
+        $cursor = json_encode([
+            'phase' => 'streaming',
+            'root' => base64_encode($dir),
+            'path' => base64_encode($filePath),
+            'ctime' => filectime($filePath),
+            'bytes' => filesize($filePath) + 1,
+        ]);
+        $this->assertIsString($cursor);
+
+        $sync = new \FileTreeProducer($dir, [
+            'cursor' => $cursor,
+            'paths' => $this->enumerateFiles($dir),
+        ]);
+
+        $chunks = $this->processAllChunks($sync);
+
+        $this->assertCount(1, $chunks);
+        $this->assertSame('error', $chunks[0]['type']);
+        $this->assertSame('file_read', $chunks[0]['error_type']);
+        $this->assertSame($filePath, $chunks[0]['path']);
+    }
+
     public function testMultipleResumeCycles()
     {
         $dir = $this->createTestDirectory('multiple-resume', [
