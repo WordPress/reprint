@@ -195,6 +195,60 @@ class URLInPotentiallyStructuredTextProcessorTest extends TestCase {
     }
 
     /**
+     * @dataProvider schemeLessTextUrlCases
+     */
+    public function testRewritesASchemeLessTextUrl(string $input, string $expected): void
+    {
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, [self::SOURCE_URL => self::SAME_PATH_TARGET_URL])
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function schemeLessTextUrlCases(): iterable
+    {
+        yield 'Markdown link destination' => [
+            '[Download](source.example/media/logo.png)',
+            '[Download](destination.example/media/logo.png)',
+        ];
+
+        yield 'quoted URL with query and fragment' => [
+            '"source.example/media/logo.png?download=1#preview"',
+            '"destination.example/media/logo.png?download=1#preview"',
+        ];
+    }
+
+    /**
+     * @dataProvider userInformationCases
+     */
+    public function testLeavesUserInformationAndSuffixBytesUntouched(string $input, string $expected): void
+    {
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, [self::SOURCE_URL => self::SAME_PATH_TARGET_URL])
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function userInformationCases(): iterable
+    {
+        yield 'literal protocol' => [
+            'url("https://user:password@source.example/media/logo.png?download=1#preview");',
+            'url("https://user:password@destination.example/media/logo.png?download=1#preview");',
+        ];
+
+        yield 'escaped protocol' => [
+            'url("https:\\/\\/user:password@source.example\\/media\\/logo.png?download=1#preview");',
+            'url("https:\\/\\/user:password@destination.example\\/media\\/logo.png?download=1#preview");',
+        ];
+    }
+
+    /**
      * @dataProvider nonMatchingUrlCases
      */
     public function testLeavesNonMatchingUrlsUntouched(string $input): void
@@ -213,6 +267,12 @@ class URLInPotentiallyStructuredTextProcessorTest extends TestCase {
         yield 'wrong initial path' => ['https://source.example/media-old/logo.png'];
         yield 'wrong protocol' => ['http://source.example/media/logo.png'];
         yield 'different domain case' => ['https://SOURCE.example/media/logo.png'];
+        yield 'source authority in an unsupported URL path' => [
+            'https://other.example/source.example/media/logo.png',
+        ];
+        yield 'source authority in a CSS identifier' => [
+            '.source.example/media/logo.png { color: red; }',
+        ];
     }
 
     /**

@@ -3,9 +3,9 @@
 /**
  * Replaces configured URL bases in text whose surrounding format is unknown.
  *
- * This is deliberately not a URL rewriter. It finds a configured HTTP(S)
- * scheme spelling followed by the configured source domain and initial path.
- * The initial path qualifies the mapping; it is not normally replaced. The
+ * This is deliberately not a URL rewriter. It finds a configured source
+ * authority and initial path, with an optional HTTP(S) scheme spelling. The
+ * initial path qualifies the mapping; it is not normally replaced. The
  * processor replaces the configured source authority with the destination
  * domain and preserves the protocol, path, and
  * every following byte byte-for-byte. It may replace the configured initial
@@ -31,7 +31,9 @@
  * A candidate scheme starts at the beginning of the value or after any byte
  * other than an ASCII letter, plus sign, or hyphen. This deliberately accepts
  * a URL after an equals sign, such as a URL-valued query parameter, while
- * rejecting a URL embedded in an identifier or a longer scheme name.
+ * rejecting a URL embedded in an identifier or a longer scheme name. A
+ * scheme-less authority requires a stronger left boundary so it cannot match
+ * the host portion of a malformed or unsupported URL.
  *
  * The scanner accepts the literal protocol spelling (`https://`) and forms
  * with one or three backslashes before the colon and/or either slash
@@ -40,17 +42,19 @@
  * separators prevent initial-path replacement, so the processor never has to
  * manufacture an escaped target path. This covers common JSON-like and
  * site-builder spellings without making a claim about their escape rules.
+ * Optional user information before the source authority, plus query and
+ * fragment suffixes after it, remain untouched.
  */
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
 class URLInPotentiallyStructuredTextProcessor {
     /**
      * @var array<int, array{
-     *     source_scheme: string,
      *     source_authority: string,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
-     *     target_path: string
+     *     target_path: string,
+     *     pattern: string
      * }>
      */
     private array $url_mappings = [];
@@ -61,12 +65,12 @@ class URLInPotentiallyStructuredTextProcessor {
 
     /**
      * @var array{
-     *     source_scheme: string,
      *     source_authority: string,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
      *     target_path: string,
+     *     pattern: string,
      *     start: int,
      *     authority_length: int,
      *     base_length: int,
@@ -178,12 +182,12 @@ class URLInPotentiallyStructuredTextProcessor {
 
     /**
      * @return array{
-     *     source_scheme: string,
      *     source_authority: string,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
      *     target_path: string,
+     *     pattern: string,
      *     start: int,
      *     authority_length: int,
      *     base_length: int,
@@ -192,172 +196,87 @@ class URLInPotentiallyStructuredTextProcessor {
      */
     private function find_next_url_base(): ?array
     {
-        while (true) {
-            $next_start = null;
-            foreach ($this->url_mappings as $mapping) {
-                $start = strpos($this->text, $mapping['source_authority'], $this->bytes_already_scanned);
-                if ($start !== false && ( $next_start === null || $start < $next_start )) {
-                    $next_start = $start;
-                }
+        $next_match = null;
+        foreach ($this->url_mappings as $mapping) {
+            $found = preg_match(
+                $mapping['pattern'],
+                $this->text,
+                $matches,
+                PREG_OFFSET_CAPTURE,
+                $this->bytes_already_scanned
+            );
+            if ($found !== 1) {
+                continue;
             }
 
-            if ($next_start === null) {
-                return null;
+            $authority_start = $matches['authority'][1];
+            if ($next_match !== null && $authority_start >= $next_match['start']) {
+                continue;
             }
 
-            foreach ($this->url_mappings as $mapping) {
-                if (substr($this->text, $next_start, strlen($mapping['source_authority'])) !== $mapping['source_authority']) {
-                    continue;
-                }
-
-                $match = $this->match_url_base_at($mapping, $next_start);
-                if ($match !== null) {
-                    return $match;
-                }
-            }
-
-            $this->bytes_already_scanned = $next_start + 1;
+            $next_match = array_merge(
+                $mapping,
+                [
+                    'start'                 => $authority_start,
+                    'authority_length'      => strlen($matches['authority'][0]),
+                    'base_length'           => strlen($matches['base'][0]),
+                    'has_escaped_separator' => strpos($matches[0][0], '\\') !== false,
+                ]
+            );
         }
+
+        return $next_match;
     }
 
     /**
-     * @param array{
-     *     source_scheme: string,
-     *     source_authority: string,
-     *     source_path: string,
-     *     source_base: string,
-     *     target_domain: string,
-     *     target_path: string
-     * } $mapping
+     * Build a candidate pattern adapted from URLInTextProcessor's URL finder.
+     *
+     * The pattern recognizes only this mapping's authority and initial path.
+     * Capturing those slices, rather than a complete parsed URL, lets callers
+     * replace the authority without rendering any surrounding syntax.
+     */
+    private function create_url_candidate_pattern(
+        string $source_scheme,
+        string $source_authority,
+        string $source_path
+    ): string
+    {
+        $escaped_separator = '(?:\\\\{1}|\\\\{3})?';
+        $source_path_pattern = str_replace(
+            '/',
+            $escaped_separator . '/',
+            preg_quote($source_path, '~')
+        );
+
+        return '~
+            (?<![A-Za-z0-9._%+\\/@-])
+            (?:
+                ' . preg_quote($source_scheme, '~') . '
+                ' . $escaped_separator . ':
+                ' . $escaped_separator . '/
+                ' . $escaped_separator . '/
+                (?:[^\s<>@/\\\\]+@)?
+            )?
+            (?<base>
+                (?<authority>' . preg_quote($source_authority, '~') . ')
+                ' . $source_path_pattern . '
+            )
+            (?=
+                $
+                | ' . $escaped_separator . '/
+                | [/?# \t\r\n.,!;:)\]}>"\']
+            )
+        ~x';
+    }
+
+    /**
      * @return array{
-     *     source_scheme: string,
      *     source_authority: string,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
      *     target_path: string,
-     *     start: int,
-     *     authority_length: int,
-     *     base_length: int,
-     *     has_escaped_separator: bool
-     * }|null
-     */
-    private function match_url_base_at(array $mapping, int $start): ?array
-    {
-        $scheme_match = $this->find_scheme_before($start, $mapping['source_scheme']);
-        if ($scheme_match === null) {
-            return null;
-        }
-
-        $position = $start + strlen($mapping['source_authority']);
-        $has_escaped_separator = $scheme_match['has_escaped_separator'];
-        $source_path_length = strlen($mapping['source_path']);
-        for ($path_position = 0; $path_position < $source_path_length; $path_position++) {
-            $expected_byte = $mapping['source_path'][$path_position];
-            if ($expected_byte === '/') {
-                foreach ([3, 1] as $backslash_count) {
-                    $escaped_separator = str_repeat('\\', $backslash_count) . '/';
-                    if (substr($this->text, $position, strlen($escaped_separator)) === $escaped_separator) {
-                        $has_escaped_separator = true;
-                        $position += strlen($escaped_separator);
-                        continue 2;
-                    }
-                }
-                if (( $this->text[$position] ?? '' ) === '/') {
-                    ++$position;
-                    continue;
-                }
-                return null;
-            }
-
-            if (( $this->text[$position] ?? '' ) !== $expected_byte) {
-                return null;
-            }
-            ++$position;
-        }
-
-        if (!$this->has_url_boundary_after($position)) {
-            return null;
-        }
-
-        return array_merge(
-            $mapping,
-            [
-                'start'                 => $start,
-                'authority_length'      => strlen($mapping['source_authority']),
-                'base_length'           => $position - $start,
-                'has_escaped_separator' => $has_escaped_separator,
-            ]
-        );
-    }
-
-    /**
-     * @return array{has_escaped_separator: bool}|null
-     */
-    private function find_scheme_before(int $domain_start, string $source_scheme): ?array
-    {
-        foreach ([0, 1, 3] as $colon_backslash_count) {
-            foreach ([0, 1, 3] as $first_slash_backslash_count) {
-                foreach ([0, 1, 3] as $second_slash_backslash_count) {
-                    $separator = str_repeat('\\', $colon_backslash_count) . ':'
-                        . str_repeat('\\', $first_slash_backslash_count) . '/'
-                        . str_repeat('\\', $second_slash_backslash_count) . '/';
-                    $prefix = $source_scheme . $separator;
-                    $scheme_start = $domain_start - strlen($prefix);
-                    if ($scheme_start < 0
-                        || substr($this->text, $scheme_start, strlen($prefix)) !== $prefix
-                        || !$this->has_scheme_left_boundary($scheme_start)) {
-                        continue;
-                    }
-
-                    return [
-                        'has_escaped_separator' => (
-                            $colon_backslash_count > 0
-                            || $first_slash_backslash_count > 0
-                            || $second_slash_backslash_count > 0
-                        ),
-                    ];
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private function has_scheme_left_boundary(int $start): bool
-    {
-        if ($start === 0) {
-            return true;
-        }
-
-        $byte = $this->text[$start - 1];
-        return ! (
-            ( $byte >= 'A' && $byte <= 'Z' )
-            || ( $byte >= 'a' && $byte <= 'z' )
-            || $byte === '+'
-            || $byte === '-'
-        );
-    }
-
-    private function has_url_boundary_after(int $end): bool
-    {
-        if ($end === strlen($this->text)) {
-            return true;
-        }
-
-        return substr($this->text, $end, 4) === str_repeat('\\', 3) . '/'
-            || substr($this->text, $end, 2) === '\\/'
-            || strpos("/?# \t\r\n.,!;:)]}>\"'", $this->text[$end]) !== false;
-    }
-
-    /**
-     * @return array{
-     *     source_scheme: string,
-     *     source_authority: string,
-     *     source_path: string,
-     *     source_base: string,
-     *     target_domain: string,
-     *     target_path: string
+     *     pattern: string
      * }|null
      */
     private function create_url_mapping(string $source_url, string $target_url): ?array
@@ -369,12 +288,16 @@ class URLInPotentiallyStructuredTextProcessor {
         }
 
         return [
-            'source_scheme'    => $source['scheme'],
             'source_authority' => $source['authority'],
             'source_path'      => $source['path'],
             'source_base'      => $source['authority'] . $source['path'],
             'target_domain'    => $target['host'],
             'target_path'      => $target['path'],
+            'pattern'          => $this->create_url_candidate_pattern(
+                $source['scheme'],
+                $source['authority'],
+                $source['path']
+            ),
         ];
     }
 

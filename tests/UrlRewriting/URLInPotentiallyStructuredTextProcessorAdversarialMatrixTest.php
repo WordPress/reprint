@@ -11,7 +11,7 @@ class URLInPotentiallyStructuredTextProcessorAdversarialMatrixTest extends TestC
 
     /**
      * This cross-product is the lexical contract for the opaque processor:
-     * every accepted protocol spelling, every accepted source-path spelling,
+     * every accepted URL prefix, every accepted source-path spelling,
      * four export wrappers, and four forms of trailing URL bytes. It checks
      * the output byte-for-byte instead of decoding any part of the value.
      *
@@ -53,6 +53,8 @@ class URLInPotentiallyStructuredTextProcessorAdversarialMatrixTest extends TestC
             'fragment immediately after configured base' => '#media',
         ];
 
+        yield from self::yieldMatrixCases('scheme-less', '', $wrappers, $suffixes);
+
         foreach ([false, true] as $colon_escaped) {
             foreach ([false, true] as $first_slash_escaped) {
                 foreach ([false, true] as $second_slash_escaped) {
@@ -67,30 +69,44 @@ class URLInPotentiallyStructuredTextProcessorAdversarialMatrixTest extends TestC
                         $second_slash_escaped ? 'escaped' : 'literal'
                     );
 
-                    foreach ([false, true] as $leading_path_slash_escaped) {
-                        foreach ([false, true] as $inner_path_slash_escaped) {
-                            $path = ( $leading_path_slash_escaped ? '\\/' : '/' )
-                                . 'wp-content'
-                                . ( $inner_path_slash_escaped ? '\\/' : '/' )
-                                . 'uploads';
-                            $path_name = sprintf(
-                                'leading-path-%s-inner-path-%s',
-                                $leading_path_slash_escaped ? 'escaped' : 'literal',
-                                $inner_path_slash_escaped ? 'escaped' : 'literal'
-                            );
+                    yield from self::yieldMatrixCases($scheme_name, $scheme, $wrappers, $suffixes);
+                }
+            }
+        }
+    }
 
-                            foreach ($wrappers as $wrapper_name => [$prefix, $end]) {
-                                foreach ($suffixes as $suffix_name => $suffix) {
-                                    yield $wrapper_name . ' | ' . $scheme_name . ' | '
-                                        . $path_name . ' | ' . $suffix_name => [
-                                            $prefix,
-                                            $scheme,
-                                            $path,
-                                            $suffix . $end,
-                                        ];
-                                }
-                            }
-                        }
+    /**
+     * @param array<string, array{string, string}> $wrappers
+     * @param array<string, string>                $suffixes
+     * @return iterable<string, array{string, string, string, string}>
+     */
+    private static function yieldMatrixCases(
+        string $scheme_name,
+        string $scheme,
+        array $wrappers,
+        array $suffixes
+    ): iterable {
+        foreach ([false, true] as $leading_path_slash_escaped) {
+            foreach ([false, true] as $inner_path_slash_escaped) {
+                $path = ( $leading_path_slash_escaped ? '\\/' : '/' )
+                    . 'wp-content'
+                    . ( $inner_path_slash_escaped ? '\\/' : '/' )
+                    . 'uploads';
+                $path_name = sprintf(
+                    'leading-path-%s-inner-path-%s',
+                    $leading_path_slash_escaped ? 'escaped' : 'literal',
+                    $inner_path_slash_escaped ? 'escaped' : 'literal'
+                );
+
+                foreach ($wrappers as $wrapper_name => [$prefix, $end]) {
+                    foreach ($suffixes as $suffix_name => $suffix) {
+                        yield $wrapper_name . ' | ' . $scheme_name . ' | '
+                            . $path_name . ' | ' . $suffix_name => [
+                                $prefix,
+                                $scheme,
+                                $path,
+                                $suffix . $end,
+                            ];
                     }
                 }
             }
@@ -148,6 +164,9 @@ class URLInPotentiallyStructuredTextProcessorAdversarialMatrixTest extends TestC
         ];
         yield 'source URL appears in a JavaScript identifier' => [
             'prefixhttps://source.example/wp-content/uploads/2026/01/hero.jpg',
+        ];
+        yield 'scheme-less source authority follows at sign' => [
+            'user@source.example/wp-content/uploads/2026/01/hero.jpg',
         ];
         yield 'CSS hexadecimal escapes require a CSS parser' => [
             'url(https\\3a \\2f \\2f source.example\\2f wp-content\\2f uploads\\2f hero.jpg)',
