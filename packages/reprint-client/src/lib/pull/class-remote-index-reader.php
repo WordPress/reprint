@@ -33,18 +33,63 @@ use function WordPress\Reprint\Exporter\assert_valid_path;
  *
  * ## Lifecycle and resume
  *
- * Call open() once, read forward with next_entry(), retain byte_offset() only
- * after the returned entry has been processed, and call close() when the scan
- * ends. seek_to_byte_offset() positions a newly opened reader at such a saved
- * boundary. The reader assumes the file is already sorted and never sorts or
- * writes it.
+ * Store the byte offset only after the returned entry has been processed:
  *
- * A missing file opens as an empty reader because the first pull has no prior
- * remote index. Blank lines are consumed and skipped. A malformed non-blank
- * line is consumed before next_entry() throws, so a caller which deliberately
- * tolerates malformed records can catch the exception and continue with the
- * following line. byte_offset() includes every line consumed by the preceding
- * call, including skipped blank or rejected lines.
+ *     $reader = new RemoteIndexReader($remote_index_path);
+ *     try {
+ *         $reader->open();
+ *         $reader->seek_to_byte_offset($processed_byte_offset);
+ *         while (($entry = $reader->next_entry()) !== null) {
+ *             apply_remote_index_entry($entry);
+ *             $processed_byte_offset = $reader->byte_offset();
+ *             save_processed_byte_offset($processed_byte_offset);
+ *         }
+ *     } finally {
+ *         $reader->close();
+ *     }
+ *
+ * If the process stops inside apply_remote_index_entry(), the stored offset
+ * still precedes that entry. A new reader therefore selects it again:
+ *
+ *     $reader = new RemoteIndexReader($remote_index_path);
+ *     try {
+ *         $reader->open();
+ *         $reader->seek_to_byte_offset(load_processed_byte_offset());
+ *         $entry = $reader->next_entry(); // The first unprocessed entry.
+ *     } finally {
+ *         $reader->close();
+ *     }
+ *
+ * A missing file behaves like an empty index, as it does during the first
+ * pull:
+ *
+ *     $reader = new RemoteIndexReader($missing_remote_index_path);
+ *     try {
+ *         $reader->open();
+ *         $entry = $reader->next_entry(); // null.
+ *         $byte_offset = $reader->byte_offset(); // 0.
+ *     } finally {
+ *         $reader->close();
+ *     }
+ *
+ * Blank lines are skipped. A malformed non-blank line is consumed before
+ * next_entry() throws, so a caller which accepts rejected records can continue
+ * with the following line:
+ *
+ *     $reader = new RemoteIndexReader($remote_index_path);
+ *     try {
+ *         $reader->open();
+ *         try {
+ *             $reader->next_entry();
+ *         } catch (RuntimeException $exception) {
+ *             $rejected_line_end = $reader->byte_offset();
+ *         }
+ *         $following_entry = $reader->next_entry();
+ *     } finally {
+ *         $reader->close();
+ *     }
+ *
+ * The reader assumes the file is already sorted and never sorts or writes it.
  */
 class RemoteIndexReader
 {
