@@ -67,7 +67,9 @@
  * Complete PHP serializations, JSON documents, and block markup must likewise
  * be parsed first; pass only the resulting text leaves to this processor.
  *
- * Matching is byte-for-byte and case-sensitive. A scheme may begin at the
+ * The HTTP(S) scheme and authority are matched case-insensitively. A configured
+ * source path remains byte-for-byte and case-sensitive because URL paths may
+ * name different resources when their case differs. A scheme may begin at the
  * start of the value or after a byte other than an ASCII letter, plus sign, or
  * hyphen. Scheme-less authorities use a stricter boundary so the scanner does
  * not mistake part of another URL or identifier for a match.
@@ -293,14 +295,14 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         return '~
             (?<![A-Za-z0-9._%+\\/@-])
             (?:
-                ' . preg_quote($source_scheme, '~') . '
+                (?i:' . preg_quote($source_scheme, '~') . ')
                 ' . $escaped_separator . ':
                 ' . $escaped_separator . '/
                 ' . $escaped_separator . '/
                 (?:[^\s<>@/\\\\]+@)?
             )?
             (?<base>
-                (?<authority>' . preg_quote($source_authority, '~') . ')
+                (?<authority>(?i:' . preg_quote($source_authority, '~') . '))
                 ' . $source_path_pattern . '
             )
             (?=

@@ -121,6 +121,28 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
         );
     }
 
+    public function testRewritesSchemeAndAuthorityIgnoringAsciiCase(): void
+    {
+        $input = 'HTTPS://SoUrCe.ExAmPlE/media/logo.png';
+        $expected = 'HTTPS://destination.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
+        );
+    }
+
+    public function testMatchesAConfiguredSourcePathCaseSensitively(): void
+    {
+        $input = 'https://SOURCE.EXAMPLE/Media/logo.png';
+        $expected = 'https://SOURCE.EXAMPLE/Media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example'])
+        );
+    }
+
     public function testRewritesAUrlValuedQueryParameter(): void
     {
         $input = 'https://archive.example/export?redirect=https://source.example/wp-content/uploads/2026/01/hero.jpg';
