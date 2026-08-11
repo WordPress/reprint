@@ -365,7 +365,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         if (( $scheme !== 'http' && $scheme !== 'https' )
             || ( !$is_source_url && ( array_key_exists('port', $parts) || $path !== '' ) )
             || !( $this->is_alphanumeric_dot_hyphen_domain_name($host) || ( $is_source_url && $this->is_ip_address($host) ) )
-            || !$this->is_ascii_path($path)) {
+            || !$this->contains_only_exclamation_mark_through_tilde_bytes($path)) {
             return null;
         }
 
@@ -388,7 +388,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             && preg_match('/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/', $domain) === 1;
     }
 
-    private function is_ascii_path(string $path): bool
+    private function contains_only_exclamation_mark_through_tilde_bytes(string $path): bool
     {
         return $path === '' || preg_match('/^[\x21-\x7E]+$/', $path) === 1;
     }
