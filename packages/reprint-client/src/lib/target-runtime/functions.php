@@ -94,6 +94,9 @@ function generate_runtime_php(RuntimeManifest $manifest, string $filesystem_root
         $lines[] = '';
     }
 
+    $lines[] = generate_runtime_request_path_code();
+    $lines[] = '';
+
     // SQLite lazy-loading proxy — replaces $wpdb before WordPress boots.
     // WordPress's require_wp_db() sees $wpdb is already set and skips
     // the MySQL connection. The first real database call triggers the
@@ -354,6 +357,60 @@ function generate_route_handler_code(RuntimeManifest $manifest): string
         }
     }
     return $code;
+}
+
+/**
+ * Generate the runtime helper that reads a request URI path before a handler
+ * maps it to the local filesystem.
+ *
+ * The helper preserves percent encoding in its return value so existing
+ * callers keep their raw request-path behavior. It rejects a NUL byte or a
+ * parent component after decoding, which prevents an encoded path from
+ * escaping a filesystem root.
+ */
+function generate_runtime_request_path_code(): string
+{
+    return <<<'PHP'
+if (!function_exists('reprint_runtime_request_path')) {
+    /**
+     * Returns the raw request URI path when it is safe for filesystem mapping.
+     *
+     * Query strings are omitted. Percent encoding remains intact so a caller
+     * can preserve the request path spelling. A decoded NUL byte or `..`
+     * component returns null.
+     *
+     * Examples:
+     *
+     *     /wp-content/uploads/photo.jpg?size=large -> /wp-content/uploads/photo.jpg
+     *     /wp-content/%2e%2e/wp-config.php         -> null
+     */
+    function reprint_runtime_request_path(): ?string
+    {
+        $request_uri = $_SERVER['REQUEST_URI'] ?? '/';
+        if (!is_string($request_uri)) {
+            return null;
+        }
+
+        $request_path = parse_url($request_uri, PHP_URL_PATH);
+        if (!is_string($request_path)) {
+            return null;
+        }
+        if ($request_path === '') {
+            return '/';
+        }
+
+        $decoded_request_path = rawurldecode($request_path);
+        if (
+            strpos($decoded_request_path, "\0") !== false
+            || preg_match('#(?:^|/)\.\.(?:/|$)#', $decoded_request_path)
+        ) {
+            return null;
+        }
+
+        return $request_path;
+    }
+}
+PHP;
 }
 
 /**

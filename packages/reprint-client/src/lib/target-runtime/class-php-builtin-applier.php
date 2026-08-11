@@ -71,12 +71,8 @@ class PhpBuiltinApplier implements RuntimeApplier
         $lines = [];
         $lines[] = '// CLI-server routing (php -S only).';
         $lines[] = '// Handles static files, PHP execution, and WordPress pretty permalinks.';
-        $lines[] = '$path = parse_url($_SERVER[\'REQUEST_URI\'] ?? \'/\', PHP_URL_PATH);';
-        $lines[] = 'if (!is_string($path) || $path === \'\') {';
-        $lines[] = '    $path = \'/\';';
-        $lines[] = '}';
-        $lines[] = '$decoded_path = rawurldecode($path);';
-        $lines[] = 'if (strpos($decoded_path, "\0") !== false || preg_match(\'#(?:^|/)\\.\\.(?:/|$)#\', $decoded_path)) {';
+        $lines[] = '$path = reprint_runtime_request_path();';
+        $lines[] = 'if ($path === null) {';
         $lines[] = '    return false;';
         $lines[] = '}';
         $lines[] = '$document_root = rtrim($_SERVER[\'DOCUMENT_ROOT\'] ?? \'\', \'/\');';

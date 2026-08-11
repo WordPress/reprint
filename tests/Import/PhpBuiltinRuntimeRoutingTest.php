@@ -132,4 +132,30 @@ class PhpBuiltinRuntimeRoutingTest extends TestCase
 
         $this->assertSame("body{color:#111}\n", $output);
     }
+
+    public function testRoutesPhpFilesWithoutTheirQueryString(): void
+    {
+        $output = $this->runRuntime('/wp-admin/install.php?from=runtime-test');
+
+        $this->assertStringContainsString('core-install', $output);
+    }
+
+    public function testRoutesMoreThanOneRequestInTheSameProcess(): void
+    {
+        $this->assertStringContainsString(
+            'core-install',
+            $this->runRuntime('/wp-admin/install.php'),
+        );
+        $this->assertStringContainsString(
+            'docroot-plugin',
+            $this->runRuntime('/wp-content/plugins/example/site.php'),
+        );
+    }
+
+    public function testRejectsEncodedParentComponentsBeforeRouting(): void
+    {
+        $output = $this->runRuntime('/wp-content/%2e%2e/wp-admin/install.php');
+
+        $this->assertSame('', $output);
+    }
 }
