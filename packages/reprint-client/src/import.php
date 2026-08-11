@@ -501,7 +501,7 @@ class ImportClient
         $this->filesystem_root = $resolved_local_filesystem_root;
 
         $this->pull_index_journal = new PullIndexJournal(
-            $this,
+            [$this, "audit_log"],
             $this->pull_index_wal_path,
             $this->remote_index_file,
             $this->local_index_file,

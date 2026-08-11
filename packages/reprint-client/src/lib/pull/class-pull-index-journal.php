@@ -84,7 +84,8 @@ use function WordPress\Reprint\Exporter\relative_path_under;
  */
 class PullIndexJournal
 {
-    private ImportClient $client;
+    /** @var callable(string):void Writes one journal audit message. */
+    private $log_audit_message;
 
     /** @var string Path to pull/index.wal. */
     private string $pull_index_wal_path;
@@ -107,20 +108,20 @@ class PullIndexJournal
      * Construction does not create or open the WAL. A journal which never
      * begins a files-pull lifecycle therefore creates no files.
      *
-     * @param ImportClient $client              Audit log owner.
-     * @param string       $pull_index_wal_path Path to `pull/index.wal`.
-     * @param string       $remote_index_path   Remote index path.
-     * @param string       $local_index_path    Local index path.
-     * @param string       $filesystem_root     Resolved local projection root.
+     * @param callable(string):void $log_audit_message   Writes one audit log message.
+     * @param string                $pull_index_wal_path Path to `pull/index.wal`.
+     * @param string                $remote_index_path   Remote index path.
+     * @param string                $local_index_path    Local index path.
+     * @param string                $filesystem_root     Resolved local projection root.
      */
     public function __construct(
-        ImportClient $client,
+        callable $log_audit_message,
         string $pull_index_wal_path,
         string $remote_index_path,
         string $local_index_path,
         string $filesystem_root
     ) {
-        $this->client = $client;
+        $this->log_audit_message = $log_audit_message;
         $this->pull_index_wal_path = $pull_index_wal_path;
         $this->remote_index_path = $remote_index_path;
         $this->local_index_path = $local_index_path;
@@ -147,7 +148,7 @@ class PullIndexJournal
             throw new RuntimeException("Failed to open the pull index WAL.");
         }
         if ($pull_index_wal_is_new) {
-            $this->client->audit_log(
+            ($this->log_audit_message)(
                 "FILE CREATE | {$this->pull_index_wal_path} | pull index WAL",
             );
         }
@@ -353,7 +354,7 @@ class PullIndexJournal
 
         $remote_index_replacement_file = $this->remote_index_path . ".new";
 
-        $this->client->audit_log(
+        ($this->log_audit_message)(
             "INDEX MERGE START | merging pull index WAL into {$this->remote_index_path}",
         );
 
@@ -456,7 +457,7 @@ class PullIndexJournal
         if (!rename($remote_index_replacement_file, $this->remote_index_path)) {
             throw new RuntimeException("Failed to replace the remote index file.");
         }
-        $this->client->audit_log("INDEX MERGE COMPLETE | {$this->remote_index_path} updated");
+        ($this->log_audit_message)("INDEX MERGE COMPLETE | {$this->remote_index_path} updated");
 
         /*
          * Rebuild the sorted local index updates from the pull index WAL. This
@@ -524,7 +525,7 @@ class PullIndexJournal
                 "Failed to clear the applied pull index WAL."
             );
         }
-        $this->client->audit_log(
+        ($this->log_audit_message)(
             "FILE TRUNCATE | {$this->pull_index_wal_path} | pull index WAL batch applied"
         );
     }
