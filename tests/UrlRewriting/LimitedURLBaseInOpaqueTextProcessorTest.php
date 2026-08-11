@@ -18,7 +18,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example/wp-content/uploads'])
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
         );
     }
 
@@ -29,7 +29,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example/wp-content/uploads'])
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
         );
     }
 
@@ -40,7 +40,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example/wp-content/uploads'])
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
         );
     }
 
@@ -51,7 +51,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example/wp-content/uploads'])
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
         );
     }
 
@@ -62,7 +62,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example/wp-content/uploads'])
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
         );
     }
 
@@ -73,7 +73,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example/wp-content/uploads'])
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
         );
     }
 
@@ -84,7 +84,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example/wp-content/uploads'])
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
         );
     }
 
@@ -95,7 +95,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example/wp-content/uploads'])
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
         );
     }
 
@@ -106,7 +106,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example/wp-content/uploads'])
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
         );
     }
 
@@ -117,7 +117,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example/wp-content/uploads'])
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
         );
     }
 
@@ -128,7 +128,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example/wp-content/uploads'])
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
         );
     }
 
@@ -139,7 +139,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example/wp-content/uploads'])
+            $this->rewrite($input, ['https://source.example' => 'https://destination.example'])
         );
     }
 
@@ -150,7 +150,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://127.0.0.1:8108/media' => 'https://destination.example/media'])
+            $this->rewrite($input, ['https://127.0.0.1:8108' => 'https://destination.example'])
         );
     }
 
@@ -161,7 +161,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://[::1]:8108/media' => 'https://destination.example/media'])
+            $this->rewrite($input, ['https://[::1]:8108' => 'https://destination.example'])
         );
     }
 
@@ -172,14 +172,36 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/media' => 'https://xn--bcher-kva.example/media'])
+            $this->rewrite($input, ['https://source.example' => 'https://xn--bcher-kva.example'])
         );
     }
 
-    public function testReplacesTheEntireLiteralUrlBase(): void
+    public function testReplacesTheEntireLiteralSourceBase(): void
     {
         $input = 'https://source.example/media/logo.png';
-        $expected = 'https://destination.example/assets/logo.png';
+        $expected = 'https://destination.example/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example'])
+        );
+    }
+
+    public function testReplacesTheEntireEscapedSourceBase(): void
+    {
+        $input = 'https:\\/\\/source.example\\/media\\/logo.png';
+        $expected = 'https:\\/\\/destination.example\\/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example'])
+        );
+    }
+
+    public function testDoesNotFallBackToDomainOnlyWhenTheTargetHasAPath(): void
+    {
+        $input = 'https://source.example/media/logo.png';
+        $expected = 'https://source.example/media/logo.png';
 
         $this->assertSame(
             $expected,
@@ -187,14 +209,14 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
         );
     }
 
-    public function testDoesNotReencodeAnEscapedUrlBaseWithADifferentTargetPath(): void
+    public function testDoesNotRewriteWhenTheTargetHasAPercentEncodedPath(): void
     {
-        $input = 'https:\\/\\/source.example\\/media\\/logo.png';
-        $expected = 'https:\\/\\/source.example\\/media\\/logo.png';
+        $input = 'https://source.example/media/logo.png';
+        $expected = 'https://source.example/media/logo.png';
 
         $this->assertSame(
             $expected,
-            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example/assets'])
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example/archive%2Fmedia'])
         );
     }
 

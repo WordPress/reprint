@@ -9,51 +9,51 @@
  * [vc_video link="https:\/\/source.example\/wp-content\/uploads\/2026\/01\/video.mp4"]
  * ```
  *
- * and this mapping:
+ * and this domain-to-domain mapping:
  *
  * ```
- * https://source.example/wp-content/uploads => https://destination.example/wp-content/uploads
+ * https://source.example => https://destination.example
  * ```
  *
- * it changes source.example to destination.example and produces:
+ * it replaces the complete configured base, source.example, and produces:
  *
  * ```
  * [vc_video link="https:\/\/destination.example\/wp-content\/uploads\/2026\/01\/video.mp4"]
  * ```
  *
- * The escaped path bytes are left alone. The complete configured source base
- * and target base have the same initial path, so replacing the domain yields
- * the complete target base without choosing a new escape spelling.
+ * The protocol, escaped path, and shortcode syntax are outside the configured
+ * base, so they remain byte-for-byte identical.
  *
  * The motivation is boring: opaque text has no reliable escape contract. A
  * backslash may belong to JSON, CSS, a shortcode, HTML, or an application
- * convention. This class only changes bytes when it can name the exact range
- * to replace. It does not parse, decode, normalize, or re-encode input URL
- * bytes.
+ * convention. This class therefore replaces one exact source-base slice with
+ * one target domain. It never parses, decodes, normalizes, or re-encodes input
+ * URL bytes.
  *
  * It handles these cases:
  *
- * - Literal URL bases. A mapping from source.example/media to
- *   destination.example/assets changes
+ * - A domain-to-domain mapping in literal, scheme-less, or slash-escaped URLs.
+ * - A source base with an initial ASCII path when the target has no path. The
+ *   entire source base is removed as one slice. For example, mapping
+ *   https://source.example/media to https://destination.example changes
  *   https://source.example/media/logo.png to
- *   https://destination.example/assets/logo.png. The protocol and logo.png
- *   suffix remain from the input.
- * - Scheme-less URLs and HTTP(S) spellings with one or three backslashes
- *   before the colon and/or either slash: https:\/\/, https\:\/\/, and
- *   https:\\\/\\\/.
- * - A configured ASCII source domain, or an IPv4 or IPv6 source address with
- *   an optional port. Punycode destination domains are accepted.
+ *   https://destination.example/logo.png.
+ * - HTTP(S) spellings with one or three backslashes before the colon and/or
+ *   either slash: https:\/\/, https\:\/\/, and https:\\\/\\\/.
+ * - An ASCII source domain, or an IPv4 or IPv6 source address with an optional
+ *   port. Punycode destination domains are accepted.
  * - User information before the source authority, and query and fragment
  *   suffixes after the base. Those bytes remain untouched.
  *
  * It deliberately does not handle these cases:
  *
- * - An escaped source path with a different target path. Writing the target
- *   would require deciding whether its separators should be /, \/, or another
- *   representation. The URL is left unchanged.
+ * - A target with a path. Inserting that path would require deciding whether
+ *   its separators should be /, \/, or another representation. The complete
+ *   mapping is ignored; the processor does not fall back to changing only the
+ *   domain.
  * - CSS hexadecimal escapes such as https\3a \2f \2f ..., percent-encoded
- *   separators, a Unicode destination domain or path, or an IPv4/IPv6
- *   destination. Those require a parser that knows the surrounding format.
+ *   separators, a Unicode destination domain, or an IPv4/IPv6 destination.
+ *   Those require a parser that knows the surrounding format.
  * - A complete PHP serialization, JSON document, or block-markup value. Call
  *   this only for a text leaf after the processor for that format has exposed
  *   it. This class cannot preserve a representation it did not parse.
@@ -69,9 +69,9 @@
  *
  * ```php
  * $processor = new LimitedURLBaseInOpaqueTextProcessor(
- *     '[vc_video link="https://source.example/wp-content/uploads/video.mp4"]',
+ *     '[vc_video link="https:\\/\\/source.example\\/media\\/video.mp4"]',
  *     [
- *         'https://source.example/wp-content/uploads' => 'https://destination.example/assets',
+ *         'https://source.example' => 'https://destination.example',
  *     ]
  * );
  *
@@ -90,7 +90,6 @@ class LimitedURLBaseInOpaqueTextProcessor {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
-     *     target_path: string,
      *     pattern: string
      * }>
      */
@@ -106,12 +105,9 @@ class LimitedURLBaseInOpaqueTextProcessor {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
-     *     target_path: string,
      *     pattern: string,
      *     start: int,
-     *     authority_length: int,
-     *     base_length: int,
-     *     has_escaped_separator: bool
+     *     base_length: int
      * }|null
      */
     private ?array $matched_url = null;
@@ -122,20 +118,20 @@ class LimitedURLBaseInOpaqueTextProcessor {
     /**
      * Construct a processor for one opaque text value.
      *
-     * Each mapping uses a complete HTTP(S) source URL base and target URL
-     * base. A target may have an ASCII path, for example:
+     * Each mapping uses a complete HTTP(S) source URL base and a target URL
+     * containing only its domain. For example:
      *
      * ```
      * [
-     *     'https://source.example/wp-content/uploads' => 'https://destination.example/assets',
+     *     'https://source.example/media' => 'https://destination.example',
      * ]
      * ```
      *
-     * A literal occurrence replaces source.example/wp-content/uploads with
-     * destination.example/assets. An escaped occurrence is left alone because
-     * this processor does not encode the target path.
+     * A matching occurrence replaces source.example/media as one slice. A
+     * target path, port, IP address, user information, query, or fragment makes
+     * the mapping unsupported, so that mapping is ignored entirely.
      *
-     * @param array<string, string> $url_mapping Source URL base => target URL base.
+     * @param array<string, string> $url_mapping Source URL base => target URL.
      */
     public function __construct(string $text, array $url_mapping)
     {
@@ -176,18 +172,13 @@ class LimitedURLBaseInOpaqueTextProcessor {
     }
 
     /**
-     * Queue replacement of the current source URL base.
+     * Queue replacement of the complete current source URL base.
      *
-     * For a literal input, a mapping from source.example/media to
-     * destination.example/assets turns
+     * A mapping from source.example/media to destination.example turns
      * https://source.example/media/logo.png into
-     * https://destination.example/assets/logo.png. It leaves the protocol and
-     * logo.png untouched.
-     *
-     * The same mapping does not change https:\/\/source.example\/media\/logo.png.
-     * Choosing how to write the target path would re-encode bytes from the
-     * opaque input. When both configured paths are the same, replacing only
-     * the authority preserves the existing path representation.
+     * https://destination.example/logo.png. It never keeps /media after
+     * claiming to replace that source base, and it never falls back to a
+     * domain-only replacement for an unsupported target mapping.
      */
     public function replace_url_base(): bool
     {
@@ -195,21 +186,10 @@ class LimitedURLBaseInOpaqueTextProcessor {
             return false;
         }
 
-        $length = $this->matched_url['authority_length'];
-        $replacement = $this->matched_url['target_domain'];
-        if ($this->matched_url['source_path'] !== $this->matched_url['target_path']) {
-            if ($this->matched_url['has_escaped_separator']) {
-                return false;
-            }
-
-            $length = $this->matched_url['base_length'];
-            $replacement .= $this->matched_url['target_path'];
-        }
-
         $this->lexical_updates[$this->matched_url['start']] = [
             'start'       => $this->matched_url['start'],
-            'length'      => $length,
-            'replacement' => $replacement,
+            'length'      => $this->matched_url['base_length'],
+            'replacement' => $this->matched_url['target_domain'],
         ];
 
         return true;
@@ -250,12 +230,9 @@ class LimitedURLBaseInOpaqueTextProcessor {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
-     *     target_path: string,
      *     pattern: string,
      *     start: int,
-     *     authority_length: int,
-     *     base_length: int,
-     *     has_escaped_separator: bool
+     *     base_length: int
      * }|null
      */
     private function find_next_url_base(): ?array
@@ -281,10 +258,8 @@ class LimitedURLBaseInOpaqueTextProcessor {
             $next_match = array_merge(
                 $mapping,
                 [
-                    'start'                 => $authority_start,
-                    'authority_length'      => strlen($matches['authority'][0]),
-                    'base_length'           => strlen($matches['base'][0]),
-                    'has_escaped_separator' => strpos($matches['base'][0], '\\') !== false,
+                    'start'       => $authority_start,
+                    'base_length' => strlen($matches['base'][0]),
                 ]
             );
         }
@@ -339,7 +314,6 @@ class LimitedURLBaseInOpaqueTextProcessor {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
-     *     target_path: string,
      *     pattern: string
      * }|null
      */
@@ -356,7 +330,6 @@ class LimitedURLBaseInOpaqueTextProcessor {
             'source_path'      => $source['path'],
             'source_base'      => $source['authority'] . $source['path'],
             'target_domain'    => $target['host'],
-            'target_path'      => $target['path'],
             'pattern'          => $this->create_url_candidate_pattern(
                 $source['scheme'],
                 $source['authority'],
@@ -368,7 +341,7 @@ class LimitedURLBaseInOpaqueTextProcessor {
     /**
      * @return array{scheme: string, host: string, authority: string, path: string}|null
      */
-    private function get_supported_url_parts(string $url, bool $allow_ip_and_port): ?array
+    private function get_supported_url_parts(string $url, bool $is_source_url): ?array
     {
         $parts = parse_url($url);
         if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])) {
@@ -385,8 +358,8 @@ class LimitedURLBaseInOpaqueTextProcessor {
         $host = (string) $parts['host'];
         $path = isset($parts['path']) ? (string) $parts['path'] : '';
         if (( $scheme !== 'http' && $scheme !== 'https' )
-            || ( !$allow_ip_and_port && array_key_exists('port', $parts) )
-            || !( $this->is_alphanumeric_dot_hyphen_domain_name($host) || ( $allow_ip_and_port && $this->is_ip_address($host) ) )
+            || ( !$is_source_url && ( array_key_exists('port', $parts) || $path !== '' ) )
+            || !( $this->is_alphanumeric_dot_hyphen_domain_name($host) || ( $is_source_url && $this->is_ip_address($host) ) )
             || !$this->is_ascii_path($path)) {
             return null;
         }
