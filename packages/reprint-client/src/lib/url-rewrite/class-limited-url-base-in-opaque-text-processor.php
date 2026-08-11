@@ -3,83 +3,67 @@
 /**
  * Replaces a configured URL base in text whose format is unknown.
  *
- * This is deliberately not a URL rewriter. It has no way to know whether a
- * backslash belongs to JSON, CSS, a shortcode, HTML, or an application
- * escape convention. It therefore changes a known literal URL base, or leaves
- * the URL alone. It never invents an escape spelling for a target path.
- *
- * For example, with this mapping:
- *
- * ```
- * https://source.example/wp-content/uploads => https://destination.example/assets
- * ```
- *
- * this literal input:
- *
- * ```
- * [vc_video link="https://source.example/wp-content/uploads/2026/01/video.mp4"]
- * ```
- *
- * becomes:
- *
- * ```
- * [vc_video link="https://destination.example/assets/2026/01/video.mp4"]
- * ```
- *
- * The protocol and the suffix after the configured base come from the input.
- * The domain and initial path come from the target mapping. It does not turn
- * that escaped input into a new escaped target path:
+ * Given this escaped shortcode:
  *
  * ```
  * [vc_video link="https:\/\/source.example\/wp-content\/uploads\/2026\/01\/video.mp4"]
  * ```
  *
- * That value remains unchanged for this mapping. Choosing whether the target
- * should use /, \/, or another representation would require knowing the
- * surrounding format.
- *
- * If the configured source and target paths are identical, escaped source
- * paths are safe. For example, source.example/media => destination.example/media
- * changes the authority but leaves the source path's existing bytes alone.
- * In particular, this class never parses, decodes, normalizes, or re-encodes
- * input URL bytes. Source authorities and paths match as exact ASCII bytes;
- * case variants are not equivalent here.
- *
- * A configured source may use an ASCII domain or an IP address, with an
- * optional port, so exports made from a local development server can still be
- * imported. The destination must be a domain made from letters, digits, dots,
- * and hyphens, with an ASCII path and no port, user information, query, or
- * fragment. Punycode is supported. These mappings are intentionally ignored:
+ * and this mapping:
  *
  * ```
- * https://source.example/media => https://192.0.2.1/media
- * https://source.example/media => https://bücher.example/media
- * https://source.example/media => https://destination.example/über-uns
+ * https://source.example/wp-content/uploads => https://destination.example/wp-content/uploads
  * ```
  *
- * A parser that knows the enclosing data format may support them. This class
- * cannot do so without risking an edit outside its safe byte range.
+ * it changes source.example to destination.example and produces:
  *
- * Call this only with a string leaf that its caller has already classified as
- * text. It is not a parser for a complete PHP serialization, JSON document,
- * or block-markup value. Those formats must first be handled by a processor
- * that knows their representation. Keep complete structured values out of
- * this processor and its tests; this class cannot preserve their syntax.
+ * ```
+ * [vc_video link="https:\/\/destination.example\/wp-content\/uploads\/2026\/01\/video.mp4"]
+ * ```
  *
- * A candidate scheme starts at the beginning of the value or after any byte
- * other than an ASCII letter, plus sign, or hyphen. This deliberately accepts
- * a URL after an equals sign, such as a URL-valued query parameter, while
- * rejecting a URL embedded in an identifier or a longer scheme name. A
- * scheme-less authority requires a stronger left boundary so it cannot match
- * the host portion of a malformed or unsupported URL.
+ * The escaped path bytes are left alone. The complete configured source base
+ * and target base have the same initial path, so replacing the domain yields
+ * the complete target base without choosing a new escape spelling.
  *
- * The scanner accepts a literal protocol (https://), a scheme-less URL, and
- * forms with one or three backslashes before the colon and/or either slash:
- * https:\/\/, https\:\/\/, and https:\\\/\\\/. The three-backslash form is
- * one JSON escaping layer around an already escaped URL. It does not accept
- * CSS hexadecimal escapes such as https\3a \2f \2f ... or percent-encoded
- * separators. Optional user information before the source authority, plus
- * query and fragment suffixes after it, remain untouched.
+ * The motivation is boring: opaque text has no reliable escape contract. A
+ * backslash may belong to JSON, CSS, a shortcode, HTML, or an application
+ * convention. This class only changes bytes when it can name the exact range
+ * to replace. It does not parse, decode, normalize, or re-encode input URL
+ * bytes.
+ *
+ * It handles these cases:
+ *
+ * - Literal URL bases. A mapping from source.example/media to
+ *   destination.example/assets changes
+ *   https://source.example/media/logo.png to
+ *   https://destination.example/assets/logo.png. The protocol and logo.png
+ *   suffix remain from the input.
+ * - Scheme-less URLs and HTTP(S) spellings with one or three backslashes
+ *   before the colon and/or either slash: https:\/\/, https\:\/\/, and
+ *   https:\\\/\\\/.
+ * - A configured ASCII source domain, or an IPv4 or IPv6 source address with
+ *   an optional port. Punycode destination domains are accepted.
+ * - User information before the source authority, and query and fragment
+ *   suffixes after the base. Those bytes remain untouched.
+ *
+ * It deliberately does not handle these cases:
+ *
+ * - An escaped source path with a different target path. Writing the target
+ *   would require deciding whether its separators should be /, \/, or another
+ *   representation. The URL is left unchanged.
+ * - CSS hexadecimal escapes such as https\3a \2f \2f ..., percent-encoded
+ *   separators, a Unicode destination domain or path, or an IPv4/IPv6
+ *   destination. Those require a parser that knows the surrounding format.
+ * - A complete PHP serialization, JSON document, or block-markup value. Call
+ *   this only for a text leaf after the processor for that format has exposed
+ *   it. This class cannot preserve a representation it did not parse.
+ *
+ * Source authorities and paths match as exact ASCII bytes; case variants are
+ * not equivalent here. A candidate scheme starts at the beginning of the value
+ * or after any byte other than an ASCII letter, plus sign, or hyphen. This
+ * accepts a URL after an equals sign, while rejecting a URL embedded in an
+ * identifier or a longer scheme name. A scheme-less authority has a stronger
+ * left boundary so it cannot match the host portion of a malformed URL.
  *
  * Example usage:
  *
