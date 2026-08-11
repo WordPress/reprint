@@ -97,6 +97,17 @@ class NewSiteUrlSqliteTest extends TestCase
             $this->completeTextExpression('yes'),
         );
 
+        $stmts[] = sprintf(
+            "INSERT INTO `wp_options` VALUES "
+            . "(4, %s, %s, %s);",
+            $this->completeTextExpression('serialized_urls'),
+            $this->completeTextExpression(serialize([
+                'primary' => $siteUrl . '/primary',
+                'nested' => serialize($siteUrl . '/nested'),
+            ])),
+            $this->completeTextExpression('yes'),
+        );
+
         return implode("\n", $stmts) . "\n";
     }
 
@@ -205,6 +216,19 @@ class NewSiteUrlSqliteTest extends TestCase
             'wp_test',
         );
         $this->assertSame('My Test Blog', $blogname[0]['option_value']);
+
+        $serialized_urls = $this->querySqlite(
+            $sqlitePath,
+            "SELECT option_value FROM wp_options WHERE option_name = 'serialized_urls'",
+            'wp_test',
+        );
+        $this->assertSame(
+            serialize([
+                'primary' => $newUrl . '/primary',
+                'nested' => serialize($newUrl . '/nested'),
+            ]),
+            $serialized_urls[0]['option_value'],
+        );
     }
 
     /**

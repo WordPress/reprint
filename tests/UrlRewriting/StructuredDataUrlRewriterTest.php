@@ -160,12 +160,87 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($expected, $this->createRewriter()->rewrite($input));
     }
 
-    public function testLeavesCompletePhpSerializationUnchanged(): void
+    public function testRewritesCompleteAndNestedPhpSerialization(): void
     {
         $input = serialize([
             'url' => 'https://old-site.com/path',
             'nested' => serialize('https://old-site.com/other'),
         ]);
+        $expected = serialize([
+            'url' => 'https://new-site.com/path',
+            'nested' => serialize('https://new-site.com/other'),
+        ]);
+
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testRewritesSerializedObjectWithoutEvaluatingIt(): void
+    {
+        $object = new stdClass();
+        $object->url = 'https://old-site.com/path';
+        $input = serialize($object);
+        $object->url = 'https://new-site.com/path';
+        $expected = serialize($object);
+
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testSerializedRewriteCodeDoesNotEvaluateSerializedValues(): void
+    {
+        $paths = [
+            __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/class-php-serialization-processor.php',
+            __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/class-structured-data-url-rewriter.php',
+        ];
+
+        foreach ($paths as $path) {
+            $source = file_get_contents($path);
+            $this->assertIsString($source);
+            foreach (token_get_all($source) as $token) {
+                if (
+                    is_array($token)
+                    && $token[0] === T_STRING
+                    && strtolower($token[1]) === 'unserialize'
+                ) {
+                    $this->fail($path . ' invokes unserialize().');
+                }
+            }
+        }
+        $this->addToAssertionCount(1);
+    }
+
+    public function testLeavesMalformedPhpSerializationUnchanged(): void
+    {
+        $input = 'a:1:{s:3:"url";s:999:"https://old-site.com/path";}';
+
+        $this->assertSame($input, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testLeavesCustomSerializedPayloadOpaque(): void
+    {
+        $payload = 'https://old-site.com/path';
+        $input = 'C:7:"Example":' . strlen($payload) . ':{' . $payload . '}';
+
+        $this->assertSame($input, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testLeavesSerializedKeysUnchanged(): void
+    {
+        $input = serialize([
+            'https://old-site.com/key' => 'https://old-site.com/value',
+        ]);
+        $expected = serialize([
+            'https://old-site.com/key' => 'https://new-site.com/value',
+        ]);
+
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testExcessivelyNestedSerializationFailsClosed(): void
+    {
+        $input = 'https://old-site.com/deep';
+        for ($depth = 0; $depth < 258; $depth++) {
+            $input = serialize($input);
+        }
 
         $this->assertSame($input, $this->createRewriter()->rewrite($input));
     }

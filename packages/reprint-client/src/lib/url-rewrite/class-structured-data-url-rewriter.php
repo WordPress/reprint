@@ -3,14 +3,16 @@
 /**
  * Rewrites exact ASCII URL bases in a decoded database value.
  *
- * No content syntax is parsed, decoded, or re-encoded: the writer replaces
- * only a matched source-base byte range and copies every other byte. Escaped
- * or otherwise alternate URL spellings remain unchanged. Values containing a
- * PHP serialization token are left opaque because changing a string length
- * without updating its length prefix would corrupt the value.
+ * Plain text is copied byte for byte around exact source-base replacements.
+ * Complete PHP serialization is parsed without evaluating it; string values
+ * are rewritten recursively and every changed byte-length prefix is rebuilt.
+ * Malformed, partial, embedded, and custom serialized payloads remain opaque.
+ * Escaped or otherwise alternate URL spellings remain unchanged.
  */
 class StructuredDataUrlRewriter
 {
+    private const MAX_NESTING_DEPTH = 256;
+
     /**
      * Exact absolute source bases and pathless target origins for plain text.
      *
@@ -148,7 +150,17 @@ class StructuredDataUrlRewriter
      */
     public function rewrite(string $value): string
     {
-        if ($value === '' || $this->literal_mapping === []) {
+        return $this->rewrite_value($value, 0);
+    }
+
+    /** Rewrite one value at a bounded structured-data nesting depth. */
+    private function rewrite_value(string $value, int $depth): string
+    {
+        if (
+            $value === ''
+            || $this->literal_mapping === []
+            || $depth > self::MAX_NESTING_DEPTH
+        ) {
             return $value;
         }
 
@@ -156,11 +168,57 @@ class StructuredDataUrlRewriter
             return $value;
         }
 
+        if ($this->could_be_complete_php_serialization($value)) {
+            $rewritten_serialization = $this->rewrite_php_serialization($value, $depth);
+            if ($rewritten_serialization !== null) {
+                return $rewritten_serialization;
+            }
+        }
+
         if ($this->might_contain_php_serialization($value)) {
             return $value;
         }
 
         return $this->rewrite_literal_url_bases($value);
+    }
+
+    /**
+     * Return whether the first byte can begin serialization with string leaves.
+     */
+    private function could_be_complete_php_serialization(string $value): bool
+    {
+        $first_byte = $value[0] ?? '';
+        return $first_byte === 'a'
+            || $first_byte === 's'
+            || $first_byte === 'O'
+            || $first_byte === 'C'
+            || $first_byte === 'E';
+    }
+
+    /**
+     * Rewrite a complete PHP serialization without invoking unserialize().
+     *
+     * Recursive rewriting handles a serialization stored inside a serialized
+     * string before the outer string length is recalculated.
+     *
+     * @return string|null Rewritten bytes, or null when the input is malformed.
+     */
+    private function rewrite_php_serialization(string $value, int $depth): ?string
+    {
+        $processor = new PhpSerializationProcessor($value);
+        if ($processor->is_malformed()) {
+            return null;
+        }
+
+        while ($processor->next_value()) {
+            $original_value = $processor->get_value();
+            $rewritten_value = $this->rewrite_value($original_value, $depth + 1);
+            if ($rewritten_value !== $original_value) {
+                $processor->set_value($rewritten_value);
+            }
+        }
+
+        return $processor->get_updated_serialization();
     }
 
     /**

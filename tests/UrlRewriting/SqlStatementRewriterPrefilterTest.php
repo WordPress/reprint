@@ -337,7 +337,7 @@ class SqlStatementRewriterPrefilterTest extends TestCase
      * URL inside serialized PHP at varying offsets, with a clean
      * delimiter so the leaf-rewriter recognises the URL.
      */
-    public function testLeavesSerializedPhpUnchangedAtVariousAlignments(): void
+    public function testRewritesSerializedPhpAtVariousAlignments(): void
     {
         $rewriter = $this->createRewriter();
         for ($pad_len = 0; $pad_len < 12; $pad_len++) {
@@ -350,9 +350,9 @@ class SqlStatementRewriterPrefilterTest extends TestCase
             $rewritten = $rewriter->rewrite($sql);
             $decoded   = $this->decodeFirstValue($rewritten);
             $this->assertSame(
-                $blob,
+                serialize(['k' => $padding . 'https://new-site.com/seg-' . $pad_len]),
                 $decoded,
-                "pad_len={$pad_len} changed serialized PHP"
+                "pad_len={$pad_len} did not safely rewrite serialized PHP"
             );
         }
     }

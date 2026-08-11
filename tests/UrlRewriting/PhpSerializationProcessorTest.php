@@ -298,6 +298,33 @@ class PhpSerializationProcessorTest extends TestCase
         $this->assertSame($input, $result);
     }
 
+    public function testEnumPassthroughAllowsSurroundingStringReplacements(): void
+    {
+        $enum_identifier = 'Example\\Status:Published';
+        $serialized_enum = 'E:' . strlen($enum_identifier) . ':"' . $enum_identifier . '";';
+        $input = 'a:3:{'
+            . serialize('before') . serialize('old')
+            . serialize('status') . $serialized_enum
+            . serialize('after') . serialize('keep')
+            . '}';
+        $expected = 'a:3:{'
+            . serialize('before') . serialize('a longer replacement')
+            . serialize('status') . $serialized_enum
+            . serialize('after') . serialize('keep')
+            . '}';
+
+        $processor = new PhpSerializationProcessor($input);
+
+        $this->assertFalse($processor->is_malformed());
+        $this->assertTrue($processor->next_value());
+        $this->assertSame('old', $processor->get_value());
+        $processor->set_value('a longer replacement');
+        $this->assertTrue($processor->next_value());
+        $this->assertSame('keep', $processor->get_value());
+        $this->assertFalse($processor->next_value());
+        $this->assertSame($expected, $processor->get_updated_serialization());
+    }
+
     // ---------------------------------------------------------------
     // URL rewriting: URL replaced and s:N: updated
     // ---------------------------------------------------------------
@@ -430,6 +457,49 @@ class PhpSerializationProcessorTest extends TestCase
         $this->assertSame($input, $p->get_updated_serialization());
     }
 
+    /**
+     * @dataProvider structurallyInvalidSerializations
+     */
+    public function testStructurallyInvalidSerializationIsMalformed(string $input): void
+    {
+        $processor = new PhpSerializationProcessor($input);
+
+        $this->assertTrue($processor->is_malformed());
+        $this->assertFalse($processor->next_value());
+        $this->assertSame($input, $processor->get_updated_serialization());
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function structurallyInvalidSerializations(): iterable
+    {
+        $url = 'https://old-site.com/page';
+
+        yield 'boolean array key' => [
+            'a:1:{b:1;s:' . strlen($url) . ':"' . $url . '";}',
+        ];
+        yield 'integer object property name' => [
+            'O:8:"stdClass":1:{i:0;s:' . strlen($url) . ':"' . $url . '";}',
+        ];
+        yield 'reference to a nonexistent value' => [
+            'a:2:{i:0;R:999;i:1;s:' . strlen($url) . ':"' . $url . '";}',
+        ];
+        yield 'object reference to a string value' => [
+            'a:3:{i:0;s:3:"old";i:1;r:2;i:2;s:' . strlen($url) . ':"' . $url . '";}',
+        ];
+        yield 'invalid double' => [
+            'a:2:{i:0;d:https://old-site.com;i:1;s:' . strlen($url) . ':"' . $url . '";}',
+        ];
+        yield 'oversized string length' => [
+            's:999999999999999999999999999999999999999999:"' . $url . '";',
+        ];
+        yield 'oversized array count' => [
+            'a:999999999999999999999999999999999999999999:{i:0;s:'
+                . strlen($url) . ':"' . $url . '";}',
+        ];
+    }
+
     // ---------------------------------------------------------------
     // Strings containing quotes, semicolons, null bytes
     // ---------------------------------------------------------------
@@ -466,5 +536,18 @@ class PhpSerializationProcessorTest extends TestCase
         $input = serialize($value);
         $result = $this->processWithTransform($input, fn($v) => strtoupper($v));
         $this->assertSame('S:5:"INNER";', unserialize($result));
+    }
+
+    public function testExcessiveContainerNestingIsMalformed(): void
+    {
+        $value = 'https://old-site.com/deep';
+        for ($depth = 0; $depth < 258; $depth++) {
+            $value = [$value];
+        }
+        $input = serialize($value);
+        $processor = new PhpSerializationProcessor($input);
+
+        $this->assertTrue($processor->is_malformed());
+        $this->assertSame($input, $processor->get_updated_serialization());
     }
 }

@@ -415,7 +415,8 @@ The command returns one of three exit codes:
 
 If the site's domain is changing (e.g. migrating from `https://old-site.com`
 to `https://new-site.com`), use `db-apply` with `--rewrite-url` to import
-the SQL dump into a target database while rewriting all URLs in one pass.
+the SQL dump into a target database while rewriting eligible literal URLs in
+one pass.
 
 MySQL target:
 
@@ -446,10 +447,13 @@ scheme, a DNS host, an optional port from 1 through 65535, and an optional path;
 `TO` must be an ASCII HTTP origin without a path. A non-root `FROM` path must not
 end in `/`. Escaped, case-variant, and encoded spellings are left unchanged; a
 single root slash on either base is normalized. JSON, block markup, and CSS are
-not parsed or re-encoded. Values containing PHP serialization tokens are left
-unchanged so a byte-length prefix cannot become stale. Source paths accept ASCII
-RFC 3986 path characters and percent escapes; a backslash is not a path
-separator.
+not parsed or re-encoded. Complete PHP serialization is parsed as bytes without
+calling `unserialize()`: string values are rewritten recursively, keys and
+object property names remain unchanged, and every changed string length is
+recalculated. Malformed or partial serialization, custom serialized object
+payloads, and serialization embedded in another format remain unchanged. Source
+paths accept ASCII RFC 3986 path characters and percent escapes; a backslash is
+not a path separator.
 
 Only occurrences with conservative URL boundaries are changed. Ambiguous
 occurrences, including an unquoted URL immediately after `=` or beside an

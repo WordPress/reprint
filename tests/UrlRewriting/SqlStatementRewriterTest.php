@@ -78,16 +78,31 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertEquals($sql, $rewriter->rewrite($sql));
     }
 
-    public function testLeavesSerializedPhpValuesUnchanged(): void
+    public function testRewritesSerializedPhpValuesAndUpdatesLengths(): void
     {
         $rewriter = $this->createRewriter();
         $serialized = serialize(['siteurl' => 'https://old-site.com/site']);
+        $expected = serialize(['siteurl' => 'https://new-site.com/site']);
         $encoded = base64_encode($serialized);
         $sql = "INSERT INTO `wp_options` VALUES(1, FROM_BASE64('{$encoded}'));";
 
         $result = $this->rewriteCompleteText($rewriter, $sql);
 
         $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $this->assertSame($expected, $values[0]);
+    }
+
+    public function testMalformedSerializedPhpValueIsByteIdentical(): void
+    {
+        $rewriter = $this->createRewriter();
+        $serialized = 'a:1:{s:3:"url";s:999:"https://old-site.com/site";}';
+        $encoded = base64_encode($serialized);
+        $sql = "INSERT INTO `wp_options` VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = $this->rewriteCompleteText($rewriter, $sql);
+        $values = $this->collectValues($result);
+
         $this->assertCount(1, $values);
         $this->assertSame($serialized, $values[0]);
     }
@@ -166,8 +181,11 @@ class SqlStatementRewriterTest extends TestCase
         // HTML should be rewritten
         $this->assertStringContainsString('new-site.com', $values[0]);
 
-        // Serialized PHP remains opaque so its byte-length prefixes stay valid.
-        $this->assertSame($serialized, $values[1]);
+        // Serialized PHP is parsed and its changed byte-length prefixes remain valid.
+        $this->assertSame(
+            serialize(['url' => 'https://new-site.com/home']),
+            $values[1]
+        );
 
         // Plain text should be rewritten
         $this->assertStringContainsString('new-site.com', $values[2]);

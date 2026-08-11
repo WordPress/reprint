@@ -5,7 +5,7 @@
  * 1. Create site with known content containing source URLs in various formats
  * 2. Run db-pull → verify pull/domains.json contains the source domain
  * 3. Run db-apply with --rewrite-url to apply SQL to target database
- * 4. Verify literal URLs are rewritten while serialized PHP remains unchanged
+ * 4. Verify literal and serialized PHP URLs are rewritten without invalid lengths
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -38,7 +38,7 @@ describe('Import: URL Rewriting', () => {
                     ['html_option', `<a href="${SOURCE_DOMAIN}/about">About</a> <img src="${SOURCE_DOMAIN}/logo.png"/>`]
                 );
 
-                // Serialized PHP is opaque to the literal first-pass rewriter.
+                // Serialized PHP requires each changed byte length to be updated.
                 const serialized = `a:2:{s:7:"siteurl";s:${SOURCE_DOMAIN.length}:"${SOURCE_DOMAIN}";s:4:"home";s:${SOURCE_DOMAIN.length}:"${SOURCE_DOMAIN}";}`;
                 await conn.query(
                     `INSERT INTO wp_options (option_name, option_value) VALUES (?, ?)`,
@@ -180,7 +180,7 @@ describe('Import: URL Rewriting', () => {
         );
     });
 
-    it('serialized PHP values remain byte-identical', async () => {
+    it('serialized PHP values are rewritten with updated lengths', async () => {
         const conn = await createMysqlConnection(importDb);
         const [[row]] = await conn.query(
             "SELECT option_value FROM wp_options WHERE option_name = 'serialized_option'"
@@ -188,11 +188,11 @@ describe('Import: URL Rewriting', () => {
         await conn.end();
 
         assert.ok(row, 'Expected serialized_option row');
-        const expected = `a:2:{s:7:"siteurl";s:${SOURCE_DOMAIN.length}:"${SOURCE_DOMAIN}";s:4:"home";s:${SOURCE_DOMAIN.length}:"${SOURCE_DOMAIN}";}`;
+        const expected = `a:2:{s:7:"siteurl";s:${TARGET_DOMAIN.length}:"${TARGET_DOMAIN}";s:4:"home";s:${TARGET_DOMAIN.length}:"${TARGET_DOMAIN}";}`;
         assert.equal(
             row.option_value,
             expected,
-            'Expected serialized PHP to remain byte-identical'
+            'Expected serialized PHP URLs and byte lengths to be rewritten'
         );
     });
 

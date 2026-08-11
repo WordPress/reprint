@@ -26,6 +26,7 @@
 class PhpSerializationProcessor
 {
     private const DIGITS = '0123456789';
+    private const MAX_NESTING_DEPTH = 256;
 
     /** @var string The original serialized data. */
     private $data;
@@ -64,6 +65,12 @@ class PhpSerializationProcessor
     /** @var int Current cursor position. -1 means before the first value. */
     private $cursor = -1;
 
+    /** @var int Number assigned to the next parsed value for reference checks. */
+    private $parsed_values = 0;
+
+    /** @var array<int, string> Serialized type byte indexed by value number. */
+    private $parsed_value_types = [];
+
     /**
      * Parse the input upfront, recording the position of every string value.
      *
@@ -84,14 +91,16 @@ class PhpSerializationProcessor
         }
 
         $pos = 0;
-        if (!$this->parse_value($pos, true)) {
+        if (!$this->parse_value($pos, true, 0)) {
             $this->malformed = true;
+            $this->bookmarks = [];
             return;
         }
 
         // If there's trailing data, the input is malformed
         if ($pos !== $this->data_length) {
             $this->malformed = true;
+            $this->bookmarks = [];
         }
     }
 
@@ -159,7 +168,7 @@ class PhpSerializationProcessor
      */
     public function get_updated_serialization(): string
     {
-        if (empty($this->replacements)) {
+        if ($this->malformed || empty($this->replacements)) {
             return $this->data;
         }
 
@@ -198,17 +207,55 @@ class PhpSerializationProcessor
     // -----------------------------------------------------------------
 
     /**
+     * Read an unsigned decimal which cannot exceed the input byte length.
+     *
+     * Serialized lengths and collection counts larger than the complete input
+     * cannot be valid. Comparing the digit string before casting also prevents
+     * integer overflow from turning an invalid length into a usable offset.
+     */
+    private function parse_bounded_unsigned_decimal(int &$pos): ?int
+    {
+        $digit_length = strspn($this->data, self::DIGITS, $pos);
+        if ($digit_length === 0) {
+            return null;
+        }
+
+        $digits = substr($this->data, $pos, $digit_length);
+        $normalized_digits = ltrim($digits, '0');
+        if ($normalized_digits === '') {
+            $normalized_digits = '0';
+        }
+        $maximum = (string) $this->data_length;
+        if (
+            strlen($normalized_digits) > strlen($maximum)
+            || (
+                strlen($normalized_digits) === strlen($maximum)
+                && strcmp($normalized_digits, $maximum) > 0
+            )
+        ) {
+            return null;
+        }
+
+        $pos += $digit_length;
+        return (int) $normalized_digits;
+    }
+
+    /**
      * Dispatch on the type character at the current position.
      *
-     * @param int  &$pos     Current byte offset (updated in place).
-     * @param bool $is_value Whether this position is a value (true) or
-     *                       a key/property name (false).
+     * @param int  &$pos      Current byte offset (updated in place).
+     * @param bool $is_value Whether this position is a value (true) or a key.
+     * @param int  $depth     Current nesting depth.
      * @return bool True if parsing succeeded.
      */
-    private function parse_value(int &$pos, bool $is_value): bool
+    private function parse_value(int &$pos, bool $is_value, int $depth): bool
     {
-        if (!isset($this->data[$pos])) {
+        if ($depth > self::MAX_NESTING_DEPTH || !isset($this->data[$pos])) {
             return false;
+        }
+        if ($is_value) {
+            ++$this->parsed_values;
+            $this->parsed_value_types[$this->parsed_values] = $this->data[$pos];
         }
 
         switch ($this->data[$pos]) {
@@ -223,14 +270,16 @@ class PhpSerializationProcessor
             case 'N':
                 return $this->parse_null($pos);
             case 'a':
-                return $this->parse_array($pos);
+                return $this->parse_array($pos, $depth);
             case 'O':
-                return $this->parse_object($pos);
+                return $this->parse_object($pos, $depth);
             case 'C':
                 return $this->parse_custom($pos);
+            case 'E':
+                return $this->parse_enum($pos);
             case 'r':
             case 'R':
-                return $this->parse_reference($pos);
+                return $is_value && $this->parse_reference($pos);
             default:
                 return false;
         }
@@ -254,13 +303,10 @@ class PhpSerializationProcessor
         $prefix_start = $pos;
         $pos += 2; // skip 's:'
 
-        // Read the byte-length number using strspn for fast digit scanning
-        $digit_len = strspn($this->data, self::DIGITS, $pos);
-        if ($digit_len === 0) {
+        $byte_length = $this->parse_bounded_unsigned_decimal($pos);
+        if ($byte_length === null) {
             return false;
         }
-        $byte_length = (int) substr($this->data, $pos, $digit_len);
-        $pos += $digit_len;
 
         // Expect :" then exactly $byte_length bytes then ";
         // Minimum remaining: 2 (:" ) + $byte_length + 2 (";) = $byte_length + 4
@@ -328,12 +374,19 @@ class PhpSerializationProcessor
         }
         $pos += 2; // skip 'd:'
 
-        // Read until semicolon — PHP serialize can produce various float representations
-        $span = strcspn($this->data, ';', $pos);
-        if ($span === 0 || $pos + $span >= $this->data_length) {
+        $matches = [];
+        if (
+            preg_match(
+                '/\G(?:NAN|-?INF|-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[Ee][+-]?[0-9]+)?);/',
+                $this->data,
+                $matches,
+                0,
+                $pos
+            ) !== 1
+        ) {
             return false;
         }
-        $pos += $span + 1; // skip value + ';'
+        $pos += strlen($matches[0]);
 
         return true;
     }
@@ -347,7 +400,7 @@ class PhpSerializationProcessor
         if (!isset($this->data[$pos + 3])
             || $this->data[$pos] !== 'b'
             || $this->data[$pos + 1] !== ':'
-            || ($this->data[$pos + 2] !== '0' && $this->data[$pos + 2] !== '1')
+            || ( $this->data[$pos + 2] !== '0' && $this->data[$pos + 2] !== '1' )
             || $this->data[$pos + 3] !== ';'
         ) {
             return false;
@@ -374,20 +427,17 @@ class PhpSerializationProcessor
      * Keys are parsed with is_value=false (they're structural, not content).
      * Values are parsed with is_value=true so they get bookmarked.
      */
-    private function parse_array(int &$pos): bool
+    private function parse_array(int &$pos, int $depth): bool
     {
         if (!isset($this->data[$pos + 1]) || $this->data[$pos] !== 'a' || $this->data[$pos + 1] !== ':') {
             return false;
         }
         $pos += 2; // skip 'a:'
 
-        // Read element count
-        $digit_len = strspn($this->data, self::DIGITS, $pos);
-        if ($digit_len === 0) {
+        $count = $this->parse_bounded_unsigned_decimal($pos);
+        if ($count === null) {
             return false;
         }
-        $count = (int) substr($this->data, $pos, $digit_len);
-        $pos += $digit_len;
 
         // Expect :{
         if (!isset($this->data[$pos + 1]) || $this->data[$pos] !== ':' || $this->data[$pos + 1] !== '{') {
@@ -396,13 +446,22 @@ class PhpSerializationProcessor
         $pos += 2; // skip ':{'
 
         for ($i = 0; $i < $count; $i++) {
-            // Parse key (string or integer, not a value)
-            if (!$this->parse_value($pos, false)) {
+            if (!isset($this->data[$pos])) {
+                return false;
+            }
+            if ($this->data[$pos] === 's') {
+                if (!$this->parse_string($pos, false)) {
+                    return false;
+                }
+            } elseif ($this->data[$pos] === 'i') {
+                if (!$this->parse_integer($pos)) {
+                    return false;
+                }
+            } else {
                 return false;
             }
 
-            // Parse value (with bookmark)
-            if (!$this->parse_value($pos, true)) {
+            if (!$this->parse_value($pos, true, $depth + 1)) {
                 return false;
             }
         }
@@ -427,20 +486,17 @@ class PhpSerializationProcessor
      * preserved correctly because we read by byte count, not by scanning
      * for delimiters.
      */
-    private function parse_object(int &$pos): bool
+    private function parse_object(int &$pos, int $depth): bool
     {
         if (!isset($this->data[$pos + 1]) || $this->data[$pos] !== 'O' || $this->data[$pos + 1] !== ':') {
             return false;
         }
         $pos += 2; // skip 'O:'
 
-        // Read class name length
-        $digit_len = strspn($this->data, self::DIGITS, $pos);
-        if ($digit_len === 0) {
+        $name_len = $this->parse_bounded_unsigned_decimal($pos);
+        if ($name_len === null || $name_len === 0) {
             return false;
         }
-        $name_len = (int) substr($this->data, $pos, $digit_len);
-        $pos += $digit_len;
 
         // Expect :" then exactly name_len bytes then ":
         // Minimum remaining: 2 (:" ) + name_len + 2 (":) = name_len + 4
@@ -455,13 +511,10 @@ class PhpSerializationProcessor
         }
         $pos += 2; // skip '":'
 
-        // Read property count
-        $digit_len = strspn($this->data, self::DIGITS, $pos);
-        if ($digit_len === 0) {
+        $prop_count = $this->parse_bounded_unsigned_decimal($pos);
+        if ($prop_count === null) {
             return false;
         }
-        $prop_count = (int) substr($this->data, $pos, $digit_len);
-        $pos += $digit_len;
 
         // Expect :{
         if (!isset($this->data[$pos + 1]) || $this->data[$pos] !== ':' || $this->data[$pos + 1] !== '{') {
@@ -470,13 +523,11 @@ class PhpSerializationProcessor
         $pos += 2; // skip ':{'
 
         for ($i = 0; $i < $prop_count; $i++) {
-            // Parse property name (not a value — structural)
-            if (!$this->parse_value($pos, false)) {
+            if (!$this->parse_string($pos, false)) {
                 return false;
             }
 
-            // Parse property value (with bookmark)
-            if (!$this->parse_value($pos, true)) {
+            if (!$this->parse_value($pos, true, $depth + 1)) {
                 return false;
             }
         }
@@ -501,13 +552,25 @@ class PhpSerializationProcessor
         if (!isset($this->data[$pos + 1]) || $this->data[$pos + 1] !== ':') {
             return false;
         }
+        $reference_type = $this->data[$pos];
         $pos += 2; // skip 'r:' or 'R:'
 
-        $digit_len = strspn($this->data, self::DIGITS, $pos);
-        if ($digit_len === 0) {
+        $reference = $this->parse_bounded_unsigned_decimal($pos);
+        if (
+            $reference === null
+            || $reference < 1
+            || $reference >= $this->parsed_values
+            || (
+                $reference_type === 'r'
+                && !in_array(
+                    $this->parsed_value_types[$reference] ?? '',
+                    ['O', 'C', 'E'],
+                    true
+                )
+            )
+        ) {
             return false;
         }
-        $pos += $digit_len;
 
         if (!isset($this->data[$pos]) || $this->data[$pos] !== ';') {
             return false;
@@ -531,13 +594,10 @@ class PhpSerializationProcessor
         }
         $pos += 2; // skip 'C:'
 
-        // Read class name length
-        $digit_len = strspn($this->data, self::DIGITS, $pos);
-        if ($digit_len === 0) {
+        $name_len = $this->parse_bounded_unsigned_decimal($pos);
+        if ($name_len === null || $name_len === 0) {
             return false;
         }
-        $name_len = (int) substr($this->data, $pos, $digit_len);
-        $pos += $digit_len;
 
         // Expect :" then exactly name_len bytes then ":
         if ($pos + $name_len + 4 > $this->data_length || $this->data[$pos] !== ':' || $this->data[$pos + 1] !== '"') {
@@ -551,13 +611,10 @@ class PhpSerializationProcessor
         }
         $pos += 2; // skip '":'
 
-        // Read payload length
-        $digit_len = strspn($this->data, self::DIGITS, $pos);
-        if ($digit_len === 0) {
+        $payload_len = $this->parse_bounded_unsigned_decimal($pos);
+        if ($payload_len === null) {
             return false;
         }
-        $payload_len = (int) substr($this->data, $pos, $digit_len);
-        $pos += $digit_len;
 
         // Expect :{ then exactly payload_len bytes then }
         if ($pos + $payload_len + 3 > $this->data_length || $this->data[$pos] !== ':' || $this->data[$pos + 1] !== '{') {
@@ -570,6 +627,45 @@ class PhpSerializationProcessor
             return false;
         }
         $pos++; // skip '}'
+
+        return true;
+    }
+
+    /**
+     * Parse an enum case while leaving its class and case identifier opaque.
+     */
+    private function parse_enum(int &$pos): bool
+    {
+        if (!isset($this->data[$pos + 1]) || $this->data[$pos] !== 'E' || $this->data[$pos + 1] !== ':') {
+            return false;
+        }
+        $pos += 2; // skip 'E:'
+
+        $identifier_length = $this->parse_bounded_unsigned_decimal($pos);
+        if (
+            $identifier_length === null
+            || $identifier_length < 3
+            || $pos + $identifier_length + 4 > $this->data_length
+            || $this->data[$pos] !== ':'
+            || $this->data[$pos + 1] !== '"'
+        ) {
+            return false;
+        }
+        $pos += 2; // skip ':"'
+
+        if (
+            $this->data[$pos] === ':'
+            || $this->data[$pos + $identifier_length - 1] === ':'
+            || substr_count($this->data, ':', $pos, $identifier_length) !== 1
+        ) {
+            return false;
+        }
+        $pos += $identifier_length;
+
+        if ($this->data[$pos] !== '"' || $this->data[$pos + 1] !== ';') {
+            return false;
+        }
+        $pos += 2;
 
         return true;
     }
