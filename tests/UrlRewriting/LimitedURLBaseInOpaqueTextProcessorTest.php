@@ -6,9 +6,395 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.php';
 
 class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
-    private const SOURCE_URL = 'https://source.example/media';
-    private const SAME_PATH_TARGET_URL = 'http://destination.example/media';
-    private const DIFFERENT_PATH_TARGET_URL = 'http://destination.example/assets';
+    /**
+     * These are opaque text leaves only. Do not add complete PHP serializations,
+     * JSON documents, or known block markup: StructuredDataUrlRewriter handles
+     * data whose syntax it knows before this processor receives a text value.
+     */
+    public function testRewritesAnUnquotedCssUrlWithoutChangingItsTerminator(): void
+    {
+        $input = '.hero{background-image:url(https://source.example/wp-content/uploads/2026/01/hero.jpg);}';
+        $expected = '.hero{background-image:url(https://destination.example/wp-content/uploads/2026/01/hero.jpg);}';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesAQuotedCssUrlWithoutChangingItsTerminator(): void
+    {
+        $input = '.hero{background-image:url("https:\\/\\/source.example\\/wp-content\\/uploads\\/2026\\/01\\/hero.jpg");}';
+        $expected = '.hero{background-image:url("https:\\/\\/destination.example\\/wp-content\\/uploads\\/2026\\/01\\/hero.jpg");}';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesTheWPBakeryVideoShortcodeUrl(): void
+    {
+        $input = '[vc_video link="https://source.example/wp-content/uploads/2026/01/video.mp4"]';
+        $expected = '[vc_video link="https://destination.example/wp-content/uploads/2026/01/video.mp4"]';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesCssInAnEntityQuotedWPBakeryAttribute(): void
+    {
+        $input = '[vc_column width=&#187;1\\/2&#8243; css=&#187;.vc_custom{background-image:url(https://source.example/wp-content/uploads/2026/01/hero.jpg?id=8086) !important;}&#187;]';
+        $expected = '[vc_column width=&#187;1\\/2&#8243; css=&#187;.vc_custom{background-image:url(https://destination.example/wp-content/uploads/2026/01/hero.jpg?id=8086) !important;}&#187;]';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesCssInAShortcodeInsideAnHtmlAttribute(): void
+    {
+        $input = '<div data-builder-shortcode=\'[vc_column css=&#187;.vc_custom{background-image:url(https:\\/\\/source.example\\/wp-content\\/uploads\\/2026\\/01\\/hero.jpg)}&#187;]\'></div>';
+        $expected = '<div data-builder-shortcode=\'[vc_column css=&#187;.vc_custom{background-image:url(https:\\/\\/destination.example\\/wp-content\\/uploads\\/2026\\/01\\/hero.jpg)}&#187;]\'></div>';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesASmartQuotedDiviUrl(): void
+    {
+        $input = '[et_pb_section background_image=”https://source.example/wp-content/uploads/2026/01/hero.jpg”]';
+        $expected = '[et_pb_section background_image=”https://destination.example/wp-content/uploads/2026/01/hero.jpg”]';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesAnEscapedUrlAmongEscapedBlockMarkup(): void
+    {
+        $input = '[vc_column_text]<!-- \\/wp:post-content -->\\r\\n<p style=\\"text-align:center;\\"><img src=\\"https:\\/\\/source.example\\/wp-content\\/uploads\\/2026\\/01\\/hero.jpg\\" /><!-- \\/wp:image -->[\\/vc_column_text]';
+        $expected = '[vc_column_text]<!-- \\/wp:post-content -->\\r\\n<p style=\\"text-align:center;\\"><img src=\\"https:\\/\\/destination.example\\/wp-content\\/uploads\\/2026\\/01\\/hero.jpg\\" /><!-- \\/wp:image -->[\\/vc_column_text]';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesAThreeBackslashJsonEscapedUrl(): void
+    {
+        $input = '[builder_data value="{\\\"url\\\":\\\"https:\\\\\\/\\\\\\/source.example\\\\\\/wp-content\\\\\\/uploads\\\\\\/2026\\\\\\/01\\\\\\/hero.jpg\\\"}"]';
+        $expected = '[builder_data value="{\\\"url\\\":\\\"https:\\\\\\/\\\\\\/destination.example\\\\\\/wp-content\\\\\\/uploads\\\\\\/2026\\\\\\/01\\\\\\/hero.jpg\\\"}"]';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesAUrlWithUserInformationAndPreservesItsSuffix(): void
+    {
+        $input = 'url("https://user:password@source.example/wp-content/uploads/logo.png?download=1#preview");';
+        $expected = 'url("https://user:password@destination.example/wp-content/uploads/logo.png?download=1#preview");';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesASchemelessMarkdownUrl(): void
+    {
+        $input = '[Download](source.example/wp-content/uploads/logo.png)';
+        $expected = '[Download](destination.example/wp-content/uploads/logo.png)';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesAUrlValuedQueryParameter(): void
+    {
+        $input = 'https://archive.example/export?redirect=https://source.example/wp-content/uploads/2026/01/hero.jpg';
+        $expected = 'https://archive.example/export?redirect=https://destination.example/wp-content/uploads/2026/01/hero.jpg';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesEveryConfiguredOccurrenceInOneTextLeaf(): void
+    {
+        $input = 'url(https://source.example/wp-content/uploads/2026/01/a.jpg); url("https:\\/\\/source.example\\/wp-content\\/uploads\\/2026\\/01\\/b.jpg");';
+        $expected = 'url(https://destination.example/wp-content/uploads/2026/01/a.jpg); url("https:\\/\\/destination.example\\/wp-content\\/uploads\\/2026\\/01\\/b.jpg");';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/wp-content/uploads' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesAConfiguredSourceIpv4AddressAndPort(): void
+    {
+        $input = 'url(https://127.0.0.1:8108/media/logo.png);';
+        $expected = 'url(https://destination.example/media/logo.png);';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://127.0.0.1:8108/media' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesAConfiguredSourceIpv6AddressAndPort(): void
+    {
+        $input = 'url(https://[::1]:8108/media/logo.png);';
+        $expected = 'url(https://destination.example/media/logo.png);';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://[::1]:8108/media' => 'https://destination.example'])
+        );
+    }
+
+    public function testRewritesToAPunycodeTargetDomain(): void
+    {
+        $input = 'url("https:\\/\\/source.example\\/media\\/logo.png");';
+        $expected = 'url("https:\\/\\/xn--bcher-kva.example\\/media\\/logo.png");';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://xn--bcher-kva.example'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheTargetHasAnAsciiPath(): void
+    {
+        $input = 'https://source.example/media/logo.png';
+        $expected = 'https://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example/assets'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheTargetHasAPercentEncodedPath(): void
+    {
+        $input = 'https://source.example/media/logo.png';
+        $expected = 'https://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example/archive%2Fmedia'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheTargetIsAnIpv4Address(): void
+    {
+        $input = 'https://source.example/media/logo.png';
+        $expected = 'https://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://192.0.2.1'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheTargetIsAnIpv6Address(): void
+    {
+        $input = 'https://source.example/media/logo.png';
+        $expected = 'https://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://[2001:db8::1]'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheTargetDomainHasUnicodeCharacters(): void
+    {
+        $input = 'https://source.example/media/logo.png';
+        $expected = 'https://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://bücher.example'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheTargetPathHasUnicodeCharacters(): void
+    {
+        $input = 'https://source.example/media/logo.png';
+        $expected = 'https://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example/über-uns'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheTargetHasAPort(): void
+    {
+        $input = 'https://source.example/media/logo.png';
+        $expected = 'https://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example:8443'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheTargetHasUserInformation(): void
+    {
+        $input = 'https://source.example/media/logo.png';
+        $expected = 'https://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://user:password@destination.example'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheTargetHasAQuery(): void
+    {
+        $input = 'https://source.example/media/logo.png';
+        $expected = 'https://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example?preview=1'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheTargetHasAFragment(): void
+    {
+        $input = 'https://source.example/media/logo.png';
+        $expected = 'https://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example#part'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheSourceDomainHasUnicodeCharacters(): void
+    {
+        $input = 'https://bücher.example/media/logo.png';
+        $expected = 'https://bücher.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://bücher.example/media' => 'https://destination.example'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheSourcePathHasUnicodeCharacters(): void
+    {
+        $input = 'https://source.example/über-uns/logo.png';
+        $expected = 'https://source.example/über-uns/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/über-uns' => 'https://destination.example'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheSourceHasUserInformation(): void
+    {
+        $input = 'https://user:password@source.example/media/logo.png';
+        $expected = 'https://user:password@source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://user:password@source.example/media' => 'https://destination.example'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheSourceHasAQuery(): void
+    {
+        $input = 'https://source.example/media?preview=1';
+        $expected = 'https://source.example/media?preview=1';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media?preview=1' => 'https://destination.example'])
+        );
+    }
+
+    public function testDoesNotRewriteWhenTheSourceHasAFragment(): void
+    {
+        $input = 'https://source.example/media#part';
+        $expected = 'https://source.example/media#part';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media#part' => 'https://destination.example'])
+        );
+    }
+
+    public function testDoesNotRewriteAUrlInALongerIdentifier(): void
+    {
+        $input = 'prefixhttps://source.example/media/logo.png';
+        $expected = 'prefixhttps://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example'])
+        );
+    }
+
+    public function testDoesNotRewriteAUrlFollowingAPlusSign(): void
+    {
+        $input = '+https://source.example/media/logo.png';
+        $expected = '+https://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example'])
+        );
+    }
+
+    public function testDoesNotRewriteAUrlFollowingAHyphen(): void
+    {
+        $input = '-https://source.example/media/logo.png';
+        $expected = '-https://source.example/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example'])
+        );
+    }
+
+    public function testDoesNotRewriteCssHexadecimalEscapes(): void
+    {
+        $input = 'url(https\\3a \\2f \\2f source.example\\2f media\\2f logo.png)';
+        $expected = 'url(https\\3a \\2f \\2f source.example\\2f media\\2f logo.png)';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example'])
+        );
+    }
+
+    public function testDoesNotRewriteAnUnconfiguredSourcePort(): void
+    {
+        $input = 'https://source.example:8443/media/logo.png';
+        $expected = 'https://source.example:8443/media/logo.png';
+
+        $this->assertSame(
+            $expected,
+            $this->rewrite($input, ['https://source.example/media' => 'https://destination.example'])
+        );
+    }
 
     /**
      * @param array<string, string> $mapping
@@ -22,283 +408,5 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
         }
 
         return $processor->get_updated_text();
-    }
-
-    /**
-     * @dataProvider escapedSchemeAndPathCases
-     */
-    public function testSamePathMappingReplacesOnlyTheDomain(
-        string $scheme,
-        string $path
-    ): void {
-        $input = 'url(' . $scheme . 'source.example' . $path . ');';
-        $expected = 'url(' . $scheme . 'destination.example' . $path . ');';
-
-        $this->assertSame(
-            $expected,
-            $this->rewrite($input, [self::SOURCE_URL => self::SAME_PATH_TARGET_URL])
-        );
-    }
-
-    /**
-     * @return iterable<string, array{string, string}>
-     */
-    public static function escapedSchemeAndPathCases(): iterable
-    {
-        yield 'literal scheme and path' => ['https://', '/media/logo.png'];
-        yield 'escaped scheme slashes and path slashes' => ['https:\\/\\/', '\\/media\\/logo.png'];
-        yield 'escaped scheme colon' => ['https\\://', '/media/logo.png'];
-        yield 'all scheme separators escaped' => ['https\\:\\/\\/', '\\/media\\/logo.png'];
-    }
-
-    public function testLiteralBaseCanReplaceADifferentInitialPath(): void
-    {
-        $input = 'url(https://source.example/media/logo%2Fraw.png);';
-        $expected = 'url(https://destination.example/assets/logo%2Fraw.png);';
-
-        $this->assertSame(
-            $expected,
-            $this->rewrite($input, [self::SOURCE_URL => self::DIFFERENT_PATH_TARGET_URL])
-        );
-    }
-
-    public function testEscapedBaseDoesNotGenerateATargetPath(): void
-    {
-        $input = 'url(https:\\/\\/source.example\\/media\\/logo.png);';
-
-        $this->assertSame(
-            $input,
-            $this->rewrite($input, [self::SOURCE_URL => self::DIFFERENT_PATH_TARGET_URL])
-        );
-    }
-
-    /**
-     * @dataProvider cssUrlCases
-     */
-    public function testRewritesCssUrlDomainWithoutTouchingClosingSyntax(
-        string $input,
-        string $expected
-    ): void {
-        $this->assertSame(
-            $expected,
-            $this->rewrite($input, [self::SOURCE_URL => self::SAME_PATH_TARGET_URL])
-        );
-    }
-
-    /**
-     * @return iterable<string, array{string, string}>
-     */
-    public static function cssUrlCases(): iterable
-    {
-        yield 'unquoted URL function ending with parenthesis and semicolon' => [
-            '.hero{background-image:url(https://source.example/media/logo.png);}',
-            '.hero{background-image:url(https://destination.example/media/logo.png);}',
-        ];
-
-        yield 'quoted URL function ending with quote parenthesis and semicolon' => [
-            '.hero{background-image:url("https:\\/\\/source.example\\/media\\/logo.png");}',
-            '.hero{background-image:url("https:\\/\\/destination.example\\/media\\/logo.png");}',
-        ];
-    }
-
-    public function testRewritesAQuotedShortcodeAttributeWithoutChangingItsPathBytes(): void
-    {
-        $input = '[vc_single_image href="https://source.example/media/logo.png"]';
-        $expected = '[vc_single_image href="https://destination.example/media/logo.png"]';
-
-        $this->assertSame(
-            $expected,
-            $this->rewrite($input, [self::SOURCE_URL => self::SAME_PATH_TARGET_URL])
-        );
-    }
-
-    public function testRewritesToAPunycodeTargetDomain(): void
-    {
-        $input = 'url("https:\\/\\/source.example\\/media\\/logo.png");';
-        $expected = 'url("https:\\/\\/xn--bcher-kva.example\\/media\\/logo.png");';
-
-        $this->assertSame(
-            $expected,
-            $this->rewrite(
-                $input,
-                [self::SOURCE_URL => 'https://xn--bcher-kva.example/media']
-            )
-        );
-    }
-
-    /**
-     * @dataProvider sourceIpAndPortCases
-     */
-    public function testRewritesAConfiguredSourceIpAddressAndPort(
-        string $source_url,
-        string $input,
-        string $expected
-    ): void {
-        $this->assertSame(
-            $expected,
-            $this->rewrite($input, [$source_url => self::SAME_PATH_TARGET_URL])
-        );
-    }
-
-    /**
-     * @return iterable<string, array{string, string, string}>
-     */
-    public static function sourceIpAndPortCases(): iterable
-    {
-        yield 'IPv4 with port' => [
-            'https://127.0.0.1:8108/media',
-            'url(https://127.0.0.1:8108/media/logo.png);',
-            'url(https://destination.example/media/logo.png);',
-        ];
-
-        yield 'IPv6 with port' => [
-            'https://[::1]:8108/media',
-            'url(https://[::1]:8108/media/logo.png);',
-            'url(https://destination.example/media/logo.png);',
-        ];
-    }
-
-    public function testRewritesCssInASiteBuilderShortcodeInsideAnHtmlAttribute(): void
-    {
-        $input = '<div data-builder-shortcode=\'[vc_column css=&#187;.vc_custom{'
-            . 'background-image:url(https\\:\\/\\/source.example\\/media\\/logo.png)}&#187;]\'></div>';
-        $expected = '<div data-builder-shortcode=\'[vc_column css=&#187;.vc_custom{'
-            . 'background-image:url(https\\:\\/\\/destination.example\\/media\\/logo.png)}&#187;]\'></div>';
-
-        $this->assertSame(
-            $expected,
-            $this->rewrite($input, [self::SOURCE_URL => self::SAME_PATH_TARGET_URL])
-        );
-    }
-
-    public function testRewritesMultipleBasesWithoutTouchingTheirSuffixes(): void
-    {
-        $input = 'url(https://source.example/media/first.png);'
-            . 'url("https:\\/\\/source.example\\/media\\/second.png");';
-        $expected = 'url(https://destination.example/media/first.png);'
-            . 'url("https:\\/\\/destination.example\\/media\\/second.png");';
-
-        $this->assertSame(
-            $expected,
-            $this->rewrite($input, [self::SOURCE_URL => self::SAME_PATH_TARGET_URL])
-        );
-    }
-
-    public function testRewritesAUrlValuedOuterQuery(): void
-    {
-        $input = 'https://archive.example/?url=https://source.example/media/logo.png';
-
-        $this->assertSame(
-            'https://archive.example/?url=https://destination.example/media/logo.png',
-            $this->rewrite($input, [self::SOURCE_URL => self::SAME_PATH_TARGET_URL])
-        );
-    }
-
-    /**
-     * @dataProvider schemeLessTextUrlCases
-     */
-    public function testRewritesASchemeLessTextUrl(string $input, string $expected): void
-    {
-        $this->assertSame(
-            $expected,
-            $this->rewrite($input, [self::SOURCE_URL => self::SAME_PATH_TARGET_URL])
-        );
-    }
-
-    /**
-     * @return iterable<string, array{string, string}>
-     */
-    public static function schemeLessTextUrlCases(): iterable
-    {
-        yield 'Markdown link destination' => [
-            '[Download](source.example/media/logo.png)',
-            '[Download](destination.example/media/logo.png)',
-        ];
-
-        yield 'quoted URL with query and fragment' => [
-            '"source.example/media/logo.png?download=1#preview"',
-            '"destination.example/media/logo.png?download=1#preview"',
-        ];
-    }
-
-    /**
-     * @dataProvider userInformationCases
-     */
-    public function testLeavesUserInformationAndSuffixBytesUntouched(string $input, string $expected): void
-    {
-        $this->assertSame(
-            $expected,
-            $this->rewrite($input, [self::SOURCE_URL => self::SAME_PATH_TARGET_URL])
-        );
-    }
-
-    /**
-     * @return iterable<string, array{string, string}>
-     */
-    public static function userInformationCases(): iterable
-    {
-        yield 'literal protocol' => [
-            'url("https://user:password@source.example/media/logo.png?download=1#preview");',
-            'url("https://user:password@destination.example/media/logo.png?download=1#preview");',
-        ];
-
-        yield 'escaped protocol' => [
-            'url("https:\\/\\/user:password@source.example\\/media\\/logo.png?download=1#preview");',
-            'url("https:\\/\\/user:password@destination.example\\/media\\/logo.png?download=1#preview");',
-        ];
-    }
-
-    /**
-     * @dataProvider nonMatchingUrlCases
-     */
-    public function testLeavesNonMatchingUrlsUntouched(string $input): void
-    {
-        $this->assertSame(
-            $input,
-            $this->rewrite($input, [self::SOURCE_URL => self::SAME_PATH_TARGET_URL])
-        );
-    }
-
-    /**
-     * @return iterable<string, array{string}>
-     */
-    public static function nonMatchingUrlCases(): iterable
-    {
-        yield 'wrong initial path' => ['https://source.example/media-old/logo.png'];
-        yield 'wrong protocol' => ['http://source.example/media/logo.png'];
-        yield 'different domain case' => ['https://SOURCE.example/media/logo.png'];
-        yield 'source authority in an unsupported URL path' => [
-            'https://other.example/source.example/media/logo.png',
-        ];
-        yield 'source authority in a CSS identifier' => [
-            '.source.example/media/logo.png { color: red; }',
-        ];
-    }
-
-    /**
-     * @dataProvider unsupportedMappingCases
-     */
-    public function testLeavesUnsupportedTargetBasesUntouched(string $target_url): void
-    {
-        $input = 'https://source.example/media/logo.png';
-
-        $this->assertSame(
-            $input,
-            $this->rewrite($input, [self::SOURCE_URL => $target_url])
-        );
-    }
-
-    /**
-     * @return iterable<string, array{string}>
-     */
-    public static function unsupportedMappingCases(): iterable
-    {
-        yield 'IPv6 target' => ['https://[2001:db8::1]/media'];
-        yield 'IPv4 target' => ['https://192.0.2.1/media'];
-        yield 'Unicode target domain' => ['https://bücher.example/media'];
-        yield 'Unicode target path' => ['https://destination.example/über-uns'];
-        yield 'target port' => ['https://destination.example:8443/media'];
-        yield 'target fragment' => ['https://destination.example/media#part'];
-        yield 'target query' => ['https://destination.example/media?preview=1'];
     }
 }

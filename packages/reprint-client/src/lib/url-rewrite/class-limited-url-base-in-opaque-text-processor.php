@@ -5,22 +5,22 @@
  *
  * This is deliberately not a URL rewriter. It finds a configured source
  * authority and initial path, with an optional HTTP(S) scheme spelling. The
- * initial path qualifies the mapping; it is not normally replaced. The
+ * initial path qualifies the mapping; it is never replaced. The
  * processor replaces the configured source authority with the destination
- * domain and preserves the protocol, path, and
- * every following byte byte-for-byte. It may replace the configured initial
- * path only when the complete URL base uses literal, unescaped separators.
+ * domain and preserves the protocol, path, and every following byte
+ * byte-for-byte. The configured initial path only qualifies the mapping; it
+ * is never replaced.
  * In particular, this class never parses, decodes, normalizes, or re-encodes
  * bytes from the input URL. Source authorities and paths match as exact ASCII
  * bytes; case variants are not equivalent here.
  *
  * A configured source may use an ASCII domain or an IP address, with an
  * optional port, so exports made from a local development server can still be
- * imported. The destination must use an ASCII domain and ASCII path, with no
- * port, user information, query, or fragment. Punycode domains are ASCII and
- * therefore supported. IPv4 and IPv6 destination addresses, Unicode
- * destinations, and every unsupported mapping are left for a parser which
- * knows the surrounding data format.
+ * imported. The destination must use an alphanumeric, dot, and hyphen domain
+ * with no path, port, user information, query, or fragment. Punycode domains
+ * are supported. IPv4 and IPv6 destination addresses, Unicode destinations,
+ * destination paths, and every unsupported mapping are left for a parser
+ * which knows the surrounding data format.
  *
  * Call this only with a string leaf that its caller has already classified as
  * text. It is not a parser for a complete PHP serialization, JSON document,
@@ -38,10 +38,9 @@
  * The scanner accepts the literal protocol spelling (`https://`) and forms
  * with one or three backslashes before the colon and/or either slash
  * (`https:\/\/`, `https\:\/\/`, and `https:\\\/\\\/`). The three-backslash
- * form is one JSON escaping layer around an already escaped URL. Escaped
- * separators prevent initial-path replacement, so the processor never has to
- * manufacture an escaped target path. This covers common JSON-like and
- * site-builder spellings without making a claim about their escape rules.
+ * form is one JSON escaping layer around an already escaped URL. This covers
+ * common JSON-like and site-builder spellings without making a claim about
+ * their escape rules.
  * Optional user information before the source authority, plus query and
  * fragment suffixes after it, remain untouched.
  */
@@ -53,7 +52,6 @@ class LimitedURLBaseInOpaqueTextProcessor {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
-     *     target_path: string,
      *     pattern: string
      * }>
      */
@@ -69,12 +67,10 @@ class LimitedURLBaseInOpaqueTextProcessor {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
-     *     target_path: string,
      *     pattern: string,
      *     start: int,
      *     authority_length: int,
-     *     base_length: int,
-     *     has_escaped_separator: bool
+     *     base_length: int
      * }|null
      */
     private ?array $matched_url = null;
@@ -124,10 +120,9 @@ class LimitedURLBaseInOpaqueTextProcessor {
     /**
      * Queue the current URL-base replacement.
      *
-     * The configured target protocol is intentionally not used. If source and
-     * target paths match, the replacement covers only the domain. Different
-     * paths are replaced only for a fully literal base, never by generating an
-     * escaped target path.
+     * The configured target protocol is intentionally not used. The target
+     * mapping cannot contain a path, so the replacement always covers only
+     * the source authority.
      */
     public function replace_url_base(): bool
     {
@@ -135,21 +130,10 @@ class LimitedURLBaseInOpaqueTextProcessor {
             return false;
         }
 
-        $replacement = $this->matched_url['target_domain'];
-        $length = $this->matched_url['authority_length'];
-        if ($this->matched_url['source_path'] !== $this->matched_url['target_path']) {
-            if ($this->matched_url['has_escaped_separator']) {
-                return false;
-            }
-
-            $replacement .= $this->matched_url['target_path'];
-            $length = $this->matched_url['base_length'];
-        }
-
         $this->lexical_updates[$this->matched_url['start']] = [
             'start'       => $this->matched_url['start'],
-            'length'      => $length,
-            'replacement' => $replacement,
+            'length'      => $this->matched_url['authority_length'],
+            'replacement' => $this->matched_url['target_domain'],
         ];
 
         return true;
@@ -186,12 +170,10 @@ class LimitedURLBaseInOpaqueTextProcessor {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
-     *     target_path: string,
      *     pattern: string,
      *     start: int,
      *     authority_length: int,
-     *     base_length: int,
-     *     has_escaped_separator: bool
+     *     base_length: int
      * }|null
      */
     private function find_next_url_base(): ?array
@@ -217,10 +199,9 @@ class LimitedURLBaseInOpaqueTextProcessor {
             $next_match = array_merge(
                 $mapping,
                 [
-                    'start'                 => $authority_start,
-                    'authority_length'      => strlen($matches['authority'][0]),
-                    'base_length'           => strlen($matches['base'][0]),
-                    'has_escaped_separator' => strpos($matches[0][0], '\\') !== false,
+                    'start'            => $authority_start,
+                    'authority_length' => strlen($matches['authority'][0]),
+                    'base_length'      => strlen($matches['base'][0]),
                 ]
             );
         }
@@ -275,7 +256,6 @@ class LimitedURLBaseInOpaqueTextProcessor {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
-     *     target_path: string,
      *     pattern: string
      * }|null
      */
@@ -292,7 +272,6 @@ class LimitedURLBaseInOpaqueTextProcessor {
             'source_path'      => $source['path'],
             'source_base'      => $source['authority'] . $source['path'],
             'target_domain'    => $target['host'],
-            'target_path'      => $target['path'],
             'pattern'          => $this->create_url_candidate_pattern(
                 $source['scheme'],
                 $source['authority'],
@@ -321,7 +300,7 @@ class LimitedURLBaseInOpaqueTextProcessor {
         $host = (string) $parts['host'];
         $path = isset($parts['path']) ? (string) $parts['path'] : '';
         if (( $scheme !== 'http' && $scheme !== 'https' )
-            || ( !$allow_ip_and_port && array_key_exists('port', $parts) )
+            || ( !$allow_ip_and_port && ( array_key_exists('port', $parts) || $path !== '' ) )
             || !( $this->is_alphanumeric_dot_hyphen_domain_name($host) || ( $allow_ip_and_port && $this->is_ip_address($host) ) )
             || !$this->is_ascii_path($path)) {
             return null;
