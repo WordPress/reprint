@@ -650,9 +650,7 @@ class PushPlan
         $local_relative_path = $this->index_diff->get_path();
         $local_index_path_type = $this->index_diff->get_path_type_in_old_index();
         $fresh_local_index_path_type = $this->index_diff->get_path_type_in_new_index();
-        $path_comparison = $local_index_path_type === null
-            ? -1
-            : ( $fresh_local_index_path_type === null ? 1 : 0 );
+        $local_path_change = $this->index_diff->get_path_change();
         $fresh_local_index_entry_shape = $fresh_local_index_path_type === null
             ? null
             : $this->index_entry_shape($fresh_local_index_path_type);
@@ -683,7 +681,7 @@ class PushPlan
             }
         }
 
-        if ($path_comparison < 0) {
+        if ($local_path_change === "added") {
             // New files, symlinks, and empty directories need to be pushed.
             // A NUL byte cannot occur in an indexed path, so it cannot match
             // when the old index has no following path.
@@ -725,7 +723,7 @@ class PushPlan
                     $local_file_bytes_to_push += $fresh_local_index_size;
                 }
             }
-        } elseif ($path_comparison > 0) {
+        } elseif ($local_path_change === "deleted") {
             $local_empty_directory_is_implied_by_fresh_descendant =
                 $local_index_entry_shape === "empty_directory"
                 && $this->fresh_index_contains_path_or_descendant(
@@ -767,17 +765,11 @@ class PushPlan
             $empty_directory_needs_push =
                 $fresh_local_index_entry_shape === "empty_directory"
                 && $local_index_entry_shape !== "empty_directory";
-            // File and symlink changes are defined by type, ctime, and
-            // size. Other index values do not select a path for upload.
+            // The diff processor defines modification by type, ctime, and
+            // size. Only modified files and symlinks need to be uploaded.
             $changed_file_or_symlink_needs_push =
                 $fresh_local_index_entry_is_file_or_symlink
-                && (
-                    $this->index_diff->get_ctime_in_new_index()
-                        !== $this->index_diff->get_ctime_in_old_index()
-                    || $this->index_diff->get_size_in_new_index()
-                        !== $this->index_diff->get_size_in_old_index()
-                    || $fresh_local_index_path_type !== $local_index_path_type
-                );
+                && $local_path_change === "modified";
             $needs_delete =
                 $fresh_local_index_entry_is_file_or_symlink
                 !== $local_index_entry_is_file_or_symlink;
