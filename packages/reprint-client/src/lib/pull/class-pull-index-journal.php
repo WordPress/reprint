@@ -75,12 +75,11 @@ use function WordPress\Reprint\Exporter\relative_path_under;
  * idempotent. An unterminated final JSONL record is ignored; files-pull resumes
  * from the preceding durable cursor and repeats that mutation.
  *
- * ## Lifecycle marker
+ * ## WAL lifecycle
  *
- * The WAL also marks an unfinished files-pull lifecycle. open() creates or
- * retains it, successful application leaves an empty file in place, and
- * remove_empty_marker() removes that empty file only after files-pull
- * completes or aborts.
+ * An empty WAL also indicates an unfinished files-pull lifecycle. open()
+ * creates or retains it. Successful application leaves the WAL empty, and
+ * remove_empty_wal() removes it only after files-pull completes or aborts.
  */
 class PullIndexJournal
 {
@@ -132,8 +131,7 @@ class PullIndexJournal
      * Creates or retains the WAL and opens it for appending.
      *
      * Repeated calls retain the existing writer. Creating a new WAL also
-     * creates the unfinished files-pull lifecycle marker and writes its audit
-     * record.
+     * records the unfinished files-pull lifecycle and writes an audit record.
      *
      * @throws RuntimeException When the WAL cannot be opened.
      */
@@ -531,17 +529,17 @@ class PullIndexJournal
     }
 
     /**
-     * Removes the empty WAL which marks an unfinished files-pull lifecycle.
+     * Removes the empty WAL after the files-pull lifecycle ends.
      *
      * The writer is closed first. A non-empty WAL is refused because removing
      * it would discard completed mutations which have not reached their
-     * required indexes. A missing marker already represents the requested
+     * required indexes. A missing WAL already represents the requested
      * result.
      *
-     * @throws RuntimeException When pending records remain or the marker
+     * @throws RuntimeException When pending records remain or the WAL
      *                          cannot be closed or removed.
      */
-    public function remove_empty_marker(): void
+    public function remove_empty_wal(): void
     {
         if (is_resource($this->pull_index_wal_handle)) {
             if (!fclose($this->pull_index_wal_handle)) {

@@ -2264,7 +2264,7 @@ class ImportClient
         );
         // Replay the pull index WAL before clearing the cursor which made its records durable.
         $this->pull_index_journal->apply_pending_records();
-        $this->pull_index_journal->remove_empty_marker();
+        $this->pull_index_journal->remove_empty_wal();
         $this->reset_state();
 
         if (file_exists($this->next_remote_index_file)) {
@@ -2925,7 +2925,7 @@ class ImportClient
 
         // Already completed.
         if ($current_status === "complete") {
-            $this->pull_index_journal->remove_empty_marker();
+            $this->pull_index_journal->remove_empty_wal();
             $remote_index_entry_count = $this->remote_index_entry_count();
             $this->progress->clear_progress_line();
 
@@ -3002,7 +3002,7 @@ class ImportClient
                 );
             }
 
-            // The marker blocks files-diff and files-push before the first
+            // The empty WAL blocks files-diff and files-push before the first
             // pull checkpoint can make this lifecycle resumable.
             $this->pull_index_journal->open();
             $this->get_state()->active_resumable_command->command_name = "files-pull";
@@ -3158,7 +3158,7 @@ class ImportClient
         $this->ensure_local_index_exists();
         $this->get_state()->active_resumable_command->completion_state = "complete";
         $this->save_state();
-        $this->pull_index_journal->remove_empty_marker();
+        $this->pull_index_journal->remove_empty_wal();
 
         $this->progress->clear_progress_line();
         $remote_index_entry_count = $this->remote_index_entry_count();

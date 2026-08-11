@@ -38,7 +38,7 @@ final class PullIndexWalTest extends TestCase
         $this->removeTree($this->root);
     }
 
-    public function testAppliedBatchAdvancesBothIndexesAndLeavesTheMarker(): void
+    public function testAppliedBatchAdvancesBothIndexesAndLeavesEmptyWal(): void
     {
         mkdir($this->fileRoot . '/site');
         file_put_contents($this->fileRoot . '/site/file.txt', 'hello');
@@ -69,7 +69,7 @@ final class PullIndexWalTest extends TestCase
         );
         $this->assertSame(5, $localIndexEntries['site/file.txt']['size']);
 
-        $journal->remove_empty_marker();
+        $journal->remove_empty_wal();
         $this->assertFileDoesNotExist($pullIndexWalPath);
     }
 
@@ -114,7 +114,7 @@ final class PullIndexWalTest extends TestCase
 
         $journal->apply_pending_records();
         $this->assertSame([], $this->remoteIndexEntryPaths());
-        $journal->remove_empty_marker();
+        $journal->remove_empty_wal();
     }
 
     public function testUpsertingFileDoesNotCreateParentDirectoryEntries(): void
