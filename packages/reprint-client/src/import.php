@@ -34,7 +34,8 @@ use function WordPress\Filesystem\wp_unix_path_segments;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
-use function WordPress\Reprint\Exporter\path_is_within_root;
+use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Exporter\path_is_descendant_of;
 use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 use function WordPress\Reprint\Exporter\relative_path_under;
@@ -2254,7 +2255,7 @@ class ImportClient
         $push_state_directory = realpath_with_missing_tail(
             $push_state_directory
         );
-        if (path_is_within_root($push_state_directory, $resolved_local_filesystem_root)) {
+        if (path_is_same_as_or_descendant_of($push_state_directory, $resolved_local_filesystem_root)) {
             throw new InvalidArgumentException(
                 'The local push state directory ' . $push_state_directory
                 . ' must be outside the filesystem root ' . $resolved_local_filesystem_root . '.'
@@ -2578,7 +2579,7 @@ class ImportClient
             if (
                 $content_dir !== null &&
                 $uploads_basedir !== null &&
-                !path_is_within_root($uploads_basedir, $content_dir)
+                !path_is_same_as_or_descendant_of($uploads_basedir, $content_dir)
             ) {
                 $this->audit_log(
                     "NON-STANDARD LAYOUT | uploads at {$uploads_basedir} " .
@@ -3536,7 +3537,7 @@ class ImportClient
             }
             // Skip if this directory is a subdirectory of an already-visited path,
             // since those files were already included in the parent's index.
-            if (path_is_within_root($dir, array_keys($visited))) {
+            if (path_is_same_as_or_descendant_of($dir, array_keys($visited))) {
                 $this->audit_log(
                     "FOLLOW SYMLINK SKIP | {$dir} already covered by a visited parent",
                     true,
@@ -3680,7 +3681,7 @@ class ImportClient
             }
 
             // Check containment: skip if already under a visited root
-            if (path_is_within_root($symlink_target, array_keys($visited))) {
+            if (path_is_same_as_or_descendant_of($symlink_target, array_keys($visited))) {
                 continue;
             }
 
@@ -4735,28 +4736,16 @@ class ImportClient
         $wp_includes_detached = $wp_includes_path !== null
             && $wp_includes_path !== wp_join_unix_paths($abspath, "wp-includes");
         $content_detached = $content_dir !== null
-            && (
-                $content_dir === $abspath
-                || !path_is_within_root($content_dir, $abspath)
-            );
+            && !path_is_descendant_of($content_dir, $abspath);
         $plugins_detached = $plugins_dir !== null
             && $content_dir !== null
-            && (
-                $plugins_dir === $content_dir
-                || !path_is_within_root($plugins_dir, $content_dir)
-            );
+            && !path_is_descendant_of($plugins_dir, $content_dir);
         $mu_plugins_detached = $mu_plugins_dir !== null
             && $content_dir !== null
-            && (
-                $mu_plugins_dir === $content_dir
-                || !path_is_within_root($mu_plugins_dir, $content_dir)
-            );
+            && !path_is_descendant_of($mu_plugins_dir, $content_dir);
         $uploads_detached = $uploads_basedir !== null
             && $content_dir !== null
-            && (
-                $uploads_basedir === $content_dir
-                || !path_is_within_root($uploads_basedir, $content_dir)
-            );
+            && !path_is_descendant_of($uploads_basedir, $content_dir);
 
         // If any sub-component is detached from content_dir, we need to
         // "explode" wp-content into a real directory with individual symlinks
@@ -7334,11 +7323,11 @@ class ImportClient
             $remote_parent_components[] = $missing_remote_path_components[$component_index];
             $path_prefix = wp_join_unix_paths("/", ...$remote_parent_components);
             if (
-                !path_is_within_root(
+                !path_is_same_as_or_descendant_of(
                     $nearest_existing_path_before,
                     $path_prefix,
                 )
-                && !path_is_within_root(
+                && !path_is_same_as_or_descendant_of(
                     $nearest_existing_path_after,
                     $path_prefix,
                 )
@@ -8693,7 +8682,7 @@ class ImportClient
             $resolved = normalize_path(wp_join_unix_paths($symlink_parent_dir, $target));
         }
 
-        if (!path_is_within_root($resolved, $root)) {
+        if (!path_is_same_as_or_descendant_of($resolved, $root)) {
             throw new RuntimeException(
                 "Security: symlink target escapes filesystem root: {$target} " .
                 "(resolves to {$resolved}, root is {$root})"
@@ -8808,7 +8797,7 @@ class ImportClient
                 continue;
             }
             $next_remote_index_entry_path = $next_remote_index_entry["path"];
-            if (path_is_within_root($next_remote_index_entry_path, $remote_absolute_path)) {
+            if (path_is_same_as_or_descendant_of($next_remote_index_entry_path, $remote_absolute_path)) {
                 $path_prefix_found = true;
                 break;
             }
@@ -8963,7 +8952,7 @@ class ImportClient
         $filesystem_root = $this->filesystem_root;
         $directory = $this->resolve_token_path($raw, ["fs-root" => $filesystem_root]);
 
-        if (!path_is_within_root($directory, $filesystem_root)) {
+        if (!path_is_same_as_or_descendant_of($directory, $filesystem_root)) {
             throw new InvalidArgumentException(
                 "--follow-symlinks local followed symlinks root \"{$directory}\" resolves outside --fs-root ({$filesystem_root}); " .
                     "it must stay within the destination root",
@@ -8997,7 +8986,7 @@ class ImportClient
             $source = $this->resolve_token_path($source_raw, $source_tokens);
             $target = $this->resolve_token_path($target_raw, $target_tokens);
 
-            if (!path_is_within_root($target, $filesystem_root)) {
+            if (!path_is_same_as_or_descendant_of($target, $filesystem_root)) {
                 throw new InvalidArgumentException(
                     "--remap target \"{$target}\" resolves outside --fs-root ({$filesystem_root}); " .
                         "targets must stay within the destination root",
@@ -9048,7 +9037,7 @@ class ImportClient
         $directories = [];
         foreach (["wp-plugins" => "plugins", "wp-mu-plugins" => "mu-plugins", "wp-uploads" => "uploads"] as $token => $name) {
             $source = $source_tokens[$token];
-            if ($source !== null && !path_is_within_root($source, $content)) {
+            if ($source !== null && !path_is_same_as_or_descendant_of($source, $content)) {
                 $directories[$name] = $source;
             }
         }
@@ -9107,7 +9096,7 @@ class ImportClient
             $covered = false;
 
             foreach ($sources as $other) {
-                if ($other !== $path && path_is_within_root($path, $other)) {
+                if (path_is_descendant_of($path, $other)) {
                     $covered = true;
                     break;
                 }
@@ -9606,7 +9595,7 @@ class ImportClient
             $real_check = realpath($check_path);
             if (
                 $real_check === false ||
-                !path_is_within_root($real_check, $real_filesystem_root)
+                !path_is_same_as_or_descendant_of($real_check, $real_filesystem_root)
             ) {
                 // In preserve-local mode, a path that resolves outside the
                 // filesystem root is expected when a directory like wp-content/plugins
@@ -9707,7 +9696,7 @@ class ImportClient
             }
 
             $resolved = realpath($current);
-            if ($resolved === false || !path_is_within_root($resolved, $real_filesystem_root)) {
+            if ($resolved === false || !path_is_same_as_or_descendant_of($resolved, $real_filesystem_root)) {
                 throw new RuntimeException(
                     "Security: Refusing to create directory outside filesystem root: {$current}",
                 );
@@ -10102,7 +10091,7 @@ class ImportClient
     private function path_is_within_original_export_scope(string $path): bool
     {
         foreach ($this->get_export_directories() as $root) {
-            if (path_is_within_root($path, $root)) {
+            if (path_is_same_as_or_descendant_of($path, $root)) {
                 return true;
             }
         }
@@ -10185,7 +10174,7 @@ class ImportClient
                 continue;
             }
             // Check if this path is already covered by an existing dir.
-            if (!path_is_within_root($path, $dirs)) {
+            if (!path_is_same_as_or_descendant_of($path, $dirs)) {
                 $dirs[] = $path;
                 $this->audit_log(
                     "DIRECTORY AUTO-DETECT | adding {$label} outside roots: " .

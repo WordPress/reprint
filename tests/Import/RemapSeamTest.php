@@ -3,7 +3,8 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use function WordPress\Reprint\Exporter\path_is_within_root;
+use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Exporter\path_is_descendant_of;
 use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 use function WordPress\Reprint\Exporter\relative_path_under;
@@ -198,14 +199,14 @@ class RemapSeamTest extends TestCase
     }
 
     /**
-     * @dataProvider providePathWithinRootCases
+     * @dataProvider providePathSameAsOrDescendantOfCases
      */
-    public function testPathIsWithinRoot(bool $expected, string $path, string $root): void
+    public function testPathIsSameAsOrDescendantOf(bool $expected, string $path, string $ancestor): void
     {
-        $this->assertSame($expected, path_is_within_root($path, $root));
+        $this->assertSame($expected, path_is_same_as_or_descendant_of($path, $ancestor));
     }
 
-    public static function providePathWithinRootCases(): array
+    public static function providePathSameAsOrDescendantOfCases(): array
     {
         return array(
             'filesystem root itself' => array(true, '/', '/'),
@@ -217,16 +218,51 @@ class RemapSeamTest extends TestCase
         );
     }
 
-    public function testPathIsWithinRootMatchesAnyPathAndRoot(): void
+    public function testPathIsSameAsOrDescendantOfMatchesAnyPathAndAncestor(): void
     {
-        $this->assertTrue(path_is_within_root('/a/b', ['/elsewhere', '/a']));
-        $this->assertTrue(path_is_within_root(['/elsewhere', '/a/b'], '/a'));
-        $this->assertTrue(path_is_within_root(
+        $this->assertTrue(path_is_same_as_or_descendant_of('/a/b', ['/elsewhere', '/a']));
+        $this->assertTrue(path_is_same_as_or_descendant_of(['/elsewhere', '/a/b'], '/a'));
+        $this->assertTrue(path_is_same_as_or_descendant_of(
             ['/elsewhere', '/a/b'],
             ['/not-this-one', '/a']
         ));
-        $this->assertFalse(path_is_within_root(
+        $this->assertFalse(path_is_same_as_or_descendant_of(
             ['/elsewhere', '/other'],
+            ['/not-this-one', '/a']
+        ));
+    }
+
+    /**
+     * @dataProvider providePathDescendantOfCases
+     */
+    public function testPathIsDescendantOf(bool $expected, string $path, string $ancestor): void
+    {
+        $this->assertSame($expected, path_is_descendant_of($path, $ancestor));
+    }
+
+    public static function providePathDescendantOfCases(): array
+    {
+        return array(
+            'filesystem root itself' => array(false, '/', '/'),
+            'filesystem root child' => array(true, '/child', '/'),
+            'relative path is outside filesystem root' => array(false, 'child', '/'),
+            'exact non-root match' => array(false, '/a', '/a'),
+            'non-root descendant' => array(true, '/a/b', '/a'),
+            'sibling prefix' => array(false, '/ab', '/a'),
+            'relative logical descendant' => array(true, 'a/b', 'a'),
+        );
+    }
+
+    public function testPathIsDescendantOfMatchesAnyPathAndAncestor(): void
+    {
+        $this->assertTrue(path_is_descendant_of('/a/b', ['/elsewhere', '/a']));
+        $this->assertTrue(path_is_descendant_of(['/elsewhere', '/a/b'], '/a'));
+        $this->assertTrue(path_is_descendant_of(
+            ['/elsewhere', '/a/b'],
+            ['/not-this-one', '/a']
+        ));
+        $this->assertFalse(path_is_descendant_of(
+            ['/elsewhere', '/a'],
             ['/not-this-one', '/a']
         ));
     }
