@@ -104,6 +104,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_base: string,
      *     target_domain: string,
      *     target_scheme: string,
+     *     target_path: string,
      *     pattern: string
      * }>
      */
@@ -120,9 +121,11 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_base: string,
      *     target_domain: string,
      *     target_scheme: string,
+     *     target_path: string,
      *     pattern: string,
      *     start: int,
      *     base_length: int,
+     *     replacement: string,
      *     scheme_start: int|null,
      *     scheme_length: int,
      *     candidate_scheme: string
@@ -206,7 +209,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         $this->lexical_updates[$this->matched_url['start']] = [
             'start'       => $this->matched_url['start'],
             'length'      => $this->matched_url['base_length'],
-            'replacement' => $this->matched_url['target_domain'],
+            'replacement' => $this->matched_url['replacement'],
         ];
 
         if (
@@ -259,9 +262,11 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_base: string,
      *     target_domain: string,
      *     target_scheme: string,
+     *     target_path: string,
      *     pattern: string,
      *     start: int,
      *     base_length: int,
+     *     replacement: string,
      *     scheme_start: int|null,
      *     scheme_length: int,
      *     candidate_scheme: string
@@ -292,6 +297,11 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                 [
                     'start'         => $authority_start,
                     'base_length'   => strlen($matches['base'][0]),
+                    'replacement'   => $mapping['target_domain'] . str_replace(
+                        '/',
+                        $matches['protocol_path_separator'][0],
+                        $mapping['target_path']
+                    ),
                     'scheme_start'  => $matches['scheme'][1] === -1
                         ? null
                         : $matches['scheme'][1],
@@ -315,7 +325,8 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     private function create_url_candidate_pattern(
         string $source_scheme,
         string $source_authority,
-        string $source_path
+        string $source_path,
+        bool $requires_protocol
     ): string
     {
         $escaped_separator = '(?:\\\\{1}|\\\\{3})?';
@@ -325,15 +336,20 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             preg_quote($source_path, '~')
         );
 
+        $protocol_pattern = '
+            (?<scheme>(?i:' . preg_quote($source_scheme, '~') . '))
+            ' . $escaped_separator . ':
+            (?<protocol_path_separator>' . $escaped_separator . '/)
+            ' . $escaped_separator . '/
+            (?:[^\s<>@/\\\\]+@)?
+        ';
+        if (!$requires_protocol) {
+            $protocol_pattern = '(?:' . $protocol_pattern . ')?';
+        }
+
         return '~
             (?<![A-Za-z0-9._%+\\/@-])
-            (?:
-                (?<scheme>(?i:' . preg_quote($source_scheme, '~') . '))
-                ' . $escaped_separator . ':
-                ' . $escaped_separator . '/
-                ' . $escaped_separator . '/
-                (?:[^\s<>@/\\\\]+@)?
-            )?
+            ' . $protocol_pattern . '
             (?<base>
                 (?<authority>(?i:' . preg_quote($source_authority, '~') . '))
                 ' . $source_path_pattern . '
@@ -353,6 +369,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_base: string,
      *     target_domain: string,
      *     target_scheme: string,
+     *     target_path: string,
      *     pattern: string
      * }|null
      */
@@ -374,10 +391,12 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             'source_base'      => $source['authority'] . $source_path,
             'target_domain'    => $target['host'],
             'target_scheme'    => $target['scheme'],
+            'target_path'      => $target['path'],
             'pattern'          => $this->create_url_candidate_pattern(
                 $source['scheme'],
                 $source['authority'],
-                $source_path
+                $source_path,
+                $target['path'] !== ''
             ),
         ];
     }
@@ -401,8 +420,12 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         $scheme = strtolower( (string) $parts['scheme'] );
         $host = (string) $parts['host'];
         $path = isset($parts['path']) ? (string) $parts['path'] : '';
+        $has_unsupported_target_path =
+            !$is_source_url
+            && $path !== ''
+            && preg_match('#^/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$#', $path) !== 1;
         if (( $scheme !== 'http' && $scheme !== 'https' )
-            || ( !$is_source_url && ( array_key_exists('port', $parts) || $path !== '' ) )
+            || ( !$is_source_url && ( array_key_exists('port', $parts) || $has_unsupported_target_path ) )
             || !( $this->is_alphanumeric_dot_hyphen_domain_name($host) || ( $is_source_url && $this->is_ip_address($host) ) )
             || !$this->contains_only_exclamation_mark_through_tilde_bytes($path)) {
             return null;

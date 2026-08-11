@@ -226,24 +226,19 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://destination.example/assets-2026/_private/logo.png',
                 ['https://source.example/media' => 'https://destination.example/assets-2026/_private'],
             ],
-            'escaped target path uses the source path slash spelling' => [
+            'escaped target path copies the protocol slash spelling' => [
                 'https:\\/\\/source.example\\/media\\/logo.png',
                 'https:\\/\\/destination.example\\/assets\\/logo.png',
                 ['https://source.example/media' => 'https://destination.example/assets'],
-            ],
-            'target path uses the slash immediately after an unmapped authority' => [
-                'source.example\\/logo.png',
-                'destination.example\\/assets\\/logo.png',
-                ['https://source.example' => 'https://destination.example/assets'],
             ],
             'target path uses the protocol separator when the URL has no suffix' => [
                 'https:\\\\\/\\\\\\/source.example',
                 'https:\\\\\/\\\\\\/destination.example\\\\\\/assets',
                 ['https://source.example' => 'https://destination.example/assets'],
             ],
-            'target path uses the literal separator from the configured source path' => [
+            'target path copies the protocol slash when the source path slash differs' => [
                 'https:\\/\\/source.example/media/logo.png',
-                'https:\\/\\/destination.example/assets/logo.png',
+                'https:\\/\\/destination.example\\/assets/logo.png',
                 ['https://source.example/media' => 'https://destination.example/assets'],
             ],
             'target path comes before a query after an unmapped authority' => [
@@ -288,6 +283,11 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
             'scheme-less authority without a separator stays unchanged' => [
                 'source.example',
                 'source.example',
+                ['https://source.example' => 'https://destination.example/assets'],
+            ],
+            'scheme-less authority with a path stays unchanged' => [
+                'source.example\\/logo.png',
+                'source.example\\/logo.png',
                 ['https://source.example' => 'https://destination.example/assets'],
             ],
             'target has a percent-encoded path' => [
