@@ -37,8 +37,10 @@
  * Supported sources:
  *
  * - ASCII domains and IPv4 or IPv6 addresses, with an optional port.
- * - An optional initial ASCII path. That path is part of the source base and is
- *   removed with it. Mapping https://source.example/media to
+ * - An optional initial path containing only bytes from `!` (0x21) through
+ *   `~` (0x7E). Spaces and multibyte characters are rejected. That path is
+ *   part of the source base and is removed with it. Mapping
+ *   https://source.example/media to
  *   https://destination.example changes
  *   https://source.example/media/logo.png to
  *   https://destination.example/logo.png.
@@ -121,8 +123,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * Creates a processor for one opaque text value.
      *
-     * A source may include an initial ASCII path. A target must be an HTTP(S)
-     * URL with a supported domain and no path or other URL components:
+     * A source may include an initial path containing only bytes from `!`
+     * (0x21) through `~` (0x7E). A target must be an HTTP(S) URL with a
+     * supported domain and no path or other URL components:
      *
      * ```
      * [
