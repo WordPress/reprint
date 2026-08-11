@@ -71,7 +71,7 @@
  * Example usage:
  *
  * ```php
- * $processor = new LimitedURLBaseInOpaqueTextProcessor(
+ * $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
  *     '[vc_video link="https:\\/\\/source.example\\/media\\/video.mp4"]',
  *     [
  *         'https://source.example' => 'https://destination.example',
@@ -86,7 +86,7 @@
  * ```
  */
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
-class LimitedURLBaseInOpaqueTextProcessor {
+class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * @var array<int, array{
      *     source_authority: string,

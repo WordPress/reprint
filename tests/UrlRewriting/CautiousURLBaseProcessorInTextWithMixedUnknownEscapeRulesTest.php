@@ -5,7 +5,7 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.php';
 
-class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
+class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends TestCase {
     /**
      * These are opaque text leaves only. Do not add complete PHP serializations,
      * JSON documents, or known block markup: StructuredDataUrlRewriter handles
@@ -423,7 +423,7 @@ class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
      */
     private function rewrite(string $text, array $mapping): string
     {
-        $processor = new LimitedURLBaseInOpaqueTextProcessor($text, $mapping);
+        $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules($text, $mapping);
 
         while ($processor->next_url()) {
             $processor->replace_url_base();
