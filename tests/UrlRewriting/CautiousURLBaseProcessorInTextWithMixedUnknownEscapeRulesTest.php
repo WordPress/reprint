@@ -216,6 +216,41 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://site.com/source.com/media?next=https://destination.com/media/logo.png',
                 ['https://source.com' => 'https://destination.com'],
             ],
+            'literal target path replaces a configured source path' => [
+                'https://source.example/media/logo.png',
+                'https://destination.example/assets/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'target path accepts hyphen underscore and nested components' => [
+                'https://source.example/media/logo.png',
+                'https://destination.example/assets-2026/_private/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets-2026/_private'],
+            ],
+            'escaped target path uses the source path slash spelling' => [
+                'https:\\/\\/source.example\\/media\\/logo.png',
+                'https:\\/\\/destination.example\\/assets\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'target path uses the slash immediately after an unmapped authority' => [
+                'source.example\\/logo.png',
+                'destination.example\\/assets\\/logo.png',
+                ['https://source.example' => 'https://destination.example/assets'],
+            ],
+            'target path uses the protocol separator when the URL has no suffix' => [
+                'https:\\\\\/\\\\\\/source.example',
+                'https:\\\\\/\\\\\\/destination.example\\\\\\/assets',
+                ['https://source.example' => 'https://destination.example/assets'],
+            ],
+            'target path uses the literal separator from the configured source path' => [
+                'https:\\/\\/source.example/media/logo.png',
+                'https:\\/\\/destination.example/assets/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'target path comes before a query after an unmapped authority' => [
+                'https:\\/\\/source.example?download=1',
+                'https:\\/\\/destination.example\\/assets?download=1',
+                ['https://source.example' => 'https://destination.example/assets'],
+            ],
         ];
     }
 
@@ -230,10 +265,30 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://SOURCE.EXAMPLE/Media/logo.png',
                 ['https://source.example/media' => 'https://destination.example'],
             ],
-            'target has a path' => [
+            'target path has a dot segment' => [
                 'https://source.example/media/logo.png',
                 'https://source.example/media/logo.png',
-                ['https://source.example/media' => 'https://destination.example/assets'],
+                ['https://source.example/media' => 'https://destination.example/assets/../private'],
+            ],
+            'target path has an empty segment' => [
+                'https://source.example/media/logo.png',
+                'https://source.example/media/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets//private'],
+            ],
+            'target path has a percent escape' => [
+                'https://source.example/media/logo.png',
+                'https://source.example/media/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets%2Fprivate'],
+            ],
+            'target path ends with a slash' => [
+                'https://source.example/media/logo.png',
+                'https://source.example/media/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets/'],
+            ],
+            'scheme-less authority without a separator stays unchanged' => [
+                'source.example',
+                'source.example',
+                ['https://source.example' => 'https://destination.example/assets'],
             ],
             'target has a percent-encoded path' => [
                 'https://source.example/media/logo.png',
