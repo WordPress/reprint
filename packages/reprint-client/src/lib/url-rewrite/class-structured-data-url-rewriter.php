@@ -21,7 +21,7 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * 4. A `data-settings` HTML attribute containing valid JSON → recurse on its
  *    JSON string leaves
  * 5. Leaf text → BlockMarkupUrlProcessor (block_markup hint) or
- *    URLInPotentiallyStructuredTextProcessor (default)
+ *    LimitedURLBaseInOpaqueTextProcessor (default)
  *
  * HTML is not broadly auto-detected. The narrow `data-settings` case is safe
  * to recognize because both the HTML attribute and its JSON value must parse
@@ -644,7 +644,7 @@ class StructuredDataUrlRewriter
                 return $p->get_updated_html();
 
             case self::PLAIN_TEXT:
-                $p = new URLInPotentiallyStructuredTextProcessor($content, $this->url_mapping);
+                $p = new LimitedURLBaseInOpaqueTextProcessor($content, $this->url_mapping);
                 while ( $p->next_url() ) {
                     $p->replace_url_base();
                 }
