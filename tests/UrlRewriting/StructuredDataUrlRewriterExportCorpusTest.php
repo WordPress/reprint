@@ -7,7 +7,7 @@ require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.
 
 class StructuredDataUrlRewriterExportCorpusTest extends TestCase {
     private const SOURCE_URL = 'https://source.example/wp-content/uploads';
-    private const TARGET_URL = 'https://destination.example/wp-content/uploads';
+    private const TARGET_URL = 'https://destination.example';
 
     /**
      * @dataProvider structuredSiteBuilderExports
@@ -218,7 +218,7 @@ class StructuredDataUrlRewriterExportCorpusTest extends TestCase {
     {
         $input = '{"content":[{"settings":{"image":{"url":"https:\\/\\/source.example\\/wp-content\\/uploads\\/2026\\/01\\/logo.png"}}}]}';
         $output = ( new StructuredDataUrlRewriter([
-            self::SOURCE_URL => 'https://xn--bcher-kva.example/wp-content/uploads',
+            self::SOURCE_URL => 'https://xn--bcher-kva.example',
         ]) )->rewrite($input);
 
         $this->assertStringContainsString('xn--bcher-kva.example', $output);
