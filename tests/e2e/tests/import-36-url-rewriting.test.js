@@ -25,6 +25,28 @@ describe('Import: URL Rewriting', () => {
     // Derive source domain from site registry so the port stays in sync
     const SOURCE_DOMAIN = new URL(getSiteUrl(site)).origin;
     const TARGET_DOMAIN = 'https://target.example.com';
+    const ESCAPED_SOURCE_DOMAIN = SOURCE_DOMAIN.replaceAll('/', '\\/');
+    const ESCAPED_TARGET_DOMAIN = 'http:\\/\\/target.example.com';
+    const SITE_BUILDER_CASES = [
+        {
+            name: 'WPBakery escaped video shortcode',
+            slug: 'url-rewrite-wpbakery-video',
+            input: `[vc_video link="${ESCAPED_SOURCE_DOMAIN}\\/wp-content\\/uploads\\/video.mp4"]`,
+            expected: `[vc_video link="${ESCAPED_TARGET_DOMAIN}\\/wp-content\\/uploads\\/video.mp4"]`,
+        },
+        {
+            name: 'WPBakery entity-quoted CSS shortcode attribute',
+            slug: 'url-rewrite-wpbakery-css',
+            input: `[vc_column width=&#187;1\\/2&#8243; css=&#187;.vc_custom{background-image:url(${ESCAPED_SOURCE_DOMAIN}\\/wp-content\\/uploads\\/hero.jpg?id=8086) !important;}&#187;]`,
+            expected: `[vc_column width=&#187;1\\/2&#8243; css=&#187;.vc_custom{background-image:url(${ESCAPED_TARGET_DOMAIN}\\/wp-content\\/uploads\\/hero.jpg?id=8086) !important;}&#187;]`,
+        },
+        {
+            name: 'Divi shortcode inside a core HTML block',
+            slug: 'url-rewrite-divi-in-core-html',
+            input: `<!-- wp:html --><p>[et_pb_section background_image=”${ESCAPED_SOURCE_DOMAIN}\\/wp-content\\/uploads\\/hero.jpg”][/et_pb_section]</p><!-- /wp:html -->`,
+            expected: `<!-- wp:html --><p>[et_pb_section background_image=”${ESCAPED_TARGET_DOMAIN}\\/wp-content\\/uploads\\/hero.jpg”][/et_pb_section]</p><!-- /wp:html -->`,
+        },
+    ];
 
     beforeAll(async () => {
         await ensureSite(site, {
@@ -68,6 +90,13 @@ describe('Import: URL Rewriting', () => {
                     `INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (?, ?, ?)`,
                     [postId, '_no_urls', 'Just a regular string with no URLs']
                 );
+
+                for (const testCase of SITE_BUILDER_CASES) {
+                    await conn.query(
+                        `INSERT INTO wp_posts (post_author, post_date, post_date_gmt, post_content, post_title, post_excerpt, post_status, comment_status, ping_status, post_password, post_name, to_ping, pinged, post_modified, post_modified_gmt, post_content_filtered, post_parent, guid, menu_order, post_type, post_mime_type, comment_count) VALUES (1, NOW(), NOW(), ?, ?, '', 'publish', 'open', 'open', '', ?, '', '', NOW(), NOW(), '', 0, ?, 0, 'post', '', 0)`,
+                        [testCase.input, testCase.name, testCase.slug, `${SOURCE_DOMAIN}/${testCase.slug}`]
+                    );
+                }
             },
         });
         tempDir = createTempDir('e2e-url-rewriting');
@@ -230,6 +259,18 @@ describe('Import: URL Rewriting', () => {
             !row.post_content.includes(SOURCE_DOMAIN),
             `Expected block markup to NOT contain source domain, got: ${row.post_content}`
         );
+    });
+
+    it.each(SITE_BUILDER_CASES)('$name is rewritten without changing its escaping', async (testCase) => {
+        const conn = await createMysqlConnection(importDb);
+        const [[row]] = await conn.query(
+            'SELECT post_content FROM wp_posts WHERE post_name = ?',
+            [testCase.slug]
+        );
+        await conn.end();
+
+        assert.ok(row, `Expected ${testCase.slug} post`);
+        assert.equal(row.post_content, testCase.expected);
     });
 
     it('plain text URLs in post_excerpt are rewritten', async () => {

@@ -401,6 +401,59 @@ class StructuredDataUrlRewriterTest extends TestCase
         ];
     }
 
+    /**
+     * @param array<string, string> $mapping
+     */
+    #[DataProvider('structured_target_base_cases')]
+    public function testKnownStructuredUrlsAcceptTargetsWhichOpaqueTextCannotSafelyWrite(
+        string $input,
+        string $expected,
+        array $mapping
+    ): void {
+        $rewriter = $this->createRewriter($mapping);
+
+        $this->assertSame($expected, $rewriter->rewrite_known_block_markup_value($input));
+    }
+
+    /**
+     * @return array<string, array{0:string, 1:string, 2:array<string, string>}>
+     */
+    public static function structured_target_base_cases(): array
+    {
+        return [
+            'trailing slash' => [
+                '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://new.example/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                ['https://old-site.com' => 'https://new.example/'],
+            ],
+            'initial path' => [
+                '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://new.example/base/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                ['https://old-site.com' => 'https://new.example/base'],
+            ],
+            'port' => [
+                '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://new.example:8443/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                ['https://old-site.com' => 'https://new.example:8443'],
+            ],
+            'IPv4 address' => [
+                '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://192.0.2.1/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                ['https://old-site.com' => 'https://192.0.2.1'],
+            ],
+            'IPv6 address' => [
+                '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://[2001:db8::1]/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                ['https://old-site.com' => 'https://[2001:db8::1]'],
+            ],
+            'Unicode domain' => [
+                '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://xn--bcher-kva.example/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                ['https://old-site.com' => 'https://bücher.example'],
+            ],
+        ];
+    }
+
     public function testBlockMarkupLeavesEncodedSiteOriginInputValueUnchanged(): void
     {
         $rewriter = $this->createRewriter();
