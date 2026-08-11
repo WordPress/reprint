@@ -1,6 +1,5 @@
 <?php
 
-use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
 use WordPress\DataLiberation\URL\URLInTextProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 
@@ -19,8 +18,8 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
  * 3. Base64 → decode, recurse on decoded content, re-encode if changed
- * 4. Leaf text → BlockMarkupUrlProcessor (block_markup hint) or
- *    URLInTextProcessor (default)
+ * 4. Leaf text → CautiousTextBlockMarkupUrlProcessor (block_markup hint)
+ *    or URLInTextProcessor (default)
  *
  * HTML is never auto-detected — the caller must explicitly pass
  * content_type='block_markup' for values known to contain HTML/block markup.
@@ -37,6 +36,15 @@ class StructuredDataUrlRewriter
 
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
+
+    /**
+     * Exact configured URL spellings used for byte-level replacement in block
+     * markup text tokens. The parsed mapping below serves the structured URL
+     * processors; it cannot preserve the caller's lexical source base.
+     *
+     * @var array<string, string>
+     */
+    private array $url_mapping;
 
     /**
      * Pre-parsed url_mapping: each entry is
@@ -84,6 +92,8 @@ class StructuredDataUrlRewriter
      */
     public function __construct(array $url_mapping)
     {
+        $this->url_mapping = $url_mapping;
+
         // Extract unique source domains for the quick-reject check.
         $domains = [];
         foreach (array_keys($url_mapping) as $from_url) {
@@ -331,12 +341,11 @@ class StructuredDataUrlRewriter
     /**
      * Rewrite a decoded value already known by the SQL layer to be block markup.
      *
-     * Block markup owns HTML attributes, block-comment JSON, CSS url() values,
-     * text URLs, entity decoding, URL casing, and IDN canonicalization. This
-     * intentionally routes through the structured parser instead of doing a
-     * literal source-base replacement, because one database value may contain
-     * multiple spellings of the same URL that only the parser can recognize as
-     * equivalent.
+     * Block markup owns HTML attributes, block-comment JSON, and CSS url()
+     * values. Raw text tokens use cautious source-base replacement because they
+     * may contain shortcodes or another syntax with unknown escaping rules.
+     * Arbitrary HTML attributes remain outside that fallback until their raw
+     * string spans can be exposed without re-encoding the containing markup.
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
@@ -437,48 +446,54 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
-                $p = new BlockMarkupUrlProcessor( $content, $base_url );
-                while ( $p->next_url() ) {
-                    $raw_url = $p->get_raw_url();
+                $p = new CautiousTextBlockMarkupUrlProcessor( $content, $base_url );
+                while ( $p->next_token() ) {
                     $token_type = $p->get_token_type() ?? '';
-                    $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
-                    $cached = $this->get_cached_rewrite_result($cache_key);
-                    if ($cached !== null) {
-                        if ($cached !== false) {
-                            $p->set_url($cached['raw_url'], $cached['parsed_url']);
+                    if ( '#text' === $token_type ) {
+                        if ($this->maybe_contains_rewritable_urls($p->get_modifiable_text())) {
+                            $p->replace_url_bases_in_current_text($this->url_mapping);
                         }
                         continue;
                     }
 
-                    $parsed_url = $p->get_parsed_url();
-                    $converted = false;
-                    foreach ( $parsed_mapping as $mapping ) {
-                        if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
-                            $converted = WPURL::replace_base_url(
-                                $parsed_url,
-                                array(
-                                    'old_base_url' => $base_url,
-                                    'new_base_url' => $mapping['to_url'],
-                                    'raw_url'      => $raw_url,
-                                    'is_relative'  => (
-                                        '#text' !== $token_type &&
-                                        ! WPURL::can_parse($raw_url)
-                                    ),
-                                )
-                            );
-                            break;
+                    while ( $p->next_url_in_current_token() ) {
+                        $raw_url = $p->get_raw_url();
+                        $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
+                        $cached = $this->get_cached_rewrite_result($cache_key);
+                        if ($cached !== null) {
+                            if ($cached !== false) {
+                                $p->set_url($cached['raw_url'], $cached['parsed_url']);
+                            }
+                            continue;
                         }
-                    }
 
-                    $cache_value = false;
-                    if ($converted !== false) {
-                        $cache_value = [
-                            'raw_url'    => (string) $converted,
-                            'parsed_url' => $converted->new_url,
-                        ];
-                        $p->set_url($cache_value['raw_url'], $cache_value['parsed_url']);
+                        $parsed_url = $p->get_parsed_url();
+                        $converted = false;
+                        foreach ( $parsed_mapping as $mapping ) {
+                            if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
+                                $converted = WPURL::replace_base_url(
+                                    $parsed_url,
+                                    array(
+                                        'old_base_url' => $base_url,
+                                        'new_base_url' => $mapping['to_url'],
+                                        'raw_url'      => $raw_url,
+                                        'is_relative'  => ! WPURL::can_parse($raw_url),
+                                    )
+                                );
+                                break;
+                            }
+                        }
+
+                        $cache_value = false;
+                        if ($converted !== false) {
+                            $cache_value = [
+                                'raw_url'    => (string) $converted,
+                                'parsed_url' => $converted->new_url,
+                            ];
+                            $p->set_url($cache_value['raw_url'], $cache_value['parsed_url']);
+                        }
+                        $this->set_cached_rewrite_result($cache_key, $cache_value);
                     }
-                    $this->set_cached_rewrite_result($cache_key, $cache_value);
                 }
 
                 return $p->get_updated_html();

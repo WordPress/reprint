@@ -1,5 +1,6 @@
 <?php
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../vendor/autoload.php';
@@ -351,6 +352,85 @@ class StructuredDataUrlRewriterTest extends TestCase
         $input = '<a href="https://old-site.com/page">Link</a>';
         $result = $rewriter->rewrite($input, 'block_markup');
         $this->assertStringContainsString('https://new-site.com/page', $result);
+    }
+
+    #[DataProvider('block_markup_text_node_cases')]
+    public function testBlockMarkupTextNodesUseCautiousUrlBaseReplacement(
+        string $input,
+        string $expected
+    ): void {
+        $rewriter = $this->createRewriter();
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    /**
+     * @return array<string, array{0:string, 1:string}>
+     */
+    public static function block_markup_text_node_cases(): array
+    {
+        return [
+            'core shortcode block body' => [
+                '<!-- wp:shortcode -->[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]<!-- /wp:shortcode -->',
+                '<!-- wp:shortcode -->[vc_video link="https:\/\/new-site.com\/media\/video.mp4"]<!-- /wp:shortcode -->',
+            ],
+            'shortcode text inside a core HTML block' => [
+                '<!-- wp:html --><p>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]</p><!-- /wp:html -->',
+                '<!-- wp:html --><p>[vc_video link="https:\/\/new-site.com\/media\/video.mp4"]</p><!-- /wp:html -->',
+            ],
+            'Elementor-style HTML containing shortcode text' => [
+                '<section data-builder="elementor"><p>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]</p></section>',
+                '<section data-builder="elementor"><p>[vc_video link="https:\/\/new-site.com\/media\/video.mp4"]</p></section>',
+            ],
+            'pure WPBakery shortcode record' => [
+                '[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '[vc_video link="https:\/\/new-site.com\/media\/video.mp4"]',
+            ],
+            'pure Divi 4 shortcode record' => [
+                '[et_pb_section background_image=”https:\/\/old-site.com\/media\/hero.jpg”][/et_pb_section]',
+                '[et_pb_section background_image=”https:\/\/new-site.com\/media\/hero.jpg”][/et_pb_section]',
+            ],
+            'entity-quoted CSS in a WPBakery shortcode attribute' => [
+                '[vc_column css=&#187;.vc_custom{background-image:url(https:\/\/old-site.com\/media\/hero.jpg?id=8086) !important;}&#187;]',
+                '[vc_column css=&#187;.vc_custom{background-image:url(https:\/\/new-site.com\/media\/hero.jpg?id=8086) !important;}&#187;]',
+            ],
+            'ordinary prose in a block-markup column' => [
+                'Download https:\/\/old-site.com\/media\/guide.pdf for the full guide.',
+                'Download https:\/\/new-site.com\/media\/guide.pdf for the full guide.',
+            ],
+        ];
+    }
+
+    public function testBlockMarkupLeavesEncodedSiteOriginInputValueUnchanged(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<input type="hidden" value="{&quot;instance&quot;:{&quot;url&quot;:&quot;https:\/\/old-site.com\/media\/hero.jpg&quot;}}">';
+
+        $this->assertSame($input, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    public function testBlockMarkupTextOffsetFollowsAnEarlierStructuredReplacement(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://very-long-source.example' => 'https://new.example',
+        ]);
+        $input = '<a href="https://very-long-source.example/page">'
+            . '[vc_video link="https:\/\/very-long-source.example\/media\/video.mp4"]'
+            . '</a>';
+        $expected = '<a href="https://new.example/page">'
+            . '[vc_video link="https:\/\/new.example\/media\/video.mp4"]'
+            . '</a>';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    public function testBlockMarkupStillUsesTheCssUrlProcessorForStyleAttributes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<div style="background-image:url(https://old-site.com/media/hero.jpg)"></div>';
+        $expected = '<div style="background-image:url(&quot;https://new-site.com/media/hero.jpg&quot;)"></div>';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
     }
 
     public function testKnownBlockMarkupRewritesEscapedBlockJsonAndHtml(): void
