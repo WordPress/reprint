@@ -31,8 +31,9 @@
  * of those formats and could corrupt the value.
  *
  * Instead, the processor performs one narrow operation: find the configured
- * source base as bytes and replace that entire slice with a target domain. It
- * does not decode, normalize, or re-encode the input.
+ * source base as bytes and replace that entire slice with a target domain and,
+ * when safely available, a restricted target path. It does not decode,
+ * normalize, or re-encode the input.
  *
  * Supported sources:
  *
@@ -53,11 +54,14 @@
  *   Only source.example is replaced. The username, password, path, query, and
  *   fragment remain byte-for-byte unchanged.
  *
- * Unsupported mappings are discarded as a whole. There is no partial
- * replacement:
+ * Mappings that cannot be safely rendered are discarded as a whole. There is
+ * no partial replacement:
  *
- * - A target path is not supported. Writing it would require choosing whether
- *   each slash should be /, \/, or something else.
+ * - A target path may contain non-empty slash-separated components composed
+ *   only of ASCII letters, digits, hyphens, and underscores. Each target slash
+ *   copies the spelling of a slash from the configured source path, candidate
+ *   suffix, or protocol separator. A scheme-less authority without such a
+ *   slash is left unchanged.
  * - Target ports, user information, queries, fragments, IPv4/IPv6 addresses,
  *   and Unicode domains are not supported. Punycode domains are supported.
  * - Unicode source domains and paths are not supported.
@@ -101,6 +105,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
+     *     target_path: string,
      *     pattern: string
      * }>
      */
@@ -116,9 +121,11 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
+     *     target_path: string,
      *     pattern: string,
      *     start: int,
-     *     base_length: int
+     *     base_length: int,
+     *     replacement: string
      * }|null
      */
     private ?array $matched_url = null;
@@ -131,7 +138,8 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *
      * A source may include an initial path containing only bytes from `!`
      * (0x21) through `~` (0x7E). A target must be an HTTP(S) URL with a
-     * supported domain and no path or other URL components:
+     * supported domain and an optional path of slash-separated ASCII letters,
+     * digits, hyphens, and underscores. Other URL components are rejected:
      *
      * ```
      * [
@@ -186,8 +194,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *
      * Mapping source.example/media to destination.example changes
      * https://source.example/media/logo.png to
-     * https://destination.example/logo.png. The protocol and logo.png suffix
-     * are outside the matched base and remain unchanged.
+     * https://destination.example/assets/logo.png when the target has the
+     * restricted /assets path. The protocol and logo.png suffix are outside
+     * the matched base and remain unchanged.
      */
     public function replace_url_base(): bool
     {
@@ -198,7 +207,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         $this->lexical_updates[$this->matched_url['start']] = [
             'start'       => $this->matched_url['start'],
             'length'      => $this->matched_url['base_length'],
-            'replacement' => $this->matched_url['target_domain'],
+            'replacement' => $this->matched_url['replacement'],
         ];
 
         return true;
@@ -237,9 +246,11 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
+     *     target_path: string,
      *     pattern: string,
      *     start: int,
-     *     base_length: int
+     *     base_length: int,
+     *     replacement: string
      * }|null
      */
     private function find_next_url_base(): ?array
@@ -262,11 +273,31 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                 continue;
             }
 
+            $target_path_separator = '';
+            if ($mapping['target_path'] !== '') {
+                $target_path_separator = null;
+                foreach (['source_path_separator', 'suffix_separator', 'scheme_path_separator'] as $separator_name) {
+                    if (isset($matches[$separator_name]) && $matches[$separator_name][1] !== -1) {
+                        $target_path_separator = $matches[$separator_name][0];
+                        break;
+                    }
+                }
+
+                if ($target_path_separator === null) {
+                    continue;
+                }
+            }
+
             $next_match = array_merge(
                 $mapping,
                 [
                     'start'       => $authority_start,
                     'base_length' => strlen($matches['base'][0]),
+                    'replacement' => $mapping['target_domain'] . str_replace(
+                        '/',
+                        $target_path_separator . '/',
+                        $mapping['target_path']
+                    ),
                 ]
             );
         }
@@ -288,11 +319,16 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     ): string
     {
         $escaped_separator = '(?:\\\\{1}|\\\\{3})?';
-        $source_path_pattern = str_replace(
-            '/',
-            $escaped_separator . '/',
-            preg_quote($source_path, '~')
-        );
+        $source_path_pattern = '';
+        if ($source_path !== '') {
+            $source_path_pattern =
+                '(?<source_path_separator>' . $escaped_separator . ')/' .
+                str_replace(
+                    '/',
+                    $escaped_separator . '/',
+                    preg_quote(substr($source_path, 1), '~')
+                );
+        }
 
         return '~
             (?<![A-Za-z0-9._%+\\/@-])
@@ -300,7 +336,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                 (?i:' . preg_quote($source_scheme, '~') . ')
                 ' . $escaped_separator . ':
                 ' . $escaped_separator . '/
-                ' . $escaped_separator . '/
+                (?<scheme_path_separator>' . $escaped_separator . ')/
                 (?:[^\s<>@/\\\\]+@)?
             )?
             (?<base>
@@ -309,7 +345,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             )
             (?=
                 $
-                | ' . $escaped_separator . '/
+                | (?<suffix_separator>' . $escaped_separator . ')/
                 | [/?# \t\r\n,!;)\]}>"\']
             )
         ~x';
@@ -321,6 +357,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
+     *     target_path: string,
      *     pattern: string
      * }|null
      */
@@ -337,6 +374,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             'source_path'      => $source['path'],
             'source_base'      => $source['authority'] . $source['path'],
             'target_domain'    => $target['host'],
+            'target_path'      => $target['path'],
             'pattern'          => $this->create_url_candidate_pattern(
                 $source['scheme'],
                 $source['authority'],
@@ -364,8 +402,12 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         $scheme = strtolower( (string) $parts['scheme'] );
         $host = (string) $parts['host'];
         $path = isset($parts['path']) ? (string) $parts['path'] : '';
+        $has_unsupported_target_path =
+            !$is_source_url &&
+            $path !== '' &&
+            preg_match('#^/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$#', $path) !== 1;
         if (( $scheme !== 'http' && $scheme !== 'https' )
-            || ( !$is_source_url && ( array_key_exists('port', $parts) || $path !== '' ) )
+            || ( !$is_source_url && ( array_key_exists('port', $parts) || $has_unsupported_target_path ) )
             || !( $this->is_alphanumeric_dot_hyphen_domain_name($host) || ( $is_source_url && $this->is_ip_address($host) ) )
             || !$this->contains_only_exclamation_mark_through_tilde_bytes($path)) {
             return null;
