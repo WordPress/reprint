@@ -5,6 +5,7 @@
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\assert_valid_relative_path;
 use function WordPress\Reprint\Exporter\normalize_excluded_paths;
+use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\relative_path_under;
 use function WordPress\Reprint\Exporter\trim_right_slash;
@@ -2454,7 +2455,7 @@ final class Site_Export_Push_Session {
             );
         }
         assert_valid_relative_path($path, 'Document-root-relative path');
-        if ($path === '.maintenance' || strpos($path, '.maintenance/') === 0) {
+        if (path_is_same_as_or_descendant_of($path, '.maintenance')) {
             throw new InvalidArgumentException('The WordPress maintenance marker path is reserved: ' . base64_encode($path) . '.');
         }
     }

@@ -66,6 +66,7 @@ class DeactivateHostPluginsTest extends TestCase
         $this->insertOption($pdo, 'active_plugins', serialize([
             'sg-cachepress/sg-cachepress.php',
             'sg-security/sg-security.php',
+            'sg-cachepress-extra/sg-cachepress-extra.php',
             'woocommerce/woocommerce.php',
             'akismet/akismet.php',
         ]));
@@ -96,6 +97,7 @@ class DeactivateHostPluginsTest extends TestCase
         $remaining = unserialize($this->fetchOption($pdo, 'active_plugins'));
         $this->assertSame(
             [
+                'sg-cachepress-extra/sg-cachepress-extra.php',
                 'woocommerce/woocommerce.php',
                 'akismet/akismet.php',
             ],
