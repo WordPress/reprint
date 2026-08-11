@@ -47,9 +47,11 @@
  * - Literal, scheme-less, and slash-escaped URL spellings. The recognized
  *   HTTP(S) separators may have one or three preceding backslashes, including
  *   https:\/\/, https\:\/\/, and https:\\\/\\\/.
- * - Candidate URLs with user information before the authority, and path,
- *   query, or fragment bytes after the configured base. Those bytes are
- *   outside the replacement.
+ * - Other parts of the URL may surround the configured base. For example,
+ *   https://user:password@source.example/logo.png?download=1#preview becomes
+ *   https://user:password@destination.example/logo.png?download=1#preview.
+ *   Only source.example is replaced. The username, password, path, query, and
+ *   fragment remain byte-for-byte unchanged.
  *
  * Unsupported mappings are discarded as a whole. There is no partial
  * replacement:
