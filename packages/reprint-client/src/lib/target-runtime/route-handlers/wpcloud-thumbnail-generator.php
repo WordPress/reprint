@@ -30,23 +30,18 @@ function wpcloud_thumbnail_generator_code(): string
 (function() {
 	if (!defined('WP_CONTENT_DIR')) return;
 
-	$uri = $_SERVER['REQUEST_URI'] ?? '';
-	$path = parse_url($uri, PHP_URL_PATH);
-	if (!$path) return;
-
-	// Only handle requests inside /wp-content/uploads/
-	if (strpos($path, '/wp-content/uploads/') === false) return;
+	$uploads_relative_path = reprint_runtime_uploads_request_relative_path();
+	if ($uploads_relative_path === null) return;
 
 	// Only handle filenames with a -WxH thumbnail suffix
-	if (!preg_match('/-(\d+)x(\d+)(\.\w+)$/', $path, $m)) return;
+	if (!preg_match('/-(\d+)x(\d+)(\.\w+)$/', $uploads_relative_path, $m)) return;
 
 	$max_width  = (int) $m[1];
 	$max_height = (int) $m[2];
 	$ext        = strtolower($m[3]);
 
-	// Map the URL path to a filesystem path relative to WP_CONTENT_DIR.
-	$relative   = preg_replace('#^.*/wp-content/#', '', $path);
-	$thumb_path = WP_CONTENT_DIR . '/' . $relative;
+	// Map the uploads-relative request path beneath WP_CONTENT_DIR.
+	$thumb_path = WP_CONTENT_DIR . '/uploads/' . $uploads_relative_path;
 
 	// If the thumbnail already exists on disk, let the server handle it
 	if (file_exists($thumb_path)) return;
