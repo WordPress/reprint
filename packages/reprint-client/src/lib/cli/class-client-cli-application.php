@@ -9,7 +9,7 @@ use Throwable;
 /**
  * Coordinates CLI routing, input processing, command execution, and reporting.
  */
-class ImporterCliApplication {
+class ClientCliApplication {
 
 	/** @var string|null */
 	protected $last_error_code;
@@ -19,7 +19,7 @@ class ImporterCliApplication {
 	private $argument_parser;
 	/** @var CliHelpRenderer */
 	private $help_renderer;
-	/** @var ImporterVersionProvider */
+	/** @var ClientVersionProvider */
 	private $version_provider;
 	/** @var CliOutput */
 	private $output;
@@ -28,7 +28,7 @@ class ImporterCliApplication {
 		CliCommandRegistry $command_registry,
 		CliArgumentParser $argument_parser,
 		CliHelpRenderer $help_renderer,
-		ImporterVersionProvider $version_provider,
+		ClientVersionProvider $version_provider,
 		CliOutput $output
 	) {
 		$this->command_registry = $command_registry;
@@ -45,12 +45,12 @@ class ImporterCliApplication {
 	 * @param resource $standard_error Standard error stream.
 	 */
 	public static function create_default(
-		string $source_directory,
+		string $client_source_directory,
 		$standard_output,
 		$standard_error
 	): self {
 		$command_registry = CliCommandRegistry::create_default();
-		$version_provider = new ImporterVersionProvider( $source_directory );
+		$version_provider = new ClientVersionProvider( $client_source_directory );
 		return new self(
 			$command_registry,
 			new CliArgumentParser(),
@@ -64,7 +64,7 @@ class ImporterCliApplication {
 	 * Run one invocation without terminating the PHP process.
 	 *
 	 * @param array<int,string> $arguments Process arguments.
-	 * @param bool $rethrow_execution_error Let an embedding caller handle operation failures.
+	 * @param bool $rethrow_execution_error Let an embedding caller handle command execution failures.
 	 */
 	public function run( array $arguments, bool $rethrow_execution_error = false ): int {
 		try {
@@ -105,7 +105,7 @@ class ImporterCliApplication {
 
 			$invocation = $this->argument_parser->parse( $command, $arguments );
 
-			return $this->run_business_command( $invocation, $rethrow_execution_error );
+			return $this->run_invocation( $invocation, $rethrow_execution_error );
 		} catch ( CliInputException $error ) {
 			$this->output->write_error( rtrim( $error->getMessage(), "\n" ) . "\n" );
 			return 1;
@@ -121,7 +121,7 @@ class ImporterCliApplication {
 			|| in_array( '-h', $command_arguments, true );
 	}
 
-	private function run_business_command(
+	private function run_invocation(
 		CliInvocation $invocation,
 		bool $rethrow_execution_error
 	): int {
@@ -154,23 +154,23 @@ class ImporterCliApplication {
 		$client                = null;
 		$process_lock          = null;
 		try {
-			// Acquire the lock before local push state setup and audit writes so
+			// Acquire the lock before resolving the local push state directory or writing the command audit entry so
 			// each command owns every local state transition for its complete invocation.
-			$process_lock = new ReprintProcessLock( $invocation->state_directory );
+			$process_lock = new ReprintProcessLock( $invocation->state_dir );
 
 			$files_push_context = null;
-			$files_diff_push_state_directory = null;
+			$push_state_directory = null;
 			if ( $invocation->command === 'files-push' ) {
 				$files_push_context = ImportClient::prepare_files_push_context(
 					$invocation->remote_reprint_api_url,
-					$invocation->state_directory,
+					$invocation->state_dir,
 					$invocation->filesystem_root,
 					$invocation->options
 				);
 			} elseif ( $invocation->command === 'files-diff' ) {
-				$files_diff_push_state_directory = ImportClient::resolve_push_state_directory(
+				$push_state_directory = ImportClient::resolve_push_state_directory(
 					$invocation->remote_reprint_api_url,
-					$invocation->state_directory,
+					$invocation->state_dir,
 					$invocation->filesystem_root,
 					'files-diff'
 				);
@@ -178,7 +178,7 @@ class ImporterCliApplication {
 
 			$client = new ImportClient(
 				$invocation->remote_reprint_api_url,
-				$invocation->state_directory,
+				$invocation->state_dir,
 				$invocation->filesystem_root,
 				$invocation->command
 			);
@@ -191,8 +191,8 @@ class ImporterCliApplication {
 			if ( $files_push_context !== null ) {
 				$options['files_push_context'] = $files_push_context;
 			}
-			if ( $files_diff_push_state_directory !== null ) {
-				$options['files_diff_push_state_directory'] = $files_diff_push_state_directory;
+			if ( $push_state_directory !== null ) {
+				$options['files_diff_push_state_directory'] = $push_state_directory;
 			}
 			$client->run( $options, $process_lock );
 

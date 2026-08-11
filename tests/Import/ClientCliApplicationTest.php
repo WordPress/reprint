@@ -1,6 +1,6 @@
 <?php
 
-// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedNamespaceFound -- Existing importer test namespace.
+// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedNamespaceFound -- Existing import test namespace.
 // phpcs:disable Generic.Files.OneObjectStructurePerFile.MultipleFound -- The recording application belongs to this test fixture.
 
 namespace ImportTests;
@@ -10,14 +10,14 @@ use Reprint\Importer\Cli\CliCommandRegistry;
 use Reprint\Importer\Cli\CliHelpRenderer;
 use Reprint\Importer\Cli\CliInvocation;
 use Reprint\Importer\Cli\CliOutput;
-use Reprint\Importer\Cli\ImporterCliApplication;
-use Reprint\Importer\Cli\ImporterVersionProvider;
+use Reprint\Importer\Cli\ClientCliApplication;
+use Reprint\Importer\Cli\ClientVersionProvider;
 use RuntimeException;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
 
-final class ImporterCliApplicationTest extends TestCase {
+final class ClientCliApplicationTest extends TestCase {
 
     /** @var resource */
     private $standardOutput;
@@ -41,7 +41,7 @@ final class ImporterCliApplicationTest extends TestCase {
         parent::tearDown();
     }
 
-    public function testValidatedInvocationIsTheOnlyInputPassedToBusinessExecution(): void
+    public function testValidatedInvocationIsTheOnlyInputPassedToCommandExecution(): void
     {
         $application = $this->createApplication();
         $application->exit_code = 2;
@@ -66,7 +66,7 @@ final class ImporterCliApplicationTest extends TestCase {
         $this->assertInstanceOf(CliInvocation::class, $invocation);
         $this->assertSame('files-pull', $invocation->command);
         $this->assertSame('https://example.test', $invocation->remote_reprint_api_url);
-        $this->assertSame('/tmp/reprint-state', $invocation->state_directory);
+        $this->assertSame('/tmp/reprint-state', $invocation->state_dir);
         $this->assertSame('/tmp/reprint-files', $invocation->filesystem_root);
         $this->assertSame(
             [':wp-content:', ':wp-uploads:/2026'],
@@ -79,7 +79,26 @@ final class ImporterCliApplicationTest extends TestCase {
         $this->assertSame('', $this->readStream($this->standardError));
     }
 
-    public function testInvalidInputNeverReachesBusinessExecution(): void
+    public function testCommandAliasesResolveToCanonicalCommandNames(): void
+    {
+        $commandRegistry = CliCommandRegistry::create_default();
+        $aliases = [
+            'files-sync' => 'files-pull',
+            'db-sync' => 'db-pull',
+            'flat-document-root' => 'flat-docroot',
+            'flatten-docroot' => 'flat-docroot',
+            'import-metadata' => 'pull-metadata',
+            'install-exporter' => 'install-server',
+        ];
+
+        foreach ($aliases as $alias => $canonicalName) {
+            $canonicalCommand = $commandRegistry->find($canonicalName);
+            $this->assertNotNull($canonicalCommand, $canonicalName);
+            $this->assertSame($canonicalCommand, $commandRegistry->find($alias), $alias);
+        }
+    }
+
+    public function testInvalidInputNeverReachesCommandExecution(): void
     {
         $application = $this->createApplication();
 
@@ -342,13 +361,13 @@ final class ImporterCliApplicationTest extends TestCase {
         $this->assertSame('Database pull failed.', $error['error']);
     }
 
-    private function createApplication(?CliOutput $output = null): CliRecordingImporterApplication
+    private function createApplication(?CliOutput $output = null): CliRecordingClientApplication
     {
         $commandRegistry = CliCommandRegistry::create_default();
-        $versionProvider = new ImporterVersionProvider(
+        $versionProvider = new ClientVersionProvider(
             __DIR__ . '/../../packages/reprint-client/src'
         );
-        return new CliRecordingImporterApplication(
+        return new CliRecordingClientApplication(
             $commandRegistry,
             new CliArgumentParser(),
             new CliHelpRenderer($commandRegistry, $versionProvider),
@@ -399,7 +418,7 @@ final class CliTerminalOutput extends CliOutput {
     }
 }
 
-final class CliRecordingImporterApplication extends ImporterCliApplication {
+final class CliRecordingClientApplication extends ClientCliApplication {
 
     public int $run_count = 0;
 

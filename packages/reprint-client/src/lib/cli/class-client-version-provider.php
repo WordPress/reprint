@@ -3,19 +3,19 @@
 namespace Reprint\Importer\Cli;
 
 /**
- * Resolves the importer version from a packaged VERSION file or Git.
+ * Resolves the Reprint client version from a packaged VERSION file or Git.
  */
-class ImporterVersionProvider {
+class ClientVersionProvider {
 
 	/** @var string */
-	private $source_directory;
+	private $client_source_directory;
 
-	public function __construct( string $source_directory ) {
-		$this->source_directory = rtrim( $source_directory, '/' );
+	public function __construct( string $client_source_directory ) {
+		$this->client_source_directory = rtrim( $client_source_directory, '/' );
 	}
 
 	public function get_version(): string {
-		$version_file = $this->source_directory . '/VERSION';
+		$version_file = $this->client_source_directory . '/VERSION';
 		if ( is_file( $version_file ) ) {
 			$contents = file_get_contents( $version_file );
 			if ( $contents !== false ) {

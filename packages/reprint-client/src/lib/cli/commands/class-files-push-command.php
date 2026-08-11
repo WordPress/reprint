@@ -5,7 +5,7 @@ namespace Reprint\Importer\Cli\Commands;
 use Reprint\Importer\Cli\CliOption;
 
 /**
- * Push one filesystem root to a remote Reprint API.
+ * Push local paths beneath the remote document root from the filesystem root.
  */
 class FilesPushCommand extends AbstractCliCommand {
 
@@ -47,7 +47,7 @@ class FilesPushCommand extends AbstractCliCommand {
 	}
 
 	protected function framework_options(): array {
-		return [ $this->progress_option() ];
+		return [ $this->progress_output_mode_option() ];
 	}
 
 	protected function command_options(): array {

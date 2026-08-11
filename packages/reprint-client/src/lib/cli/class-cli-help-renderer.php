@@ -35,12 +35,12 @@ class CliHelpRenderer {
 	/** @var CliCommandRegistry */
 	private $command_registry;
 
-	/** @var ImporterVersionProvider */
+	/** @var ClientVersionProvider */
 	private $version_provider;
 
 	public function __construct(
 		CliCommandRegistry $command_registry,
-		ImporterVersionProvider $version_provider
+		ClientVersionProvider $version_provider
 	) {
 		$this->command_registry = $command_registry;
 		$this->version_provider = $version_provider;

@@ -3,7 +3,7 @@
 namespace Reprint\Importer\Cli;
 
 /**
- * Validated input supplied to the business-operation runner.
+ * Validated input supplied to the command runner.
  */
 class CliInvocation {
 
@@ -14,7 +14,7 @@ class CliInvocation {
 	public $remote_reprint_api_url;
 
 	/** @var string */
-	public $state_directory;
+	public $state_dir;
 
 	/** @var string */
 	public $filesystem_root;
@@ -28,7 +28,7 @@ class CliInvocation {
 	/**
 	 * @param string $command Canonical command name.
 	 * @param string $remote_reprint_api_url Remote Reprint API URL which selects the remote state directory.
-	 * @param string $state_directory Directory containing pull state.
+	 * @param string $state_dir Caller-selected state directory containing Reprint state for one filesystem root.
 	 * @param string $filesystem_root Filesystem root read or changed by the command.
 	 * @param array $options Validated command options.
 	 * @param array<int,string> $original_arguments Original process arguments for the audit log.
@@ -36,21 +36,21 @@ class CliInvocation {
 	private function __construct(
 		string $command,
 		string $remote_reprint_api_url,
-		string $state_directory,
+		string $state_dir,
 		string $filesystem_root,
 		array $options,
 		array $original_arguments
 	) {
 		$this->command                = $command;
 		$this->remote_reprint_api_url = $remote_reprint_api_url;
-		$this->state_directory        = $state_directory;
+		$this->state_dir              = $state_dir;
 		$this->filesystem_root        = $filesystem_root;
 		$this->options                = $options;
 		$this->original_arguments     = $original_arguments;
 	}
 
 	/**
-	 * Validate parsed command input and create a business invocation.
+	 * Validate parsed command input and create a command invocation.
 	 *
 	 * @param array<string,string> $positional_arguments Parsed positional arguments keyed by synopsis name.
 	 * @param array<string,mixed> $options Parsed associative arguments keyed by invocation option name.
@@ -59,12 +59,12 @@ class CliInvocation {
 	public static function from_parsed_input(
 		CliCommand $command,
 		array $positional_arguments,
-		?string $state_directory,
+		?string $state_dir,
 		?string $filesystem_root,
 		array $options,
 		array $original_arguments
 	): self {
-		if ( $command->requires_state_directory() && ! $state_directory ) {
+		if ( $command->requires_state_directory() && ! $state_dir ) {
 			throw new CliInputException(
 				"Error: --state-dir=DIR is required\n"
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI input errors are plain-text terminal messages, not HTML output.
@@ -102,12 +102,12 @@ class CliInvocation {
 			);
 		}
 
-		$state_directory = $state_directory ?? '';
+		$state_dir = $state_dir ?? '';
 		if ( $filesystem_root_requirement === CliCommand::FILESYSTEM_ROOT_UNUSED ) {
 			// pull-metadata reads only state, but ImportClient still expects
 			// a filesystem root path. Point it at state-dir rather than requiring an
 			// otherwise-unused CLI option.
-			$filesystem_root = $state_directory;
+			$filesystem_root = $state_dir;
 		} else {
 			$filesystem_root = $filesystem_root ?: (string) $flat_document_root;
 		}
@@ -117,7 +117,7 @@ class CliInvocation {
 		return new self(
 			$command->get_name(),
 			$positional_arguments['remote_reprint_api_url'],
-			$state_directory,
+			$state_dir,
 			$filesystem_root,
 			$options,
 			$original_arguments

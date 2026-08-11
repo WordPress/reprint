@@ -45,7 +45,7 @@ class FilesDiffCommand extends AbstractCliCommand {
 	}
 
 	protected function framework_options(): array {
-		return [ $this->progress_option() ];
+		return [ $this->progress_output_mode_option() ];
 	}
 
 	protected function command_options(): array {

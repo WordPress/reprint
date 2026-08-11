@@ -11005,7 +11005,7 @@ if (
 	)
 ) {
 	$reprint_exit_after_pull = ! defined( 'EXIT_AFTER_PULL' ) || EXIT_AFTER_PULL;
-	$reprint_application       = \Reprint\Importer\Cli\ImporterCliApplication::create_default(
+	$reprint_application       = \Reprint\Importer\Cli\ClientCliApplication::create_default(
 		__DIR__,
 		STDOUT,
 		STDERR

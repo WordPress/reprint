@@ -65,7 +65,7 @@ abstract class AbstractCliCommand implements CliCommand {
 	 */
 	protected function framework_options(): array {
 		return [
-			$this->progress_option(),
+			$this->progress_output_mode_option(),
 			CliOption::flag(
 				'adaptive',
 				'tuning_config.enabled',
@@ -172,7 +172,7 @@ abstract class AbstractCliCommand implements CliCommand {
 		)->in_main_help( 'global' );
 	}
 
-	protected function progress_option(): CliOption {
+	protected function progress_output_mode_option(): CliOption {
 		return CliOption::value(
 			'progress',
 			'progress',

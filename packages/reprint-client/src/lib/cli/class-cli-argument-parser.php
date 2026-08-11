@@ -39,7 +39,7 @@ class CliArgumentParser {
 			++$argument_index;
 		}
 
-		$state_directory = null;
+		$state_dir       = null;
 		$filesystem_root = null;
 		$options         = [
 			'abort'         => false,
@@ -106,7 +106,7 @@ class CliArgumentParser {
 			$this->store_value(
 				$option,
 				$value,
-				$state_directory,
+				$state_dir,
 				$filesystem_root,
 				$options
 			);
@@ -116,7 +116,7 @@ class CliArgumentParser {
 		return CliInvocation::from_parsed_input(
 			$command,
 			$positional_arguments,
-			$state_directory,
+			$state_dir,
 			$filesystem_root,
 			$options,
 			$arguments
@@ -203,12 +203,12 @@ class CliArgumentParser {
 	private function store_value(
 		CliOption $option,
 		$value,
-		?string &$state_directory,
+		?string &$state_dir,
 		?string &$filesystem_root,
 		array &$options
 	): void {
 		if ( $option->target === 'state_dir' ) {
-			$state_directory = $value;
+			$state_dir = $value;
 			return;
 		}
 		if ( $option->target === 'filesystem_root' ) {
