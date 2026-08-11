@@ -5,7 +5,7 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.php';
 
-class URLInPotentiallyStructuredTextProcessorExportCorpusTest extends TestCase {
+class LimitedURLBaseInOpaqueTextProcessorExportCorpusTest extends TestCase {
     private const SOURCE_URL = 'https://source.example/wp-content/uploads';
     private const TARGET_URL = 'https://destination.example/wp-content/uploads';
 
@@ -307,7 +307,7 @@ class URLInPotentiallyStructuredTextProcessorExportCorpusTest extends TestCase {
 
     private function rewrite(string $text, ?array $mapping = null): string
     {
-        $processor = new URLInPotentiallyStructuredTextProcessor(
+        $processor = new LimitedURLBaseInOpaqueTextProcessor(
             $text,
             $mapping ?? [self::SOURCE_URL => self::TARGET_URL]
         );

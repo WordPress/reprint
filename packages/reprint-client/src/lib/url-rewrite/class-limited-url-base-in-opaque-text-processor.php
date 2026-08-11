@@ -46,7 +46,7 @@
  * fragment suffixes after it, remain untouched.
  */
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
-class URLInPotentiallyStructuredTextProcessor {
+class LimitedURLBaseInOpaqueTextProcessor {
     /**
      * @var array<int, array{
      *     source_authority: string,

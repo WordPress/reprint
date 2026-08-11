@@ -5,7 +5,7 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.php';
 
-class URLInPotentiallyStructuredTextProcessorTest extends TestCase {
+class LimitedURLBaseInOpaqueTextProcessorTest extends TestCase {
     private const SOURCE_URL = 'https://source.example/media';
     private const SAME_PATH_TARGET_URL = 'http://destination.example/media';
     private const DIFFERENT_PATH_TARGET_URL = 'http://destination.example/assets';
@@ -15,7 +15,7 @@ class URLInPotentiallyStructuredTextProcessorTest extends TestCase {
      */
     private function rewrite(string $text, array $mapping): string
     {
-        $processor = new URLInPotentiallyStructuredTextProcessor($text, $mapping);
+        $processor = new LimitedURLBaseInOpaqueTextProcessor($text, $mapping);
 
         while ($processor->next_url()) {
             $processor->replace_url_base();
