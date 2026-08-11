@@ -650,7 +650,7 @@ class PushPlan
         $local_relative_path = $this->index_diff->get_path();
         $local_index_path_type = $this->index_diff->get_path_type_in_old_index();
         $fresh_local_index_path_type = $this->index_diff->get_path_type_in_new_index();
-        $local_path_change = $this->index_diff->get_path_change();
+        $local_path_transition = $this->index_diff->get_path_transition();
         $fresh_local_index_entry_shape = $fresh_local_index_path_type === null
             ? null
             : $this->index_entry_shape($fresh_local_index_path_type);
@@ -681,7 +681,7 @@ class PushPlan
             }
         }
 
-        if ($local_path_change === "added") {
+        if ($local_path_transition === "added") {
             // New files, symlinks, and empty directories need to be pushed.
             // A NUL byte cannot occur in an indexed path, so it cannot match
             // when the old index has no following path.
@@ -723,7 +723,7 @@ class PushPlan
                     $local_file_bytes_to_push += $fresh_local_index_size;
                 }
             }
-        } elseif ($local_path_change === "deleted") {
+        } elseif ($local_path_transition === "deleted") {
             $local_empty_directory_is_implied_by_fresh_descendant =
                 $local_index_entry_shape === "empty_directory"
                 && $this->fresh_index_contains_path_or_descendant(
@@ -769,7 +769,7 @@ class PushPlan
             // size. Only modified files and symlinks need to be uploaded.
             $changed_file_or_symlink_needs_push =
                 $fresh_local_index_entry_is_file_or_symlink
-                && $local_path_change === "modified";
+                && $local_path_transition === "modified";
             $needs_delete =
                 $fresh_local_index_entry_is_file_or_symlink
                 !== $local_index_entry_is_file_or_symlink;

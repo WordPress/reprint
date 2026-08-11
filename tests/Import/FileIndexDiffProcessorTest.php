@@ -97,11 +97,11 @@ final class FileIndexDiffProcessorTest extends TestCase
                 'd-size-changed.txt' => 'modified',
                 'e-ctime-changed.txt' => 'modified',
                 'f-unchanged.txt' => 'unchanged',
-            ] as $path => $change
+            ] as $path => $transition
         ) {
             $this->assertTrue($processor->next_path());
             $this->assertSame($path, $processor->get_path());
-            $this->assertSame($change, $processor->get_path_change());
+            $this->assertSame($transition, $processor->get_path_transition());
         }
         $this->assertFalse($processor->next_path());
         $processor->close();

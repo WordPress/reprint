@@ -42,7 +42,7 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * `wp-content/a.txt`, the current path has no old entry and
  * `get_path_type_in_old_index()` returns null.
  *
- * The processor labels that snapshot difference through `get_path_change()`.
+ * The processor labels that snapshot difference through `get_path_transition()`.
  * It does not decide whether to copy, remove, or preserve a path. That policy
  * remains with the caller.
  *
@@ -83,7 +83,7 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  *     while ($has_path) {
  *         apply_path_operation(
  *             $processor->get_path(),
- *             $processor->get_path_change()
+ *             $processor->get_path_transition()
  *         );
  *         $has_path = $processor->next_path();
  *         save_cursor($processor->get_cursor());
@@ -339,7 +339,7 @@ final class FileIndexDiffProcessor
     }
 
     /**
-     * Returns how the current path differs between the two snapshots.
+     * Returns the current path's transition from the old to the new snapshot.
      *
      * A path is `added` when it occurs only in the new index and `deleted` when
      * it occurs only in the old index. A path present in both is `modified`
@@ -350,7 +350,7 @@ final class FileIndexDiffProcessor
      * @return string One of `added`, `modified`, `deleted`, or `unchanged`.
      * @phpstan-return 'added'|'modified'|'deleted'|'unchanged'
      */
-    public function get_path_change(): string
+    public function get_path_transition(): string
     {
         $this->assert_current_path();
         if ($this->current_path_found_in === "new") {
