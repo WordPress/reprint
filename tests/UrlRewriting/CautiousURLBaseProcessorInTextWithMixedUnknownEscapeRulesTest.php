@@ -131,6 +131,66 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https:\\/\\/destination.example\\/logo.png',
                 ['https://source.example/media' => 'https://destination.example'],
             ],
+            'escaped JSON in a shortcode attribute' => [
+                '[builder config="{\\"image\\":\\"https:\\/\\/source.example\\/media\\/hero.jpg\\"}"]',
+                '[builder config="{\\"image\\":\\"https:\\/\\/destination.example\\/media\\/hero.jpg\\"}"]',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'multiply escaped JSON in an HTML attribute' => [
+                '<div data-builder="{\\\"image\\\":\\\"https:\\\\\\/\\\\\\/source.example\\\\\\/media\\\\\\/hero.jpg\\\"}"></div>',
+                '<div data-builder="{\\\"image\\\":\\\"https:\\\\\\/\\\\\\/destination.example\\\\\\/media\\\\\\/hero.jpg\\\"}"></div>',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'JSON-LD script text with escaped slashes' => [
+                '<script type="application/ld+json">{"@context":"https://schema.org","url":"https:\\/\\/source.example\\/products\\/boat"}</script>',
+                '<script type="application/ld+json">{"@context":"https://schema.org","url":"https:\\/\\/destination.example\\/products\\/boat"}</script>',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'entity-quoted JSON-LD in an HTML attribute' => [
+                '<div data-schema="{&quot;url&quot;:&quot;https:\\/\\/source.example\\/products\\/boat&quot;}"></div>',
+                '<div data-schema="{&quot;url&quot;:&quot;https:\\/\\/destination.example\\/products\\/boat&quot;}"></div>',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'escaped block markup in a shortcode text leaf' => [
+                '[vc_column_text]<!-- wp:image {\\"url\\":\\"https:\\/\\/source.example\\/media\\/hero.jpg\\"} --><figure><img src=\\"https:\\/\\/source.example\\/media\\/hero.jpg\\"></figure><!-- \\/wp:image -->[/vc_column_text]',
+                '[vc_column_text]<!-- wp:image {\\"url\\":\\"https:\\/\\/destination.example\\/media\\/hero.jpg\\"} --><figure><img src=\\"https:\\/\\/destination.example\\/media\\/hero.jpg\\"></figure><!-- \\/wp:image -->[/vc_column_text]',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'CSS image-set with literal and escaped URLs' => [
+                '[vc_column css=".hero{background-image:image-set(url(https://source.example/media/a.png) 1x,url(https:\\/\\/source.example\\/media\\/b.png) 2x);}"]',
+                '[vc_column css=".hero{background-image:image-set(url(https://destination.example/media/a.png) 1x,url(https:\\/\\/destination.example\\/media\\/b.png) 2x);}"]',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'HTML source set with literal and escaped URLs' => [
+                '<img srcset="https://source.example/media/a.png 1x, https:\\/\\/source.example\\/media\\/b.png 2x">',
+                '<img srcset="https://destination.example/media/a.png 1x, https:\\/\\/destination.example\\/media\\/b.png 2x">',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'emoji and multibyte bytes after the configured base' => [
+                'https://source.example/media/🚤.jpg?caption=🌊',
+                'https://destination.example/media/🚤.jpg?caption=🌊',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'control and high bytes after the configured base' => [
+                "https://source.example/media/logo.png?raw=\x1F\x7F\x80",
+                "https://destination.example/media/logo.png?raw=\x1F\x7F\x80",
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'source base path with accepted punctuation bytes' => [
+                'https://source.example/media[old]{v1}!/logo.png',
+                'https://destination.example/logo.png',
+                ['https://source.example/media[old]{v1}!' => 'https://destination.example'],
+            ],
+            'HTTP source mapping preserves the candidate protocol' => [
+                'http://source.example/media/logo.png',
+                'http://destination.example/media/logo.png',
+                ['http://source.example' => 'https://destination.example'],
+            ],
+            'exact scheme-less host beside a longer unrelated host' => [
+                'not-the-right-source.com source.com/media/logo.png',
+                'not-the-right-source.com destination.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
         ];
     }
 
@@ -244,6 +304,101 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://source.example:8443/media/logo.png',
                 'https://source.example:8443/media/logo.png',
                 ['https://source.example/media' => 'https://destination.example'],
+            ],
+            'HTTPS mapping does not match an HTTP URL' => [
+                'http://source.com/media/logo.png',
+                'http://source.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'HTTPS mapping does not match an FTP URL' => [
+                'ftp://source.com/media/logo.png',
+                'ftp://source.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'HTTPS mapping does not match a protocol-relative URL' => [
+                '//source.com/media/logo.png',
+                '//source.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'host is a hyphenated suffix of another host' => [
+                'https://not-the-right-source.com/media/logo.png',
+                'https://not-the-right-source.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'host is a subdomain of the configured host' => [
+                'https://cdn.source.com/media/logo.png',
+                'https://cdn.source.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host is a prefix of a longer host' => [
+                'https://source.com.evil.example/media/logo.png',
+                'https://source.com.evil.example/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'candidate domain has an unconfigured port' => [
+                'https://source.com:8443/media/logo.png',
+                'https://source.com:8443/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'candidate IPv4 address has an unconfigured port' => [
+                'https://192.0.2.1:8443/media/logo.png',
+                'https://192.0.2.1:8443/media/logo.png',
+                ['https://192.0.2.1' => 'https://destination.com'],
+            ],
+            'candidate IPv6 address has an unconfigured port' => [
+                'https://[2001:db8::1]:8443/media/logo.png',
+                'https://[2001:db8::1]:8443/media/logo.png',
+                ['https://[2001:db8::1]' => 'https://destination.com'],
+            ],
+            'target domain contains an emoji' => [
+                'https://source.example/media/logo.png',
+                'https://source.example/media/logo.png',
+                ['https://source.example' => 'https://🚤.example'],
+            ],
+            'source domain contains an emoji' => [
+                'https://🚤.example/media/logo.png',
+                'https://🚤.example/media/logo.png',
+                ['https://🚤.example' => 'https://destination.example'],
+            ],
+            'configured source path contains an emoji' => [
+                'https://source.example/🚤/logo.png',
+                'https://source.example/🚤/logo.png',
+                ['https://source.example/🚤' => 'https://destination.example'],
+            ],
+            'configured source path contains a space byte' => [
+                'https://source.example/media archive/logo.png',
+                'https://source.example/media archive/logo.png',
+                ['https://source.example/media archive' => 'https://destination.example'],
+            ],
+            'configured source path contains a control byte' => [
+                "https://source.example/media\x1Farchive/logo.png",
+                "https://source.example/media\x1Farchive/logo.png",
+                ["https://source.example/media\x1Farchive" => 'https://destination.example'],
+            ],
+            'configured source path contains a DEL byte' => [
+                "https://source.example/media\x7Farchive/logo.png",
+                "https://source.example/media\x7Farchive/logo.png",
+                ["https://source.example/media\x7Farchive" => 'https://destination.example'],
+            ],
+            'configured source path contains a high byte' => [
+                "https://source.example/media\x80archive/logo.png",
+                "https://source.example/media\x80archive/logo.png",
+                ["https://source.example/media\x80archive" => 'https://destination.example'],
+            ],
+            'protocol separators use two backslashes' => [
+                'https:\\\\/\\\\/source.example\\\\/media\\\\/logo.png',
+                'https:\\\\/\\\\/source.example\\\\/media\\\\/logo.png',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'protocol separators are percent encoded' => [
+                'https%3A%2F%2Fsource.example%2Fmedia%2Flogo.png',
+                'https%3A%2F%2Fsource.example%2Fmedia%2Flogo.png',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'protocol separators are HTML entities' => [
+                'https&colon;&sol;&sol;source.example&sol;media&sol;logo.png',
+                'https&colon;&sol;&sol;source.example&sol;media&sol;logo.png',
+                ['https://source.example' => 'https://destination.example'],
             ],
         ];
     }
