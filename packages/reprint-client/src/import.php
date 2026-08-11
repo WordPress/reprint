@@ -3571,6 +3571,22 @@ class ImportClient
                                         . $local_absolute_path . "."
                                 );
                             }
+                            if ($local_path_transition === "added") {
+                                // Non-empty directories have no index entry of
+                                // their own. Removing their added descendants
+                                // can leave empty implicit ancestors behind.
+                                $local_parent_path = dirname($local_absolute_path);
+                                while (
+                                    $local_parent_path !== $this->filesystem_root
+                                    && path_is_within_root(
+                                        $local_parent_path,
+                                        $this->filesystem_root
+                                    )
+                                    && @rmdir($local_parent_path)
+                                ) {
+                                    $local_parent_path = dirname($local_parent_path);
+                                }
+                            }
                         }
                         if (
                             $changed_local_root === null
