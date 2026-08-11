@@ -87,6 +87,31 @@ class TypeSwapTest extends TestCase
     }
 
     /**
+     * create_directory_if_missing should not follow a symlink beyond the filesystem root.
+     */
+    public function testEnsureDirectoryPathRejectsExternalSymlink(): void
+    {
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $fsRoot = realpath($this->tempDir . '/fs-root');
+        $this->assertIsString($fsRoot);
+
+        $externalDirectory = $this->tempDir . '/external-directory';
+        mkdir($externalDirectory, 0755);
+        symlink($externalDirectory, $fsRoot . '/shared-directory');
+
+        $reflection = new \ReflectionClass($client);
+        $method = $reflection->getMethod('create_directory_if_missing');
+        try {
+            $method->invoke($client, $fsRoot . '/shared-directory/child');
+            $this->fail('A symlink outside the filesystem root was followed.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('outside filesystem root', $exception->getMessage());
+        }
+
+        $this->assertDirectoryDoesNotExist($externalDirectory . '/child');
+    }
+
+    /**
      * A file chunk should replace a symlink-to-directory with a regular file.
      */
     public function testFileChunkReplacesSymlinkToDirectory()

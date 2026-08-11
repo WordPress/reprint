@@ -141,7 +141,9 @@ function generate_runtime_php(RuntimeManifest $manifest, string $filesystem_root
  */
 function generate_sqlite_loader_code(array $sqlite): string
 {
-    $plugin_dir = addslashes($sqlite['plugin_dir']);
+    $integration_path = addslashes(
+        wp_join_unix_paths($sqlite['plugin_dir'], '/wp-includes/sqlite/db.php')
+    );
     $db_dir = addslashes($sqlite['db_dir']);
     $db_file = addslashes($sqlite['db_file']);
 
@@ -196,7 +198,7 @@ class Streaming_SQLite_Loader {
 PROXY_BODY
     . "\n"
     // Inject the resolved plugin path into the loader method.
-    . "        \$integration = '{$plugin_dir}/wp-includes/sqlite/db.php';\n"
+    . "        \$integration = '{$integration_path}';\n"
     . <<<'PROXY_TAIL'
         require_once $integration;
         if ($GLOBALS['wpdb'] === $this) {

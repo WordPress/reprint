@@ -144,6 +144,20 @@ class SqliteRuntimeConfigTest extends TestCase
         $this->assertStringContainsString("Constant already defined", $runtime);
     }
 
+    public function testSqliteLoaderJoinsThePluginDirectoryAndIntegrationPath(): void
+    {
+        $runtime = \generate_sqlite_loader_code([
+            'plugin_dir' => '/runtime/sqlite-database-integration/',
+            'db_dir' => '/runtime/database/',
+            'db_file' => '.ht.sqlite',
+        ]);
+
+        $this->assertStringContainsString(
+            "\$integration = '/runtime/sqlite-database-integration/wp-includes/sqlite/db.php';",
+            $runtime,
+        );
+    }
+
     public function testDefaultSqlitePathKeepsTheRootContentDirectory(): void
     {
         if (!extension_loaded('pdo_sqlite')) {

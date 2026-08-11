@@ -6042,13 +6042,7 @@ class ImportClient
         $retained_plugins = [];
         while ($processor->next_value()) {
             $basename = $processor->get_value();
-            $is_match = false;
-            foreach ($plugin_dirs as $dir) {
-                if (strpos($basename, $dir . '/') === 0) {
-                    $is_match = true;
-                    break;
-                }
-            }
+            $is_match = path_is_descendant_of($basename, $plugin_dirs);
             if ($is_match) {
                 $deactivated_plugins[] = $basename;
             } else {
@@ -9581,35 +9575,21 @@ class ImportClient
         // Security: Ensure path is under the filesystem root
         $real_filesystem_root = $this->filesystem_root;
 
-        // Resolve the target path (or what it would be)
-        // For non-existent paths, resolve the parent and append the final component
-        $check_path = $dir;
-        while (
-            !file_exists($check_path) &&
-            $check_path !== dirname($check_path)
-        ) {
-            $check_path = dirname($check_path);
-        }
-
-        if (file_exists($check_path)) {
-            $real_check = realpath($check_path);
-            if (
-                $real_check === false ||
-                !path_is_same_as_or_descendant_of($real_check, $real_filesystem_root)
-            ) {
-                // In preserve-local mode, a path that resolves outside the
-                // filesystem root is expected when a directory like wp-content/plugins
-                // is symlinked to a shared hosting location.  Skip gracefully
-                // instead of treating it as a security violation.
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: path resolves outside filesystem root via symlink: {$dir}",
-                    );
-                }
-                throw new RuntimeException(
-                    "Security: Refusing to create directory outside filesystem root: {$dir}",
+        // Resolve the nearest existing ancestor while retaining any missing tail.
+        $resolved_directory = realpath_with_missing_tail($dir);
+        if (!path_is_same_as_or_descendant_of($resolved_directory, $real_filesystem_root)) {
+            // In preserve-local mode, a path that resolves outside the
+            // filesystem root is expected when a directory like wp-content/plugins
+            // is symlinked to a shared hosting location.  Skip gracefully
+            // instead of treating it as a security violation.
+            if ($this->fs_root_nonempty_behavior === 'preserve-local') {
+                throw new PreserveLocalSkipException(
+                    "PRESERVE-LOCAL: path resolves outside filesystem root via symlink: {$dir}",
                 );
             }
+            throw new RuntimeException(
+                "Security: Refusing to create directory outside filesystem root: {$dir}",
+            );
         }
 
         if (is_dir($dir) && !is_link($dir)) {
