@@ -1,69 +1,72 @@
 <?php
 
 /**
- * Replaces a configured URL base in text whose format is unknown.
+ * Replaces a known URL base without interpreting the surrounding text.
  *
- * Given this escaped shortcode:
+ * For example, given this shortcode:
  *
  * ```
- * [vc_video link="https:\/\/source.example\/wp-content\/uploads\/2026\/01\/video.mp4"]
+ * [vc_video link="https:\/\/source.example\/wp-content\/uploads\/video.mp4"]
  * ```
  *
- * and this domain-to-domain mapping:
+ * and this mapping:
  *
  * ```
  * https://source.example => https://destination.example
  * ```
  *
- * it replaces the complete configured base, source.example, and produces:
+ * the result is:
  *
  * ```
- * [vc_video link="https:\/\/destination.example\/wp-content\/uploads\/2026\/01\/video.mp4"]
+ * [vc_video link="https:\/\/destination.example\/wp-content\/uploads\/video.mp4"]
  * ```
  *
- * The protocol, escaped path, and shortcode syntax are outside the configured
- * base, so they remain byte-for-byte identical.
+ * The configured base is source.example, so that is the complete byte range
+ * replaced. The protocol, escaped slashes, path, and shortcode syntax are not
+ * part of the base and remain unchanged.
  *
- * The motivation is boring: opaque text has no reliable escape contract. A
- * backslash may belong to JSON, CSS, a shortcode, HTML, or an application
- * convention. This class therefore replaces one exact source-base slice with
- * one target domain. It never parses, decodes, normalizes, or re-encodes input
- * URL bytes.
+ * This processor is for text whose escaping rules are unknown. The backslashes
+ * above might come from JSON, CSS, a shortcode serializer, or another format.
+ * Parsing the URL and writing it back would force this processor to choose one
+ * of those formats and could corrupt the value.
  *
- * It handles these cases:
+ * Instead, the processor performs one narrow operation: find the configured
+ * source base as bytes and replace that entire slice with a target domain. It
+ * does not decode, normalize, or re-encode the input.
  *
- * - A domain-to-domain mapping in literal, scheme-less, or slash-escaped URLs.
- * - A source base with an initial ASCII path when the target has no path. The
- *   entire source base is removed as one slice. For example, mapping
- *   https://source.example/media to https://destination.example changes
+ * Supported sources:
+ *
+ * - ASCII domains and IPv4 or IPv6 addresses, with an optional port.
+ * - An optional initial ASCII path. That path is part of the source base and is
+ *   removed with it. Mapping https://source.example/media to
+ *   https://destination.example changes
  *   https://source.example/media/logo.png to
  *   https://destination.example/logo.png.
- * - HTTP(S) spellings with one or three backslashes before the colon and/or
- *   either slash: https:\/\/, https\:\/\/, and https:\\\/\\\/.
- * - An ASCII source domain, or an IPv4 or IPv6 source address with an optional
- *   port. Punycode destination domains are accepted.
- * - User information before the source authority, and query and fragment
- *   suffixes after the base. Those bytes remain untouched.
+ * - Literal, scheme-less, and slash-escaped URL spellings. The recognized
+ *   HTTP(S) separators may have one or three preceding backslashes, including
+ *   https:\/\/, https\:\/\/, and https:\\\/\\\/.
+ * - Candidate URLs with user information before the authority, and path,
+ *   query, or fragment bytes after the configured base. Those bytes are
+ *   outside the replacement.
  *
- * It deliberately does not handle these cases:
+ * Unsupported mappings are discarded as a whole. There is no partial
+ * replacement:
  *
- * - A target with a path. Inserting that path would require deciding whether
- *   its separators should be /, \/, or another representation. The complete
- *   mapping is ignored; the processor does not fall back to changing only the
- *   domain.
- * - CSS hexadecimal escapes such as https\3a \2f \2f ..., percent-encoded
- *   separators, a Unicode destination domain, or an IPv4/IPv6 destination.
- *   Those require a parser that knows the surrounding format.
- * - A complete PHP serialization, JSON document, or block-markup value. Call
- *   this only for a text leaf after the processor for that format has exposed
- *   it. This class cannot preserve a representation it did not parse.
+ * - A target path is not supported. Writing it would require choosing whether
+ *   each slash should be /, \/, or something else.
+ * - Target ports, user information, queries, fragments, IPv4/IPv6 addresses,
+ *   and Unicode domains are not supported. Punycode domains are supported.
+ * - Unicode source domains and paths are not supported.
  *
- * Source authorities and paths match as exact ASCII bytes; case variants are
- * not equivalent here. A candidate scheme starts at the beginning of the value
- * or after any byte other than an ASCII letter, plus sign, or hyphen. This
- * accepts a URL after an equals sign, while rejecting a URL embedded in an
- * identifier or a longer scheme name. A scheme-less authority has a stronger
- * left boundary so it cannot match the host portion of a malformed URL.
+ * CSS hexadecimal escapes such as https\3a \2f \2f ... and percent-encoded
+ * separators are not recognized. They need a parser for the enclosing format.
+ * Complete PHP serializations, JSON documents, and block markup must likewise
+ * be parsed first; pass only the resulting text leaves to this processor.
+ *
+ * Matching is byte-for-byte and case-sensitive. A scheme may begin at the
+ * start of the value or after a byte other than an ASCII letter, plus sign, or
+ * hyphen. Scheme-less authorities use a stricter boundary so the scanner does
+ * not mistake part of another URL or identifier for a match.
  *
  * Example usage:
  *
@@ -116,10 +119,10 @@ class LimitedURLBaseInOpaqueTextProcessor {
     private array $lexical_updates = [];
 
     /**
-     * Construct a processor for one opaque text value.
+     * Creates a processor for one opaque text value.
      *
-     * Each mapping uses a complete HTTP(S) source URL base and a target URL
-     * containing only its domain. For example:
+     * A source may include an initial ASCII path. A target must be an HTTP(S)
+     * URL with a supported domain and no path or other URL components:
      *
      * ```
      * [
@@ -127,9 +130,8 @@ class LimitedURLBaseInOpaqueTextProcessor {
      * ]
      * ```
      *
-     * A matching occurrence replaces source.example/media as one slice. A
-     * target path, port, IP address, user information, query, or fragment makes
-     * the mapping unsupported, so that mapping is ignored entirely.
+     * Invalid mappings are skipped as a whole. They cannot produce a partial
+     * domain replacement.
      *
      * @param array<string, string> $url_mapping Source URL base => target URL.
      */
@@ -153,12 +155,11 @@ class LimitedURLBaseInOpaqueTextProcessor {
     }
 
     /**
-     * Find the next configured source URL base in the text.
+     * Finds the next configured source URL base.
      *
-     * A current URL remains available until the next call. Call
-     * replace_url_base() to queue the base replacement, then call this method
-     * again. Calling replace_url_base() is optional: advancing skips that
-     * match without changing it.
+     * The match remains current until the next call. Call replace_url_base()
+     * first to queue its replacement. Calling next_url() again without doing
+     * so skips the current match.
      */
     public function next_url(): bool
     {
@@ -172,13 +173,12 @@ class LimitedURLBaseInOpaqueTextProcessor {
     }
 
     /**
-     * Queue replacement of the complete current source URL base.
+     * Queues replacement of the complete current source base.
      *
-     * A mapping from source.example/media to destination.example turns
-     * https://source.example/media/logo.png into
-     * https://destination.example/logo.png. It never keeps /media after
-     * claiming to replace that source base, and it never falls back to a
-     * domain-only replacement for an unsupported target mapping.
+     * Mapping source.example/media to destination.example changes
+     * https://source.example/media/logo.png to
+     * https://destination.example/logo.png. The protocol and logo.png suffix
+     * are outside the matched base and remain unchanged.
      */
     public function replace_url_base(): bool
     {
@@ -196,11 +196,9 @@ class LimitedURLBaseInOpaqueTextProcessor {
     }
 
     /**
-     * Return the input with queued URL-base replacements applied.
+     * Returns the input with all queued base replacements applied.
      *
-     * This does not mutate the original text. Bytes outside queued URL-base
-     * ranges, including URL suffixes and unrelated escape bytes, are copied
-     * exactly.
+     * Bytes outside the queued ranges are copied unchanged.
      */
     public function get_updated_text(): string
     {
