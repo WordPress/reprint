@@ -3529,7 +3529,7 @@ class ImportClient
 
                 while (
                     $changed_local_root !== null
-                    && !path_is_within_root(
+                    && !path_is_same_as_or_descendant_of(
                         $local_relative_path,
                         $changed_local_root["path"]
                     )
@@ -3578,7 +3578,7 @@ class ImportClient
                                 $local_parent_path = dirname($local_absolute_path);
                                 while (
                                     $local_parent_path !== $this->filesystem_root
-                                    && path_is_within_root(
+                                    && path_is_same_as_or_descendant_of(
                                         $local_parent_path,
                                         $this->filesystem_root
                                     )
@@ -3590,7 +3590,7 @@ class ImportClient
                         }
                         if (
                             $changed_local_root === null
-                            || !path_is_within_root(
+                            || !path_is_same_as_or_descendant_of(
                                 $local_relative_path,
                                 $changed_local_root["path"]
                             )
@@ -3641,7 +3641,7 @@ class ImportClient
                 ) {
                     if (
                         $changed_local_root !== null
-                        && path_is_within_root(
+                        && path_is_same_as_or_descendant_of(
                             $local_relative_path,
                             $changed_local_root["path"]
                         )
@@ -3781,7 +3781,7 @@ class ImportClient
             $this->filesystem_root,
             $local_relative_path
         );
-        if (path_is_within_root($local_absolute_path, $this->state_dir)) {
+        if (path_is_same_as_or_descendant_of($local_absolute_path, $this->state_dir)) {
             return false;
         }
 
@@ -3790,7 +3790,7 @@ class ImportClient
             $local_prefix = $this->map_remote_absolute_path_to_local_absolute_path(
                 $remote_prefix
             );
-            if (path_is_within_root($local_absolute_path, $local_prefix)) {
+            if (path_is_same_as_or_descendant_of($local_absolute_path, $local_prefix)) {
                 $selected = true;
                 break;
             }
@@ -3802,7 +3802,7 @@ class ImportClient
             $local_prefix = $this->map_remote_absolute_path_to_local_absolute_path(
                 $remote_prefix
             );
-            if (path_is_within_root($local_absolute_path, $local_prefix)) {
+            if (path_is_same_as_or_descendant_of($local_absolute_path, $local_prefix)) {
                 return false;
             }
         }
