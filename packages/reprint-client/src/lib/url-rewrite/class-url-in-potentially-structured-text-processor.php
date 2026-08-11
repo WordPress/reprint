@@ -322,7 +322,7 @@ class URLInPotentiallyStructuredTextProcessor {
         $path = isset($parts['path']) ? (string) $parts['path'] : '';
         if (( $scheme !== 'http' && $scheme !== 'https' )
             || ( !$allow_ip_and_port && array_key_exists('port', $parts) )
-            || !( $this->is_ascii_domain($host) || ( $allow_ip_and_port && $this->is_ip_address($host) ) )
+            || !( $this->is_alphanumeric_dot_hyphen_domain_name($host) || ( $allow_ip_and_port && $this->is_ip_address($host) ) )
             || !$this->is_ascii_path($path)) {
             return null;
         }
@@ -340,7 +340,7 @@ class URLInPotentiallyStructuredTextProcessor {
         return filter_var(trim($host, '[]'), FILTER_VALIDATE_IP) !== false;
     }
 
-    private function is_ascii_domain(string $domain): bool
+    private function is_alphanumeric_dot_hyphen_domain_name(string $domain): bool
     {
         return filter_var($domain, FILTER_VALIDATE_IP) === false
             && preg_match('/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/', $domain) === 1;
