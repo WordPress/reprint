@@ -32,6 +32,7 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
  * base processor should update those spans without decoding and re-encoding
  * their enclosing format. Once that exists, this subclass should disappear.
  *
+ * @method string get_modifiable_text()
  * @method bool set_modifiable_text(string $plaintext_content)
  * @property array<string, WP_HTML_Text_Replacement> $lexical_updates
  */
