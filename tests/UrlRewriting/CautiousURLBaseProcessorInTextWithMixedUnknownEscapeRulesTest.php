@@ -191,6 +191,16 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'not-the-right-source.com destination.com/media/logo.png',
                 ['https://source.com' => 'https://destination.com'],
             ],
+            'only standalone scheme-less host outside another URL path' => [
+                'site.com/source.com/media/logo.png source.com/media/logo.png',
+                'site.com/source.com/media/logo.png destination.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'outer URL path stays unchanged while full query URL is rewritten' => [
+                'https://site.com/source.com/media?next=https://source.com/media/logo.png',
+                'https://site.com/source.com/media?next=https://destination.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
         ];
     }
 
@@ -399,6 +409,56 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https&colon;&sol;&sol;source.example&sol;media&sol;logo.png',
                 'https&colon;&sol;&sol;source.example&sol;media&sol;logo.png',
                 ['https://source.example' => 'https://destination.example'],
+            ],
+            'configured host appears in another absolute URL path' => [
+                'https://site.com/source.com/media/logo.png',
+                'https://site.com/source.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host appears in another scheme-less URL path' => [
+                'site.com/source.com/media/logo.png',
+                'site.com/source.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host follows an escaped outer path separator' => [
+                'https:\\/\\/site.com\\/source.com\\/media\\/logo.png',
+                'https:\\/\\/site.com\\/source.com\\/media\\/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host follows a percent-encoded outer path separator' => [
+                'https://site.com/path%2Fsource.com/media/logo.png',
+                'https://site.com/path%2Fsource.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host is the username of another URL' => [
+                'https://source.com@site.com/media/logo.png',
+                'https://source.com@site.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host is part of the password of another URL' => [
+                'https://user:source.com@site.com/media/logo.png',
+                'https://user:source.com@site.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host is the prefix of a filename' => [
+                'https://site.com/media/source.com.png',
+                'https://site.com/media/source.com.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'candidate authority has a trailing dot' => [
+                'https://source.com./media/logo.png',
+                'https://source.com./media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'longer unrelated host appears in an outer query value' => [
+                'https://site.com/?next=not-the-right-source.com/media/logo.png',
+                'https://site.com/?next=not-the-right-source.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host follows another host inside an outer query value' => [
+                'https://site.com/?path=site.com/source.com/media/logo.png',
+                'https://site.com/?path=site.com/source.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
             ],
         ];
     }
