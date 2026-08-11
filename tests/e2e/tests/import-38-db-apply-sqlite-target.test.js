@@ -12,8 +12,9 @@ import { ensureSite } from '../lib/site-setup.js';
 describe('Import: SQLite db-apply target', () => {
     const site = 'basic';
     const targetDb = 'wp_sqlite_import';
-    const targetDomain = 'https://sqlite-target.example.com';
+    const targetBaseUrl = 'https://sqlite-target.example.com';
     const sourceDomain = new URL(getSiteUrl(site)).origin;
+    const expectedTargetUrl = `${new URL(sourceDomain).protocol}//sqlite-target.example.com`;
     let tempDir;
     let sqlitePath;
 
@@ -48,7 +49,7 @@ describe('Import: SQLite db-apply target', () => {
                 '--target-engine=sqlite',
                 `--target-sqlite-path=${sqlitePath}`,
                 `--target-db=${targetDb}`,
-                '--rewrite-url', sourceDomain, targetDomain,
+                '--rewrite-url', sourceDomain, targetBaseUrl,
             ],
         });
 
@@ -74,7 +75,7 @@ describe('Import: SQLite db-apply target', () => {
         assert.equal(options.length, 2, `Expected siteurl/home rows, got: ${JSON.stringify(options)}`);
         for (const row of options) {
             assert.ok(
-                row.option_value.includes(targetDomain),
+                row.option_value.includes(expectedTargetUrl),
                 `Expected rewritten target domain in ${row.option_name}, got: ${row.option_value}`,
             );
             assert.ok(

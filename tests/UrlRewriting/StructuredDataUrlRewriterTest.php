@@ -71,12 +71,15 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertEquals($input, $result);
     }
 
-    public function testDoesNotRewriteQueryString(): void
+    public function testRewritesUrlValuedQueryString(): void
     {
         $rewriter = $this->createRewriter();
         $input = 'Visit us at https://webarchive.org?url=https://old-site.com/about for more info.';
         $result = $rewriter->rewrite($input);
-        $this->assertEquals($input, $result);
+        $this->assertSame(
+            'Visit us at https://webarchive.org?url=https://new-site.com/about for more info.',
+            $result
+        );
     }
 
     // --- JSON content ---
@@ -197,16 +200,24 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($input, $result, 'Serialized PHP with no matching URLs should be byte-identical');
     }
 
-    public function testMalformedSerializedPhpFallsBackToText(): void
+    public function testMalformedSerializedPhpRemainsOpaque(): void
     {
         $rewriter = $this->createRewriter();
-        // SerializedPhpFormat::is_serialized() triggers on 's:...' ending with ';'
-        // but this is truncated/malformed — the walker will return false,
-        // falling back to text rewriting
+        // This resembles serialized PHP but is truncated/malformed. Replacing
+        // its quoted bytes could make a length-prefixed value inconsistent.
         $input = 's:999:"https://old-site.com";';
         $result = $rewriter->rewrite($input);
-        // Should have attempted text rewriting, replacing the URL
-        $this->assertStringContainsString('new-site.com', $result);
+        $this->assertSame($input, $result);
+    }
+
+    public function testMalformedJsonRemainsOpaque(): void
+    {
+        $rewriter = $this->createRewriter();
+        // This is not a complete JSON document. Replacing its quoted bytes
+        // would assume escape and string-boundary rules that were not parsed.
+        $input = '{"url":"https:\\/\\/old-site.com\\/page",}';
+
+        $this->assertSame($input, $rewriter->rewrite($input));
     }
 
     // --- Base64 ---

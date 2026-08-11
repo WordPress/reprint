@@ -1,7 +1,6 @@
 <?php
 
 use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
-use WordPress\DataLiberation\URL\URLInTextProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 
 use function WordPress\DataLiberation\URL\is_child_url_of;
@@ -19,14 +18,17 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
  * 3. Base64 → decode, recurse on decoded content, re-encode if changed
- * 4. Leaf text → BlockMarkupUrlProcessor (block_markup hint) or
- *    URLInTextProcessor (default)
+ * 4. A `data-settings` HTML attribute containing valid JSON → recurse on its
+ *    JSON string leaves
+ * 5. Leaf text → BlockMarkupUrlProcessor (block_markup hint) or
+ *    URLInPotentiallyStructuredTextProcessor (default)
  *
- * HTML is never auto-detected — the caller must explicitly pass
- * content_type='block_markup' for values known to contain HTML/block markup.
- * The hint propagates through recursive calls so that leaf strings inside
- * serialized PHP, JSON, or base64 eventually reach the same block-markup
- * parser.
+ * HTML is not broadly auto-detected. The narrow `data-settings` case is safe
+ * to recognize because both the HTML attribute and its JSON value must parse
+ * before this rewriter enters either layer. Other HTML/block markup requires
+ * content_type='block_markup'. The hint propagates through recursive calls so
+ * that leaf strings inside serialized PHP, JSON, or base64 eventually reach
+ * the same block-markup parser.
  */
 class StructuredDataUrlRewriter
 {
@@ -63,6 +65,9 @@ class StructuredDataUrlRewriter
     /** @var string Cache namespace for this rewriter's URL mapping. */
     private string $mapping_cache_key;
 
+    /** @var array<string, string> Source URL base => target URL base. */
+    private array $url_mapping;
+
     /** @var array<string, array{content_type: string, input: string, output: string}> */
     private array $structured_rewrite_cache = [];
 
@@ -84,6 +89,8 @@ class StructuredDataUrlRewriter
      */
     public function __construct(array $url_mapping)
     {
+        $this->url_mapping = $url_mapping;
+
         // Extract unique source domains for the quick-reject check.
         $domains = [];
         foreach (array_keys($url_mapping) as $from_url) {
@@ -134,7 +141,27 @@ class StructuredDataUrlRewriter
             $content_type = self::PLAIN_TEXT;
         }
 
-        $structured_cache_key = sha1($content_type . "\0" . $value);
+        return $this->rewrite_value($value, $content_type, false);
+    }
+
+    /**
+     * Rewrite a value, distinguishing top-level input from a string that an
+     * enclosing parser has already accepted.
+     *
+     * A malformed top-level PHP serialization or JSON value stays untouched:
+     * its enclosing escaping rules are unknown. A malformed nested candidate
+     * is instead ordinary text within a parser-confirmed string leaf, and may
+     * take the cautious opaque-text path.
+     */
+    private function rewrite_value(string $value, string $content_type, bool $is_parser_confirmed_string_leaf): string
+    {
+        if ($value === '') {
+            return $value;
+        }
+
+        $structured_cache_key = sha1(
+            $content_type . "\0" . ( $is_parser_confirmed_string_leaf ? 'leaf' : 'top-level' ) . "\0" . $value
+        );
         $cached = $this->get_cached_structured_rewrite($structured_cache_key, $content_type, $value);
         if ($cached !== null) {
             return $cached;
@@ -154,18 +181,21 @@ class StructuredDataUrlRewriter
         // cannot expose serialized string values for rewriting.
         if ($this->could_be_php_serialization_with_strings($value)) {
             $p = new PhpSerializationProcessor($value);
-            if (!$p->is_malformed()) {
-                while ($p->next_value()) {
-                    $original = $p->get_value();
-                    $rewritten = $this->rewrite($original, $content_type);
-                    if ($rewritten !== $original) {
-                        $p->set_value($rewritten);
-                    }
-                }
-                $rewritten_value = $p->get_updated_serialization();
-                $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
-                return $rewritten_value;
+            if ($p->is_malformed()) {
+                return $is_parser_confirmed_string_leaf
+                    ? $this->rewrite_leaf_text($value, $content_type)
+                    : $value;
             }
+            while ($p->next_value()) {
+                $original = $p->get_value();
+                $rewritten = $this->rewrite_value($original, $content_type, true);
+                if ($rewritten !== $original) {
+                    $p->set_value($rewritten);
+                }
+            }
+            $rewritten_value = $p->get_updated_serialization();
+            $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
+            return $rewritten_value;
         }
 
         // Performance guard: avoid calling json_decode() for ordinary URL
@@ -173,19 +203,20 @@ class StructuredDataUrlRewriter
         // once entered; this gate only skips first non-whitespace bytes that
         // cannot start a JSON value containing string leaves.
         if ($this->could_be_json_with_strings($value)) {
-            $iter = new JsonStringIterator($value);
-            if (!$iter->is_malformed()) {
-                while ($iter->next_value()) {
-                    $original = $iter->get_value();
-                    $rewritten = $this->rewrite($original, $content_type);
-                    if ($rewritten !== $original) {
-                        $iter->set_value($rewritten);
-                    }
-                }
-                $rewritten_value = $iter->get_result();
-                $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
-                return $rewritten_value;
+            $rewritten_value = $this->rewrite_json_value($value, $content_type);
+            if ($rewritten_value === null) {
+                return $is_parser_confirmed_string_leaf
+                    ? $this->rewrite_leaf_text($value, $content_type)
+                    : $value;
             }
+            $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
+            return $rewritten_value;
+        }
+
+        $rewritten_value = $this->rewrite_json_in_data_settings_attributes($value, $content_type);
+        if ($rewritten_value !== null) {
+            $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
+            return $rewritten_value;
         }
 
         // Base64 decoding is temporarily disabled for performance.
@@ -193,9 +224,112 @@ class StructuredDataUrlRewriter
         // Base64ValueScanner in SqlStatementRewriter — this block
         // was for base64-within-base64 nesting which is rare in practice.
 
-        $rewritten_value = $this->rewrite_urls($value, $content_type);
+        $rewritten_value = $this->rewrite_leaf_text($value, $content_type);
         $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
         return $rewritten_value;
+    }
+
+    /**
+     * Rewrite valid JSON while preserving its enclosing JSON representation.
+     *
+     * @return string|null Updated JSON, or null when the JSON is malformed.
+     */
+    private function rewrite_json_value(string $value, string $content_type): ?string
+    {
+        $iter = new JsonStringIterator($value);
+        if ($iter->is_malformed()) {
+            return null;
+        }
+
+        while ($iter->next_value()) {
+            $original = $iter->get_value();
+            $rewritten = $this->rewrite_value($original, $content_type, true);
+            if ($rewritten !== $original) {
+                $iter->set_value($rewritten);
+            }
+        }
+
+        return $iter->get_result();
+    }
+
+    /**
+     * Rewrite JSON stored in the page-builder `data-settings` HTML attribute.
+     *
+     * The tag processor must recognize the attribute and the JSON parser must
+     * accept its value. An invalid JSON value is deliberately left unchanged;
+     * this method still reports that it handled the surrounding structured
+     * value so the opaque-text path cannot guess at its escape rules.
+     *
+     * @return string|null Updated HTML, or null when no `data-settings` HTML
+     *                     attribute was found.
+     */
+    private function rewrite_json_in_data_settings_attributes(string $value, string $content_type): ?string
+    {
+        if (stripos($value, 'data-settings') === false) {
+            return null;
+        }
+
+        $processor = new WP_HTML_PHP_Tag_Processor($value);
+        $found_data_settings = false;
+        while ($processor->next_tag()) {
+            $original = $processor->get_attribute('data-settings');
+            if (!is_string($original)) {
+                continue;
+            }
+
+            $found_data_settings = true;
+            $rewritten = $this->rewrite_json_value($original, $content_type);
+            if ($rewritten !== null && $rewritten !== $original) {
+                $processor->set_attribute('data-settings', $rewritten);
+            }
+        }
+
+        return $found_data_settings ? $processor->get_updated_html() : null;
+    }
+
+    private function rewrite_leaf_text(string $value, string $content_type): string
+    {
+        $rewritten_value = $this->rewrite_urls($value, $content_type);
+
+        if ($content_type === self::BLOCK_MARKUP) {
+            return $this->rewrite_json_ld_script_elements($rewritten_value, $content_type);
+        }
+
+        return $rewritten_value;
+    }
+
+    /**
+     * Rewrite valid JSON-LD script contents without treating other scripts as
+     * structured data. JSON-LD is identified by the MIME type's essence, so a
+     * charset parameter does not prevent rewriting.
+     */
+    private function rewrite_json_ld_script_elements(string $value, string $content_type): string
+    {
+        if (stripos($value, 'application/ld+json') === false) {
+            return $value;
+        }
+
+        $processor = new WP_HTML_PHP_Tag_Processor($value);
+        while ($processor->next_token()) {
+            if ($processor->get_token_type() !== '#tag'
+                || $processor->get_tag() !== 'SCRIPT') {
+                continue;
+            }
+
+            $type = $processor->get_attribute('type');
+            if (!is_string($type)
+                || strtolower(trim(explode(';', $type, 2)[0])) !== 'application/ld+json') {
+                continue;
+            }
+
+            $original = $processor->get_modifiable_text();
+            $rewritten = $this->rewrite_json_value($original, $content_type);
+            if ($rewritten !== null && $rewritten !== $original) {
+                $processor->set_modifiable_text($rewritten);
+            }
+        }
+
+        return $processor->get_updated_html();
     }
 
     /**
@@ -244,9 +378,11 @@ class StructuredDataUrlRewriter
      *
      * This is a speed guard before constructing JsonStringIterator, whose
      * constructor calls json_decode(). Objects and arrays can contain nested
-     * string leaves, and JSON string scalars can themselves be rewritten. The
-     * iterator remains responsible for full JSON validation after this coarse
-     * first-byte check passes.
+     * string leaves, and JSON string scalars can themselves be rewritten. An
+     * array also checks its first non-whitespace value byte: a shortcode name
+     * such as `[vc_row ...]` cannot start JSON, while JSON's `true`, `false`,
+     * and `null` literals remain valid starts. The iterator remains
+     * responsible for full JSON validation after this syntax gate passes.
      */
     private function could_be_json_with_strings(string $value): bool
     {
@@ -257,7 +393,31 @@ class StructuredDataUrlRewriter
                 continue;
             }
 
-            return $byte === '{' || $byte === '[' || $byte === '"';
+            if ($byte !== '[') {
+                return $byte === '{' || $byte === '"';
+            }
+
+            for (++$i; $i < $length; $i++) {
+                $first_array_value_byte = $value[$i];
+                if ($first_array_value_byte === ' '
+                    || $first_array_value_byte === "\n"
+                    || $first_array_value_byte === "\r"
+                    || $first_array_value_byte === "\t") {
+                    continue;
+                }
+
+                return $first_array_value_byte === ']'
+                    || $first_array_value_byte === '{'
+                    || $first_array_value_byte === '['
+                    || $first_array_value_byte === '"'
+                    || $first_array_value_byte === '-'
+                    || ($first_array_value_byte >= '0' && $first_array_value_byte <= '9')
+                    || $first_array_value_byte === 't'
+                    || $first_array_value_byte === 'f'
+                    || $first_array_value_byte === 'n';
+            }
+
+            return true;
         }
 
         return false;
@@ -484,44 +644,9 @@ class StructuredDataUrlRewriter
                 return $p->get_updated_html();
 
             case self::PLAIN_TEXT:
-                $p = new URLInTextProcessor( $content, $base_url );
+                $p = new URLInPotentiallyStructuredTextProcessor($content, $this->url_mapping);
                 while ( $p->next_url() ) {
-                    $raw_url = $p->get_raw_url();
-                    $cache_key = $this->mapping_cache_key . "\0" . self::PLAIN_TEXT . "\0" . $raw_url;
-                    $cached = $this->get_cached_rewrite_result($cache_key);
-                    if ($cached !== null) {
-                        if ($cached !== false) {
-                            $p->set_raw_url($cached['raw_url']);
-                        }
-                        continue;
-                    }
-
-                    $parsed_url = $p->get_parsed_url();
-                    $converted = false;
-                    foreach ( $parsed_mapping as $mapping ) {
-                        if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
-                            $converted = WPURL::replace_base_url(
-                                $parsed_url,
-                                array(
-                                    'old_base_url' => $base_url,
-                                    'new_base_url' => $mapping['to_url'],
-                                    'raw_url'      => $p->get_raw_url(),
-                                    'is_relative'  => false,
-                                )
-                            );
-                            break;
-                        }
-                    }
-
-                    $cache_value = false;
-                    if ($converted !== false) {
-                        $cache_value = [
-                            'raw_url'    => (string) $converted,
-                            'parsed_url' => $converted->new_url,
-                        ];
-                        $p->set_raw_url($cache_value['raw_url']);
-                    }
-                    $this->set_cached_rewrite_result($cache_key, $cache_value);
+                    $p->replace_url_base();
                 }
 
                 return $p->get_updated_text();

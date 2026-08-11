@@ -24,7 +24,8 @@ describe('Import: URL Rewriting', () => {
     let tempDir;
     // Derive source domain from site registry so the port stays in sync
     const SOURCE_DOMAIN = new URL(getSiteUrl(site)).origin;
-    const TARGET_DOMAIN = 'https://target.example.com';
+    const TARGET_BASE_URL = 'https://target.example.com';
+    const EXPECTED_TARGET_URL = `${new URL(SOURCE_DOMAIN).protocol}//target.example.com`;
 
     beforeAll(async () => {
         await ensureSite(site, {
@@ -124,7 +125,7 @@ describe('Import: URL Rewriting', () => {
                 `--target-user=e2e_admin`,
                 `--target-pass=e2e_password`,
                 `--target-db=${importDb}`,
-                `--rewrite-url`, SOURCE_DOMAIN, TARGET_DOMAIN,
+                `--rewrite-url`, SOURCE_DOMAIN, TARGET_BASE_URL,
             ],
         });
 
@@ -203,13 +204,12 @@ describe('Import: URL Rewriting', () => {
             val.startsWith('a:'),
             `Expected serialized PHP format, got: ${val.substring(0, 10)}`
         );
-        // Verify s:N: byte lengths are correct for the target domain URL.
-        // The rewriter preserves the original URL's trailing-slash style,
-        // so a bare origin like "https://target.example.com" stays without
-        // a trailing slash.
-        const targetLen = TARGET_DOMAIN.length;
+        // The opaque-text processor changes only the authority. It keeps the
+        // source protocol, so the destination mapping's https scheme is not
+        // copied into this http source value.
+        const targetLen = EXPECTED_TARGET_URL.length;
         assert.ok(
-            val.includes(`s:${targetLen}:"${TARGET_DOMAIN}"`),
+            val.includes(`s:${targetLen}:"${EXPECTED_TARGET_URL}"`),
             `Expected correct s:N: prefix for target URL (s:${targetLen}:), got: ${val}`
         );
     });
