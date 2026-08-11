@@ -48,18 +48,16 @@ function remote_upload_proxy_code(): string
 	if ($method !== 'GET' && $method !== 'HEAD') return;
 
 	$uri = $_SERVER['REQUEST_URI'] ?? '';
-	$path = parse_url($uri, PHP_URL_PATH);
-	if (!is_string($path) || $path === '') return;
-
-	if (!preg_match('#/wp-content/uploads/(.+)$#', $path, $matches)) return;
+	$uploads_relative_path = reprint_runtime_uploads_request_relative_path();
+	if ($uploads_relative_path === null) return;
 
 	$content_dir = defined('WP_CONTENT_DIR')
 		? rtrim(WP_CONTENT_DIR, '/')
 		: rtrim($_SERVER['DOCUMENT_ROOT'] ?? '', '/') . '/wp-content';
-	$local_path = $content_dir . '/uploads/' . ltrim($matches[1], '/');
+	$local_path = $content_dir . '/uploads/' . $uploads_relative_path;
 	if (file_exists($local_path)) return;
 
-	$target_url = rtrim(REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL, '/') . '/' . ltrim($matches[1], '/');
+	$target_url = rtrim(REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL, '/') . '/' . $uploads_relative_path;
 	$query = parse_url($uri, PHP_URL_QUERY);
 	if (is_string($query) && $query !== '') {
 		$target_url .= '?' . $query;

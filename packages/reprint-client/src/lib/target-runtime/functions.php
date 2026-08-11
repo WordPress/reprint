@@ -96,6 +96,8 @@ function generate_runtime_php(RuntimeManifest $manifest, string $filesystem_root
 
     $lines[] = generate_runtime_request_path_code();
     $lines[] = '';
+    $lines[] = generate_runtime_uploads_request_relative_path_code();
+    $lines[] = '';
 
     // SQLite lazy-loading proxy — replaces $wpdb before WordPress boots.
     // WordPress's require_wp_db() sees $wpdb is already set and skips
@@ -408,6 +410,53 @@ if (!function_exists('reprint_runtime_request_path')) {
         }
 
         return $request_path;
+    }
+}
+PHP;
+}
+
+/**
+ * Generate the runtime helper that extracts a path below WordPress uploads.
+ *
+ * The returned suffix has no leading slash and retains percent encoding. The
+ * generic request-path helper rejects decoded parent components before this
+ * helper looks for the uploads marker.
+ */
+function generate_runtime_uploads_request_relative_path_code(): string
+{
+    return <<<'PHP'
+if (!function_exists('reprint_runtime_uploads_request_relative_path')) {
+    /**
+     * Returns the raw path below /wp-content/uploads/ for this request.
+     *
+     * The marker may follow an installation subdirectory. The return value
+     * has no leading slash and retains percent encoding. Missing or unsafe
+     * request paths, and the uploads directory itself, return null.
+     *
+     * Examples:
+     *
+     *     /wp-content/uploads/2026/photo.jpg -> 2026/photo.jpg
+     *     /site/wp-content/uploads/photo.jpg -> photo.jpg
+     *     /wp-content/uploads/               -> null
+     */
+    function reprint_runtime_uploads_request_relative_path(): ?string
+    {
+        $request_path = reprint_runtime_request_path();
+        if ($request_path === null) {
+            return null;
+        }
+
+        $uploads_marker = '/wp-content/uploads/';
+        $uploads_marker_offset = strpos($request_path, $uploads_marker);
+        if ($uploads_marker_offset === false) {
+            return null;
+        }
+
+        $uploads_relative_path = ltrim(
+            substr($request_path, $uploads_marker_offset + strlen($uploads_marker)),
+            '/'
+        );
+        return $uploads_relative_path === '' ? null : $uploads_relative_path;
     }
 }
 PHP;
