@@ -11,21 +11,21 @@
  *
  * For example, with this mapping:
  *
- * ~~~
+ * ```
  * https://source.example/wp-content/uploads => https://destination.example
- * ~~~
+ * ```
  *
  * this input:
  *
- * ~~~
+ * ```
  * [vc_video link="https:\/\/source.example\/wp-content\/uploads\/2026\/01\/video.mp4"]
- * ~~~
+ * ```
  *
  * becomes:
  *
- * ~~~
+ * ```
  * [vc_video link="https:\/\/destination.example\/wp-content\/uploads\/2026\/01\/video.mp4"]
- * ~~~
+ * ```
  *
  * The https:\/\/ spelling, every path separator, the query, the fragment,
  * and the shortcode syntax are copied from the input. The destination
@@ -39,11 +39,11 @@
  * and hyphens, with no path, port, user information, query, or fragment.
  * Punycode is supported. These mappings are intentionally ignored:
  *
- * ~~~
+ * ```
  * https://source.example/media => https://destination.example/assets
  * https://source.example/media => https://192.0.2.1
  * https://source.example/media => https://bücher.example
- * ~~~
+ * ```
  *
  * A parser that knows the enclosing data format may support them. This class
  * cannot do so without risking an edit outside its one safe byte range.
@@ -71,7 +71,7 @@
  *
  * Example usage:
  *
- * ~~~php
+ * ```php
  * $processor = new LimitedURLBaseInOpaqueTextProcessor(
  *     '[vc_video link="https://source.example/wp-content/uploads/video.mp4"]',
  *     [
@@ -84,7 +84,7 @@
  * }
  *
  * $rewritten = $processor->get_updated_text();
- * ~~~
+ * ```
  */
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
 class LimitedURLBaseInOpaqueTextProcessor {
@@ -126,11 +126,11 @@ class LimitedURLBaseInOpaqueTextProcessor {
      * Each mapping uses an HTTP(S) source URL base and a target URL containing
      * only its domain. For example:
      *
-     * ~~~
+     * ```
      * [
      *     'https://source.example/wp-content/uploads' => 'https://destination.example',
      * ]
-     * ~~~
+     * ```
      *
      * A mapping with a target path, such as
      * https://destination.example/uploads, is ignored rather than changing
