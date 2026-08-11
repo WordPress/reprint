@@ -280,29 +280,10 @@ function normalize_excluded_paths(array $excluded_paths): array
         if (!is_string($path)) {
             throw new InvalidArgumentException('Each excluded path must be a string; observed ' . gettype($path) . '.');
         }
-        if ($path === '') {
-            throw new InvalidArgumentException('Excluded path must not be empty.');
-        }
-        if ($path[0] === '/') {
+        if ($path !== '' && $path[0] === '/') {
             throw new InvalidArgumentException('Excluded path must be document-root-relative: ' . base64_encode($path) . '.');
         }
-        if (strpos($path, "\0") !== false) {
-            throw new InvalidArgumentException('Excluded path must not contain a NUL byte: ' . base64_encode($path) . '.');
-        }
-        if (strpos($path, '\\') !== false) {
-            throw new InvalidArgumentException('Excluded path must not contain a backslash: ' . base64_encode($path) . '.');
-        }
-        foreach (explode('/', $path) as $segment) {
-            if ($segment === '') {
-                throw new InvalidArgumentException('Excluded path must not contain an empty component: ' . base64_encode($path) . '.');
-            }
-            if ($segment === '.') {
-                throw new InvalidArgumentException('Excluded path must not contain a dot component: ' . base64_encode($path) . '.');
-            }
-            if ($segment === '..') {
-                throw new InvalidArgumentException('Excluded path must not contain a parent component: ' . base64_encode($path) . '.');
-            }
-        }
+        assert_valid_relative_path($path, 'Excluded path');
         $normalized_excluded_paths[] = $path;
     }
     sort($normalized_excluded_paths, SORT_STRING);
@@ -315,6 +296,51 @@ function normalize_excluded_paths(array $excluded_paths): array
         );
     }
     return $normalized_excluded_paths;
+}
+
+/**
+ * Validates a document-root-relative path carried as raw bytes.
+ *
+ * A valid path has one or more slash-delimited components. It cannot be
+ * absolute, use Windows separators, include a NUL byte, or contain empty,
+ * current-directory, or parent-directory components. It deliberately does
+ * not trim whitespace: spaces and other non-reserved bytes are valid file
+ * name bytes.
+ *
+ * Examples:
+ *
+ *     assert_valid_relative_path('wp-content/plugins', 'Excluded path');
+ *     assert_valid_relative_path('index.php', 'Document-root-relative path');
+ *
+ * @param string $path Raw path bytes to validate.
+ * @param string $label Human-readable name at the start of validation errors.
+ * @throws InvalidArgumentException When the path has a reserved form.
+ */
+function assert_valid_relative_path(string $path, string $label): void
+{
+    if ($path === '') {
+        throw new InvalidArgumentException("{$label} must not be empty.");
+    }
+    if ($path[0] === '/') {
+        throw new InvalidArgumentException("{$label} must not be absolute: " . base64_encode($path) . '.');
+    }
+    if (strpos($path, "\0") !== false) {
+        throw new InvalidArgumentException("{$label} must not contain a NUL byte: " . base64_encode($path) . '.');
+    }
+    if (strpos($path, '\\') !== false) {
+        throw new InvalidArgumentException("{$label} must not contain a backslash: " . base64_encode($path) . '.');
+    }
+    foreach (explode('/', $path) as $component) {
+        if ($component === '') {
+            throw new InvalidArgumentException("{$label} must not contain an empty component: " . base64_encode($path) . '.');
+        }
+        if ($component === '.') {
+            throw new InvalidArgumentException("{$label} must not contain a dot component: " . base64_encode($path) . '.');
+        }
+        if ($component === '..') {
+            throw new InvalidArgumentException("{$label} must not contain a parent component: " . base64_encode($path) . '.');
+        }
+    }
 }
 // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
