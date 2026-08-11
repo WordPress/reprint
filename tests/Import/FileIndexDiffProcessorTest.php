@@ -71,6 +71,42 @@ final class FileIndexDiffProcessorTest extends TestCase
         $processor->close();
     }
 
+    public function testClassifiesAddedDeletedModifiedAndUnchangedPaths(): void
+    {
+        $old_index_file = $this->write_index('old.jsonl', [
+            $this->entry('b-deleted.txt'),
+            $this->entry('c-type-changed', 1, 1, 'file'),
+            $this->entry('d-size-changed.txt', 1, 10),
+            $this->entry('e-ctime-changed.txt', 10, 1),
+            $this->entry('f-unchanged.txt', 10, 20),
+        ]);
+        $new_index_file = $this->write_index('new.jsonl', [
+            $this->entry('a-added.txt'),
+            $this->entry('c-type-changed', 1, 1, 'dir'),
+            $this->entry('d-size-changed.txt', 1, 20),
+            $this->entry('e-ctime-changed.txt', 20, 1),
+            $this->entry('f-unchanged.txt', 10, 20),
+        ]);
+        $processor = FileIndexDiffProcessor::create($old_index_file, $new_index_file);
+
+        foreach (
+            [
+                'a-added.txt' => 'added',
+                'b-deleted.txt' => 'deleted',
+                'c-type-changed' => 'modified',
+                'd-size-changed.txt' => 'modified',
+                'e-ctime-changed.txt' => 'modified',
+                'f-unchanged.txt' => 'unchanged',
+            ] as $path => $change
+        ) {
+            $this->assertTrue($processor->next_path());
+            $this->assertSame($path, $processor->get_path());
+            $this->assertSame($change, $processor->get_path_change());
+        }
+        $this->assertFalse($processor->next_path());
+        $processor->close();
+    }
+
     public function testComparesDecodedPathBytesInsteadOfBase64Text(): void
     {
         $old_index_file = $this->write_index('old.jsonl', [

@@ -31,10 +31,10 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * `next_path()` selects the first unconsumed path found in either index. That
  * selected path becomes the **current path**. The current path can have:
  *
- * - an old entry and no new entry, meaning the path disappeared;
- * - no old entry and a new entry, meaning the path appeared; or
- * - an entry in both indexes, meaning the caller must compare their recorded
- *   information to decide whether the path changed.
+ * - an old entry and no new entry, making the path `deleted`;
+ * - no old entry and a new entry, making the path `added`; or
+ * - an entry in both indexes, making the path `modified` when its recorded
+ *   type, size, or ctime differs and `unchanged` otherwise.
  *
  * For example, while `wp-content/a.txt` is current, its old entry is the
  * record for `wp-content/a.txt` in the old index. It is not the record for
@@ -42,9 +42,9 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * `wp-content/a.txt`, the current path has no old entry and
  * `get_path_type_in_old_index()` returns null.
  *
- * This class only aligns the two indexes. It does not classify a change or
- * decide whether to copy, remove, or preserve a path. The caller makes that
- * decision from the information exposed for the current path.
+ * The processor labels that snapshot difference through `get_path_change()`.
+ * It does not decide whether to copy, remove, or preserve a path. That policy
+ * remains with the caller.
  *
  * ## Current, preceding, and following paths
  *
@@ -83,8 +83,7 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  *     while ($has_path) {
  *         apply_path_operation(
  *             $processor->get_path(),
- *             $processor->get_path_type_in_old_index(),
- *             $processor->get_path_type_in_new_index()
+ *             $processor->get_path_change()
  *         );
  *         $has_path = $processor->next_path();
  *         save_cursor($processor->get_cursor());
@@ -337,6 +336,40 @@ final class FileIndexDiffProcessor
         return $this->current_path_found_in === "new"
             ? $this->new_index_entry["path"]
             : $this->old_index_entry["path"];
+    }
+
+    /**
+     * Returns how the current path differs between the two snapshots.
+     *
+     * A path is `added` when it occurs only in the new index and `deleted` when
+     * it occurs only in the old index. A path present in both is `modified`
+     * when its recorded type, size, or ctime differs; otherwise it is
+     * `unchanged`. The label describes the indexes, not the operation a caller
+     * should perform.
+     *
+     * @return string One of `added`, `modified`, `deleted`, or `unchanged`.
+     * @phpstan-return 'added'|'modified'|'deleted'|'unchanged'
+     */
+    public function get_path_change(): string
+    {
+        $this->assert_current_path();
+        if ($this->current_path_found_in === "new") {
+            return "added";
+        }
+        if ($this->current_path_found_in === "old") {
+            return "deleted";
+        }
+
+        $old_index_entry = $this->get_required_old_index_entry();
+        $new_index_entry = $this->get_required_new_index_entry();
+        if (
+            $old_index_entry["type"] !== $new_index_entry["type"]
+            || $old_index_entry["size"] !== $new_index_entry["size"]
+            || $old_index_entry["ctime"] !== $new_index_entry["ctime"]
+        ) {
+            return "modified";
+        }
+        return "unchanged";
     }
 
     /**
