@@ -10,14 +10,13 @@ use function WordPress\Reprint\Exporter\relative_path_under;
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
 
 /**
- * Publishes completed files-pull mutations from `pull/index.wal` into the
+ * Applies completed files-pull mutations from `pull/index.wal` to the
  * remote and local indexes.
  *
- * The journal records work only after ImportClient has completed the
- * corresponding file, symlink, empty-directory, or deletion operation. It
- * does not perform those filesystem mutations. ImportClient owns the pull
- * cursor, selection and preserve-local policy, progress, and command status;
- * this class owns the append-only record format and index publication.
+ * Each record represents a file, symlink, empty-directory, or deletion
+ * operation which has already completed. The journal does not perform those
+ * filesystem mutations. It owns the append-only record format and applies
+ * the recorded mutations to both indexes.
  *
  * ## Record format
  *
@@ -50,9 +49,10 @@ use function WordPress\Reprint\Exporter\relative_path_under;
  *     }
  *
  * A completed selected deletion beneath the filesystem root uses the same `-`
- * operation and includes only `local_relative_path_b64`, so publication
- * removes the local index entry without inspecting a path which is already
- * gone. Publishing the upsert example produces these one-line index entries:
+ * operation and includes only `local_relative_path_b64`, so applying the
+ * journal removes the local index entry without inspecting a path which is
+ * already gone. Applying the upsert example produces these one-line index
+ * entries:
  *
  *     remote index:
  *     {"path":"L3Nydi9zaXRlL2ZpbGUudHh0","ctime":10,"size":4,"type":"file"}
@@ -60,25 +60,25 @@ use function WordPress\Reprint\Exporter\relative_path_under;
  *     local index:
  *     {"path":"ZmlsZS50eHQ=","ctime":12,"size":4,"type":"file"}
  *
- * ## Publication and interruption
+ * ## Applying records and interruption
  *
- * ImportClient calls flush() immediately before saving a cursor which covers
- * the appended records. apply_pending_records() closes the writer, merges all
- * complete records into the remote index, projects records with local fields
- * into the local index, and truncates the WAL only after the remote replacement
- * and any required local replacement have been published by rename().
+ * Call flush() immediately before saving a cursor which covers the appended
+ * records. apply_pending_records() closes the writer, merges all complete
+ * records into the remote index, projects records with local fields into the
+ * local index, and truncates the WAL only after the remote index and any
+ * changed local index have been replaced by rename().
  *
- * Publication is not resumable within the method, but it is safe to restart.
- * If the process stops before WAL truncation, the next call recreates the work
- * files and replays the complete batch. Upserts replace the same entry and
- * deletions of absent entries write nothing, so replay is idempotent. An
- * unterminated final JSONL record is ignored; files-pull resumes from the
- * preceding durable cursor and repeats that mutation.
+ * Applying a batch is not resumable within the method, but it is safe to
+ * restart. If the process stops before WAL truncation, the next call recreates
+ * the work files and replays the complete batch. Upserts replace the same
+ * entry and deletions of absent entries write nothing, so replay is
+ * idempotent. An unterminated final JSONL record is ignored; files-pull resumes
+ * from the preceding durable cursor and repeats that mutation.
  *
  * ## Lifecycle marker
  *
  * The WAL also marks an unfinished files-pull lifecycle. open() creates or
- * retains it, successful publication leaves an empty file in place, and
+ * retains it, successful application leaves an empty file in place, and
  * remove_empty_marker() removes that empty file only after files-pull
  * completes or aborts.
  */
@@ -104,14 +104,13 @@ class PullIndexJournal
     /**
      * Configures the journal, index paths, and local projection root.
      *
-     * Construction does not create or open the WAL. ImportClient may therefore
-     * construct the journal for commands which never begin a files-pull
-     * lifecycle.
+     * Construction does not create or open the WAL. A journal which never
+     * begins a files-pull lifecycle therefore creates no files.
      *
-     * @param ImportClient $client              Owner used for audit logging.
+     * @param ImportClient $client              Audit log owner.
      * @param string       $pull_index_wal_path Path to `pull/index.wal`.
-     * @param string       $remote_index_path   Published remote index path.
-     * @param string       $local_index_path    Published local index path.
+     * @param string       $remote_index_path   Remote index path.
+     * @param string       $local_index_path    Local index path.
      * @param string       $filesystem_root     Resolved local projection root.
      */
     public function __construct(
@@ -278,9 +277,9 @@ class PullIndexJournal
     /**
      * Invalidates remote state without changing the local index.
      *
-     * The `-` record omits `local_relative_path_b64`, so publication removes
-     * only the remote index entry. Use this after files-pull intentionally
-     * leaves no local path which it can account for.
+     * The `-` record omits `local_relative_path_b64`, so applying the journal
+     * removes only the remote index entry. Use this after files-pull
+     * intentionally leaves no local path which it can account for.
      *
      * @param string $remote_absolute_path Source absolute path to invalidate.
      * @throws RuntimeException When the record cannot be appended.
@@ -294,7 +293,7 @@ class PullIndexJournal
     }
 
     /**
-     * Flushes appended records before ImportClient saves their cursor.
+     * Flushes appended records before the corresponding cursor is saved.
      *
      * A closed journal has nothing to flush. This ordering ensures a saved
      * cursor never claims a completed mutation whose record remains only in a
@@ -313,7 +312,7 @@ class PullIndexJournal
     }
 
     /**
-     * Publishes all complete pending records into the accounted indexes.
+     * Applies all complete pending records to the accounted indexes.
      *
      * Applying a record here means folding its `+` or `-` projection into the
      * remote index and, when local fields are present, the local index. The
@@ -322,7 +321,7 @@ class PullIndexJournal
      * remote replacement and any required local replacement succeed.
      *
      * Not resumable mid-way, but safe to restart: the remote index and any
-     * changed local index are published by atomic rename(), and the journal is
+     * changed local index are replaced by atomic rename(), and the journal is
      * truncated only after the final required rename. A crash anywhere before
      * that leaves the journal intact, so the next apply_pending_records()
      * reruns the whole merge. Re-applying an already-applied batch is
@@ -333,7 +332,7 @@ class PullIndexJournal
      * cursor checkpoint which would have covered it.
      *
      * @throws RuntimeException When the WAL or an index cannot be read,
-     *                          published, or cleared.
+     *                          replaced, or cleared.
      */
     public function apply_pending_records(): void
     {
