@@ -72,7 +72,9 @@
  * name different resources when their case differs. A scheme may begin at the
  * start of the value or after a byte other than an ASCII letter, plus sign, or
  * hyphen. Scheme-less authorities use a stricter boundary so the scanner does
- * not mistake part of another URL or identifier for a match.
+ * not mistake part of another URL or identifier for a match. A dot or colon
+ * immediately after the configured base is rejected: it may continue the host
+ * name or introduce a port which the mapping did not include.
  *
  * Example usage:
  *
@@ -308,7 +310,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             (?=
                 $
                 | ' . $escaped_separator . '/
-                | [/?# \t\r\n.,!;:)\]}>"\']
+                | [/?# \t\r\n,!;)\]}>"\']
             )
         ~x';
     }
