@@ -1,31 +1,57 @@
 <?php
 
 /**
- * Replaces configured URL bases in text whose surrounding format is unknown.
+ * Replaces only a configured URL authority in text whose format is unknown.
  *
- * This is deliberately not a URL rewriter. It finds a configured source
- * authority and initial path, with an optional HTTP(S) scheme spelling. The
- * initial path qualifies the mapping; it is never replaced. The
- * processor replaces the configured source authority with the destination
- * domain and preserves the protocol, path, and every following byte
- * byte-for-byte. The configured initial path only qualifies the mapping; it
- * is never replaced.
- * In particular, this class never parses, decodes, normalizes, or re-encodes
- * bytes from the input URL. Source authorities and paths match as exact ASCII
- * bytes; case variants are not equivalent here.
+ * This is deliberately not a URL rewriter. It has no way to know whether a
+ * backslash belongs to JSON, CSS, a shortcode, HTML, or an application
+ * escape convention. It therefore finds a known source authority and replaces
+ * that byte range only. The source initial path qualifies the mapping, but is
+ * never replaced.
+ *
+ * For example, with this mapping:
+ *
+ * ~~~
+ * https://source.example/wp-content/uploads => https://destination.example
+ * ~~~
+ *
+ * this input:
+ *
+ * ~~~
+ * [vc_video link="https:\/\/source.example\/wp-content\/uploads\/2026\/01\/video.mp4"]
+ * ~~~
+ *
+ * becomes:
+ *
+ * ~~~
+ * [vc_video link="https:\/\/destination.example\/wp-content\/uploads\/2026\/01\/video.mp4"]
+ * ~~~
+ *
+ * The https:\/\/ spelling, every path separator, the query, the fragment,
+ * and the shortcode syntax are copied from the input. The destination
+ * protocol is not rendered. In particular, this class never parses, decodes,
+ * normalizes, or re-encodes input URL bytes. Source authorities and paths
+ * match as exact ASCII bytes; case variants are not equivalent here.
  *
  * A configured source may use an ASCII domain or an IP address, with an
  * optional port, so exports made from a local development server can still be
- * imported. The destination must use an alphanumeric, dot, and hyphen domain
- * with no path, port, user information, query, or fragment. Punycode domains
- * are supported. IPv4 and IPv6 destination addresses, Unicode destinations,
- * destination paths, and every unsupported mapping are left for a parser
- * which knows the surrounding data format.
+ * imported. The destination must be a domain made from letters, digits, dots,
+ * and hyphens, with no path, port, user information, query, or fragment.
+ * Punycode is supported. These mappings are intentionally ignored:
+ *
+ * ~~~
+ * https://source.example/media => https://destination.example/assets
+ * https://source.example/media => https://192.0.2.1
+ * https://source.example/media => https://bücher.example
+ * ~~~
+ *
+ * A parser that knows the enclosing data format may support them. This class
+ * cannot do so without risking an edit outside its one safe byte range.
  *
  * Call this only with a string leaf that its caller has already classified as
  * text. It is not a parser for a complete PHP serialization, JSON document,
- * or block-markup value: those formats must first be handled by a processor
- * which knows their representation. Keep complete structured values out of
+ * or block-markup value. Those formats must first be handled by a processor
+ * that knows their representation. Keep complete structured values out of
  * this processor and its tests; this class cannot preserve their syntax.
  *
  * A candidate scheme starts at the beginning of the value or after any byte
@@ -35,14 +61,30 @@
  * scheme-less authority requires a stronger left boundary so it cannot match
  * the host portion of a malformed or unsupported URL.
  *
- * The scanner accepts the literal protocol spelling (`https://`) and forms
- * with one or three backslashes before the colon and/or either slash
- * (`https:\/\/`, `https\:\/\/`, and `https:\\\/\\\/`). The three-backslash
- * form is one JSON escaping layer around an already escaped URL. This covers
- * common JSON-like and site-builder spellings without making a claim about
- * their escape rules.
- * Optional user information before the source authority, plus query and
- * fragment suffixes after it, remain untouched.
+ * The scanner accepts a literal protocol (https://), a scheme-less URL, and
+ * forms with one or three backslashes before the colon and/or either slash:
+ * https:\/\/, https\:\/\/, and https:\\\/\\\/. The three-backslash form is
+ * one JSON escaping layer around an already escaped URL. It does not accept
+ * CSS hexadecimal escapes such as https\3a \2f \2f ... or percent-encoded
+ * separators. Optional user information before the source authority, plus
+ * query and fragment suffixes after it, remain untouched.
+ *
+ * Example usage:
+ *
+ * ~~~php
+ * $processor = new LimitedURLBaseInOpaqueTextProcessor(
+ *     '[vc_video link="https://source.example/wp-content/uploads/video.mp4"]',
+ *     [
+ *         'https://source.example/wp-content/uploads' => 'https://destination.example',
+ *     ]
+ * );
+ *
+ * while ($processor->next_url()) {
+ *     $processor->replace_url_base();
+ * }
+ *
+ * $rewritten = $processor->get_updated_text();
+ * ~~~
  */
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
 class LimitedURLBaseInOpaqueTextProcessor {
@@ -79,7 +121,22 @@ class LimitedURLBaseInOpaqueTextProcessor {
     private array $lexical_updates = [];
 
     /**
-     * @param array<string, string> $url_mapping Source URL base => target URL base.
+     * Construct a processor for one opaque text value.
+     *
+     * Each mapping uses an HTTP(S) source URL base and a target URL containing
+     * only its domain. For example:
+     *
+     * ~~~
+     * [
+     *     'https://source.example/wp-content/uploads' => 'https://destination.example',
+     * ]
+     * ~~~
+     *
+     * A mapping with a target path, such as
+     * https://destination.example/uploads, is ignored rather than changing
+     * input path bytes.
+     *
+     * @param array<string, string> $url_mapping Source URL base => target URL.
      */
     public function __construct(string $text, array $url_mapping)
     {
@@ -101,10 +158,12 @@ class LimitedURLBaseInOpaqueTextProcessor {
     }
 
     /**
-     * Move to the next configured source URL base in the text.
+     * Find the next configured source URL base in the text.
      *
      * A current URL remains available until the next call. Call
-     * replace_url_base() before advancing to queue its replacement.
+     * replace_url_base() to queue the authority replacement, then call this
+     * method again. Calling replace_url_base() is optional: advancing skips
+     * that match without changing it.
      */
     public function next_url(): bool
     {
@@ -118,11 +177,13 @@ class LimitedURLBaseInOpaqueTextProcessor {
     }
 
     /**
-     * Queue the current URL-base replacement.
+     * Queue replacement of the current source authority.
      *
-     * The configured target protocol is intentionally not used. The target
-     * mapping cannot contain a path, so the replacement always covers only
-     * the source authority.
+     * Given https:\/\/source.example\/media\/logo.png, this queues only
+     * source.example for replacement. It does not change https:\/\/, any
+     * /media/ bytes, or logo.png. The configured target protocol is
+     * intentionally not used. The target mapping cannot contain a path, so
+     * the replacement always covers only the source authority.
      */
     public function replace_url_base(): bool
     {
@@ -140,7 +201,10 @@ class LimitedURLBaseInOpaqueTextProcessor {
     }
 
     /**
-     * Apply queued URL-base replacements without changing any other bytes.
+     * Return the input with queued authority replacements applied.
+     *
+     * This does not mutate the original text. Bytes outside queued authority
+     * ranges, including every escape byte and URL suffix, are copied exactly.
      */
     public function get_updated_text(): string
     {
