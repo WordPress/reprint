@@ -248,7 +248,7 @@ completed a non-skipped local mutation beneath the filesystem root. Applying
 a batch updates the remote index first, then the local index, and clears the
 records only after both replacements finish.
 
-The empty WAL remains as a marker until files-pull completes. A retained WAL
+The empty WAL remains until files-pull completes. A retained WAL
 is consumed only while resuming or aborting the interrupted files-pull,
 including through a high-level pull command. Files-diff and files-push reject
 the unfinished files-pull instead of consuming its WAL.
