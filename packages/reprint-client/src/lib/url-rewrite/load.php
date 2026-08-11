@@ -15,6 +15,7 @@ require_once __DIR__ . '/class-json-string-iterator.php';
 require_once __DIR__ . '/class-base64-value-scanner.php';
 require_once __DIR__ . '/class-fast-insert-scanner.php';
 require_once __DIR__ . '/class-sqlite-prepared-insert-builder.php';
+require_once __DIR__ . '/class-cautious-url-base-processor-in-text-with-mixed-unknown-escape-rules.php';
 
 // Depend on the iterators above
 require_once __DIR__ . '/class-structured-data-url-rewriter.php';
