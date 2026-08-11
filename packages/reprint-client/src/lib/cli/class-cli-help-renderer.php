@@ -9,6 +9,7 @@ class CliHelpRenderer {
 
 	private const GLOBAL_OPTION_ORDER = [
 		'secret',
+		'progress',
 		'abort',
 		'verbose',
 		'no-follow-symlinks',
@@ -17,6 +18,18 @@ class CliHelpRenderer {
 		'adaptive',
 		'step',
 		'steps',
+	];
+
+	private const COMMAND_SHARED_OPTION_ORDER = [
+		'state-dir',
+		'fs-root',
+		'secret',
+		'progress',
+		'abort',
+		'verbose',
+		'no-follow-symlinks',
+		'on-fs-root-nonempty',
+		'include-caches',
 	];
 
 	/** @var CliCommandRegistry */
@@ -192,9 +205,9 @@ class CliHelpRenderer {
 		return $output . "\n";
 	}
 
-	public function render_install_exporter( bool $use_terminal_colors ): string {
+	public function render_install_server( bool $use_terminal_colors ): string {
 		$version                = $this->version_provider->get_version();
-		$is_development_version = str_contains( $version, '-trunk' ) || $version === 'v0.0.0';
+		$is_development_version = strpos( $version, '-trunk' ) !== false || $version === 'v0.0.0';
 		$bold                   = $use_terminal_colors ? "\033[1m" : '';
 		$dim                    = $use_terminal_colors ? "\033[2m" : '';
 		$cyan                   = $use_terminal_colors ? "\033[36m" : '';
@@ -202,16 +215,16 @@ class CliHelpRenderer {
 		$repository             = 'WordPress/reprint';
 		$zip_url                = "https://github.com/{$repository}/releases/download/{$version}/reprint-exporter-wp.zip";
 
-		$output = "{$bold}Install the RePrint Exporter Plugin{$reset}\n\n";
-		$output .= "The exporter plugin must be installed on the WordPress site you\n";
+		$output = "{$bold}Install the Reprint Server Plugin{$reset}\n\n";
+		$output .= "The Reprint Server plugin must be installed on the WordPress site you\n";
 		$output .= "want to mirror. It exposes the HTTP API that reprint connects to.\n\n";
 		$output .= "{$bold}Step 1: Download the plugin{$reset}\n\n";
 		if ( $is_development_version ) {
 			$output .= "  You are running an unreleased development build ({$version}).\n";
-			$output .= "  Install the exporter plugin from the same branch:\n\n";
-			$output .= "  {$dim}composer build:exporter-plugin{$reset}\n\n";
+			$output .= "  Install the Reprint Server plugin from the same branch:\n\n";
+			$output .= "  {$dim}composer build:server-plugin{$reset}\n\n";
 			$output .= "  Then upload reprint-exporter-wp.zip through wp-admin,\n";
-			$output .= "  or symlink reprint-exporter-wp/ into wp-content/plugins/.\n";
+			$output .= "  or symlink reprint-server-wp/ into wp-content/plugins/.\n";
 		} else {
 			$output .= "  {$cyan}{$zip_url}{$reset}\n";
 		}
@@ -220,7 +233,7 @@ class CliHelpRenderer {
 		$output .= "  2. Go to Plugins → Add New Plugin → Upload Plugin\n";
 		$output .= "  3. Upload reprint-exporter-wp.zip and activate it\n\n";
 		$output .= "{$bold}Step 3: Configure the shared secret{$reset}\n\n";
-		$output .= "  1. In wp-admin, go to Site Export (in the sidebar)\n";
+		$output .= "  1. In wp-admin, go to Reprint Server (in the sidebar)\n";
 		$output .= "  2. Enter a shared secret and save\n";
 		$output .= "  3. Use the same secret with reprint:\n\n";
 		$output .= "     {$dim}php reprint.phar preflight https://your-site.com \\\n";
@@ -249,6 +262,17 @@ class CliHelpRenderer {
 			[ 'required', 'global' ],
 			true
 		) ? 1 : 0;
-		return $first_is_shared - $second_is_shared;
+		if ( $first_is_shared !== $second_is_shared ) {
+			return $first_is_shared - $second_is_shared;
+		}
+		if ( ! $first_is_shared ) {
+			return 0;
+		}
+
+		$first_position  = array_search( $first->name, self::COMMAND_SHARED_OPTION_ORDER, true );
+		$second_position = array_search( $second->name, self::COMMAND_SHARED_OPTION_ORDER, true );
+		$first_position  = $first_position === false ? PHP_INT_MAX : $first_position;
+		$second_position = $second_position === false ? PHP_INT_MAX : $second_position;
+		return $first_position <=> $second_position;
 	}
 }

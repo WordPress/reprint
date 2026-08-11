@@ -15,7 +15,7 @@ use Reprint\Importer\Cli\Commands\FilesPushCommand;
 use Reprint\Importer\Cli\Commands\FilesStatsCommand;
 use Reprint\Importer\Cli\Commands\FlatDocumentRootCommand;
 use Reprint\Importer\Cli\Commands\PullMetadataCommand;
-use Reprint\Importer\Cli\Commands\InstallExporterCommand;
+use Reprint\Importer\Cli\Commands\InstallServerCommand;
 use Reprint\Importer\Cli\Commands\PreflightAssertCommand;
 use Reprint\Importer\Cli\Commands\PreflightCommand;
 use Reprint\Importer\Cli\Commands\PullCommand;
@@ -59,7 +59,7 @@ class CliCommandRegistry {
 			new PullCommand(),
 			new PullFilesCommand(),
 			new PullDatabaseCommand(),
-			new InstallExporterCommand(),
+			new InstallServerCommand(),
 			new PreflightCommand(),
 			new PreflightAssertCommand(),
 			new FilesPullCommand(),

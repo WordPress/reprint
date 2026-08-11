@@ -10994,7 +10994,7 @@ class ImportClient
     }
 }
 
-// Only run CLI logic when this file is an importer entry point.
+// Only run CLI logic when this file is a Reprint client entry point.
 if (
 	PHP_SAPI === 'cli'
 	&& isset( $argv )

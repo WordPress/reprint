@@ -36,7 +36,7 @@ class PullFilesCommand extends AbstractCliCommand {
 			. "\n"
 			. "  reprint pull-files https://example.com \\\n"
 			. "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n"
-			. "    --only=:wp-content: --only=:wp-plugins:\n";
+			. "    --include=:wp-content: --exclude=:wp-uploads:\n";
 	}
 
 	protected function command_options(): array {

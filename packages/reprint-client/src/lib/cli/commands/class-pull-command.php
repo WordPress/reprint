@@ -35,9 +35,6 @@ class PullCommand extends AbstractCliCommand {
 			. "interrupted, re-run the same command to resume from where it left off.\n"
 			. "Running pull again after completion performs a delta sync.\n"
 			. "\n"
-			. "Use --filter=essential-files to defer uploads and other large wp-content\n"
-			. "entries while still completing the rest of the pull.\n"
-			. "\n"
 			. "The ?site-export-api query parameter is added automatically if missing,\n"
 			. "so you can pass just the site URL.\n";
 	}
@@ -53,11 +50,6 @@ class PullCommand extends AbstractCliCommand {
 			. "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n"
 			. "    --target-user=root --target-db=wp_local \\\n"
 			. "    --new-site-url=http://localhost:8881\n"
-			. "\n"
-			. "  # Complete the main pull now, defer the heavier file tail:\n"
-			. "  reprint pull https://example.com \\\n"
-			. "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n"
-			. "    --filter=essential-files --target-engine=sqlite --runtime=none\n"
 			. "\n"
 			. "  # Full clone with SQLite, flattened layout, and PHP built-in server:\n"
 			. "  reprint pull https://example.com \\\n"

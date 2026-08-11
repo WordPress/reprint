@@ -88,11 +88,11 @@ class ImporterCliApplication {
 			if ( $command === null ) {
 				throw new CliInputException( "Unknown command: {$arguments[1]}" );
 			}
-			// install-exporter is a standalone guide — no URL, state-dir, or filesystem root needed.
+			// install-server is a standalone guide — no URL, state-dir, or filesystem root needed.
 			// Handle it before per-command --help so it always shows the full guide.
-			if ( $command->get_name() === 'install-exporter' ) {
+			if ( $command->get_name() === 'install-server' ) {
 				$this->output->write(
-					$this->help_renderer->render_install_exporter(
+					$this->help_renderer->render_install_server(
 						$this->output->standard_output_is_terminal()
 					)
 				);
@@ -128,11 +128,18 @@ class ImporterCliApplication {
 		try {
 			return $this->execute_invocation( $invocation );
 		} catch ( Throwable $error ) {
+			$progress_output_mode = $invocation->options['progress'] ?? 'auto';
+			$progress_stream_is_terminal = ( $invocation->options['sql_output'] ?? null ) === 'stdout'
+				? $this->output->standard_error_is_terminal()
+				: $this->output->standard_output_is_terminal();
+			$uses_terminal_progress = $progress_output_mode === 'tty'
+				|| ( $progress_output_mode === 'auto' && $progress_stream_is_terminal );
 			$this->output->write_error(
 				$this->render_execution_error(
 					$error,
 					$this->last_error_code,
-					$this->output->standard_error_is_terminal()
+					$uses_terminal_progress && empty( $invocation->options['verbose'] ),
+					$invocation->command === 'files-diff' ? '' : "\n"
 				)
 			);
 			if ( $rethrow_execution_error ) {
@@ -203,10 +210,11 @@ class ImporterCliApplication {
 	private function render_execution_error(
 		Throwable $error,
 		?string $error_code,
-		bool $use_terminal_format
+		bool $use_terminal_format,
+		string $terminal_prefix
 	): string {
 		if ( $use_terminal_format ) {
-			return "\nError: " . $error->getMessage() . "\n";
+			return $terminal_prefix . 'Error: ' . $error->getMessage() . "\n";
 		}
 
 		$payload = [

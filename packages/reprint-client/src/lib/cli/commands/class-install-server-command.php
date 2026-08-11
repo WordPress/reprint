@@ -5,12 +5,16 @@ namespace Reprint\Importer\Cli\Commands;
 use Reprint\Importer\Cli\CliCommand;
 
 /**
- * Show exporter plugin installation guidance.
+ * Show Reprint Server plugin installation guidance.
  */
-class InstallExporterCommand extends AbstractCliCommand {
+class InstallServerCommand extends AbstractCliCommand {
 
 	public function get_name(): string {
-		return 'install-exporter';
+		return 'install-server';
+	}
+
+	public function get_aliases(): array {
+		return [ 'install-exporter' ];
 	}
 
 	public function get_level(): string {
@@ -18,15 +22,15 @@ class InstallExporterCommand extends AbstractCliCommand {
 	}
 
 	public function get_short_description(): string {
-		return 'Show how to install the exporter plugin on your site';
+		return 'Show how to install the Reprint Server plugin on your site';
 	}
 
 	public function get_long_description(): string {
-		return "Prints the download URL for the exporter WordPress plugin that\n"
+		return "Prints the download URL for the Reprint Server WordPress plugin that\n"
 			. "matches this version of reprint, and step-by-step installation\n"
 			. "instructions.\n"
 			. "\n"
-			. "The exporter plugin must be installed on the remote site before\n"
+			. "The Reprint Server plugin must be installed on the remote site before\n"
 			. "any other reprint command can connect to it.\n";
 	}
 

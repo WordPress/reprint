@@ -15,7 +15,7 @@ use Reprint\Importer\Cli\ImporterVersionProvider;
 use RuntimeException;
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
 
 final class ImporterCliApplicationTest extends TestCase {
 
@@ -52,9 +52,11 @@ final class ImporterCliApplicationTest extends TestCase {
             'https://example.test',
             '--state-dir=/tmp/reprint-state',
             '--fs-root=/tmp/reprint-files',
-            '--only=:wp-content:',
-            '--only',
+            '--include=:wp-content:',
+            '--include',
             ':wp-uploads:/2026',
+            '--exclude=:wp-content:/cache',
+            '--progress=jsonl',
             '--index-batch-max=9000',
         ]);
 
@@ -68,8 +70,10 @@ final class ImporterCliApplicationTest extends TestCase {
         $this->assertSame('/tmp/reprint-files', $invocation->filesystem_root);
         $this->assertSame(
             [':wp-content:', ':wp-uploads:/2026'],
-            $invocation->options['only']
+            $invocation->options['include']
         );
+        $this->assertSame([':wp-content:/cache'], $invocation->options['exclude']);
+        $this->assertSame('jsonl', $invocation->options['progress']);
         $this->assertSame(9000, $invocation->options['tuning_config']['index_batch_max']);
         $this->assertSame('', $this->readStream($this->standardOutput));
         $this->assertSame('', $this->readStream($this->standardError));
@@ -249,18 +253,107 @@ final class ImporterCliApplicationTest extends TestCase {
         $this->assertSame('Embedding caller failure.', $error['error']);
     }
 
-    private function createApplication(): CliRecordingImporterApplication
+    public function testFilesDiffTtyExecutionFailureHasNoLeadingBlankLine(): void
+    {
+        $application = $this->createApplication();
+        $application->error = new RuntimeException('Diff failed.');
+
+        $exitCode = $application->run([
+            'reprint',
+            'files-diff',
+            'https://example.test',
+            '--state-dir=/tmp/reprint-state',
+            '--fs-root=/tmp/reprint-files',
+            '--progress=tty',
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertSame("Error: Diff failed.\n", $this->readStream($this->standardError));
+    }
+
+    public function testVerboseExecutionFailureKeepsStructuredOutputWithTtyProgress(): void
+    {
+        $application = $this->createApplication();
+        $application->error = new RuntimeException('Push failed.');
+
+        $exitCode = $application->run([
+            'reprint',
+            'files-push',
+            'https://example.test',
+            '--state-dir=/tmp/reprint-state',
+            '--fs-root=/tmp/reprint-files',
+            '--secret=token',
+            '--progress=tty',
+            '--verbose',
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $error = json_decode(trim($this->readStream($this->standardError)), true);
+        $this->assertIsArray($error);
+        $this->assertSame('Push failed.', $error['error']);
+    }
+
+    public function testAutoProgressUsesStandardOutputTerminalForRegularCommands(): void
+    {
+        $output = new CliTerminalOutput(
+            $this->standardOutput,
+            $this->standardError,
+            true,
+            false
+        );
+        $application = $this->createApplication($output);
+        $application->error = new RuntimeException('Metadata failed.');
+
+        $exitCode = $application->run([
+            'reprint',
+            'pull-metadata',
+            'https://example.test',
+            '--state-dir=/tmp/reprint-state',
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertSame("\nError: Metadata failed.\n", $this->readStream($this->standardError));
+    }
+
+    public function testAutoProgressUsesStandardErrorTerminalForSqlOutput(): void
+    {
+        $output = new CliTerminalOutput(
+            $this->standardOutput,
+            $this->standardError,
+            true,
+            false
+        );
+        $application = $this->createApplication($output);
+        $application->error = new RuntimeException('Database pull failed.');
+
+        $exitCode = $application->run([
+            'reprint',
+            'db-pull',
+            'https://example.test',
+            '--state-dir=/tmp/reprint-state',
+            '--fs-root=/tmp/reprint-files',
+            '--secret=token',
+            '--sql-output=stdout',
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $error = json_decode(trim($this->readStream($this->standardError)), true);
+        $this->assertIsArray($error);
+        $this->assertSame('Database pull failed.', $error['error']);
+    }
+
+    private function createApplication(?CliOutput $output = null): CliRecordingImporterApplication
     {
         $commandRegistry = CliCommandRegistry::create_default();
         $versionProvider = new ImporterVersionProvider(
-            __DIR__ . '/../../packages/reprint-importer/src'
+            __DIR__ . '/../../packages/reprint-client/src'
         );
         return new CliRecordingImporterApplication(
             $commandRegistry,
             new CliArgumentParser(),
             new CliHelpRenderer($commandRegistry, $versionProvider),
             $versionProvider,
-            new CliOutput($this->standardOutput, $this->standardError)
+            $output ?? new CliOutput($this->standardOutput, $this->standardError)
         );
     }
 
@@ -271,6 +364,38 @@ final class ImporterCliApplicationTest extends TestCase {
     {
         rewind($stream);
         return (string) stream_get_contents($stream);
+    }
+}
+
+final class CliTerminalOutput extends CliOutput {
+
+    private bool $standardOutputIsTerminal;
+
+    private bool $standardErrorIsTerminal;
+
+    /**
+     * @param resource $standardOutput Standard output stream.
+     * @param resource $standardError Standard error stream.
+     */
+    public function __construct(
+        $standardOutput,
+        $standardError,
+        bool $standardOutputIsTerminal,
+        bool $standardErrorIsTerminal
+    ) {
+        parent::__construct($standardOutput, $standardError);
+        $this->standardOutputIsTerminal = $standardOutputIsTerminal;
+        $this->standardErrorIsTerminal  = $standardErrorIsTerminal;
+    }
+
+    public function standard_output_is_terminal(): bool
+    {
+        return $this->standardOutputIsTerminal;
+    }
+
+    public function standard_error_is_terminal(): bool
+    {
+        return $this->standardErrorIsTerminal;
     }
 }
 

@@ -11,7 +11,7 @@ require_once __DIR__ . '/commands/abstract-cli-command.php';
 require_once __DIR__ . '/commands/class-pull-command.php';
 require_once __DIR__ . '/commands/class-pull-files-command.php';
 require_once __DIR__ . '/commands/class-pull-database-command.php';
-require_once __DIR__ . '/commands/class-install-exporter-command.php';
+require_once __DIR__ . '/commands/class-install-server-command.php';
 require_once __DIR__ . '/commands/class-preflight-command.php';
 require_once __DIR__ . '/commands/class-preflight-assert-command.php';
 require_once __DIR__ . '/commands/class-files-pull-command.php';

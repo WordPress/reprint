@@ -2,6 +2,7 @@
 
 namespace Reprint\Importer\Cli\Commands;
 
+use ImportClient;
 use Reprint\Importer\Cli\CliCommand;
 use Reprint\Importer\Cli\CliOption;
 use Reprint\Importer\Cli\CliPositionalArgument;
@@ -64,6 +65,7 @@ abstract class AbstractCliCommand implements CliCommand {
 	 */
 	protected function framework_options(): array {
 		return [
+			$this->progress_option(),
 			CliOption::flag(
 				'adaptive',
 				'tuning_config.enabled',
@@ -170,6 +172,15 @@ abstract class AbstractCliCommand implements CliCommand {
 		)->in_main_help( 'global' );
 	}
 
+	protected function progress_option(): CliOption {
+		return CliOption::value(
+			'progress',
+			'progress',
+			'MODE',
+			'Progress output: auto, tty, or jsonl (default: auto)'
+		)->accepting( ImportClient::PROGRESS_OUTPUT_MODES )->in_main_help( 'global' );
+	}
+
 	protected function abort_option(): CliOption {
 		return CliOption::flag(
 			'abort',
@@ -233,7 +244,7 @@ abstract class AbstractCliCommand implements CliCommand {
 			'filter',
 			'filter',
 			'MODE',
-			'Filter which files to download (pull/pull-files: none|essential-files; files-pull also supports skipped-earlier)'
+			null
 		)->accepting( [ 'none', 'essential-files', 'skipped-earlier' ] );
 	}
 
@@ -330,11 +341,18 @@ abstract class AbstractCliCommand implements CliCommand {
 				. '(a :fs-root: path or an absolute path within --fs-root); repeatable'
 			),
 			CliOption::value_or_next(
-				'only',
-				'only',
+				'include',
+				'include',
 				'SOURCE',
 				'Restrict the file pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); '
 				. 'repeat for several. Default pulls everything'
+			)->with_aliases( [ 'only' ] )->repeated(),
+			CliOption::value_or_next(
+				'exclude',
+				'exclude',
+				'SOURCE',
+				'Omit SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path) from the file pull; '
+				. 'repeat for several'
 			)->repeated(),
 		];
 	}

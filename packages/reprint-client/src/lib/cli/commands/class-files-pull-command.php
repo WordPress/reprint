@@ -31,22 +31,21 @@ class FilesPullCommand extends AbstractCliCommand {
 	}
 
 	public function get_extra_help(): ?string {
-		return "Filter modes:\n"
-			. "  none             Pull all files (default)\n"
-			. "  essential-files   Skip uploads, pull only code/config/themes/plugins.\n"
-			. "                    The skipped file list is saved for later retrieval.\n"
-			. "  skipped-earlier   Pull only files skipped by a prior essential-files run.\n"
+		return "Path selection:\n"
+			. "  --include=SOURCE   Include only this source path prefix; repeatable.\n"
+			. "  --exclude=SOURCE   Exclude this source path prefix; repeatable.\n"
+			. "  Exclusions win when include and exclude prefixes overlap.\n"
 			. "\n"
 			. "Output files:\n"
 			. "  (filesystem root)/                       Downloaded files\n"
+			. "  remotes/<md5-of-trimmed-remote-reprint-api-url>/local_index.jsonl\n"
+			. "                                           Local index advanced by completed pull mutations\n"
 			. "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/remote-index.jsonl\n"
 			. "                                           Remote index\n"
 			. "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/remote-index.next.jsonl\n"
 			. "                                           Next remote index\n"
 			. "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/fetch-list.jsonl\n"
 			. "                                           Files pending download\n"
-			. "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/skipped-fetch-list.jsonl\n"
-			. "                                           Files skipped by --filter=essential-files\n"
 			. "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json\n"
 			. "                                           Resumable pull state\n"
 			. "  audit.log                       Audit log\n";
