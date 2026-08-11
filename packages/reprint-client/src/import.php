@@ -3547,25 +3547,14 @@ class ImportClient
                 }
 
                 if ($local_diff_path === $local_relative_path) {
-                    $old_path_type = $index_diff->get_path_type_in_old_index();
-                    $new_path_type = $index_diff->get_path_type_in_new_index();
-                    $local_path_changed = $old_path_type !== $new_path_type
-                        || (
-                            $old_path_type !== null
-                            && (
-                                $index_diff->get_size_in_old_index()
-                                    !== $index_diff->get_size_in_new_index()
-                                || $index_diff->get_ctime_in_old_index()
-                                    !== $index_diff->get_ctime_in_new_index()
-                            )
-                        );
+                    $local_path_transition = $index_diff->get_path_transition();
                     if (
-                        $local_path_changed
+                        $local_path_transition !== "unchanged"
                         && $this->is_local_relative_path_selected_for_make_identical(
                             $local_relative_path
                         )
                     ) {
-                        if ($new_path_type !== null) {
+                        if ($local_path_transition !== "deleted") {
                             $local_absolute_path = wp_join_unix_paths(
                                 $this->filesystem_root,
                                 $local_relative_path
