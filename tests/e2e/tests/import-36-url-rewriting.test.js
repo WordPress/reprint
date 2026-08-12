@@ -275,7 +275,6 @@ register_block_type('reprint/e2e-shortcode', [
 
         // Run db-apply with URL mapping
         const result = runImporter(importUrl(), tempDir, 'db-apply', {
-            secret: getSiteSecret(site),
             extraArgs: [
                 `--target-user=e2e_admin`,
                 `--target-pass=e2e_password`,

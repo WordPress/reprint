@@ -197,7 +197,6 @@ require_once ABSPATH . 'wp-settings.php';
         beforeAll(() => {
             flattenTo = join(tempDir, 'flattened');
             const result = runImporter(importUrl(), tempDir, 'flat-docroot', {
-                secret: getSiteSecret(site),
                 extraArgs: [`--flatten-to=${flattenTo}`],
             });
             assert.equal(

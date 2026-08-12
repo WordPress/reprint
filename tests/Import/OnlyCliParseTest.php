@@ -4,11 +4,12 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
+require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
+
 /**
  * --include and --exclude reuse the existing `value-or-next` option type (like
- * --new-site-url), but are repeatable because commas are valid path bytes. The
- * parser lives inside the CLI bootstrap guard (not require-able), so this
- * exercises the real binary.
+ * --new-site-url), but are repeatable because commas are valid path bytes.
+ * These tests exercise parsing through the package's real binary.
  */
 class OnlyCliParseTest extends TestCase
 {
