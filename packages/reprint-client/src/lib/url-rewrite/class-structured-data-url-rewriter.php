@@ -481,6 +481,13 @@ class StructuredDataUrlRewriter
                         continue;
                     }
 
+                    if ($this->token_has_css_or_json_text($p)) {
+                        $text = $p->get_modifiable_text();
+                        if ($this->maybe_contains_rewritable_urls($text)) {
+                            $p->replace_url_bases_in_current_text($this->url_mapping);
+                        }
+                    }
+
                     while ( $p->next_url_in_current_token() ) {
                         $raw_url = $p->get_raw_url();
                         $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
@@ -570,6 +577,32 @@ class StructuredDataUrlRewriter
                 _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );
                 return '';
         }
+    }
+
+    /**
+     * Return whether the current tag owns CSS or JSON text. Those values are
+     * raw text in the HTML tokenizer, not ordinary HTML text nodes. Keep their
+     * original escaping while the cautious processor replaces only a mapped
+     * URL base.
+     */
+    private function token_has_css_or_json_text(CautiousTextBlockMarkupUrlProcessor $processor): bool
+    {
+        $tag = strtolower($processor->get_tag() ?? '');
+        if ($tag === 'style') {
+            return true;
+        }
+
+        if ($tag !== 'script') {
+            return false;
+        }
+
+        $type = $processor->get_attribute('type');
+        if (!is_string($type)) {
+            return false;
+        }
+
+        $mime_type = strtolower(trim(explode(';', $type, 2)[0]));
+        return $mime_type === 'application/ld+json' || $mime_type === 'application/json';
     }
 
     /**
