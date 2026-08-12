@@ -23,7 +23,9 @@ describe('Import: URL Rewriting', () => {
     const site = 'url-rewriting';
     const importDb = 'e2e_url_rewriting_import_36';
     let tempDir;
-    // Derive source domain from site registry so the port stays in sync
+    // db-apply still needs the source domain from the site registry. The test
+    // cases spell out that domain so their input and expected output remain
+    // readable string literals.
     const SOURCE_DOMAIN = new URL(getSiteUrl(site)).origin;
     const TARGET_DOMAIN = 'https://target.example.com';
     // These shapes come from the WPBakery and Divi records in the site-builder
@@ -36,36 +38,36 @@ describe('Import: URL Rewriting', () => {
         {
             name: 'nested WPBakery escaped video shortcode',
             slug: 'url-rewrite-wpbakery-video',
-            input: `[vc_row][vc_column width="1/2"][vc_video link="${SOURCE_DOMAIN.replaceAll('/', '\\/')}\\/wp-content\\/uploads\\/video.mp4"][/vc_column][/vc_row]`,
-            expected: `[vc_row][vc_column width="1/2"][vc_video link="http:\\/\\/target.example.com\\/wp-content\\/uploads\\/video.mp4"][/vc_column][/vc_row]`,
+            input: '[vc_row][vc_column width="1/2"][vc_video link="http:\\/\\/127.0.0.1:8108\\/wp-content\\/uploads\\/video.mp4"][/vc_column][/vc_row]',
+            expected: '[vc_row][vc_column width="1/2"][vc_video link="http:\\/\\/target.example.com\\/wp-content\\/uploads\\/video.mp4"][/vc_column][/vc_row]',
             rendered: '<div data-e2e-shortcode="vc_row"><div data-e2e-shortcode="vc_column"><span data-e2e-shortcode="vc_video" data-url="http://target.example.com/wp-content/uploads/video.mp4"></span></div></div>',
         },
         {
             name: 'WPBakery entity-quoted CSS shortcode attribute',
             slug: 'url-rewrite-wpbakery-css',
-            input: `[vc_column width=&#187;1\\/2&#8243; css=&#187;.vc_custom{background-image:url(${SOURCE_DOMAIN.replaceAll('/', '\\/')}\\/wp-content\\/uploads\\/hero.jpg?id=8086) !important;}&#187;]`,
-            expected: `[vc_column width=&#187;1\\/2&#8243; css=&#187;.vc_custom{background-image:url(http:\\/\\/target.example.com\\/wp-content\\/uploads\\/hero.jpg?id=8086) !important;}&#187;]`,
+            input: '[vc_column width=&#187;1\\/2&#8243; css=&#187;.vc_custom{background-image:url(http:\\/\\/127.0.0.1:8108\\/wp-content\\/uploads\\/hero.jpg?id=8086) !important;}&#187;]',
+            expected: '[vc_column width=&#187;1\\/2&#8243; css=&#187;.vc_custom{background-image:url(http:\\/\\/target.example.com\\/wp-content\\/uploads\\/hero.jpg?id=8086) !important;}&#187;]',
             rendered: '<div data-e2e-shortcode="vc_column"></div>',
         },
         {
             name: 'WPBakery shortcode nested across broken-looking paragraph markup',
             slug: 'url-rewrite-wpbakery-mixed-html',
-            input: `[vc_column_text]</p>\r\n<h4><strong>Monohull</strong></h4>\r\n<p>[vc_video link="${SOURCE_DOMAIN.replaceAll('/', '\\/')}\\/wp-content\\/uploads\\/tour.mp4"]</p>\r\n<p>[/vc_column_text]`,
-            expected: `[vc_column_text]</p>\r\n<h4><strong>Monohull</strong></h4>\r\n<p>[vc_video link="http:\\/\\/target.example.com\\/wp-content\\/uploads\\/tour.mp4"]</p>\r\n<p>[/vc_column_text]`,
+            input: '[vc_column_text]</p>\r\n<h4><strong>Monohull</strong></h4>\r\n<p>[vc_video link="http:\\/\\/127.0.0.1:8108\\/wp-content\\/uploads\\/tour.mp4"]</p>\r\n<p>[/vc_column_text]',
+            expected: '[vc_column_text]</p>\r\n<h4><strong>Monohull</strong></h4>\r\n<p>[vc_video link="http:\\/\\/target.example.com\\/wp-content\\/uploads\\/tour.mp4"]</p>\r\n<p>[/vc_column_text]',
             rendered: '<div data-e2e-shortcode="vc_column_text"></p>\r\n<h4><strong>Monohull</strong></h4>\r\n<p><span data-e2e-shortcode="vc_video" data-url="http://target.example.com/wp-content/uploads/tour.mp4"></span></p>\r\n<p></div>',
         },
         {
             name: 'Divi shortcode inside a core HTML block',
             slug: 'url-rewrite-divi-in-core-html',
-            input: `<!-- wp:html --><p>[et_pb_section background_image=”${SOURCE_DOMAIN.replaceAll('/', '\\/')}\\/wp-content\\/uploads\\/hero.jpg”][/et_pb_section]</p><!-- /wp:html -->`,
-            expected: `<!-- wp:html --><p>[et_pb_section background_image=”http:\\/\\/target.example.com\\/wp-content\\/uploads\\/hero.jpg”][/et_pb_section]</p><!-- /wp:html -->`,
+            input: '<!-- wp:html --><p>[et_pb_section background_image=”http:\\/\\/127.0.0.1:8108\\/wp-content\\/uploads\\/hero.jpg”][/et_pb_section]</p><!-- /wp:html -->',
+            expected: '<!-- wp:html --><p>[et_pb_section background_image=”http:\\/\\/target.example.com\\/wp-content\\/uploads\\/hero.jpg”][/et_pb_section]</p><!-- /wp:html -->',
             rendered: '<p><div data-e2e-shortcode="et_pb_section"></div></p>',
         },
         {
             name: 'Divi image card with entities and pipe-delimited state',
             slug: 'url-rewrite-divi-image-card',
-            input: `[dipl_image_card title="Social Media Strategy" image="${SOURCE_DOMAIN.replaceAll('/', '\\/')}\\/wp-content\\/uploads\\/investment-plan.jpg" icon="&#xe0e3;||divi||400" content_bg_color_gradient_stops="#141252 0%|#303b90 100%"][/dipl_image_card]`,
-            expected: `[dipl_image_card title="Social Media Strategy" image="http:\\/\\/target.example.com\\/wp-content\\/uploads\\/investment-plan.jpg" icon="&#xe0e3;||divi||400" content_bg_color_gradient_stops="#141252 0%|#303b90 100%"][/dipl_image_card]`,
+            input: '[dipl_image_card title="Social Media Strategy" image="http:\\/\\/127.0.0.1:8108\\/wp-content\\/uploads\\/investment-plan.jpg" icon="&#xe0e3;||divi||400" content_bg_color_gradient_stops="#141252 0%|#303b90 100%"][/dipl_image_card]',
+            expected: '[dipl_image_card title="Social Media Strategy" image="http:\\/\\/target.example.com\\/wp-content\\/uploads\\/investment-plan.jpg" icon="&#xe0e3;||divi||400" content_bg_color_gradient_stops="#141252 0%|#303b90 100%"][/dipl_image_card]',
             rendered: '<span data-e2e-shortcode="dipl_image_card" data-url="http://target.example.com/wp-content/uploads/investment-plan.jpg"></span>',
         },
     ];
@@ -78,36 +80,36 @@ describe('Import: URL Rewriting', () => {
         {
             name: 'WPBakery table with percent-encoded HTML and URL',
             slug: 'url-rewrite-wpbakery-percent-encoded-table',
-            input: `[vc_table allow_html="1"]Download,%3Ca%20href%3D%22${encodeURIComponent(SOURCE_DOMAIN + '/wp-content/uploads/manual.pdf')}%22%3ELink%3C%2Fa%3E[/vc_table]`,
-            expected: `[vc_table allow_html="1"]Download,%3Ca%20href%3D%22${encodeURIComponent('http://target.example.com/wp-content/uploads/manual.pdf')}%22%3ELink%3C%2Fa%3E[/vc_table]`,
+            input: '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22http%3A%2F%2F127.0.0.1%3A8108%2Fwp-content%2Fuploads%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
+            expected: '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22http%3A%2F%2Ftarget.example.com%2Fwp-content%2Fuploads%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
             rendered: '<div data-e2e-shortcode="vc_table">Download,<a href="http://target.example.com/wp-content/uploads/manual.pdf">Link</a></div>',
         },
         {
             name: 'WPBakery raw HTML with a Base64-encoded link',
             slug: 'url-rewrite-wpbakery-base64-html',
-            input: `[vc_raw_html]${Buffer.from(`<a href="${SOURCE_DOMAIN}/manual.pdf">Manual</a>`).toString('base64')}[/vc_raw_html]`,
-            expected: `[vc_raw_html]${Buffer.from('<a href="http://target.example.com/manual.pdf">Manual</a>').toString('base64')}[/vc_raw_html]`,
+            input: '[vc_raw_html]PGEgaHJlZj0iaHR0cDovLzEyNy4wLjAuMTo4MTA4L21hbnVhbC5wZGYiPk1hbnVhbDwvYT4=[/vc_raw_html]',
+            expected: '[vc_raw_html]PGEgaHJlZj0iaHR0cDovL3RhcmdldC5leGFtcGxlLmNvbS9tYW51YWwucGRmIj5NYW51YWw8L2E+[/vc_raw_html]',
             rendered: '<a href="http://target.example.com/manual.pdf">Manual</a>',
         },
         {
             name: 'SiteOrigin JSON encoded inside an HTML attribute',
             slug: 'url-rewrite-siteorigin-input-value',
-            input: `[vc_column_text]<input type="hidden" value="{&quot;url&quot;:&quot;${SOURCE_DOMAIN.replaceAll('/', '\\/')}\\/hero.jpg&quot;}">[/vc_column_text]`,
+            input: '[vc_column_text]<input type="hidden" value="{&quot;url&quot;:&quot;http:\\/\\/127.0.0.1:8108\\/hero.jpg&quot;}">[/vc_column_text]',
             expected: '[vc_column_text]<input type="hidden" value="{&quot;url&quot;:&quot;http:\\/\\/target.example.com\\/hero.jpg&quot;}">[/vc_column_text]',
             rendered: '<div data-e2e-shortcode="vc_column_text"><input type="hidden" value="{&quot;url&quot;:&quot;http:\\/\\/target.example.com\\/hero.jpg&quot;}"></div>',
         },
         {
             name: 'shortcode stored inside block JSON attributes',
             slug: 'url-rewrite-shortcode-block-attribute',
-            input: `<!-- wp:reprint/e2e-shortcode {"shortcode":"[vc_video link=\\"${SOURCE_DOMAIN.replaceAll('/', '\\/')}\\/video.mp4\\"]"} /-->`,
+            input: '<!-- wp:reprint/e2e-shortcode {"shortcode":"[vc_video link=\\"http:\\/\\/127.0.0.1:8108\\/video.mp4\\"]"} /-->',
             expected: '<!-- wp:reprint/e2e-shortcode {"shortcode":"[vc_video link=\\"http:\\/\\/target.example.com\\/video.mp4\\"]"} /-->',
             rendered: '<span data-e2e-shortcode="vc_video" data-url="http://target.example.com/video.mp4"></span>',
         },
         {
             name: 'percent-encoded redirect URL in a shortcode attribute',
             slug: 'url-rewrite-percent-encoded-query-url',
-            input: `[vc_video link="https://archive.example/watch?next=${encodeURIComponent(SOURCE_DOMAIN + '/video.mp4')}"]`,
-            expected: `[vc_video link="https://archive.example/watch?next=${encodeURIComponent('http://target.example.com/video.mp4')}"]`,
+            input: '[vc_video link="https://archive.example/watch?next=http%3A%2F%2F127.0.0.1%3A8108%2Fvideo.mp4"]',
+            expected: '[vc_video link="https://archive.example/watch?next=http%3A%2F%2Ftarget.example.com%2Fvideo.mp4"]',
             rendered: `<span data-e2e-shortcode="vc_video" data-url="https://archive.example/watch?next=${encodeURIComponent('http://target.example.com/video.mp4')}"></span>`,
         },
         {
@@ -120,6 +122,8 @@ describe('Import: URL Rewriting', () => {
     ];
 
     beforeAll(async () => {
+        assert.equal(SOURCE_DOMAIN, 'http://127.0.0.1:8108');
+
         await ensureSite(site, {
             afterCreate: async (siteDir) => {
                 const muPluginDir = join(siteDir, 'wp-content', 'mu-plugins');
