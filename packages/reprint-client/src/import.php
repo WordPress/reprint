@@ -11572,8 +11572,8 @@ if (
             'target' => 'include',
             'placeholder' => 'SOURCE',
             'repeatable' => true,
-            'help' => 'Restrict the file pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
-                'repeat for several. Default pulls everything',
+            'help' => 'Restrict the file pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute ' .
+                'path to a directory or a single file); repeat for several. Default pulls everything',
             'commands' => ['pull-files', 'files-pull'],
             'aliases' => ['only'],
         ],

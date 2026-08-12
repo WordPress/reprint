@@ -139,6 +139,7 @@
     },
     "db-index-interruption": {
       "port": 8125
-    }
+    },
+      "only-file-path": { "port": 8126 }
   }
 }
