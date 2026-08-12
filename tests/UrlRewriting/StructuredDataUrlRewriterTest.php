@@ -373,6 +373,33 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://new-site.com/page', $result);
     }
 
+    public function testBlockMarkupUsesCautiousFallbackForOpaqueUrlContexts(): void
+    {
+        $rewriter = $this->createRewriter();
+        $cases = [
+            'srcset candidates' => [
+                '<img srcset="https://old-site.com/one.jpg 1x, https://old-site.com/two.jpg 2x">',
+                '<img srcset="https://new-site.com/one.jpg 1x, https://new-site.com/two.jpg 2x">',
+            ],
+            'style element body' => [
+                '<style>.hero{background-image:url(https://old-site.com/hero.jpg)}</style>',
+                '<style>.hero{background-image:url(https://new-site.com/hero.jpg)}</style>',
+            ],
+            'meta content attribute' => [
+                '<meta property="og:image" content="https://old-site.com/social.jpg">',
+                '<meta property="og:image" content="https://new-site.com/social.jpg">',
+            ],
+        ];
+
+        foreach ($cases as $description => [$input, $expected]) {
+            $this->assertSame(
+                $expected,
+                $rewriter->rewrite_known_block_markup_value($input),
+                $description
+            );
+        }
+    }
+
     #[DataProvider('block_markup_text_node_cases')]
     public function testBlockMarkupTextNodesUseCautiousUrlBaseReplacement(
         string $input,
@@ -408,6 +435,10 @@ class StructuredDataUrlRewriterTest extends TestCase
             'pure Divi 4 shortcode record' => [
                 '[et_pb_section background_image=”https:\/\/old-site.com\/media\/hero.jpg”][/et_pb_section]',
                 '[et_pb_section background_image=”https:\/\/new-site.com\/media\/hero.jpg”][/et_pb_section]',
+            ],
+            'Divi critical CSS preserves quoted values and URL terminator' => [
+                '[et_pb_section custom_css_main_element=\'font-size:"64px";font-family:"Rubik";line-height:"1.1em";background:url(https:\\/\\/old-site.com\\/wp-content\\/uploads\\/2017\\/01\\/wanderlust.jpg) no-repeat center center fixed;\'][/et_pb_section]',
+                '[et_pb_section custom_css_main_element=\'font-size:"64px";font-family:"Rubik";line-height:"1.1em";background:url(https:\\/\\/new-site.com\\/wp-content\\/uploads\\/2017\\/01\\/wanderlust.jpg) no-repeat center center fixed;\'][/et_pb_section]',
             ],
             'entity-quoted CSS in a WPBakery shortcode attribute' => [
                 '[vc_column css=&#187;.vc_custom{background-image:url(https:\/\/old-site.com\/media\/hero.jpg?id=8086) !important;}&#187;]',
@@ -473,12 +504,13 @@ class StructuredDataUrlRewriterTest extends TestCase
         ];
     }
 
-    public function testBlockMarkupLeavesEncodedSiteOriginInputValueUnchanged(): void
+    public function testBlockMarkupCautiouslyRewritesEncodedSiteOriginInputValue(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<input type="hidden" value="{&quot;instance&quot;:{&quot;url&quot;:&quot;https:\/\/old-site.com\/media\/hero.jpg&quot;}}">';
+        $expected = '<input type="hidden" value="{&quot;instance&quot;:{&quot;url&quot;:&quot;https:\/\/new-site.com\/media\/hero.jpg&quot;}}">';
 
-        $this->assertSame($input, $rewriter->rewrite($input, 'block_markup'));
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
     }
 
     public function testBlockMarkupTextOffsetFollowsAnEarlierStructuredReplacement(): void
@@ -519,12 +551,13 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $result);
     }
 
-    public function testKnownBlockMarkupDoesNotRewriteEmbeddedQueryUrl(): void
+    public function testKnownBlockMarkupCautiouslyRewritesEmbeddedQueryUrl(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<a href="https://webarchive.org?url=https://old-site.com/about">Archive</a>';
+        $expected = '<a href="https://webarchive.org?url=https://new-site.com/about">Archive</a>';
 
-        $this->assertSame($input, $rewriter->rewrite_known_block_markup_value($input));
+        $this->assertSame($expected, $rewriter->rewrite_known_block_markup_value($input));
     }
 
     public function testKnownBlockMarkupRewritesMixedLiteralAndCaseVariantUrls(): void
@@ -594,7 +627,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', strtolower($result));
     }
 
-    public function testRewriteCacheSeparatesPlainTextAndBlockMarkupSemantics(): void
+    public function testBlockMarkupCautiouslyRewritesUrlInAnUnknownAttribute(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<div data-note="https://old-site.com/not-a-url-attribute">Content</div>';
@@ -603,7 +636,10 @@ class StructuredDataUrlRewriterTest extends TestCase
         $block_result = $rewriter->rewrite($input, 'block_markup');
 
         $this->assertStringContainsString('https://new-site.com/not-a-url-attribute', $plain_result);
-        $this->assertSame($input, $block_result);
+        $this->assertSame(
+            '<div data-note="https://new-site.com/not-a-url-attribute">Content</div>',
+            $block_result
+        );
     }
 
     // --- Content type hint: null (default) uses plain text URL scanning ---

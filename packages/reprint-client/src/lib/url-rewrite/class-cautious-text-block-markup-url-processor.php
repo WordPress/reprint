@@ -20,8 +20,9 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
  * bytes never pass through the HTML text encoder.
  *
  * Tags, block attributes, and CSS continue through BlockMarkupUrlProcessor.
- * This class deliberately does not inspect arbitrary HTML attributes. A
- * SiteOrigin value such as this remains unchanged:
+ * This subclass deliberately handles only text tokens. StructuredDataUrlRewriter
+ * separately runs the same cautious replacement over the completed markup for
+ * opaque attributes. A SiteOrigin value such as this keeps its encoding:
  *
  * ```
  * <input value="{&quot;url&quot;:&quot;https:\/\/source.example\/image.jpg&quot;}">

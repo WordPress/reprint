@@ -342,10 +342,9 @@ class StructuredDataUrlRewriter
      * Rewrite a decoded value already known by the SQL layer to be block markup.
      *
      * Block markup owns HTML attributes, block-comment JSON, and CSS url()
-     * values. Raw text tokens use cautious source-base replacement because they
-     * may contain shortcodes or another syntax with unknown escaping rules.
-     * Arbitrary HTML attributes remain outside that fallback until their raw
-     * string spans can be exposed without re-encoding the containing markup.
+     * values. After those exact rewrites, cautious source-base replacement
+     * covers URLs in opaque contexts such as srcset, style element bodies, and
+     * meta content without decoding or re-encoding their enclosing syntax.
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
@@ -496,7 +495,21 @@ class StructuredDataUrlRewriter
                     }
                 }
 
-                return $p->get_updated_html();
+                $rewritten_content = $p->get_updated_html();
+
+                // The block processor leaves opaque contexts such as srcset,
+                // style element bodies, and meta content untouched. Until it
+                // exposes raw spans for them, replace only recognized source
+                // bases in its updated markup.
+                $cautious_processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
+                    $rewritten_content,
+                    $this->url_mapping
+                );
+                while ($cautious_processor->next_url()) {
+                    $cautious_processor->replace_url_base();
+                }
+
+                return $cautious_processor->get_updated_text();
 
             case self::PLAIN_TEXT:
                 $p = new URLInTextProcessor( $content, $base_url );
