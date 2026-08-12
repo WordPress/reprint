@@ -186,9 +186,19 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://destination.example/logo.png',
                 ['https://source.example/media[old]{v1}!' => 'https://destination.example'],
             ],
-            'HTTP source mapping preserves the candidate protocol' => [
+            'HTTP source mapping applies the target protocol' => [
                 'http://source.example/media/logo.png',
-                'http://destination.example/media/logo.png',
+                'https://destination.example/media/logo.png',
+                ['http://source.example' => 'https://destination.example'],
+            ],
+            'uppercase HTTP candidate applies the target protocol' => [
+                'HTTP://source.example/media/logo.png',
+                'https://destination.example/media/logo.png',
+                ['http://source.example' => 'https://destination.example'],
+            ],
+            'protocol rewrite preserves escaped separators' => [
+                'http:\\/\\/source.example\\/media\\/logo.png',
+                'https:\\/\\/destination.example\\/media\\/logo.png',
                 ['http://source.example' => 'https://destination.example'],
             ],
             'exact scheme-less host beside a longer unrelated host' => [

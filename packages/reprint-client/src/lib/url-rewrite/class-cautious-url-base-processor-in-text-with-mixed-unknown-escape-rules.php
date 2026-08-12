@@ -22,8 +22,8 @@
  * ```
  *
  * The configured base is source.example, so that is the complete byte range
- * replaced. The protocol, escaped slashes, path, and shortcode syntax are not
- * part of the base and remain unchanged.
+ * replaced. When the configured target uses a different protocol, the protocol
+ * is replaced too. Escaped slashes, path, and shortcode syntax remain unchanged.
  *
  * This processor is for text whose escaping rules are unknown. The backslashes
  * above might come from JSON, CSS, a shortcode serializer, or another format.
@@ -32,7 +32,8 @@
  *
  * Instead, the processor performs one narrow operation: find the configured
  * source base as bytes and replace that entire slice with a target domain. It
- * does not decode, normalize, or re-encode the input.
+ * replaces the literal protocol separately when the mapping changes it. It does
+ * not decode, normalize, or re-encode the input.
  *
  * Supported sources:
  *
@@ -102,6 +103,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
+     *     target_scheme: string,
      *     pattern: string
      * }>
      */
@@ -117,9 +119,13 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
+     *     target_scheme: string,
      *     pattern: string,
      *     start: int,
-     *     base_length: int
+     *     base_length: int,
+     *     scheme_start: int|null,
+     *     scheme_length: int,
+     *     candidate_scheme: string
      * }|null
      */
     private ?array $matched_url = null;
@@ -187,8 +193,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *
      * Mapping source.example/media to destination.example changes
      * https://source.example/media/logo.png to
-     * https://destination.example/logo.png. The protocol and logo.png suffix
-     * are outside the matched base and remain unchanged.
+     * https://destination.example/logo.png. The logo.png suffix is outside the
+     * matched base and remains unchanged. A configured protocol change replaces
+     * only the literal scheme, preserving the separator's existing escaping.
      */
     public function replace_url_base(): bool
     {
@@ -201,6 +208,19 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             'length'      => $this->matched_url['base_length'],
             'replacement' => $this->matched_url['target_domain'],
         ];
+
+        if (
+            $this->matched_url['scheme_start'] !== null
+            && ( $this->matched_url['candidate_scheme'] === 'http' || $this->matched_url['candidate_scheme'] === 'https' )
+            && ( $this->matched_url['target_scheme'] === 'http' || $this->matched_url['target_scheme'] === 'https' )
+            && $this->matched_url['candidate_scheme'] !== $this->matched_url['target_scheme']
+        ) {
+            $this->lexical_updates[$this->matched_url['scheme_start']] = [
+                'start'       => $this->matched_url['scheme_start'],
+                'length'      => $this->matched_url['scheme_length'],
+                'replacement' => $this->matched_url['target_scheme'],
+            ];
+        }
 
         return true;
     }
@@ -238,9 +258,13 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
+     *     target_scheme: string,
      *     pattern: string,
      *     start: int,
-     *     base_length: int
+     *     base_length: int,
+     *     scheme_start: int|null,
+     *     scheme_length: int,
+     *     candidate_scheme: string
      * }|null
      */
     private function find_next_url_base(): ?array
@@ -266,8 +290,13 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             $next_match = array_merge(
                 $mapping,
                 [
-                    'start'       => $authority_start,
-                    'base_length' => strlen($matches['base'][0]),
+                    'start'         => $authority_start,
+                    'base_length'   => strlen($matches['base'][0]),
+                    'scheme_start'  => $matches['scheme'][1] === -1
+                        ? null
+                        : $matches['scheme'][1],
+                    'scheme_length'    => strlen($matches['scheme'][0]),
+                    'candidate_scheme' => strtolower($matches['scheme'][0]),
                 ]
             );
         }
@@ -278,9 +307,10 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * Build a candidate pattern adapted from URLInTextProcessor's URL finder.
      *
-     * The pattern recognizes only this mapping's authority and initial path.
-     * Capturing those slices, rather than a complete parsed URL, lets callers
-     * replace the authority without rendering any surrounding syntax.
+     * The pattern recognizes only this mapping's scheme, authority, and initial
+     * path. Capturing those slices, rather than a complete parsed URL, lets
+     * callers replace the scheme and authority without rendering separators or
+     * surrounding syntax.
      */
     private function create_url_candidate_pattern(
         string $source_scheme,
@@ -298,7 +328,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         return '~
             (?<![A-Za-z0-9._%+\\/@-])
             (?:
-                (?i:' . preg_quote($source_scheme, '~') . ')
+                (?<scheme>(?i:' . preg_quote($source_scheme, '~') . '))
                 ' . $escaped_separator . ':
                 ' . $escaped_separator . '/
                 ' . $escaped_separator . '/
@@ -322,6 +352,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
+     *     target_scheme: string,
      *     pattern: string
      * }|null
      */
@@ -342,6 +373,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             'source_path'      => $source_path,
             'source_base'      => $source['authority'] . $source_path,
             'target_domain'    => $target['host'],
+            'target_scheme'    => $target['scheme'],
             'pattern'          => $this->create_url_candidate_pattern(
                 $source['scheme'],
                 $source['authority'],
