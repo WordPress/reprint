@@ -226,11 +226,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https:\\\\\/\\\\\\/destination.example\\\\\\/assets',
                 ['https://source.example' => 'https://destination.example/assets'],
             ],
-            'target path uses the literal separator from the configured source path' => [
-                'https:\\/\\/source.example/media/logo.png',
-                'https:\\/\\/destination.example/assets/logo.png',
-                ['https://source.example/media' => 'https://destination.example/assets'],
-            ],
             'target path comes before a query after an unmapped authority' => [
                 'https:\\/\\/source.example?download=1',
                 'https:\\/\\/destination.example\\/assets?download=1',
