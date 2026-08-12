@@ -58,8 +58,10 @@
  * Unsupported mappings are discarded as a whole. There is no partial
  * replacement:
  *
- * - A target path is not supported. Writing it would require choosing whether
- *   each slash should be /, \/, or something else.
+ * - A target path may contain non-empty slash-separated components composed
+ *   only of ASCII letters, digits, hyphens, and underscores. Each slash copies
+ *   the spelling of the first slash in the matched protocol. A scheme-less
+ *   authority stays unchanged when the target has a path.
  * - Target ports, user information, queries, fragments, IPv4/IPv6 addresses,
  *   and Unicode domains are not supported. Punycode domains are supported.
  * - Unicode source domains and paths are not supported.
@@ -318,9 +320,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      * Build a candidate pattern adapted from URLInTextProcessor's URL finder.
      *
      * The pattern recognizes only this mapping's scheme, authority, and initial
-     * path. Capturing those slices, rather than a complete parsed URL, lets
-     * callers replace the scheme and authority without rendering separators or
-     * surrounding syntax.
+     * path. It captures the scheme and the first slash in the protocol. Those
+     * bytes supply the target protocol and target-path slash spelling without
+     * parsing or rewriting the surrounding text.
      */
     private function create_url_candidate_pattern(
         string $source_scheme,
