@@ -27,6 +27,7 @@
             <file>ExportResolveDirectoriesTest.php</file>
             <file>FileIndexDedupTest.php</file>
             <file>FileIndexSkipDefaultsTest.php</file>
+            <file>FileIndexProcessorTest.php</file>
             <file>ExporterUtilsTest.php</file>
             <file>HmacServerTest.php</file>
             <file>MultipartProcessorTest.php</file>
