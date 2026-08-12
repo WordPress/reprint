@@ -4703,7 +4703,7 @@ class ImportClient
             // wp-content is the only ABSPATH entry the target can own files
             // in; the rest is core, which the pull owns entirely.
             if ($adopt_flatten_to_content && $entry === "wp-content") {
-                $this->flatten_adopt_content_directory(
+                $this->flatten_adopt_wp_content(
                     $source,
                     $target,
                     $adopted,
@@ -4803,7 +4803,7 @@ class ImportClient
             // sub-components are skipped because they are adopted below,
             // against the source each one actually comes from.
             if ($adopt_flatten_to_content) {
-                $this->flatten_adopt_content_directory(
+                $this->flatten_adopt_wp_content(
                     $local_content_dir,
                     $wp_content_target,
                     $adopted,
@@ -4886,7 +4886,7 @@ class ImportClient
             if (is_dir($local_content_dir)) {
                 $target = wp_join_unix_paths($flatten_to, "wp-content");
                 if ($adopt_flatten_to_content) {
-                    $this->flatten_adopt_content_directory(
+                    $this->flatten_adopt_wp_content(
                         $local_content_dir,
                         $target,
                         $adopted,
@@ -5095,10 +5095,15 @@ class ImportClient
     }
 
     /**
-     * Move the wp-content entries that only $target holds into $source, so
-     * that replacing $target with a symlink no longer deletes them.
+     * Adopt into the pulled wp-content: move the entries that only the
+     * flattened wp-content holds into the pulled one, so that replacing it
+     * with a symlink no longer deletes them.
      *
-     * Called only by run_flat_document_root(), in its 'adopt' conflict mode.
+     * This is the wp-content level and nothing else. The only caller is
+     * run_flat_document_root(), in its 'adopt' conflict mode, and every call
+     * passes <flatten-to>/wp-content as the flattened side. The two
+     * directories below it, flatten_adopt_unit_container() and
+     * flatten_adopt_file_tree(), are the generic ones.
      *
      * Merging stops at whole units. A plugin or a theme belongs to one side
      * or the other: descending into one the pull also has would keep the
@@ -5113,55 +5118,62 @@ class ImportClient
      *
      * Per entry at this level:
      *
-     *   - absent from the source -> move it into the source
-     *   - a container above      -> walk it under that container's rule
-     *   - anything else          -> leave it, the pulled copy wins
+     *   - absent from the pulled side -> move it there
+     *   - a container above           -> walk it under that container's rule
+     *   - anything else               -> leave it, the pulled copy wins
      *
      * Nothing is deleted here. The caller places the symlinks afterwards, so
      * a failed move stops the command with the flattened layout still intact.
      *
-     * @param string   $source                 Filesystem-root directory the entries belong in.
-     * @param string   $target                 Flattened directory being merged away.
-     * @param int      $adopted                Running count of moved entries, by reference.
-     * @param string[] $unit_container_names   Entry names whose own children are whole
-     *                                         plugins or themes.
-     * @param string[] $file_container_names   Entry names whose contents merge file by file.
-     * @param string[] $target_entries_to_skip Top-level entry names this call must not move,
-     *                                         because another (source, target) pair owns them.
+     * @param string   $pulled_content_directory Filesystem-root wp-content the entries belong in.
+     * @param string   $flattened_wp_content     Flattened wp-content being merged away.
+     * @param int      $adopted                  Running count of moved entries, by reference.
+     * @param string[] $unit_container_names     Entry names whose own children are whole
+     *                                           plugins or themes.
+     * @param string[] $file_container_names     Entry names whose contents merge file by file.
+     * @param string[] $entries_to_skip          Entry names this call must not move, because
+     *                                           another (source, target) pair owns them.
      */
-    private function flatten_adopt_content_directory(
-        string $source,
-        string $target,
+    private function flatten_adopt_wp_content(
+        string $pulled_content_directory,
+        string $flattened_wp_content,
         int &$adopted,
         array $unit_container_names,
         array $file_container_names,
-        array $target_entries_to_skip = []
+        array $entries_to_skip = []
     ): void {
-        if (!$this->flatten_both_sides_are_real_directories($source, $target)) {
+        // Only a real directory on both sides has entries to compare. A
+        // symlinked target is a previous flatten, and holds nothing of its own.
+        if (
+            is_link($pulled_content_directory) ||
+            !is_dir($pulled_content_directory) ||
+            is_link($flattened_wp_content) ||
+            !is_dir($flattened_wp_content)
+        ) {
             return;
         }
 
-        foreach (@scandir($target) ?: [] as $entry) {
+        foreach (@scandir($flattened_wp_content) ?: [] as $entry) {
             if ($entry === "." || $entry === "..") {
                 continue;
             }
-            if (in_array($entry, $target_entries_to_skip, true)) {
+            if (in_array($entry, $entries_to_skip, true)) {
                 continue;
             }
-            $source_entry = wp_join_unix_paths($source, $entry);
-            $target_entry = wp_join_unix_paths($target, $entry);
+            $pulled_entry = wp_join_unix_paths($pulled_content_directory, $entry);
+            $flattened_entry = wp_join_unix_paths($flattened_wp_content, $entry);
 
-            if (!file_exists($source_entry) && !is_link($source_entry)) {
-                $this->flatten_move_into_filesystem_root($target_entry, $source_entry);
+            if (!file_exists($pulled_entry) && !is_link($pulled_entry)) {
+                $this->flatten_move_into_filesystem_root($flattened_entry, $pulled_entry);
                 ++$adopted;
                 continue;
             }
             if (in_array($entry, $unit_container_names, true)) {
-                $this->flatten_adopt_unit_container($source_entry, $target_entry, $adopted);
+                $this->flatten_adopt_unit_container($pulled_entry, $flattened_entry, $adopted);
                 continue;
             }
             if (in_array($entry, $file_container_names, true)) {
-                $this->flatten_adopt_file_tree($source_entry, $target_entry, $adopted);
+                $this->flatten_adopt_file_tree($pulled_entry, $flattened_entry, $adopted);
             }
         }
     }
@@ -5177,7 +5189,12 @@ class ImportClient
         string $target,
         int &$adopted
     ): void {
-        if (!$this->flatten_both_sides_are_real_directories($source, $target)) {
+        if (
+            is_link($source) ||
+            !is_dir($source) ||
+            is_link($target) ||
+            !is_dir($target)
+        ) {
             return;
         }
 
@@ -5208,7 +5225,12 @@ class ImportClient
         string $target,
         int &$adopted
     ): void {
-        if (!$this->flatten_both_sides_are_real_directories($source, $target)) {
+        if (
+            is_link($source) ||
+            !is_dir($source) ||
+            is_link($target) ||
+            !is_dir($target)
+        ) {
             return;
         }
 
@@ -5226,21 +5248,6 @@ class ImportClient
             }
             $this->flatten_adopt_file_tree($source_entry, $target_entry, $adopted);
         }
-    }
-
-    /**
-     * Whether both paths are real directories, so their entries can be
-     * compared. A symlinked target is a previous flatten and holds nothing
-     * of its own.
-     */
-    private function flatten_both_sides_are_real_directories(
-        string $source,
-        string $target
-    ): bool {
-        return !is_link($source) &&
-            is_dir($source) &&
-            !is_link($target) &&
-            is_dir($target);
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions carry CLI filesystem paths, never HTML output.
