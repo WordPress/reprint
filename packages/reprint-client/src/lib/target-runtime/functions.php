@@ -1,4 +1,7 @@
 <?php
+
+use function WordPress\Filesystem\wp_join_unix_paths;
+
 /**
  * Target runtime functions.
  *
@@ -138,7 +141,9 @@ function generate_runtime_php(RuntimeManifest $manifest, string $filesystem_root
  */
 function generate_sqlite_loader_code(array $sqlite): string
 {
-    $plugin_dir = addslashes($sqlite['plugin_dir']);
+    $integration_path = addslashes(
+        wp_join_unix_paths($sqlite['plugin_dir'], '/wp-includes/sqlite/db.php')
+    );
     $db_dir = addslashes($sqlite['db_dir']);
     $db_file = addslashes($sqlite['db_file']);
 
@@ -193,7 +198,7 @@ class Streaming_SQLite_Loader {
 PROXY_BODY
     . "\n"
     // Inject the resolved plugin path into the loader method.
-    . "        \$integration = '{$plugin_dir}/wp-includes/sqlite/db.php';\n"
+    . "        \$integration = '{$integration_path}';\n"
     . <<<'PROXY_TAIL'
         require_once $integration;
         if ($GLOBALS['wpdb'] === $this) {
@@ -225,7 +230,7 @@ function copy_sqlite_plugin(string $source_dir, string $output_dir): string
         );
     }
 
-    $target_dir = $output_dir . '/sqlite-database-integration';
+    $target_dir = wp_join_unix_paths($output_dir, 'sqlite-database-integration');
 
     if (!is_dir($target_dir)) {
         copy_directory_recursive($source_dir, $target_dir);
@@ -247,8 +252,8 @@ function copy_sqlite_plugin(string $source_dir, string $output_dir): string
  */
 function ensure_sqlite_plugin_database_driver(string $source_dir, string $target_dir): void
 {
-    $target_database_dir = $target_dir . '/wp-includes/database';
-    if (is_file($target_database_dir . '/version.php') && !is_link($target_database_dir)) {
+    $target_database_dir = wp_join_unix_paths($target_dir, 'wp-includes/database');
+    if (is_file(wp_join_unix_paths($target_database_dir, 'version.php')) && !is_link($target_database_dir)) {
         return;
     }
 
@@ -260,6 +265,8 @@ function ensure_sqlite_plugin_database_driver(string $source_dir, string $target
 
 function sqlite_plugin_database_driver_source(string $source_dir): string
 {
+    // The packaged CLI passes a phar:// source directory. The Unix filesystem
+    // helper would collapse the scheme's required `:///` separator.
     $candidates = [
         $source_dir . '/wp-includes/database',
         dirname($source_dir) . '/mysql-on-sqlite/src',
@@ -315,7 +322,7 @@ function copy_directory_recursive(string $source, string $dest): void
         RecursiveIteratorIterator::SELF_FIRST,
     );
     foreach ($iterator as $item) {
-        $target = $dest . '/' . $iterator->getSubPathname();
+        $target = wp_join_unix_paths($dest, $iterator->getSubPathname());
         if ($item->isDir()) {
             if (!is_dir($target)) {
                 mkdir($target, 0755, true);

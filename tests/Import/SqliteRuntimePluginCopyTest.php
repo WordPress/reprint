@@ -71,4 +71,15 @@ class SqliteRuntimePluginCopyTest extends TestCase
         $this->assertFileExists($copied . '/wp-includes/database/version.php');
         $this->assertFileExists($copied . '/wp-includes/database/load.php');
     }
+
+    public function testCopyNormalizesATrailingOutputDirectorySlash(): void
+    {
+        $copied = \copy_sqlite_plugin($this->pluginSource(), $this->tempDir . '/');
+
+        $this->assertSame(
+            $this->tempDir . '/sqlite-database-integration',
+            $copied,
+        );
+        $this->assertFileExists($copied . '/wp-includes/database/version.php');
+    }
 }

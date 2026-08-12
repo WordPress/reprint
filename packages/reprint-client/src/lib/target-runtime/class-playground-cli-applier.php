@@ -1,4 +1,7 @@
 <?php
+
+use function WordPress\Filesystem\wp_join_unix_paths;
+
 /**
  * Runtime applier for WordPress Playground CLI (@wp-playground/cli).
  *
@@ -58,7 +61,7 @@ class PlaygroundCliApplier implements RuntimeApplier
         // 1. Write runtime.php using the VFS path (/wordpress) as fs-root.
         //    Inside Playground, the host's fs-root is mounted at /wordpress,
         //    so all resolved {fs-root} paths must reference /wordpress.
-        $runtime_path = $output_dir . '/runtime.php';
+        $runtime_path = wp_join_unix_paths($output_dir, 'runtime.php');
         $runtime = generate_runtime_php($manifest, self::VFS_ROOT);
 
         // Suppress display of PHP warnings and deprecation notices.
@@ -79,13 +82,13 @@ class PlaygroundCliApplier implements RuntimeApplier
         $manifest->sqlite = $saved_sqlite;
 
         // 2. Write blueprint.json (minimal — most config is in start.sh flags)
-        $blueprint_path = $output_dir . '/blueprint.json';
+        $blueprint_path = wp_join_unix_paths($output_dir, 'blueprint.json');
         $blueprint = $this->generate_blueprint();
         write_runtime_file($blueprint_path, json_encode($blueprint, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
         $summary[] = "Wrote {$blueprint_path}";
 
         // 3. Write start.sh
-        $start_path = $output_dir . '/start.sh';
+        $start_path = wp_join_unix_paths($output_dir, 'start.sh');
         $start_script = $this->generate_start_script(
             $manifest,
             $filesystem_root,
@@ -102,7 +105,7 @@ class PlaygroundCliApplier implements RuntimeApplier
         // 4. Write start.json — structured config for programmatic consumers
         // (e.g. Studio). The source paths are as seen by this PHP process;
         // callers running inside a VFS must map them to host paths.
-        $config_path = $output_dir . '/start.json';
+        $config_path = wp_join_unix_paths($output_dir, 'start.json');
         $config = $this->generate_start_config(
             $filesystem_root,
             $output_dir,
@@ -213,12 +216,12 @@ class PlaygroundCliApplier implements RuntimeApplier
             // document root. Three mounts assemble the standard layout.
             $mounts[] = $wordpress_core_dir . ':/wordpress';
 
-            $wp_content = $real_fs_root . '/wp-content';
+            $wp_content = wp_join_unix_paths($real_fs_root, 'wp-content');
             if (is_dir($wp_content)) {
                 $mounts[] = $wp_content . ':/wordpress/wp-content';
             }
 
-            $wp_config = $real_fs_root . '/wp-config.php';
+            $wp_config = wp_join_unix_paths($real_fs_root, 'wp-config.php');
             if (file_exists($wp_config)) {
                 $mounts[] = $wp_config . ':/wordpress/wp-config.php';
             }
@@ -250,7 +253,7 @@ class PlaygroundCliApplier implements RuntimeApplier
             'document_root' => self::VFS_ROOT,
             'mounts_before_install' => [],
             'mounts' => [],
-            'blueprint' => $output_dir . '/blueprint.json',
+            'blueprint' => wp_join_unix_paths($output_dir, 'blueprint.json'),
             'port' => $port,
             'follow_symlinks' => true,
             'wordpress_install_mode' => 'do-not-attempt-installing',

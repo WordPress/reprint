@@ -3,7 +3,9 @@
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Push errors become authenticated API JSON, never HTML output.
 
 use function WordPress\Filesystem\wp_join_unix_paths;
+use function WordPress\Reprint\Exporter\assert_valid_relative_path;
 use function WordPress\Reprint\Exporter\normalize_excluded_paths;
+use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\relative_path_under;
 use function WordPress\Reprint\Exporter\trim_right_slash;
@@ -2445,9 +2447,6 @@ final class Site_Export_Push_Session {
      * @param string $path Document-root-relative raw path bytes.
      */
     private function assert_path_not_reserved(string $path): void {
-        if ($path === '') {
-            throw new InvalidArgumentException('Document-root-relative path must not be empty.');
-        }
         $path_bytes = strlen($path);
         if ($path_bytes > self::MAX_PATH_BYTES) {
             throw new InvalidArgumentException(
@@ -2455,27 +2454,8 @@ final class Site_Export_Push_Session {
                 . self::MAX_PATH_BYTES . ' bytes; observed ' . $path_bytes . '.'
             );
         }
-        if ($path[0] === '/') {
-            throw new InvalidArgumentException('Document-root-relative path must not be absolute: ' . base64_encode($path) . '.');
-        }
-        if (strpos($path, "\0") !== false) {
-            throw new InvalidArgumentException('Document-root-relative path must not contain a NUL byte: ' . base64_encode($path) . '.');
-        }
-        if (strpos($path, '\\') !== false) {
-            throw new InvalidArgumentException('Document-root-relative path must not contain a backslash: ' . base64_encode($path) . '.');
-        }
-        foreach (explode('/', $path) as $segment) {
-            if ($segment === '') {
-                throw new InvalidArgumentException('Document-root-relative path must not contain an empty component: ' . base64_encode($path) . '.');
-            }
-            if ($segment === '.') {
-                throw new InvalidArgumentException('Document-root-relative path must not contain a dot component: ' . base64_encode($path) . '.');
-            }
-            if ($segment === '..') {
-                throw new InvalidArgumentException('Document-root-relative path must not contain a parent component: ' . base64_encode($path) . '.');
-            }
-        }
-        if ($path === '.maintenance' || strpos($path, '.maintenance/') === 0) {
+        assert_valid_relative_path($path, 'Document-root-relative path');
+        if (path_is_same_as_or_descendant_of($path, '.maintenance')) {
             throw new InvalidArgumentException('The WordPress maintenance marker path is reserved: ' . base64_encode($path) . '.');
         }
     }

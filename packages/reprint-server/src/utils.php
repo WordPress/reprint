@@ -280,29 +280,10 @@ function normalize_excluded_paths(array $excluded_paths): array
         if (!is_string($path)) {
             throw new InvalidArgumentException('Each excluded path must be a string; observed ' . gettype($path) . '.');
         }
-        if ($path === '') {
-            throw new InvalidArgumentException('Excluded path must not be empty.');
-        }
-        if ($path[0] === '/') {
+        if ($path !== '' && $path[0] === '/') {
             throw new InvalidArgumentException('Excluded path must be document-root-relative: ' . base64_encode($path) . '.');
         }
-        if (strpos($path, "\0") !== false) {
-            throw new InvalidArgumentException('Excluded path must not contain a NUL byte: ' . base64_encode($path) . '.');
-        }
-        if (strpos($path, '\\') !== false) {
-            throw new InvalidArgumentException('Excluded path must not contain a backslash: ' . base64_encode($path) . '.');
-        }
-        foreach (explode('/', $path) as $segment) {
-            if ($segment === '') {
-                throw new InvalidArgumentException('Excluded path must not contain an empty component: ' . base64_encode($path) . '.');
-            }
-            if ($segment === '.') {
-                throw new InvalidArgumentException('Excluded path must not contain a dot component: ' . base64_encode($path) . '.');
-            }
-            if ($segment === '..') {
-                throw new InvalidArgumentException('Excluded path must not contain a parent component: ' . base64_encode($path) . '.');
-            }
-        }
+        assert_valid_relative_path($path, 'Excluded path');
         $normalized_excluded_paths[] = $path;
     }
     sort($normalized_excluded_paths, SORT_STRING);
@@ -316,45 +297,145 @@ function normalize_excluded_paths(array $excluded_paths): array
     }
     return $normalized_excluded_paths;
 }
+
+/**
+ * Validates a document-root-relative path carried as raw bytes.
+ *
+ * A valid path has one or more slash-delimited components. It cannot be
+ * absolute, use Windows separators, include a NUL byte, or contain empty,
+ * current-directory, or parent-directory components. It deliberately does
+ * not trim whitespace: spaces and other non-reserved bytes are valid file
+ * name bytes.
+ *
+ * Examples:
+ *
+ *     assert_valid_relative_path('wp-content/plugins', 'Excluded path');
+ *     assert_valid_relative_path('index.php', 'Document-root-relative path');
+ *
+ * @param string $path Raw path bytes to validate.
+ * @param string $label Human-readable name at the start of validation errors.
+ * @throws InvalidArgumentException When the path has a reserved form.
+ */
+function assert_valid_relative_path(string $path, string $label): void
+{
+    if ($path === '') {
+        throw new InvalidArgumentException("{$label} must not be empty.");
+    }
+    if ($path[0] === '/') {
+        throw new InvalidArgumentException("{$label} must not be absolute: " . base64_encode($path) . '.');
+    }
+    if (strpos($path, "\0") !== false) {
+        throw new InvalidArgumentException("{$label} must not contain a NUL byte: " . base64_encode($path) . '.');
+    }
+    if (strpos($path, '\\') !== false) {
+        throw new InvalidArgumentException("{$label} must not contain a backslash: " . base64_encode($path) . '.');
+    }
+    foreach (explode('/', $path) as $component) {
+        if ($component === '') {
+            throw new InvalidArgumentException("{$label} must not contain an empty component: " . base64_encode($path) . '.');
+        }
+        if ($component === '.') {
+            throw new InvalidArgumentException("{$label} must not contain a dot component: " . base64_encode($path) . '.');
+        }
+        if ($component === '..') {
+            throw new InvalidArgumentException("{$label} must not contain a parent component: " . base64_encode($path) . '.');
+        }
+    }
+}
 // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
 /**
- * Returns true when one path is equal to or strictly under one root.
+ * Indicates whether a candidate path is the same as or a descendant of an
+ * ancestor.
  *
- * Either argument may be a list. The result is true when any path-and-root
- * pair matches. The filesystem root contains every absolute path, and cannot
- * use the normal root-plus-slash prefix because that would produce `//`.
+ * Either argument may be a list. The result is true when any candidate-and-
+ * ancestor pair matches. The filesystem root matches every absolute path and
+ * cannot use the normal ancestor-plus-slash prefix because that would produce
+ * `//`.
+ *
+ * Examples:
+ *
+ *     path_is_same_as_or_descendant_of('/srv/site', '/srv/site');            // true
+ *     path_is_same_as_or_descendant_of('/srv/site/wp-content', '/srv/site'); // true
+ *     path_is_same_as_or_descendant_of('/srv/site-old', '/srv/site');        // false
+ *     path_is_same_as_or_descendant_of('/', '/');                             // true
  *
  * @param string|list<string> $path Candidate path or paths.
- * @param string|list<string> $root Containing root or roots.
- * @return bool Whether a candidate path belongs to a root.
+ * @param string|list<string> $ancestor Ancestor path or paths.
+ * @return bool Whether a candidate is the same as or a descendant of an
+ *              ancestor.
  * @throws InvalidArgumentException If either scalar value is not a string.
  */
-function path_is_within_root($path, $root): bool
+function path_is_same_as_or_descendant_of($path, $ancestor): bool
 {
     if (is_array($path)) {
         foreach ($path as $candidate_path) {
-            if (path_is_within_root($candidate_path, $root)) {
+            if (path_is_same_as_or_descendant_of($candidate_path, $ancestor)) {
                 return true;
             }
         }
         return false;
     }
-    if (is_array($root)) {
-        foreach ($root as $candidate_root) {
-            if (path_is_within_root($path, $candidate_root)) {
+    if (is_array($ancestor)) {
+        foreach ($ancestor as $candidate_ancestor) {
+            if (path_is_same_as_or_descendant_of($path, $candidate_ancestor)) {
                 return true;
             }
         }
         return false;
     }
-    if (!is_string($path) || !is_string($root)) {
+    if (!is_string($path) || !is_string($ancestor)) {
         throw new InvalidArgumentException('Path containment expects strings or lists of strings.');
     }
-    if ($root === "/") {
+    if ($ancestor === "/") {
         return str_starts_with($path, "/");
     }
-    return $path === $root || str_starts_with($path, $root . "/");
+    return $path === $ancestor || str_starts_with($path, $ancestor . "/");
+}
+
+/**
+ * Indicates whether a candidate path is a descendant of an ancestor.
+ *
+ * Either argument may be a list. The result is true when any candidate-and-
+ * ancestor pair has a component-boundary match below the ancestor. Unlike
+ * path_is_same_as_or_descendant_of(), equal paths do not match. The
+ * filesystem root contains every absolute descendant, but not itself.
+ *
+ * Examples:
+ *
+ *     path_is_descendant_of('/srv/site/wp-content', '/srv/site'); // true
+ *     path_is_descendant_of('/srv/site', '/srv/site');            // false
+ *     path_is_descendant_of('/srv/site-old', '/srv/site');        // false
+ *     path_is_descendant_of('/wp-content', '/');                  // true
+ *     path_is_descendant_of('/', '/');                             // false
+ *
+ * @param string|list<string> $path Candidate path or paths.
+ * @param string|list<string> $ancestor Ancestor path or paths.
+ * @return bool Whether a candidate is a descendant of an ancestor.
+ * @throws InvalidArgumentException If either scalar value is not a string.
+ */
+function path_is_descendant_of($path, $ancestor): bool
+{
+    if (is_array($path)) {
+        foreach ($path as $candidate_path) {
+            if (path_is_descendant_of($candidate_path, $ancestor)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (is_array($ancestor)) {
+        foreach ($ancestor as $candidate_ancestor) {
+            if (path_is_descendant_of($path, $candidate_ancestor)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (!path_is_same_as_or_descendant_of($path, $ancestor)) {
+        return false;
+    }
+    return $path !== $ancestor;
 }
 
 /**

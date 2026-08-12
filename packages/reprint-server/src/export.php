@@ -8,7 +8,7 @@ use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\build_pdo_dsn;
 use function WordPress\Reprint\Exporter\json_encode_or_throw;
 use function WordPress\Reprint\Exporter\parse_size;
-use function WordPress\Reprint\Exporter\path_is_within_root;
+use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Exporter\trim_right_slash;
 
 require_once __DIR__ . '/class-file-index-processor.php';
@@ -738,7 +738,7 @@ function normalize_path_list(array $paths): array
         }
         $real = realpath($path);
         $final = $real !== false ? $real : $path;
-        $final = $final === "/" ? "/" : rtrim($final, "/");
+        $final = trim_right_slash($final);
         if ($final === "") {
             continue;
         }

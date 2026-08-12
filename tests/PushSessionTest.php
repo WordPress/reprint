@@ -311,6 +311,17 @@ final class PushSessionTest extends TestCase {
         }
     }
 
+    public function testMaintenancePrefixSiblingCanReachWork(): void {
+        $push_session = $this->push_session('24242424242424242424242424242424');
+
+        $this->push_file($push_session, '.maintenance-backup/allowed.php', 'safe');
+
+        $this->assertSame(
+            'complete',
+            $push_session->get_status('.maintenance-backup/allowed.php')['path']['state'],
+        );
+    }
+
     public function testCommitTraversesAncestorsOfAnExcludedPathToInstallItsSibling(): void {
         $excluded_directory = $this->docroot . '/wp-content/plugins/reprint';
         mkdir($excluded_directory, 0700, true);
