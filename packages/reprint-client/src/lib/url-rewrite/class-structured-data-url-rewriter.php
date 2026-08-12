@@ -154,7 +154,13 @@ class StructuredDataUrlRewriter
         // source domain, there's nothing to rewrite. This avoids expensive
         // parsing (serialized PHP, JSON, block markup) for the vast majority
         // of values that don't contain any rewritable URLs.
-        if (!$this->maybe_contains_rewritable_urls($value)) {
+        if (
+            !$this->maybe_contains_rewritable_urls($value) &&
+            (
+                $content_type !== self::BLOCK_MARKUP ||
+                !$this->might_contain_base64_shortcode_body($value)
+            )
+        ) {
             return $value;
         }
 
@@ -227,6 +233,19 @@ class StructuredDataUrlRewriter
             }
         }
         return false;
+    }
+
+    /**
+     * Return whether a block-markup value may contain a Base64 shortcode body.
+     * The later decoder remains the authority on Base64 validity and whether
+     * the decoded value actually contains a mapped URL.
+     */
+    private function might_contain_base64_shortcode_body(string $value): bool
+    {
+        return preg_match(
+            '/\[[A-Za-z][A-Za-z0-9_-]*(?:\s+[^\]]*)?\][A-Za-z0-9+\/=]+\[\/[A-Za-z][A-Za-z0-9_-]*\]/',
+            $value
+        ) === 1;
     }
 
     /**
@@ -450,7 +469,13 @@ class StructuredDataUrlRewriter
                 while ( $p->next_token() ) {
                     $token_type = $p->get_token_type() ?? '';
                     if ( '#text' === $token_type ) {
-                        if ($this->maybe_contains_rewritable_urls($p->get_modifiable_text())) {
+                        $text = $p->get_modifiable_text();
+                        $rewritten_text = $this->rewrite_base64_shortcode_bodies($text);
+                        if ($rewritten_text !== $text) {
+                            $p->replace_raw_current_text($rewritten_text);
+                            continue;
+                        }
+                        if ($this->maybe_contains_rewritable_urls($text)) {
                             $p->replace_url_bases_in_current_text($this->url_mapping);
                         }
                         continue;
@@ -545,5 +570,38 @@ class StructuredDataUrlRewriter
                 _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );
                 return '';
         }
+    }
+
+    /**
+     * Rewrite a Base64 payload which is the complete body of a shortcode.
+     *
+     * Builder records often make an opaque Base64 value the content between a
+     * shortcode opener and its matching closer. The block-markup processor
+     * sees that whole record as one text token, so the decoded value would
+     * otherwise never reach the JSON, block-markup, or cautious text routes.
+     * This only accepts a contiguous canonical Base64 payload and changes the
+     * enclosing shortcode when its decoded value contains a mapped URL.
+     */
+    private function rewrite_base64_shortcode_bodies(string $text): string
+    {
+        $rewritten = preg_replace_callback(
+            '/(\[([A-Za-z][A-Za-z0-9_-]*)(?:\s+[^\]]*)?\])([A-Za-z0-9+\/=]+)(\[\/\2\])/',
+            function (array $matches): string {
+                $decoded = base64_decode($matches[3], true);
+                if ($decoded === false || !$this->maybe_contains_rewritable_urls($decoded)) {
+                    return $matches[0];
+                }
+
+                $updated = $this->rewrite($decoded, self::BLOCK_MARKUP);
+                if ($updated === $decoded) {
+                    return $matches[0];
+                }
+
+                return $matches[1] . base64_encode($updated) . $matches[4];
+            },
+            $text
+        );
+
+        return $rewritten ?? $text;
     }
 }
