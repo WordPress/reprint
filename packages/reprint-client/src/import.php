@@ -166,6 +166,13 @@ class ImportClient
     /** Progress output modes accepted by every command. */
     public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl'];
 
+    /**
+     * What flat-docroot does when a real file or directory sits where a
+     * symlink must go: stop, replace it, or move whatever only --flatten-to
+     * holds into --fs-root and then replace it.
+     */
+    public const FLATTEN_TO_CONFLICT_MODES = ['error', 'replace', 'adopt'];
+
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
@@ -4469,8 +4476,9 @@ class ImportClient
      * wp-content/, wp-load.php structure.
      *
      * The command is idempotent: re-running refreshes all symlinks.
-     * If a path that should be a symlink is a regular file/directory,
-     * the command stops with an error unless --force is specified.
+     * When a path that should be a symlink is a regular file or directory,
+     * --on-flatten-to-conflict decides what happens: stop, replace it, or
+     * replace it after moving whatever only --flatten-to has into --fs-root.
      */
     public function run_flat_document_root(array $options): void
     {
@@ -4482,7 +4490,36 @@ class ImportClient
         }
 
         $flatten_to = trim_right_slash($flatten_to);
+
+        // --force predates the three-way option and says the same thing as
+        // 'replace', so it stays as its alias.
+        $conflict_mode = $options["on_flatten_to_conflict"] ?? null;
         $force = $options["force"] ?? false;
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions quote CLI option values, never HTML output.
+        if (
+            $conflict_mode !== null &&
+            !in_array($conflict_mode, self::FLATTEN_TO_CONFLICT_MODES, true)
+        ) {
+            throw new InvalidArgumentException(
+                "Invalid --on-flatten-to-conflict value: {$conflict_mode}. Valid values: " .
+                    implode(", ", self::FLATTEN_TO_CONFLICT_MODES),
+            );
+        }
+        if ($force && $conflict_mode !== null && $conflict_mode !== "replace") {
+            throw new InvalidArgumentException(
+                "--force means --on-flatten-to-conflict=replace, which contradicts " .
+                    "--on-flatten-to-conflict={$conflict_mode}. Pass one of them.",
+            );
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        if ($conflict_mode === null) {
+            $conflict_mode = $force ? "replace" : "error";
+        }
+
+        // 'adopt' salvages wp-content and replaces everything else, because
+        // the rest of the layout is core, which the pull owns entirely.
+        $replace_conflicts = $conflict_mode !== "error";
+        $adopt_flatten_to_content = $conflict_mode === "adopt";
 
         // Ensure the filesystem root exists
         if (!is_dir($this->filesystem_root)) {
@@ -4590,7 +4627,8 @@ class ImportClient
             sprintf(
                 "FLAT-DOCUMENT-ROOT | abspath=%s wp_admin=%s wp_includes=%s " .
                     "content_dir=%s content_detached=%s " .
-                    "plugins_detached=%s mu_plugins_detached=%s uploads_detached=%s",
+                    "plugins_detached=%s mu_plugins_detached=%s uploads_detached=%s " .
+                    "on_flatten_to_conflict=%s",
                 $abspath,
                 $wp_admin_path ?? "(from abspath)",
                 $wp_includes_path ?? "(from abspath)",
@@ -4599,12 +4637,31 @@ class ImportClient
                 $plugins_detached ? "yes" : "no",
                 $mu_plugins_detached ? "yes" : "no",
                 $uploads_detached ? "yes" : "no",
+                $conflict_mode,
             ),
         );
 
         $created = 0;
         $refreshed = 0;
         $forced = 0;
+        $adopted = 0;
+
+        // Which wp-content entries hold independent things, so that adoption
+        // may walk into them. The conventional names cover every site; the
+        // preflight ones cover a site that renamed a component directory.
+        // A name neither tree has simply never matches.
+        $unit_container_names = ["plugins", "mu-plugins", "themes"];
+        $file_container_names = ["uploads"];
+        foreach ([$plugins_dir, $mu_plugins_dir] as $unit_component_dir) {
+            if ($unit_component_dir !== null) {
+                $unit_container_names[] = basename($unit_component_dir);
+            }
+        }
+        if ($uploads_basedir !== null) {
+            $file_container_names[] = basename($uploads_basedir);
+        }
+        $unit_container_names = array_values(array_unique($unit_container_names));
+        $file_container_names = array_values(array_unique($file_container_names));
 
         // Determine what to skip from ABSPATH enumeration.
         // Components with known detached locations are handled separately.
@@ -4643,10 +4700,21 @@ class ImportClient
 
             $source = wp_join_unix_paths($local_abspath, $entry);
             $target = wp_join_unix_paths($flatten_to, $entry);
+            // wp-content is the only ABSPATH entry the target can own files
+            // in; the rest is core, which the pull owns entirely.
+            if ($adopt_flatten_to_content && $entry === "wp-content") {
+                $this->flatten_adopt_content_directory(
+                    $source,
+                    $target,
+                    $adopted,
+                    $unit_container_names,
+                    $file_container_names,
+                );
+            }
             $this->flatten_place_symlink(
                 $source,
                 $target,
-                $force,
+                $replace_conflicts,
                 $created,
                 $refreshed,
                 $forced,
@@ -4659,7 +4727,7 @@ class ImportClient
             $this->flatten_place_symlink(
                 $local_wp_admin,
                 wp_join_unix_paths($flatten_to, "wp-admin"),
-                $force,
+                $replace_conflicts,
                 $created,
                 $refreshed,
                 $forced,
@@ -4669,7 +4737,7 @@ class ImportClient
             $this->flatten_place_symlink(
                 $local_wp_includes,
                 wp_join_unix_paths($flatten_to, "wp-includes"),
-                $force,
+                $replace_conflicts,
                 $created,
                 $refreshed,
                 $forced,
@@ -4693,7 +4761,7 @@ class ImportClient
                 $this->flatten_place_symlink(
                     $local_parent_wp_config,
                     $wp_config_in_flatten,
-                    $force,
+                    $replace_conflicts,
                     $created,
                     $refreshed,
                     $forced,
@@ -4713,24 +4781,41 @@ class ImportClient
             $wp_content_target = wp_join_unix_paths($flatten_to, "wp-content");
             $this->flatten_ensure_real_directory(
                 $wp_content_target,
-                $force,
+                $replace_conflicts,
                 $forced,
             );
+
+            // Determine which sub-entries to skip (will be overridden)
+            $skip_from_content = [];
+            if ($plugins_detached) {
+                $skip_from_content["plugins"] = true;
+            }
+            if ($mu_plugins_detached) {
+                $skip_from_content["mu-plugins"] = true;
+            }
+            if ($uploads_detached) {
+                $skip_from_content["uploads"] = true;
+            }
+
+            // wp-content itself stays a real directory here, so its target-only
+            // entries are never deleted — but they would stay outside the
+            // filesystem root, where files-push cannot reach them. The detached
+            // sub-components are skipped because they are adopted below,
+            // against the source each one actually comes from.
+            if ($adopt_flatten_to_content) {
+                $this->flatten_adopt_content_directory(
+                    $local_content_dir,
+                    $wp_content_target,
+                    $adopted,
+                    $unit_container_names,
+                    $file_container_names,
+                    array_keys($skip_from_content),
+                );
+            }
 
             // Symlink all entries from content_dir into the real wp-content dir
             if (is_dir($local_content_dir)) {
                 $content_entries = @scandir($local_content_dir) ?: [];
-                // Determine which sub-entries to skip (will be overridden)
-                $skip_from_content = [];
-                if ($plugins_detached) {
-                    $skip_from_content["plugins"] = true;
-                }
-                if ($mu_plugins_detached) {
-                    $skip_from_content["mu-plugins"] = true;
-                }
-                if ($uploads_detached) {
-                    $skip_from_content["uploads"] = true;
-                }
 
                 foreach ($content_entries as $entry) {
                     if ($entry === "." || $entry === "..") {
@@ -4744,7 +4829,7 @@ class ImportClient
                     $this->flatten_place_symlink(
                         $source,
                         $target,
-                        $force,
+                        $replace_conflicts,
                         $created,
                         $refreshed,
                         $forced,
@@ -4755,10 +4840,13 @@ class ImportClient
             // Symlink detached sub-components into wp-content
             if ($plugins_detached && is_dir($local_plugins_dir)) {
                 $target = wp_join_unix_paths($wp_content_target, "plugins");
+                if ($adopt_flatten_to_content) {
+                    $this->flatten_adopt_unit_container($local_plugins_dir, $target, $adopted);
+                }
                 $this->flatten_place_symlink(
                     $local_plugins_dir,
                     $target,
-                    $force,
+                    $replace_conflicts,
                     $created,
                     $refreshed,
                     $forced,
@@ -4766,10 +4854,13 @@ class ImportClient
             }
             if ($mu_plugins_detached && is_dir($local_mu_plugins_dir)) {
                 $target = wp_join_unix_paths($wp_content_target, "mu-plugins");
+                if ($adopt_flatten_to_content) {
+                    $this->flatten_adopt_unit_container($local_mu_plugins_dir, $target, $adopted);
+                }
                 $this->flatten_place_symlink(
                     $local_mu_plugins_dir,
                     $target,
-                    $force,
+                    $replace_conflicts,
                     $created,
                     $refreshed,
                     $forced,
@@ -4777,10 +4868,13 @@ class ImportClient
             }
             if ($uploads_detached && is_dir($local_uploads_basedir)) {
                 $target = wp_join_unix_paths($wp_content_target, "uploads");
+                if ($adopt_flatten_to_content) {
+                    $this->flatten_adopt_file_tree($local_uploads_basedir, $target, $adopted);
+                }
                 $this->flatten_place_symlink(
                     $local_uploads_basedir,
                     $target,
-                    $force,
+                    $replace_conflicts,
                     $created,
                     $refreshed,
                     $forced,
@@ -4791,10 +4885,19 @@ class ImportClient
             // Simple case: just symlink the whole content_dir as wp-content.
             if (is_dir($local_content_dir)) {
                 $target = wp_join_unix_paths($flatten_to, "wp-content");
+                if ($adopt_flatten_to_content) {
+                    $this->flatten_adopt_content_directory(
+                        $local_content_dir,
+                        $target,
+                        $adopted,
+                        $unit_container_names,
+                        $file_container_names,
+                    );
+                }
                 $this->flatten_place_symlink(
                     $local_content_dir,
                     $target,
-                    $force,
+                    $replace_conflicts,
                     $created,
                     $refreshed,
                     $forced,
@@ -4810,10 +4913,13 @@ class ImportClient
 
         $this->audit_log(
             sprintf(
-                "FLAT-DOCUMENT-ROOT | Complete: %d created, %d refreshed, %d force-replaced",
+                "FLAT-DOCUMENT-ROOT | Complete: %d created, %d refreshed, %d force-replaced, " .
+                    "%d adopted (mode: %s)",
                 $created,
                 $refreshed,
                 $forced,
+                $adopted,
+                $conflict_mode,
             ),
             true,
         );
@@ -4827,9 +4933,11 @@ class ImportClient
             "wp_includes_path" => $wp_includes_path,
             "content_dir" => $content_dir,
             "content_detached" => $content_detached,
+            "on_flatten_to_conflict" => $conflict_mode,
             "created" => $created,
             "refreshed" => $refreshed,
             "force_replaced" => $forced,
+            "adopted" => $adopted,
         ];
         if (!$this->progress->is_mode('pipeline')) {
             fwrite($this->progress_fd, json_encode($result) . "\n");
@@ -4985,6 +5093,273 @@ class ImportClient
         );
         $created++;
     }
+
+    /**
+     * Move the wp-content entries that only $target holds into $source, so
+     * that replacing $target with a symlink no longer deletes them.
+     *
+     * Called only by run_flat_document_root(), in its 'adopt' conflict mode.
+     *
+     * Merging stops at whole units. A plugin or a theme belongs to one side
+     * or the other: descending into one the pull also has would keep the
+     * files its version dropped, leaving a directory that matches no release
+     * and pushing those files back to the source later. So the walk passes
+     * through the directories that hold independent things and stops at the
+     * things themselves:
+     *
+     *   plugins, mu-plugins, themes -> one level, each child whole
+     *   uploads                     -> all the way down, each file its own
+     *   anything else               -> whole, because its insides are unknown
+     *
+     * Per entry at this level:
+     *
+     *   - absent from the source -> move it into the source
+     *   - a container above      -> walk it under that container's rule
+     *   - anything else          -> leave it, the pulled copy wins
+     *
+     * Nothing is deleted here. The caller places the symlinks afterwards, so
+     * a failed move stops the command with the flattened layout still intact.
+     *
+     * @param string   $source                 Filesystem-root directory the entries belong in.
+     * @param string   $target                 Flattened directory being merged away.
+     * @param int      $adopted                Running count of moved entries, by reference.
+     * @param string[] $unit_container_names   Entry names whose own children are whole
+     *                                         plugins or themes.
+     * @param string[] $file_container_names   Entry names whose contents merge file by file.
+     * @param string[] $target_entries_to_skip Top-level entry names this call must not move,
+     *                                         because another (source, target) pair owns them.
+     */
+    private function flatten_adopt_content_directory(
+        string $source,
+        string $target,
+        int &$adopted,
+        array $unit_container_names,
+        array $file_container_names,
+        array $target_entries_to_skip = []
+    ): void {
+        if (!$this->flatten_both_sides_are_real_directories($source, $target)) {
+            return;
+        }
+
+        foreach (@scandir($target) ?: [] as $entry) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+            if (in_array($entry, $target_entries_to_skip, true)) {
+                continue;
+            }
+            $source_entry = wp_join_unix_paths($source, $entry);
+            $target_entry = wp_join_unix_paths($target, $entry);
+
+            if (!file_exists($source_entry) && !is_link($source_entry)) {
+                $this->flatten_move_into_filesystem_root($target_entry, $source_entry);
+                ++$adopted;
+                continue;
+            }
+            if (in_array($entry, $unit_container_names, true)) {
+                $this->flatten_adopt_unit_container($source_entry, $target_entry, $adopted);
+                continue;
+            }
+            if (in_array($entry, $file_container_names, true)) {
+                $this->flatten_adopt_file_tree($source_entry, $target_entry, $adopted);
+            }
+        }
+    }
+
+    /**
+     * Move whole plugins or themes that only $target holds into $source.
+     *
+     * Each child is one unit. A name the pull also has stays the pull's, down
+     * to the last file, so two versions of the same plugin never merge.
+     */
+    private function flatten_adopt_unit_container(
+        string $source,
+        string $target,
+        int &$adopted
+    ): void {
+        if (!$this->flatten_both_sides_are_real_directories($source, $target)) {
+            return;
+        }
+
+        foreach (@scandir($target) ?: [] as $entry) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+            $source_entry = wp_join_unix_paths($source, $entry);
+            if (file_exists($source_entry) || is_link($source_entry)) {
+                continue;
+            }
+            $this->flatten_move_into_filesystem_root(
+                wp_join_unix_paths($target, $entry),
+                $source_entry
+            );
+            ++$adopted;
+        }
+    }
+
+    /**
+     * Move the files that only $target holds into $source, to the leaf.
+     *
+     * For uploads, where each file stands alone: a photo the pull does not
+     * have is its own thing, not part of some larger version.
+     */
+    private function flatten_adopt_file_tree(
+        string $source,
+        string $target,
+        int &$adopted
+    ): void {
+        if (!$this->flatten_both_sides_are_real_directories($source, $target)) {
+            return;
+        }
+
+        foreach (@scandir($target) ?: [] as $entry) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+            $source_entry = wp_join_unix_paths($source, $entry);
+            $target_entry = wp_join_unix_paths($target, $entry);
+
+            if (!file_exists($source_entry) && !is_link($source_entry)) {
+                $this->flatten_move_into_filesystem_root($target_entry, $source_entry);
+                ++$adopted;
+                continue;
+            }
+            $this->flatten_adopt_file_tree($source_entry, $target_entry, $adopted);
+        }
+    }
+
+    /**
+     * Whether both paths are real directories, so their entries can be
+     * compared. A symlinked target is a previous flatten and holds nothing
+     * of its own.
+     */
+    private function flatten_both_sides_are_real_directories(
+        string $source,
+        string $target
+    ): bool {
+        return !is_link($source) &&
+            is_dir($source) &&
+            !is_link($target) &&
+            is_dir($target);
+    }
+
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions carry CLI filesystem paths, never HTML output.
+
+    /**
+     * Move one flattened entry to its place under the filesystem root.
+     *
+     * A symlink is recreated rather than moved: a relative link value is read
+     * against its own parent directory, and the two parents sit at different
+     * depths. An absolute value already resolves the same from either.
+     *
+     * rename() reports EXDEV when --flatten-to and --fs-root are on different
+     * filesystems, which nothing stops the caller from choosing, so a copy is
+     * the fallback rather than the error.
+     *
+     * Only the moved entry's own value is rewritten. A relative symlink deeper
+     * in a moved directory keeps its value, which still resolves when it points
+     * within that directory and breaks when it points out of it. No move can
+     * preserve the second kind.
+     */
+    private function flatten_move_into_filesystem_root(
+        string $target_entry,
+        string $source_entry
+    ): void {
+        if (is_link($target_entry)) {
+            $link_value = readlink($target_entry);
+            if ($link_value === false) {
+                throw new RuntimeException(
+                    "Could not read the symlink value at {$target_entry}.",
+                );
+            }
+            if (strpos($link_value, "/") !== 0) {
+                $link_value = self::compute_relative_path(
+                    realpath_with_missing_tail(dirname($source_entry)),
+                    normalize_path(
+                        wp_join_unix_paths(dirname($target_entry), $link_value)
+                    )
+                );
+            }
+            if (!symlink($link_value, $source_entry)) {
+                throw new RuntimeException(
+                    "Failed to create symlink: {$source_entry} -> {$link_value}",
+                );
+            }
+            if (!unlink($target_entry)) {
+                throw new RuntimeException(
+                    "Created {$source_entry} but could not remove the original " .
+                        "symlink at {$target_entry}.",
+                );
+            }
+        } elseif (!@rename($target_entry, $source_entry)) {
+            $this->flatten_copy_local_path($target_entry, $source_entry);
+            if (
+                !$this->remove_local_absolute_path_without_following_symlinks(
+                    $target_entry
+                )
+            ) {
+                throw new RuntimeException(
+                    "Copied {$target_entry} to {$source_entry} but could not remove " .
+                        "the original at {$target_entry}.",
+                );
+            }
+        }
+
+        $this->audit_log(
+            "FLAT-DOCUMENT-ROOT ADOPT | Moved into the filesystem root: " .
+                "{$target_entry} -> {$source_entry}",
+        );
+    }
+
+    /**
+     * Copy a file, symlink, or directory tree to a path that does not exist yet.
+     *
+     * This is the cross-filesystem half of a move, so it reproduces a symlink
+     * as a symlink instead of following it into its target. Values are kept
+     * verbatim: an entry and everything below it move together, so a relative
+     * value that resolves within the tree still resolves after the copy.
+     */
+    private function flatten_copy_local_path(string $from, string $to): void
+    {
+        if (is_link($from)) {
+            $link_value = readlink($from);
+            if ($link_value === false) {
+                throw new RuntimeException(
+                    "Could not read the symlink value at {$from}.",
+                );
+            }
+            if (!symlink($link_value, $to)) {
+                throw new RuntimeException(
+                    "Failed to create symlink: {$to} -> {$link_value}",
+                );
+            }
+            return;
+        }
+
+        // A failed copy or mkdir here is reported as an exception naming both
+        // paths, so the raw PHP warning would only duplicate it.
+        if (!is_dir($from)) {
+            if (!@copy($from, $to)) {
+                throw new RuntimeException("Failed to copy {$from} to {$to}.");
+            }
+            return;
+        }
+
+        if (!@mkdir($to, 0755, true)) {
+            throw new RuntimeException("Failed to create directory: {$to}");
+        }
+        foreach (@scandir($from) ?: [] as $entry) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+            $this->flatten_copy_local_path(
+                wp_join_unix_paths($from, $entry),
+                wp_join_unix_paths($to, $entry)
+            );
+        }
+    }
+
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     /**
      * Ensure a path is a real directory (not a symlink).
@@ -11405,10 +11780,21 @@ if (
             'commands' => ['pull', 'flat-docroot'],
         ],
         [
+            'name' => 'on-flatten-to-conflict',
+            'type' => 'value',
+            'target' => 'on_flatten_to_conflict',
+            'placeholder' => 'MODE',
+            'valid_values' => ImportClient::FLATTEN_TO_CONFLICT_MODES,
+            'help' => 'What to do when a real file or directory sits where a symlink must go: ' .
+                'error (default), replace it, or adopt — move wp-content entries that only ' .
+                '--flatten-to has into --fs-root, then replace (the pulled copy wins on conflicts)',
+            'commands' => ['pull', 'flat-docroot'],
+        ],
+        [
             'name' => 'force',
             'type' => 'flag',
             'target' => 'force',
-            'help' => 'Remove conflicting non-symlink files and replace with symlinks',
+            'help' => 'Alias for --on-flatten-to-conflict=replace',
             'commands' => ['pull', 'flat-docroot'],
         ],
 
@@ -12203,8 +12589,22 @@ if (
                 "/srv/htdocs and WP_CONTENT_DIR at /tmp/__wp__/wp-content).\n" .
                 "\n" .
                 "No files are copied — only symlinks are created. Idempotent.\n" .
-                "If a path that should be a symlink is a regular file or directory,\n" .
-                "the command stops with an error unless --force is specified.\n",
+                "\n" .
+                "--on-flatten-to-conflict decides what happens when a real file or\n" .
+                "directory already sits where a symlink must go:\n" .
+                "\n" .
+                "  error    Stop and say what blocked the link. The default.\n" .
+                "  replace  Delete it. --force is an alias for this mode.\n" .
+                "  adopt    Move the wp-content entries that only --flatten-to has\n" .
+                "           into --fs-root, then replace as above.\n" .
+                "\n" .
+                "Use adopt when flattening onto a site that already exists. replace\n" .
+                "deletes the plugins, themes and uploads that only --flatten-to has;\n" .
+                "adopt keeps them, and keeps them where later commands such as\n" .
+                "files-push, which read only --fs-root, can still see them. The\n" .
+                "pulled copy wins wherever both sides hold the same path, and only\n" .
+                "wp-content is adopted — the rest of the layout is core, which the\n" .
+                "pull owns entirely.\n",
             "extra" => null,
         ],
         "apply-runtime" => [
