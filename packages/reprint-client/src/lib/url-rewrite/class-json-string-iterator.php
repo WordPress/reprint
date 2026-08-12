@@ -3,10 +3,10 @@
 /**
  * Cursor-based iterator over raw JSON string-value spans.
  *
- * It validates and walks the JSON once without constructing a decoded object
- * tree. Object keys are skipped; string values are exposed as decoded strings.
- * Changed values are encoded individually, leaving every untouched byte in
- * the enclosing JSON document intact.
+ * It validates JSON without constructing a decoded object tree, then walks
+ * raw string-value spans. Object keys are skipped; string values are exposed
+ * as decoded strings. Changed values are encoded individually, leaving every
+ * untouched byte in the enclosing JSON document intact.
  */
 class JsonStringIterator
 {
@@ -20,30 +20,55 @@ class JsonStringIterator
     private bool $valid = false;
 
     /**
-     * Raw spans for JSON string values, including their surrounding quotes.
+     * Raw string-value spans for the PHP validation fallback, including their
+     * surrounding quotes. The native-validation path scans values lazily.
      *
-     * @var array<int, array{start: int, length: int}>
+     * @var array<int, array{start: int, length: int, has_escapes: bool}>
      */
     private array $string_spans = [];
 
-    /** @var array<int, string> Changed decoded values by string-span index. */
+    /**
+     * Changed string spans. The native-validation path retains only these.
+     *
+     * @var array<int, array{start: int, length: int, value: string}>
+     */
     private array $replacements = [];
 
     /** @var int Current cursor position. -1 means before the first value. */
     private int $cursor = -1;
+
+    /** @var bool Whether next_value() scans spans after native validation. */
+    private bool $scans_string_spans = false;
+
+    /** @var int Raw JSON offset for the next native-validation string scan. */
+    private int $next_string_offset = 0;
+
+    /** @var array{start: int, length: int, has_escapes: bool}|null Current native-validation string span. */
+    private ?array $current_string_span = null;
 
     public function __construct(string $json)
     {
         $this->original = $json;
         $this->length = strlen($json);
 
-        if (preg_match('//u', $json) !== 1) {
-            return;
-        }
-
         $pos = 0;
         $this->skip_whitespace($pos);
         if ($pos === $this->length || !str_contains('"[{', $json[$pos])) {
+            return;
+        }
+
+        if (function_exists('json_validate')) {
+            if (!json_validate($json)) {
+                return;
+            }
+
+            $this->scans_string_spans = true;
+            $this->next_string_offset = $pos;
+            $this->valid = true;
+            return;
+        }
+
+        if (preg_match('//u', $json) !== 1) {
             return;
         }
 
@@ -73,6 +98,27 @@ class JsonStringIterator
         }
 
         ++$this->cursor;
+
+        if ($this->scans_string_spans) {
+            while (true) {
+                $span = $this->next_string_span();
+                if ($span === null) {
+                    return false;
+                }
+
+                if ($span['is_key']) {
+                    continue;
+                }
+
+                $this->current_string_span = [
+                    'start'       => $span['start'],
+                    'length'      => $span['length'],
+                    'has_escapes' => $span['has_escapes'],
+                ];
+                return true;
+            }
+        }
+
         return $this->cursor < count($this->string_spans);
     }
 
@@ -82,10 +128,14 @@ class JsonStringIterator
     public function get_value(): string
     {
         if (array_key_exists($this->cursor, $this->replacements)) {
-            return $this->replacements[$this->cursor];
+            return $this->replacements[$this->cursor]['value'];
         }
 
-        $span = $this->string_spans[$this->cursor];
+        $span = $this->get_current_string_span();
+        if (!$span['has_escapes']) {
+            return substr($this->original, $span['start'] + 1, $span['length'] - 2);
+        }
+
         $value = json_decode(substr($this->original, $span['start'], $span['length']));
 
         return is_string($value) ? $value : '';
@@ -96,7 +146,12 @@ class JsonStringIterator
      */
     public function set_value(string $new_value): void
     {
-        $this->replacements[$this->cursor] = $new_value;
+        $span = $this->get_current_string_span();
+        $this->replacements[$this->cursor] = [
+            'start'  => $span['start'],
+            'length' => $span['length'],
+            'value'  => $new_value,
+        ];
     }
 
     /**
@@ -111,11 +166,10 @@ class JsonStringIterator
         $result = '';
         $last_end = 0;
 
-        foreach ($this->replacements as $index => $replacement) {
-            $span = $this->string_spans[$index];
-            $result .= substr($this->original, $last_end, $span['start'] - $last_end);
-            $result .= json_encode($replacement, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-            $last_end = $span['start'] + $span['length'];
+        foreach ($this->replacements as $replacement) {
+            $result .= substr($this->original, $last_end, $replacement['start'] - $last_end);
+            $result .= json_encode($replacement['value'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            $last_end = $replacement['start'] + $replacement['length'];
         }
 
         return $result . substr($this->original, $last_end);
@@ -157,13 +211,19 @@ class JsonStringIterator
         $start = $pos++;
 
         while ($pos < $this->length) {
+            $pos += strcspn($this->original, self::string_terminators(), $pos, $this->length - $pos);
+            if ($pos === $this->length) {
+                return false;
+            }
+
             $char = $this->original[$pos++];
 
             if ($char === '"') {
                 if ($is_string_value) {
                     $this->string_spans[] = [
-                        'start'  => $start,
-                        'length' => $pos - $start,
+                        'start'       => $start,
+                        'length'      => $pos - $start,
+                        'has_escapes' => true,
                     ];
                 }
 
@@ -193,6 +253,48 @@ class JsonStringIterator
         }
 
         return false;
+    }
+
+    /**
+     * Scan one string span after json_validate() has confirmed the document.
+     *
+     * A string followed by a colon is an object key; every other string is a
+     * value. No structural parsing is needed after native validation.
+     */
+    private function next_string_span(): ?array
+    {
+        $pos = $this->next_string_offset;
+        $pos += strcspn($this->original, '"', $pos, $this->length - $pos);
+        if ($pos === $this->length) {
+            return null;
+        }
+
+        $start = $pos++;
+        $has_escapes = false;
+        while (true) {
+            $pos += strcspn($this->original, '"\\', $pos, $this->length - $pos);
+            $char = $this->original[$pos++];
+            if ($char === '"') {
+                break;
+            }
+
+            $has_escapes = true;
+            $escape = $this->original[$pos++];
+            if ($escape === 'u') {
+                $pos += 4;
+            }
+        }
+
+        $string_end = $pos;
+        $this->skip_whitespace($pos);
+        $this->next_string_offset = $pos;
+
+        return [
+            'start'       => $start,
+            'length'      => $string_end - $start,
+            'has_escapes' => $has_escapes,
+            'is_key'      => $pos < $this->length && $this->original[$pos] === ':',
+        ];
     }
 
     /**
@@ -406,5 +508,33 @@ class JsonStringIterator
 
         ++$pos;
         return true;
+    }
+
+    /**
+     * Return the current raw string span for either iterator path.
+     *
+     * @return array{start: int, length: int, has_escapes: bool}
+     */
+    private function get_current_string_span(): array
+    {
+        if ($this->scans_string_spans && $this->current_string_span !== null) {
+            return $this->current_string_span;
+        }
+
+        return $this->string_spans[$this->cursor];
+    }
+
+    /**
+     * Return bytes which terminate a raw JSON string run.
+     */
+    private static function string_terminators(): string
+    {
+        static $terminators = null;
+
+        if ($terminators === null) {
+            $terminators = '"\\' . implode('', array_map('chr', range(0, 31)));
+        }
+
+        return $terminators;
     }
 }
