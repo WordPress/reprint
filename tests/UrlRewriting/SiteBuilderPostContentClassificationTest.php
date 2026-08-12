@@ -171,6 +171,72 @@ class SiteBuilderPostContentClassificationTest extends TestCase {
             'Divi module URL in an HTML comment' => $rewrite_domain(
                 '<!-- [et_pb_image src="https://old-site.com/uploads/logo.png"] -->'
             ),
+            'Base64 shortcode body containing block markup' => [
+                '[et_pb_code]' . base64_encode('<!-- wp:image {"url":"https://old-site.com/uploads/logo.png"} /-->') . '[/et_pb_code]',
+                '[et_pb_code]' . base64_encode('<!-- wp:image {"url":"https://new-site.com/uploads/logo.png"} /-->') . '[/et_pb_code]',
+            ],
+            'Base64 shortcode body containing CSS' => [
+                '[vc_raw_html]' . base64_encode('.hero{background:url(https://old-site.com/uploads/hero.jpg)}') . '[/vc_raw_html]',
+                '[vc_raw_html]' . base64_encode('.hero{background:url(https://new-site.com/uploads/hero.jpg)}') . '[/vc_raw_html]',
+            ],
+            'Base64 shortcode body containing JSON-LD' => [
+                '[et_pb_code]' . base64_encode('{"@context":"https://schema.org","image":"https://old-site.com/uploads/logo.png"}') . '[/et_pb_code]',
+                '[et_pb_code]' . base64_encode('{"@context":"https://schema.org","image":"https://new-site.com/uploads/logo.png"}') . '[/et_pb_code]',
+            ],
+            'JSON document containing block markup' => $rewrite_domain(
+                '{"content":"<!-- wp:image {\\"url\\":\\"https:\\/\\/old-site.com\\/uploads\\/logo.png\\"} /-->"}'
+            ),
+            'JSON document containing HTML and a shortcode' => $rewrite_domain(
+                '{"html":"<p>[et_pb_image src=\\"https:\\/\\/old-site.com\\/uploads\\/logo.png\\"]</p>"}'
+            ),
+            'serialized PHP array containing block markup' => [
+                serialize(['content' => '<!-- wp:image {"url":"https://old-site.com/uploads/logo.png"} /-->']),
+                serialize(['content' => '<!-- wp:image {"url":"https://new-site.com/uploads/logo.png"} /-->']),
+            ],
+            'serialized PHP array containing HTML and a shortcode' => [
+                serialize(['content' => '<p>[vc_video link="https://old-site.com/uploads/tour.mp4"]</p>']),
+                serialize(['content' => '<p>[vc_video link="https://new-site.com/uploads/tour.mp4"]</p>']),
+            ],
+            'block markup with shortcode CSS and JSON-LD' => $rewrite_domain(
+                '<!-- wp:html --><style>.hero{background:url(https:\\/\\/old-site.com\\/uploads\\/hero.jpg)}</style><p>[et_pb_image src="https:\\/\\/old-site.com\\/uploads\\/logo.png"]</p><script type="application/ld+json">{"image":"https:\\/\\/old-site.com\\/uploads\\/logo.png"}</script><!-- /wp:html -->'
+            ),
+            'CSS between Divi opener and closer' => $rewrite_domain(
+                '[et_pb_section] .hero{background:url(https:\\/\\/old-site.com\\/uploads\\/hero.jpg) no-repeat center} [/et_pb_section]'
+            ),
+            'CSS between WPBakery opener and closer' => $rewrite_domain(
+                '[vc_column_text].hero{background:url(https:\\/\\/old-site.com\\/uploads\\/hero.jpg)}[/vc_column_text]'
+            ),
+            'Divi CSS preserves Unicode string escapes' => $rewrite_domain(
+                '[et_pb_section custom_css_main_element=\'font-family:"R\\00fc bik";content:"\\1f6a4 ";background:url(https:\\/\\/old-site.com\\/uploads\\/hero.jpg) no-repeat center center fixed;\'][/et_pb_section]'
+            ),
+            'Divi CSS preserves a literal Unicode character' => $rewrite_domain(
+                '[et_pb_section custom_css_main_element=\'font-family:"Rubik 🚤";background:url(https:\\/\\/old-site.com\\/uploads\\/hero.jpg)\'][/et_pb_section]'
+            ),
+            'Divi CSS URL with six-digit Unicode escapes' => $rewrite_domain(
+                '[et_pb_section custom_css_main_element="background:url(https\\00003a\\00002f\\00002fold-site.com\\00002fuploads\\00002fhero.jpg)"][/et_pb_section]'
+            ),
+            'Divi CSS URL with uppercase Unicode escapes' => $rewrite_domain(
+                '[et_pb_section custom_css_main_element="background:url(https\\3A \\2F \\2F old-site.com\\2F uploads\\2F hero.jpg)"][/et_pb_section]'
+            ),
+            'Divi CSS URL with an escaped source host' => [
+                '[et_pb_section custom_css_main_element="background:url(https\\3a \\2f \\2f old\\2dsite\\2ecom\\2f uploads\\2f hero.jpg)"][/et_pb_section]',
+                '[et_pb_section custom_css_main_element="background:url(https\\3a \\2f \\2f new-site.com\\2f uploads\\2f hero.jpg)"][/et_pb_section]',
+            ],
+            'Divi CSS URL with Unicode escapes in its path' => $rewrite_domain(
+                '[et_pb_section custom_css_main_element="background:url(https:\\/\\/old-site.com\\/uploads\\/hero\\00002ejpg)"][/et_pb_section]'
+            ),
+            'Divi CSS URL with a Unicode-escaped query value' => $rewrite_domain(
+                '[et_pb_section custom_css_main_element="background:url(https:\\/\\/old-site.com\\/uploads\\/hero.jpg?caption=\\1f6a4 )"][/et_pb_section]'
+            ),
+            'Divi CSS comment beside a rewritten URL' => $rewrite_domain(
+                '[et_pb_section custom_css_main_element="/* fallback \\1f6a4 */ background:url(https:\\/\\/old-site.com\\/uploads\\/hero.jpg)"][/et_pb_section]'
+            ),
+            'HTML style CSS with a literal URL and Unicode escapes' => $rewrite_domain(
+                '<div style="font-family: R\\00fc bik; background-image: url(https:\\/\\/old-site.com\\/uploads\\/hero.jpg)"></div>'
+            ),
+            'JSON-LD script beside a shortcode in block markup' => $rewrite_domain(
+                '<!-- wp:html --><script type="application/ld+json">{"image":"https:\\/\\/old-site.com\\/uploads\\/logo.png"}</script>[vc_video link="https:\\/\\/old-site.com\\/uploads\\/tour.mp4"]<!-- /wp:html -->'
+            ),
         ];
     }
 }
