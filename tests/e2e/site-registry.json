@@ -154,6 +154,9 @@
     },
     "files-pull-mirror": {
       "port": 8130
+    },
+    "only-file-path": {
+      "port": 8131
     }
   }
 }
