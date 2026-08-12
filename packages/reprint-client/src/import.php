@@ -177,6 +177,23 @@ class ImportClient
      */
     private const MAX_CONSECUTIVE_INTERRUPTED_RESPONSES = 3;
 
+    /**
+     * cURL error numbers that can be temporary, often meaning the peer cut the transfer short.
+     * We can attempt some retries from these errors before giving up.
+     */
+    private const TRANSIENT_CURL_ERROR_NUMBERS = [
+        // Transfer- and socket-level; reachable over any HTTP version.
+        18, // CURLE_PARTIAL_FILE — transfer shorter or longer than announced
+        52, // CURLE_GOT_NOTHING  — empty response
+        55, // CURLE_SEND_ERROR   — peer reset while the request body was uploading
+        56, // CURLE_RECV_ERROR   — connection reset / receive failure
+        // HTTP/2 framing layer; reachable only when h2 is negotiated.
+        16, // CURLE_HTTP2        — HTTP/2 connection framing error (GOAWAY)
+        92, // CURLE_HTTP2_STREAM — HTTP/2 stream reset by the server (RST_STREAM)
+        // HTTP/3 framing layer. Inert until something opts into h3
+        95, // CURLE_HTTP3        — HTTP/3 layer error
+    ];
+
     /** @var string Remote Reprint API URL. */
     public $remote_reprint_api_url;
 
@@ -9952,32 +9969,69 @@ class ImportClient
      */
     private function check_curl_error($ch): void
     {
-        if (!curl_errno($ch)) {
+        $error_number = curl_errno($ch);
+        if (!$error_number) {
             return;
         }
-        $errno = curl_errno($ch);
-        $error = curl_error($ch);
-        $timeout_errno = defined("CURLE_OPERATION_TIMEDOUT")
+
+        $error_message = curl_error($ch);
+        $protocol = self::describe_curl_http_version(
+            (int) curl_getinfo($ch, CURLINFO_HTTP_VERSION),
+        );
+        $timeout_error_number = defined("CURLE_OPERATION_TIMEDOUT")
             ? CURLE_OPERATION_TIMEDOUT
             : 28;
-        $this->last_curl_errno = $errno;
-        $this->last_curl_timeout = $errno === $timeout_errno;
+
+        $this->last_curl_errno = $error_number;
+        $this->last_curl_timeout = $error_number === $timeout_error_number;
+
         if ($this->last_curl_timeout) {
-            throw new CurlTimeoutException("cURL error: {$error}");
-        }
-        // These errors mean the response ended before cURL could finish
-        // receiving it. Content-decoding failures such as
-        // CURLE_BAD_CONTENT_ENCODING (61) remain fatal because the same bytes
-        // will fail again after resumption.
-        //   18 = CURLE_PARTIAL_FILE (transfer closed mid-stream)
-        //   52 = CURLE_GOT_NOTHING (empty response)
-        //   56 = CURLE_RECV_ERROR (connection reset / receive failure)
-        if (in_array($errno, [18, 52, 56], true)) {
-            throw new TransientInterruptionException(
-                "cURL error ({$errno}): {$error}",
+            throw new CurlTimeoutException(
+                "cURL error over {$protocol}: {$error_message}",
             );
         }
-        throw new RuntimeException("cURL error ($errno): {$error}");
+
+        if (in_array($error_number, self::TRANSIENT_CURL_ERROR_NUMBERS, true)) {
+            throw new TransientInterruptionException(
+                "cURL error ({$error_number}) over {$protocol}: {$error_message}",
+            );
+        }
+
+        throw new RuntimeException(
+            "cURL error ({$error_number}) over {$protocol}: {$error_message}",
+        );
+    }
+
+    /**
+     * Render a CURLINFO_HTTP_VERSION value as the wire protocol name.
+     *
+     * An error number alone does not say which protocol a request negotiated,
+     * which is what makes a transport failure hard to diagnose after the fact.
+     * Naming the protocol in the error puts it in the operator's log.
+     *
+     * These are libcurl's runtime values, not PHP's constant names, so they are
+     * matched as literals: CURL_HTTP_VERSION_3 does not exist on the PHP 7.4
+     * this package supports, and naming it would fatal on any PHP that predates
+     * it while libcurl still reports 30 for an h3 transfer.
+     *
+     * @param int $http_version Value from curl_getinfo(CURLINFO_HTTP_VERSION).
+     */
+    private static function describe_curl_http_version(int $http_version): string
+    {
+        switch ($http_version) {
+            case 1: // CURL_HTTP_VERSION_1_0
+                return "HTTP/1.0";
+            case 2: // CURL_HTTP_VERSION_1_1
+                return "HTTP/1.1";
+            case 3: // CURL_HTTP_VERSION_2_0
+                return "HTTP/2";
+            case 30: // CURL_HTTP_VERSION_3
+                return "HTTP/3";
+            default:
+                // CURL_HTTP_VERSION_NONE — the connection failed before a
+                // protocol was negotiated, or the value is from a newer curl.
+                return "unnegotiated HTTP version";
+        }
     }
 
     /**
@@ -10588,7 +10642,11 @@ class ImportClient
         $result = curl_exec($ch);
         $this->audit_log(
             "curl_exec completed, result=" .
-                ($result === false ? "false" : "true"),
+                ($result === false ? "false" : "true") .
+                " | protocol=" .
+                self::describe_curl_http_version(
+                    (int) curl_getinfo($ch, CURLINFO_HTTP_VERSION),
+                ),
             false,
         );
 
