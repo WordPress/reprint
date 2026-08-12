@@ -165,16 +165,6 @@ class ImportClient
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
 
-    /** @var array<string,string> */
-    private const RUNTIME_DATABASE_TARGET_FLAGS = [
-        "target_db" => "--target-db",
-        "target_sqlite_path" => "--target-sqlite-path",
-        "target_host" => "--target-host",
-        "target_port" => "--target-port",
-        "target_user" => "--target-user",
-        "target_pass" => "--target-pass",
-    ];
-
     /**
      * Maximum number of consecutive interrupted responses with no cursor
      * progress before the importer gives up. This prevents endless resumption
@@ -4671,7 +4661,16 @@ class ImportClient
     /** @param array<string,mixed> $options */
     private function assert_runtime_database_target_options_name_an_engine(array $options): void
     {
-        foreach (self::RUNTIME_DATABASE_TARGET_FLAGS as $option_key => $flag) {
+        $target_flags = [
+            "target_db" => "--target-db",
+            "target_sqlite_path" => "--target-sqlite-path",
+            "target_host" => "--target-host",
+            "target_port" => "--target-port",
+            "target_user" => "--target-user",
+            "target_pass" => "--target-pass",
+        ];
+
+        foreach ($target_flags as $option_key => $flag) {
             $value = $options[$option_key] ?? null;
             if ($value === null || $value === "") {
                 continue;
