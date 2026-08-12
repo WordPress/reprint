@@ -4373,7 +4373,7 @@ class ImportClient
         // The target is either stated on the command line or read from what
         // db-apply connected to, and decides the DB_* constants and, for
         // SQLite targets, the database integration plugin setup.
-        $target = $this->resolve_runtime_database_target($options);
+        $target = $this->resolve_apply_runtime_database_target($options);
         $target_engine = $target["engine"];
         if ($target_engine === "mysql") {
             $manifest->constants["DB_NAME"] = $target["db"];
@@ -4560,7 +4560,7 @@ class ImportClient
      * @param array<string,mixed> $options
      * @return array<string,mixed>
      */
-    private function resolve_runtime_database_target(array $options): array
+    private function resolve_apply_runtime_database_target(array $options): array
     {
         $recorded_target = $this->get_state()->apply;
         $stated_engine = $options["target_engine"] ?? null;
@@ -4577,7 +4577,24 @@ class ImportClient
                 $recorded_target = null;
             }
         } else {
-            $this->assert_runtime_database_target_options_name_an_engine($options);
+            $target_flags = [
+                "target_db" => "--target-db",
+                "target_sqlite_path" => "--target-sqlite-path",
+                "target_host" => "--target-host",
+                "target_port" => "--target-port",
+                "target_user" => "--target-user",
+                "target_pass" => "--target-pass",
+            ];
+            foreach ($target_flags as $option_key => $flag) {
+                $value = $options[$option_key] ?? null;
+                if ($value === null || $value === "") {
+                    continue;
+                }
+                throw new InvalidArgumentException(
+                    "apply-runtime received {$flag} without --target-engine. " .
+                    "Add --target-engine=mysql or --target-engine=sqlite to state the database target.",
+                );
+            }
             $engine = $recorded_target->target_engine;
         }
 
@@ -4601,7 +4618,13 @@ class ImportClient
                 null,
             );
             if ($engine_was_stated && $sqlite_path !== null) {
-                $this->assert_runtime_sqlite_target_directory_exists((string) $sqlite_path);
+                $directory = dirname((string) $sqlite_path);
+                if (!is_dir($directory)) {
+                    throw new InvalidArgumentException(
+                        "The directory for --target-sqlite-path={$sqlite_path} does not exist: {$directory}. " .
+                        "Create it first; the database file itself is created on the first request.",
+                    );
+                }
             }
 
             return [
@@ -4658,42 +4681,6 @@ class ImportClient
         return $target;
     }
 
-    /** @param array<string,mixed> $options */
-    private function assert_runtime_database_target_options_name_an_engine(array $options): void
-    {
-        $target_flags = [
-            "target_db" => "--target-db",
-            "target_sqlite_path" => "--target-sqlite-path",
-            "target_host" => "--target-host",
-            "target_port" => "--target-port",
-            "target_user" => "--target-user",
-            "target_pass" => "--target-pass",
-        ];
-
-        foreach ($target_flags as $option_key => $flag) {
-            $value = $options[$option_key] ?? null;
-            if ($value === null || $value === "") {
-                continue;
-            }
-            throw new InvalidArgumentException(
-                "apply-runtime received {$flag} without --target-engine. " .
-                "Add --target-engine=mysql or --target-engine=sqlite to state the database target.",
-            );
-        }
-    }
-
-    private function assert_runtime_sqlite_target_directory_exists(string $sqlite_path): void
-    {
-        $directory = dirname($sqlite_path);
-        if (is_dir($directory)) {
-            return;
-        }
-
-        throw new InvalidArgumentException(
-            "The directory for --target-sqlite-path={$sqlite_path} does not exist: {$directory}. " .
-            "Create it first; the database file itself is created on the first request.",
-        );
-    }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     /**
