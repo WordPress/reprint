@@ -6,10 +6,8 @@ use PHPUnit\Framework\TestCase;
 
 require_once dirname(__DIR__) . '/packages/reprint-server/src/export.php';
 
-// export.php registers process-wide error/exception handlers as a side
-// effect of being loaded. Pop them back off so they don't outlive this
-// file and swallow unrelated failures (or exit()) in tests that run
-// later in the same PHPUnit process.
+// Loading export.php installs process-wide handlers that would otherwise
+// swallow unrelated failures — or exit() — in later tests.
 restore_error_handler();
 restore_exception_handler();
 
