@@ -93,6 +93,19 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('no network calls are made', $output);
     }
 
+    public function testApplyRuntimeHelpListsTheDatabaseTargetOptions(): void
+    {
+        $output = $this->runHelp('apply-runtime');
+
+        $this->assertStringContainsString('--target-engine=ENGINE', $output);
+        $this->assertStringContainsString('--target-sqlite-path=PATH', $output);
+        $this->assertStringContainsString('--target-db=NAME', $output);
+        $this->assertStringContainsString('--target-host=HOST', $output);
+        $this->assertStringContainsString('--target-port=PORT', $output);
+        $this->assertStringContainsString('--target-user=USER', $output);
+        $this->assertStringContainsString('--target-pass=PASS', $output);
+    }
+
     public function testPullMetadataRejectsAnInvocationWithoutARemoteReprintApiUrl(): void
     {
         $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
