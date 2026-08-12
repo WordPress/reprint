@@ -131,6 +131,11 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https:\\/\\/destination.example\\/logo.png',
                 ['https://source.example/media' => 'https://destination.example'],
             ],
+            'source root slash remains after a longer target domain' => [
+                'http://source.example/',
+                'http://much-longer-destination.example/',
+                ['http://source.example/' => 'http://much-longer-destination.example'],
+            ],
             'escaped JSON in a shortcode attribute' => [
                 '[builder config="{\\"image\\":\\"https:\\/\\/source.example\\/media\\/hero.jpg\\"}"]',
                 '[builder config="{\\"image\\":\\"https:\\/\\/destination.example\\/media\\/hero.jpg\\"}"]',

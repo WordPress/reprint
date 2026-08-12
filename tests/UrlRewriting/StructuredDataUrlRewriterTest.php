@@ -164,6 +164,25 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame('https://new-site.com/page', unserialize($result));
     }
 
+    public function testPreservesRootSlashInSerializedPhp(): void
+    {
+        $rewriter = $this->createRewriter([
+            'http://old-site.com/' => 'http://much-longer-destination.example',
+        ]);
+        $input = serialize(['siteurl' => 'http://old-site.com/']);
+
+        $result = $rewriter->rewrite($input);
+
+        $this->assertSame(
+            'http://much-longer-destination.example/',
+            unserialize($result)['siteurl']
+        );
+        $this->assertStringContainsString(
+            's:' . strlen('http://much-longer-destination.example/') . ':',
+            $result
+        );
+    }
+
     public function testRewritesUrlsInDoubleSerializedPhp(): void
     {
         $rewriter = $this->createRewriter();
