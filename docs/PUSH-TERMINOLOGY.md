@@ -60,6 +60,12 @@ local relative path to a document-root-relative path.
   planning a push. Use `$fresh_local_index_file`.
 - An **index entry** records one path, type, size, and ctime. Use
   `$index_entry`.
+- A **file sync patch planner** compares a patch base index with a patch result
+  index and selects `copy`, `delete`, or `replace` operations. To make two
+  trees identical, the destination is the patch base and the source is the
+  patch result. To copy only source changes, the source snapshots from the
+  last sync and now are the patch base and result. The planner owns the index
+  diff and the active deletion roots file.
 - The **pull index WAL** records completed pull mutations awaiting application
   to the remote and local indexes.
 - A **pull plan** lists remote absolute paths still scheduled for download or
@@ -270,13 +276,12 @@ Use these names verbatim:
 | Active plan directory | `plan`, `$plan_directory` |
 | Plan-owned fresh local index file | `fresh_local_index.jsonl`, `$fresh_local_index_file` |
 | Local index file | `local_index.jsonl`, `local_index_file`, `$local_index_file` |
-| Byte offset in the local index | `byte_offset_in_local_index`, `$byte_offset_in_local_index` |
 | Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
 | Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
 | Local push state directory | `push_state_directory`, `$push_state_directory` |
 | PushPlan cursor | `push_plan_cursor`, `$push_plan_cursor`, `get_cursor()` |
 | Sender-owned excluded paths | `excluded_paths.json`, `$excluded_paths_path` |
-| Deleted-directory stack | `deleted_directories_stack.jsonl`, `$deleted_directories_stack` |
+| Active deletion roots | `deleted_directories_stack.jsonl`, `$active_deletion_roots_file` |
 | Active state | `sender.json`, `$state_path` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Selected local-path count | `local_paths_to_push_count`, `$local_paths_to_push_count` |
@@ -302,18 +307,20 @@ a target-confirmed files-push commit, advanced path by path by later completed
 files-pull mutations.
 Files-pull does not scan unrelated paths or accept their pending local changes.
 PushPlan diffs its fresh local index against the local index its caller
-supplies. `byte_offset_in_local_index` is the position from which its current
-lookahead entry is read again after resume.
+supplies. Its FileSyncPatchPlanner owns the FileIndexDiffProcessor and the
+active deletion roots file. That file remembers directory deletions which
+cover index paths the planner has not processed yet.
 
 The PushPlan cursor is stored in `sender.json`. It contains `plan_directory`,
 `filesystem_root`, `local_index_file`, and the current
 planning position. During `indexing`, that position contains the
 FileIndexProcessor cursor and the committed byte offset in
-`fresh_local_index.jsonl`. During `diffing`, it contains the index offsets,
-output offsets, and the active byte offset in
-`deleted_directories_stack.jsonl`. The stack file is append-only; each entry
-links to the preceding active directory. The exclusions have a maximum of 100
-paths. The `sender.json` phases are `creating`, `finishing_previous_commit`,
+`fresh_local_index.jsonl`. During `diffing`, it contains the output offsets
+and the complete FileSyncPatchPlanner cursor. PushPlan
+stores that nested cursor without unpacking or rebuilding it. The active
+deletion roots file is append-only; each entry links to the preceding active
+directory. The exclusions have a maximum of 100 paths. The `sender.json`
+phases are `creating`, `finishing_previous_commit`,
 `starting_plan`, `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
 `saving_local_index`, `completing`, `removing`, and `discarding_plan`. It stores
 both the current and blocking push session IDs, selected path-list cursor,
@@ -513,7 +520,6 @@ Use these names verbatim inside `PushPlan`:
 | Local index file | `$local_index_file` |
 | Open local index file | `$local_index_file_handle` |
 | Local index lookahead entry | `$local_index_lookahead_entry`, `$local_index_lookahead_entry_loaded` |
-| Byte offset in the local index | `$byte_offset_in_local_index` |
 | Read the next index entry | `read_next_index_entry()`, `$index_file_handle` |
 | Index entry and shape | `$index_entry`, `$local_index_entry`, `$local_index_entry_shape`, `index_entry_shape()` |
 | Cursor | `$cursor`, `get_cursor()` |
@@ -521,10 +527,9 @@ Use these names verbatim inside `PushPlan`:
 | Fresh local index processor | `$file_index_processor`, `next_file_index_step()` |
 | Fresh local indexing cursor | `IndexingCursor`, `file_index_cursor` |
 | Fresh local index byte offset | `$fresh_local_index_byte_offset` |
-| Byte offset in the fresh local index during diff | `$byte_offset_in_fresh_local_index` |
 | Open fresh local index | `$fresh_local_index_handle` |
 | Combined index bytes | `$index_bytes_total` |
-| Index diff cursor | `IndexDiffCursor` |
+| File-sync planner cursor | `file_sync_planner_cursor`, `$file_sync_planner_cursor` |
 | Plan progress | `get_progress()` |
 | Start index diff | `start_index_diff()` |
 | Seek an index file | `seek_index_file_to_byte_offset()`, `$index_file_handle` |

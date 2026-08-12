@@ -179,12 +179,14 @@ The cursor contains the plan directory, filesystem root, local index file,
 document root's local relative path, and current planning position. During
 indexing, that position contains the `FileIndexProcessor` cursor and committed
 fresh-index byte offset. During diffing, each step flushes only the path list or
-append-only deleted-directory stack changed by that step before updating the two index
-offsets, two output byte offsets, and active stack byte offset. Each stack entry
-links to the preceding active directory, so continuation reads only the top
-entry. A later process passes the stored cursor to `PushPlan::resume()`. The
-plan uses its private exclusions copy, discards bytes beyond the stored output
-offsets, and continues from the retained internal phase.
+append-only active deletion roots file changed by that step before updating
+the two output byte offsets and the nested FileSyncPatchPlanner cursor. Each
+active deletion root links to the preceding one, so continuation reads only
+the current root. PushPlan stores and restores the planner cursor without
+rebuilding it. A later process passes the stored cursor to
+`PushPlan::resume()`. The plan uses its private exclusions copy, discards bytes
+beyond the stored output offsets, and continues from the retained internal
+phase.
 
 The first push to a site has no local index or previously pushed rows. Every
 current file, symlink, and empty directory is selected, and no local deletion
@@ -326,7 +328,7 @@ state:
       fresh_local_index.jsonl           plan-owned fresh local index
       local_paths_to_push.jsonl         local paths to push
       local_paths_to_delete             raw NUL-delimited document-root-relative paths
-      deleted_directories_stack.jsonl   append-only planning stack
+      deleted_directories_stack.jsonl   active directory-deletion roots
 ```
 
 The sender has an explicit start/step/cancel/close lifecycle.

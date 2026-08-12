@@ -287,7 +287,7 @@ final class PushPlanTest extends TestCase
         $this->assertSame("gone\0", file_get_contents($this->planPath('local_paths_to_delete')));
     }
 
-    public function testDeletedDirectoryStackAppendsWithoutGrowingTheCursor(): void
+    public function testActiveDeletionRootsAppendWithoutGrowingTheCursor(): void
     {
         $this->saveLocalIndex($this->writeIndex([
             'a/child.txt' => [1, 1, 'file'],
@@ -296,11 +296,16 @@ final class PushPlanTest extends TestCase
         $plan = $this->startPlan();
 
         $this->assertTrue($this->nextPlanStep($plan));
-        $stack_bytes = filesize($this->planPath('deleted_directories_stack.jsonl'));
-        $this->assertIsInt($stack_bytes);
-        $this->assertGreaterThan(0, $stack_bytes);
+        $active_deletion_roots_bytes = filesize($this->planPath('deleted_directories_stack.jsonl'));
+        $this->assertIsInt($active_deletion_roots_bytes);
+        $this->assertGreaterThan(0, $active_deletion_roots_bytes);
         $first_cursor = $this->planCursor();
-        $this->assertSame(0, $first_cursor['deleted_directory_stack_top_byte_offset']);
+        $this->assertSame(
+            0,
+            $first_cursor['file_sync_planner_cursor'][
+                'active_deletion_root_byte_offset'
+            ]
+        );
 
         $this->assertFalse($this->nextPlanStep($plan));
         $complete_cursor = $this->planCursor();
@@ -312,7 +317,7 @@ final class PushPlanTest extends TestCase
             ],
             $complete_cursor
         );
-        $this->assertSame($stack_bytes, filesize($this->planPath('deleted_directories_stack.jsonl')));
+        $this->assertSame($active_deletion_roots_bytes, filesize($this->planPath('deleted_directories_stack.jsonl')));
         $plan->close();
 
         $this->assertSame("a\0b.txt\0", file_get_contents($this->planPath('local_paths_to_delete')));
@@ -539,8 +544,12 @@ final class PushPlanTest extends TestCase
     public function testStepRetainsTheFollowingFreshLocalIndexEntryUntilClose(): void
     {
         $plan = $this->startPlan($this->writeIndex($this->manyFileEntries(3)));
-        $index_diff_property = new ReflectionProperty(
+        $patch_planner_property = new ReflectionProperty(
             PushPlan::class,
+            'patch_planner'
+        );
+        $index_diff_property = new ReflectionProperty(
+            FileSyncPatchPlanner::class,
             'index_diff'
         );
         $new_index_handle_property = new ReflectionProperty(
@@ -554,13 +563,16 @@ final class PushPlanTest extends TestCase
 
         $this->assertTrue($this->nextPlanStep($plan));
         $first_plan_cursor = $this->planCursor();
-        $index_diff = $index_diff_property->getValue($plan);
+        $patch_planner = $patch_planner_property->getValue($plan);
+        $index_diff = $index_diff_property->getValue($patch_planner);
         $fresh_local_index_handle = $new_index_handle_property->getValue(
             $index_diff
         );
         $this->assertIsResource($fresh_local_index_handle);
         $this->assertGreaterThan(
-            $first_plan_cursor['byte_offset_in_fresh_local_index'],
+            $first_plan_cursor['file_sync_planner_cursor'][
+                'index_diff_cursor'
+            ]['new_index_byte_offset'],
             ftell($fresh_local_index_handle)
         );
         $retained_fresh_local_index_entry = $new_index_entry_property->getValue(
@@ -572,7 +584,9 @@ final class PushPlanTest extends TestCase
         $this->assertTrue($this->nextPlanStep($plan));
         $second_plan_cursor = $this->planCursor();
         $this->assertGreaterThan(
-            $second_plan_cursor['byte_offset_in_fresh_local_index'],
+            $second_plan_cursor['file_sync_planner_cursor'][
+                'index_diff_cursor'
+            ]['new_index_byte_offset'],
             ftell($fresh_local_index_handle)
         );
         $this->assertPathCounts(2, 0);
@@ -606,15 +620,21 @@ final class PushPlanTest extends TestCase
         $this->assertSame('', $cursor['document_root_local_relative_path']);
         $this->assertSame([
             'phase',
-            'byte_offset_in_fresh_local_index',
-            'byte_offset_in_local_index',
+            'file_sync_planner_cursor',
             'byte_offset_in_local_paths_to_push',
             'byte_offset_in_local_paths_to_delete',
             'local_paths_to_push_count',
             'local_file_bytes_to_push',
-            'deleted_directory_stack_top_byte_offset',
-            'preceding_fresh_local_index_entry_path',
         ], array_keys($cursor['position']));
+        $this->assertSame([
+            'patch_base_index_file',
+            'patch_result_index_file',
+            'active_deletion_roots_file',
+            'included_index_path_roots',
+            'excluded_index_path_roots',
+            'index_diff_cursor',
+            'active_deletion_root_byte_offset',
+        ], array_keys($cursor['position']['file_sync_planner_cursor']));
         $this->assertSame(1, $cursor['position']['local_paths_to_push_count']);
         $this->assertSame(1, $cursor['position']['local_file_bytes_to_push']);
         $this->assertSame(
