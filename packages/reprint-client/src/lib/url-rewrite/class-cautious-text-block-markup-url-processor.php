@@ -34,12 +34,34 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
  *
  * @method string get_modifiable_text()
  * @method bool set_modifiable_text(string $plaintext_content)
+ * @method string|null get_tag()
+ * @method string|true|null get_attribute(string $name)
  * @property array<string, WP_HTML_Text_Replacement> $lexical_updates
  */
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
 class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
     /**
-     * Replace configured URL bases in the current raw text token.
+     * Replace the current text token without passing it through the HTML
+     * encoder. The caller has already rewritten a nested data value and must
+     * preserve the surrounding shortcode or builder bytes verbatim.
+     */
+    public function replace_raw_current_text(string $updated_text): bool
+    {
+        if ('#text' !== $this->get_token_type()) {
+            return false;
+        }
+
+        $this->get_updated_html();
+        if (!$this->set_modifiable_text('')) {
+            return false;
+        }
+
+        $this->lexical_updates['modifiable text']->text = $updated_text;
+        return true;
+    }
+
+    /**
+     * Replace configured URL bases in the current raw modifiable text.
      *
      * WP_HTML_Tag_Processor exposes decoded text through get_modifiable_text()
      * and HTML-encodes the complete replacement in set_modifiable_text(). The
@@ -50,7 +72,7 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
      */
     public function replace_url_bases_in_current_text(array $url_mapping): bool
     {
-        if ('#text' !== $this->get_token_type()) {
+        if ($this->get_token_type() !== '#text' && $this->get_token_type() !== '#tag') {
             return false;
         }
 

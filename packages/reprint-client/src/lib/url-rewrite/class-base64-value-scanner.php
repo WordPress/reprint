@@ -318,7 +318,7 @@ class Base64ValueScanner
         }
     }
 
-    private static function encoded_payload_could_decode_to_http_scheme(string $payload): bool
+    public static function encoded_payload_could_decode_to_http_scheme(string $payload): bool
     {
         return strpos($payload, 'aHR0') !== false
             || strpos($payload, 'dHA6') !== false

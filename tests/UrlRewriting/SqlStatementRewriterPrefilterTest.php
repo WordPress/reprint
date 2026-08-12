@@ -439,20 +439,23 @@ class SqlStatementRewriterPrefilterTest extends TestCase
     }
 
     /**
-     * Uppercase HTTP encodes to `SFRU…` — none of our prefixes match.
-     * The leaf rewriter is also case-sensitive on "http", so this is
-     * preserved-behaviour, not a regression.
+     * Uppercase HTTP encodes to `SFRU…`, but the source-domain check still
+     * reaches the leaf rewriter. The cautious path preserves the scheme bytes
+     * while replacing the configured authority.
      */
-    public function testUppercaseHttpIsLeftAlone(): void
+    public function testUppercaseHttpPreservesItsSchemeWhenRewritten(): void
     {
         $rewriter = $this->createRewriter();
         $value = 'HTTP://old-site.com/page';
         $sql = $this->buildInsertSql($value);
-        // Sanity: prefilter does not match.
+        // Sanity: the encoded HTTP marker does not match the prefilter.
         foreach (self::PREFIXES as $prefix) {
             $this->assertFalse(strpos($sql, $prefix), "Unexpected prefilter hit on '{$prefix}'");
         }
-        $this->assertSame($sql, $rewriter->rewrite($sql));
+        $this->assertSame(
+            $this->buildInsertSql('HTTP://new-site.com/page'),
+            $rewriter->rewrite($sql)
+        );
     }
 
     /**

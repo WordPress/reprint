@@ -193,6 +193,22 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $values[0]);
     }
 
+    public function testPostContentRewritesBase64ShortcodeBodyWithoutAnOuterHttpPrefix(): void
+    {
+        $rewriter = $this->createRewriter();
+        $value = '[vc_raw_html]' . base64_encode(
+            '<img src="https://old-site.com/uploads/logo.png">'
+        ) . '[/vc_raw_html]';
+        $expected = '[vc_raw_html]' . base64_encode(
+            '<img src="https://new-site.com/uploads/logo.png">'
+        ) . '[/vc_raw_html]';
+        $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('" . base64_encode($value) . "'));";
+
+        $values = $this->collectValues($rewriter->rewrite($sql));
+
+        $this->assertSame([$expected], $values);
+    }
+
     public function testUnknownColumnUsesPlainTextUrlScanning(): void
     {
         $rewriter = $this->createRewriter();
@@ -223,7 +239,7 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringContainsString('new-site.com/page', $values[0]);
     }
 
-    public function testPostContentUsesStructuredParserForMixedUrlSpellings(): void
+    public function testPostContentPreservesARewrittenCaseVariantScheme(): void
     {
         $rewriter = $this->createRewriter();
         $markup = '<a href="https://old-site.com/literal">Literal</a>'
@@ -236,7 +252,7 @@ class SqlStatementRewriterTest extends TestCase
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
         $this->assertStringContainsString('https://new-site.com/literal', $values[0]);
-        $this->assertStringContainsString('https://new-site.com/case-variant', $values[0]);
+        $this->assertStringContainsString('HTTPS://new-site.com/case-variant', $values[0]);
         $this->assertStringNotContainsString('old-site.com', strtolower($values[0]));
     }
 
@@ -560,17 +576,17 @@ class SqlStatementRewriterTest extends TestCase
         $encoded = base64_encode($block);
 
         // wp_posts.post_content → block_markup: rewrites both the JSON
-        // attribute and the <img> src correctly.
+        // attribute and the <img> src without changing the JSON spelling.
         $sql_real = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
         $result_real = $rewriter->rewrite($sql_real);
         $values_real = $this->collectValues($result_real);
         $this->assertStringContainsString('new-longer-domain-site.com/img.jpg', $values_real[0]);
-        // The JSON attribute should still be valid inside the block comment.
-        // The block parser JSON-encodes attribute values, so slashes are escaped.
+        // The JSON attribute remains valid inside the block comment and its
+        // unchanged bytes retain their original spelling.
         $this->assertStringContainsString(
-            '"url":"https:\/\/new-longer-domain-site.com\/img.jpg"',
+            '"url":"https://new-longer-domain-site.com/img.jpg"',
             $values_real[0],
-            'block_markup should correctly rewrite the JSON attribute inside the block comment'
+            'block_markup should rewrite the JSON attribute without re-encoding it'
         );
 
         // spoofed_posts.post_content → auto-detect (not block_markup): the
