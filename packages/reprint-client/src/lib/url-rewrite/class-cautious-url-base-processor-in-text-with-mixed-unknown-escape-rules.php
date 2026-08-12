@@ -39,7 +39,8 @@
  * - ASCII domains and IPv4 or IPv6 addresses, with an optional port.
  * - An optional initial path containing only bytes from `!` (0x21) through
  *   `~` (0x7E). Spaces and multibyte characters are rejected. That path is
- *   part of the source base and is removed with it. Mapping
+ *   part of the source base and is removed with it. A root slash is the URL
+ *   separator rather than a removable path, so it remains after replacement. Mapping
  *   https://source.example/media to
  *   https://destination.example changes
  *   https://source.example/media/logo.png to
@@ -332,15 +333,19 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             return null;
         }
 
+        // A source URL ending at its authority uses / as the URL separator,
+        // not as an initial path to remove. Leave its original spelling alone.
+        $source_path = $source['path'] === '/' ? '' : $source['path'];
+
         return [
             'source_authority' => $source['authority'],
-            'source_path'      => $source['path'],
-            'source_base'      => $source['authority'] . $source['path'],
+            'source_path'      => $source_path,
+            'source_base'      => $source['authority'] . $source_path,
             'target_domain'    => $target['host'],
             'pattern'          => $this->create_url_candidate_pattern(
                 $source['scheme'],
                 $source['authority'],
-                $source['path']
+                $source_path
             ),
         ];
     }
