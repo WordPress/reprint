@@ -377,6 +377,24 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
     }
 
+    public function testBlockMarkupUsesCautiousReplacementInStyleTagText(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<style>.hero{background:url(https:\\/\\/old-site.com\\/uploads\\/hero.jpg)}</style>';
+        $expected = '<style>.hero{background:url(https:\\/\\/new-site.com\\/uploads\\/hero.jpg)}</style>';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    public function testBlockMarkupUsesCautiousReplacementInJsonScriptText(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<script type="application/ld+json; charset=UTF-8">{"image":"https:\\/\\/old-site.com\\/uploads\\/logo.png"}</script>';
+        $expected = '<script type="application/ld+json; charset=UTF-8">{"image":"https:\\/\\/new-site.com\\/uploads\\/logo.png"}</script>';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
     /**
      * @return array<string, array{0:string, 1:string}>
      */
