@@ -128,6 +128,7 @@ class SqlStatementRewriter
             && strpos($sql, 'dHA6') === false
             && strpos($sql, 'dHBz') === false
             && strpos($sql, 'dHRw') === false
+            && !$this->might_contain_nested_builder_data($sql)
         ) {
             return $sql;
         }
@@ -154,6 +155,23 @@ class SqlStatementRewriter
         $value_to_column_map = $this->map_values_to_columns_from_tokens($tokens);
         $scanner = new Base64ValueScanner($sql, $tokens);
         return $this->rewrite_with_scanner($scanner, $value_to_column_map);
+    }
+
+    /**
+     * Return whether an INSERT names a WordPress content column which may hold
+     * a nested builder value. An outer Base64 payload cannot expose the HTTP
+     * prefix when a shortcode body contains a second Base64 payload, so those
+     * columns must reach the decoded-value classifier.
+     */
+    private function might_contain_nested_builder_data(string $sql): bool
+    {
+        foreach (['post_content', 'post_content_filtered', 'post_excerpt', 'comment_content', 'description'] as $column) {
+            if (stripos($sql, $column) !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -185,17 +203,19 @@ class SqlStatementRewriter
 
     private function rewrite_value_for_column(string $value, string $table, ?string $column): string
     {
-        if (strpos($value, 'http') === false) {
-            return $value;
-        }
-
-        if (!$this->url_rewriter->value_might_contain_source_domain($value)) {
-            return $value;
-        }
-
         $content_type = $column !== null
             ? $this->get_content_type($table, $column)
             : null;
+
+        if (
+            $content_type !== StructuredDataUrlRewriter::BLOCK_MARKUP &&
+            (
+                strpos($value, 'http') === false ||
+                !$this->url_rewriter->value_might_contain_source_domain($value)
+            )
+        ) {
+            return $value;
+        }
 
         // Rewrite URLs in the value. Known block-markup columns go through
         // the structured block parser so alternate URL spellings (for example
@@ -222,32 +242,40 @@ class SqlStatementRewriter
     private function rewrite_with_scanner(Base64ValueScanner $scanner, ?array $value_to_column_map): string
     {
         while ($scanner->next_value()) {
-            if (!$scanner->encoded_payload_could_contain_http_scheme()) {
-                continue;
-            }
-
-            $value = $scanner->get_value();
-
-            if (strpos($value, 'http') === false) {
-                continue;
-            }
-
-            if (!$this->url_rewriter->value_might_contain_source_domain($value)) {
-                continue;
-            }
-
             // Determine content type hint for this column.
             $column_name = null;
+            $table_name = '';
             if ($value_to_column_map !== null) {
+                $table_name = $value_to_column_map['table'];
                 $column_name = $this->find_column_at_offset(
                     $value_to_column_map['column_map'],
                     $scanner->get_match_offset()
                 );
             }
 
+            $content_type = $column_name !== null
+                ? $this->get_content_type($table_name, $column_name)
+                : null;
+            $nested_builder_data = $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP;
+            if (!$nested_builder_data && !$scanner->encoded_payload_could_contain_http_scheme()) {
+                continue;
+            }
+
+            $value = $scanner->get_value();
+
+            if (
+                !$nested_builder_data &&
+                (
+                    strpos($value, 'http') === false ||
+                    !$this->url_rewriter->value_might_contain_source_domain($value)
+                )
+            ) {
+                continue;
+            }
+
             $rewritten = $this->rewrite_value_for_column(
                 $value,
-                $value_to_column_map['table'] ?? '',
+                $table_name,
                 $column_name
             );
 

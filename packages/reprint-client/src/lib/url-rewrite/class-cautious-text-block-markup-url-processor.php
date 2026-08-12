@@ -39,6 +39,26 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
 class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
     /**
+     * Replace the current text token without passing it through the HTML
+     * encoder. The caller has already rewritten a nested data value and must
+     * preserve the surrounding shortcode or builder bytes verbatim.
+     */
+    public function replace_raw_current_text(string $updated_text): bool
+    {
+        if ('#text' !== $this->get_token_type()) {
+            return false;
+        }
+
+        $this->get_updated_html();
+        if (!$this->set_modifiable_text('')) {
+            return false;
+        }
+
+        $this->lexical_updates['modifiable text']->text = $updated_text;
+        return true;
+    }
+
+    /**
      * Replace configured URL bases in the current raw text token.
      *
      * WP_HTML_Tag_Processor exposes decoded text through get_modifiable_text()
