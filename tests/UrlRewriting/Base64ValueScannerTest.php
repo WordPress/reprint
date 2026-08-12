@@ -4,8 +4,23 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.php';
 
-class Base64ValueScannerTest extends TestCase
-{
+class Base64ValueScannerTest extends TestCase {
+    public function testEncodedPayloadCouldDecodeToHttpSchemeAtEveryAlignment(): void
+    {
+        foreach (['', 'x', 'xx'] as $prefix) {
+            $payload = base64_encode($prefix . 'https://old-site.com/page');
+
+            $this->assertTrue(Base64ValueScanner::encoded_payload_could_decode_to_http_scheme($payload));
+        }
+    }
+
+    public function testEncodedPayloadWithoutHttpSchemeIsRejected(): void
+    {
+        $payload = base64_encode('mailto:hello@example.com');
+
+        $this->assertFalse(Base64ValueScanner::encoded_payload_could_decode_to_http_scheme($payload));
+    }
+
     /**
      * Collect all decoded values from the scanner without modifying them.
      *
