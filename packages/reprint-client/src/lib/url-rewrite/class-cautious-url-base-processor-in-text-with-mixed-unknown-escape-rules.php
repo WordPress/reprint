@@ -58,10 +58,10 @@
  * no partial replacement:
  *
  * - A target path may contain non-empty slash-separated components composed
- *   only of ASCII letters, digits, hyphens, and underscores. Each target slash
- *   copies the spelling of a slash from the configured source path, candidate
+ *   only of ASCII letters, digits, hyphens, and underscores. Its slashes use
+ *   the first spelling available from the configured source path, candidate
  *   suffix, or protocol separator. A scheme-less authority without such a
- *   slash is left unchanged.
+ *   spelling is left unchanged when the target has a path.
  * - Target ports, user information, queries, fragments, IPv4/IPv6 addresses,
  *   and Unicode domains are not supported. Punycode domains are supported.
  * - Unicode source domains and paths are not supported.
@@ -308,8 +308,8 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      * Build a candidate pattern adapted from URLInTextProcessor's URL finder.
      *
      * The pattern recognizes only this mapping's authority and initial path.
-     * Capturing those slices, rather than a complete parsed URL, lets callers
-     * replace the authority without rendering any surrounding syntax.
+     * Capturing their raw ranges and a nearby slash spelling lets callers add a
+     * restricted target path without rendering the surrounding syntax.
      */
     private function create_url_candidate_pattern(
         string $source_scheme,
