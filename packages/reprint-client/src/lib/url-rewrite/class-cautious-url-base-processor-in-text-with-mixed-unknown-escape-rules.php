@@ -192,11 +192,10 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * Queues replacement of the complete current source base.
      *
-     * Mapping source.example/media to destination.example changes
+     * Mapping source.example/media to destination.example/assets changes
      * https://source.example/media/logo.png to
-     * https://destination.example/assets/logo.png when the target has the
-     * restricted /assets path. The protocol and logo.png suffix are outside
-     * the matched base and remain unchanged.
+     * https://destination.example/assets/logo.png. The protocol and original
+     * /logo.png suffix are outside the matched base and remain unchanged.
      */
     public function replace_url_base(): bool
     {
