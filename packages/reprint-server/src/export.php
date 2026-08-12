@@ -6,6 +6,7 @@
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\build_pdo_dsn;
+use function WordPress\Reprint\Exporter\canonical_root_path;
 use function WordPress\Reprint\Exporter\json_encode_or_throw;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
@@ -1189,10 +1190,11 @@ function resolve_directories(array $config): array
         $directory = trim($directory);
         assert_valid_path($directory, "directory entry");
 
-        $real_directory = realpath($directory);
-        if ($real_directory === false) {
+        // A root may be one file named by --include, so any existing path is valid.
+        $real_directory = canonical_root_path($directory);
+        if ($real_directory === null) {
             throw new InvalidArgumentException(
-                "directory does not exist or is not accessible: {$directory}\n" .
+                "directory entry does not exist or is not accessible: {$directory}\n" .
                     "Current working directory: " .
                     getcwd() .
                     "\n" .

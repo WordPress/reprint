@@ -24,6 +24,7 @@
             <file>CreateDbConnectionTest.php</file>
             <file>PushCommitTest.php</file>
             <file>ExportHttpServerTest.php</file>
+            <file>ExportResolveDirectoriesTest.php</file>
             <file>FileIndexDedupTest.php</file>
             <file>FileIndexSkipDefaultsTest.php</file>
             <file>ExporterUtilsTest.php</file>
