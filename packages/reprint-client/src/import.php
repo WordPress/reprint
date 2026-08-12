@@ -4314,6 +4314,12 @@ class ImportClient
         $preflight_data = $entry["data"];
         $webhost = $this->get_state()->webhost ?? "other";
 
+        // Resolve the target database up front, with the rest of the option
+        // checks, so a bad --target-* value fails before the output directory
+        // is created. The target is either stated on the command line or read
+        // from what db-apply connected to.
+        $target = $this->resolve_apply_runtime_database_target($options);
+
         // Resolve the local document root from either --flat-document-root
         // (used as-is) or --fs-root (prefixed with the remote document_root).
         // Mutual exclusion is already enforced at the CLI level.
@@ -4370,10 +4376,8 @@ class ImportClient
         $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data);
 
         // Step 1b: Merge the target database configuration into the manifest.
-        // The target is either stated on the command line or read from what
-        // db-apply connected to, and decides the DB_* constants and, for
-        // SQLite targets, the database integration plugin setup.
-        $target = $this->resolve_apply_runtime_database_target($options);
+        // It decides the DB_* constants and, for SQLite targets, the database
+        // integration plugin setup.
         $target_engine = $target["engine"];
         if ($target_engine === "mysql") {
             $manifest->constants["DB_NAME"] = $target["db"];
@@ -4612,18 +4616,32 @@ class ImportClient
         };
 
         if ($engine === "sqlite") {
-            $sqlite_path = $option_then_recorded(
-                $options["target_sqlite_path"] ?? null,
-                $recorded_target === null ? null : $recorded_target->target_sqlite_path,
-                null,
-            );
-            if ($engine_was_stated && $sqlite_path !== null) {
-                $directory = dirname((string) $sqlite_path);
-                if (!is_dir($directory)) {
+            // DB_DIR reaches runtime.php verbatim, so absolutize a stated path
+            // here; a relative one would resolve against the server's working
+            // directory. A recorded path is used as db-apply wrote it —
+            // flat-docroot may have moved the tree since, and apply-runtime
+            // without options accepts that.
+            $stated_sqlite_path = $options["target_sqlite_path"] ?? null;
+            if ($stated_sqlite_path !== null && $stated_sqlite_path !== "") {
+                $stated_sqlite_path = (string) $stated_sqlite_path;
+                $directory = dirname($stated_sqlite_path);
+                $absolute_directory = is_dir($directory) ? realpath($directory) : false;
+                if ($absolute_directory === false) {
                     throw new InvalidArgumentException(
-                        "The directory for --target-sqlite-path={$sqlite_path} does not exist: {$directory}. " .
+                        "The directory for --target-sqlite-path={$stated_sqlite_path} does not exist: {$directory}. " .
                         "Create it first; the database file itself is created on the first request.",
                     );
+                }
+                $sqlite_path = wp_join_unix_paths(
+                    $absolute_directory,
+                    basename($stated_sqlite_path),
+                );
+            } else {
+                $sqlite_path = $recorded_target === null
+                    ? null
+                    : $recorded_target->target_sqlite_path;
+                if ($sqlite_path === "") {
+                    $sqlite_path = null;
                 }
             }
 
@@ -5515,15 +5533,14 @@ class ImportClient
                         "--target-sqlite-path option is required but was missing.",
                     );
                 }
-                $sqlite_path = wp_join_unix_paths(
+                $target_path = wp_join_unix_paths(
                     $this->filesystem_root,
                     $content_dir,
                     'database',
                     '.ht.sqlite'
                 );
-                $target_path = $sqlite_path;
-                $this->audit_log("DB-APPLY | defaulting SQLite path to: {$sqlite_path}");
-                $this->progress->show_lifecycle_line("SQLite path: {$sqlite_path}\n");
+                $this->audit_log("DB-APPLY | defaulting SQLite path to: {$target_path}");
+                $this->progress->show_lifecycle_line("SQLite path: {$target_path}\n");
             }
 
             // Persist target database configuration for apply-runtime.
@@ -12990,14 +13007,16 @@ if (
                 "  Options win field by field; a --target-engine that differs from the\n" .
                 "  one db-apply used replaces the recorded target completely.\n" .
                 "  For MySQL targets the constants are DB_HOST, DB_NAME, DB_USER, and\n" .
-                "  DB_PASSWORD. For SQLite targets, the sqlite-database-integration\n" .
-                "  plugin is copied into the output directory and a lazy-loading \$wpdb\n" .
-                "  proxy is generated in runtime.php (Playground-style, no files placed\n" .
-                "  in the filesystem root). The SQLite file may be absent — the plugin\n" .
-                "  creates it on the first request — but its directory must exist.\n" .
+                "  DB_PASSWORD. Every field you leave out falls back to the recorded\n" .
+                "  target, so name the whole connection when you point at a different\n" .
+                "  database — otherwise you inherit db-apply's host, port or password.\n" .
+                "  For SQLite targets, the sqlite-database-integration plugin is copied\n" .
+                "  into the output directory and a lazy-loading \$wpdb proxy is generated\n" .
+                "  in runtime.php (Playground-style, no files placed in the filesystem\n" .
+                "  root). The SQLite file may be absent — the plugin creates it on the\n" .
+                "  first request — but its directory must exist.\n" .
                 "  apply-runtime does not write these options to state: they configure\n" .
                 "  one run, unlike db-apply's record of a database it connected to.\n" .
-				"  Like db-apply, apply-runtime masks --target-pass in the audit log.\n" .
                 "\n" .
                 "Output files (nginx-fpm):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
@@ -13025,8 +13044,8 @@ if (
                 "\n" .
                 "  # Point the runtime at a database db-apply did not create:\n" .
                 "  reprint apply-runtime https://example.com --state-dir=./state \\\n" .
-                "    --fs-root=./files --output-dir=./runtime --runtime=php-builtin \\\n" .
-                "    --target-engine=sqlite --target-sqlite-path=./files/wp-content/database/.ht.sqlite\n" .
+                "    --flat-document-root=./flat --output-dir=./runtime --runtime=php-builtin \\\n" .
+                "    --target-engine=sqlite --target-sqlite-path=./flat/wp-content/database/.ht.sqlite\n" .
                 "\n" .
                 "  bash ./runtime/start.sh\n",
         ],

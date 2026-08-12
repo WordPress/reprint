@@ -11,7 +11,7 @@
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -38,7 +38,9 @@ describe('Import: apply-runtime database target', { timeout: 300000 }, () => {
             files: 'sample',
         });
 
-        tempDir = createTempDir('e2e-apply-runtime-db-target');
+        // Canonical, so the path apply-runtime resolves for DB_DIR matches the
+        // one the assertions build (macOS symlinks the temp root).
+        tempDir = realpathSync(createTempDir('e2e-apply-runtime-db-target'));
         databasePrepDir = createTempDir('e2e-apply-runtime-db-source');
         runtimeDir = join(tempDir, 'runtime');
         sqlitePath = join(fsRootDir(tempDir), getSiteDir(site), 'wp-content', 'database', '.ht.sqlite');

@@ -500,6 +500,10 @@ The SQLite file itself may be missing — the `sqlite-database-integration` plug
 creates it on the first request — but its directory must exist. The options
 apply to this run only; `apply-runtime` does not record them in state.
 
+Every field you leave out falls back to what `db-apply` recorded, as long as the
+engine matches. Name the whole connection when you point at a different MySQL
+database — otherwise you inherit `db-apply`'s host, port or password.
+
 **What gets generated:**
 
 The command produces a `runtime.php` file that sets PHP constants, server

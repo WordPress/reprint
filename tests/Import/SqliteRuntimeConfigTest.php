@@ -17,7 +17,10 @@ class SqliteRuntimeConfigTest extends TestCase
     {
         parent::setUp();
 
-        $this->tempDir = sys_get_temp_dir() . '/sqlite-runtime-config-' . uniqid('', true);
+        // Canonical temp root, so paths the command resolves with realpath()
+        // match the ones the assertions build (macOS symlinks /var to
+        // /private/var).
+        $this->tempDir = realpath(sys_get_temp_dir()) . '/sqlite-runtime-config-' . uniqid('', true);
         $this->stateDir = $this->tempDir . '/state';
         $this->fsRoot = $this->tempDir . '/fs-root';
         $this->outputDir = $this->tempDir . '/runtime';
@@ -226,6 +229,47 @@ class SqliteRuntimeConfigTest extends TestCase
         );
         $this->assertStringContainsString("define('DB_FILE', '.ht.sqlite');", $runtime);
         $this->assertStringContainsString("define('DB_NAME', 'wp_runtime');", $runtime);
+    }
+
+    public function testSqliteEngineOptionKeepsARecordedPathWhoseDirectoryIsGone(): void
+    {
+        // flat-docroot moves the tree after db-apply records the path, so a
+        // recorded path need not exist. Naming the engine must not turn a run
+        // that works without options into an error.
+        $this->writeState([
+            'apply' => [
+                'target_sqlite_path' => $this->tempDir . '/moved-away/database/.ht.sqlite',
+            ],
+        ]);
+
+        $runtime = $this->applyRuntime(['target_engine' => 'sqlite']);
+
+        $this->assertStringContainsString(
+            "define('DB_DIR',  '" . $this->tempDir . "/moved-away/database/');",
+            $runtime
+        );
+    }
+
+    public function testRelativeSqlitePathBecomesAbsoluteInTheRuntime(): void
+    {
+        $this->writeState($this->emptyApplyState());
+
+        $previous_directory = getcwd();
+        chdir($this->fsRoot);
+        try {
+            $runtime = $this->applyRuntime([
+                'target_engine' => 'sqlite',
+                'target_sqlite_path' => './wp-content/database/.ht.sqlite',
+            ]);
+        } finally {
+            chdir($previous_directory);
+        }
+
+        $this->assertStringContainsString(
+            "define('DB_DIR',  '" . $this->fsRoot . "/wp-content/database/');",
+            $runtime
+        );
+        $this->assertStringContainsString("define('DB_FILE', '.ht.sqlite');", $runtime);
     }
 
     public function testMysqlTargetOptionsConfigureTheRuntimeWithoutDbApplyState(): void
