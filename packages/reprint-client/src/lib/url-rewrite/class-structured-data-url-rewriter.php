@@ -1,6 +1,5 @@
 <?php
 
-use WordPress\DataLiberation\URL\URLInTextProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 
 use function WordPress\DataLiberation\URL\is_child_url_of;
@@ -19,7 +18,7 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  *    values and recurse on each
  * 3. Base64 → decode, recurse on decoded content, re-encode if changed
  * 4. Leaf text → CautiousTextBlockMarkupUrlProcessor (block_markup hint)
- *    or URLInTextProcessor (default)
+ *    or CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules (default)
  *
  * HTML is never auto-detected — the caller must explicitly pass
  * content_type='block_markup' for values known to contain HTML/block markup.
