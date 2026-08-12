@@ -9,7 +9,8 @@
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -27,29 +28,89 @@ describe('Import: URL Rewriting', () => {
     const TARGET_DOMAIN = 'https://target.example.com';
     const ESCAPED_SOURCE_DOMAIN = SOURCE_DOMAIN.replaceAll('/', '\\/');
     const ESCAPED_TARGET_DOMAIN = 'http:\\/\\/target.example.com';
+    const PERCENT_ENCODED_SOURCE_MANUAL_URL = encodeURIComponent(`${SOURCE_DOMAIN}/wp-content/uploads/manual.pdf`);
+    // These shapes come from the WPBakery and Divi records in the site-builder
+    // markup report. The URLs use this test site's origin so db-apply can map
+    // them, but the surrounding shortcode grammar is kept intact. In
+    // particular, artifact 575 supplies the broken-looking paragraph body,
+    // artifact 562 the percent-encoded table, and artifact 804 the image card.
+    // https://adamziel.github.io/llm-research/reports/site-builder-markup.html
     const SITE_BUILDER_CASES = [
         {
-            name: 'WPBakery escaped video shortcode',
+            name: 'nested WPBakery escaped video shortcode',
             slug: 'url-rewrite-wpbakery-video',
-            input: `[vc_video link="${ESCAPED_SOURCE_DOMAIN}\\/wp-content\\/uploads\\/video.mp4"]`,
-            expected: `[vc_video link="${ESCAPED_TARGET_DOMAIN}\\/wp-content\\/uploads\\/video.mp4"]`,
+            input: `[vc_row][vc_column width="1/2"][vc_video link="${ESCAPED_SOURCE_DOMAIN}\\/wp-content\\/uploads\\/video.mp4"][/vc_column][/vc_row]`,
+            expected: `[vc_row][vc_column width="1/2"][vc_video link="${ESCAPED_TARGET_DOMAIN}\\/wp-content\\/uploads\\/video.mp4"][/vc_column][/vc_row]`,
+            rendered: '<div data-e2e-shortcode="vc_row"><div data-e2e-shortcode="vc_column"><span data-e2e-shortcode="vc_video" data-url="http://target.example.com/wp-content/uploads/video.mp4"></span></div></div>',
         },
         {
             name: 'WPBakery entity-quoted CSS shortcode attribute',
             slug: 'url-rewrite-wpbakery-css',
             input: `[vc_column width=&#187;1\\/2&#8243; css=&#187;.vc_custom{background-image:url(${ESCAPED_SOURCE_DOMAIN}\\/wp-content\\/uploads\\/hero.jpg?id=8086) !important;}&#187;]`,
             expected: `[vc_column width=&#187;1\\/2&#8243; css=&#187;.vc_custom{background-image:url(${ESCAPED_TARGET_DOMAIN}\\/wp-content\\/uploads\\/hero.jpg?id=8086) !important;}&#187;]`,
+            rendered: '<div data-e2e-shortcode="vc_column"></div>',
+        },
+        {
+            name: 'WPBakery shortcode nested across broken-looking paragraph markup',
+            slug: 'url-rewrite-wpbakery-mixed-html',
+            input: `[vc_column_text]</p>\r\n<h4><strong>Monohull</strong></h4>\r\n<p>[vc_video link="${ESCAPED_SOURCE_DOMAIN}\\/wp-content\\/uploads\\/tour.mp4"]</p>\r\n<p>[/vc_column_text]`,
+            expected: `[vc_column_text]</p>\r\n<h4><strong>Monohull</strong></h4>\r\n<p>[vc_video link="${ESCAPED_TARGET_DOMAIN}\\/wp-content\\/uploads\\/tour.mp4"]</p>\r\n<p>[/vc_column_text]`,
+            rendered: '<div data-e2e-shortcode="vc_column_text"></p>\r\n<h4><strong>Monohull</strong></h4>\r\n<p><span data-e2e-shortcode="vc_video" data-url="http://target.example.com/wp-content/uploads/tour.mp4"></span></p>\r\n<p></div>',
+        },
+        {
+            name: 'WPBakery table with percent-encoded HTML and URL',
+            slug: 'url-rewrite-wpbakery-percent-encoded-table',
+            input: `[vc_table allow_html="1"]Download,%3Ca%20href%3D%22${PERCENT_ENCODED_SOURCE_MANUAL_URL}%22%3ELink%3C%2Fa%3E[/vc_table]`,
+            expected: `[vc_table allow_html="1"]Download,%3Ca%20href%3D%22${PERCENT_ENCODED_SOURCE_MANUAL_URL}%22%3ELink%3C%2Fa%3E[/vc_table]`,
+            rendered: `<div data-e2e-shortcode="vc_table">Download,<a href="${SOURCE_DOMAIN}/wp-content/uploads/manual.pdf">Link</a></div>`,
         },
         {
             name: 'Divi shortcode inside a core HTML block',
             slug: 'url-rewrite-divi-in-core-html',
             input: `<!-- wp:html --><p>[et_pb_section background_image=”${ESCAPED_SOURCE_DOMAIN}\\/wp-content\\/uploads\\/hero.jpg”][/et_pb_section]</p><!-- /wp:html -->`,
             expected: `<!-- wp:html --><p>[et_pb_section background_image=”${ESCAPED_TARGET_DOMAIN}\\/wp-content\\/uploads\\/hero.jpg”][/et_pb_section]</p><!-- /wp:html -->`,
+            rendered: '<p><div data-e2e-shortcode="et_pb_section"></div></p>',
+        },
+        {
+            name: 'Divi image card with entities and pipe-delimited state',
+            slug: 'url-rewrite-divi-image-card',
+            input: `[dipl_image_card title="Social Media Strategy" image="${ESCAPED_SOURCE_DOMAIN}\\/wp-content\\/uploads\\/investment-plan.jpg" icon="&#xe0e3;||divi||400" content_bg_color_gradient_stops="#141252 0%|#303b90 100%"][/dipl_image_card]`,
+            expected: `[dipl_image_card title="Social Media Strategy" image="${ESCAPED_TARGET_DOMAIN}\\/wp-content\\/uploads\\/investment-plan.jpg" icon="&#xe0e3;||divi||400" content_bg_color_gradient_stops="#141252 0%|#303b90 100%"][/dipl_image_card]`,
+            rendered: '<span data-e2e-shortcode="dipl_image_card" data-url="http://target.example.com/wp-content/uploads/investment-plan.jpg"></span>',
         },
     ];
 
     beforeAll(async () => {
         await ensureSite(site, {
+            afterCreate: async (siteDir) => {
+                const muPluginDir = join(siteDir, 'wp-content', 'mu-plugins');
+                mkdirSync(muPluginDir, { recursive: true });
+                writeFileSync(join(muPluginDir, 'e2e-site-builder-shortcodes.php'), `<?php
+function reprint_e2e_container_shortcode($attributes, $content = null, $tag = '') {
+    return '<div data-e2e-shortcode="' . esc_attr($tag) . '">' . do_shortcode((string) $content) . '</div>';
+}
+
+function reprint_e2e_media_shortcode($attributes, $content = null, $tag = '') {
+    $url_attribute = 'vc_video' === $tag ? 'link' : 'image';
+    $url = isset($attributes[$url_attribute]) ? (string) $attributes[$url_attribute] : '';
+    $url = html_entity_decode(str_replace(chr(92) . '/', '/', $url), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+
+    return '<span data-e2e-shortcode="' . esc_attr($tag) . '" data-url="' . esc_url($url) . '"></span>';
+}
+
+function reprint_e2e_table_shortcode($attributes, $content = null) {
+    return '<div data-e2e-shortcode="vc_table">' . rawurldecode((string) $content) . '</div>';
+}
+
+foreach (['vc_row', 'vc_column', 'vc_column_text', 'et_pb_section'] as $shortcode) {
+    add_shortcode($shortcode, 'reprint_e2e_container_shortcode');
+}
+foreach (['vc_video', 'dipl_image_card'] as $shortcode) {
+    add_shortcode($shortcode, 'reprint_e2e_media_shortcode');
+}
+add_shortcode('vc_table', 'reprint_e2e_table_shortcode');
+`);
+            },
             customDb: async (dbName, conn) => {
                 // WordPress tables already exist from wp core install.
                 // Just INSERT additional test data into existing tables.
@@ -114,6 +175,15 @@ describe('Import: URL Rewriting', () => {
 
     function importUrl() {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
+    }
+
+    function renderPostContent(postContent) {
+        const php = "require $argv[1] . '/wp-load.php'; echo do_shortcode(do_blocks(base64_decode($argv[2], true)));";
+        return execFileSync(
+            process.env.PHP_BINARY || 'php',
+            ['-r', php, getSiteDir(site), Buffer.from(postContent).toString('base64')],
+            { encoding: 'utf8' }
+        ).trim();
     }
 
     it('db-pull completes and produces db.sql', () => {
@@ -261,7 +331,7 @@ describe('Import: URL Rewriting', () => {
         );
     });
 
-    it.each(SITE_BUILDER_CASES)('$name is rewritten without changing its escaping', async (testCase) => {
+    it.each(SITE_BUILDER_CASES)('$name survives URL rewriting and still renders', async (testCase) => {
         const conn = await createMysqlConnection(importDb);
         const [[row]] = await conn.query(
             'SELECT post_content FROM wp_posts WHERE post_name = ?',
@@ -271,6 +341,7 @@ describe('Import: URL Rewriting', () => {
 
         assert.ok(row, `Expected ${testCase.slug} post`);
         assert.equal(row.post_content, testCase.expected);
+        assert.equal(renderPostContent(row.post_content), testCase.rendered);
     });
 
     it('plain text URLs in post_excerpt are rewritten', async () => {
