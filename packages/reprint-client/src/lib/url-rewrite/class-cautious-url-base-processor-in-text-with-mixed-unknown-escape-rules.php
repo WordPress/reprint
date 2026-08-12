@@ -194,11 +194,11 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * Queues replacement of the complete current source base.
      *
-     * Mapping source.example/media to destination.example changes
+     * Mapping source.example/media to destination.example/assets changes
      * https://source.example/media/logo.png to
-     * https://destination.example/logo.png. The logo.png suffix is outside the
-     * matched base and remains unchanged. A configured protocol change replaces
-     * only the literal scheme, preserving the separator's existing escaping.
+     * https://destination.example/assets/logo.png. The original /logo.png
+     * suffix is outside the matched base and remains unchanged. A configured
+     * protocol change replaces only the literal scheme.
      */
     public function replace_url_base(): bool
     {
