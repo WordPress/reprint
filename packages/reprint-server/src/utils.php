@@ -35,6 +35,7 @@ namespace WordPress\Reprint\Exporter {
 
 use InvalidArgumentException;
 use RuntimeException;
+use function WordPress\Filesystem\wp_join_unix_paths;
 
 // Composer's "files" autoload includes this file once per registered
 // path. In a monorepo where the same package is mirrored into vendor/
@@ -391,6 +392,37 @@ function path_is_same_as_or_descendant_of($path, $ancestor): bool
         return str_starts_with($path, "/");
     }
     return $path === $ancestor || str_starts_with($path, $ancestor . "/");
+}
+
+/**
+ * Canonicalizes one configured root path.
+ *
+ * A directory resolves through realpath(). Any other path keeps its final
+ * component, because a root may be a single file named by --include and
+ * resolving that component would index a symlinked file under its target.
+ *
+ * @param string $path Root path as configured.
+ * @return string|null Canonical root path, or null when it does not exist.
+ */
+function canonical_root_path(string $path): ?string
+{
+    clearstatcache(true, $path);
+    if (is_dir($path)) {
+        $canonical_path = realpath($path);
+        return $canonical_path === false ? null : $canonical_path;
+    }
+
+    // file_exists() follows links and so reports a broken link as absent.
+    if (@lstat($path) === false) {
+        return null;
+    }
+
+    $canonical_parent = realpath(dirname($path));
+    if ($canonical_parent === false) {
+        return null;
+    }
+
+    return wp_join_unix_paths($canonical_parent, basename($path));
 }
 
 /**
