@@ -391,6 +391,124 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     // ---------------------------------------------------------------
+    // cURL error number classification
+    // ---------------------------------------------------------------
+
+    /**
+     * A real transfer cut short by the peer must raise
+     * TransientInterruptionException so the caller can checkpoint and resume.
+     *
+     * Driven over a real socket rather than by injecting an error number: a
+     * server that accepts and closes without replying makes cURL report either
+     * CURLE_GOT_NOTHING (52) or CURLE_RECV_ERROR (56) depending on how far the
+     * exchange got. Both are in TRANSIENT_CURL_ERROR_NUMBERS, so this proves
+     * the classification on the wire instead of restating the constant.
+     */
+    public function testTransferCutShortByPeerIsTransient()
+    {
+        [$server, $url] = $this->startConnectionClosingServer();
+
+        try {
+            $curl = curl_init($url);
+            curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($curl, CURLOPT_TIMEOUT, 10);
+            curl_exec($curl);
+
+            $errorNumber = curl_errno($curl);
+            $this->assertContains(
+                $errorNumber,
+                [52, 56],
+                'The stub server should make cURL report a cut-short transfer',
+            );
+
+            [$client, $reflection] = $this->prepareClient();
+            $checkCurlError = $reflection->getMethod('check_curl_error');
+
+            try {
+                $checkCurlError->invoke($client, $curl);
+                $this->fail('A transfer cut short by the peer should have thrown');
+            } catch (TransientInterruptionException $e) {
+                $this->assertStringContainsString("({$errorNumber})", $e->getMessage());
+            }
+
+            curl_close($curl);
+        } finally {
+            proc_close($server);
+        }
+    }
+
+    /**
+     * A failure that will reproduce on the next request must stay fatal.
+     * Connecting to a closed port yields CURLE_COULDNT_CONNECT (7), which is
+     * deliberately absent from TRANSIENT_CURL_ERROR_NUMBERS.
+     */
+    public function testUnreachableHostStaysFatal()
+    {
+        $curl = curl_init('http://127.0.0.1:1/');
+        curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 5);
+        curl_exec($curl);
+
+        $this->assertSame(
+            7,
+            curl_errno($curl),
+            'Connecting to a closed port should report CURLE_COULDNT_CONNECT',
+        );
+
+        [$client, $reflection] = $this->prepareClient();
+        $checkCurlError = $reflection->getMethod('check_curl_error');
+
+        try {
+            $checkCurlError->invoke($client, $curl);
+            $this->fail('An unreachable host should have thrown');
+        } catch (\RuntimeException $e) {
+            $this->assertNotInstanceOf(
+                InterruptedResponseException::class,
+                $e,
+                'An unreachable host must not be treated as a resumable interruption',
+            );
+        }
+
+        curl_close($curl);
+    }
+
+    /**
+     * Start a server that accepts a connection then closes it without a
+     * response. Returns the process handle and the URL to request.
+     */
+    private function startConnectionClosingServer(): array
+    {
+        $port = 8000 + (getmypid() % 20000);
+        $script = $this->tempDir . '/close-immediately.php';
+        file_put_contents($script, <<<'PHP'
+<?php
+$server = stream_socket_server("tcp://127.0.0.1:" . $argv[1], $errno, $errstr);
+if (!$server) {
+    exit(1);
+}
+echo "ready\n";
+$connection = stream_socket_accept($server, 10);
+if ($connection) {
+    fclose($connection);
+}
+fclose($server);
+PHP);
+
+        $process = proc_open(
+            sprintf('%s %s %d', escapeshellarg(PHP_BINARY), escapeshellarg($script), $port),
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+        );
+        $this->assertIsResource($process, 'The stub server should start');
+
+        // Block until the listener is bound so the request cannot race it.
+        $this->assertSame('ready', trim((string) fgets($pipes[1])));
+
+        return [$process, "http://127.0.0.1:{$port}/"];
+    }
+
+
+    // ---------------------------------------------------------------
     // Consecutive interrupted-response counter
     // ---------------------------------------------------------------
 
