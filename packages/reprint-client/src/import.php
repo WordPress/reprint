@@ -173,6 +173,13 @@ class ImportClient
      */
     public const FLATTEN_TO_CONFLICT_MODES = ['error', 'replace', 'adopt'];
 
+    /**
+     * Suffix for the path a cross-filesystem adopt copies into before renaming
+     * it to its real name. Derived from the destination rather than random, so
+     * a later run clears what an interrupted one left behind.
+     */
+    private const FLATTEN_ADOPT_STAGING_SUFFIX = '.reprint-adopt-incomplete';
+
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
@@ -5299,7 +5306,28 @@ class ImportClient
                 );
             }
         } elseif (!@rename($target_entry, $source_entry)) {
-            $this->flatten_copy_local_path($target_entry, $source_entry);
+            // Copy beside the destination and rename it into place, never into
+            // the destination itself. A copy that dies partway — a full disk, an
+            // unreadable file, a signal during a large one — would otherwise
+            // leave a partial entry that the next run reads as the pulled copy,
+            // skips, and then deletes the intact original along with the
+            // flattened wp-content. The staging path is derived, not random, so
+            // a later run clears whatever the last one abandoned. Both paths sit
+            // in the filesystem root, so the rename is atomic.
+            $staging_path = $source_entry . self::FLATTEN_ADOPT_STAGING_SUFFIX;
+            $this->remove_local_absolute_path_without_following_symlinks($staging_path);
+            try {
+                $this->flatten_copy_local_path($target_entry, $staging_path);
+                if (!@rename($staging_path, $source_entry)) {
+                    throw new RuntimeException(
+                        "Copied {$target_entry} to {$staging_path} but could not move it " .
+                            "to {$source_entry}.",
+                    );
+                }
+            } catch (Throwable $copy_failure) {
+                $this->remove_local_absolute_path_without_following_symlinks($staging_path);
+                throw $copy_failure;
+            }
             if (
                 !$this->remove_local_absolute_path_without_following_symlinks(
                     $target_entry
@@ -12595,7 +12623,8 @@ if (
                 "directories on the source server (e.g. WP Cloud with ABSPATH at\n" .
                 "/srv/htdocs and WP_CONTENT_DIR at /tmp/__wp__/wp-content).\n" .
                 "\n" .
-                "No files are copied — only symlinks are created. Idempotent.\n" .
+                "Only symlinks are created; the pulled files stay where they are.\n" .
+                "Idempotent.\n" .
                 "\n" .
                 "--on-flatten-to-conflict decides what happens when a real file or\n" .
                 "directory already sits where a symlink must go:\n" .
@@ -12611,7 +12640,12 @@ if (
                 "files-push, which read only --fs-root, can still see them. The\n" .
                 "pulled copy wins wherever both sides hold the same path, and only\n" .
                 "wp-content is adopted — the rest of the layout is core, which the\n" .
-                "pull owns entirely.\n",
+                "pull owns entirely.\n" .
+                "\n" .
+                "adopt is the one mode that writes outside --flatten-to. It renames\n" .
+                "each entry into --fs-root, and copies then removes it instead when\n" .
+                "the two directories are on different filesystems, where a rename\n" .
+                "cannot work. Either way the entry ends up in --fs-root only.\n",
             "extra" => null,
         ],
         "apply-runtime" => [

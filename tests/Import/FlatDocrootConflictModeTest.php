@@ -364,6 +364,52 @@ class FlatDocrootConflictModeTest extends TestCase
         );
     }
 
+    public function testACopyThatFailsPartwayLeavesNothingAtTheDestination(): void
+    {
+        if ( function_exists('posix_getuid') && posix_getuid() === 0 ) {
+            $this->markTestSkipped('File permissions do not stop root from reading.');
+        }
+
+        $this->writePulled('wp-content/plugins/from-the-pull/plugin.php', '<?php');
+        $this->writeFlattened('wp-content/plugins/local-only/first.php', '<?php // copied');
+        $this->writeFlattened('wp-content/plugins/local-only/second.php', '<?php // unreadable');
+        $this->writeFlattened('wp-content/plugins/local-only/third.php', '<?php // never reached');
+        // rename() needs to write to the entry's parent, so a read-only parent
+        // sends the move down the cross-filesystem copy path, and an unreadable
+        // file part-way through that copy fails it after it has written some.
+        chmod($this->flattenTo . '/wp-content/plugins/local-only/second.php', 0000);
+        chmod($this->flattenTo . '/wp-content/plugins', 0555);
+
+        try {
+            $this->flatten(['on_flatten_to_conflict' => 'adopt']);
+            $this->fail('the failed copy should have stopped the command');
+        } catch (\RuntimeException $exception) {
+            // Expected.
+        } finally {
+            chmod($this->flattenTo . '/wp-content/plugins', 0755);
+            chmod($this->flattenTo . '/wp-content/plugins/local-only/second.php', 0644);
+        }
+
+        $plugins = $this->localAbspath . 'wp-content/plugins';
+        $this->assertFileDoesNotExist(
+            $plugins . '/local-only',
+            'a half-copied entry must not sit at the name the next run reads as the pulled copy',
+        );
+        $this->assertSame(
+            [],
+            glob($plugins . '/*.reprint-adopt-incomplete') ?: [],
+            'and the staging path it copied into is cleared',
+        );
+        $this->assertFileExists(
+            $this->flattenTo . '/wp-content/plugins/local-only/first.php',
+            'the original is untouched, so a later run can try again',
+        );
+        $this->assertFalse(
+            is_link($this->flattenTo . '/wp-content'),
+            'nothing was replaced with a symlink, so nothing was deleted',
+        );
+    }
+
     // ---- helpers ----
 
     /**
