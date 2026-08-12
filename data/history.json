@@ -15947,61 +15947,61 @@
       "results": [
         {
           "stage": "preflight",
-          "elapsedMs": 148.50920600000245,
+          "elapsedMs": 148.3210769999987,
           "attempts": 1,
           "ok": true
         },
         {
           "stage": "files-pull",
-          "elapsedMs": 10980.247073999999,
+          "elapsedMs": 12666.440497000001,
           "attempts": 2,
           "ok": true
         },
         {
           "stage": "db-pull",
-          "elapsedMs": 109885.688291,
+          "elapsedMs": 109016.54856300002,
           "attempts": 1,
           "ok": true
         },
         {
           "stage": "db-apply",
-          "elapsedMs": 33227.947426,
+          "elapsedMs": 33012.07608299999,
           "attempts": 1,
           "ok": true
         },
         {
           "stage": "apply-runtime",
-          "elapsedMs": 107.62928900000406,
+          "elapsedMs": 109.75158199999714,
           "attempts": 1,
           "ok": true
         },
         {
           "stage": "playground-sqlite-db-pull",
-          "elapsedMs": 262086.61928599997,
+          "elapsedMs": 265273.082177,
           "attempts": 1,
           "ok": true
         },
         {
           "stage": "playground-sqlite-db-apply",
-          "elapsedMs": 62154.58788899996,
+          "elapsedMs": 60666.0273800001,
           "attempts": 1,
           "ok": true
         },
         {
           "stage": "file-fetch-untuned-random",
-          "elapsedMs": 174.93298200005665,
+          "elapsedMs": 180.10161500005051,
           "attempts": 1,
           "ok": true
         },
         {
           "stage": "file-fetch-binary-compression",
-          "elapsedMs": 112.30170199996792,
+          "elapsedMs": 102.70627600001171,
           "attempts": 1,
           "ok": true
         },
         {
           "stage": "files-pull-large-part-peak-memory",
-          "elapsedMs": 4618.1134280000115,
+          "elapsedMs": 4671.070082999999,
           "attempts": 1,
           "ok": true
         }
