@@ -364,6 +364,19 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
     }
 
+    public function testBlockMarkupRewritesBase64ShortcodeBody(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '[vc_raw_html]' . base64_encode(
+            '<img src="https://old-site.com/uploads/logo.png">'
+        ) . '[/vc_raw_html]';
+        $expected = '[vc_raw_html]' . base64_encode(
+            '<img src="https://new-site.com/uploads/logo.png">'
+        ) . '[/vc_raw_html]';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
     /**
      * @return array<string, array{0:string, 1:string}>
      */

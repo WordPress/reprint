@@ -193,6 +193,22 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $values[0]);
     }
 
+    public function testPostContentRewritesBase64ShortcodeBodyWithoutAnOuterHttpPrefix(): void
+    {
+        $rewriter = $this->createRewriter();
+        $value = '[vc_raw_html]' . base64_encode(
+            '<img src="https://old-site.com/uploads/logo.png">'
+        ) . '[/vc_raw_html]';
+        $expected = '[vc_raw_html]' . base64_encode(
+            '<img src="https://new-site.com/uploads/logo.png">'
+        ) . '[/vc_raw_html]';
+        $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('" . base64_encode($value) . "'));";
+
+        $values = $this->collectValues($rewriter->rewrite($sql));
+
+        $this->assertSame([$expected], $values);
+    }
+
     public function testUnknownColumnUsesPlainTextUrlScanning(): void
     {
         $rewriter = $this->createRewriter();
