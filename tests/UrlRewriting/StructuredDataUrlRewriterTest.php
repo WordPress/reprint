@@ -72,12 +72,55 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertEquals($input, $result);
     }
 
-    public function testDoesNotRewriteQueryString(): void
+    /**
+     * A mapped URL nested in another URL's query string or fragment is rewritten.
+     *
+     * `?redirect_to=`, `?return_url=` and friends point at the site being migrated and
+     * have to follow it. The cost is that a deliberate reference to the old address —
+     * an archive link, say — moves too. Matching the base as bytes cannot tell those
+     * apart, and following the site is the more common intent.
+     *
+     * Both content types must agree here. Block markup reached this behaviour first,
+     * when its text tokens moved to cautious base replacement.
+     */
+    public function testRewritesUrlNestedInAnotherUrl(): void
     {
         $rewriter = $this->createRewriter();
-        $input = 'Visit us at https://webarchive.org?url=https://old-site.com/about for more info.';
-        $result = $rewriter->rewrite($input);
-        $this->assertEquals($input, $result);
+
+        $cases = [
+            'Visit us at https://webarchive.org?url=https://old-site.com/about for more info.'
+                => 'Visit us at https://webarchive.org?url=https://new-site.com/about for more info.',
+            'https://other.example/login?redirect_to=https://old-site.com/account'
+                => 'https://other.example/login?redirect_to=https://new-site.com/account',
+            'https://other.example/p#next=https://old-site.com/y'
+                => 'https://other.example/p#next=https://new-site.com/y',
+        ];
+
+        foreach ($cases as $input => $expected) {
+            $this->assertEquals(
+                $expected,
+                $rewriter->rewrite($input, StructuredDataUrlRewriter::PLAIN_TEXT),
+                'plain text'
+            );
+            $this->assertEquals(
+                $expected,
+                $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP),
+                'block markup'
+            );
+        }
+    }
+
+    /**
+     * A percent-encoded nested URL is left alone by both content types — decoding it
+     * would mean guessing the enclosing format's escaping rules.
+     */
+    public function testDoesNotRewritePercentEncodedNestedUrl(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = 'https://other.example/go?to=https%3A%2F%2Fold-site.com%2Fx';
+
+        $this->assertEquals($input, $rewriter->rewrite($input, StructuredDataUrlRewriter::PLAIN_TEXT));
+        $this->assertEquals($input, $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
     }
 
     // --- JSON content ---
