@@ -4007,7 +4007,7 @@ class ImportClient
     {
         echo json_encode(
             $this->build_pull_metadata(),
-            JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
+            JSON_UNESCAPED_SLASHES
         ) . "\n";
     }
 
@@ -4022,29 +4022,47 @@ class ImportClient
      *
      *     @type bool  $hasCompletedOnce Whether the pull pipeline has completed
      *                                   at least once.
+     *     @type bool  $hasLocalIndex     Whether a nonempty local index exists.
+     *     @type bool  $hasSkippedFiles   Whether files deferred by the pull
+     *                                   remain. Current pulls do not defer
+     *                                   files, so this is always false.
      *     @type mixed $pullStage        Last completed pull stage.
      *     @type array $sourceSite {
      *         Source-site values reported by preflight.
      *
-     *         @type string|null $homeUrl                    WordPress home URL.
-     *         @type string|null $siteUrl                    WordPress site URL.
-     *         @type string|null $tablePrefix                WordPress database
-     *                                                       table prefix.
-     *         @type string|null $wordpressDatabaseCharset   Charset used by
-     *                                                       WordPress.
-     *         @type string|null $serverDatabaseCharset      Database server's
-     *                                                       default charset.
+     *         @type string|null $homeUrl                 WordPress home URL.
+     *         @type string|null $siteUrl                 WordPress site URL.
+     *         @type string|null $tablePrefix             WordPress database
+     *                                                    table prefix.
+     *         @type string|null $wordpressDatabaseCharset Charset used by
+     *                                                     WordPress.
+     *         @type string|null $serverDatabaseCharset   Database server's
+     *                                                    default charset.
+     *         @type string|null $contentDirectory        Remote WordPress
+     *                                                    content directory.
+     *         @type string|null $wordpressAbsolutePath   Remote WordPress
+     *                                                    ABSPATH.
+     *         @type string[]    $wordpressRoots          WordPress roots
+     *                                                    detected remotely.
+     *         @type string[]    $extraDirectories        Remote directories
+     *                                                    needed by the runtime.
      *     }
      * }
      * @phpstan-return array{
      *     hasCompletedOnce: bool,
+     *     hasLocalIndex: bool,
+     *     hasSkippedFiles: bool,
      *     pullStage: mixed,
      *     sourceSite: array{
      *         homeUrl: string|null,
      *         siteUrl: string|null,
      *         tablePrefix: string|null,
      *         wordpressDatabaseCharset: string|null,
-     *         serverDatabaseCharset: string|null
+     *         serverDatabaseCharset: string|null,
+     *         contentDirectory: string|null,
+     *         wordpressAbsolutePath: string|null,
+     *         wordpressRoots: string[],
+     *         extraDirectories: string[]
      *     }
      * }
      */
@@ -4052,11 +4070,21 @@ class ImportClient
     {
         $state = $this->get_state();
         $pull = $state->pull_pipeline;
-        $database = $state->preflight_record()["data"]["database"] ?? [];
+        $preflight_record = $state->preflight_record() ?? [];
+        $preflight_data = $preflight_record["data"] ?? [];
+        $database = $preflight_data["database"] ?? [];
         $wordpress = $database["wp"] ?? [];
+        $paths_urls = $wordpress["paths_urls"] ?? [];
+        $runtime_manifest = host_analyzer_for(
+            $state->webhost ?? "other"
+        )->analyze($preflight_data);
 
         return [
             "hasCompletedOnce" => $pull->has_completed_once,
+            "hasLocalIndex" =>
+                is_file($this->local_index_file) &&
+                filesize($this->local_index_file) > 0,
+            "hasSkippedFiles" => false,
             "pullStage" => $pull->last_completed_stage,
             "sourceSite" => [
                 "homeUrl" => $wordpress["home"] ?? null,
@@ -4064,6 +4092,13 @@ class ImportClient
                 "tablePrefix" => $wordpress["table_prefix"] ?? null,
                 "wordpressDatabaseCharset" => $wordpress["wpdb_charset"] ?? null,
                 "serverDatabaseCharset" => $database["server_charset"] ?? null,
+                "contentDirectory" => $paths_urls["content_dir"] ?? null,
+                "wordpressAbsolutePath" => $paths_urls["abspath"] ?? null,
+                "wordpressRoots" => array_column(
+                    $preflight_data["wp_detect"]["roots"] ?? [],
+                    "path"
+                ),
+                "extraDirectories" => $runtime_manifest->extra_directories,
             ],
         ];
     }
@@ -12164,9 +12199,9 @@ if (
             "short" => "Print local pull metadata for host integrations as JSON",
             "usage" => "reprint pull-metadata <remote-reprint-api-url> --state-dir=DIR",
             "description" =>
-                "Reads <remote-state-directory>/pull/state.json and prints pull\n" .
-                "lifecycle and source-site metadata for host integrations. The remote\n" .
-                "Reprint API URL selects the state; no network calls are made.\n",
+                "Prints pull lifecycle, artifact availability, and source-site\n" .
+                "metadata for host integrations. The remote Reprint API URL selects\n" .
+                "the state; no network calls are made.\n",
             "extra" =>
                 "Example:\n" .
                 "  reprint pull-metadata https://example.com --state-dir=./state | jq '.hasCompletedOnce'\n",
