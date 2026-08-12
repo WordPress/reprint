@@ -10,6 +10,7 @@ require_once __DIR__ . '/../wp-stubs.php';
 require_once __DIR__ . '/../mysql-query-stream/load.php';
 
 // Leaf classes (no internal dependencies)
+require_once __DIR__ . '/json-prefix.php';
 require_once __DIR__ . '/class-php-serialization-processor.php';
 require_once __DIR__ . '/class-json-string-iterator.php';
 require_once __DIR__ . '/class-base64-value-scanner.php';

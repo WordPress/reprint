@@ -158,7 +158,7 @@ class StructuredDataUrlRewriter
             !$this->maybe_contains_rewritable_urls($value) &&
             (
                 $content_type !== self::BLOCK_MARKUP ||
-                !$this->might_contain_base64_shortcode_body($value)
+                !Base64ValueScanner::encoded_payload_could_decode_to_http_scheme($value)
             )
         ) {
             return $value;
@@ -236,35 +236,19 @@ class StructuredDataUrlRewriter
     }
 
     /**
-     * Return whether a block-markup value may contain a Base64 shortcode body.
-     * The later decoder remains the authority on Base64 validity and whether
-     * the decoded value actually contains a mapped URL.
-     */
-    private function might_contain_base64_shortcode_body(string $value): bool
-    {
-        return preg_match(
-            '/\[[A-Za-z][A-Za-z0-9_-]*(?:\s+[^\]]*)?\][A-Za-z0-9+\/=]+\[\/[A-Za-z][A-Za-z0-9_-]*\]/',
-            $value
-        ) === 1;
-    }
-
-    /**
      * Return whether the value starts with a PHP serialization token that may
      * expose string values to rewrite.
      *
      * This is a speed guard before constructing PhpSerializationProcessor. It
      * deliberately omits scalar serialized types such as i:, d:, b:, N;, r:,
-     * and R: because they cannot contain string leaves. The processor remains
-     * responsible for full validation once this coarse first-byte check passes.
+     * and R: because they cannot contain string leaves. The prefix validator
+     * only rejects syntax that is already impossible in the first 100 bytes;
+     * the processor remains responsible for full validation.
      */
     private function could_be_php_serialization_with_strings(string $value): bool
     {
-        $first_byte = $value[0] ?? '';
-
-        return $first_byte === 'a'
-            || $first_byte === 's'
-            || $first_byte === 'O'
-            || $first_byte === 'C';
+        return preg_match('/^(?:a|s|O|C)(?::|$)/', $value) === 1
+            && PhpSerializationProcessor::is_valid_prefix($value);
     }
 
     /**
@@ -274,22 +258,12 @@ class StructuredDataUrlRewriter
      * This is a speed guard before constructing JsonStringIterator, whose
      * constructor calls json_decode(). Objects and arrays can contain nested
      * string leaves, and JSON string scalars can themselves be rewritten. The
-     * iterator remains responsible for full JSON validation after this coarse
-     * first-byte check passes.
+     * prefix parser only rejects syntax that is already impossible in the
+     * first 100 bytes. The iterator remains responsible for full validation.
      */
     private function could_be_json_with_strings(string $value): bool
     {
-        $length = strlen($value);
-        for ($i = 0; $i < $length; $i++) {
-            $byte = $value[$i];
-            if ($byte === ' ' || $byte === "\n" || $byte === "\r" || $byte === "\t") {
-                continue;
-            }
-
-            return $byte === '{' || $byte === '[' || $byte === '"';
-        }
-
-        return false;
+        return \Reprint\Importer\UrlRewrite\is_valid_json_prefix($value);
     }
 
     /**
@@ -481,6 +455,13 @@ class StructuredDataUrlRewriter
                         continue;
                     }
 
+                    if ($this->token_has_css_or_json_text($p)) {
+                        $text = $p->get_modifiable_text();
+                        if ($this->maybe_contains_rewritable_urls($text)) {
+                            $p->replace_url_bases_in_current_text($this->url_mapping);
+                        }
+                    }
+
                     while ( $p->next_url_in_current_token() ) {
                         $raw_url = $p->get_raw_url();
                         $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
@@ -570,6 +551,32 @@ class StructuredDataUrlRewriter
                 _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );
                 return '';
         }
+    }
+
+    /**
+     * Return whether the current tag owns CSS or JSON text. Those values are
+     * raw text in the HTML tokenizer, not ordinary HTML text nodes. Keep their
+     * original escaping while the cautious processor replaces only a mapped
+     * URL base.
+     */
+    private function token_has_css_or_json_text(CautiousTextBlockMarkupUrlProcessor $processor): bool
+    {
+        $tag = strtolower($processor->get_tag() ?? '');
+        if ($tag === 'style') {
+            return true;
+        }
+
+        if ($tag !== 'script') {
+            return false;
+        }
+
+        $type = $processor->get_attribute('type');
+        if (!is_string($type)) {
+            return false;
+        }
+
+        $mime_type = strtolower(trim(explode(';', $type, 2)[0]));
+        return $mime_type === 'application/ld+json' || $mime_type === 'application/json';
     }
 
     /**

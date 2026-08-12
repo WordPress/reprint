@@ -318,7 +318,14 @@ class Base64ValueScanner
         }
     }
 
-    private static function encoded_payload_could_decode_to_http_scheme(string $payload): bool
+    /**
+     * Return whether a Base64 payload could decode to an HTTP(S) URL.
+     *
+     * A Base64 group begins at one of three alignments relative to the scheme,
+     * so the encoded payload has one of four markers. The caller remains
+     * responsible for Base64 validation and URL rewriting.
+     */
+    public static function encoded_payload_could_decode_to_http_scheme(string $payload): bool
     {
         return strpos($payload, 'aHR0') !== false
             || strpos($payload, 'dHA6') !== false

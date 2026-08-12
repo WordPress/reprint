@@ -27,6 +27,330 @@ class PhpSerializationProcessor
 {
     private const DIGITS = '0123456789';
 
+    /**
+     * Return whether the first $bytes could be the prefix of a serialized
+     * value accepted by this processor.
+     *
+     * The prefix may stop inside a token, a byte-counted string, or an open
+     * array/object. Bytes after the prefix are deliberately not inspected.
+     */
+    public static function is_valid_prefix(string $serialized, int $bytes = 100): bool
+    {
+        $length = min(strlen($serialized), $bytes);
+        if ($length === 0) {
+            return true;
+        }
+
+        $pos = 0;
+        $parse_value = null;
+
+        $expect = static function (string $expected) use (&$serialized, &$pos, $length): int {
+            if ($pos === $length) {
+                return 0;
+            }
+
+            $available = min(strlen($expected), $length - $pos);
+            if (substr_compare($serialized, $expected, $pos, $available) !== 0) {
+                return -1;
+            }
+
+            if ($available < strlen($expected)) {
+                $pos = $length;
+                return 0;
+            }
+
+            $pos += $available;
+            return 1;
+        };
+
+        $parse_count = static function () use (&$serialized, &$pos, $length): array {
+            if ($pos === $length) {
+                return [0, 0];
+            }
+
+            $digits = strspn($serialized, self::DIGITS, $pos, $length - $pos);
+            if ($digits === 0) {
+                return [-1, 0];
+            }
+
+            $count = 0;
+            for ($offset = 0; $offset < $digits; ++$offset) {
+                $digit = ord($serialized[$pos + $offset]) - ord('0');
+                if ($count > intdiv(PHP_INT_MAX - $digit, 10)) {
+                    return [-1, 0];
+                }
+                $count = $count * 10 + $digit;
+            }
+
+            $pos += $digits;
+            return [1, $count];
+        };
+
+        $parse_string = static function () use (&$serialized, &$pos, $length, $expect, $parse_count): int {
+            $status = $expect('s:');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            [$status, $byte_length] = $parse_count();
+            if ($status !== 1) {
+                return $status;
+            }
+
+            $status = $expect(':"');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            if ($byte_length > $length - $pos) {
+                $pos = $length;
+                return 0;
+            }
+
+            $pos += $byte_length;
+            return $expect('";');
+        };
+
+        $parse_integer = static function () use (&$serialized, &$pos, $length, $expect): int {
+            $status = $expect('i:');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            if ($pos === $length) {
+                return 0;
+            }
+
+            if ($serialized[$pos] === '-') {
+                ++$pos;
+                if ($pos === $length) {
+                    return 0;
+                }
+            }
+
+            $digits = strspn($serialized, self::DIGITS, $pos, $length - $pos);
+            if ($digits === 0) {
+                return -1;
+            }
+
+            $pos += $digits;
+            return $expect(';');
+        };
+
+        $parse_double = static function () use (&$serialized, &$pos, $length, $expect): int {
+            $status = $expect('d:');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            $span = strcspn($serialized, ';', $pos, $length - $pos);
+            if ($span === 0) {
+                return $pos === $length ? 0 : -1;
+            }
+
+            $pos += $span;
+            return $expect(';');
+        };
+
+        $parse_boolean = static function () use (&$serialized, &$pos, $length, $expect): int {
+            $status = $expect('b:');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            if ($pos === $length) {
+                return 0;
+            }
+            if ($serialized[$pos] !== '0' && $serialized[$pos] !== '1') {
+                return -1;
+            }
+
+            ++$pos;
+            return $expect(';');
+        };
+
+        $parse_reference = static function () use (&$serialized, &$pos, $length, $expect, $parse_count): int {
+            ++$pos;
+            $status = $expect(':');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            [$status] = $parse_count();
+            if ($status !== 1) {
+                return $status;
+            }
+
+            return $expect(';');
+        };
+
+        $parse_array = null;
+        $parse_object = null;
+        $parse_custom = null;
+
+        $parse_array = function () use (&$parse_value, &$serialized, &$pos, $length, $expect, $parse_count): int {
+            $status = $expect('a:');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            [$status, $count] = $parse_count();
+            if ($status !== 1) {
+                return $status;
+            }
+
+            $status = $expect(':{');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            for ($entry = 0; $entry < $count; ++$entry) {
+                $status = $parse_value();
+                if ($status !== 1) {
+                    return $status;
+                }
+
+                $status = $parse_value();
+                if ($status !== 1) {
+                    return $status;
+                }
+            }
+
+            return $expect('}');
+        };
+
+        $parse_object = function () use (&$parse_value, &$serialized, &$pos, $length, $expect, $parse_count): int {
+            $status = $expect('O:');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            [$status, $class_name_length] = $parse_count();
+            if ($status !== 1) {
+                return $status;
+            }
+
+            $status = $expect(':"');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            if ($class_name_length > $length - $pos) {
+                $pos = $length;
+                return 0;
+            }
+
+            $pos += $class_name_length;
+            $status = $expect('":');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            [$status, $property_count] = $parse_count();
+            if ($status !== 1) {
+                return $status;
+            }
+
+            $status = $expect(':{');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            for ($property = 0; $property < $property_count; ++$property) {
+                $status = $parse_value();
+                if ($status !== 1) {
+                    return $status;
+                }
+
+                $status = $parse_value();
+                if ($status !== 1) {
+                    return $status;
+                }
+            }
+
+            return $expect('}');
+        };
+
+        $parse_custom = static function () use (&$serialized, &$pos, $length, $expect, $parse_count): int {
+            $status = $expect('C:');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            [$status, $class_name_length] = $parse_count();
+            if ($status !== 1) {
+                return $status;
+            }
+
+            $status = $expect(':"');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            if ($class_name_length > $length - $pos) {
+                $pos = $length;
+                return 0;
+            }
+
+            $pos += $class_name_length;
+            $status = $expect('":');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            [$status, $payload_length] = $parse_count();
+            if ($status !== 1) {
+                return $status;
+            }
+
+            $status = $expect(':{');
+            if ($status !== 1) {
+                return $status;
+            }
+
+            if ($payload_length > $length - $pos) {
+                $pos = $length;
+                return 0;
+            }
+
+            $pos += $payload_length;
+            return $expect('}');
+        };
+
+        $parse_value = function () use (&$serialized, &$pos, $length, $parse_string, $parse_integer, $parse_double, $parse_boolean, $expect, $parse_array, $parse_object, $parse_custom, $parse_reference): int {
+            if ($pos === $length) {
+                return 0;
+            }
+
+            switch ($serialized[$pos]) {
+                case 's':
+                    return $parse_string();
+                case 'i':
+                    return $parse_integer();
+                case 'd':
+                    return $parse_double();
+                case 'b':
+                    return $parse_boolean();
+                case 'N':
+                    return $expect('N;');
+                case 'a':
+                    return $parse_array();
+                case 'O':
+                    return $parse_object();
+                case 'C':
+                    return $parse_custom();
+                case 'r':
+                case 'R':
+                    return $parse_reference();
+                default:
+                    return -1;
+            }
+        };
+
+        $status = $parse_value();
+        return $status !== -1 && ( $status === 0 || $pos === $length );
+    }
+
     /** @var string The original serialized data. */
     private $data;
 
