@@ -8,8 +8,6 @@ use Reprint\Importer\State\FileDiffProgressState;
 use Reprint\Importer\State\FilesPullSummaryState;
 use Reprint\Importer\State\RemoteFileIndexCursorState;
 
-use Reprint\Importer\DatabaseTargetResolutionPolicy;
-use Reprint\Importer\DatabaseTargetResolver;
 use function WordPress\Filesystem\wp_join_unix_paths;
 
 require_once __DIR__ . '/class-pull-failure-reported-exception.php';
@@ -701,20 +699,32 @@ class Pull
      * MySQL database apply needs a user and database name because Reprint connects to
      * an existing server. SQLite database apply can use the generated default path
      * when no explicit target path is supplied.
-     *
-     * Returns the options with the effective engine named.
      */
     private function validate_database_target_options(array $options): array
     {
-        // MySQL is the engine credentials alone imply. Name it in the options
-        // so every stage — including apply-runtime, which otherwise falls back
-        // to db-apply state — reads one effective target.
-        $target = DatabaseTargetResolver::resolve(
-            $options,
-            null,
-            DatabaseTargetResolutionPolicy::for_pull(),
-        );
-        $options['target_engine'] = $target->engine;
+        if (!empty($options['target_engine'])) {
+            $engine = strtolower($options['target_engine']);
+            if (!in_array($engine, ['mysql', 'sqlite'], true)) {
+                throw new InvalidArgumentException(
+                    "Invalid --target-engine value: {$options['target_engine']}. " .
+                    "Valid engines: mysql, sqlite"
+                );
+            }
+            $options['target_engine'] = $engine;
+        }
+
+        if (($options['target_engine'] ?? 'mysql') === 'mysql') {
+            if (empty($options['target_user'])) {
+                throw new InvalidArgumentException(
+                    "--target-user is required when db-apply targets MySQL."
+                );
+            }
+            if (empty($options['target_db'])) {
+                throw new InvalidArgumentException(
+                    "--target-db is required when db-apply targets MySQL."
+                );
+            }
+        }
 
         return $options;
     }

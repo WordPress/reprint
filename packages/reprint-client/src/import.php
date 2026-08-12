@@ -11,9 +11,6 @@
  */
 
 use Reprint\Importer\CurlTimeoutException;
-use Reprint\Importer\DatabaseTarget;
-use Reprint\Importer\DatabaseTargetResolutionPolicy;
-use Reprint\Importer\DatabaseTargetResolver;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\Pull\PullFailureReportedException;
 use Reprint\Importer\State\DatabaseApplyCommandState;
@@ -167,6 +164,16 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
+
+    /** @var array<string,string> */
+    private const RUNTIME_DATABASE_TARGET_FLAGS = [
+        "target_db" => "--target-db",
+        "target_sqlite_path" => "--target-sqlite-path",
+        "target_host" => "--target-host",
+        "target_port" => "--target-port",
+        "target_user" => "--target-user",
+        "target_pass" => "--target-pass",
+    ];
 
     /**
      * Maximum number of consecutive interrupted responses with no cursor
@@ -4376,19 +4383,15 @@ class ImportClient
         // The target is either stated on the command line or read from what
         // db-apply connected to, and decides the DB_* constants and, for
         // SQLite targets, the database integration plugin setup.
-        $target = DatabaseTargetResolver::resolve(
-            $options,
-            DatabaseTarget::from_apply_state($this->get_state()->apply),
-            DatabaseTargetResolutionPolicy::for_runtime(),
-        );
-        $target_engine = $target === null ? null : $target->engine;
+        $target = $this->resolve_runtime_database_target($options);
+        $target_engine = $target["engine"];
         if ($target_engine === "mysql") {
-            $manifest->constants["DB_NAME"] = $target->database_name;
-            $manifest->constants["DB_USER"] = $target->user;
-            $manifest->constants["DB_PASSWORD"] = $target->password;
-            $host_value = $target->host;
-            if ($target->port !== 3306) {
-                $host_value .= ":" . $target->port;
+            $manifest->constants["DB_NAME"] = $target["db"];
+            $manifest->constants["DB_USER"] = $target["user"];
+            $manifest->constants["DB_PASSWORD"] = $target["pass"];
+            $host_value = $target["host"];
+            if ($target["port"] !== 3306) {
+                $host_value .= ":" . $target["port"];
             }
             $manifest->constants["DB_HOST"] = $host_value;
             // runtime.php defines DB_* before wp-config.php loads, which
@@ -4396,8 +4399,8 @@ class ImportClient
             // generated runtime.php installs a handler to suppress them.
             $manifest->has_db_constants = true;
         } elseif ($target_engine === "sqlite") {
-            $sqlite_path = $target->sqlite_path;
-            $manifest->constants["DB_NAME"] = $target->database_name;
+            $sqlite_path = $target["sqlite_path"];
+            $manifest->constants["DB_NAME"] = $target["db"];
             // The SQLite integration still requires a non-empty DB_NAME
             // for its MySQL information-schema emulation, even though the
             // physical database location comes from DB_DIR/DB_FILE.
@@ -4554,6 +4557,145 @@ class ImportClient
         }
         $this->progress->show_lifecycle_line($human_summary);
     }
+
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.
+    /**
+     * Resolve the database target the generated runtime should point at.
+     *
+     * Without an explicit engine, apply-runtime uses the database target
+     * db-apply recorded. An explicit engine lets a caller name a database it
+     * keeps outside Reprint's db-apply stage. Options fill missing values from
+     * matching recorded state; a different engine ignores it entirely.
+     *
+     * @param array<string,mixed> $options
+     * @return array<string,mixed>
+     */
+    private function resolve_runtime_database_target(array $options): array
+    {
+        $recorded_target = $this->get_state()->apply;
+        $stated_engine = $options["target_engine"] ?? null;
+        $engine_was_stated = $stated_engine !== null && $stated_engine !== "";
+
+        if ($engine_was_stated) {
+            $engine = strtolower((string) $stated_engine);
+            if (!in_array($engine, ["mysql", "sqlite"], true)) {
+                throw new InvalidArgumentException(
+                    "Invalid --target-engine value: {$stated_engine}. Valid engines: mysql, sqlite.",
+                );
+            }
+            if ($recorded_target->target_engine !== $engine) {
+                $recorded_target = null;
+            }
+        } else {
+            $this->assert_runtime_database_target_options_name_an_engine($options);
+            $engine = $recorded_target->target_engine;
+        }
+
+        if ($engine === null) {
+            return ["engine" => null];
+        }
+
+        $option_then_recorded = static function ($option_value, $recorded_value, $default_value) {
+            foreach ([$option_value, $recorded_value] as $candidate) {
+                if ($candidate !== null && $candidate !== "") {
+                    return $candidate;
+                }
+            }
+            return $default_value;
+        };
+
+        if ($engine === "sqlite") {
+            $sqlite_path = $option_then_recorded(
+                $options["target_sqlite_path"] ?? null,
+                $recorded_target === null ? null : $recorded_target->target_sqlite_path,
+                null,
+            );
+            if ($engine_was_stated && $sqlite_path !== null) {
+                $this->assert_runtime_sqlite_target_directory_exists((string) $sqlite_path);
+            }
+
+            return [
+                "engine" => "sqlite",
+                "db" => (string) $option_then_recorded(
+                    $options["target_db"] ?? null,
+                    $recorded_target === null ? null : $recorded_target->target_db,
+                    "sqlite_database",
+                ),
+                "sqlite_path" => $sqlite_path === null ? null : (string) $sqlite_path,
+            ];
+        }
+
+        $target = [
+            "engine" => "mysql",
+            "db" => (string) $option_then_recorded(
+                $options["target_db"] ?? null,
+                $recorded_target === null ? null : $recorded_target->target_db,
+                "",
+            ),
+            "host" => (string) $option_then_recorded(
+                $options["target_host"] ?? null,
+                $recorded_target === null ? null : $recorded_target->target_host,
+                "127.0.0.1",
+            ),
+            "port" => (int) $option_then_recorded(
+                $options["target_port"] ?? null,
+                $recorded_target === null ? null : $recorded_target->target_port,
+                3306,
+            ),
+            "user" => (string) $option_then_recorded(
+                $options["target_user"] ?? null,
+                $recorded_target === null ? null : $recorded_target->target_user,
+                "",
+            ),
+            "pass" => (string) $option_then_recorded(
+                $options["target_pass"] ?? null,
+                $recorded_target === null ? null : $recorded_target->target_pass,
+                "",
+            ),
+        ];
+
+        if ($engine_was_stated) {
+            foreach (["user" => "--target-user", "db" => "--target-db"] as $field => $flag) {
+                if ($target[$field] === "") {
+                    throw new InvalidArgumentException(
+                        "apply-runtime with --target-engine=mysql requires {$flag}: " .
+                        "neither the command line nor the recorded db-apply target supplied one.",
+                    );
+                }
+            }
+        }
+
+        return $target;
+    }
+
+    /** @param array<string,mixed> $options */
+    private function assert_runtime_database_target_options_name_an_engine(array $options): void
+    {
+        foreach (self::RUNTIME_DATABASE_TARGET_FLAGS as $option_key => $flag) {
+            $value = $options[$option_key] ?? null;
+            if ($value === null || $value === "") {
+                continue;
+            }
+            throw new InvalidArgumentException(
+                "apply-runtime received {$flag} without --target-engine. " .
+                "Add --target-engine=mysql or --target-engine=sqlite to state the database target.",
+            );
+        }
+    }
+
+    private function assert_runtime_sqlite_target_directory_exists(string $sqlite_path): void
+    {
+        $directory = dirname($sqlite_path);
+        if (is_dir($directory)) {
+            return;
+        }
+
+        throw new InvalidArgumentException(
+            "The directory for --target-sqlite-path={$sqlite_path} does not exist: {$directory}. " .
+            "Create it first; the database file itself is created on the first request.",
+        );
+    }
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     /**
      * Enable the temporary remote upload proxy when uploads may still be
@@ -5365,14 +5507,18 @@ class ImportClient
 
     private function create_target_db_apply_connection(array $options): array
     {
-        $target = DatabaseTargetResolver::resolve(
-            $options,
-            null,
-            DatabaseTargetResolutionPolicy::for_direct_database_apply(),
-        );
+        $target_engine = strtolower((string) ($options["target_engine"] ?? "mysql"));
+        if (!in_array($target_engine, ["mysql", "sqlite"], true)) {
+            throw new InvalidArgumentException(
+                "Invalid --target-engine value: {$target_engine}. Valid engines: mysql, sqlite.",
+            );
+        }
 
-        if ($target->engine === "sqlite") {
-            if ($target->sqlite_path === null) {
+        if ($target_engine === "sqlite") {
+            $target_path = $options["target_sqlite_path"] ?? null;
+            $target_db = $options["target_db"] ?? "sqlite_database";
+
+            if (!$target_path) {
                 $content_dir = $this->clean_preflight_path(
                     $this->get_state()->get(
                         'preflight.database.wp.paths_urls.content_dir'
@@ -5389,33 +5535,49 @@ class ImportClient
                     'database',
                     '.ht.sqlite'
                 );
-                $target = $target->with_sqlite_path($sqlite_path);
+                $target_path = $sqlite_path;
                 $this->audit_log("DB-APPLY | defaulting SQLite path to: {$sqlite_path}");
                 $this->progress->show_lifecycle_line("SQLite path: {$sqlite_path}\n");
             }
 
-            $target->store_in_apply_state($this->get_state()->apply);
-
-            $sqlite_path = $target->sqlite_path;
-            if ($sqlite_path === null) {
-                throw new LogicException('SQLite target resolution requires a database path.');
-            }
+            // Persist target database configuration for apply-runtime.
+            $this->get_state()->apply->target_engine = "sqlite";
+            $this->get_state()->apply->target_db = $target_db;
+            $this->get_state()->apply->target_sqlite_path = $target_path;
 
             return [
-                $this->create_sqlite_target_pdo($sqlite_path, $target->database_name),
+                $this->create_sqlite_target_pdo($target_path, $target_db),
                 sprintf(
                     "engine=sqlite path=%s db=%s",
-                    $sqlite_path,
-                    $target->database_name,
+                    $target_path,
+                    $target_db,
                 ),
             ];
         }
 
-        $target->store_in_apply_state($this->get_state()->apply);
+        $target_host = $options["target_host"] ?? "127.0.0.1";
+        $target_port = (int) ($options["target_port"] ?? 3306);
+        $target_user = $options["target_user"] ?? null;
+        $target_pass = $options["target_pass"] ?? "";
+        $target_db = $options["target_db"] ?? null;
 
-        $dsn = "mysql:host={$target->host};port={$target->port};dbname={$target->database_name};charset=utf8mb4";
+        if (!$target_user || !$target_db) {
+            throw new InvalidArgumentException(
+                "db-apply with --target-engine=mysql requires --target-user and --target-db.",
+            );
+        }
+
+        // Persist target database configuration for apply-runtime.
+        $this->get_state()->apply->target_engine = "mysql";
+        $this->get_state()->apply->target_db = $target_db;
+        $this->get_state()->apply->target_host = $target_host;
+        $this->get_state()->apply->target_port = $target_port;
+        $this->get_state()->apply->target_user = $target_user;
+        $this->get_state()->apply->target_pass = $target_pass;
+
+        $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
         try {
-            $pdo = new PDO($dsn, $target->user, $target->password, [
+            $pdo = new PDO($dsn, $target_user, $target_pass, [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 PDO::MYSQL_ATTR_LOCAL_INFILE => false,
@@ -5432,10 +5594,10 @@ class ImportClient
             $pdo,
             sprintf(
                 "engine=mysql host=%s port=%d db=%s user=%s",
-                $target->host,
-                $target->port,
-                $target->database_name,
-                $target->user,
+                $target_host,
+                $target_port,
+                $target_db,
+                $target_user,
             ),
         ];
     }

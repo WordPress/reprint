@@ -851,48 +851,4 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame($flatten_to, $client->apply_runtime_options["flat_document_root"]);
     }
 
-    public function testPullHandsTheSqliteTargetToApplyRuntime(): void
-    {
-        $client = new PullBridgeFakeClient($this->stateDir, $this->filesystem_root);
-        $sqlite_path = $this->tempDir . '/database/.ht.sqlite';
-
-        ob_start();
-        $client->run([
-            "command" => "pull",
-            "runtime" => "playground-cli",
-            "start_runtime" => "none",
-            "target_engine" => "sqlite",
-            "target_sqlite_path" => $sqlite_path,
-        ]);
-        ob_end_clean();
-
-        // apply-runtime resolves the same target the db-apply stage used, so
-        // the generated runtime configuration does not depend on state alone.
-        $this->assertIsArray($client->apply_runtime_options);
-        $this->assertSame('sqlite', $client->apply_runtime_options["target_engine"]);
-        $this->assertSame($sqlite_path, $client->apply_runtime_options["target_sqlite_path"]);
-    }
-
-    public function testPullNamesTheMysqlEngineForTheApplyRuntimeStage(): void
-    {
-        $client = new PullBridgeFakeClient($this->stateDir, $this->filesystem_root);
-
-        ob_start();
-        $client->run([
-            "command" => "pull",
-            "runtime" => "playground-cli",
-            "start_runtime" => "none",
-            "target_user" => "root",
-            "target_db" => "wp_new",
-        ]);
-        ob_end_clean();
-
-        // MySQL is the implied engine when only credentials are given. Pull
-        // states it outright so later stages read one effective target.
-        $this->assertIsArray($client->apply_runtime_options);
-        $this->assertSame('mysql', $client->apply_runtime_options["target_engine"]);
-        $this->assertSame('root', $client->apply_runtime_options["target_user"]);
-        $this->assertSame('wp_new', $client->apply_runtime_options["target_db"]);
-    }
-
 }

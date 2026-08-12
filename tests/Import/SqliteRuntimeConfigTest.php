@@ -283,6 +283,27 @@ class SqliteRuntimeConfigTest extends TestCase
         $this->assertStringContainsString($this->fsRoot . '/absent-directory', $message);
     }
 
+    public function testApplyRuntimeMasksTheTargetDatabasePasswordInItsAuditLog(): void
+    {
+        $password = 'database-password-' . bin2hex(random_bytes(4));
+        $client = new \ImportClient(
+            'https://source.example/export.php',
+            $this->stateDir,
+            $this->fsRoot,
+        );
+
+        $client->audit_log_argv('apply-runtime', [
+            'reprint',
+            'apply-runtime',
+            'https://source.example/export.php',
+            '--target-pass=' . $password,
+        ]);
+
+        $audit_log = (string) file_get_contents($this->stateDir . '/audit.log');
+        $this->assertStringNotContainsString($password, $audit_log);
+        $this->assertStringContainsString('--target-pass=***', $audit_log);
+    }
+
     public function testDefaultSqlitePathKeepsTheRootContentDirectory(): void
     {
         if (!extension_loaded('pdo_sqlite')) {
