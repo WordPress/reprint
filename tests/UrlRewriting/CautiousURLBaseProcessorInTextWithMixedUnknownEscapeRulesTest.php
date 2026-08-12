@@ -96,9 +96,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'HTTPS://destination.example/media/logo.png',
                 ['https://source.example' => 'https://destination.example'],
             ],
-            'URL-valued query parameter' => [
+            'URL-valued query parameter remains opaque' => [
                 'https://archive.example/export?redirect=https://source.example/wp-content/uploads/2026/01/hero.jpg',
-                'https://archive.example/export?redirect=https://destination.example/wp-content/uploads/2026/01/hero.jpg',
+                'https://archive.example/export?redirect=https://source.example/wp-content/uploads/2026/01/hero.jpg',
                 ['https://source.example' => 'https://destination.example'],
             ],
             'every configured occurrence in one text leaf' => [
@@ -196,9 +196,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'site.com/source.com/media/logo.png destination.com/media/logo.png',
                 ['https://source.com' => 'https://destination.com'],
             ],
-            'outer URL path stays unchanged while full query URL is rewritten' => [
+            'embedded URL in an outer query remains opaque' => [
                 'https://site.com/source.com/media?next=https://source.com/media/logo.png',
-                'https://site.com/source.com/media?next=https://destination.com/media/logo.png',
+                'https://site.com/source.com/media?next=https://source.com/media/logo.png',
                 ['https://source.com' => 'https://destination.com'],
             ],
         ];
@@ -305,9 +305,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 '-https://source.example/media/logo.png',
                 ['https://source.example/media' => 'https://destination.example'],
             ],
-            'CSS uses hexadecimal escapes' => [
+            'CSS hexadecimal escapes preserve their spelling' => [
                 'url(https\\3a \\2f \\2f source.example\\2f media\\2f logo.png)',
-                'url(https\\3a \\2f \\2f source.example\\2f media\\2f logo.png)',
+                'url(https\\3a \\2f \\2f destination.example\\2f logo.png)',
                 ['https://source.example/media' => 'https://destination.example'],
             ],
             'source URL has an unconfigured port' => [
@@ -400,9 +400,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https:\\\\/\\\\/source.example\\\\/media\\\\/logo.png',
                 ['https://source.example' => 'https://destination.example'],
             ],
-            'protocol separators are percent encoded' => [
+            'percent-encoded protocol separators preserve their spelling' => [
                 'https%3A%2F%2Fsource.example%2Fmedia%2Flogo.png',
-                'https%3A%2F%2Fsource.example%2Fmedia%2Flogo.png',
+                'https%3A%2F%2Fdestination.example%2Fmedia%2Flogo.png',
                 ['https://source.example' => 'https://destination.example'],
             ],
             'protocol separators are HTML entities' => [

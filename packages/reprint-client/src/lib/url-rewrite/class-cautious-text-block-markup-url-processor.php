@@ -34,6 +34,8 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
  *
  * @method string get_modifiable_text()
  * @method bool set_modifiable_text(string $plaintext_content)
+ * @method string|null get_tag()
+ * @method string|true|null get_attribute(string $name)
  * @property array<string, WP_HTML_Text_Replacement> $lexical_updates
  */
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound

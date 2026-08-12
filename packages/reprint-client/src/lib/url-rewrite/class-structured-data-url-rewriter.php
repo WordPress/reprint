@@ -14,11 +14,14 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * the parsers themselves remain the authority on what's valid.
  *
  * 1. Serialized PHP → construct PhpSerializationProcessor, if not malformed,
- *    iterate string values and recurse on each
- * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
+ *    iterate string values and recurse on each so byte lengths remain valid
+ * 2. Opaque fragments → replace only a configured URL authority in the raw
+ *    bytes, preserving their enclosing format's escapes and quoting
+ * 3. Base64 → decode canonical payloads that might contain HTTP(S), recurse,
+ *    and re-encode only when changed
+ * 4. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
- * 3. Base64 → decode, recurse on decoded content, re-encode if changed
- * 4. Leaf text → CautiousTextBlockMarkupUrlProcessor (block_markup hint)
+ * 5. Leaf text → CautiousTextBlockMarkupUrlProcessor (block_markup hint)
  *    or URLInTextProcessor (default)
  *
  * HTML is never auto-detected — the caller must explicitly pass
@@ -144,30 +147,16 @@ class StructuredDataUrlRewriter
             $content_type = self::PLAIN_TEXT;
         }
 
+        $input = $value;
         $structured_cache_key = sha1($content_type . "\0" . $value);
         $cached = $this->get_cached_structured_rewrite($structured_cache_key, $content_type, $value);
         if ($cached !== null) {
             return $cached;
         }
 
-        // Quick-reject: if the value doesn't contain href=", src=", or any
-        // source domain, there's nothing to rewrite. This avoids expensive
-        // parsing (serialized PHP, JSON, block markup) for the vast majority
-        // of values that don't contain any rewritable URLs.
-        if (
-            !$this->maybe_contains_rewritable_urls($value) &&
-            (
-                $content_type !== self::BLOCK_MARKUP ||
-                !$this->might_contain_base64_shortcode_body($value)
-            )
-        ) {
-            return $value;
-        }
-
-        // Performance guard: avoid constructing the serialized-PHP parser for
-        // ordinary URL strings and block markup. The parser still owns
-        // validation once entered; this gate only skips first-byte shapes that
-        // cannot expose serialized string values for rewriting.
+        // PHP serialization includes byte lengths for every string. Let its
+        // parser own the outer record before changing a leaf, so a mapped host
+        // whose length differs from the source also updates that framing.
         if ($this->could_be_php_serialization_with_strings($value)) {
             $p = new PhpSerializationProcessor($value);
             if (!$p->is_malformed()) {
@@ -179,9 +168,30 @@ class StructuredDataUrlRewriter
                     }
                 }
                 $rewritten_value = $p->get_updated_serialization();
-                $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
+                $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $input, $rewritten_value);
                 return $rewritten_value;
             }
+        }
+
+        // Rewrite the smallest unambiguous unit first: a configured URL base
+        // in the original bytes. This works equally in HTML attributes,
+        // shortcode attributes, CSS, and JSON without asking a parent format
+        // to encode its complete value again.
+        $value = $this->rewrite_url_bases_cautiously($value);
+
+        // An opaque Base64 token has no readable host. Decode only canonical
+        // Base64 tokens whose bytes contain an HTTP(S) marker, then return the
+        // re-encoded token only when its decoded content changed.
+        if ($this->might_contain_base64_encoded_http($value)) {
+            $value = $this->rewrite_embedded_base64_values($value, $content_type);
+        }
+
+        // Quick-reject after the two byte-preserving paths above. Structured
+        // parsers remain the authority on their syntax; this merely avoids
+        // opening them when there is no remaining mapped host to expose.
+        if (!$this->maybe_contains_rewritable_urls($value)) {
+            $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $input, $value);
+            return $value;
         }
 
         // Performance guard: avoid calling json_decode() for ordinary URL
@@ -199,7 +209,7 @@ class StructuredDataUrlRewriter
                     }
                 }
                 $rewritten_value = $iter->get_result();
-                $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
+                $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $input, $rewritten_value);
                 return $rewritten_value;
             }
         }
@@ -210,8 +220,56 @@ class StructuredDataUrlRewriter
         // was for base64-within-base64 nesting which is rare in practice.
 
         $rewritten_value = $this->rewrite_urls($value, $content_type);
-        $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
+        $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $input, $rewritten_value);
         return $rewritten_value;
+    }
+
+    /**
+     * Replace configured URL bases in an opaque fragment without decoding it.
+     *
+     * The fragment may be a complete post content value or a raw string leaf
+     * inside a recognized format. Valid PHP serialization is dispatched before
+     * this method so its byte lengths remain valid. The cautious processor only
+     * replaces the mapped authority and leaves enclosing quoting and escapes
+     * untouched.
+     */
+    private function rewrite_url_bases_cautiously(string $value): string
+    {
+        $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
+            $value,
+            $this->url_mapping
+        );
+        while ($processor->next_url()) {
+            $processor->replace_url_base();
+        }
+
+        return $processor->get_updated_text();
+    }
+
+    /**
+     * Decode and recursively rewrite canonical Base64 tokens in a raw
+     * fragment. A replacement is limited to a token which decodes cleanly and
+     * whose decoded bytes actually change, so unrelated opaque text remains
+     * untouched.
+     */
+    private function rewrite_embedded_base64_values(string $value, string $content_type): string
+    {
+        $rewritten = preg_replace_callback(
+            '/(?<![A-Za-z0-9+\/=])(?:[A-Za-z0-9+\/]{4})*(?:[A-Za-z0-9+\/]{2}==|[A-Za-z0-9+\/]{3}=|[A-Za-z0-9+\/]{4})(?![A-Za-z0-9+\/=])/',
+            function (array $matches) use ($content_type): string {
+                $encoded = $matches[0];
+                $decoded = base64_decode($encoded, true);
+                if ($decoded === false || base64_encode($decoded) !== $encoded) {
+                    return $encoded;
+                }
+
+                $updated = $this->rewrite($decoded, $content_type);
+                return $updated === $decoded ? $encoded : base64_encode($updated);
+            },
+            $value
+        );
+
+        return $rewritten ?? $value;
     }
 
     /**
@@ -236,16 +294,13 @@ class StructuredDataUrlRewriter
     }
 
     /**
-     * Return whether a block-markup value may contain a Base64 shortcode body.
-     * The later decoder remains the authority on Base64 validity and whether
-     * the decoded value actually contains a mapped URL.
+     * Return whether a string might contain a Base64 payload which decodes to
+     * an HTTP(S) URL. Base64ValueScanner owns the alignment markers used by
+     * both SQL values and embedded payloads.
      */
-    private function might_contain_base64_shortcode_body(string $value): bool
+    private function might_contain_base64_encoded_http(string $value): bool
     {
-        return preg_match(
-            '/\[[A-Za-z][A-Za-z0-9_-]*(?:\s+[^\]]*)?\][A-Za-z0-9+\/=]+\[\/[A-Za-z][A-Za-z0-9_-]*\]/',
-            $value
-        ) === 1;
+        return Base64ValueScanner::encoded_payload_could_decode_to_http_scheme($value);
     }
 
     /**
@@ -470,11 +525,6 @@ class StructuredDataUrlRewriter
                     $token_type = $p->get_token_type() ?? '';
                     if ( '#text' === $token_type ) {
                         $text = $p->get_modifiable_text();
-                        $rewritten_text = $this->rewrite_base64_shortcode_bodies($text);
-                        if ($rewritten_text !== $text) {
-                            $p->replace_raw_current_text($rewritten_text);
-                            continue;
-                        }
                         if ($this->maybe_contains_rewritable_urls($text)) {
                             $p->replace_url_bases_in_current_text($this->url_mapping);
                         }
@@ -605,36 +655,4 @@ class StructuredDataUrlRewriter
         return $mime_type === 'application/ld+json' || $mime_type === 'application/json';
     }
 
-    /**
-     * Rewrite a Base64 payload which is the complete body of a shortcode.
-     *
-     * Builder records often make an opaque Base64 value the content between a
-     * shortcode opener and its matching closer. The block-markup processor
-     * sees that whole record as one text token, so the decoded value would
-     * otherwise never reach the JSON, block-markup, or cautious text routes.
-     * This only accepts a contiguous canonical Base64 payload and changes the
-     * enclosing shortcode when its decoded value contains a mapped URL.
-     */
-    private function rewrite_base64_shortcode_bodies(string $text): string
-    {
-        $rewritten = preg_replace_callback(
-            '/(\[([A-Za-z][A-Za-z0-9_-]*)(?:\s+[^\]]*)?\])([A-Za-z0-9+\/=]+)(\[\/\2\])/',
-            function (array $matches): string {
-                $decoded = base64_decode($matches[3], true);
-                if ($decoded === false || !$this->maybe_contains_rewritable_urls($decoded)) {
-                    return $matches[0];
-                }
-
-                $updated = $this->rewrite($decoded, self::BLOCK_MARKUP);
-                if ($updated === $decoded) {
-                    return $matches[0];
-                }
-
-                return $matches[1] . base64_encode($updated) . $matches[4];
-            },
-            $text
-        );
-
-        return $rewritten ?? $text;
-    }
 }

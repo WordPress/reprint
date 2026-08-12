@@ -287,32 +287,61 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         string $source_path
     ): string
     {
-        $escaped_separator = '(?:\\\\{1}|\\\\{3})?';
+        // A builder can store the URL syntax in JSON, HTML entities, percent
+        // escapes, or CSS hexadecimal escapes. The authority itself remains
+        // plain text, so replace only that raw span after recognizing these
+        // spelling variants of `:` and `/`.
+        $backslash = '(?:\\\\{1}|\\\\{3})?';
+        $css_colon = '\\\\(?:0{0,5}3[aA])(?:[ \\t\\r\\n\\f])?';
+        $css_slash = '\\\\(?:0{0,5}2[fF])(?:[ \\t\\r\\n\\f])?';
+        $json_colon = '\\\\u00(?:3[aA])';
+        $json_slash = '\\\\u00(?:2[fF])';
+        $colon = '(?:' . $backslash . ':|(?i:%3a)|&\#(?:0*58|[xX]0*3[aA]);|' . $css_colon . '|' . $json_colon . ')';
+        $slash = '(?:' . $backslash . '/|(?i:%2f)|&\#(?:0*47|[xX]0*2[fF]);|' . $css_slash . '|' . $json_slash . ')';
+        $source_authority_pattern = $this->create_css_escaped_text_pattern($source_authority);
         $source_path_pattern = str_replace(
             '/',
-            $escaped_separator . '/',
+            $slash,
             preg_quote($source_path, '~')
         );
 
         return '~
-            (?<![A-Za-z0-9._%+\\/@-])
+            (?:(?<![A-Za-z0-9._%+=\\/@-])|(?<=%22)|(?<=%27))
             (?:
                 (?i:' . preg_quote($source_scheme, '~') . ')
-                ' . $escaped_separator . ':
-                ' . $escaped_separator . '/
-                ' . $escaped_separator . '/
+                ' . $colon . '
+                ' . $slash . '
+                ' . $slash . '
                 (?:[^\s<>@/\\\\]+@)?
             )?
             (?<base>
-                (?<authority>(?i:' . preg_quote($source_authority, '~') . '))
+                (?<authority>' . $source_authority_pattern . ')
                 ' . $source_path_pattern . '
             )
             (?=
                 $
-                | ' . $escaped_separator . '/
+                | ' . $slash . '
                 | [/?# \t\r\n,!;)\]}>"\']
             )
         ~x';
+    }
+
+    /**
+     * Match an ASCII authority as literal bytes or CSS hexadecimal escapes.
+     * The complete authority remains one captured span, allowing the caller
+     * to replace it without selecting an escape spelling for the target host.
+     */
+    private function create_css_escaped_text_pattern(string $text): string
+    {
+        $pattern = '';
+        $length = strlen($text);
+        for ($offset = 0; $offset < $length; ++$offset) {
+            $byte = $text[$offset];
+            $hex = dechex(ord($byte));
+            $pattern .= '(?:(?i:' . preg_quote($byte, '~') . ')|\\\\0{0,5}' . $hex . '(?:[ \\t\\r\\n\\f])?)';
+        }
+
+        return $pattern;
     }
 
     /**
