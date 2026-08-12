@@ -243,6 +243,158 @@ final class FileIndexProcessorTest extends TestCase {
         $processor->next_index_step();
     }
 
+    public function testSingleFileRootIsIndexedWithoutTraversal(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        file_put_contents($docroot . '/wp-config.php', '<?php // config');
+        file_put_contents($docroot . '/other.php', '<?php // other');
+        $configPath = (string) realpath($docroot . '/wp-config.php');
+
+        $result = $this->collectEntries([$configPath], $configPath);
+
+        $this->assertCount(1, $result['entries']);
+        $this->assertSame($configPath, $result['entries'][0]['path']);
+        $this->assertSame('file', $result['entries'][0]['type']);
+        $this->assertSame(filesize($configPath), $result['entries'][0]['size']);
+    }
+
+    public function testFileRootAndDirectoryRootAreBothIndexed(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot . '/wp-content/plugins/hello', 0755, true);
+        file_put_contents($docroot . '/wp-config.php', '<?php // config');
+        file_put_contents($docroot . '/wp-content/plugins/hello/hello.php', '<?php // hello');
+        $configPath = (string) realpath($docroot . '/wp-config.php');
+        $pluginsPath = (string) realpath($docroot . '/wp-content/plugins');
+
+        $result = $this->collectEntries([$configPath, $pluginsPath], $configPath);
+
+        $paths = array_column($result['entries'], 'path');
+        $this->assertContains($configPath, $paths);
+        $this->assertContains($pluginsPath . '/hello/hello.php', $paths);
+    }
+
+    public function testFileSymlinkRootIsIndexedAsTheLinkItself(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        file_put_contents($docroot . '/target.php', '<?php // target');
+        symlink('target.php', $docroot . '/link.php');
+        $linkPath = (string) realpath($docroot) . '/link.php';
+
+        $result = $this->collectEntries([$linkPath], $linkPath);
+
+        $this->assertCount(1, $result['entries']);
+        $this->assertSame($linkPath, $result['entries'][0]['path']);
+        $this->assertSame('link', $result['entries'][0]['type']);
+        // Only a link ending at a directory carries a target; fetch supplies this one.
+        $this->assertArrayNotHasKey('target', $result['entries'][0]);
+    }
+
+    public function testBrokenSymlinkRootIsIndexedRatherThanRejected(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        symlink('absent.php', $docroot . '/broken.php');
+        $brokenPath = (string) realpath($docroot) . '/broken.php';
+
+        $result = $this->collectEntries([$brokenPath], $brokenPath);
+
+        $this->assertCount(1, $result['entries']);
+        $this->assertSame($brokenPath, $result['entries'][0]['path']);
+        $this->assertSame('link', $result['entries'][0]['type']);
+    }
+
+    public function testMissingFileRootNamesTheObservedPath(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        $missingPath = $docroot . '/absent.php';
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage($missingPath);
+
+        FileIndexProcessor::start([$docroot], $missingPath, false, false, '');
+    }
+
+    public function testFileRootInsideASkippedDirectoryIsStillIndexed(): void
+    {
+        // path_is_default_skipped() is tested against children, never against a root.
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot . '/wp-content/cache', 0755, true);
+        file_put_contents($docroot . '/wp-content/cache/keep.php', '<?php // keep');
+        $cachedPath = (string) realpath($docroot . '/wp-content/cache/keep.php');
+
+        $result = $this->collectEntries([$cachedPath], $cachedPath, false);
+
+        $this->assertCount(1, $result['entries']);
+        $this->assertSame($cachedPath, $result['entries'][0]['path']);
+    }
+
+    public function testResumingAfterTheFirstStepDoesNotRepeatFileRoots(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot . '/nested', 0755, true);
+        file_put_contents($docroot . '/wp-config.php', '<?php // config');
+        file_put_contents($docroot . '/nested/b.txt', 'b');
+        $configPath = (string) realpath($docroot . '/wp-config.php');
+        $nestedPath = (string) realpath($docroot . '/nested');
+        $roots = [$configPath, $nestedPath];
+
+        $uninterrupted = $this->collectEntries($roots, $configPath);
+        $resumed = $this->collectEntries($roots, $configPath, true, true);
+
+        $this->assertSame(
+            array_column($uninterrupted['entries'], 'path'),
+            array_column($resumed['entries'], 'path')
+        );
+        $this->assertSame(
+            1,
+            count(array_keys(array_column($resumed['entries'], 'path'), $configPath)),
+            'The named file must be indexed exactly once across a resume'
+        );
+    }
+
+    /**
+     * Runs a processor over explicit roots and collects every entry.
+     *
+     * @param string[] $roots                Configured roots, canonical.
+     * @param string   $indexDirectory       Root where traversal begins.
+     * @param bool     $includeCaches        Whether generated caches are included.
+     * @param bool     $resumeAfterEveryStep Whether to reopen from the cursor each step.
+     * @return array {
+     *     Completed traversal.
+     *
+     *     @type array[]  $entries  File-index entries.
+     *     @type string[] $statuses Status returned by every step.
+     * }
+     */
+    private function collectEntries(
+        array $roots,
+        string $indexDirectory,
+        bool $includeCaches = true,
+        bool $resumeAfterEveryStep = false
+    ): array {
+        $processor = FileIndexProcessor::start($roots, $indexDirectory, false, $includeCaches, '');
+        $entries = [];
+        $statuses = [];
+        while ($processor->next_index_step()) {
+            $statuses[] = $processor->get_step_status();
+            foreach ($processor->get_index_entries() as $entry) {
+                $entries[] = $entry;
+            }
+            if ($resumeAfterEveryStep) {
+                $cursor = json_encode($processor->get_cursor(), JSON_THROW_ON_ERROR);
+                $processor->close();
+                $processor = FileIndexProcessor::resume($roots, $cursor, false, $includeCaches, '');
+            }
+        }
+        $processor->close();
+
+        return ['entries' => $entries, 'statuses' => $statuses];
+    }
+
     /**
      * @return array {
      *     Completed traversal.

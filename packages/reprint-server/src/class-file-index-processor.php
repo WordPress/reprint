@@ -99,12 +99,10 @@ final class FileIndexProcessor {
         bool $include_caches,
         string $storage_path
     ): self {
-        // Anchor traversal to a real directory. All later comparisons use
-        // canonical paths so configured roots and followed links share one
-        // path namespace.
-        clearstatcache(true, $index_directory);
-        $canonical_index_directory = realpath($index_directory);
-        if ($canonical_index_directory === false || !is_dir($canonical_index_directory)) {
+        // Canonical paths keep configured roots and followed links in one
+        // namespace. A root may also be one file named by --include.
+        $canonical_index_directory = \WordPress\Reprint\Exporter\canonical_root_path($index_directory);
+        if ($canonical_index_directory === null) {
             throw new InvalidArgumentException(
                 "list_dir does not exist or is not accessible: {$index_directory}"
             );
@@ -142,12 +140,24 @@ final class FileIndexProcessor {
             }
         }
 
+        // A root that is not a directory is one named path; nothing to walk.
+        $directory_roots = [];
+        $path_roots = [];
+        foreach ($ordered_directories as $directory) {
+            clearstatcache(true, $directory);
+            if (is_dir($directory)) {
+                $directory_roots[] = $directory;
+            } else {
+                $path_roots[] = $directory;
+            }
+        }
+
         // The last stack element is visited next, so reverse the desired order
         // while constructing the depth-first traversal stack.
         $directory_stack = [];
-        for ($i = count($ordered_directories) - 1; $i >= 0; $i--) {
+        for ($i = count($directory_roots) - 1; $i >= 0; $i--) {
             $directory_stack[] = [
-                "dir" => $ordered_directories[$i],
+                "dir" => $directory_roots[$i],
                 "after" => null,
             ];
         }
@@ -157,13 +167,41 @@ final class FileIndexProcessor {
         // found here must precede ordinary directory entries.
         $initial_index_entries = [];
         if ($follow_symlinks) {
-            foreach ($ordered_directories as $directory) {
+            foreach ($directory_roots as $directory) {
                 $initial_index_entries = array_merge(
                     $initial_index_entries,
                     self::find_parent_symlinks($directory)
                 );
             }
+            // dirname() so a symlinked file is not repeated as an intermediate entry.
+            foreach ($path_roots as $path_root) {
+                $initial_index_entries = array_merge(
+                    $initial_index_entries,
+                    self::find_parent_symlinks(dirname($path_root))
+                );
+            }
         }
+
+        // These share the first step's cursor boundary: the endpoint always takes
+        // one step before its budget check, and resume() begins with none of them.
+        foreach ($path_roots as $path_root) {
+            clearstatcache(true, $path_root);
+            $stat = @lstat($path_root);
+            if ($stat === false) {
+                // Present when canonicalized moments ago, so it has just disappeared.
+                continue;
+            }
+            $inspected_path = self::index_entries_for_path($path_root, $stat, $follow_symlinks);
+            $initial_index_entries = array_merge(
+                $initial_index_entries,
+                $inspected_path["entries"]
+            );
+        }
+
+        // X-Index-Dir names a directory, so a named path reports its parent.
+        $reported_index_directory = in_array($canonical_index_directory, $path_roots, true)
+            ? dirname($canonical_index_directory)
+            : $canonical_index_directory;
 
         return new self(
             $directories,
@@ -171,7 +209,7 @@ final class FileIndexProcessor {
             $include_caches,
             $storage_path,
             $directory_stack,
-            $canonical_index_directory,
+            $reported_index_directory,
             $initial_index_entries
         );
     }
