@@ -281,6 +281,11 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'destination.example\\/assets\\/logo.png',
                 ['https://source.example' => 'https://destination.example/assets'],
             ],
+            'scheme-less target path skips a longer unrelated host' => [
+                'not-the-source.com/media/logo.png source.com/media/logo.png',
+                'not-the-source.com/media/logo.png destination.com/assets/media/logo.png',
+                ['https://source.com' => 'https://destination.com/assets'],
+            ],
         ];
     }
 
