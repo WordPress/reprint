@@ -271,6 +271,21 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 '\\/\\/destination.example\\/assets\\/logo.png',
                 ['https://source.example/media' => 'https://destination.example/assets'],
             ],
+            'scheme-less URL copies its configured path slash' => [
+                'source.example\\/media\\/logo.png',
+                'destination.example\\/assets\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'scheme-less URL copies its following path slash' => [
+                'source.example\\/logo.png',
+                'destination.example\\/assets\\/logo.png',
+                ['https://source.example' => 'https://destination.example/assets'],
+            ],
+            'scheme-less target path skips a longer unrelated host' => [
+                'not-the-source.com/media/logo.png source.com/media/logo.png',
+                'not-the-source.com/media/logo.png destination.com/assets/media/logo.png',
+                ['https://source.com' => 'https://destination.com/assets'],
+            ],
         ];
     }
 
@@ -308,11 +323,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
             'scheme-less authority without a separator stays unchanged' => [
                 'source.example',
                 'source.example',
-                ['https://source.example' => 'https://destination.example/assets'],
-            ],
-            'scheme-less authority with a path stays unchanged' => [
-                'source.example\\/logo.png',
-                'source.example\\/logo.png',
                 ['https://source.example' => 'https://destination.example/assets'],
             ],
             'target has a percent-encoded path' => [
