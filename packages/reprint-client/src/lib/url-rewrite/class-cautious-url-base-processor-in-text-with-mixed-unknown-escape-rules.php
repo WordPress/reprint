@@ -171,6 +171,22 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     }
 
     /**
+     * Replace every supported configured source base in one opaque text value.
+     *
+     * @param string                $text        Text to rewrite.
+     * @param array<string, string> $url_mapping Source URL base => target URL.
+     */
+    public static function replace_all_url_bases(string $text, array $url_mapping): string
+    {
+        $processor = new self($text, $url_mapping);
+        while ($processor->next_url()) {
+            $processor->replace_url_base();
+        }
+
+        return $processor->get_updated_text();
+    }
+
+    /**
      * Finds the next configured source URL base.
      *
      * The match remains current until the next call. Call replace_url_base()

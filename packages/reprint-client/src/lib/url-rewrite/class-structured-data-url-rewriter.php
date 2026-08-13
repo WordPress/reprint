@@ -454,7 +454,7 @@ class StructuredDataUrlRewriter
                     $token_type = $p->get_token_type() ?? '';
                     if ( '#text' === $token_type ) {
                         if ($this->maybe_contains_rewritable_urls($p->get_modifiable_text())) {
-                            $p->replace_url_bases_in_current_text($this->url_mapping);
+                            $p->replace_url_bases_in_current_opaque_token($this->url_mapping);
                         }
                         continue;
                     }
@@ -507,20 +507,7 @@ class StructuredDataUrlRewriter
                         $this->set_cached_rewrite_result($cache_key, $cache_value);
                     }
 
-                    if ('#block-comment' === $token_type || '#comment' === $token_type) {
-                        $p->replace_url_bases_in_current_block_comment($this->url_mapping);
-                    } elseif ('#tag' === $token_type) {
-                        $tag = $p->get_tag();
-                        if ('IMG' === $tag || 'SOURCE' === $tag) {
-                            $p->replace_url_bases_in_current_attribute('srcset', $this->url_mapping);
-                        } elseif ('META' === $tag) {
-                            $p->replace_url_bases_in_current_attribute('content', $this->url_mapping);
-                        } elseif ('APPLET' === $tag || 'OBJECT' === $tag) {
-                            $p->replace_url_bases_in_current_attribute('archive', $this->url_mapping);
-                        } elseif ('STYLE' === $tag || 'SCRIPT' === $tag) {
-                            $p->replace_url_bases_in_current_raw_text_element($this->url_mapping);
-                        }
-                    }
+                    $p->replace_url_bases_in_current_opaque_token($this->url_mapping);
                 }
 
                 return $p->get_updated_html();

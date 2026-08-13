@@ -44,43 +44,50 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
  */
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
 class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
+    /** @var array<string, string> */
+    private const OPAQUE_URL_ATTRIBUTES = [
+        'APPLET' => 'archive',
+        'IMG'    => 'srcset',
+        'META'   => 'content',
+        'OBJECT' => 'archive',
+        'SOURCE' => 'srcset',
+    ];
+
     /**
-     * Replace configured URL bases in the current raw text token.
+     * Replace configured URL bases in the current opaque token.
      *
-     * WP_HTML_Tag_Processor exposes decoded text through get_modifiable_text()
-     * and HTML-encodes the complete replacement in set_modifiable_text(). The
-     * protected lexical update contains the raw span selected by the parser.
-     * Replacing its text directly preserves every byte outside the URL base.
+     * Text tokens are opaque. For other tokens, the caller runs the parent
+     * processor's known URL handling first, then this method covers its
+     * declared URL subsyntaxes without scanning unrelated markup.
      *
      * @param array<string, string> $url_mapping Source URL base => target URL.
      */
-    public function replace_url_bases_in_current_text(array $url_mapping): bool
+    public function replace_url_bases_in_current_opaque_token(array $url_mapping): bool
     {
-        if ('#text' !== $this->get_token_type()) {
+        $token_type = $this->get_token_type();
+        if ('#text' === $token_type) {
+            return $this->replace_url_bases_in_current_modifiable_text($url_mapping);
+        }
+
+        if ('#block-comment' === $token_type || '#comment' === $token_type) {
+            return $this->replace_url_bases_in_current_block_comment($url_mapping);
+        }
+
+        if ('#tag' !== $token_type) {
             return false;
         }
 
-        return $this->replace_url_bases_in_current_modifiable_text($url_mapping);
-    }
-
-    /**
-     * Replace configured URL bases in a style or script element body.
-     *
-     * These element bodies are raw text on their opening-tag token. Their raw
-     * span can be changed without re-encoding the surrounding CSS or JavaScript.
-     *
-     * @param array<string, string> $url_mapping Source URL base => target URL.
-     */
-    public function replace_url_bases_in_current_raw_text_element(array $url_mapping): bool
-    {
-        if (
-            '#tag' !== $this->get_token_type() ||
-            ( 'STYLE' !== $this->get_tag() && 'SCRIPT' !== $this->get_tag() )
-        ) {
-            return false;
+        $tag = $this->get_tag();
+        $attribute_name = self::OPAQUE_URL_ATTRIBUTES[$tag] ?? null;
+        if ($attribute_name !== null) {
+            return $this->replace_url_bases_in_current_attribute($attribute_name, $url_mapping);
         }
 
-        return $this->replace_url_bases_in_current_modifiable_text($url_mapping);
+        if ('STYLE' === $tag || 'SCRIPT' === $tag) {
+            return $this->replace_url_bases_in_current_modifiable_text($url_mapping);
+        }
+
+        return false;
     }
 
     /**
@@ -93,7 +100,7 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
      * @param string                $attribute_name Attribute to replace within.
      * @param array<string, string> $url_mapping    Source URL base => target URL.
      */
-    public function replace_url_bases_in_current_attribute(
+    private function replace_url_bases_in_current_attribute(
         string $attribute_name,
         array $url_mapping
     ): bool {
@@ -114,7 +121,10 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
         }
 
         $raw_attribute = substr($html, $attribute_update->start, $attribute_update->length);
-        $updated_attribute = $this->get_cautiously_rewritten_value($raw_attribute, $url_mapping);
+        $updated_attribute = CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules::replace_all_url_bases(
+            $raw_attribute,
+            $url_mapping
+        );
         if ($updated_attribute === $raw_attribute) {
             unset($this->lexical_updates[$attribute_update_key]);
             return false;
@@ -133,7 +143,7 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
      *
      * @param array<string, string> $url_mapping Source URL base => target URL.
      */
-    public function replace_url_bases_in_current_block_comment(array $url_mapping): bool
+    private function replace_url_bases_in_current_block_comment(array $url_mapping): bool
     {
         if ('#comment' === $this->get_token_type()) {
             // The toolkit does not yet recognize custom block names containing
@@ -157,7 +167,7 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
         }
 
         $raw_block_comment = substr($html, $block_span->start, $block_span->length);
-        $updated_block_comment = $this->get_cautiously_rewritten_value(
+        $updated_block_comment = CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules::replace_all_url_bases(
             $raw_block_comment,
             $url_mapping
         );
@@ -191,7 +201,10 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
 
         $text_update = $this->lexical_updates['modifiable text'];
         $raw_text = substr($html, $text_update->start, $text_update->length);
-        $updated_text = $this->get_cautiously_rewritten_value($raw_text, $url_mapping);
+        $updated_text = CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules::replace_all_url_bases(
+            $raw_text,
+            $url_mapping
+        );
         if ($updated_text === $raw_text) {
             unset($this->lexical_updates['modifiable text']);
             return false;
@@ -199,22 +212,5 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
 
         $text_update->text = $updated_text;
         return true;
-    }
-
-    /**
-     * @param array<string, string> $url_mapping Source URL base => target URL.
-     */
-    private function get_cautiously_rewritten_value(string $value, array $url_mapping): string
-    {
-        $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
-            $value,
-            $url_mapping
-        );
-
-        while ($processor->next_url()) {
-            $processor->replace_url_base();
-        }
-
-        return $processor->get_updated_text();
     }
 }
