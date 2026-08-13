@@ -256,6 +256,21 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https:\\/\\/destination.example\\/assets\\/logo.png',
                 ['http://source.example/media' => 'https://destination.example/assets'],
             ],
+            'protocol-relative URL' => [
+                '//source.com/media/logo.png',
+                '//destination.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'protocol-relative URL with a target path' => [
+                '//source.example/media/logo.png',
+                '//destination.example/assets/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'escaped protocol-relative URL with a target path' => [
+                '\\/\\/source.example\\/media\\/logo.png',
+                '\\/\\/destination.example\\/assets\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
         ];
     }
 
@@ -403,11 +418,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
             'HTTPS mapping does not match an FTP URL' => [
                 'ftp://source.com/media/logo.png',
                 'ftp://source.com/media/logo.png',
-                ['https://source.com' => 'https://destination.com'],
-            ],
-            'HTTPS mapping does not match a protocol-relative URL' => [
-                '//source.com/media/logo.png',
-                '//source.com/media/logo.png',
                 ['https://source.com' => 'https://destination.com'],
             ],
             'host is a hyphenated suffix of another host' => [

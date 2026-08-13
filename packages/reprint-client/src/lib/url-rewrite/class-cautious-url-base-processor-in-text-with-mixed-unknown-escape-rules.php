@@ -46,9 +46,9 @@
  *   https://destination.example changes
  *   https://source.example/media/logo.png to
  *   https://destination.example/logo.png.
- * - Literal, scheme-less, and slash-escaped URL spellings. The recognized
- *   HTTP(S) separators may have one or three preceding backslashes, including
- *   https:\/\/, https\:\/\/, and https:\\\/\\\/.
+ * - Literal, protocol-relative, scheme-less, and slash-escaped URL spellings.
+ *   The recognized separators may have one or three preceding backslashes,
+ *   including https:\/\/, https\:\/\/, and https:\\\/\\\/.
  * - Other parts of the URL may surround the configured base. For example,
  *   https://user:password@source.example/logo.png?download=1#preview becomes
  *   https://user:password@destination.example/logo.png?download=1#preview.
@@ -60,7 +60,7 @@
  *
  * - A target path may contain non-empty slash-separated components composed
  *   only of ASCII letters, digits, hyphens, and underscores. Each slash copies
- *   the spelling of the first slash in the matched protocol. A scheme-less
+ *   the spelling of the first slash before the matched authority. A scheme-less
  *   authority stays unchanged when the target has a path.
  * - Target ports, user information, queries, fragments, IPv4/IPv6 addresses,
  *   and Unicode domains are not supported. Punycode domains are supported.
@@ -301,7 +301,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                     'base_length'   => strlen($matches['base'][0]),
                     'replacement'   => $mapping['target_domain'] . str_replace(
                         '/',
-                        $matches['protocol_slash'][0],
+                        $matches['url_slash'][0],
                         $mapping['target_path']
                     ),
                     'scheme_start'  => $matches['scheme'][1] === -1
@@ -319,16 +319,15 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * Build a candidate pattern adapted from URLInTextProcessor's URL finder.
      *
-     * The pattern recognizes only this mapping's scheme, authority, and initial
-     * path. It captures the scheme and the first slash in the protocol. Those
-     * bytes supply the target protocol and target-path slash spelling without
-     * parsing or rewriting the surrounding text.
+     * The pattern recognizes this mapping's absolute, protocol-relative, and
+     * scheme-less forms. Absolute and protocol-relative forms capture the first
+     * slash before the authority. That spelling is used for a target path.
      */
     private function create_url_candidate_pattern(
         string $source_scheme,
         string $source_authority,
         string $source_path,
-        bool $requires_protocol
+        bool $requires_url_slashes
     ): string
     {
         $escaped_separator = '(?:\\\\{1}|\\\\{3})?';
@@ -337,17 +336,21 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             $escaped_separator . '/',
             preg_quote($source_path, '~')
         );
-        $protocol_optional_quantifier = $requires_protocol ? '' : '?';
+        $url_prefix_optional_quantifier = $requires_url_slashes ? '' : '?';
 
         return '~
             (?<![A-Za-z0-9._%+\\/@-])
             (?:
-                (?<scheme>(?i:' . preg_quote($source_scheme, '~') . '))
-                ' . $escaped_separator . ':
-                (?<protocol_slash>' . $escaped_separator . '/)
+                (?:
+                    (?<scheme>(?i:' . preg_quote($source_scheme, '~') . '))
+                    ' . $escaped_separator . ':
+                    |
+                    (?<!:)
+                )
+                (?<url_slash>' . $escaped_separator . '/)
                 ' . $escaped_separator . '/
                 (?:[^\s<>@/\\\\]+@)?
-            )' . $protocol_optional_quantifier . '
+            )' . $url_prefix_optional_quantifier . '
             (?<base>
                 (?<authority>(?i:' . preg_quote($source_authority, '~') . '))
                 ' . $source_path_pattern . '
