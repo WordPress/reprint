@@ -318,9 +318,10 @@ final class FileIndexProcessorTest extends TestCase {
         FileIndexProcessor::start([$docroot], $missingPath, false, false, '');
     }
 
-    public function testFileRootInsideASkippedDirectoryIsStillIndexed(): void
+    public function testFileRootInsideASkippedDirectoryIsOmitted(): void
     {
-        // path_is_default_skipped() is tested against children, never against a root.
+        // Selecting one file must not reach what selecting its directory cannot:
+        // a directory root here indexes nothing, because its children are skipped.
         $docroot = $this->tempDir . '/site';
         mkdir($docroot . '/wp-content/cache', 0755, true);
         file_put_contents($docroot . '/wp-content/cache/keep.php', '<?php // keep');
@@ -328,8 +329,67 @@ final class FileIndexProcessorTest extends TestCase {
 
         $result = $this->collectEntries([$cachedPath], $cachedPath, false);
 
+        $this->assertSame([], $result['entries']);
+        $this->assertContains(FileIndexProcessor::STATUS_SKIPPED, $result['statuses']);
+    }
+
+    public function testFileRootInsideASkippedDirectoryIsIndexedWhenCachesAreIncluded(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot . '/wp-content/cache', 0755, true);
+        file_put_contents($docroot . '/wp-content/cache/keep.php', '<?php // keep');
+        $cachedPath = (string) realpath($docroot . '/wp-content/cache/keep.php');
+
+        $result = $this->collectEntries([$cachedPath], $cachedPath, true);
+
         $this->assertCount(1, $result['entries']);
         $this->assertSame($cachedPath, $result['entries'][0]['path']);
+    }
+
+    public function testFileRootInsideTheStoragePathIsNeverIndexed(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot . '/.reprint', 0755, true);
+        file_put_contents($docroot . '/.reprint/sender.json', '{"token":"secret"}');
+        $storagePath = (string) realpath($docroot . '/.reprint');
+        $senderPath = $storagePath . '/sender.json';
+
+        $processor = FileIndexProcessor::start([$senderPath], $senderPath, false, true, $storagePath);
+        $entries = [];
+        while ($processor->next_index_step()) {
+            foreach ($processor->get_index_entries() as $entry) {
+                $entries[] = $entry;
+            }
+        }
+        $processor->close();
+
+        $this->assertSame([], $entries, 'Reprint storage must never be indexed, even when named');
+    }
+
+    public function testEachNamedPathIsOneStepAndSurvivesAResume(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        $roots = [];
+        for ($index = 0; $index < 5; $index++) {
+            $path = $docroot . '/file' . $index . '.php';
+            file_put_contents($path, '<?php // ' . $index);
+            $roots[] = (string) realpath($path);
+        }
+
+        $uninterrupted = $this->collectEntries($roots, $roots[0]);
+        $resumed = $this->collectEntries($roots, $roots[0], true, true);
+
+        $this->assertSame($roots, array_column($uninterrupted['entries'], 'path'));
+        $this->assertSame($roots, array_column($resumed['entries'], 'path'));
+        $this->assertSame(
+            5,
+            count(array_filter(
+                $uninterrupted['statuses'],
+                static fn(?string $status): bool => $status === FileIndexProcessor::STATUS_INDEXED
+            )),
+            'Each named path must be its own step, not one step returning all of them'
+        );
     }
 
     public function testResumingAfterTheFirstStepDoesNotRepeatFileRoots(): void

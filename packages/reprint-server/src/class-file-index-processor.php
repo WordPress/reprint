@@ -61,6 +61,9 @@ final class FileIndexProcessor {
     /** @var array[] Intermediate symlinks emitted before a new traversal begins. */
     private $initial_index_entries;
 
+    /** @var string[] Named paths still to inspect, one per step, before traversal. */
+    private $pending_path_roots = [];
+
     /** @var string[]|null Sorted names in the current directory. */
     private $current_directory_names = null;
 
@@ -172,27 +175,6 @@ final class FileIndexProcessor {
                     self::find_parent_symlinks($directory)
                 );
             }
-            // dirname() so a symlinked file is not repeated as an intermediate entry.
-            foreach ($path_roots as $path_root) {
-                $initial_index_entries = array_merge(
-                    $initial_index_entries,
-                    self::find_parent_symlinks(dirname($path_root))
-                );
-            }
-        }
-
-        // Emitted by the first step; resume() begins with none of them.
-        foreach ($path_roots as $path_root) {
-            clearstatcache(true, $path_root);
-            $stat = @lstat($path_root);
-            if ($stat === false) {
-                continue;
-            }
-            $inspected_path = self::index_entries_for_path($path_root, $stat, $follow_symlinks);
-            $initial_index_entries = array_merge(
-                $initial_index_entries,
-                $inspected_path["entries"]
-            );
         }
 
         // X-Index-Dir names a directory, so a named path reports its parent.
@@ -207,7 +189,8 @@ final class FileIndexProcessor {
             $storage_path,
             $directory_stack,
             $reported_index_directory,
-            $initial_index_entries
+            $initial_index_entries,
+            $path_roots
         );
     }
 
@@ -273,6 +256,24 @@ final class FileIndexProcessor {
             ];
         }
 
+        // Named paths not yet inspected. Absent from cursors written before
+        // one request could carry them.
+        $pending_path_roots = [];
+        $encoded_path_roots = isset($cursor["paths"]) ? $cursor["paths"] : [];
+        if (!is_array($encoded_path_roots)) {
+            throw new InvalidArgumentException("Index cursor paths must be an array");
+        }
+        foreach ($encoded_path_roots as $encoded_path_root) {
+            if (!is_string($encoded_path_root) || $encoded_path_root === "") {
+                throw new InvalidArgumentException("Index cursor path entry must be a non-empty string");
+            }
+            $path_root = base64_decode($encoded_path_root, true);
+            if ($path_root === false || $path_root === "") {
+                throw new InvalidArgumentException("Index cursor path entry has invalid encoding");
+            }
+            $pending_path_roots[] = $path_root;
+        }
+
         // During continuation, the active directory is the best description
         // of what this request is indexing. A completed cursor has no active
         // directory, so it falls back to the first configured root.
@@ -287,7 +288,8 @@ final class FileIndexProcessor {
             $storage_path,
             $directory_stack,
             $index_directory,
-            []
+            [],
+            $pending_path_roots
         );
     }
 
@@ -316,6 +318,14 @@ final class FileIndexProcessor {
             $this->step_status = self::STATUS_INDEXED;
             $this->index_entries = $this->initial_index_entries;
             $this->initial_index_entries = [];
+            return true;
+        }
+
+        // One named path per step, before traversal. Inspecting them here
+        // rather than in start() keeps every step bounded and lets the cursor
+        // carry the ones still pending.
+        if (!empty($this->pending_path_roots)) {
+            $this->index_next_path_root();
             return true;
         }
 
@@ -439,7 +449,8 @@ final class FileIndexProcessor {
      * @return array {
      *     File-index cursor.
      *
-     *     @type array[] $stack Active directories with base64-encoded path names.
+     *     @type array[]  $stack Active directories with base64-encoded path names.
+     *     @type string[] $paths Base64-encoded named paths not yet inspected.
      * }
      */
     public function get_cursor(): array
@@ -451,7 +462,11 @@ final class FileIndexProcessor {
                 "after" => $frame["after"] !== null ? base64_encode($frame["after"]) : null,
             ];
         }
-        return ["stack" => $encoded_stack];
+        $encoded_path_roots = [];
+        foreach ($this->pending_path_roots as $path_root) {
+            $encoded_path_roots[] = base64_encode($path_root);
+        }
+        return ["stack" => $encoded_stack, "paths" => $encoded_path_roots];
     }
 
     /**
@@ -564,6 +579,7 @@ final class FileIndexProcessor {
      * @param array[]  $directory_stack      Active directory stack.
      * @param string   $index_directory      Directory reported by the endpoint.
      * @param array[]  $initial_index_entries Intermediate symlinks emitted before traversal.
+     * @param string[] $pending_path_roots   Named paths still to inspect, one per step.
      */
     private function __construct(
         array $directories,
@@ -572,7 +588,8 @@ final class FileIndexProcessor {
         string $storage_path,
         array $directory_stack,
         string $index_directory,
-        array $initial_index_entries
+        array $initial_index_entries,
+        array $pending_path_roots = []
     ) {
         $this->directories = $directories;
         $this->follow_symlinks = $follow_symlinks;
@@ -581,6 +598,7 @@ final class FileIndexProcessor {
         $this->directory_stack = $directory_stack;
         $this->index_directory = $index_directory;
         $this->initial_index_entries = $initial_index_entries;
+        $this->pending_path_roots = $pending_path_roots;
     }
 
     /**
@@ -731,6 +749,49 @@ final class FileIndexProcessor {
             }
         }
         return $low;
+    }
+
+    /**
+     * Inspects the next named path and settles its cursor entry.
+     *
+     * Omissions match traversal: a path under a default-skipped directory or
+     * under the Reprint storage path is skipped even though the caller named
+     * it, so selecting one file cannot reach what selecting its directory
+     * cannot.
+     */
+    private function index_next_path_root(): void
+    {
+        // Settle the cursor before any stat call, so a path that disappears
+        // or is omitted is not inspected again after a resume.
+        $path_root = array_shift($this->pending_path_roots);
+
+        if (!$this->include_caches && self::path_is_default_skipped($path_root)) {
+            $this->step_status = self::STATUS_SKIPPED;
+            return;
+        }
+        if (
+            $this->storage_path !== ""
+            && \WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of($path_root, $this->storage_path)
+        ) {
+            $this->step_status = self::STATUS_SKIPPED;
+            return;
+        }
+
+        clearstatcache(true, $path_root);
+        $stat = @lstat($path_root);
+        if ($stat === false) {
+            $this->step_status = self::STATUS_PATH_UNAVAILABLE;
+            return;
+        }
+
+        $entries = [];
+        if ($this->follow_symlinks) {
+            // dirname() so a symlinked file is not repeated as an intermediate entry.
+            $entries = self::find_parent_symlinks(dirname($path_root));
+        }
+        $inspected_path = self::index_entries_for_path($path_root, $stat, $this->follow_symlinks);
+        $this->index_entries = array_merge($entries, $inspected_path["entries"]);
+        $this->step_status = self::STATUS_INDEXED;
     }
 
     /**
