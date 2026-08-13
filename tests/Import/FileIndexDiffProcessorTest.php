@@ -327,6 +327,31 @@ final class FileIndexDiffProcessorTest extends TestCase
         $processor->close();
     }
 
+    public function testDecoderMustReturnAnEntryForEveryLine(): void
+    {
+        $old_index_file = $this->write_index('old.jsonl', []);
+        $new_index_file = $this->write_index('new.jsonl', [
+            $this->entry('new.txt'),
+        ]);
+        $processor = FileIndexDiffProcessor::create(
+            $old_index_file,
+            $new_index_file,
+            static function (string $line) {
+                return null;
+            }
+        );
+
+        $this->expectException(UnexpectedValueException::class);
+        $this->expectExceptionMessage(
+            'returned NULL; expected one index entry for each line'
+        );
+        try {
+            $processor->next_path();
+        } finally {
+            $processor->close();
+        }
+    }
+
     public function testCloseIsIdempotentAndMakesTheProcessorTerminal(): void
     {
         $old_index_file = $this->write_index('old.jsonl', []);

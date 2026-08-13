@@ -139,6 +139,14 @@ final class RemoteIndexReaderTest extends TestCase
         $reader->close();
     }
 
+    public function testLineDecoderRejectsABlankRecord(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Invalid index line format');
+
+        \RemoteIndexReader::decode_index_line("\n");
+    }
+
     private function indexLine(
         string $path,
         int $ctime,
