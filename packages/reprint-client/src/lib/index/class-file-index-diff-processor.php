@@ -18,6 +18,8 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * link, or directory, its size, its inode change time (ctime), and, for some
  * directories, whether it was empty. Both indexes must use the same path
  * coordinate system; paths may be local relative paths or remote absolute paths.
+ * Each physical line must decode to one entry. A decoder cannot filter lines;
+ * blank or invalid records must throw.
  *
  * This processor opens two such lists:
  *
@@ -124,7 +126,7 @@ final class FileIndexDiffProcessor
     /** @var resource|null Stream containing the ending tree. */
     private $new_index_handle = null;
 
-    /** @var callable(string):IndexEntry|null Decodes one JSONL index line. */
+    /** @var callable(string):IndexEntry Decodes one JSONL index line. */
     private $decode_index_line;
 
     /** @var IndexEntry|null Unconsumed old entry, which may be current or following. */
@@ -163,10 +165,8 @@ final class FileIndexDiffProcessor
      *
      * @param string        $old_index_file  Old index, or a missing path for an empty index.
      * @param string        $new_index_file  New index.
-     * @param callable|null $decode_index_line Decoder for one JSONL line. A
-     *                                        null return skips that line;
-     *                                        null uses the local decoder.
-     * @phpstan-param (callable(string):IndexEntry|null)|null $decode_index_line
+     * @param callable|null $decode_index_line Decoder for one JSONL line. Null uses the local decoder.
+     * @phpstan-param (callable(string):IndexEntry)|null $decode_index_line
      * @return self Open processor positioned before either index's first path.
      */
     public static function create(
@@ -210,10 +210,8 @@ final class FileIndexDiffProcessor
      *     @type string|null $preceding_new_index_entry_path_b64 New-index path before the next position.
      * }
      * @phpstan-param Cursor $cursor
-     * @param callable|null $decode_index_line Decoder for one JSONL line. A
-     *                                        null return skips that line;
-     *                                        null uses the local decoder.
-     * @phpstan-param (callable(string):IndexEntry|null)|null $decode_index_line
+     * @param callable|null $decode_index_line Decoder for one JSONL line. Null uses the local decoder.
+     * @phpstan-param (callable(string):IndexEntry)|null $decode_index_line
      * @return self Open processor restored at the supplied continuation boundary.
      */
     public static function resume(
@@ -679,19 +677,20 @@ final class FileIndexDiffProcessor
         if (!is_resource($index_handle)) {
             return null;
         }
-        while (true) {
-            $line = fgets($index_handle);
-            if ($line === false) {
-                break;
+        $line = fgets($index_handle);
+        if ($line === false) {
+            if (!feof($index_handle)) {
+                throw new RuntimeException("Failed to read a file-index entry.");
             }
-            $index_entry = ( $this->decode_index_line )($line);
-            if ($index_entry !== null) {
-                return $index_entry;
-            }
+            return null;
         }
-        if (!feof($index_handle)) {
-            throw new RuntimeException("Failed to read a file-index entry.");
+        $index_entry = ( $this->decode_index_line )($line);
+        if (!is_array($index_entry)) {
+            throw new UnexpectedValueException(
+                "The file-index decoder returned " . gettype($index_entry)
+                . "; expected one index entry for each line."
+            );
         }
-        return null;
+        return $index_entry;
     }
 }

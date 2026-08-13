@@ -279,20 +279,19 @@ final class FilesPullDiffResumeTest extends TestCase
         $this->assertFileDoesNotExist($this->pullStateDirectory . '/index.wal');
     }
 
-    public function testDiffSkipsBlankRemoteIndexLinesAndUsesRemoteFieldDefaults(): void
+    public function testDiffUsesRemoteFieldDefaults(): void
     {
         $this->writeIndex(
             'remote-index.jsonl',
-            "\n" . json_encode([
+            json_encode([
                 'path' => base64_encode('/same.txt'),
             ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
         );
         $this->writeIndex(
             'remote-index.next.jsonl',
-            "\n"
-                . json_encode([
-                    'path' => base64_encode('/added.txt'),
-                ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
+            json_encode([
+                'path' => base64_encode('/added.txt'),
+            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
                 . $this->indexLine('/same.txt', 0, 0)
         );
 
@@ -301,6 +300,19 @@ final class FilesPullDiffResumeTest extends TestCase
 
         $this->assertTrue($this->runDiff($client));
         $this->assertSame(['/added.txt'], $this->readFetchPaths());
+    }
+
+    public function testDiffRejectsBlankRemoteIndexRecords(): void
+    {
+        $this->writeIndex('remote-index.jsonl', '');
+        $this->writeIndex('remote-index.next.jsonl', "\n");
+
+        $client = $this->newClient();
+        $this->writeDiffState($client);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Invalid index line format');
+        $this->runDiff($client);
     }
 
     private function newClient(): InterruptibleFilesPullClient
