@@ -158,6 +158,9 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 
         [$client, $r] = $this->prepareClient(['/wp-content']);
         $r->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
+        $r->getProperty('pull_index_journal')
+            ->getValue($client)
+            ->apply_pending_records();
 
         // Unselected file AND its index entry survive.
         $this->assertFileExists($unselected);
@@ -181,6 +184,9 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             ['/wp-content/uploads']
         );
         $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
+        $reflection->getProperty('pull_index_journal')
+            ->getValue($client)
+            ->apply_pending_records();
 
         $this->assertFileExists($excluded);
         $this->assertContains(
@@ -273,6 +279,9 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 
         [$client, $r] = $this->prepareClient(['/wp-content/themes']);
         $r->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
+        $r->getProperty('pull_index_journal')
+            ->getValue($client)
+            ->apply_pending_records();
 
         // The selected root, its matched contents, and its index entry survive…
         $this->assertDirectoryExists($this->filesystem_root . '/wp-content/themes');
