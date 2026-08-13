@@ -72,6 +72,15 @@ use function WordPress\Reprint\Exporter\relative_path_under;
  *
  * ## Saving and applying records
  *
+ * The index-diff cursor says which path comes next. The WAL does not. It only
+ * records work that files-pull has already done. Pull saves the diff cursor,
+ * fetch-list byte offset, and WAL byte offset together.
+ *
+ * A process may append a WAL record and stop before it saves those three new
+ * positions. The saved cursor will select that path again. On resume, remove
+ * the WAL bytes after the saved offset before replaying the path. This keeps
+ * the cursor and both output files at the same saved boundary.
+ *
  * Call flush() before saving the cursor for the recorded work. This makes
  * sure the WAL record reaches the file before the cursor moves past it.
  *
@@ -164,25 +173,31 @@ class PullIndexJournal
     }
 
     /**
-     * Opens the WAL at the last byte covered by the saved diff cursor.
+     * Opens the WAL after truncating it to the saved diff boundary.
      *
-     * A process may stop after appending a record but before saving the cursor
-     * for that path. Bytes after the saved offset are discarded so resuming the
-     * diff can append the path again without putting the WAL out of path order.
+     * For example, suppose the saved WAL offset is 100 but the WAL contains
+     * 140 bytes. Bytes 100 through 139 were written without the matching diff
+     * cursor being saved. This method removes those bytes and opens the writer
+     * at byte 100. The saved cursor then selects the path again and files-pull
+     * writes its WAL record once at the correct place.
      *
-     * The caller must not already have this journal open. Closing an existing
-     * append handle here could flush bytes which are not covered by the saved
-     * offset while an async shutdown is inspecting the same object.
+     * The previous diff invocation must close its WAL writer first. Closing an
+     * append handle may flush bytes written after the saved offset. Keeping
+     * that close in the previous invocation leaves this method one job: open
+     * the WAL, remove the unsaved tail, and continue from the saved boundary.
+     * It also keeps the journal in one clear lifecycle state when an async
+     * shutdown runs between PHP statements.
      *
-     * @param int $byte_offset First byte not covered by the saved diff cursor.
+     * @param int $byte_offset First WAL byte after the saved records.
      * @throws LogicException When the WAL is already open.
-     * @throws RuntimeException When the WAL cannot be restored to that offset.
+     * @throws RuntimeException When the WAL cannot be truncated and positioned
+     *                          at that offset.
      */
     public function open_and_truncate_to_saved_byte_offset(int $byte_offset): void
     {
         if ($this->pull_index_wal_handle) {
             throw new LogicException(
-                "Cannot restore the byte offset of an open pull index WAL."
+                "Cannot truncate an open pull index WAL."
             );
         }
         $this->pull_index_wal_handle = fopen($this->pull_index_wal_path, "c+b");
@@ -200,7 +215,8 @@ class PullIndexJournal
             fclose($this->pull_index_wal_handle);
             $this->pull_index_wal_handle = null;
             throw new RuntimeException(
-                "Failed to restore the pull index WAL at byte offset {$byte_offset}."
+                "Failed to truncate and position the pull index WAL " .
+                    "at byte offset {$byte_offset}."
             );
         }
     }
