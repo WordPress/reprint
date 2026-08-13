@@ -517,10 +517,8 @@ class StructuredDataUrlRewriter
                             $p->replace_url_bases_in_current_attribute('content', $this->url_mapping);
                         } elseif ('APPLET' === $tag || 'OBJECT' === $tag) {
                             $p->replace_url_bases_in_current_attribute('archive', $this->url_mapping);
-                        } elseif ('STYLE' === $tag) {
-                            $p->replace_url_bases_in_current_style_element_body($this->url_mapping);
-                        } elseif ('SCRIPT' === $tag) {
-                            $p->replace_url_bases_in_current_script_element_body($this->url_mapping);
+                        } elseif ('STYLE' === $tag || 'SCRIPT' === $tag) {
+                            $p->replace_url_bases_in_current_raw_text_element($this->url_mapping);
                         }
                     }
                 }

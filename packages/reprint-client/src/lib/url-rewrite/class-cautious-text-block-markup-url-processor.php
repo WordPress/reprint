@@ -64,33 +64,19 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
     }
 
     /**
-     * Replace configured URL bases in the current style element body.
+     * Replace configured URL bases in a style or script element body.
      *
-     * Style element bodies are raw text on the STYLE token, not #text tokens.
-     * Their raw span can be changed without re-encoding the CSS around a URL.
-     *
-     * @param array<string, string> $url_mapping Source URL base => target URL.
-     */
-    public function replace_url_bases_in_current_style_element_body(array $url_mapping): bool
-    {
-        if ('#tag' !== $this->get_token_type() || 'STYLE' !== $this->get_tag()) {
-            return false;
-        }
-
-        return $this->replace_url_bases_in_current_modifiable_text($url_mapping);
-    }
-
-    /**
-     * Replace configured URL bases in the current script element body.
-     *
-     * Script element bodies are raw text on the SCRIPT token. This only
-     * replaces configured source bases and leaves JavaScript syntax untouched.
+     * These element bodies are raw text on their opening-tag token. Their raw
+     * span can be changed without re-encoding the surrounding CSS or JavaScript.
      *
      * @param array<string, string> $url_mapping Source URL base => target URL.
      */
-    public function replace_url_bases_in_current_script_element_body(array $url_mapping): bool
+    public function replace_url_bases_in_current_raw_text_element(array $url_mapping): bool
     {
-        if ('#tag' !== $this->get_token_type() || 'SCRIPT' !== $this->get_tag()) {
+        if (
+            '#tag' !== $this->get_token_type() ||
+            ( 'STYLE' !== $this->get_tag() && 'SCRIPT' !== $this->get_tag() )
+        ) {
             return false;
         }
 
