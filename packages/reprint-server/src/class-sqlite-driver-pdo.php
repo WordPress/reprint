@@ -1,13 +1,13 @@
 <?php
 /**
- * PDO-compatible adapter for WP_SQLite_Driver.
+ * PDO-compatible adapter for the SQLite Database Integration driver.
  *
  * MySQLDumpProducer expects a PDO connection — prepare(), query(), and the
  * statement methods fetch(), fetchAll(), fetchColumn(), execute().
- * On SQLite sites, the WP_SQLite_Driver is already loaded by WordPress
- * (via the sqlite-database-integration plugin's db.php drop-in) and is
- * available at $wpdb->dbh. This adapter wraps that driver so the dump
- * producer can use it without knowing it's talking to SQLite.
+ * On SQLite sites, the plugin's db.php drop-in loads a driver which translates
+ * MySQL queries to SQLite. This adapter supplies the PDO operations which that
+ * driver does not implement so the dump producer can use either supported
+ * plugin version without knowing it is talking to SQLite.
  *
  * Every MySQL query goes through the driver's AST-based translator, which
  * converts it to SQLite on the fly. The result is transparent: the dump
@@ -16,7 +16,7 @@
  */
 
 /**
- * Wraps a WP_SQLite_Driver instance to look like a PDO connection.
+ * Wraps a supported SQLite Database Integration driver as a PDO connection.
  *
  * Only the methods that MySQLDumpProducer and the export endpoints actually
  * use are implemented. Anything else will trigger a clear PHP error rather
@@ -24,13 +24,17 @@
  */
 class SqliteDriverPDO
 {
-    /** @var WP_SQLite_Driver */
+    /** @var object The plugin's MySQL-on-SQLite driver. */
     private $driver;
 
     /** @var PDO The raw SQLite PDO for quote() delegation. */
     private $raw_pdo;
 
-    public function __construct(WP_SQLite_Driver $driver, PDO $raw_pdo)
+    /**
+     * @param object $driver  WP_SQLite_Driver or WP_MySQL_On_SQLite.
+     * @param PDO    $raw_pdo The underlying SQLite connection.
+     */
+    public function __construct($driver, PDO $raw_pdo)
     {
         $this->driver = $driver;
         $this->raw_pdo = $raw_pdo;
@@ -68,14 +72,14 @@ class SqliteDriverPDO
 }
 
 /**
- * PDOStatement-compatible wrapper for WP_SQLite_Driver query results.
+ * PDOStatement-compatible wrapper for MySQL-on-SQLite query results.
  *
  * Collects all result rows eagerly after execution and serves them
  * through fetch/fetchAll/fetchColumn.
  */
 class SqliteDriverPDOStatement
 {
-    /** @var WP_SQLite_Driver */
+    /** @var object The plugin's MySQL-on-SQLite driver. */
     private $driver;
 
     /** @var PDO The raw SQLite PDO for quote() delegation. */
@@ -93,7 +97,12 @@ class SqliteDriverPDOStatement
     /** @var array|null Parameters bound via bindValue(). */
     private $bound_params = null;
 
-    public function __construct(WP_SQLite_Driver $driver, PDO $raw_pdo, string $sql)
+    /**
+     * @param object $driver  WP_SQLite_Driver or WP_MySQL_On_SQLite.
+     * @param PDO    $raw_pdo The underlying SQLite connection.
+     * @param string $sql     MySQL query to execute.
+     */
+    public function __construct($driver, PDO $raw_pdo, string $sql)
     {
         $this->driver = $driver;
         $this->raw_pdo = $raw_pdo;
@@ -104,7 +113,7 @@ class SqliteDriverPDOStatement
      * Executes the prepared statement.
      *
      * Substitutes bound parameters into the query, sends it through
-     * WP_SQLite_Driver::query(), and stores the result rows.
+     * the plugin's MySQL-on-SQLite driver, and stores the result rows.
      *
      * @param array|null $params Positional or named parameters.
      * @return bool True on success.
@@ -154,12 +163,16 @@ class SqliteDriverPDOStatement
             }
         }
 
-        $this->driver->query($sql);
-        $result = $this->driver->get_query_results();
-        $this->rows = is_array($result) ? $result : [];
+        $result = $this->driver->query($sql);
+        if ($result instanceof PDOStatement) {
+            $this->rows = $result->fetchAll(PDO::FETCH_ASSOC);
+        } else {
+            $result = $this->driver->get_query_results();
+            $this->rows = is_array($result) ? $result : [];
+        }
 
-        // WP_SQLite_Driver returns results as arrays of objects (PDO::FETCH_OBJ
-        // by default). Convert to associative arrays for PDO compatibility.
+        // The version 2 driver returns arrays of objects. Convert those rows
+        // to the same associative arrays returned by the version 3 driver.
         foreach ($this->rows as $i => $row) {
             if (is_object($row)) {
                 $this->rows[$i] = (array) $row;
