@@ -20,9 +20,10 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
  * bytes never pass through the HTML text encoder.
  *
  * Tags, block attributes, and CSS continue through BlockMarkupUrlProcessor.
- * This class also handles the raw `srcset` and `content` subsyntaxes listed by
- * that processor, plus style element bodies. It deliberately does not inspect
- * arbitrary HTML attributes. A SiteOrigin value such as this remains unchanged:
+ * This class also handles the raw `srcset`, `content`, and `archive`
+ * subsyntaxes listed by that processor, plus style and script element bodies
+ * and nested block-comment values. It deliberately does not inspect arbitrary
+ * HTML attributes. A SiteOrigin value such as this remains unchanged:
  *
  * ```
  * <input value="{&quot;url&quot;:&quot;https:\/\/source.example\/image.jpg&quot;}">
@@ -38,6 +39,7 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
  * @method string|null get_tag()
  * @method string|true|null get_attribute(string $name)
  * @method bool set_attribute(string $name, string|bool $value)
+ * @method WP_HTML_Span|false get_block_delimiter_span()
  * @property array<string, WP_HTML_Text_Replacement> $lexical_updates
  */
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
@@ -72,6 +74,23 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
     public function replace_url_bases_in_current_style_element_body(array $url_mapping): bool
     {
         if ('#tag' !== $this->get_token_type() || 'STYLE' !== $this->get_tag()) {
+            return false;
+        }
+
+        return $this->replace_url_bases_in_current_modifiable_text($url_mapping);
+    }
+
+    /**
+     * Replace configured URL bases in the current script element body.
+     *
+     * Script element bodies are raw text on the SCRIPT token. This only
+     * replaces configured source bases and leaves JavaScript syntax untouched.
+     *
+     * @param array<string, string> $url_mapping Source URL base => target URL.
+     */
+    public function replace_url_bases_in_current_script_element_body(array $url_mapping): bool
+    {
+        if ('#tag' !== $this->get_token_type() || 'SCRIPT' !== $this->get_tag()) {
             return false;
         }
 
@@ -116,6 +135,56 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
         }
 
         $attribute_update->text = $updated_attribute;
+        return true;
+    }
+
+    /**
+     * Replace configured URL bases in the current block comment.
+     *
+     * BlockMarkupUrlProcessor decodes block JSON to inspect scalar values and
+     * skips nested values. The raw block-comment span lets this processor
+     * update a configured source base without serializing that JSON again.
+     *
+     * @param array<string, string> $url_mapping Source URL base => target URL.
+     */
+    public function replace_url_bases_in_current_block_comment(array $url_mapping): bool
+    {
+        if ('#comment' === $this->get_token_type()) {
+            // The toolkit does not yet recognize custom block names containing
+            // a slash, but their delimiter still identifies a block comment.
+            if (preg_match('/^\s*wp:[A-Za-z0-9_-]+\//', $this->get_modifiable_text()) !== 1) {
+                return false;
+            }
+
+            return $this->replace_url_bases_in_current_modifiable_text($url_mapping);
+        }
+
+        if ('#block-comment' !== $this->get_token_type()) {
+            return false;
+        }
+
+        // Apply any exact block-attribute rewrite before reading its span.
+        $html = $this->get_updated_html();
+        $block_span = $this->get_block_delimiter_span();
+        if ($block_span === false) {
+            return false;
+        }
+
+        $raw_block_comment = substr($html, $block_span->start, $block_span->length);
+        $updated_block_comment = $this->get_cautiously_rewritten_value(
+            $raw_block_comment,
+            $url_mapping
+        );
+        if ($updated_block_comment === $raw_block_comment) {
+            return false;
+        }
+
+        $this->lexical_updates['block delimiter'] = new WP_HTML_Text_Replacement(
+            $block_span->start,
+            $block_span->length,
+            $updated_block_comment
+        );
+
         return true;
     }
 

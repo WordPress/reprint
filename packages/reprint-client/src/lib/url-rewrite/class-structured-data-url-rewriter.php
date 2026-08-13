@@ -344,10 +344,11 @@ class StructuredDataUrlRewriter
      * Block markup owns HTML attributes, block-comment JSON, and CSS url()
      * values. Raw text tokens use cautious source-base replacement because they
      * may contain shortcodes or another syntax with unknown escaping rules.
-     * The block processor also handles srcset, meta content, and style element
-     * bodies through their raw spans. Other arbitrary HTML attributes remain
-     * outside that fallback until their raw string spans can be exposed without
-     * re-encoding the containing markup.
+     * The block processor also handles srcset, meta content, archive values,
+     * style and script element bodies, and nested block JSON through their raw
+     * spans. Other arbitrary HTML attributes remain outside that fallback until
+     * their raw string spans can be exposed without re-encoding the containing
+     * markup.
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
@@ -460,6 +461,15 @@ class StructuredDataUrlRewriter
 
                     while ( $p->next_url_in_current_token() ) {
                         $raw_url = $p->get_raw_url();
+                        $tag = $p->get_tag();
+                        if (
+                            ( 'APPLET' === $tag || 'OBJECT' === $tag ) &&
+                            'archive' === $p->get_inspected_attribute_name()
+                        ) {
+                            // archive is a URL list, not one URL. Its raw
+                            // attribute handler replaces every source base.
+                            continue;
+                        }
                         $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
                         $cached = $this->get_cached_rewrite_result($cache_key);
                         if ($cached !== null) {
@@ -497,14 +507,20 @@ class StructuredDataUrlRewriter
                         $this->set_cached_rewrite_result($cache_key, $cache_value);
                     }
 
-                    if ('#tag' === $token_type) {
+                    if ('#block-comment' === $token_type || '#comment' === $token_type) {
+                        $p->replace_url_bases_in_current_block_comment($this->url_mapping);
+                    } elseif ('#tag' === $token_type) {
                         $tag = $p->get_tag();
                         if ('IMG' === $tag || 'SOURCE' === $tag) {
                             $p->replace_url_bases_in_current_attribute('srcset', $this->url_mapping);
                         } elseif ('META' === $tag) {
                             $p->replace_url_bases_in_current_attribute('content', $this->url_mapping);
+                        } elseif ('APPLET' === $tag || 'OBJECT' === $tag) {
+                            $p->replace_url_bases_in_current_attribute('archive', $this->url_mapping);
                         } elseif ('STYLE' === $tag) {
                             $p->replace_url_bases_in_current_style_element_body($this->url_mapping);
+                        } elseif ('SCRIPT' === $tag) {
+                            $p->replace_url_bases_in_current_script_element_body($this->url_mapping);
                         }
                     }
                 }

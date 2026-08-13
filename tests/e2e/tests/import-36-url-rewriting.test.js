@@ -70,6 +70,13 @@ describe('Import: URL Rewriting', () => {
             expected: '[dipl_image_card title="Social Media Strategy" image="https:\\/\\/target.example.com\\/wp-content\\/uploads\\/investment-plan.jpg" icon="&#xe0e3;||divi||400" content_bg_color_gradient_stops="#141252 0%|#303b90 100%"][/dipl_image_card]',
             rendered: '<span data-e2e-shortcode="dipl_image_card" data-url="https://target.example.com/wp-content/uploads/investment-plan.jpg"></span>',
         },
+        {
+            name: 'shortcode stored inside block JSON attributes',
+            slug: 'url-rewrite-shortcode-block-attribute',
+            input: '<!-- wp:reprint/e2e-shortcode {"shortcode":"[vc_video link=\\"http:\\/\\/127.0.0.1:8108\\/video.mp4\\"]"} /-->',
+            expected: '<!-- wp:reprint/e2e-shortcode {"shortcode":"[vc_video link=\\"http:\\/\\/target.example.com\\/video.mp4\\"]"} /-->',
+            rendered: '<span data-e2e-shortcode="vc_video" data-url="http://target.example.com/video.mp4"></span>',
+        },
     ];
 
     // These are useful failures, not descriptions of current behavior. A
@@ -97,13 +104,6 @@ describe('Import: URL Rewriting', () => {
             input: '[vc_column_text]<input type="hidden" value="{&quot;url&quot;:&quot;http:\\/\\/127.0.0.1:8108\\/hero.jpg&quot;}">[/vc_column_text]',
             expected: '[vc_column_text]<input type="hidden" value="{&quot;url&quot;:&quot;http:\\/\\/target.example.com\\/hero.jpg&quot;}">[/vc_column_text]',
             rendered: '<div data-e2e-shortcode="vc_column_text"><input type="hidden" value="{&quot;url&quot;:&quot;http:\\/\\/target.example.com\\/hero.jpg&quot;}"></div>',
-        },
-        {
-            name: 'shortcode stored inside block JSON attributes',
-            slug: 'url-rewrite-shortcode-block-attribute',
-            input: '<!-- wp:reprint/e2e-shortcode {"shortcode":"[vc_video link=\\"http:\\/\\/127.0.0.1:8108\\/video.mp4\\"]"} /-->',
-            expected: '<!-- wp:reprint/e2e-shortcode {"shortcode":"[vc_video link=\\"http:\\/\\/target.example.com\\/video.mp4\\"]"} /-->',
-            rendered: '<span data-e2e-shortcode="vc_video" data-url="http://target.example.com/video.mp4"></span>',
         },
         {
             name: 'percent-encoded redirect URL in a shortcode attribute',

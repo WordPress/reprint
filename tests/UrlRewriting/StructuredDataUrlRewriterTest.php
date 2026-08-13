@@ -381,6 +381,10 @@ class StructuredDataUrlRewriterTest extends TestCase
                 '<img srcset="https://old-site.com/one.jpg 1x, https://old-site.com/two.jpg 2x">',
                 '<img srcset="https://new-site.com/one.jpg 1x, https://new-site.com/two.jpg 2x">',
             ],
+            'source srcset candidates' => [
+                '<source srcset="https://old-site.com/one.webp 1x, https://old-site.com/two.webp 2x">',
+                '<source srcset="https://new-site.com/one.webp 1x, https://new-site.com/two.webp 2x">',
+            ],
             'style element body' => [
                 '<style>.hero{background-image:url(https://old-site.com/hero.jpg)}</style>',
                 '<style>.hero{background-image:url(https://new-site.com/hero.jpg)}</style>',
@@ -388,6 +392,22 @@ class StructuredDataUrlRewriterTest extends TestCase
             'meta content attribute' => [
                 '<meta property="og:image" content="https://old-site.com/social.jpg">',
                 '<meta property="og:image" content="https://new-site.com/social.jpg">',
+            ],
+            'object archive attribute' => [
+                '<object archive="https://old-site.com/one.jar https://old-site.com/two.jar"></object>',
+                '<object archive="https://new-site.com/one.jar https://new-site.com/two.jar"></object>',
+            ],
+            'applet archive attribute' => [
+                '<applet archive="https://old-site.com/one.jar https://old-site.com/two.jar"></applet>',
+                '<applet archive="https://new-site.com/one.jar https://new-site.com/two.jar"></applet>',
+            ],
+            'script element body' => [
+                '<script>window.asset="https://old-site.com/asset.js";</script>',
+                '<script>window.asset="https://new-site.com/asset.js";</script>',
+            ],
+            'nested block JSON attribute' => [
+                '<!-- wp:reprint/example {"settings":{"shortcode":"[vc_video link=\\"https:\\/\\/old-site.com\\/video.mp4\\"]"}} /-->',
+                '<!-- wp:reprint/example {"settings":{"shortcode":"[vc_video link=\\"https:\\/\\/new-site.com\\/video.mp4\\"]"}} /-->',
             ],
         ];
 
