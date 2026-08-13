@@ -40,6 +40,8 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
      */
     public static function supported_cases(): array
     {
+        $eight_backslash_separator = str_repeat('\\', 8) . '/';
+
         return [
             'unquoted CSS URL preserves its terminator' => [
                 '.hero{background-image:url(https://source.example/wp-content/uploads/2026/01/hero.jpg);}',
@@ -80,6 +82,25 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 '[builder_data value="{\\\"url\\\":\\\"https:\\\\\\/\\\\\\/source.example\\\\\\/wp-content\\\\\\/uploads\\\\\\/2026\\\\\\/01\\\\\\/hero.jpg\\\"}"]',
                 '[builder_data value="{\\\"url\\\":\\\"https:\\\\\\/\\\\\\/destination.example\\\\\\/wp-content\\\\\\/uploads\\\\\\/2026\\\\\\/01\\\\\\/hero.jpg\\\"}"]',
                 ['https://source.example' => 'https://destination.example'],
+            ],
+            'two-backslash URL separators' => [
+                'https:\\\\/\\\\/source.example\\\\/media\\\\/logo.png',
+                'https:\\\\/\\\\/destination.example\\\\/assets\\\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'four-backslash URL separators' => [
+                'https:\\\\\\\\/\\\\\\\\/source.example\\\\\\\\/media\\\\\\\\/logo.png',
+                'https:\\\\\\\\/\\\\\\\\/destination.example\\\\\\\\/assets\\\\\\\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'eight-backslash URL separators' => [
+                'https:' . $eight_backslash_separator . $eight_backslash_separator
+                    . 'source.example' . $eight_backslash_separator . 'media'
+                    . $eight_backslash_separator . 'logo.png',
+                'https:' . $eight_backslash_separator . $eight_backslash_separator
+                    . 'destination.example' . $eight_backslash_separator . 'assets'
+                    . $eight_backslash_separator . 'logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
             ],
             'username, password, and suffix remain unchanged' => [
                 'url("https://user:password@source.example/wp-content/uploads/logo.png?download=1#preview");',
@@ -294,6 +315,8 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
      */
     public static function unsupported_cases(): array
     {
+        $nine_backslash_separator = str_repeat('\\', 9) . '/';
+
         return [
             'configured source path differs by case' => [
                 'https://SOURCE.EXAMPLE/Media/logo.png',
@@ -495,9 +518,16 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 "https://source.example/media\x80archive/logo.png",
                 ["https://source.example/media\x80archive" => 'https://destination.example'],
             ],
-            'protocol separators use two backslashes' => [
-                'https:\\\\/\\\\/source.example\\\\/media\\\\/logo.png',
-                'https:\\\\/\\\\/source.example\\\\/media\\\\/logo.png',
+            'protocol slashes use different escaping' => [
+                'https:\\/\\\\/source.example\\/media\\/logo.png',
+                'https:\\/\\\\/source.example\\/media\\/logo.png',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'protocol separators use nine backslashes' => [
+                'https:' . $nine_backslash_separator . $nine_backslash_separator
+                    . 'source.example' . $nine_backslash_separator . 'media/logo.png',
+                'https:' . $nine_backslash_separator . $nine_backslash_separator
+                    . 'source.example' . $nine_backslash_separator . 'media/logo.png',
                 ['https://source.example' => 'https://destination.example'],
             ],
             'protocol separators are percent encoded' => [

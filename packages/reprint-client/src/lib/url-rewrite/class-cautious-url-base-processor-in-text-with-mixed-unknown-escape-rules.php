@@ -47,8 +47,8 @@
  *   https://source.example/media/logo.png to
  *   https://destination.example/logo.png.
  * - Literal, protocol-relative, scheme-less, and slash-escaped URL spellings.
- *   The recognized separators may have one or three preceding backslashes,
- *   including https:\/\/, https\:\/\/, and https:\\\/\\\/.
+ *   A separator may have up to eight preceding backslashes. The two slashes
+ *   before an authority must use the same spelling.
  * - Other parts of the URL may surround the configured base. For example,
  *   https://user:password@source.example/logo.png?download=1#preview becomes
  *   https://user:password@destination.example/logo.png?download=1#preview.
@@ -339,27 +339,27 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         bool $requires_path_slash
     ): string
     {
-        $escaped_separator = '(?:\\\\{1}|\\\\{3})?';
+        $separator_escape = '\\\\{0,8}';
         $source_path_pattern = '';
         if ($source_path !== '') {
             $source_path_pattern =
-                '(?<path_slash>' . $escaped_separator . '/)'
+                '(?<path_slash>' . $separator_escape . '/)'
                 . str_replace(
                     '/',
-                    $escaped_separator . '/',
+                    $separator_escape . '/',
                     preg_quote(substr($source_path, 1), '~')
                 );
         }
         $candidate_boundary_pattern = '(?=
             $
-            | ' . $escaped_separator . '/
+            | ' . $separator_escape . '/
             | [/?# \t\r\n,!;)\]}>"\']
         )';
         if ($requires_path_slash && $source_path === '') {
             $candidate_boundary_pattern = '(?(url_slash)
                 ' . $candidate_boundary_pattern . '
                 |
-                (?=(?<path_slash>' . $escaped_separator . '/))
+                (?=(?<path_slash>' . $separator_escape . '/))
             )';
         }
 
@@ -368,12 +368,12 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             (?:
                 (?:
                     (?<scheme>(?i:' . preg_quote($source_scheme, '~') . '))
-                    ' . $escaped_separator . ':
+                    ' . $separator_escape . ':
                     |
                     (?<!:)
                 )
-                (?<url_slash>' . $escaped_separator . '/)
-                ' . $escaped_separator . '/
+                (?<url_slash>(?<url_slash_escape>' . $separator_escape . ')/)
+                \k<url_slash_escape>/
                 (?:[^\s<>@/\\\\]+@)?
             )?
             (?<base>
