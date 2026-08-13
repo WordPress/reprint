@@ -310,6 +310,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             }
             $target_port = '';
             if ($mapping['target_port'] !== null) {
+                // No escaped colon is available here. Use an unescaped colon.
+                // This risks breaking an unknown format, but ':' is not a
+                // common string terminator in popular formats.
                 $target_port_colon = $matches['scheme_colon'][1] === -1
                     ? ':'
                     : $matches['scheme_colon'][0];
