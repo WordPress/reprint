@@ -164,6 +164,48 @@ class PullIndexJournal
     }
 
     /**
+     * Opens the WAL at the last byte covered by the saved diff cursor.
+     *
+     * A process may stop after appending a record but before saving the cursor
+     * for that path. Bytes after the saved offset are discarded so resuming the
+     * diff can append the path again without putting the WAL out of path order.
+     *
+     * The caller must not already have this journal open. Closing an existing
+     * append handle here could flush bytes which are not covered by the saved
+     * offset while an async shutdown is inspecting the same object.
+     *
+     * @param int $byte_offset First byte not covered by the saved diff cursor.
+     * @throws LogicException When the WAL is already open.
+     * @throws RuntimeException When the WAL cannot be restored to that offset.
+     */
+    public function open_at_saved_byte_offset(int $byte_offset): void
+    {
+        if ($this->pull_index_wal_handle) {
+            throw new LogicException(
+                "Cannot restore the byte offset of an open pull index WAL."
+            );
+        }
+        $this->pull_index_wal_handle = fopen($this->pull_index_wal_path, "c+b");
+        if (!$this->pull_index_wal_handle) {
+            throw new RuntimeException("Failed to open the pull index WAL.");
+        }
+        $pull_index_wal_stat = fstat($this->pull_index_wal_handle);
+        if (
+            $byte_offset < 0
+            || $pull_index_wal_stat === false
+            || $byte_offset > $pull_index_wal_stat["size"]
+            || !ftruncate($this->pull_index_wal_handle, $byte_offset)
+            || fseek($this->pull_index_wal_handle, $byte_offset) !== 0
+        ) {
+            fclose($this->pull_index_wal_handle);
+            $this->pull_index_wal_handle = null;
+            throw new RuntimeException(
+                "Failed to restore the pull index WAL at byte offset {$byte_offset}."
+            );
+        }
+    }
+
+    /**
      * Checks whether the WAL is open for append.
      *
      * @return bool True when the writer handle is open.
@@ -171,6 +213,27 @@ class PullIndexJournal
     public function is_open(): bool
     {
         return is_resource($this->pull_index_wal_handle);
+    }
+
+    /**
+     * Idempotently closes the WAL writer without applying its records.
+     *
+     * Closing flushes PHP's stream buffer. It does not move a saved cursor or
+     * make later bytes durable; diff resume still truncates the WAL to the
+     * saved byte offset before appending again.
+     *
+     * @throws RuntimeException When the open WAL cannot be closed.
+     */
+    public function close(): void
+    {
+        if (!$this->pull_index_wal_handle) {
+            return;
+        }
+        if (!fclose($this->pull_index_wal_handle)) {
+            $this->pull_index_wal_handle = null;
+            throw new RuntimeException("Failed to close the pull index WAL.");
+        }
+        $this->pull_index_wal_handle = null;
     }
 
     /**
@@ -318,6 +381,27 @@ class PullIndexJournal
     }
 
     /**
+     * Returns the byte after the last record written to the open WAL.
+     *
+     * Call flush() first when this offset will be stored as a durable boundary.
+     *
+     * @return int Next byte in the WAL.
+     * @throws LogicException When the WAL is not open.
+     * @throws RuntimeException When its position cannot be read.
+     */
+    public function byte_offset(): int
+    {
+        if (!$this->pull_index_wal_handle) {
+            throw new LogicException("The pull index WAL is not open.");
+        }
+        $byte_offset = ftell($this->pull_index_wal_handle);
+        if (!is_int($byte_offset)) {
+            throw new RuntimeException("Failed to read the pull index WAL byte offset.");
+        }
+        return $byte_offset;
+    }
+
+    /**
      * Applies every complete WAL record to the indexes.
      *
      * This method closes the writer first. It replaces the remote index, then
@@ -338,11 +422,7 @@ class PullIndexJournal
     public function apply_pending_records(): void
     {
         if ($this->pull_index_wal_handle) {
-            $pull_index_wal_closed = fclose($this->pull_index_wal_handle);
-            $this->pull_index_wal_handle = null;
-            if (!$pull_index_wal_closed) {
-                throw new RuntimeException("Failed to flush the pull index WAL.");
-            }
+            $this->close();
         }
         clearstatcache(true, $this->pull_index_wal_path);
         if (
@@ -543,12 +623,7 @@ class PullIndexJournal
      */
     public function remove_empty_wal(): void
     {
-        if (is_resource($this->pull_index_wal_handle)) {
-            if (!fclose($this->pull_index_wal_handle)) {
-                throw new RuntimeException("Failed to flush the pull index WAL.");
-            }
-            $this->pull_index_wal_handle = null;
-        }
+        $this->close();
         clearstatcache(true, $this->pull_index_wal_path);
         if (
             is_file($this->pull_index_wal_path)

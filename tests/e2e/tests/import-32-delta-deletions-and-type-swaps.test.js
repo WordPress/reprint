@@ -224,10 +224,12 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
         const statePath = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
         const state = JSON.parse(readFileSync(statePath, 'utf-8'));
 
-        assert.equal(typeof state.diff.last_consumed_remote_index_entry_path, 'string', 'Expected diff.last_consumed_remote_index_entry_path to be persisted');
-        assert.ok(
-            state.diff.last_consumed_remote_index_entry_path.startsWith('base64:'),
-            `Expected base64-encoded diff.last_consumed_remote_index_entry_path, got: ${state.diff.last_consumed_remote_index_entry_path}`,
+        const precedingNewIndexPath = state.diff.index_diff_cursor.preceding_new_index_entry_path_b64;
+        assert.equal(typeof precedingNewIndexPath, 'string', 'Expected the preceding new-index path to be persisted');
+        assert.equal(
+            Buffer.from(precedingNewIndexPath, 'base64').toString('base64'),
+            precedingNewIndexPath,
+            'Expected the preceding new-index path to use base64',
         );
 
         if (typeof state.fetch.batch_file === 'string') {

@@ -159,7 +159,7 @@ class RemoteIndexReader
             return null;
         }
         while (( $remote_index_json_line = fgets($this->remote_index_file_handle) ) !== false) {
-            $remote_index_entry = $this->parse_index_line($remote_index_json_line);
+            $remote_index_entry = self::decode_index_line($remote_index_json_line);
             if ($remote_index_entry !== null) {
                 return $remote_index_entry;
             }
@@ -244,7 +244,7 @@ class RemoteIndexReader
      * @throws InvalidArgumentException When the decoded path is not a valid
      *                                  remote absolute path.
      */
-    private function parse_index_line(string $line): ?array
+    public static function decode_index_line(string $line): ?array
     {
         $line = trim($line);
         if ($line === "") {
