@@ -4688,6 +4688,16 @@ class ImportClient
                 "merge-wp-content requires --from=DIR, the site directory whose wp-content is merged in.",
             );
         }
+        // Everything below works in absolute paths: the overlap guard and the
+        // symlink rewrite both resolve against the real filesystem, and the
+        // audit log and the result are read after the command has exited, when
+        // the working directory it ran in is gone. realpath() cannot do this —
+        // --from need not exist yet, and realpath() returns false for a path
+        // that does not.
+        $from = trim_right_slash($from);
+        if (strpos($from, "/") !== 0) {
+            $from = normalize_path(wp_join_unix_paths(getcwd(), $from));
+        }
 
         $this->require_preflight();
         $this->assert_file_pull_completed();
@@ -4713,7 +4723,7 @@ class ImportClient
         }
 
         $destination_wp_content = wp_join_unix_paths($this->filesystem_root, $content_dir);
-        $source_wp_content = wp_join_unix_paths(trim_right_slash($from), "wp-content");
+        $source_wp_content = wp_join_unix_paths($from, "wp-content");
 
         $component_destinations = [];
         foreach ([

@@ -186,6 +186,51 @@ class MergeWpContentTest extends TestCase
         );
     }
 
+    public function testASymlinkToASiblingStillResolvesAfterBothMove(): void
+    {
+        // A child theme pointing at its parent. Both move in the same run, so
+        // a value recomputed against where the parent used to be would dangle
+        // the moment the parent left. The destination needs a theme of its own
+        // for the merge to descend into the container and move each child
+        // separately, rather than renaming the whole directory across.
+        $this->writePulled('themes/twentytwentyfive/style.css', '/* pulled */');
+        $this->writeLocal('themes/parent-theme/style.css', '/* parent */');
+        symlink('parent-theme', $this->localWpContent . '/themes/child-theme');
+
+        $this->merge();
+
+        $moved = $this->pulledWpContent . '/themes/child-theme';
+        $this->assertTrue(is_link($moved));
+        $this->assertSame(
+            'parent-theme',
+            readlink($moved),
+            'a value pointing inside the merged tree is kept as it was',
+        );
+        $this->assertFileExists(
+            $moved . '/style.css',
+            'so it finds the parent at the parent\'s new home',
+        );
+    }
+
+    public function testASymlinkToASkippedSiblingResolvesToThePulledCopy(): void
+    {
+        // The destination already has its own parent theme, so that one never
+        // moves. The kept value finds the pulled copy, which is the one the
+        // site should be using.
+        $this->writePulled('themes/parent-theme/style.css', '/* pulled parent */');
+        $this->writeLocal('themes/parent-theme/style.css', '/* local parent */');
+        symlink('parent-theme', $this->localWpContent . '/themes/child-theme');
+
+        $this->merge();
+
+        $moved = $this->pulledWpContent . '/themes/child-theme';
+        $this->assertSame('parent-theme', readlink($moved));
+        $this->assertSame(
+            '/* pulled parent */',
+            file_get_contents($moved . '/style.css'),
+        );
+    }
+
     public function testTheExplodedLayoutRoutesEachComponentToItsOwnSource(): void
     {
         // uploads outside content_dir is the WP Cloud shape: each component
@@ -396,6 +441,28 @@ class MergeWpContentTest extends TestCase
             $this->permissionsOf($copied . '/plugin.php'),
             'an ordinary file keeps what it had rather than taking the umask',
         );
+    }
+
+    public function testARelativeFromIsResolvedAgainstTheWorkingDirectory(): void
+    {
+        // The form the command's own help documents: --from=./site, run from
+        // the directory holding it.
+        $this->writePulled('plugins/from-the-pull/plugin.php', '<?php');
+        $this->writeLocal('plugins/local-only/plugin.php', '<?php // local');
+
+        $workingDirectory = getcwd();
+        try {
+            chdir($this->tempDir);
+            $this->merge([], './site');
+        } finally {
+            chdir($workingDirectory);
+        }
+
+        $this->assertFileExists(
+            $this->pulledWpContent . '/plugins/local-only/plugin.php',
+            'a relative --from moves entries just as an absolute one does',
+        );
+        $this->assertFileDoesNotExist($this->localWpContent . '/plugins/local-only/plugin.php');
     }
 
     public function testTheCommandRefusesWhileAFilePullIsUnfinished(): void

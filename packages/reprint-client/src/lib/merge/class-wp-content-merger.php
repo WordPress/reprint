@@ -2,6 +2,7 @@
 
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\normalize_path;
+use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Merge failures carry CLI filesystem paths, never HTML output.
@@ -240,12 +241,12 @@ class WpContentMerger
     /**
      * Move one entry to its place on the destination side.
      *
-     * A symlink is recreated rather than moved: a relative value is read
-     * against its own parent directory, and the two parents sit at different
-     * depths. The new value stays relative because files-push transmits
-     * symlink values verbatim and the target recreates them as given, so an
-     * absolute value would write a local path onto the source server. An
-     * absolute value already resolves the same from either parent.
+     * A symlink is recreated rather than moved, and a relative value is kept
+     * or recomputed depending on where it points. One that resolves inside the
+     * tree being merged keeps its value, because the whole tree moves
+     * together. One that resolves outside it is read against a parent which
+     * has changed depth, so it is recomputed to reach the same target. An
+     * absolute value resolves the same from either parent and moves untouched.
      *
      * rename() reports EXDEV when the two sides are on different filesystems,
      * which nothing stops the caller from choosing, so a copy is the fallback
@@ -266,12 +267,26 @@ class WpContentMerger
                 );
             }
             if (strpos($link_value, "/") !== 0) {
-                $link_value = self::compute_relative_path(
-                    realpath_with_missing_tail(dirname($destination_entry)),
-                    normalize_path(
-                        wp_join_unix_paths(dirname($source_entry), $link_value)
-                    )
+                $resolved_target = normalize_path(
+                    wp_join_unix_paths(dirname($source_entry), $link_value)
                 );
+                // A target inside the tree being merged keeps its value: it
+                // either moves in this same run, or the destination already
+                // holds its own copy at that name, and the value finds
+                // whichever is there. A target outside the tree stays where it
+                // is while the link's parent changes depth, so the value has to
+                // be recomputed to still reach it.
+                if (
+                    !path_is_same_as_or_descendant_of(
+                        $resolved_target,
+                        $this->source_wp_content
+                    )
+                ) {
+                    $link_value = self::compute_relative_path(
+                        realpath_with_missing_tail(dirname($destination_entry)),
+                        $resolved_target
+                    );
+                }
             }
             if (!symlink($link_value, $destination_entry)) {
                 throw new RuntimeException(
