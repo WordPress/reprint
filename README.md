@@ -699,10 +699,14 @@ fresh.
     "updated_at": "2025-01-15T10:30:00Z"
   },
   "diff": {
-    // Byte offset into the next remote index.
-    "next_remote_index_byte_offset": 1024,
-    // Last remote index entry path consumed before that byte offset.
-    "last_consumed_remote_index_entry_path": "base64..."
+    "index_diff_cursor": {
+      "old_index_byte_offset": 512,
+      "new_index_byte_offset": 1024,
+      "preceding_new_index_entry_path_b64": "base64..."
+    },
+    // Output bytes covered by the index-diff cursor.
+    "fetch_list_byte_offset": 256,
+    "pull_index_wal_byte_offset": 128
   },
   "index": {
     "cursor": "..."               // file_index cursor

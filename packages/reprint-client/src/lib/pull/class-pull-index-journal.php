@@ -10,12 +10,11 @@ use function WordPress\Reprint\Exporter\relative_path_under;
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
 
 /**
- * Keeps `pull/index.wal` and applies its records to the remote and local
- * indexes.
+ * Records completed files-pull work and adds it to the retained indexes.
  *
- * Files-pull changes a local path first. It then writes one WAL record. This
- * class does not change files, links, or directories. It only records finished
- * work and updates the indexes.
+ * Files-pull first changes a file, link, or directory. It then writes one
+ * record to `pull/index.wal`. The journal later applies those records to the
+ * remote index and, when a local path is present, to the local index.
  *
  * ## WAL records
  *
@@ -72,20 +71,28 @@ use function WordPress\Reprint\Exporter\relative_path_under;
  *
  * ## Saving and applying records
  *
- * Call flush() before saving the cursor for the recorded work. This makes
- * sure the WAL record reaches the file before the cursor moves past it.
+ * Pull saves one checkpoint after a group of paths:
  *
- * apply_pending_records() closes the WAL writer, updates the remote index,
- * and then updates the local index when needed. It clears the WAL only after
- * the remote index and all local changes have been saved.
+ * 1. Finish each local filesystem change.
+ * 2. Append its fetch-list and WAL records.
+ * 3. Flush both files.
+ * 4. Read their byte offsets.
+ * 5. Save both offsets with the index-diff cursor.
  *
- * If the process stops before the WAL is cleared, call
- * apply_pending_records() again. It rebuilds its temporary files and applies
- * the full WAL again. A repeated `+` replaces the same entry. A repeated `-`
- * for a missing entry does nothing.
+ * The saved offsets cover the records required by the saved cursor. A process
+ * may stop after writing more records but before saving another checkpoint.
+ * Resume truncates each file to its saved offset, then continues from the
+ * saved cursor. The first path after that checkpoint is processed again.
  *
- * A final line without a newline is not applied. flush() runs before the
- * matching cursor is saved, so files-pull repeats that path after it resumes.
+ * Once the diff is complete, apply_pending_records() closes the WAL writer,
+ * replaces the remote index, applies any local-index changes, and clears the
+ * WAL. If the process stops during this work, the next call applies the same
+ * WAL again. Repeating a `+` replaces the same entry. Repeating a `-` for an
+ * absent entry leaves it absent.
+ *
+ * Readers stop before a final line without a newline. Such a line lies beyond
+ * the last saved WAL offset, so resume removes it and processes that path
+ * again.
  *
  * ## WAL lifecycle
  *
@@ -164,6 +171,57 @@ class PullIndexJournal
     }
 
     /**
+     * Opens the WAL at the last saved diff checkpoint.
+     *
+     * Resume follows these steps:
+     *
+     * 1. The previous invocation closes its WAL writer.
+     * 2. This method opens the WAL and truncates it to the saved byte offset.
+     * 3. The diff resumes from the cursor saved with that offset.
+     * 4. Files-pull writes the first path after the checkpoint again.
+     *
+     * For example, a WAL may contain 140 bytes while the saved offset is 100.
+     * The final 40 bytes were written after the last checkpoint. Truncating at
+     * byte 100 removes them before the saved cursor replays those paths.
+     *
+     * The first step happens before this method because fclose() may flush PHP
+     * stream buffers. By the time truncation starts, the WAL has its final
+     * pre-resume size and the journal owns one newly opened handle.
+     *
+     * @param int $byte_offset First WAL byte after the saved records.
+     * @throws LogicException When the WAL is already open.
+     * @throws RuntimeException When the WAL cannot be truncated and positioned
+     *                          at that offset.
+     */
+    public function open_and_truncate_to_saved_byte_offset(int $byte_offset): void
+    {
+        if ($this->pull_index_wal_handle) {
+            throw new LogicException(
+                "Cannot truncate an open pull index WAL."
+            );
+        }
+        $this->pull_index_wal_handle = fopen($this->pull_index_wal_path, "c+b");
+        if (!$this->pull_index_wal_handle) {
+            throw new RuntimeException("Failed to open the pull index WAL.");
+        }
+        $pull_index_wal_stat = fstat($this->pull_index_wal_handle);
+        if (
+            $byte_offset < 0
+            || $pull_index_wal_stat === false
+            || $byte_offset > $pull_index_wal_stat["size"]
+            || !ftruncate($this->pull_index_wal_handle, $byte_offset)
+            || fseek($this->pull_index_wal_handle, $byte_offset) !== 0
+        ) {
+            fclose($this->pull_index_wal_handle);
+            $this->pull_index_wal_handle = null;
+            throw new RuntimeException(
+                "Failed to truncate and position the pull index WAL " .
+                    "at byte offset {$byte_offset}."
+            );
+        }
+    }
+
+    /**
      * Checks whether the WAL is open for append.
      *
      * @return bool True when the writer handle is open.
@@ -171,6 +229,27 @@ class PullIndexJournal
     public function is_open(): bool
     {
         return is_resource($this->pull_index_wal_handle);
+    }
+
+    /**
+     * Idempotently closes the WAL writer and leaves its records pending.
+     *
+     * fclose() flushes PHP's stream buffer. Records after the last saved byte
+     * offset remain outside the checkpoint. A resumed diff truncates that tail
+     * before it opens the WAL for more writes.
+     *
+     * @throws RuntimeException When the open WAL cannot be closed.
+     */
+    public function close(): void
+    {
+        if (!$this->pull_index_wal_handle) {
+            return;
+        }
+        if (!fclose($this->pull_index_wal_handle)) {
+            $this->pull_index_wal_handle = null;
+            throw new RuntimeException("Failed to close the pull index WAL.");
+        }
+        $this->pull_index_wal_handle = null;
     }
 
     /**
@@ -300,10 +379,11 @@ class PullIndexJournal
     }
 
     /**
-     * Flushes WAL records before the caller saves the matching cursor.
+     * Flushes WAL records before the caller saves the matching checkpoint.
      *
-     * A closed journal has nothing to flush. Saving the cursor first could
-     * skip a record after a process stops.
+     * The caller flushes the WAL, reads byte_offset(), and then saves that
+     * offset with the index-diff cursor. Resume can therefore trust every WAL
+     * byte covered by the saved cursor.
      *
      * @throws RuntimeException When the open WAL cannot be flushed.
      */
@@ -318,19 +398,39 @@ class PullIndexJournal
     }
 
     /**
+     * Returns the byte after the last record written to the open WAL.
+     *
+     * Call flush() first when this offset will be stored as a durable boundary.
+     *
+     * @return int Next byte in the WAL.
+     * @throws LogicException When the WAL is not open.
+     * @throws RuntimeException When its position cannot be read.
+     */
+    public function byte_offset(): int
+    {
+        if (!$this->pull_index_wal_handle) {
+            throw new LogicException("The pull index WAL is not open.");
+        }
+        $byte_offset = ftell($this->pull_index_wal_handle);
+        if (!is_int($byte_offset)) {
+            throw new RuntimeException("Failed to read the pull index WAL byte offset.");
+        }
+        return $byte_offset;
+    }
+
+    /**
      * Applies every complete WAL record to the indexes.
      *
-     * This method closes the writer first. It replaces the remote index, then
-     * the local index when the WAL contains local changes. It clears the WAL
-     * only after both replacements finish.
+     * The method closes the writer, builds and installs the new remote index,
+     * applies the local-index changes, and then clears the WAL. The WAL stays
+     * intact until both indexes are ready.
      *
-     * If the process stops before that point, the WAL stays in place. The next
-     * call opens new `.new` and `.local` files and applies the full WAL again.
-     * A repeated `+` replaces the same entry. A repeated `-` for a missing
-     * entry writes nothing.
+     * A later call can repeat the full merge after an interrupted attempt.
+     * Each `+` selects the final entry for its path. Each `-` omits that path.
+     * The temporary `.new` and `.local` files are rebuilt for every attempt.
      *
-     * A final record without a newline is skipped. flush() runs before the
-     * caller saves its cursor, so files-pull repeats that path after resume.
+     * A final line without a newline lies beyond the last saved checkpoint.
+     * The reader leaves it pending for diff resume to remove and replay.
      *
      * @throws RuntimeException When the WAL or an index cannot be read,
      *                          replaced, or cleared.
@@ -338,11 +438,7 @@ class PullIndexJournal
     public function apply_pending_records(): void
     {
         if ($this->pull_index_wal_handle) {
-            $pull_index_wal_closed = fclose($this->pull_index_wal_handle);
-            $this->pull_index_wal_handle = null;
-            if (!$pull_index_wal_closed) {
-                throw new RuntimeException("Failed to flush the pull index WAL.");
-            }
+            $this->close();
         }
         clearstatcache(true, $this->pull_index_wal_path);
         if (
@@ -543,12 +639,7 @@ class PullIndexJournal
      */
     public function remove_empty_wal(): void
     {
-        if (is_resource($this->pull_index_wal_handle)) {
-            if (!fclose($this->pull_index_wal_handle)) {
-                throw new RuntimeException("Failed to flush the pull index WAL.");
-            }
-            $this->pull_index_wal_handle = null;
-        }
+        $this->close();
         clearstatcache(true, $this->pull_index_wal_path);
         if (
             is_file($this->pull_index_wal_path)

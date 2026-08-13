@@ -84,6 +84,7 @@ require_once __DIR__ . '/lib/merge/load.php';
 
 require_once __DIR__ . '/lib/sort-index-file.php';
 require_once __DIR__ . '/lib/local-index-update-functions.php';
+require_once __DIR__ . '/lib/index/class-file-index-diff-processor.php';
 require_once __DIR__ . '/lib/class-reprint-process-lock.php';
 
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
@@ -2293,9 +2294,6 @@ class ImportClient
             "RESTART | Clearing files-pull progress (keeping remote index and files)",
             true,
         );
-        // Replay the pull index WAL before clearing the cursor which made its records durable.
-        $this->pull_index_journal->apply_pending_records();
-        $this->pull_index_journal->remove_empty_wal();
         $this->reset_state();
 
         if (file_exists($this->next_remote_index_file)) {
@@ -2313,7 +2311,12 @@ class ImportClient
         $this->get_state()->index = new RemoteFileIndexCursorState();
         $this->get_state()->fetch = new FetchListProgressState();
 
+        // Applying the WAL replaces the remote index read by the diff cursor.
+        // Save the cleared cursor first. If applying the WAL stops partway, the
+        // next run starts with the cleared cursor and applies the WAL again.
         $this->save_state();
+        $this->pull_index_journal->apply_pending_records();
+        $this->pull_index_journal->remove_empty_wal();
     }
 
     /**
@@ -2939,18 +2942,25 @@ class ImportClient
             );
         }
 
-        $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
+        $active_resumable_command =
+            $this->get_state()->active_resumable_command;
+        $state_command = $active_resumable_command->command_name ?? null;
 
         $current_status =
             $state_command === "files-pull"
-                ? $this->get_state()->active_resumable_command->completion_state ?? null
+                ? $active_resumable_command->completion_state ?? null
                 : null;
         $has_progress =
             $state_command === "files-pull" &&
             $current_status !== null &&
             $current_status !== "complete";
 
-        $this->pull_index_journal->apply_pending_records();
+        $resuming_diff =
+            $has_progress
+            && $active_resumable_command->current_stage === "diff";
+        if (!$resuming_diff) {
+            $this->pull_index_journal->apply_pending_records();
+        }
         $this->assert_files_pull_path_selection_unchanged_while_resuming($has_progress);
         $this->assert_local_followed_symlinks_root_unchanged();
 
@@ -3087,8 +3097,10 @@ class ImportClient
         $this->get_state()->active_resumable_command->completion_state = "in_progress";
         $this->save_state();
 
-        $this->pull_index_journal->open();
         $stage = $this->get_state()->active_resumable_command->current_stage ?? "index";
+        if ($stage !== "diff") {
+            $this->pull_index_journal->open();
+        }
 
         if ($stage === "index") {
             $complete = $this->fetch_next_remote_index();
@@ -3108,6 +3120,7 @@ class ImportClient
             $this->sort_next_remote_index_file();
             $this->get_state()->active_resumable_command->current_stage = "diff";
             $this->get_state()->diff = new FileDiffProgressState();
+            $this->pull_index_journal->close();
             if (file_exists($this->fetch_list_file)) {
                 @unlink($this->fetch_list_file);
                 $this->audit_log(
@@ -3129,9 +3142,12 @@ class ImportClient
             $has_files_to_fetch =
                 file_exists($this->fetch_list_file) &&
                 filesize($this->fetch_list_file) > 0;
-            $stage = $has_files_to_fetch ? "fetch" : null;
+            $stage = "fetch";
             $this->get_state()->active_resumable_command->current_stage = $stage;
+            // Save the fetch stage before applying the WAL. From this stage,
+            // startup applies any pending WAL before it resumes the fetch list.
             $this->save_state();
+            $this->pull_index_journal->apply_pending_records();
 
             // In pull mode, finalize the scanning line with a checkmark
             // and start the download progress on a fresh line.
@@ -3174,8 +3190,6 @@ class ImportClient
                 );
             }
 
-            $this->get_state()->active_resumable_command->current_stage = null;
-            $this->save_state();
         }
 
         // Recreate intermediate path symlinks so the full symlink chain
@@ -3188,6 +3202,7 @@ class ImportClient
 
         $this->ensure_local_index_exists();
         $this->get_state()->active_resumable_command->completion_state = "complete";
+        $this->get_state()->active_resumable_command->current_stage = null;
         $this->save_state();
         $this->pull_index_journal->remove_empty_wal();
 
@@ -6889,211 +6904,166 @@ class ImportClient
         }
 
         $file_diff_progress_state = $this->get_state()->diff;
-        $next_remote_index_byte_offset =
-            $file_diff_progress_state->next_remote_index_byte_offset;
-        $last_consumed_remote_index_entry_path =
-            $file_diff_progress_state->last_consumed_remote_index_entry_path;
-        $last_processed_next_remote_index_entry_path =
-            $file_diff_progress_state->last_processed_next_remote_index_entry_path;
-        $fetch_list_file_mode = $next_remote_index_byte_offset > 0 ? "a" : "w";
-        if ($fetch_list_file_mode === "w") {
-            $this->audit_log(
-                "FILE CREATE | {$this->fetch_list_file} | building fetch list",
-            );
-        } else {
-            $this->audit_log(
-                "FILE APPEND | {$this->fetch_list_file} | resuming fetch list build",
-            );
-        }
-        $fetch_list_file_handle = fopen(
-            $this->fetch_list_file,
-            $fetch_list_file_mode,
+        $index_diff = FileIndexDiffProcessor::resume(
+            $this->remote_index_file,
+            $this->next_remote_index_file,
+            $file_diff_progress_state->index_diff_cursor,
+            [RemoteIndexReader::class, "decode_index_line"]
         );
-        if (!$fetch_list_file_handle) {
-            throw new RuntimeException("Failed to open fetch list file");
-        }
-
-        $next_remote_index_reader = new RemoteIndexReader(
-            $this->next_remote_index_file
-        );
+        $fetch_list_file_handle = null;
         try {
-            $next_remote_index_reader->open();
-            if ($next_remote_index_byte_offset > 0) {
-                $next_remote_index_reader->seek_to_byte_offset(
-                    $next_remote_index_byte_offset
-                );
-            }
-        } catch (RuntimeException $exception) {
-            $next_remote_index_reader->close();
-            fclose($fetch_list_file_handle);
-            throw $exception;
-        }
-
-        $remote_index_reader = new RemoteIndexReader($this->remote_index_file);
-        try {
-            $remote_index_reader->open();
-        } catch (RuntimeException $exception) {
-            $next_remote_index_reader->close();
-            fclose($fetch_list_file_handle);
-            throw $exception;
-        }
-        $remote_index_entry = $remote_index_reader->next_entry();
-        if ($last_consumed_remote_index_entry_path) {
-            while (
-                $remote_index_entry !== null &&
-                strcmp(
-                    $remote_index_entry["path"],
-                    $last_consumed_remote_index_entry_path,
-                ) <= 0
-            ) {
-                $remote_index_entry = $remote_index_reader->next_entry();
-            }
-        }
-        $this->pull_index_journal->open();
-        $next_remote_index_entries_processed = 0;
-
-        while (($next_remote_index_entry = $next_remote_index_reader->next_entry()) !== null) {
-            if ($this->shutdown_requested) {
-                break;
-            }
-
-            if (function_exists("pcntl_signal_dispatch")) {
-                pcntl_signal_dispatch();
-            }
-
-            $next_remote_index_byte_offset = $next_remote_index_reader->byte_offset();
-
-            while (
-                $remote_index_entry !== null &&
-                strcmp($remote_index_entry["path"], $next_remote_index_entry["path"]) < 0
-            ) {
-                // The remote index is a union across files-pull path selections.
-                // Keep entries outside this run's selection.
-                if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
-                    $missing_remote_index_entry_path = $remote_index_entry["path"];
-                    $remote_deletion_root = $this->derive_remote_deletion_root_from_sparse_index(
-                        $missing_remote_index_entry_path,
-                        $last_processed_next_remote_index_entry_path,
-                        $next_remote_index_entry["path"],
-                    );
-                    $local_absolute_path = $this->remove_remote_path_locally(
-                        $remote_deletion_root
-                    );
-                    if ($local_absolute_path === null) {
-                        $this->pull_index_journal->record_remote_invalidation(
-                            $missing_remote_index_entry_path
-                        );
-                    } else {
-                        $this->pull_index_journal->record_successful_deletion(
-                            $missing_remote_index_entry_path,
-                            $local_absolute_path
-                        );
-                    }
-                }
-                $last_consumed_remote_index_entry_path =
-                    $remote_index_entry["path"];
-                $remote_index_entry = $remote_index_reader->next_entry();
-            }
-
+            $fetch_list_file_handle = fopen($this->fetch_list_file, "c+b");
+            $fetch_list_file_stat = is_resource($fetch_list_file_handle)
+                ? fstat($fetch_list_file_handle)
+                : false;
             if (
-                $remote_index_entry !== null &&
-                $remote_index_entry["path"] === $next_remote_index_entry["path"]
-            ) {
-                if (
-                    $remote_index_entry["ctime"] !== $next_remote_index_entry["ctime"] ||
-                    $remote_index_entry["size"] !== $next_remote_index_entry["size"] ||
-                    $remote_index_entry["type"] !== $next_remote_index_entry["type"]
-                ) {
-                    // Re-download it when selected — the remote index confirms
-                    // that an earlier files-pull accounted for this path, so
-                    // preserve-local does not protect it.
-                    if ($this->is_selected_for_pulling($next_remote_index_entry["path"], true)) {
-                        $this->append_to_fetch_list(
-                            $next_remote_index_entry["path"],
-                            $fetch_list_file_handle,
-                        );
-                    }
-                }
-                $last_consumed_remote_index_entry_path =
-                    $remote_index_entry["path"];
-                $remote_index_entry = $remote_index_reader->next_entry();
-            } elseif (
-                $this->is_selected_for_pulling($next_remote_index_entry["path"], true) &&
-                (
-                    $remote_index_entry === null ||
-                    strcmp($remote_index_entry["path"], $next_remote_index_entry["path"]) > 0
+                !is_resource($fetch_list_file_handle)
+                || $file_diff_progress_state->fetch_list_byte_offset < 0
+                || $fetch_list_file_stat === false
+                || $file_diff_progress_state->fetch_list_byte_offset
+                    > $fetch_list_file_stat["size"]
+                || !ftruncate(
+                    $fetch_list_file_handle,
+                    $file_diff_progress_state->fetch_list_byte_offset
                 )
+                || fseek(
+                    $fetch_list_file_handle,
+                    $file_diff_progress_state->fetch_list_byte_offset
+                ) !== 0
             ) {
-                $preserve_local_skip_reason =
-                    $this->should_skip_for_preserve_local(
-                        $next_remote_index_entry["path"],
-                    );
-                if ($preserve_local_skip_reason) {
-                    $this->audit_log($preserve_local_skip_reason, true);
-                    $this->emit_skip_progress($next_remote_index_entry["path"]);
-                } else {
-                    $this->append_to_fetch_list(
-                        $next_remote_index_entry["path"],
-                        $fetch_list_file_handle,
-                    );
-                }
+                throw new RuntimeException("Failed to resume the fetch list.");
+            }
+            $this->pull_index_journal->open_and_truncate_to_saved_byte_offset(
+                $file_diff_progress_state->pull_index_wal_byte_offset
+            );
+
+            if ($file_diff_progress_state->fetch_list_byte_offset === 0) {
+                $this->audit_log(
+                    "FILE CREATE | {$this->fetch_list_file} | building fetch list",
+                );
+            } else {
+                $this->audit_log(
+                    "FILE APPEND | {$this->fetch_list_file} | resuming fetch list build",
+                );
             }
 
-            $last_processed_next_remote_index_entry_path =
-                $next_remote_index_entry["path"];
-            $next_remote_index_entries_processed++;
-            if ($next_remote_index_entries_processed % 200 === 0) {
-                $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
-                $this->get_state()->diff->last_consumed_remote_index_entry_path =
-                    $last_consumed_remote_index_entry_path;
-                $this->get_state()->diff->last_processed_next_remote_index_entry_path =
-                    $last_processed_next_remote_index_entry_path;
+            $has_path = $index_diff->next_path();
+            while ($has_path) {
+                $paths_processed = 0;
+                while ($has_path && $paths_processed < 200) {
+                    if (function_exists("pcntl_signal_dispatch")) {
+                        pcntl_signal_dispatch();
+                    }
+                    if ($this->shutdown_requested) {
+                        break;
+                    }
+
+                    $remote_absolute_path = $index_diff->get_path();
+                    $transition = $index_diff->get_path_transition();
+                    if ($transition === "deleted") {
+                        // The remote index is a union across files-pull path
+                        // selections. Keep paths outside this run's selection.
+                        if (
+                            $this->is_selected_for_pulling(
+                                $remote_absolute_path,
+                                false
+                            )
+                        ) {
+                            $remote_deletion_root =
+                                $this->derive_remote_deletion_root_from_sparse_index(
+                                    $remote_absolute_path,
+                                    $index_diff->get_preceding_path_in_new_index(),
+                                    $index_diff->get_following_path_in_new_index()
+                                );
+                            $local_absolute_path =
+                                $this->remove_remote_path_locally(
+                                    $remote_deletion_root
+                                );
+                            if ($local_absolute_path === null) {
+                                $this->pull_index_journal->record_remote_invalidation(
+                                    $remote_absolute_path
+                                );
+                            } else {
+                                $this->pull_index_journal->record_successful_deletion(
+                                    $remote_absolute_path,
+                                    $local_absolute_path
+                                );
+                            }
+                        }
+                    } elseif (
+                        $transition !== "unchanged"
+                        && $this->is_selected_for_pulling(
+                            $remote_absolute_path,
+                            true
+                        )
+                    ) {
+                        // Preserve-local protects only paths which no earlier
+                        // files-pull recorded in the remote index.
+                        $preserve_local_skip_reason = $transition === "added"
+                            ? $this->should_skip_for_preserve_local(
+                                $remote_absolute_path
+                            )
+                            : null;
+                        if ($preserve_local_skip_reason) {
+                            $this->audit_log(
+                                $preserve_local_skip_reason,
+                                true
+                            );
+                            $this->emit_skip_progress($remote_absolute_path);
+                        } else {
+                            $this->append_to_fetch_list(
+                                $remote_absolute_path,
+                                $fetch_list_file_handle
+                            );
+                        }
+                    }
+
+                    $has_path = $index_diff->next_path();
+                    ++$paths_processed;
+                }
+
+                if ($paths_processed === 0) {
+                    break;
+                }
+                if (!fflush($fetch_list_file_handle)) {
+                    throw new RuntimeException(
+                        "Failed to flush the fetch list."
+                    );
+                }
                 $this->pull_index_journal->flush();
-                $this->save_state();
-                $this->progress->tick_spinner();
-            }
-        }
-
-        while ($remote_index_entry !== null) {
-            if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
-                $missing_remote_index_entry_path = $remote_index_entry["path"];
-                $remote_deletion_root = $this->derive_remote_deletion_root_from_sparse_index(
-                    $missing_remote_index_entry_path,
-                    $last_processed_next_remote_index_entry_path,
-                    null,
+                $fetch_list_byte_offset = ftell(
+                    $fetch_list_file_handle
                 );
-                $local_absolute_path = $this->remove_remote_path_locally(
-                    $remote_deletion_root
-                );
-                if ($local_absolute_path === null) {
-                    $this->pull_index_journal->record_remote_invalidation(
-                        $missing_remote_index_entry_path
-                    );
-                } else {
-                    $this->pull_index_journal->record_successful_deletion(
-                        $missing_remote_index_entry_path,
-                        $local_absolute_path
+                if (!is_int($fetch_list_byte_offset)) {
+                    throw new RuntimeException(
+                        "Failed to read the fetch-list byte offset."
                     );
                 }
+                // Build the three positions in a new object, then replace the
+                // saved checkpoint in one assignment. An async signal can save
+                // either complete checkpoint.
+                $next_file_diff_progress_state = new FileDiffProgressState();
+                $next_file_diff_progress_state->index_diff_cursor =
+                    $index_diff->get_cursor();
+                $next_file_diff_progress_state->fetch_list_byte_offset =
+                    $fetch_list_byte_offset;
+                $next_file_diff_progress_state->pull_index_wal_byte_offset =
+                    $this->pull_index_journal->byte_offset();
+                $this->get_state()->diff = $next_file_diff_progress_state;
+                $this->save_state();
+                if ($paths_processed === 200) {
+                    $this->progress->tick_spinner();
+                }
             }
-            $last_consumed_remote_index_entry_path =
-                $remote_index_entry["path"];
-            $remote_index_entry = $remote_index_reader->next_entry();
+        } finally {
+            $index_diff->close();
+            if (is_resource($fetch_list_file_handle)) {
+                fclose($fetch_list_file_handle);
+            }
+            $this->pull_index_journal->close();
         }
 
-        $remote_index_reader->close();
-        $next_remote_index_reader->close();
-        fclose($fetch_list_file_handle);
-
-        $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
-        $this->get_state()->diff->last_consumed_remote_index_entry_path =
-            $last_consumed_remote_index_entry_path;
-        $this->get_state()->diff->last_processed_next_remote_index_entry_path =
-            $last_processed_next_remote_index_entry_path;
-        $this->pull_index_journal->apply_pending_records();
-        $this->save_state();
-
-        return !$this->shutdown_requested;
+        return !$has_path;
     }
 
     /**
@@ -7377,10 +7347,13 @@ class ImportClient
     {
         $fetch_list_json_line = json_encode(
             ["path" => base64_encode($remote_absolute_path)],
-            JSON_UNESCAPED_SLASHES,
-        );
-        if ($fetch_list_json_line !== false) {
-            fwrite($fetch_list_file_handle, $fetch_list_json_line . "\n");
+            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+        ) . "\n";
+        if (
+            fwrite($fetch_list_file_handle, $fetch_list_json_line)
+            !== strlen($fetch_list_json_line)
+        ) {
+            throw new RuntimeException("Failed to write to the fetch list.");
         }
         $this->audit_log(
             "Added to the fetch list: {$remote_absolute_path}",
@@ -10900,12 +10873,6 @@ class ImportClient
      */
     private function encode_state_paths(array $state): array
     {
-        $state["diff"]["last_consumed_remote_index_entry_path"] = $this->encode_state_path_value(
-            $state["diff"]["last_consumed_remote_index_entry_path"] ?? null,
-        );
-        $state["diff"]["last_processed_next_remote_index_entry_path"] = $this->encode_state_path_value(
-            $state["diff"]["last_processed_next_remote_index_entry_path"] ?? null,
-        );
         $state["fetch"]["batch_file"] = $this->encode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
         );
@@ -10935,12 +10902,6 @@ class ImportClient
      */
     private function decode_state_paths(array $state): array
     {
-        $state["diff"]["last_consumed_remote_index_entry_path"] = $this->decode_state_path_value(
-            $state["diff"]["last_consumed_remote_index_entry_path"] ?? null,
-        );
-        $state["diff"]["last_processed_next_remote_index_entry_path"] = $this->decode_state_path_value(
-            $state["diff"]["last_processed_next_remote_index_entry_path"] ?? null,
-        );
         $state["fetch"]["batch_file"] = $this->decode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
         );
@@ -11280,7 +11241,15 @@ class ImportClient
         $this->shutdown_requested = true;
         $this->progress->clear_progress_line();
 
-        if ($this->pull_index_journal->is_open()) {
+        $active_resumable_command =
+            $this->get_state()->active_resumable_command;
+        $applying_diff_records_would_rewrite_an_open_index =
+            $active_resumable_command->command_name === "files-pull"
+            && $active_resumable_command->current_stage === "diff";
+        if (
+            $this->pull_index_journal->is_open()
+            && !$applying_diff_records_would_rewrite_an_open_index
+        ) {
             try {
                 $this->pull_index_journal->apply_pending_records();
             } catch (Exception $e) {
@@ -11295,7 +11264,8 @@ class ImportClient
         // Log final progress before exit
         $remote_index_entry_count = $this->remote_index_entry_count();
         $files_pulled = $this->files_pulled; // Files completed in this run
-        $current_command = $this->get_state()->active_resumable_command->command_name ?? "unknown";
+        $current_command =
+            $active_resumable_command->command_name ?? "unknown";
 
         $this->audit_log(
             sprintf(
