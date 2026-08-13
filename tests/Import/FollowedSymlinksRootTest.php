@@ -99,10 +99,13 @@ class FollowedSymlinksRootTest extends TestCase
 
     private function inScope(array $onlyPrefixes, string $path): bool
     {
-        $c = $this->newClient();
-        $rc = new \ReflectionClass($c);
-        $rc->getProperty('pull_only_files_with_path_prefixes')->setValue($c, $onlyPrefixes);
-        return $rc->getMethod('path_is_within_original_export_scope')->invoke($c, $path);
+        $mapper = new \RemoteToLocalPathMapper(
+            $this->root,
+            $onlyPrefixes,
+            [],
+            $this->root . '/followed'
+        );
+        return $mapper->map_path($path) === $this->root . $path;
     }
 
     public function testTargetUnderScopeIsInScope(): void

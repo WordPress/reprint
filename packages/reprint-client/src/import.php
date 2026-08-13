@@ -107,6 +107,7 @@ require_once __DIR__ . '/lib/pull/class-pull.php';
 
 // Pull index reader and the WAL for completed files-pull mutations.
 require_once __DIR__ . '/lib/pull/class-remote-index-reader.php';
+require_once __DIR__ . '/lib/pull/class-remote-to-local-path-mapper.php';
 require_once __DIR__ . '/lib/pull/class-pull-index-journal.php';
 
 /**
@@ -9003,31 +9004,12 @@ class ImportClient
     private function map_remote_absolute_path_to_local_absolute_path(
         string $remote_absolute_path
     ): string {
-        assert_valid_path($remote_absolute_path, "remote absolute path");
-        $local_absolute_path = null;
-        $longest_remote_prefix_length = -1;
-        foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
-            $remainder = path_remainder_under($remote_absolute_path, $remote_prefix);
-            if ($remainder !== null && strlen($remote_prefix) > $longest_remote_prefix_length) {
-                $local_absolute_path = wp_join_unix_paths($local_prefix, $remainder);
-                $longest_remote_prefix_length = strlen($remote_prefix);
-            }
-        }
-        if ($local_absolute_path !== null) {
-            return $local_absolute_path;
-        }
-
-        // Following symlinks is currently the only way paths outside the original export scope reach this mapper.
-        // Use the same local followed symlinks root for copied content and rewritten symlink targets so the links do not dangle.
-        if ($this->local_followed_symlinks_root !== null
-            && !$this->path_is_within_original_export_scope($remote_absolute_path)) {
-            return wp_join_unix_paths(
-                $this->local_followed_symlinks_root,
-                $remote_absolute_path
-            );
-        }
-
-        return wp_join_unix_paths($this->filesystem_root, $remote_absolute_path);
+        return ( new RemoteToLocalPathMapper(
+            $this->filesystem_root,
+            $this->get_export_directories(),
+            $this->resolved_path_mappings,
+            $this->local_followed_symlinks_root
+        ) )->map_path($remote_absolute_path);
     }
 
 
@@ -9814,22 +9796,6 @@ class ImportClient
             );
         }
         return $dirs;
-    }
-
-    /**
-     * Whether $path falls under one of the ORIGINAL export directories (the
-     * --include prefixes, or the base roots without --include) — i.e. it was going to
-     * be pulled anyway. Evaluated against the pre-follow scope; a followed
-     * target outside all of these is "escaping" and eligible for symlink bundling.
-     */
-    private function path_is_within_original_export_scope(string $path): bool
-    {
-        foreach ($this->get_export_directories() as $root) {
-            if (path_is_same_as_or_descendant_of($path, $root)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
