@@ -413,7 +413,7 @@ class MergeWpContentTest extends TestCase
         $workingDirectory = getcwd();
         try {
             chdir($this->tempDir);
-            $this->merge([], './site');
+            $this->merge([], './site/wp-content');
         } finally {
             chdir($workingDirectory);
         }
@@ -459,14 +459,36 @@ class MergeWpContentTest extends TestCase
         $this->assertFileExists($this->localWpContent . '/plugins/local-only/plugin.php');
     }
 
+    public function testTheCommandRefusesAWordPressRootAsFrom(): void
+    {
+        // The mistake --from invites: naming the site directory. Merging it
+        // would move wp-admin, wp-includes and wp-config.php into wp-content.
+        $this->writePulled('plugins/from-the-pull/plugin.php', '<?php');
+        $this->writeLocal('plugins/local-only/plugin.php', '<?php // local');
+        $this->writeFile($this->siteDir . '/wp-load.php', '<?php // wp-load');
+
+        try {
+            $this->merge([], $this->siteDir);
+            $this->fail('a WordPress root should have been refused');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString('is a WordPress root', $exception->getMessage());
+        }
+
+        $this->assertFileExists(
+            $this->localWpContent . '/plugins/local-only/plugin.php',
+            'and nothing moved',
+        );
+        $this->assertFileDoesNotExist($this->pulledWpContent . '/wp-load.php');
+    }
+
     public function testTheCommandRefusesWhenFromAndTheDestinationOverlap(): void
     {
         $this->writePulled('plugins/from-the-pull/plugin.php', '<?php');
 
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('one holds the other');
-        // --from/wp-content is the destination.
-        $this->merge([], $this->filesystemRoot . self::ABSPATH);
+        // --from is the destination itself.
+        $this->merge([], $this->pulledWpContent);
     }
 
     private function merge(array $pathsUrls = [], ?string $from = null): void
@@ -489,7 +511,7 @@ class MergeWpContentTest extends TestCase
 
         $client = $this->makeClient();
         $this->loadClientState($client);
-        $client->run_merge_wp_content(['from' => $from ?? $this->siteDir]);
+        $client->run_merge_wp_content(['from' => $from ?? $this->localWpContent]);
     }
 
     private function writePulled(string $relative, string $contents): void

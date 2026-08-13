@@ -4678,13 +4678,23 @@ class ImportClient
         $from = $options["from"] ?? null;
         if (empty($from)) {
             throw new InvalidArgumentException(
-                "merge-wp-content requires --from=DIR, the site directory whose wp-content is merged in.",
+                "merge-wp-content requires --from=DIR, the wp-content directory to merge in.",
             );
         }
         // Keep a lexical absolute path because --from may not exist yet.
         $from = trim_right_slash($from);
         if (strpos($from, "/") !== 0) {
             $from = normalize_path(wp_join_unix_paths(getcwd(), $from));
+        }
+        // A WordPress root passed by mistake would move wp-admin, wp-includes
+        // and wp-config.php into the pulled wp-content.
+        if (is_file(wp_join_unix_paths($from, "wp-load.php"))
+            || is_dir(wp_join_unix_paths($from, "wp-includes"))
+        ) {
+            throw new InvalidArgumentException(
+                "--from must name a wp-content directory, but {$from} is a WordPress root. " .
+                    "Pass the content directory inside it.",
+            );
         }
 
         $this->require_preflight();
@@ -4709,7 +4719,7 @@ class ImportClient
         }
 
         $destination_wp_content = wp_join_unix_paths($this->filesystem_root, $content_dir);
-        $source_wp_content = wp_join_unix_paths($from, "wp-content");
+        $source_wp_content = $from;
 
         $component_destinations = [];
         foreach ([
@@ -11808,7 +11818,7 @@ if (
             'type' => 'value',
             'target' => 'from',
             'placeholder' => 'DIR',
-            'help' => 'Site directory whose wp-content is merged into the pulled one',
+            'help' => 'Local wp-content directory to merge into the pulled one',
             'commands' => ['merge-wp-content'],
         ],
 
@@ -12614,17 +12624,18 @@ if (
                 "reprint merge-wp-content <remote-reprint-api-url> --state-dir=DIR " .
                 "--fs-root=DIR --from=DIR",
             "description" =>
-                "Folds the wp-content directory under --from into the one the file\n" .
-                "pull wrote under --fs-root. --from names a site directory; the\n" .
-                "command appends wp-content to it.\n" .
+                "Folds the wp-content directory named by --from into the one the\n" .
+                "file pull wrote under --fs-root. --from is that directory itself,\n" .
+                "whatever it is called, so a site which moved WP_CONTENT_DIR works\n" .
+                "the same as a conventional one.\n" .
                 "\n" .
                 "Entries the pulled tree does not have move there. Entries it has\n" .
                 "stay as they are, so the pulled copy always wins. Nothing is\n" .
                 "deleted, and entries move rather than copy: after a run they no\n" .
                 "longer exist under --from.\n" .
                 "\n" .
-                "Run this before flat-docroot, which replaces the wp-content under\n" .
-                "--from with a symlink and would otherwise delete whatever only that\n" .
+                "Run this before flat-docroot, which replaces the local wp-content\n" .
+                "with a symlink and would otherwise delete whatever only that\n" .
                 "directory held. The remote Reprint API URL selects the state that\n" .
                 "says where the source site kept wp-content, its plugins, its\n" .
                 "mu-plugins and its uploads; no network calls are made.\n",
@@ -12640,7 +12651,7 @@ if (
                 "\n" .
                 "Example:\n" .
                 "  reprint merge-wp-content https://example.com --state-dir=./state \\\n" .
-                "    --fs-root=./files --from=./site\n",
+                "    --fs-root=./files --from=./site/wp-content\n",
         ],
         "apply-runtime" => [
             "level" => "low",
