@@ -60,8 +60,9 @@
  *
  * - A target path may contain non-empty slash-separated components composed
  *   only of ASCII letters, digits, hyphens, and underscores. Each slash copies
- *   the spelling of the first slash before the matched authority. A scheme-less
- *   authority stays unchanged when the target has a path.
+ *   the first available spelling from the URL prefix, configured source path,
+ *   or following candidate path. A scheme-less authority with no slash stays
+ *   unchanged when the target has a path.
  * - Target ports, user information, queries, fragments, IPv4/IPv6 addresses,
  *   and Unicode domains are not supported. Punycode domains are supported.
  * - Unicode source domains and paths are not supported.
@@ -294,6 +295,13 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                 continue;
             }
 
+            $target_path_slash = '';
+            if ($mapping['target_path'] !== '') {
+                $target_path_slash = $matches['url_slash'][1] === -1
+                    ? $matches['path_slash'][0]
+                    : $matches['url_slash'][0];
+            }
+
             $next_match = array_merge(
                 $mapping,
                 [
@@ -301,7 +309,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                     'base_length'   => strlen($matches['base'][0]),
                     'replacement'   => $mapping['target_domain'] . str_replace(
                         '/',
-                        $matches['url_slash'][0],
+                        $target_path_slash,
                         $mapping['target_path']
                     ),
                     'scheme_start'  => $matches['scheme'][1] === -1
@@ -320,23 +328,40 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      * Build a candidate pattern adapted from URLInTextProcessor's URL finder.
      *
      * The pattern recognizes this mapping's absolute, protocol-relative, and
-     * scheme-less forms. Absolute and protocol-relative forms capture the first
-     * slash before the authority. That spelling is used for a target path.
+     * scheme-less forms. It captures the first slash before the authority and
+     * the first slash in or after the configured source base. The first
+     * available capture supplies the spelling for a target path.
      */
     private function create_url_candidate_pattern(
         string $source_scheme,
         string $source_authority,
         string $source_path,
-        bool $requires_url_slashes
+        bool $requires_path_slash
     ): string
     {
         $escaped_separator = '(?:\\\\{1}|\\\\{3})?';
-        $source_path_pattern = str_replace(
-            '/',
-            $escaped_separator . '/',
-            preg_quote($source_path, '~')
-        );
-        $url_prefix_optional_quantifier = $requires_url_slashes ? '' : '?';
+        $source_path_pattern = '';
+        if ($source_path !== '') {
+            $source_path_pattern =
+                '(?<path_slash>' . $escaped_separator . '/)'
+                . str_replace(
+                    '/',
+                    $escaped_separator . '/',
+                    preg_quote(substr($source_path, 1), '~')
+                );
+        }
+        $candidate_boundary_pattern = '(?=
+            $
+            | ' . $escaped_separator . '/
+            | [/?# \t\r\n,!;)\]}>"\']
+        )';
+        if ($requires_path_slash && $source_path === '') {
+            $candidate_boundary_pattern = '(?(url_slash)
+                ' . $candidate_boundary_pattern . '
+                |
+                (?=(?<path_slash>' . $escaped_separator . '/))
+            )';
+        }
 
         return '~
             (?<![A-Za-z0-9._%+\\/@-])
@@ -350,16 +375,12 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                 (?<url_slash>' . $escaped_separator . '/)
                 ' . $escaped_separator . '/
                 (?:[^\s<>@/\\\\]+@)?
-            )' . $url_prefix_optional_quantifier . '
+            )?
             (?<base>
                 (?<authority>(?i:' . preg_quote($source_authority, '~') . '))
                 ' . $source_path_pattern . '
             )
-            (?=
-                $
-                | ' . $escaped_separator . '/
-                | [/?# \t\r\n,!;)\]}>"\']
-            )
+            ' . $candidate_boundary_pattern . '
         ~x';
     }
 
