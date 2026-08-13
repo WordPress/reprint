@@ -2311,9 +2311,9 @@ class ImportClient
         $this->get_state()->index = new RemoteFileIndexCursorState();
         $this->get_state()->fetch = new FetchListProgressState();
 
-        // The diff cursor belongs to the current remote index. Applying the WAL
-        // replaces that index, so save the state without the cursor first. The
-        // WAL merge is replayable and can finish now or in a later process.
+        // Applying the WAL replaces the remote index read by the diff cursor.
+        // Save the cleared cursor first. If applying the WAL stops partway, the
+        // next run starts with the cleared cursor and applies the WAL again.
         $this->save_state();
         $this->pull_index_journal->apply_pending_records();
         $this->pull_index_journal->remove_empty_wal();
@@ -3144,8 +3144,8 @@ class ImportClient
                 filesize($this->fetch_list_file) > 0;
             $stage = "fetch";
             $this->get_state()->active_resumable_command->current_stage = $stage;
-            // The diff cursor points into the retained remote index. Save the
-            // fetch stage before the WAL rewrites that index.
+            // Save the fetch stage before applying the WAL. From this stage,
+            // startup applies any pending WAL before it resumes the fetch list.
             $this->save_state();
             $this->pull_index_journal->apply_pending_records();
 
@@ -7039,9 +7039,9 @@ class ImportClient
                         "Failed to read the fetch-list byte offset."
                     );
                 }
-                // These three positions describe one boundary. Build it off
-                // the live state so an async signal saves either the old
-                // boundary or the complete new one, never a mixture.
+                // Build the three positions in a new object, then replace the
+                // saved checkpoint in one assignment. An async signal can save
+                // either complete checkpoint.
                 $next_file_diff_progress_state = new FileDiffProgressState();
                 $next_file_diff_progress_state->index_diff_cursor =
                     $index_diff->get_cursor();
