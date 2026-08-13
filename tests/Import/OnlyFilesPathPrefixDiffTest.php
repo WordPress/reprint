@@ -283,10 +283,11 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             ->getValue($client)
             ->apply_pending_records();
 
-        // The selected root, its matched contents, and its index entry survive…
+        // The selected root and its matched contents survive. The old empty
+        // directory entry is removed because the child now describes it.
         $this->assertDirectoryExists($this->filesystem_root . '/wp-content/themes');
         $this->assertFileExists($kept);
-        $this->assertContains('/wp-content/themes', $this->readRemoteIndexEntryPaths());
+        $this->assertNotContains('/wp-content/themes', $this->readRemoteIndexEntryPaths());
         // …while a genuine orphan inside it is still drained.
         $this->assertFileDoesNotExist($orphan);
         $this->assertNotContains('/wp-content/themes/old/orphan.css', $this->readRemoteIndexEntryPaths());

@@ -5,6 +5,8 @@ declare(strict_types=1);
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Match the existing importer test classes.
 
 use PHPUnit\Framework\TestCase;
+use function Reprint\Importer\file_sync_index_path_may_change;
+use function Reprint\Importer\find_file_sync_deletion_root;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/index/class-file-sync-patch-planner.php';
 
@@ -178,6 +180,92 @@ final class FileSyncPatchPlannerTest extends TestCase
             $this->collect_operations($planner)
         );
         $planner->close();
+    }
+
+    public function testFindsADeletionRootInsideANestedSelection(): void
+    {
+        $this->assertSame(
+            'outside/selected',
+            find_file_sync_deletion_root(
+                'outside/selected/child.txt',
+                null,
+                null,
+                static function (string $candidate_path): bool {
+                    return file_sync_index_path_may_change(
+                        $candidate_path,
+                        ['outside/selected'],
+                        []
+                    );
+                }
+            )
+        );
+    }
+
+    public function testDeletionRootDoesNotContainAnExcludedDescendant(): void
+    {
+        $this->assertSame(
+            'selected/delete',
+            find_file_sync_deletion_root(
+                'selected/delete/child.txt',
+                null,
+                null,
+                static function (string $candidate_path): bool {
+                    return file_sync_index_path_may_change(
+                        $candidate_path,
+                        ['selected'],
+                        ['selected/keep']
+                    );
+                }
+            )
+        );
+        $this->assertNull(
+            find_file_sync_deletion_root(
+                'selected/keep/child.txt',
+                null,
+                null,
+                static function (string $candidate_path): bool {
+                    return file_sync_index_path_may_change(
+                        $candidate_path,
+                        ['selected'],
+                        ['selected/keep']
+                    );
+                }
+            )
+        );
+    }
+
+    public function testDeletionRootPreservesAnAbsolutePathRoot(): void
+    {
+        $this->assertSame(
+            '/srv/site',
+            find_file_sync_deletion_root(
+                '/srv/site/child.txt',
+                null,
+                null,
+                static function (string $candidate_path): bool {
+                    return file_sync_index_path_may_change(
+                        $candidate_path,
+                        ['/srv/site'],
+                        []
+                    );
+                }
+            )
+        );
+    }
+
+    public function testEmptyDirectoryEntryIsKeptWhenAResultDescendantReplacesIt(): void
+    {
+        $this->assertNull(
+            find_file_sync_deletion_root(
+                'selected/directory',
+                null,
+                'selected/directory/child.txt',
+                static function (string $candidate_path): bool {
+                    return $candidate_path !== '';
+                },
+                true
+            )
+        );
     }
 
     public function testIncludedAndExcludedRootsLimitBothOperations(): void

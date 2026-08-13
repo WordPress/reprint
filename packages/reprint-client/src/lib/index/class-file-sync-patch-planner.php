@@ -1,11 +1,12 @@
 <?php
 
-use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Filesystem\wp_unix_path_segments;
+use function Reprint\Importer\file_sync_index_path_may_change;
+use function Reprint\Importer\find_file_sync_deletion_root;
 use function WordPress\Reprint\Exporter\path_is_descendant_of;
 use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 
 require_once __DIR__ . '/class-file-index-diff-processor.php';
+require_once __DIR__ . '/file-sync-path-functions.php';
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Index paths and files are CLI values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Reprint streaming classes use domain names.
@@ -319,7 +320,11 @@ final class FileSyncPatchPlanner
                 );
             if (
                 $patch_result_entry_replaces_patch_base_subtree
-                && $this->path_may_change($index_path)
+                && file_sync_index_path_may_change(
+                    $index_path,
+                    $this->included_index_path_roots,
+                    $this->excluded_index_path_roots
+                )
                 && !$this->active_deletion_root_covers_path($index_path)
             ) {
                 $path_to_delete = $index_path;
@@ -329,53 +334,31 @@ final class FileSyncPatchPlanner
                         $active_deletion_root_byte_offset
                     );
             }
-            if ($this->path_may_change($index_path)) {
+            if (
+                file_sync_index_path_may_change(
+                    $index_path,
+                    $this->included_index_path_roots,
+                    $this->excluded_index_path_roots
+                )
+            ) {
                 $path_to_copy = $index_path;
             }
         } elseif ($path_transition === "deleted") {
-            $patch_base_empty_directory_is_implied_by_patch_result_descendant =
-                $patch_base_entry_shape === "empty_directory"
-                && $this->patch_result_index_contains_path_or_descendant(
-                    $index_path,
-                    $this->index_diff->get_preceding_path_in_new_index(),
-                    $this->index_diff->get_following_path_in_new_index()
-                );
-
-            // Find the highest patch-base directory without a patch-result
-            // entry below it which path selection allows us to delete. A
-            // higher directory may sit outside an included root or contain an
-            // excluded root, so keep looking below it. Only the adjacent
-            // result entries can neighbor each parent in byte order, so no
-            // index rescan is needed.
-            $candidate_path_to_delete =
-                $this->path_may_change($index_path) ? $index_path : null;
-            $index_path_components = wp_unix_path_segments($index_path);
-            $candidate_path_components = [];
-            for (
-                $index = 0,
-                $component_count = count($index_path_components) - 1;
-                $index < $component_count;
-                ++$index
-            ) {
-                $candidate_path_components[] = $index_path_components[$index];
-                $candidate_path = wp_join_unix_paths(
-                    ...$candidate_path_components
-                );
-                if (
-                    !$this->patch_result_index_contains_path_or_descendant(
+            $candidate_path_to_delete = find_file_sync_deletion_root(
+                $index_path,
+                $this->index_diff->get_preceding_path_in_new_index(),
+                $this->index_diff->get_following_path_in_new_index(),
+                function (string $candidate_path): bool {
+                    return file_sync_index_path_may_change(
                         $candidate_path,
-                        $this->index_diff->get_preceding_path_in_new_index(),
-                        $this->index_diff->get_following_path_in_new_index()
-                    )
-                    && $this->path_may_change($candidate_path)
-                ) {
-                    $candidate_path_to_delete = $candidate_path;
-                    break;
-                }
-            }
+                        $this->included_index_path_roots,
+                        $this->excluded_index_path_roots
+                    );
+                },
+                $patch_base_entry_shape === "empty_directory"
+            );
             if (
-                !$patch_base_empty_directory_is_implied_by_patch_result_descendant
-                && $candidate_path_to_delete !== null
+                $candidate_path_to_delete !== null
                 && !$this->active_deletion_root_covers_path($index_path)
             ) {
                 $path_to_delete = $candidate_path_to_delete;
@@ -405,7 +388,11 @@ final class FileSyncPatchPlanner
             $needs_delete =
                 $patch_result_entry_is_file_or_symlink
                 !== $patch_base_entry_is_file_or_symlink;
-            $path_may_change = $this->path_may_change($index_path);
+            $path_may_change = file_sync_index_path_may_change(
+                $index_path,
+                $this->included_index_path_roots,
+                $this->excluded_index_path_roots
+            );
 
             if (
                 $needs_delete
@@ -531,27 +518,6 @@ final class FileSyncPatchPlanner
         $this->closed = true;
     }
 
-    /** Checks adjacent patch-result entries for a path or its descendant. */
-    private function patch_result_index_contains_path_or_descendant(
-        string $index_path,
-        ?string $preceding_patch_result_index_path,
-        ?string $following_patch_result_index_path
-    ): bool {
-        // NUL cannot occur in an index path and cannot match either test.
-        $preceding_patch_result_index_path =
-            $preceding_patch_result_index_path ?? "\0";
-        $following_patch_result_index_path =
-            $following_patch_result_index_path ?? "\0";
-
-        return path_is_same_as_or_descendant_of(
-            $preceding_patch_result_index_path,
-            $index_path
-        ) || path_is_same_as_or_descendant_of(
-            $following_patch_result_index_path,
-            $index_path
-        );
-    }
-
     /** Returns the logical entry kind used by the plan transition table. */
     private function index_entry_shape(string $path_type): string
     {
@@ -656,49 +622,6 @@ final class FileSyncPatchPlanner
                 $index_path,
                 $this->active_deletion_root["path"]
             );
-    }
-
-    /**
-     * Reports whether a planned operation may change the index path.
-     *
-     * The path must be inside an included root. It must not be an excluded
-     * root, sit below one, or contain one. The last case prevents a parent
-     * deletion or replacement from changing an excluded descendant.
-     */
-    private function path_may_change(string $index_path): bool
-    {
-        $is_included = false;
-        foreach ($this->included_index_path_roots as $included_index_path_root) {
-            if (
-                $included_index_path_root === ""
-                || path_is_same_as_or_descendant_of(
-                    $index_path,
-                    $included_index_path_root
-                )
-            ) {
-                $is_included = true;
-                break;
-            }
-        }
-        if (!$is_included) {
-            return false;
-        }
-        foreach ($this->excluded_index_path_roots as $excluded_index_path_root) {
-            if (
-                $excluded_index_path_root === ""
-                || path_is_same_as_or_descendant_of(
-                    $index_path,
-                    $excluded_index_path_root
-                )
-                || path_is_same_as_or_descendant_of(
-                    $excluded_index_path_root,
-                    $index_path
-                )
-            ) {
-                return false;
-            }
-        }
-        return true;
     }
 
     /** Decodes one arbitrary-byte path root stored in a JSON cursor. */

@@ -136,14 +136,14 @@ final class PullIndexWalTest extends TestCase
 
     public function testDeletedFileDerivesTheAbsentDirectoryRoot(): void
     {
-        $reflection = new \ReflectionClass(\ImportClient::class);
-        $remoteAbsolutePathToDelete = $reflection
-            ->getMethod('derive_remote_deletion_root_from_sparse_index')
-            ->invoke(
-                $this->client(),
+        $remoteAbsolutePathToDelete =
+            \Reprint\Importer\find_file_sync_deletion_root(
                 '/srv/site/gone/nested/file.txt',
                 '/srv/site/kept.txt',
-                null
+                null,
+                static function (): bool {
+                    return true;
+                }
             );
 
         $this->assertSame('/srv/site/gone', $remoteAbsolutePathToDelete);
@@ -151,14 +151,14 @@ final class PullIndexWalTest extends TestCase
 
     public function testDeletedFileKeepsAParentWithAnotherNextIndexEntry(): void
     {
-        $reflection = new \ReflectionClass(\ImportClient::class);
-        $remoteAbsolutePathToDelete = $reflection
-            ->getMethod('derive_remote_deletion_root_from_sparse_index')
-            ->invoke(
-                $this->client(),
+        $remoteAbsolutePathToDelete =
+            \Reprint\Importer\find_file_sync_deletion_root(
                 '/srv/site/kept/old.txt',
                 '/srv/site/kept/current.txt',
-                null
+                null,
+                static function (): bool {
+                    return true;
+                }
             );
 
         $this->assertSame('/srv/site/kept/old.txt', $remoteAbsolutePathToDelete);

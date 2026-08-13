@@ -121,4 +121,40 @@ final class RemoteToLocalPathMapper
 
         return wp_join_unix_paths($this->filesystem_root, $remote_absolute_path);
     }
+
+    /**
+     * Whether one remote path owns its mapped local subtree.
+     *
+     * A recursive local change at this path must not cross a remap used by a
+     * different remote subtree. This covers remap targets both below this path
+     * and above it.
+     */
+    public function remote_path_owns_mapped_local_subtree(
+        string $remote_absolute_path
+    ): bool
+    {
+        $local_absolute_path = $this->map_path($remote_absolute_path);
+        foreach ($this->resolved_path_mappings as $remote_root => $local_root) {
+            if (
+                !path_is_same_as_or_descendant_of(
+                    $remote_absolute_path,
+                    $remote_root
+                )
+                && (
+                    path_is_same_as_or_descendant_of(
+                        $local_absolute_path,
+                        $local_root
+                    )
+                    || path_is_same_as_or_descendant_of(
+                        $local_root,
+                        $local_absolute_path
+                    )
+                )
+            ) {
+                return false;
+            }
+        }
+
+        return true;
+    }
 }

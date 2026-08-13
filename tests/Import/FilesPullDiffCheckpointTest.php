@@ -498,7 +498,14 @@ final class FilesPullDiffCheckpointTest extends TestCase
                 'current_stage' => 'diff',
             ],
             'preflight' => [
-                'data' => ['ok' => true],
+                'data' => [
+                    'ok' => true,
+                    'wp_detect' => [
+                        'roots' => [[
+                            'path' => '/',
+                        ]],
+                    ],
+                ],
                 'http_code' => 200,
             ],
             'follow_symlinks' => false,

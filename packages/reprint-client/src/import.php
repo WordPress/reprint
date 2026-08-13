@@ -25,6 +25,9 @@ use Reprint\Importer\Tuning\AdaptiveTuner;
 
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
+use function Reprint\Importer\file_sync_index_path_may_change;
+use function Reprint\Importer\file_sync_result_contains_path_or_descendant;
+use function Reprint\Importer\find_file_sync_deletion_root;
 use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
@@ -85,6 +88,7 @@ require_once __DIR__ . '/lib/merge/load.php';
 require_once __DIR__ . '/lib/sort-index-file.php';
 require_once __DIR__ . '/lib/local-index-update-functions.php';
 require_once __DIR__ . '/lib/index/class-file-index-diff-processor.php';
+require_once __DIR__ . '/lib/index/file-sync-path-functions.php';
 require_once __DIR__ . '/lib/class-reprint-process-lock.php';
 
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
@@ -6911,6 +6915,12 @@ class ImportClient
             $file_diff_progress_state->index_diff_cursor,
             [RemoteIndexReader::class, "decode_index_line"]
         );
+        $remote_to_local_path_mapper = new RemoteToLocalPathMapper(
+            $this->filesystem_root,
+            $this->get_export_directories(),
+            $this->resolved_path_mappings,
+            $this->local_followed_symlinks_root
+        );
         $fetch_list_file_handle = null;
         try {
             $fetch_list_file_handle = fopen($this->fetch_list_file, "c+b");
@@ -6962,6 +6972,14 @@ class ImportClient
                     $remote_absolute_path = $index_diff->get_path();
                     $transition = $index_diff->get_path_transition();
                     if ($transition === "deleted") {
+                        $deleted_path_is_empty_directory = $index_diff->get_path_type_in_old_index() === "dir";
+                        $empty_directory_is_now_implied_by_a_descendant =
+                            $deleted_path_is_empty_directory
+                            && file_sync_result_contains_path_or_descendant(
+                                $remote_absolute_path,
+                                $index_diff->get_preceding_path_in_new_index(),
+                                $index_diff->get_following_path_in_new_index()
+                            );
                         // The remote index is a union across files-pull path
                         // selections. Keep paths outside this run's selection.
                         if (
@@ -6969,25 +6987,90 @@ class ImportClient
                                 $remote_absolute_path,
                                 false
                             )
+                            || $empty_directory_is_now_implied_by_a_descendant
                         ) {
-                            $remote_deletion_root =
-                                $this->derive_remote_deletion_root_from_sparse_index(
-                                    $remote_absolute_path,
-                                    $index_diff->get_preceding_path_in_new_index(),
-                                    $index_diff->get_following_path_in_new_index()
-                                );
                             $local_absolute_path =
-                                $this->remove_remote_path_locally(
-                                    $remote_deletion_root
-                                );
-                            if ($local_absolute_path === null) {
-                                $this->pull_index_journal->record_remote_invalidation(
+                                $remote_to_local_path_mapper->map_path(
                                     $remote_absolute_path
                                 );
-                            } else {
-                                $this->pull_index_journal->record_successful_deletion(
+                            $local_index_path = relative_path_under(
+                                $local_absolute_path, $this->filesystem_root
+                            );
+                            assert($local_index_path !== null);
+                            $remote_deletion_root =
+                                find_file_sync_deletion_root(
                                     $remote_absolute_path,
-                                    $local_absolute_path
+                                    $index_diff->get_preceding_path_in_new_index(),
+                                    $index_diff->get_following_path_in_new_index(),
+                                    function (string $candidate_path) use (
+                                        $local_index_path,
+                                        $remote_to_local_path_mapper
+                                    ): bool {
+                                        $candidate_local_absolute_path =
+                                            $remote_to_local_path_mapper->map_path(
+                                                $candidate_path
+                                            );
+                                        $candidate_local_index_path = relative_path_under(
+                                            $candidate_local_absolute_path, $this->filesystem_root
+                                        );
+                                        if (
+                                            $candidate_local_index_path === null
+                                            || $candidate_local_index_path === ""
+                                            || !path_is_same_as_or_descendant_of(
+                                                $local_index_path,
+                                                $candidate_local_index_path
+                                            )
+                                        ) {
+                                            return false;
+                                        }
+                                        if (
+                                            !$remote_to_local_path_mapper
+                                                ->remote_path_owns_mapped_local_subtree(
+                                                    $candidate_path
+                                                )
+                                        ) {
+                                            return false;
+                                        }
+                                        return file_sync_index_path_may_change(
+                                            $candidate_path,
+                                            $this->get_export_directories(),
+                                            $this->pull_excluded_files_with_path_prefixes
+                                        );
+                                    },
+                                    $deleted_path_is_empty_directory
+                                );
+                            if ($remote_deletion_root !== null) {
+                                $local_absolute_deletion_root =
+                                    $remote_to_local_path_mapper->map_path(
+                                        $remote_deletion_root
+                                    );
+                                if (
+                                    ( file_exists($local_absolute_deletion_root)
+                                        || is_link($local_absolute_deletion_root) )
+                                    && !$this->remove_local_absolute_path_without_following_symlinks(
+                                        $local_absolute_deletion_root
+                                    )
+                                ) {
+                                    $this->audit_log(
+                                        "Failed to delete: {$remote_deletion_root}",
+                                        true
+                                    );
+                                    $this->pull_index_journal->record_remote_invalidation(
+                                        $remote_absolute_path
+                                    );
+                                } else {
+                                    $this->audit_log(
+                                        "Deleted: {$remote_deletion_root}",
+                                        false
+                                    );
+                                    $this->pull_index_journal->record_successful_deletion(
+                                        $remote_absolute_path,
+                                        $local_absolute_deletion_root
+                                    );
+                                }
+                            } else {
+                                $this->pull_index_journal->record_remote_invalidation(
+                                    $remote_absolute_path
                                 );
                             }
                         }
@@ -7360,123 +7443,6 @@ class ImportClient
             "Added to the fetch list: {$remote_absolute_path}",
             false,
         );
-    }
-
-    /**
-     * Removes a remote deletion root from the mapped local filesystem.
-     *
-     * @return string|null The mapped local absolute path when it is absent
-     *                     after this call, or null when it could not be removed.
-     */
-    private function remove_remote_path_locally(
-        string $remote_deletion_root
-    ): ?string {
-        if ($remote_deletion_root === "") {
-            return null;
-        }
-        try {
-            $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
-                $remote_deletion_root
-            );
-        } catch (RuntimeException $e) {
-            $this->audit_log(
-                "Security: refusing to delete invalid path '{$remote_deletion_root}': " . $e->getMessage(),
-                true,
-            );
-            return null;
-        }
-        if (!file_exists($local_absolute_path) && !is_link($local_absolute_path)) {
-            return $local_absolute_path;
-        }
-
-        if ($this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)) {
-            $this->audit_log("Deleted: {$remote_deletion_root}", false);
-            return $local_absolute_path;
-        }
-
-        $this->audit_log("Failed to delete: {$remote_deletion_root}", true);
-        return null;
-    }
-
-    /**
-     * Derives the shallowest missing remote path that can be deleted locally.
-     *
-     * Whenever a path stored in the locally saved remote index is missing from the
-     * currently downloaded remote index, we must figure out the blast radius. What
-     * exactly was deleted on the remote server? This function answers that
-     * question based on the:
-     *
-     * * original missing path
-     * * the nearest path before it in the new index, if any
-     * * the nearest path after it in the new index, if any
-     *
-     * For example:
-     *
-     *     Saved index:
-     *         /srv/site/wp-config.php
-     *         /srv/site/wp-content/index.php
-     *         /srv/site/wp-content/test.php
-     *         /srv/site/wp-settings.php
-     *
-     *     Newly downloaded index:
-     *         /srv/site/wp-config.php
-     *         /srv/site/wp-settings.php
-     *
-     * When we notice `/srv/site/wp-content/index.php` is not in the new index,
-     * this function is called with:
-     *
-     *     derive_remote_deletion_root_from_sparse_index(
-     *         missing_remote_path: "/srv/site/wp-content/index.php",
-     *         nearest_existing_path_before: "/srv/site/wp-config.php",
-     *         nearest_existing_path_after: "/srv/site/wp-settings.php"
-     *     )
-     *     // returns "/srv/site/wp-content"
-     *
-     * The neighboring paths show that `/srv` and `/srv/site` still contain files,
-     * but neither path is within `/srv/site/wp-content`.
-     *
-     * @param string      $missing_remote_path           Previously recorded path that is now missing.
-     * @param string|null $nearest_existing_path_before  Nearest existing path before the missing path, if any.
-     * @param string|null $nearest_existing_path_after   Nearest existing path after the missing path, if any.
-     *
-     * @return string The shallowest missing parent, or the original path when every parent still contains an entry.
-     */
-    private function derive_remote_deletion_root_from_sparse_index(
-        string $missing_remote_path,
-        ?string $nearest_existing_path_before,
-        ?string $nearest_existing_path_after
-    ): string {
-        // Use an invalid path that cannot match any validated remote path so
-        // both comparisons below always receive strings.
-        if (null === $nearest_existing_path_before) {
-            $nearest_existing_path_before = "/\0/";
-        }
-        if (null === $nearest_existing_path_after) {
-            $nearest_existing_path_after = "/\0/";
-        }
-        $missing_remote_path_components = wp_unix_path_segments($missing_remote_path);
-        $remote_parent_components = [];
-        $remote_parent_component_count = count($missing_remote_path_components) - 1;
-        // Find the shallowest parent absent from both neighboring entries.
-        for ($component_index = 0; $component_index < $remote_parent_component_count; ++$component_index) {
-            $remote_parent_components[] = $missing_remote_path_components[$component_index];
-            $path_prefix = wp_join_unix_paths("/", ...$remote_parent_components);
-            if (
-                !path_is_same_as_or_descendant_of(
-                    $nearest_existing_path_before,
-                    $path_prefix,
-                )
-                && !path_is_same_as_or_descendant_of(
-                    $nearest_existing_path_after,
-                    $path_prefix,
-                )
-            ) {
-                return $path_prefix;
-            }
-        }
-        // Every parent still has an entry in the new index, so only the
-        // original missing entry should be deleted.
-        return $missing_remote_path;
     }
 
     /**

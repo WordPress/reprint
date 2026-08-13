@@ -80,6 +80,38 @@ final class RemoteToLocalPathMapperTest extends TestCase
         );
     }
 
+    public function testRemotePathDoesNotOwnLocalSubtreeContainingAnotherRemapTarget(): void
+    {
+        $mapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/a', '/b'],
+            [
+                '/a' => '/local/shared',
+                '/b' => '/local/shared/inner',
+            ]
+        );
+
+        $this->assertFalse($mapper->remote_path_owns_mapped_local_subtree('/a'));
+        $this->assertFalse($mapper->remote_path_owns_mapped_local_subtree('/b'));
+        $this->assertTrue($mapper->remote_path_owns_mapped_local_subtree('/a/file.txt'));
+    }
+
+    public function testRemotePathDoesNotOwnLocalSubtreeInsideAnotherRemapTarget(): void
+    {
+        $mapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/a', '/b'],
+            [
+                '/a' => '/local/shared/inner',
+                '/b' => '/local/shared',
+            ]
+        );
+
+        $this->assertFalse($mapper->remote_path_owns_mapped_local_subtree('/a'));
+        $this->assertFalse($mapper->remote_path_owns_mapped_local_subtree('/b'));
+        $this->assertTrue($mapper->remote_path_owns_mapped_local_subtree('/b/file.txt'));
+    }
+
     public function testPathBytesDoNotNeedToBeValidUtf8(): void
     {
         $remote_root = "/srv/site-\xff";

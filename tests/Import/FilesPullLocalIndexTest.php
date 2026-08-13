@@ -394,7 +394,7 @@ final class FilesPullLocalIndexTest extends TestCase
         );
     }
 
-    public function testPulledDeletionRemovesTheDerivedDirectoryRoot(): void
+    public function testPulledDeletionStopsAtNestedIncludedRoot(): void
     {
         $this->completeFilesPull();
         file_put_contents($this->localTree . '/folder/local-added.txt', 'local addition');
@@ -409,6 +409,10 @@ final class FilesPullLocalIndexTest extends TestCase
 
         $this->assertSame(0, $pull['exit'], $pull['output']);
         $this->assertDirectoryDoesNotExist($this->localTree . '/folder');
+        $this->assertSame(
+            $this->remoteFiles['unchanged.txt'],
+            file_get_contents($this->localTree . '/unchanged.txt')
+        );
         $index = $this->readIndex($this->localIndexPath());
         $this->assertArrayNotHasKey(
             $this->localIndexEntryPath('folder'),
@@ -431,6 +435,197 @@ final class FilesPullLocalIndexTest extends TestCase
             'local_paths_to_push' => 0,
             'local_paths_to_delete' => 0,
         ]], $this->filesDiffRecords($diff['stdout']));
+    }
+
+    public function testPulledDeletionKeepsAnExcludedDescendant(): void
+    {
+        $this->writeRemoteOverrides([
+            'added_files' => [
+                'folder/keep/child.txt' => 'excluded remote child',
+            ],
+        ]);
+        $this->completeFilesPull();
+        $excludedLocalPath = $this->localTree . '/folder/keep/child.txt';
+        $this->assertSame(
+            'excluded remote child',
+            file_get_contents($excludedLocalPath)
+        );
+
+        $this->abortFilesPull();
+        $this->writeRemoteOverrides([
+            'removed_paths' => ['folder/remote-deleted.txt'],
+        ]);
+        $pull = $this->runFilesPull([
+            '--include=/var/www/html/folder',
+            '--exclude=/var/www/html/folder/keep',
+        ]);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertSame(
+            'excluded remote child',
+            file_get_contents($excludedLocalPath)
+        );
+        $this->assertFileDoesNotExist(
+            $this->localTree . '/folder/remote-deleted.txt'
+        );
+        $index = $this->readIndex($this->localIndexPath());
+        $this->assertArrayHasKey(
+            $this->localIndexEntryPath('folder/keep/child.txt'),
+            $index
+        );
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath('folder/remote-deleted.txt'),
+            $index
+        );
+    }
+
+    public function testPulledDeletionRemovesAnEntireRemappedSelection(): void
+    {
+        $arguments = [
+            '--include=/var/www/html',
+            '--remap',
+            '/var/www/html',
+            ':fs-root:/remapped',
+        ];
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $this->assertFileExists($this->rawFileRoot . '/remapped/unchanged.txt');
+        file_put_contents($this->rawFileRoot . '/outside.txt', 'outside selection');
+
+        $this->abortFilesPull();
+        $this->writeRemoteOverrides([
+            'removed_paths' => array_merge(
+                array_keys($this->remoteFiles),
+                [self::PULLED_PATH]
+            ),
+        ]);
+        $pull = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertDirectoryDoesNotExist($this->rawFileRoot . '/remapped');
+        $this->assertSame(
+            'outside selection',
+            file_get_contents($this->rawFileRoot . '/outside.txt')
+        );
+        $this->assertSame([], $this->readIndex($this->localIndexPath()));
+    }
+
+    public function testPulledDeletionKeepsAnotherRemapTargetBelowIt(): void
+    {
+        $arguments = [
+            '--remap',
+            '/var/www/html/folder',
+            ':fs-root:/shared',
+            '--remap',
+            '/var/www/html/unchanged.txt',
+            ':fs-root:/shared/kept.txt',
+        ];
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $this->assertSame(
+            'same',
+            file_get_contents($this->rawFileRoot . '/shared/kept.txt')
+        );
+
+        $this->abortFilesPull();
+        $this->writeRemoteOverrides([
+            'removed_paths' => ['folder/remote-deleted.txt'],
+        ]);
+        $pull = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertFileDoesNotExist(
+            $this->rawFileRoot . '/shared/remote-deleted.txt'
+        );
+        $this->assertSame(
+            'same',
+            file_get_contents($this->rawFileRoot . '/shared/kept.txt')
+        );
+    }
+
+    public function testPulledDeletionKeepsAnotherRemapTargetAboveIt(): void
+    {
+        $arguments = [
+            '--remap',
+            '/var/www/html/folder',
+            ':fs-root:/shared/inner',
+            '--remap',
+            '/var/www/html/other',
+            ':fs-root:/shared',
+        ];
+        $this->writeRemoteOverrides([
+            'added_files' => [
+                'other/inner/keep.txt' => 'keep',
+            ],
+        ]);
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $this->assertSame(
+            'keep',
+            file_get_contents($this->rawFileRoot . '/shared/inner/keep.txt')
+        );
+
+        $this->abortFilesPull();
+        $this->writeRemoteOverrides([
+            'added_files' => [
+                'other/inner/keep.txt' => 'keep',
+            ],
+            'removed_paths' => ['folder/remote-deleted.txt'],
+        ]);
+        $pull = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertSame(
+            'keep',
+            file_get_contents($this->rawFileRoot . '/shared/inner/keep.txt')
+        );
+    }
+
+    public function testRemoteEmptyDirectoryBecomingNonEmptyKeepsLocalChildren(): void
+    {
+        $this->writeRemoteOverrides([
+            'added_directories' => ['folder/was-empty'],
+        ]);
+        $this->completeFilesPull();
+        file_put_contents(
+            $this->localTree . '/folder/was-empty/local.txt',
+            'local child'
+        );
+
+        $this->abortFilesPull();
+        $this->writeRemoteOverrides([
+            'added_files' => [
+                'folder/was-empty/remote.txt' => 'remote child',
+            ],
+        ]);
+        $pull = $this->runFilesPull([
+            '--include=/var/www/html/folder/was-empty',
+        ]);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertSame(
+            'local child',
+            file_get_contents(
+                $this->localTree . '/folder/was-empty/local.txt'
+            )
+        );
+        $this->assertSame(
+            'remote child',
+            file_get_contents(
+                $this->localTree . '/folder/was-empty/remote.txt'
+            )
+        );
+        $remoteIndex = $this->readIndex(
+            $this->pullStateDirectory . '/remote-index.jsonl'
+        );
+        $this->assertArrayNotHasKey(
+            '/var/www/html/folder/was-empty',
+            $remoteIndex
+        );
+        $this->assertArrayHasKey(
+            '/var/www/html/folder/was-empty/remote.txt',
+            $remoteIndex
+        );
     }
 
     public function testPulledDirectoryDeletionRemovesItsLocalIndexSubtree(): void
