@@ -11,18 +11,14 @@ use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 /**
  * Folds one wp-content directory into another.
  *
- * Entries the destination does not have move there. Entries it has stay as
- * they are, so the destination copy always wins. Nothing is deleted: a run
- * either moves an entry or leaves both sides alone.
+ * Entries that only exist in the source move to the destination. Entries that
+ * already exist in destination are untouched on both sides. Nothing is deleted.
  *
  * ## The unit boundary
  *
- * Merging stops at whole units. A plugin or a theme belongs to one side or the
- * other: descending into one both sides have would keep the files the
- * destination's version dropped, leaving a directory that matches no release
- * and pushing those files to the source site later. So the walk passes through
- * the directories that hold independent things and stops at the things
- * themselves:
+ * Plugins, mu-plugins, and themes (so called units) are shallowly merged to
+ * ensure we don't mix versions. So, if they are a directory (and not a file),
+ * the merge only moves the directory as a whole.
  *
  *   plugins, mu-plugins, themes -> one level, each child whole
  *   uploads                     -> all the way down, each file its own
@@ -52,6 +48,12 @@ class WpContentMerger
      */
     private const STAGING_SUFFIX = ".reprint-merge-incomplete";
 
+    /** Rule for an entry whose own children are whole plugins or themes. */
+    private const UNIT_CONTAINER = "unit";
+
+    /** Rule for an entry whose contents merge file by file. */
+    private const FILE_CONTAINER = "file";
+
     /** @var string wp-content directory whose entries move away. */
     private string $source_wp_content;
 
@@ -65,11 +67,23 @@ class WpContentMerger
      */
     private array $routed_destinations = [];
 
-    /** @var string[] Entry names whose own children are whole plugins or themes. */
-    private array $unit_container_names = ["plugins", "mu-plugins", "themes"];
-
-    /** @var string[] Entry names whose contents merge file by file. */
-    private array $file_container_names = ["uploads"];
+    /**
+     * How far the merge walks into an entry. An entry named by no rule moves
+     * whole, because nothing says what is inside it.
+     *
+     * The constructor gives each basename preflight reported the rule of the
+     * component it belongs to, so a site that renamed a component directory
+     * still gets that component's rule.
+     *
+     * @var array<string,string> Entry name mapped to UNIT_CONTAINER or
+     *                           FILE_CONTAINER.
+     */
+    private array $container_rules = [
+        "plugins" => self::UNIT_CONTAINER,
+        "mu-plugins" => self::UNIT_CONTAINER,
+        "themes" => self::UNIT_CONTAINER,
+        "uploads" => self::FILE_CONTAINER,
+    ];
 
     /**
      * @var callable Receives one audit line per moved entry.
@@ -111,19 +125,15 @@ class WpContentMerger
             if (!is_string($destination) || $destination === "") {
                 continue;
             }
-            // Both names route to the same place: the wp-content being merged
-            // in may use the name WordPress conventionally uses, or the one
-            // the destination site gave that component.
+            // Both names route to the same place, and the second inherits the
+            // first's rule: the wp-content being merged in may use the name
+            // WordPress conventionally uses, or the one the destination site
+            // gave that component.
             $this->routed_destinations[$conventional_name] = $destination;
             $this->routed_destinations[basename($destination)] = $destination;
-            if ($conventional_name === "uploads") {
-                $this->file_container_names[] = basename($destination);
-            } else {
-                $this->unit_container_names[] = basename($destination);
-            }
+            $this->container_rules[basename($destination)] =
+                $this->container_rules[$conventional_name];
         }
-        $this->unit_container_names = array_values(array_unique($this->unit_container_names));
-        $this->file_container_names = array_values(array_unique($this->file_container_names));
     }
 
     /**
@@ -162,11 +172,12 @@ class WpContentMerger
                 $this->move_entry($source_entry, $destination_entry);
                 continue;
             }
-            if (in_array($entry, $this->unit_container_names, true)) {
+            $rule = $this->container_rules[$entry] ?? null;
+            if ($rule === self::UNIT_CONTAINER) {
                 $this->merge_unit_container($source_entry, $destination_entry);
                 continue;
             }
-            if (in_array($entry, $this->file_container_names, true)) {
+            if ($rule === self::FILE_CONTAINER) {
                 $this->merge_file_tree($source_entry, $destination_entry);
             }
         }

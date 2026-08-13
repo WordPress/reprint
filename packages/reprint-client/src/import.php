@@ -4678,15 +4678,7 @@ class ImportClient
      *
      * Folds the wp-content directory under --from into the one the file pull
      * wrote, so entries only the local site has survive whatever the caller
-     * does to that directory next. flat-docroot replacing it with a symlink is
-     * the case this exists for, but the merge itself has nothing to do with
-     * flattening.
-     *
-     * --from names a site directory and this appends wp-content to it. The
-     * destination comes from preflight rather than the caller: reprint already
-     * knows where the source site kept wp-content, its plugins, its mu-plugins
-     * and its uploads, and asking every caller to re-derive that is how the WP
-     * Cloud layouts go quietly wrong.
+     * does to that directory next.
      */
     public function run_merge_wp_content(array $options): void
     {
