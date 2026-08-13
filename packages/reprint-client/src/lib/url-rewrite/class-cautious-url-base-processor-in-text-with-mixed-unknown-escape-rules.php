@@ -38,10 +38,11 @@
  * Supported sources:
  *
  * - ASCII domains and IPv4 or IPv6 addresses, with an optional port.
- * - An optional initial path containing only bytes from `!` (0x21) through
- *   `~` (0x7E). Spaces and multibyte characters are rejected. That path is
- *   part of the source base and is removed with it. A root slash is the URL
- *   separator rather than a removable path, so it remains after replacement. Mapping
+ * - An optional initial path containing valid UTF-8 without whitespace or
+ *   control characters. NFC and NFD spellings of the configured path match
+ *   the same source base. That path is part of the source base and is removed
+ *   with it. A root slash is the URL separator rather than a removable path,
+ *   so it remains after replacement. Mapping
  *   https://source.example/media to
  *   https://destination.example changes
  *   https://source.example/media/logo.png to
@@ -69,7 +70,7 @@
  *   of the surrounding text.
  * - Target user information, queries, fragments, IPv4/IPv6 addresses, and
  *   Unicode domains are not supported. Punycode domains are supported.
- * - Unicode source domains and paths are not supported.
+ * - Unicode source domains are not supported.
  *
  * CSS hexadecimal escapes such as https\3a \2f \2f ... and percent-encoded
  * separators are not recognized. They need a parser for the enclosing format.
@@ -77,10 +78,11 @@
  * be parsed first; pass only the resulting text leaves to this processor.
  *
  * The HTTP(S) scheme and authority are matched case-insensitively. A configured
- * source path remains byte-for-byte and case-sensitive because URL paths may
- * name different resources when their case differs. A scheme may begin at the
- * start of the value or after a byte other than an ASCII letter, plus sign, or
- * hyphen. Scheme-less authorities use a stricter boundary so the scanner does
+ * source path remains case-sensitive because URL paths may name different
+ * resources when their case differs. Canonically equivalent composed and
+ * decomposed Unicode spellings match. A scheme may begin at the start of the
+ * value or after a byte other than an ASCII letter, plus sign, or hyphen.
+ * Scheme-less authorities use a stricter boundary so the scanner does
  * not mistake part of another URL or identifier for a match. A dot or colon
  * immediately after the configured base is rejected: it may continue the host
  * name or introduce a port which the mapping did not include.

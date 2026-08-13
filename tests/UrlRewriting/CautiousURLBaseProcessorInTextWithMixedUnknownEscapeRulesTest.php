@@ -278,6 +278,27 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://destination.example/assets-2026/_private/logo.png',
                 ['https://source.example/media' => 'https://destination.example/assets-2026/_private'],
             ],
+            'decomposed source path matches a composed mapping' => [
+                'https://source.example/cafe' . "\u{0301}" . '/logo.png',
+                'https://destination.example/assets/logo.png',
+                [
+                    'https://source.example/caf' . "\u{00E9}" =>
+                        'https://destination.example/assets',
+                ],
+            ],
+            'composed source path matches a decomposed mapping' => [
+                'https://source.example/caf' . "\u{00E9}" . '/logo.png',
+                'https://destination.example/assets/logo.png',
+                [
+                    'https://source.example/cafe' . "\u{0301}" =>
+                    'https://destination.example/assets',
+                ],
+            ],
+            'other Unicode source path matches its exact spelling' => [
+                'https://source.example/🚤/logo.png',
+                'https://destination.example/logo.png',
+                ['https://source.example/🚤' => 'https://destination.example'],
+            ],
             'escaped target path copies the protocol slash spelling' => [
                 'https:\\/\\/source.example\\/media\\/logo.png',
                 'https:\\/\\/destination.example\\/assets\\/logo.png',
@@ -379,6 +400,11 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://SOURCE.EXAMPLE/Media/logo.png',
                 ['https://source.example/media' => 'https://destination.example'],
             ],
+            'compatibility-equivalent source path stays distinct' => [
+                'https://source.example/' . "\u{FB01}" . '/logo.png',
+                'https://source.example/' . "\u{FB01}" . '/logo.png',
+                ['https://source.example/fi' => 'https://destination.example'],
+            ],
             'target path has a dot segment' => [
                 'https://source.example/media/logo.png',
                 'https://source.example/media/logo.png',
@@ -448,11 +474,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://bücher.example/media/logo.png',
                 'https://bücher.example/media/logo.png',
                 ['https://bücher.example/media' => 'https://destination.example'],
-            ],
-            'source path contains Unicode characters' => [
-                'https://source.example/über-uns/logo.png',
-                'https://source.example/über-uns/logo.png',
-                ['https://source.example/über-uns' => 'https://destination.example'],
             ],
             'source mapping has a username and password' => [
                 'https://user:password@source.example/media/logo.png',
@@ -543,11 +564,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://🚤.example/media/logo.png',
                 'https://🚤.example/media/logo.png',
                 ['https://🚤.example' => 'https://destination.example'],
-            ],
-            'configured source path contains an emoji' => [
-                'https://source.example/🚤/logo.png',
-                'https://source.example/🚤/logo.png',
-                ['https://source.example/🚤' => 'https://destination.example'],
             ],
             'configured source path contains a space byte' => [
                 'https://source.example/media archive/logo.png',

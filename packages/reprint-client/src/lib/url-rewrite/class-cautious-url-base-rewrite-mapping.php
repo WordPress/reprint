@@ -27,6 +27,16 @@ class CautiousURLBaseRewriteMapping {
     /**
      * Prepares source URL base => target URL pairs.
      *
+     * A source may include an initial valid UTF-8 path without whitespace or
+     * control characters. A target must be an HTTP(S) URL with a supported
+     * domain, optional port, and optional restricted path:
+     *
+     * ```
+     * [
+     *     'https://source.example/media' => 'https://destination.example/assets',
+     * ]
+     * ```
+     *
      * Invalid pairs are skipped as a whole. They cannot produce a partial
      * domain replacement.
      *
@@ -127,13 +137,36 @@ class CautiousURLBaseRewriteMapping {
         $separator_escape = '\\\\{0,8}';
         $source_path_pattern = '';
         if ($source_path !== '') {
-            $source_path_pattern =
-                '(?<path_slash>' . $separator_escape . '/)'
-                . str_replace(
+            $source_path_spellings = [$source_path];
+            // NFC writes characters such as é as one code point. NFD writes
+            // the same character as e followed by a combining accent. Build
+            // both spellings because the mapping and input may use different
+            // forms for the same path.
+            foreach ([Normalizer::FORM_C, Normalizer::FORM_D] as $normalization_form) {
+                $normalized_source_path = Normalizer::normalize(
+                    $source_path,
+                    $normalization_form
+                );
+                if (
+                    is_string($normalized_source_path)
+                    && !in_array($normalized_source_path, $source_path_spellings, true)
+                ) {
+                    $source_path_spellings[] = $normalized_source_path;
+                }
+            }
+
+            $source_path_suffix_patterns = [];
+            foreach ($source_path_spellings as $source_path_spelling) {
+                $source_path_suffix_patterns[] = str_replace(
                     '/',
                     $separator_escape . '/',
-                    preg_quote(substr($source_path, 1), '~')
+                    preg_quote(substr($source_path_spelling, 1), '~')
                 );
+            }
+
+            $source_path_pattern =
+                '(?<path_slash>' . $separator_escape . '/)'
+                . '(?:' . implode('|', $source_path_suffix_patterns) . ')';
         }
         $candidate_boundary_pattern = '(?=
             $
@@ -188,14 +221,28 @@ class CautiousURLBaseRewriteMapping {
         $scheme = strtolower( (string) $parts['scheme'] );
         $host = (string) $parts['host'];
         $path = isset($parts['path']) ? (string) $parts['path'] : '';
+        if ($is_source_url) {
+            // parse_url() replaces control-valued bytes with underscores.
+            // Some UTF-8 continuation bytes fall in that range, so retain the
+            // source path directly from the configured URL.
+            $authority_separator_at = strpos($url, '://');
+            if ($authority_separator_at === false) {
+                return null;
+            }
+            $path_starts_at = strpos($url, '/', $authority_separator_at + 3);
+            $path = $path_starts_at === false ? '' : substr($url, $path_starts_at);
+        }
         $has_unsupported_target_path =
             !$is_source_url
             && $path !== ''
             && preg_match('#^/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$#', $path) !== 1;
+        $path_is_supported = $is_source_url
+            ? preg_match('/^[^\p{Z}\p{C}]*$/u', $path) === 1
+            : $this->contains_only_exclamation_mark_through_tilde_bytes($path);
         if (( $scheme !== 'http' && $scheme !== 'https' )
             || ( !$is_source_url && $has_unsupported_target_path )
             || !( $this->is_alphanumeric_dot_hyphen_domain_name($host) || ( $is_source_url && $this->is_ip_address($host) ) )
-            || !$this->contains_only_exclamation_mark_through_tilde_bytes($path)) {
+            || !$path_is_supported) {
             return null;
         }
 
