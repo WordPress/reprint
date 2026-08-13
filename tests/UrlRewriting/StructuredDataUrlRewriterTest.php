@@ -373,7 +373,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://new-site.com/page', $result);
     }
 
-    public function testBlockMarkupUsesCautiousFallbackForOpaqueUrlContexts(): void
+    public function testBlockMarkupUsesCautiousRewriterForOpaqueUrlContexts(): void
     {
         $rewriter = $this->createRewriter();
         $cases = [
@@ -504,13 +504,12 @@ class StructuredDataUrlRewriterTest extends TestCase
         ];
     }
 
-    public function testBlockMarkupCautiouslyRewritesEncodedSiteOriginInputValue(): void
+    public function testBlockMarkupLeavesEncodedSiteOriginInputValueUnchanged(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<input type="hidden" value="{&quot;instance&quot;:{&quot;url&quot;:&quot;https:\/\/old-site.com\/media\/hero.jpg&quot;}}">';
-        $expected = '<input type="hidden" value="{&quot;instance&quot;:{&quot;url&quot;:&quot;https:\/\/new-site.com\/media\/hero.jpg&quot;}}">';
 
-        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+        $this->assertSame($input, $rewriter->rewrite($input, 'block_markup'));
     }
 
     public function testBlockMarkupTextOffsetFollowsAnEarlierStructuredReplacement(): void
@@ -551,13 +550,12 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $result);
     }
 
-    public function testKnownBlockMarkupCautiouslyRewritesEmbeddedQueryUrl(): void
+    public function testKnownBlockMarkupDoesNotRewriteEmbeddedQueryUrl(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<a href="https://webarchive.org?url=https://old-site.com/about">Archive</a>';
-        $expected = '<a href="https://webarchive.org?url=https://new-site.com/about">Archive</a>';
 
-        $this->assertSame($expected, $rewriter->rewrite_known_block_markup_value($input));
+        $this->assertSame($input, $rewriter->rewrite_known_block_markup_value($input));
     }
 
     public function testKnownBlockMarkupRewritesMixedLiteralAndCaseVariantUrls(): void
@@ -627,7 +625,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', strtolower($result));
     }
 
-    public function testBlockMarkupCautiouslyRewritesUrlInAnUnknownAttribute(): void
+    public function testRewriteCacheSeparatesPlainTextAndBlockMarkupSemantics(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<div data-note="https://old-site.com/not-a-url-attribute">Content</div>';
@@ -636,10 +634,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $block_result = $rewriter->rewrite($input, 'block_markup');
 
         $this->assertStringContainsString('https://new-site.com/not-a-url-attribute', $plain_result);
-        $this->assertSame(
-            '<div data-note="https://new-site.com/not-a-url-attribute">Content</div>',
-            $block_result
-        );
+        $this->assertSame($input, $block_result);
     }
 
     // --- Content type hint: null (default) uses plain text URL scanning ---

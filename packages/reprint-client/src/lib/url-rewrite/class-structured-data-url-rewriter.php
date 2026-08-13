@@ -342,9 +342,12 @@ class StructuredDataUrlRewriter
      * Rewrite a decoded value already known by the SQL layer to be block markup.
      *
      * Block markup owns HTML attributes, block-comment JSON, and CSS url()
-     * values. After those exact rewrites, cautious source-base replacement
-     * covers URLs in opaque contexts such as srcset, style element bodies, and
-     * meta content without decoding or re-encoding their enclosing syntax.
+     * values. Raw text tokens use cautious source-base replacement because they
+     * may contain shortcodes or another syntax with unknown escaping rules.
+     * The block processor also handles srcset, meta content, and style element
+     * bodies through their raw spans. Other arbitrary HTML attributes remain
+     * outside that fallback until their raw string spans can be exposed without
+     * re-encoding the containing markup.
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
@@ -493,23 +496,20 @@ class StructuredDataUrlRewriter
                         }
                         $this->set_cached_rewrite_result($cache_key, $cache_value);
                     }
+
+                    if ('#tag' === $token_type) {
+                        $tag = $p->get_tag();
+                        if ('IMG' === $tag || 'SOURCE' === $tag) {
+                            $p->replace_url_bases_in_current_attribute('srcset', $this->url_mapping);
+                        } elseif ('META' === $tag) {
+                            $p->replace_url_bases_in_current_attribute('content', $this->url_mapping);
+                        } elseif ('STYLE' === $tag) {
+                            $p->replace_url_bases_in_current_style_element_body($this->url_mapping);
+                        }
+                    }
                 }
 
-                $rewritten_content = $p->get_updated_html();
-
-                // The block processor leaves opaque contexts such as srcset,
-                // style element bodies, and meta content untouched. Until it
-                // exposes raw spans for them, replace only recognized source
-                // bases in its updated markup.
-                $cautious_processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
-                    $rewritten_content,
-                    $this->url_mapping
-                );
-                while ($cautious_processor->next_url()) {
-                    $cautious_processor->replace_url_base();
-                }
-
-                return $cautious_processor->get_updated_text();
+                return $p->get_updated_html();
 
             case self::PLAIN_TEXT:
                 $p = new URLInTextProcessor( $content, $base_url );

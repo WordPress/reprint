@@ -3,7 +3,7 @@
 use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
 
 /**
- * Uses cautious byte replacement for text tokens in block markup.
+ * Uses cautious byte replacement for opaque block-markup values.
  *
  * This is a temporary bridge. BlockMarkupUrlProcessor already understands
  * HTML URL attributes, block attributes, and CSS. Its text-token path uses a
@@ -20,9 +20,9 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
  * bytes never pass through the HTML text encoder.
  *
  * Tags, block attributes, and CSS continue through BlockMarkupUrlProcessor.
- * This subclass deliberately handles only text tokens. StructuredDataUrlRewriter
- * separately runs the same cautious replacement over the completed markup for
- * opaque attributes. A SiteOrigin value such as this keeps its encoding:
+ * This class also handles the raw `srcset` and `content` subsyntaxes listed by
+ * that processor, plus style element bodies. It deliberately does not inspect
+ * arbitrary HTML attributes. A SiteOrigin value such as this remains unchanged:
  *
  * ```
  * <input value="{&quot;url&quot;:&quot;https:\/\/source.example\/image.jpg&quot;}">
@@ -35,6 +35,9 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
  *
  * @method string get_modifiable_text()
  * @method bool set_modifiable_text(string $plaintext_content)
+ * @method string|null get_tag()
+ * @method string|true|null get_attribute(string $name)
+ * @method bool set_attribute(string $name, string|bool $value)
  * @property array<string, WP_HTML_Text_Replacement> $lexical_updates
  */
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
@@ -55,6 +58,74 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
             return false;
         }
 
+        return $this->replace_url_bases_in_current_modifiable_text($url_mapping);
+    }
+
+    /**
+     * Replace configured URL bases in the current style element body.
+     *
+     * Style element bodies are raw text on the STYLE token, not #text tokens.
+     * Their raw span can be changed without re-encoding the CSS around a URL.
+     *
+     * @param array<string, string> $url_mapping Source URL base => target URL.
+     */
+    public function replace_url_bases_in_current_style_element_body(array $url_mapping): bool
+    {
+        if ('#tag' !== $this->get_token_type() || 'STYLE' !== $this->get_tag()) {
+            return false;
+        }
+
+        return $this->replace_url_bases_in_current_modifiable_text($url_mapping);
+    }
+
+    /**
+     * Replace configured URL bases in one raw HTML attribute value.
+     *
+     * Calling set_attribute() gives this subclass the raw lexical span selected
+     * by the tag processor. Restoring that span with only the source base
+     * changed keeps the attribute spelling, quotes, and entities intact.
+     *
+     * @param string                $attribute_name Attribute to replace within.
+     * @param array<string, string> $url_mapping    Source URL base => target URL.
+     */
+    public function replace_url_bases_in_current_attribute(
+        string $attribute_name,
+        array $url_mapping
+    ): bool {
+        if ('#tag' !== $this->get_token_type() || !is_string($this->get_attribute($attribute_name))) {
+            return false;
+        }
+
+        // Apply earlier URL changes before this attribute's raw span is read.
+        $html = $this->get_updated_html();
+        if (!$this->set_attribute($attribute_name, '')) {
+            return false;
+        }
+
+        $attribute_update_key = strtolower($attribute_name);
+        $attribute_update = $this->lexical_updates[$attribute_update_key] ?? null;
+        if ($attribute_update === null) {
+            return false;
+        }
+
+        $raw_attribute = substr($html, $attribute_update->start, $attribute_update->length);
+        $updated_attribute = $this->get_cautiously_rewritten_value($raw_attribute, $url_mapping);
+        if ($updated_attribute === $raw_attribute) {
+            unset($this->lexical_updates[$attribute_update_key]);
+            return false;
+        }
+
+        $attribute_update->text = $updated_attribute;
+        return true;
+    }
+
+    /**
+     * Replace URL bases in the current raw text or raw-text-element body.
+     *
+     * @param array<string, string> $url_mapping Source URL base => target URL.
+     */
+    private function replace_url_bases_in_current_modifiable_text(array $url_mapping): bool
+    {
         // Apply earlier tag, block-attribute, or CSS changes before reading the
         // current span. Their replacement lengths may have shifted its offset.
         $html = $this->get_updated_html();
@@ -65,16 +136,7 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
 
         $text_update = $this->lexical_updates['modifiable text'];
         $raw_text = substr($html, $text_update->start, $text_update->length);
-        $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
-            $raw_text,
-            $url_mapping
-        );
-
-        while ($processor->next_url()) {
-            $processor->replace_url_base();
-        }
-
-        $updated_text = $processor->get_updated_text();
+        $updated_text = $this->get_cautiously_rewritten_value($raw_text, $url_mapping);
         if ($updated_text === $raw_text) {
             unset($this->lexical_updates['modifiable text']);
             return false;
@@ -82,5 +144,22 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
 
         $text_update->text = $updated_text;
         return true;
+    }
+
+    /**
+     * @param array<string, string> $url_mapping Source URL base => target URL.
+     */
+    private function get_cautiously_rewritten_value(string $value, array $url_mapping): string
+    {
+        $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
+            $value,
+            $url_mapping
+        );
+
+        while ($processor->next_url()) {
+            $processor->replace_url_base();
+        }
+
+        return $processor->get_updated_text();
     }
 }
