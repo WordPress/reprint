@@ -256,8 +256,7 @@ final class FileIndexProcessor {
             ];
         }
 
-        // Named paths not yet inspected. Absent from cursors written before
-        // one request could carry them.
+        // Absent from cursors written before this field existed.
         $pending_path_roots = [];
         $encoded_path_roots = isset($cursor["paths"]) ? $cursor["paths"] : [];
         if (!is_array($encoded_path_roots)) {
@@ -321,9 +320,7 @@ final class FileIndexProcessor {
             return true;
         }
 
-        // One named path per step, before traversal. Inspecting them here
-        // rather than in start() keeps every step bounded and lets the cursor
-        // carry the ones still pending.
+        // One per step, before traversal, so each step stays bounded.
         if (!empty($this->pending_path_roots)) {
             $this->index_next_path_root();
             return true;
@@ -752,17 +749,11 @@ final class FileIndexProcessor {
     }
 
     /**
-     * Inspects the next named path and settles its cursor entry.
-     *
-     * Omissions match traversal: a path under a default-skipped directory or
-     * under the Reprint storage path is skipped even though the caller named
-     * it, so selecting one file cannot reach what selecting its directory
-     * cannot.
+     * Inspects one named path, applying the omissions traversal applies.
      */
     private function index_next_path_root(): void
     {
-        // Settle the cursor before any stat call, so a path that disappears
-        // or is omitted is not inspected again after a resume.
+        // Settle the cursor first so a skipped or vanished path is not retried.
         $path_root = array_shift($this->pending_path_roots);
 
         if (!$this->include_caches && self::path_is_default_skipped($path_root)) {
@@ -796,8 +787,6 @@ final class FileIndexProcessor {
 
     /**
      * Builds the index entries describing one inspected path.
-     *
-     * Static because start() schedules roots before the processor exists.
      *
      * @param string $path            Absolute path already confirmed by lstat().
      * @param array  $stat            lstat() result for the path.
@@ -840,8 +829,7 @@ final class FileIndexProcessor {
             $item["target"] = $link_target;
         }
         if ($type === "dir") {
-            // Physical emptiness, not emptiness after exclusions: calling an
-            // excluded child's parent empty would make push delete it.
+            // Physical emptiness, not post-exclusion: else push deletes the parent.
             $directory_handle = @opendir($path);
             if ($directory_handle !== false) {
                 $item["empty"] = true;
