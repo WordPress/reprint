@@ -74,15 +74,21 @@ describe('Import: URL Rewriting', () => {
             name: 'shortcode stored inside block JSON attributes',
             slug: 'url-rewrite-shortcode-block-attribute',
             input: '<!-- wp:reprint/e2e-shortcode {"shortcode":"[vc_video link=\\"http:\\/\\/127.0.0.1:8108\\/video.mp4\\"]"} /-->',
-            expected: '<!-- wp:reprint/e2e-shortcode {"shortcode":"[vc_video link=\\"http:\\/\\/target.example.com\\/video.mp4\\"]"} /-->',
-            rendered: '<span data-e2e-shortcode="vc_video" data-url="http://target.example.com/video.mp4"></span>',
+            expected: '<!-- wp:reprint/e2e-shortcode {"shortcode":"[vc_video link=\\"https:\\/\\/target.example.com\\/video.mp4\\"]"} /-->',
+            rendered: '<span data-e2e-shortcode="vc_video" data-url="https://target.example.com/video.mp4"></span>',
+        },
+        {
+            name: 'SiteOrigin JSON encoded inside an HTML attribute',
+            slug: 'url-rewrite-siteorigin-input-value',
+            input: '[vc_column_text]<input type="hidden" value="{&quot;url&quot;:&quot;http:\\/\\/127.0.0.1:8108\\/hero.jpg&quot;}">[/vc_column_text]',
+            expected: '[vc_column_text]<input type="hidden" value="{&quot;url&quot;:&quot;https:\\/\\/target.example.com\\/hero.jpg&quot;}">[/vc_column_text]',
+            rendered: '<div data-e2e-shortcode="vc_column_text"><input type="hidden" value="{&quot;url&quot;:&quot;https:\\/\\/target.example.com\\/hero.jpg&quot;}"></div>',
         },
     ];
 
     // These are useful failures, not descriptions of current behavior. A
     // migration user would reasonably expect each URL to move, but the URL is
-    // hidden behind a second encoding layer or a structured attribute whose
-    // raw string span is not available to the cautious processor yet.
+    // hidden behind an encoding layer the cautious processor does not decode.
     const SITE_BUILDER_EXPECTED_FAILURES = [
         {
             name: 'WPBakery table with percent-encoded HTML and URL',
@@ -97,13 +103,6 @@ describe('Import: URL Rewriting', () => {
             input: '[vc_raw_html]PGEgaHJlZj0iaHR0cDovLzEyNy4wLjAuMTo4MTA4L21hbnVhbC5wZGYiPk1hbnVhbDwvYT4=[/vc_raw_html]',
             expected: '[vc_raw_html]PGEgaHJlZj0iaHR0cDovL3RhcmdldC5leGFtcGxlLmNvbS9tYW51YWwucGRmIj5NYW51YWw8L2E+[/vc_raw_html]',
             rendered: '<a href="http://target.example.com/manual.pdf">Manual</a>',
-        },
-        {
-            name: 'SiteOrigin JSON encoded inside an HTML attribute',
-            slug: 'url-rewrite-siteorigin-input-value',
-            input: '[vc_column_text]<input type="hidden" value="{&quot;url&quot;:&quot;http:\\/\\/127.0.0.1:8108\\/hero.jpg&quot;}">[/vc_column_text]',
-            expected: '[vc_column_text]<input type="hidden" value="{&quot;url&quot;:&quot;http:\\/\\/target.example.com\\/hero.jpg&quot;}">[/vc_column_text]',
-            rendered: '<div data-e2e-shortcode="vc_column_text"><input type="hidden" value="{&quot;url&quot;:&quot;http:\\/\\/target.example.com\\/hero.jpg&quot;}"></div>',
         },
         {
             name: 'percent-encoded redirect URL in a shortcode attribute',

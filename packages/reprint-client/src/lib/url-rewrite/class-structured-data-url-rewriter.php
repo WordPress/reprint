@@ -342,13 +342,9 @@ class StructuredDataUrlRewriter
      * Rewrite a decoded value already known by the SQL layer to be block markup.
      *
      * Block markup owns HTML attributes, block-comment JSON, and CSS url()
-     * values. Raw text tokens use cautious source-base replacement because they
-     * may contain shortcodes or another syntax with unknown escaping rules.
-     * The block processor also handles srcset, meta content, archive values,
-     * style and script element bodies, and nested block JSON through their raw
-     * spans. Other arbitrary HTML attributes remain outside that fallback until
-     * their raw string spans can be exposed without re-encoding the containing
-     * markup.
+     * values. After exact URL handling, cautious source-base replacement runs
+     * on the current raw token. This covers opaque text, unknown attributes,
+     * URL subsyntaxes, and nested block JSON without re-encoding the token.
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
@@ -449,27 +445,11 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
-                $p = new CautiousTextBlockMarkupUrlProcessor( $content, $base_url );
+                $p = new CautiousTextBlockMarkupUrlProcessor( $content, $base_url, $this->url_mapping );
                 while ( $p->next_token() ) {
                     $token_type = $p->get_token_type() ?? '';
-                    if ( '#text' === $token_type ) {
-                        if ($this->maybe_contains_rewritable_urls($p->get_modifiable_text())) {
-                            $p->replace_url_bases_in_current_opaque_token($this->url_mapping);
-                        }
-                        continue;
-                    }
-
                     while ( $p->next_url_in_current_token() ) {
                         $raw_url = $p->get_raw_url();
-                        $tag = $p->get_tag();
-                        if (
-                            ( 'APPLET' === $tag || 'OBJECT' === $tag ) &&
-                            'archive' === $p->get_inspected_attribute_name()
-                        ) {
-                            // archive is a URL list, not one URL. Its raw
-                            // attribute handler replaces every source base.
-                            continue;
-                        }
                         $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
                         $cached = $this->get_cached_rewrite_result($cache_key);
                         if ($cached !== null) {
@@ -506,8 +486,6 @@ class StructuredDataUrlRewriter
                         }
                         $this->set_cached_rewrite_result($cache_key, $cache_value);
                     }
-
-                    $p->replace_url_bases_in_current_opaque_token($this->url_mapping);
                 }
 
                 return $p->get_updated_html();

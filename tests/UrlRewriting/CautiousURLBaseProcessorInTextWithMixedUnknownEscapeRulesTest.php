@@ -483,9 +483,12 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
      */
     private function rewrite(string $text, array $mapping): string
     {
-        return CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules::replace_all_url_bases(
-            $text,
-            $mapping
-        );
+        $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules($text, $mapping);
+
+        while ($processor->next_url()) {
+            $processor->replace_url_base();
+        }
+
+        return $processor->get_updated_text();
     }
 }
