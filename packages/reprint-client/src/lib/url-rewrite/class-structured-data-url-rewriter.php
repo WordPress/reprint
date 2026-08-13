@@ -1,6 +1,5 @@
 <?php
 
-use WordPress\DataLiberation\URL\URLInTextProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 
 use function WordPress\DataLiberation\URL\is_child_url_of;
@@ -19,7 +18,7 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  *    values and recurse on each
  * 3. Base64 → decode, recurse on decoded content, re-encode if changed
  * 4. Leaf text → CautiousTextBlockMarkupUrlProcessor (block_markup hint)
- *    or URLInTextProcessor (default)
+ *    or CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules (default)
  *
  * HTML is never auto-detected — the caller must explicitly pass
  * content_type='block_markup' for values known to contain HTML/block markup.
@@ -499,44 +498,16 @@ class StructuredDataUrlRewriter
                 return $p->get_updated_html();
 
             case self::PLAIN_TEXT:
-                $p = new URLInTextProcessor( $content, $base_url );
+                if ( ! $this->maybe_contains_rewritable_urls( $content ) ) {
+                    return $content;
+                }
+
+                $p = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
+                    $content,
+                    $this->url_mapping
+                );
                 while ( $p->next_url() ) {
-                    $raw_url = $p->get_raw_url();
-                    $cache_key = $this->mapping_cache_key . "\0" . self::PLAIN_TEXT . "\0" . $raw_url;
-                    $cached = $this->get_cached_rewrite_result($cache_key);
-                    if ($cached !== null) {
-                        if ($cached !== false) {
-                            $p->set_raw_url($cached['raw_url']);
-                        }
-                        continue;
-                    }
-
-                    $parsed_url = $p->get_parsed_url();
-                    $converted = false;
-                    foreach ( $parsed_mapping as $mapping ) {
-                        if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
-                            $converted = WPURL::replace_base_url(
-                                $parsed_url,
-                                array(
-                                    'old_base_url' => $base_url,
-                                    'new_base_url' => $mapping['to_url'],
-                                    'raw_url'      => $p->get_raw_url(),
-                                    'is_relative'  => false,
-                                )
-                            );
-                            break;
-                        }
-                    }
-
-                    $cache_value = false;
-                    if ($converted !== false) {
-                        $cache_value = [
-                            'raw_url'    => (string) $converted,
-                            'parsed_url' => $converted->new_url,
-                        ];
-                        $p->set_raw_url($cache_value['raw_url']);
-                    }
-                    $this->set_cached_rewrite_result($cache_key, $cache_value);
+                    $p->replace_url_base();
                 }
 
                 return $p->get_updated_text();
