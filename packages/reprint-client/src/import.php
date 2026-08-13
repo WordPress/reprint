@@ -6933,7 +6933,7 @@ class ImportClient
             ) {
                 throw new RuntimeException("Failed to resume the fetch list.");
             }
-            $this->pull_index_journal->open_at_saved_byte_offset(
+            $this->pull_index_journal->open_and_truncate_to_saved_byte_offset(
                 $file_diff_progress_state->pull_index_wal_byte_offset
             );
 

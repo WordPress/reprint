@@ -178,7 +178,7 @@ class PullIndexJournal
      * @throws LogicException When the WAL is already open.
      * @throws RuntimeException When the WAL cannot be restored to that offset.
      */
-    public function open_at_saved_byte_offset(int $byte_offset): void
+    public function open_and_truncate_to_saved_byte_offset(int $byte_offset): void
     {
         if ($this->pull_index_wal_handle) {
             throw new LogicException(
