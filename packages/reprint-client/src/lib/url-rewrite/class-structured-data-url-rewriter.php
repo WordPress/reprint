@@ -341,10 +341,9 @@ class StructuredDataUrlRewriter
      * Rewrite a decoded value already known by the SQL layer to be block markup.
      *
      * Block markup owns HTML attributes, block-comment JSON, and CSS url()
-     * values. Raw text tokens use cautious source-base replacement because they
-     * may contain shortcodes or another syntax with unknown escaping rules.
-     * Arbitrary HTML attributes remain outside that fallback until their raw
-     * string spans can be exposed without re-encoding the containing markup.
+     * values. After exact URL handling, cautious source-base replacement runs
+     * on the current raw token. This covers opaque text, unknown attributes,
+     * URL subsyntaxes, and nested block JSON without re-encoding the token.
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
@@ -445,16 +444,9 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
-                $p = new CautiousTextBlockMarkupUrlProcessor( $content, $base_url );
+                $p = new CautiousTextBlockMarkupUrlProcessor( $content, $base_url, $this->url_mapping );
                 while ( $p->next_token() ) {
                     $token_type = $p->get_token_type() ?? '';
-                    if ( '#text' === $token_type ) {
-                        if ($this->maybe_contains_rewritable_urls($p->get_modifiable_text())) {
-                            $p->replace_url_bases_in_current_text($this->url_mapping);
-                        }
-                        continue;
-                    }
-
                     while ( $p->next_url_in_current_token() ) {
                         $raw_url = $p->get_raw_url();
                         $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;

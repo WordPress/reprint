@@ -3,7 +3,7 @@
 use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
 
 /**
- * Uses cautious byte replacement for text tokens in block markup.
+ * Uses cautious byte replacement for opaque block-markup values.
  *
  * This is a temporary bridge. BlockMarkupUrlProcessor already understands
  * HTML URL attributes, block attributes, and CSS. Its text-token path uses a
@@ -16,70 +16,97 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
  *
  * has no declared escaping rules. Decoding and serializing that URL can change
  * its slashes, quotes, entities, query, or fragment. This subclass replaces
- * only the configured source base in the raw text-token bytes. The surrounding
+ * only the configured source base in the raw token bytes. The surrounding
  * bytes never pass through the HTML text encoder.
  *
  * Tags, block attributes, and CSS continue through BlockMarkupUrlProcessor.
- * This class deliberately does not inspect arbitrary HTML attributes. A
- * SiteOrigin value such as this remains unchanged:
+ * After that exact handling, this class can apply the same cautious replacement
+ * to the current raw token. That covers unsupported subsyntaxes without a
+ * second pass over the complete markup.
  *
- * ```
- * <input value="{&quot;url&quot;:&quot;https:\/\/source.example\/image.jpg&quot;}">
- * ```
+ * The intended design belongs in the PHP toolkit: its block URL processor
+ * should apply this token-local fallback directly. Once that exists, this
+ * subclass should disappear.
  *
- * The intended design belongs in the PHP toolkit: structured processors
- * should expose the raw spans of opaque string leaves, and the cautious URL
- * base processor should update those spans without decoding and re-encoding
- * their enclosing format. Once that exists, this subclass should disappear.
- *
- * @method string get_modifiable_text()
- * @method bool set_modifiable_text(string $plaintext_content)
- * @property array<string, WP_HTML_Text_Replacement> $lexical_updates
+ * @method bool set_bookmark(string $name)
+ * @method bool release_bookmark(string $name)
+ * @property array<string, WP_HTML_Span> $bookmarks
+ * @property array<int|string, WP_HTML_Text_Replacement> $lexical_updates
  */
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
 class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
+    /** @var array<string, string> */
+    private array $url_mapping;
+
     /**
-     * Replace configured URL bases in the current raw text token.
-     *
-     * WP_HTML_Tag_Processor exposes decoded text through get_modifiable_text()
-     * and HTML-encodes the complete replacement in set_modifiable_text(). The
-     * protected lexical update contains the raw span selected by the parser.
-     * Replacing its text directly preserves every byte outside the URL base.
-     *
-     * @param array<string, string> $url_mapping Source URL base => target URL.
+     * @param string                $html            Block markup to process.
+     * @param string|null           $base_url_string Base URL for exact URL parsing.
+     * @param array<string, string> $url_mapping     Source URL base => target URL.
      */
-    public function replace_url_bases_in_current_text(array $url_mapping): bool
+    public function __construct($html, ?string $base_url_string, array $url_mapping)
+    {
+        parent::__construct($html, $base_url_string);
+        $this->url_mapping = $url_mapping;
+    }
+
+    /**
+     * Yield exact URLs first, then cautiously rewrite the rest of the token.
+     *
+     * Text tokens are entirely opaque. `archive` is also left to the cautious
+     * fallback because it is a URL list, not one URL.
+     */
+    public function next_url_in_current_token()
     {
         if ('#text' !== $this->get_token_type()) {
-            return false;
+            while (parent::next_url_in_current_token()) {
+                if ('archive' === $this->get_inspected_attribute_name()) {
+                    continue;
+                }
+
+                return true;
+            }
         }
 
-        // Apply earlier tag, block-attribute, or CSS changes before reading the
-        // current span. Their replacement lengths may have shifted its offset.
+        $this->replace_url_bases_in_current_token();
+        return false;
+    }
+
+    /**
+     * Replace configured URL bases in the current raw token.
+     *
+     * Applying pending exact changes first keeps the token span current. The
+     * cautious processor then changes only configured source-base bytes within
+     * that span, preserving every other byte in the token.
+     */
+    private function replace_url_bases_in_current_token(): bool
+    {
         $html = $this->get_updated_html();
-
-        if (!$this->set_modifiable_text('')) {
+        if (!$this->set_bookmark('cautious URL base replacement')) {
             return false;
         }
 
-        $text_update = $this->lexical_updates['modifiable text'];
-        $raw_text = substr($html, $text_update->start, $text_update->length);
+        $token_span = $this->bookmarks['cautious URL base replacement'];
+        $this->release_bookmark('cautious URL base replacement');
+        $raw_token = substr($html, $token_span->start, $token_span->length);
         $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
-            $raw_text,
-            $url_mapping
+            $raw_token,
+            $this->url_mapping
         );
-
         while ($processor->next_url()) {
             $processor->replace_url_base();
         }
 
-        $updated_text = $processor->get_updated_text();
-        if ($updated_text === $raw_text) {
-            unset($this->lexical_updates['modifiable text']);
+        $updated_token = $processor->get_updated_text();
+        if ($updated_token === $raw_token) {
             return false;
         }
 
-        $text_update->text = $updated_text;
+        $this->lexical_updates[] = new WP_HTML_Text_Replacement(
+            $token_span->start,
+            $token_span->length,
+            $updated_token
+        );
+
         return true;
     }
 }
