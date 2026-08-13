@@ -257,7 +257,7 @@ function resolve_db_credentials(): array
  */
 function is_sqlite_site(): bool
 {
-    // @TODO: Actually check for the WP_SQLite_Driver class being used here.
+    // Connection setup checks which supported driver WordPress loaded.
     return defined('SQLITE_DB_DROPIN_VERSION') && isset($GLOBALS['@pdo']);
 }
 
@@ -265,11 +265,10 @@ function is_sqlite_site(): bool
  * Creates a database connection appropriate for the detected backend.
  *
  * For MySQL sites, returns a standard PDO connection.
- * For SQLite sites, wraps the WP_SQLite_Driver that WordPress already
- * loaded (via $wpdb->dbh) in a PDO-compatible adapter. The driver's
- * AST-based translator converts every MySQL query to SQLite on the fly,
- * so MySQLDumpProducer sees MySQL-shaped results and produces valid
- * MySQL SQL output.
+ * For SQLite sites, wraps the MySQL-on-SQLite driver which WordPress already
+ * loaded in a PDO-compatible adapter. The driver's translator converts every
+ * MySQL query to SQLite on the fly, so MySQLDumpProducer sees MySQL-shaped
+ * results and produces valid MySQL SQL output.
  *
  * @param array $creds   Credentials from resolve_db_credentials().
  * @param array $options PDO options (only used for MySQL connections).
@@ -312,10 +311,11 @@ function create_db_connection(array $creds, array $options = [])
 }
 
 /**
- * Wraps the already-loaded WP_SQLite_Driver in a PDO-compatible adapter.
+ * Wraps the SQLite plugin's already-loaded driver in a PDO-compatible adapter.
  *
- * Validates that the sqlite-database-integration plugin version is in the
- * supported range, then extracts the driver and raw PDO from $wpdb->dbh.
+ * Version 3 exposes WP_MySQL_On_SQLite through $wpdb->get_driver(). Version 2
+ * stores WP_SQLite_Driver in $wpdb->dbh. Both drivers translate MySQL queries,
+ * but neither provides every PDO operation used by MySQLDumpProducer.
  *
  * @return object PDO-compatible adapter (SqliteDriverPDO).
  * @throws RuntimeException If the driver is not available or unsupported.
@@ -325,33 +325,49 @@ function create_sqlite_pdo_adapter()
     global $wpdb;
 
     /**
-     * Minimum sqlite-database-integration version that exposes the API we
-     * depend on: WP_SQLite_Driver::query(), get_query_results(),
-     * get_connection()->get_pdo().
+     * Minimum sqlite-database-integration version that exposes the legacy
+     * WP_SQLite_Driver API used below.
      */
     $min_version = '2.1.0';
 
     require_once __DIR__ . "/class-sqlite-driver-pdo.php";
 
-    if (!isset($wpdb) || !($wpdb->dbh instanceof WP_SQLite_Driver)) {
-        throw new RuntimeException(
-            "SQLite export requires WordPress loaded with the " .
-            "sqlite-database-integration plugin active."
-        );
-    }
+    $driver = null;
+    $raw_pdo = null;
 
-    // Verify the plugin version is in the supported range.
-    if (defined('SQLITE_DRIVER_VERSION')) {
-        if (version_compare(SQLITE_DRIVER_VERSION, $min_version, '<')) {
-            throw new RuntimeException(
-                "sqlite-database-integration plugin version " . SQLITE_DRIVER_VERSION .
-                " is too old. Minimum required: " . $min_version
-            );
+    if (isset($wpdb) && method_exists($wpdb, 'get_driver')) {
+        $candidate = $wpdb->get_driver();
+        if (is_a($candidate, 'WP_MySQL_On_SQLite')) {
+            $driver = $candidate;
+            $raw_pdo = call_user_func([$driver, 'get_sqlite_pdo']);
         }
     }
 
-    $driver = $wpdb->dbh;
-    $raw_pdo = $driver->get_connection()->get_pdo();
+    if (
+        $driver === null &&
+        isset($wpdb) &&
+        $wpdb->dbh instanceof WP_SQLite_Driver
+    ) {
+        $driver = $wpdb->dbh;
+        $raw_pdo = $driver->get_connection()->get_pdo();
+    }
+
+    if ($driver === null) {
+        throw new RuntimeException(
+            "SQLite export requires WordPress to load a supported " .
+            "sqlite-database-integration driver."
+        );
+    }
+
+    if (
+        defined('SQLITE_DRIVER_VERSION') &&
+        version_compare(SQLITE_DRIVER_VERSION, $min_version, '<')
+    ) {
+        throw new RuntimeException(
+            "sqlite-database-integration plugin version " . SQLITE_DRIVER_VERSION .
+            " is too old. Minimum required: " . $min_version
+        );
+    }
 
     return new SqliteDriverPDO($driver, $raw_pdo);
 }
