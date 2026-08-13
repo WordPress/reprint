@@ -550,7 +550,7 @@ class StructuredDataUrlRewriterTest extends TestCase
             ],
             'port' => [
                 '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
-                '<a href="https://new.example:8443/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://new.example:8443/media/image.jpg">Image</a>[vc_video link="https:\/\/new.example:8443\/media\/video.mp4"]',
                 ['https://old-site.com' => 'https://new.example:8443'],
             ],
             'IPv4 address' => [
