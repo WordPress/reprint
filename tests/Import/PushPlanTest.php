@@ -499,27 +499,6 @@ final class PushPlanTest extends TestCase
         $resumedPlan->close();
     }
 
-    public function testResumesCursorWrittenBeforeDocumentRootMappingAndProgressTotals(): void
-    {
-        $entries = $this->manyFileEntries(2);
-        $current = $this->writeIndex($entries);
-        $plan = $this->startPlan($current);
-
-        $this->assertTrue($this->nextPlanStep($plan));
-        $plan->close();
-
-        unset($this->cursor['document_root_local_relative_path']);
-        unset($this->cursor['position']['local_paths_to_push_count']);
-        unset($this->cursor['position']['local_file_bytes_to_push']);
-
-        $resumedPlan = $this->resumePlan();
-        $this->planToCompletion($resumedPlan);
-
-        $this->assertCount(2, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertNull($this->planCursor()['local_paths_to_push_count']);
-        $this->assertNull($this->planCursor()['local_file_bytes_to_push']);
-    }
-
     public function testResumeDiscardsACompletedStepWhoseCursorWasNotStored(): void
     {
         $plan = $this->startPlan($this->writeIndex($this->manyFileEntries(2)));
@@ -609,13 +588,11 @@ final class PushPlanTest extends TestCase
         $cursor = $plan->get_cursor();
         $this->assertSame([
             'plan_directory',
-            'filesystem_root',
             'local_index_file',
             'document_root_local_relative_path',
             'position',
         ], array_keys($cursor));
         $this->assertSame($this->planDirectory(), $cursor['plan_directory']);
-        $this->assertSame(realpath($this->filesystemRoot()), $cursor['filesystem_root']);
         $this->assertSame($this->localIndexFile(), $cursor['local_index_file']);
         $this->assertSame('', $cursor['document_root_local_relative_path']);
         $this->assertSame([
@@ -662,7 +639,12 @@ final class PushPlanTest extends TestCase
         );
 
         try {
-            $this->assertSame('/', $plan->get_cursor()['filesystem_root']);
+            $this->assertSame(
+                '/',
+                $plan->get_cursor()['position'][
+                    'fresh_local_index_cursor'
+                ]['filesystem_root']
+            );
         } finally {
             $plan->close();
         }

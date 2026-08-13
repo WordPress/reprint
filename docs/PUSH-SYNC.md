@@ -135,15 +135,14 @@ A push plan is an internal part of the sender lifecycle:
    create stores the exclusions in `excluded_paths.json` after creating the
    active `plan/` directory.
 2. The sender starts one internal `PushPlan`. The plan copies the exclusions to
-   `plan/excluded_paths.json`, then opens
-   `plan/fresh_local_index.jsonl` and a `FileIndexProcessor`. Each internal
-   `indexing` step advances one traversal event, appends its JSONL entries when
-   applicable, and updates its traversal cursor and fresh-index byte offset.
+   `plan/excluded_paths.json`, then starts a `FreshLocalIndexProcessor`. Each
+   internal `indexing` step advances one filesystem traversal event. The
+   processor writes `plan/fresh_local_index.jsonl` and updates its cursor.
    One sender step runs at most 256 internal planning steps without crossing
    an internal phase boundary, flushes their output, and stores the resulting
    cursor in `sender.json` before returning.
 3. Once traversal is complete, the plan enters `starting_diff`. The next step
-   starts the index diff and enters `diffing`.
+   sorts the fresh local index, starts the index diff, and enters `diffing`.
 4. Each later `next_step()` compares at most one path represented by either
    index. It returns true while another planning step remains and false when
    both indexes reach EOF. It
@@ -175,10 +174,10 @@ sender run. Keeping another cursor and retained handle for this post-commit copy
 is not justified until measurements from materially larger installations show
 that it matters.
 
-The cursor contains the plan directory, filesystem root, local index file,
-document root's local relative path, and current planning position. During
-indexing, that position contains the `FileIndexProcessor` cursor and committed
-fresh-index byte offset. During diffing, each step flushes only the path list or
+The cursor contains the plan directory, local index file, document root's local
+relative path, and current planning position. During
+indexing, that position contains the complete `FreshLocalIndexProcessor`
+cursor. During diffing, each step flushes only the path list or
 append-only active deletion roots file changed by that step before updating
 the two output byte offsets and the nested FileSyncPatchPlanner cursor. Each
 active deletion root links to the preceding one, so continuation reads only
@@ -348,9 +347,9 @@ without closing, the next process uses the preceding sender boundary and
 receiver-confirmed cursors to account for later remote work.
 
 During PushPlan's internal `indexing` phase, the plan retains one
-`FileIndexProcessor` and the open fresh local index across steps. A
-newly opened plan truncates that file to the byte offset stored with the
-processor cursor before continuing. The sender lazily opens
+`FreshLocalIndexProcessor` across steps. A resumed processor truncates the
+fresh local index to the byte offset stored with its filesystem traversal
+cursor before continuing. The sender lazily opens
 `local_paths_to_push.jsonl`, `local_paths_to_delete`, and the current local file.
 It retains those handles across `next_step()` calls, lets each handle advance
 with the work, and seeks only when a newly opened or receiver-confirmed offset

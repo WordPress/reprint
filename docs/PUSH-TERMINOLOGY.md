@@ -56,8 +56,8 @@ local relative path to a document-root-relative path.
   state directory. Files-pull advances only the entries for completed local
   mutations; files-push atomically replaces the local index only after the
   target confirms commit. Use `$local_index_file`.
-- A **fresh local index** is the current filesystem-root scan created while
-  planning a push. Use `$fresh_local_index_file`.
+- A **fresh local index** is the current filesystem-root scan used for sync
+  planning. Use `$fresh_local_index_file`.
 - An **index entry** records one path, type, size, and ctime. Use
   `$index_entry`.
 - A **file sync patch planner** compares a patch base index with a patch result
@@ -312,12 +312,11 @@ active deletion roots file. That file remembers directory deletions which
 cover index paths the planner has not processed yet.
 
 The PushPlan cursor is stored in `sender.json`. It contains `plan_directory`,
-`filesystem_root`, `local_index_file`, and the current
-planning position. During `indexing`, that position contains the
-FileIndexProcessor cursor and the committed byte offset in
-`fresh_local_index.jsonl`. During `diffing`, it contains the output offsets
-and the complete FileSyncPatchPlanner cursor. PushPlan
-stores that nested cursor without unpacking or rebuilding it. The active
+`local_index_file`, and the current
+planning position. During `indexing`, that position contains the complete
+FreshLocalIndexProcessor cursor. During `diffing`, it contains the output
+offsets and the complete FileSyncPatchPlanner cursor. PushPlan stores either
+nested cursor without unpacking or rebuilding it. The active
 deletion roots file is append-only; each entry links to the preceding active
 directory. The exclusions have a maximum of 100 paths. The `sender.json`
 phases are `creating`, `finishing_previous_commit`,
@@ -524,8 +523,8 @@ Use these names verbatim inside `PushPlan`:
 | Index entry and shape | `$index_entry`, `$local_index_entry`, `$local_index_entry_shape`, `index_entry_shape()` |
 | Cursor | `$cursor`, `get_cursor()` |
 | Plan-owned excluded paths | `$excluded_paths_file` |
-| Fresh local index processor | `$file_index_processor`, `next_file_index_step()` |
-| Fresh local indexing cursor | `IndexingCursor`, `file_index_cursor` |
+| Fresh local index processor | `FreshLocalIndexProcessor`, `$fresh_local_index_processor` |
+| Fresh local indexing cursor | `fresh_local_index_cursor`, `$fresh_local_index_cursor` |
 | Fresh local index byte offset | `$fresh_local_index_byte_offset` |
 | Open fresh local index | `$fresh_local_index_handle` |
 | Combined index bytes | `$index_bytes_total` |

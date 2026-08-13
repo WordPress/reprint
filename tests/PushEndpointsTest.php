@@ -1885,8 +1885,12 @@ final class PushEndpointsTest extends TestCase {
         $push_state_directory = $this->root . '/retained-plan-state';
         $fresh_local_index_path = $push_state_directory . '/plan/fresh_local_index.jsonl';
         $plan_property = new ReflectionProperty(PushFilesSender::class, 'plan');
-        $fresh_local_index_handle_property = new ReflectionProperty(
+        $fresh_local_index_processor_property = new ReflectionProperty(
             PushPlan::class,
+            'fresh_local_index_processor'
+        );
+        $fresh_local_index_handle_property = new ReflectionProperty(
+            FreshLocalIndexProcessor::class,
             'fresh_local_index_handle'
         );
         $fresh_local_index_handle = null;
@@ -1900,7 +1904,12 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame('planning', $create_result['phase']);
             $plan = $plan_property->getValue($sender);
             $this->assertInstanceOf(PushPlan::class, $plan);
-            $fresh_local_index_handle = $fresh_local_index_handle_property->getValue($plan);
+            $fresh_local_index_processor =
+                $fresh_local_index_processor_property->getValue($plan);
+            $fresh_local_index_handle =
+                $fresh_local_index_handle_property->getValue(
+                    $fresh_local_index_processor
+                );
             $this->assertIsResource($fresh_local_index_handle);
 
             $cursor_before_step = $this->loadPlanPosition($push_state_directory);
@@ -1951,9 +1960,16 @@ final class PushEndpointsTest extends TestCase {
         $fresh_local_index_path = $push_state_directory . '/plan/fresh_local_index.jsonl';
         $options = $this->senderOptions($local_docroot, $push_state_directory);
         $plan_property = new ReflectionProperty(PushFilesSender::class, 'plan');
-        $file_index_processor_property = new ReflectionProperty(PushPlan::class, 'file_index_processor');
-        $fresh_local_index_handle_property = new ReflectionProperty(
+        $fresh_local_index_processor_property = new ReflectionProperty(
             PushPlan::class,
+            'fresh_local_index_processor'
+        );
+        $file_index_processor_property = new ReflectionProperty(
+            FreshLocalIndexProcessor::class,
+            'file_index_processor'
+        );
+        $fresh_local_index_handle_property = new ReflectionProperty(
+            FreshLocalIndexProcessor::class,
             'fresh_local_index_handle'
         );
 
@@ -1970,20 +1986,50 @@ final class PushEndpointsTest extends TestCase {
             );
             $plan = $plan_property->getValue($sender);
             $this->assertInstanceOf(PushPlan::class, $plan);
-            $file_index_processor = $file_index_processor_property->getValue($plan);
-            $fresh_local_index_handle = $fresh_local_index_handle_property->getValue($plan);
+            $fresh_local_index_processor =
+                $fresh_local_index_processor_property->getValue($plan);
+            $file_index_processor = $file_index_processor_property->getValue(
+                $fresh_local_index_processor
+            );
+            $fresh_local_index_handle =
+                $fresh_local_index_handle_property->getValue(
+                    $fresh_local_index_processor
+                );
             $this->assertInstanceOf(FileIndexProcessor::class, $file_index_processor);
             $this->assertIsResource($fresh_local_index_handle);
 
             $this->assertTrue($sender->next_step());
             $this->assertSame('planning', $sender->get_phase());
             $this->assertSame($plan, $plan_property->getValue($sender));
-            $this->assertSame($file_index_processor, $file_index_processor_property->getValue($plan));
-            $this->assertSame($fresh_local_index_handle, $fresh_local_index_handle_property->getValue($plan));
+            $this->assertSame(
+                $fresh_local_index_processor,
+                $fresh_local_index_processor_property->getValue($plan)
+            );
+            $this->assertSame(
+                $file_index_processor,
+                $file_index_processor_property->getValue(
+                    $fresh_local_index_processor
+                )
+            );
+            $this->assertSame(
+                $fresh_local_index_handle,
+                $fresh_local_index_handle_property->getValue(
+                    $fresh_local_index_processor
+                )
+            );
             $plan_cursor = $this->loadPlanPosition($push_state_directory);
             $this->assertSame('indexing', $plan_cursor['phase']);
-            $this->assertSame(ftell($fresh_local_index_handle), $plan_cursor['fresh_local_index_byte_offset']);
-            $this->assertNotEmpty($plan_cursor['file_index_cursor']['stack']);
+            $this->assertSame(
+                ftell($fresh_local_index_handle),
+                $plan_cursor['fresh_local_index_cursor']['position'][
+                    'fresh_local_index_byte_offset'
+                ]
+            );
+            $this->assertNotEmpty(
+                $plan_cursor['fresh_local_index_cursor']['position'][
+                    'file_index_cursor'
+                ]['stack']
+            );
             $state = $this->loadActiveState($push_state_directory);
             $this->assertIsArray($state);
             $this->assertArrayNotHasKey('file_index_cursor', $state);
@@ -1997,7 +2043,13 @@ final class PushEndpointsTest extends TestCase {
         try {
             $this->assertSame('planning', $sender->get_phase());
             $resumed_plan = $plan_property->getValue($sender);
-            $this->assertIsResource($fresh_local_index_handle_property->getValue($resumed_plan));
+            $resumed_fresh_local_index_processor =
+                $fresh_local_index_processor_property->getValue($resumed_plan);
+            $this->assertIsResource(
+                $fresh_local_index_handle_property->getValue(
+                    $resumed_fresh_local_index_processor
+                )
+            );
             $this->takeSenderStepsUntilPlanPhase($sender, $push_state_directory, 'starting_diff');
             $this->assertFileExists($fresh_local_index_path);
 
@@ -2073,7 +2125,12 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('planning', $state['phase']);
         $plan_cursor = $this->loadPlanPosition($push_state_directory);
         $this->assertSame('indexing', $plan_cursor['phase']);
-        $this->assertGreaterThan(0, $plan_cursor['fresh_local_index_byte_offset']);
+        $this->assertGreaterThan(
+            0,
+            $plan_cursor['fresh_local_index_cursor']['position'][
+                'fresh_local_index_byte_offset'
+            ]
+        );
 
         $result = $this->runSender($local_docroot, $push_state_directory);
 
