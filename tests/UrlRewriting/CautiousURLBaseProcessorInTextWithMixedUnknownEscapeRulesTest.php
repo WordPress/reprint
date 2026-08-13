@@ -41,6 +41,51 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
     public static function supported_cases(): array
     {
         return [
+            'target has a path' => [
+                'https://source.example/media/logo.png',
+                'https://destination.example/assets/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'target has a percent-encoded path' => [
+                'https://source.example/media/logo.png',
+                'https://destination.example/archive%2Fmedia/logo.png',
+                ['https://source.example/media' => 'https://destination.example/archive%2Fmedia'],
+            ],
+            'target path trailing slash is trimmed' => [
+                'https://source.example/logo.png',
+                'https://destination.example/base/logo.png',
+                ['https://source.example' => 'https://destination.example/base/'],
+            ],
+            'source path trailing slash is trimmed' => [
+                'https://source.example/media/logo.png',
+                'https://destination.example/logo.png',
+                ['https://source.example/media/' => 'https://destination.example'],
+            ],
+            'target has a port' => [
+                'https://source.example/media/logo.png',
+                'https://destination.example:8443/logo.png',
+                ['https://source.example/media' => 'https://destination.example:8443'],
+            ],
+            'target trailing slash is not an initial path' => [
+                'https://source.example/media/logo.png',
+                'https://destination.example/media/logo.png',
+                ['https://source.example' => 'https://destination.example/'],
+            ],
+            'injected target path copies the widest escaped separator' => [
+                'https:\\\\\\/\\\\\\/source.example\\\\\\/logo.png',
+                'https:\\\\\\/\\\\\\/destination.example\\\\\\/base\\\\\\/logo.png',
+                ['https://source.example' => 'https://destination.example/base'],
+            ],
+            'injected target path copies escaped separator spelling' => [
+                '[vc_video link="https:\\/\\/source.example\\/media\\/video.mp4"]',
+                '[vc_video link="https:\\/\\/destination.example\\/base\\/media\\/video.mp4"]',
+                ['https://source.example' => 'https://destination.example/base'],
+            ],
+            'target path swaps for a source path, escaped' => [
+                'https:\\/\\/source.example\\/media\\/logo.png',
+                'https:\\/\\/destination.example\\/assets\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
             'unquoted CSS URL preserves its terminator' => [
                 '.hero{background-image:url(https://source.example/wp-content/uploads/2026/01/hero.jpg);}',
                 '.hero{background-image:url(https://destination.example/wp-content/uploads/2026/01/hero.jpg);}',
@@ -230,16 +275,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://SOURCE.EXAMPLE/Media/logo.png',
                 ['https://source.example/media' => 'https://destination.example'],
             ],
-            'target has a path' => [
-                'https://source.example/media/logo.png',
-                'https://source.example/media/logo.png',
-                ['https://source.example/media' => 'https://destination.example/assets'],
-            ],
-            'target has a percent-encoded path' => [
-                'https://source.example/media/logo.png',
-                'https://source.example/media/logo.png',
-                ['https://source.example/media' => 'https://destination.example/archive%2Fmedia'],
-            ],
             'target is an IPv4 address' => [
                 'https://source.example/media/logo.png',
                 'https://source.example/media/logo.png',
@@ -259,11 +294,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://source.example/media/logo.png',
                 'https://source.example/media/logo.png',
                 ['https://source.example/media' => 'https://destination.example/über-uns'],
-            ],
-            'target has a port' => [
-                'https://source.example/media/logo.png',
-                'https://source.example/media/logo.png',
-                ['https://source.example/media' => 'https://destination.example:8443'],
             ],
             'target has a username and password' => [
                 'https://source.example/media/logo.png',

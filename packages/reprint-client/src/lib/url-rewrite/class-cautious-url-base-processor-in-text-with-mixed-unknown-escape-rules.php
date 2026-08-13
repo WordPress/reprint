@@ -55,14 +55,27 @@
  *   Only source.example is replaced. The username, password, path, query, and
  *   fragment remain byte-for-byte unchanged.
  *
+ * Supported targets:
+ *
+ * - ASCII or punycode domains, with an optional port. The whole authority is
+ *   replaced at once, so a port is written along with the domain.
+ * - An optional initial path. Writing one means emitting separators that were
+ *   never read, so each slash copies the spelling the matched URL already
+ *   uses: the source path's own separators, else the separator following the
+ *   base, else the scheme's own :// spelling.
+ *   Mapping https://source.example to https://destination.example/base changes
+ *   https:\/\/source.example\/logo.png to https:\/\/destination.example\/base\/logo.png.
+ * - Trailing slashes are the URL separator rather than part of the path and
+ *   are trimmed from both sides of a mapping, so https://destination.example/
+ *   and https://destination.example are the same target.
+ *
  * Unsupported mappings are discarded as a whole. There is no partial
  * replacement:
  *
- * - A target path is not supported. Writing it would require choosing whether
- *   each slash should be /, \/, or something else.
- * - Target ports, user information, queries, fragments, IPv4/IPv6 addresses,
- *   and Unicode domains are not supported. Punycode domains are supported.
- * - Unicode source domains and paths are not supported.
+ * - Target user information, queries, and fragments.
+ * - Target IPv4/IPv6 addresses and Unicode domains. Sources may be IP
+ *   addresses; targets may not.
+ * - Unicode source domains and paths.
  *
  * CSS hexadecimal escapes such as https\3a \2f \2f ... and percent-encoded
  * separators are not recognized. They need a parser for the enclosing format.
@@ -102,7 +115,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_authority: string,
      *     source_path: string,
      *     source_base: string,
-     *     target_domain: string,
+     *     target_base: string,
      *     target_scheme: string,
      *     pattern: string
      * }>
@@ -118,7 +131,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_authority: string,
      *     source_path: string,
      *     source_base: string,
-     *     target_domain: string,
+     *     target_base: string,
      *     target_scheme: string,
      *     pattern: string,
      *     start: int,
@@ -138,7 +151,8 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *
      * A source may include an initial path containing only bytes from `!`
      * (0x21) through `~` (0x7E). A target must be an HTTP(S) URL with a
-     * supported domain and no path or other URL components:
+     * supported domain, optionally with a port and an initial path, and no
+     * other URL components:
      *
      * ```
      * [
@@ -197,6 +211,81 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      * matched base and remains unchanged. A configured protocol change replaces
      * only the literal scheme, preserving the separator's existing escaping.
      */
+    /**
+     * The target base, with any path separators respelled to match the text.
+     *
+     * The enclosing format may escape slashes (`https:\\/\\/host\\/path`). Writing a
+     * target path means emitting separators we did not read, so copy the spelling
+     * the matched URL already uses rather than choosing one.
+     */
+    private function target_base_replacement(): string
+    {
+        $target_base = $this->matched_url['target_base'];
+        if (strpos($target_base, '/') === false) {
+            return $target_base;
+        }
+
+        return str_replace('/', $this->matched_separator_spelling(), $target_base);
+    }
+
+    /**
+     * How this match spells a path separator: `/`, `\/`, or `\\\/`.
+     *
+     * Writing a target path means emitting separators the text never showed
+     * us. Rather than choose a spelling, copy the nearest one this match
+     * already contains, preferring the evidence closest to where the target
+     * path will be written.
+     */
+    private function matched_separator_spelling(): string
+    {
+        $start  = $this->matched_url['start'];
+        $length = $this->matched_url['base_length'];
+
+        // Use the source path's own separators if it has any. Example: the `\/` in `source.example\/media`.
+        $spelling = $this->first_separator_spelling(substr($this->text, $start, $length));
+        if ($spelling !== null) {
+            return $spelling;
+        }
+
+        // The longest separator we'll match: `\\\/` plus the slash.
+        $MAX_SEPARATOR_BYTES = 4;
+
+        // Use the separator just past the base. Example:`source.example` followed by `\/logo.png`.
+        $spelling = $this->first_separator_spelling(
+            substr($this->text, $start + $length, $MAX_SEPARATOR_BYTES),
+            true
+        );
+        if ($spelling !== null) {
+            return $spelling;
+        }
+
+        // Use the scheme's own separators. Example: the `\/\/` in `https:\/\/source.example`.
+        $scheme_start = $this->matched_url['scheme_start'];
+        if ($scheme_start !== null) {
+            $spelling = $this->first_separator_spelling(
+                substr($this->text, $scheme_start, $start - $scheme_start)
+            );
+            if ($spelling !== null) {
+                return $spelling;
+            }
+        }
+
+        // The match had no separator at all, default to a regular slash.
+        return '/';
+    }
+
+    /**
+     * The spelling of the first path separator in $text, or null when it has none.
+     *
+     * @param bool $at_start Only accept a separator at the very start of $text.
+     */
+    private function first_separator_spelling(string $text, bool $at_start = false): ?string
+    {
+        $pattern = $at_start ? '~^(\\\\*)/~' : '~(\\\\*)/~';
+
+        return preg_match($pattern, $text, $matches) === 1 ? $matches[1] . '/' : null;
+    }
+
     public function replace_url_base(): bool
     {
         if ($this->matched_url === null) {
@@ -206,7 +295,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         $this->lexical_updates[$this->matched_url['start']] = [
             'start'       => $this->matched_url['start'],
             'length'      => $this->matched_url['base_length'],
-            'replacement' => $this->matched_url['target_domain'],
+            'replacement' => $this->target_base_replacement(),
         ];
 
         if (
@@ -257,7 +346,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_authority: string,
      *     source_path: string,
      *     source_base: string,
-     *     target_domain: string,
+     *     target_base: string,
      *     target_scheme: string,
      *     pattern: string,
      *     start: int,
@@ -351,7 +440,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_authority: string,
      *     source_path: string,
      *     source_base: string,
-     *     target_domain: string,
+     *     target_base: string,
      *     target_scheme: string,
      *     pattern: string
      * }|null
@@ -364,15 +453,15 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             return null;
         }
 
-        // A source URL ending at its authority uses / as the URL separator,
-        // not as an initial path to remove. Leave its original spelling alone.
-        $source_path = $source['path'] === '/' ? '' : $source['path'];
+        // Remove trailing slashes from both source and target paths.
+        $source_path = rtrim($source['path'], '/');
+        $target_path = rtrim($target['path'], '/');
 
         return [
             'source_authority' => $source['authority'],
             'source_path'      => $source_path,
             'source_base'      => $source['authority'] . $source_path,
-            'target_domain'    => $target['host'],
+            'target_base'    => $target['authority'] . $target_path,
             'target_scheme'    => $target['scheme'],
             'pattern'          => $this->create_url_candidate_pattern(
                 $source['scheme'],
@@ -402,7 +491,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         $host = (string) $parts['host'];
         $path = isset($parts['path']) ? (string) $parts['path'] : '';
         if (( $scheme !== 'http' && $scheme !== 'https' )
-            || ( !$is_source_url && ( array_key_exists('port', $parts) || $path !== '' ) )
             || !( $this->is_alphanumeric_dot_hyphen_domain_name($host) || ( $is_source_url && $this->is_ip_address($host) ) )
             || !$this->contains_only_exclamation_mark_through_tilde_bytes($path)) {
             return null;

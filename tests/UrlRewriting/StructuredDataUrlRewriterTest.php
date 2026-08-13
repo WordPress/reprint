@@ -522,7 +522,7 @@ class StructuredDataUrlRewriterTest extends TestCase
      * @param array<string, string> $mapping
      */
     #[DataProvider('structured_target_base_cases')]
-    public function testKnownStructuredUrlsAcceptTargetsWhichOpaqueTextCannotSafelyWrite(
+    public function testStructuredAndOpaqueUrlsAcceptExtendedTargetBases(
         string $input,
         string $expected,
         array $mapping
@@ -540,17 +540,17 @@ class StructuredDataUrlRewriterTest extends TestCase
         return [
             'trailing slash' => [
                 '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
-                '<a href="https://new.example/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://new.example/media/image.jpg">Image</a>[vc_video link="https:\/\/new.example\/media\/video.mp4"]',
                 ['https://old-site.com' => 'https://new.example/'],
             ],
             'initial path' => [
                 '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
-                '<a href="https://new.example/base/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://new.example/base/media/image.jpg">Image</a>[vc_video link="https:\/\/new.example\/base\/media\/video.mp4"]',
                 ['https://old-site.com' => 'https://new.example/base'],
             ],
             'port' => [
                 '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
-                '<a href="https://new.example:8443/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://new.example:8443/media/image.jpg">Image</a>[vc_video link="https:\/\/new.example:8443\/media\/video.mp4"]',
                 ['https://old-site.com' => 'https://new.example:8443'],
             ],
             'IPv4 address' => [
