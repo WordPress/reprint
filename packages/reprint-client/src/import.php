@@ -2304,9 +2304,9 @@ class ImportClient
         $this->get_state()->index = new RemoteFileIndexCursorState();
         $this->get_state()->fetch = new FetchListProgressState();
 
-        // Save the cleared cursor before applying records which rewrite the
-        // remote index. A stopped abort can then repeat the WAL merge, but it
-        // can never resume a byte-offset cursor against the rewritten index.
+        // The diff cursor belongs to the current remote index. Applying the WAL
+        // replaces that index, so save the state without the cursor first. The
+        // WAL merge is replayable and can finish now or in a later process.
         $this->save_state();
         $this->pull_index_journal->apply_pending_records();
         $this->pull_index_journal->remove_empty_wal();
