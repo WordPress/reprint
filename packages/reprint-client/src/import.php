@@ -80,6 +80,8 @@ require_once __DIR__ . '/lib/host/load.php';
 // Load target runtime appliers (consume a manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
 
+require_once __DIR__ . '/lib/merge/load.php';
+
 require_once __DIR__ . '/lib/sort-index-file.php';
 require_once __DIR__ . '/lib/local-index-update-functions.php';
 require_once __DIR__ . '/lib/class-reprint-process-lock.php';
@@ -160,6 +162,7 @@ class ImportClient
         "preflight",
         "preflight-assert",
         "flat-docroot",
+        "merge-wp-content",
         "apply-runtime",
     ];
 
@@ -1140,6 +1143,10 @@ class ImportClient
         }
         if ($command === "flat-docroot") {
             $this->run_flat_document_root($options);
+            return;
+        }
+        if ($command === "merge-wp-content") {
+            $this->run_merge_wp_content($options);
             return;
         }
         if ($command === "apply-runtime") {
@@ -4663,6 +4670,148 @@ class ImportClient
 
         return null;
     }
+
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions carry CLI option values and filesystem paths, never HTML output.
+    /** Move source-only wp-content entries into the pulled tree. */
+    public function run_merge_wp_content(array $options): void
+    {
+        $from = $options["from"] ?? null;
+        if (empty($from)) {
+            throw new InvalidArgumentException(
+                "merge-wp-content requires --from=DIR, the wp-content directory to merge in.",
+            );
+        }
+        // Keep a lexical absolute path because --from may not exist yet.
+        $from = trim_right_slash($from);
+        if (strpos($from, "/") !== 0) {
+            $from = normalize_path(wp_join_unix_paths(getcwd(), $from));
+        }
+        // A WordPress root passed by mistake would move wp-admin, wp-includes
+        // and wp-config.php into the pulled wp-content.
+        if (is_file(wp_join_unix_paths($from, "wp-load.php"))
+            || is_dir(wp_join_unix_paths($from, "wp-includes"))
+        ) {
+            throw new InvalidArgumentException(
+                "--from must name a wp-content directory, but {$from} is a WordPress root. " .
+                    "Pass the content directory inside it.",
+            );
+        }
+
+        $this->require_preflight();
+        $this->assert_file_pull_completed();
+        $state = $this->get_state();
+
+        // WP_CONTENT_DIR defaults to ABSPATH/wp-content.
+        $content_dir = $this->clean_preflight_path(
+            $state->get('preflight.database.wp.paths_urls.content_dir')
+        );
+        if ($content_dir === null) {
+            $abspath = $this->clean_preflight_path(
+                $state->get('preflight.database.wp.paths_urls.abspath')
+            );
+            if ($abspath === null) {
+                throw new RuntimeException(
+                    "Cannot determine where wp-content lives from preflight data. " .
+                        "Run preflight first to detect the WordPress installation.",
+                );
+            }
+            $content_dir = wp_join_unix_paths($abspath, "wp-content");
+        }
+
+        $destination_wp_content = wp_join_unix_paths($this->filesystem_root, $content_dir);
+        $source_wp_content = $from;
+
+        $component_destinations = [];
+        foreach ([
+            "plugins" => 'preflight.database.wp.paths_urls.plugins_dir',
+            "mu-plugins" => 'preflight.database.wp.paths_urls.mu_plugins_dir',
+            "uploads" => 'preflight.database.wp.paths_urls.uploads.basedir',
+        ] as $conventional_name => $preflight_path) {
+            $component_dir = $this->clean_preflight_path($state->get($preflight_path));
+            if ($component_dir !== null) {
+                $component_destinations[$conventional_name] = wp_join_unix_paths(
+                    $this->filesystem_root,
+                    $component_dir
+                );
+            }
+        }
+
+        // Guard only a real source directory. A flattened one resolves to the
+        // destination, and the merge below already does nothing with it.
+        if (!is_link($source_wp_content) && is_dir($source_wp_content)) {
+            foreach (array_merge([$destination_wp_content], array_values($component_destinations)) as $destination) {
+                $this->assert_merge_paths_do_not_overlap($source_wp_content, $destination);
+            }
+        }
+
+        $this->audit_log(
+            "MERGE-WP-CONTENT | {$source_wp_content} -> {$destination_wp_content}",
+        );
+        $merger = new WpContentMerger(
+            $source_wp_content,
+            $destination_wp_content,
+            $component_destinations,
+            function (string $line): void {
+                $this->audit_log("MERGE-WP-CONTENT | {$line}");
+            }
+        );
+        $moved = $merger->merge();
+
+        $this->audit_log(
+            "MERGE-WP-CONTENT | Complete: {$moved} moved",
+            true,
+        );
+
+        $result = [
+            "status" => "complete",
+            "from" => $source_wp_content,
+            "to" => $destination_wp_content,
+            "fs_root" => $this->filesystem_root,
+            "content_dir" => $content_dir,
+            "moved" => $moved,
+        ];
+        if (!$this->progress->is_mode('pipeline')) {
+            fwrite($this->progress_fd, json_encode($result) . "\n");
+        }
+        $this->output_progress(array_merge(["type" => "merge_wp_content_complete"], $result));
+    }
+
+    /** Refuse to merge until files-pull has completed. */
+    private function assert_file_pull_completed(): void
+    {
+        if (is_file($this->pull_index_wal_path)) {
+            throw new RuntimeException(
+                "Finish or abort the interrupted files-pull before running merge-wp-content.",
+            );
+        }
+        if (!is_file($this->local_index_file)) {
+            throw new RuntimeException(
+                "merge-wp-content requires a completed file pull: {$this->local_index_file} " .
+                    "does not exist yet. Run files-pull first.",
+            );
+        }
+    }
+
+    /** Refuse overlapping source and destination paths. */
+    private function assert_merge_paths_do_not_overlap(
+        string $source_wp_content,
+        string $destination
+    ): void {
+        $resolved_source = realpath_with_missing_tail($source_wp_content);
+        $resolved_destination = realpath_with_missing_tail($destination);
+        if (
+            !path_is_same_as_or_descendant_of($resolved_source, $resolved_destination)
+            && !path_is_same_as_or_descendant_of($resolved_destination, $resolved_source)
+        ) {
+            return;
+        }
+        throw new InvalidArgumentException(
+            "merge-wp-content cannot merge {$source_wp_content} into {$destination}: " .
+                "they resolve to {$resolved_source} and {$resolved_destination}, " .
+                "so one holds the other.",
+        );
+    }
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     /**
      * Command: flat-docroot
@@ -11377,7 +11526,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -11661,6 +11810,16 @@ if (
             'target' => 'force',
             'help' => 'Remove conflicting non-symlink files and replace with symlinks',
             'commands' => ['pull', 'flat-docroot'],
+        ],
+
+        // ── merge-wp-content options ─────────────────────────────
+        [
+            'name' => 'from',
+            'type' => 'value',
+            'target' => 'from',
+            'placeholder' => 'DIR',
+            'help' => 'Local wp-content directory to merge into the pulled one',
+            'commands' => ['merge-wp-content'],
         ],
 
         // ── apply-runtime options ────────────────────────────────
@@ -12457,6 +12616,42 @@ if (
                 "If a path that should be a symlink is a regular file or directory,\n" .
                 "the command stops with an error unless --force is specified.\n",
             "extra" => null,
+        ],
+        "merge-wp-content" => [
+            "level" => "low",
+            "short" => "Move wp-content entries only the local site has into the pulled tree",
+            "usage" =>
+                "reprint merge-wp-content <remote-reprint-api-url> --state-dir=DIR " .
+                "--fs-root=DIR --from=DIR",
+            "description" =>
+                "Folds the wp-content directory named by --from into the one the\n" .
+                "file pull wrote under --fs-root. --from is that directory itself,\n" .
+                "whatever it is called, so a site which moved WP_CONTENT_DIR works\n" .
+                "the same as a conventional one.\n" .
+                "\n" .
+                "Entries the pulled tree does not have move there. Entries it has\n" .
+                "stay as they are, so the pulled copy always wins. Nothing is\n" .
+                "deleted, and entries move rather than copy: after a run they no\n" .
+                "longer exist under --from.\n" .
+                "\n" .
+                "Run this before flat-docroot, which replaces the local wp-content\n" .
+                "with a symlink and would otherwise delete whatever only that\n" .
+                "directory held. The remote Reprint API URL selects the state that\n" .
+                "says where the source site kept wp-content, its plugins, its\n" .
+                "mu-plugins and its uploads; no network calls are made.\n",
+            "extra" =>
+                "What counts as one entry:\n" .
+                "  plugins, mu-plugins, themes  one level down, each child whole\n" .
+                "  uploads                      all the way down, each file its own\n" .
+                "  anything else                whole\n" .
+                "\n" .
+                "A plugin or theme both sides have is never merged: keeping the\n" .
+                "files the pulled version dropped would leave a directory matching\n" .
+                "no release, and push them to the source site later.\n" .
+                "\n" .
+                "Example:\n" .
+                "  reprint merge-wp-content https://example.com --state-dir=./state \\\n" .
+                "    --fs-root=./files --from=./site/wp-content\n",
         ],
         "apply-runtime" => [
             "level" => "low",
