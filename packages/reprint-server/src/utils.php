@@ -397,9 +397,8 @@ function path_is_same_as_or_descendant_of($path, $ancestor): bool
 /**
  * Canonicalizes one configured root path.
  *
- * A directory resolves through realpath(). Any other path keeps its final
- * component, because a root may be a single file named by --include and
- * resolving that component would index a symlinked file under its target.
+ * A non-directory keeps its final component, so a file named by --include is
+ * indexed as itself rather than as the target of a symlink.
  *
  * @param string $path Root path as configured.
  * @return string|null Canonical root path, or null when it does not exist.
