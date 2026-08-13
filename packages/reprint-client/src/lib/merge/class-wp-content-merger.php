@@ -10,43 +10,17 @@ use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
 
 /**
- * Folds one wp-content directory into another.
+ * Moves local-only wp-content entries into a pulled tree.
  *
- * Entries that only exist in the source move to the destination. Entries that
- * already exist in destination are untouched on both sides. Nothing is deleted.
+ * Existing destination entries win. To avoid mixing plugin or theme versions,
+ * plugins, mu-plugins, and themes move by child; uploads move by leaf; other
+ * entries move whole.
  *
- * ## The unit boundary
- *
- * Plugins, mu-plugins, and themes (so called units) are shallowly merged to
- * ensure we don't mix versions. So, if they are a directory (and not a file),
- * the merge only moves the directory as a whole.
- *
- *   plugins, mu-plugins, themes -> one level, each child whole
- *   uploads                     -> all the way down, each file its own
- *   anything else               -> whole, because its insides are unknown
- *
- * Per entry at the wp-content level:
- *
- *   - absent from the destination -> move it there
- *   - a container above           -> walk it under that container's rule
- *   - anything else               -> leave it, the destination copy wins
- *
- * ## Component directories
- *
- * WordPress lets plugins, mu-plugins and uploads live outside wp-content, and
- * hosts use that: on WP Cloud the uploads base directory sits on its own
- * volume. `$component_destinations` says where each one lives on the
- * destination side, so `uploads` moves to that directory rather than to
- * `<destination>/uploads`. Their basenames also join the container names, so a
- * site that renamed a component directory still gets the right rule.
+ * Component destinations may be outside wp-content.
  */
 class WpContentMerger
 {
-    /**
-     * Suffix for the path a cross-filesystem copy writes before it renames the
-     * finished entry into place. Derived from the destination rather than
-     * random so a later run clears what an interrupted one abandoned.
-     */
+    /** Temporary sibling used by the cross-filesystem copy fallback. */
     private const STAGING_SUFFIX = ".reprint-merge-incomplete";
 
     /** Rule for an entry whose own children are whole plugins or themes. */
@@ -55,30 +29,18 @@ class WpContentMerger
     /** Rule for an entry whose contents merge file by file. */
     private const FILE_CONTAINER = "file";
 
-    /** @var string wp-content directory whose entries move away. */
     private string $source_wp_content;
 
-    /** @var string wp-content directory the entries move into. */
     private string $destination_wp_content;
 
     /**
-     * @var array<string,string> Source entry name mapped to the destination
-     *                           path that entry moves to, for the components
-     *                           which live outside wp-content.
+     * Routes components whose preflight destination is outside wp-content.
+     *
+     * @var array<string,string>
      */
     private array $routed_destinations = [];
 
-    /**
-     * How far the merge walks into an entry. An entry named by no rule moves
-     * whole, because nothing says what is inside it.
-     *
-     * The constructor gives each basename preflight reported the rule of the
-     * component it belongs to, so a site that renamed a component directory
-     * still gets that component's rule.
-     *
-     * @var array<string,string> Entry name mapped to UNIT_CONTAINER or
-     *                           FILE_CONTAINER.
-     */
+    /** @var array<string,string> Traversal rule by source entry name. */
     private array $container_rules = [
         "plugins" => self::UNIT_CONTAINER,
         "mu-plugins" => self::UNIT_CONTAINER,
@@ -86,28 +48,20 @@ class WpContentMerger
         "uploads" => self::FILE_CONTAINER,
     ];
 
-    /**
-     * @var callable Receives one audit line per moved entry.
-     * @phpstan-var callable(string): void
-     */
+    /** @var callable(string):void */
     private $record_move;
 
-    /** @var int Entries moved by the current merge() call. */
     private int $moved = 0;
 
     /**
-     * @param string   $source_wp_content      wp-content directory whose entries move away.
-     * @param string   $destination_wp_content wp-content directory the entries move into.
+     * @param string   $source_wp_content      Source wp-content directory.
+     * @param string   $destination_wp_content Destination wp-content directory.
      * @param array    $component_destinations {
-     *     Destination directory for each component which may live outside
-     *     wp-content. An absent or null key leaves that component at its
-     *     conventional name under $destination_wp_content.
-     *
      *     @type string|null $plugins    Destination plugins directory.
      *     @type string|null $mu-plugins Destination mu-plugins directory.
      *     @type string|null $uploads    Destination uploads base directory.
      * }
-     * @param callable $record_move            Called with one audit line per moved entry.
+     * @param callable $record_move            Receives moved entries.
      *
      * @phpstan-param array<string,string|null> $component_destinations
      * @phpstan-param callable(string): void   $record_move
@@ -126,10 +80,7 @@ class WpContentMerger
             if (!is_string($destination) || $destination === "") {
                 continue;
             }
-            // Both names route to the same place, and the second inherits the
-            // first's rule: the wp-content being merged in may use the name
-            // WordPress conventionally uses, or the one the destination site
-            // gave that component.
+            // Accept both the conventional and destination component names.
             $this->routed_destinations[$conventional_name] = $destination;
             $this->routed_destinations[basename($destination)] = $destination;
             $this->container_rules[basename($destination)] =
@@ -137,13 +88,6 @@ class WpContentMerger
         }
     }
 
-    /**
-     * Move every entry the destination lacks, and report how many moved.
-     *
-     * A side which is not a real directory has nothing to compare, so the
-     * merge is a no-op. That is what makes a second run harmless once
-     * flat-docroot has replaced the source wp-content with a symlink.
-     */
     public function merge(): int
     {
         $this->moved = 0;
@@ -163,12 +107,7 @@ class WpContentMerger
                 ?? wp_join_unix_paths($this->destination_wp_content, $entry);
 
             if (!file_exists($destination_entry) && !is_link($destination_entry)) {
-                // A routed component can sit outside the destination
-                // wp-content, and the file pull creates the directories
-                // leading to it only when the source site had content there.
-                // rename() into a missing parent fails, which would send a
-                // whole uploads tree down the copy fallback for want of one
-                // mkdir.
+                // A detached component may not yet have a destination parent.
                 $this->create_parent_directory($destination_entry);
                 $this->move_entry($source_entry, $destination_entry);
                 continue;
@@ -186,13 +125,7 @@ class WpContentMerger
         return $this->moved;
     }
 
-    /**
-     * Move whole plugins or themes the destination lacks.
-     *
-     * Each child is one unit. A name the destination also has stays the
-     * destination's, down to the last file, so two versions of the same plugin
-     * never merge.
-     */
+    /** Move plugin or theme children without mixing their contents. */
     private function merge_unit_container(string $source, string $destination): void
     {
         if (!$this->is_real_directory($source) || !$this->is_real_directory($destination)) {
@@ -211,12 +144,7 @@ class WpContentMerger
         }
     }
 
-    /**
-     * Move the files the destination lacks, to the leaf.
-     *
-     * For uploads, where each file stands alone: a photo the destination does
-     * not have is its own thing, not part of some larger version.
-     */
+    /** Merge a file container, such as uploads, to the leaf. */
     private function merge_file_tree(string $source, string $destination): void
     {
         if (!$this->is_real_directory($source) || !$this->is_real_directory($destination)) {
@@ -239,23 +167,12 @@ class WpContentMerger
     }
 
     /**
-     * Move one entry to its place on the destination side.
+     * Move an entry, falling back to a staged copy across filesystems.
      *
-     * A symlink is recreated rather than moved, and a relative value is kept
-     * or recomputed depending on where it points. One that resolves inside the
-     * tree being merged keeps its value, because the whole tree moves
-     * together. One that resolves outside it is read against a parent which
-     * has changed depth, so it is recomputed to reach the same target. An
-     * absolute value resolves the same from either parent and moves untouched.
-     *
-     * rename() reports EXDEV when the two sides are on different filesystems,
-     * which nothing stops the caller from choosing, so a copy is the fallback
-     * rather than the error.
-     *
-     * Only the moved entry's own value is rewritten. A relative symlink deeper
-     * in a moved directory keeps its value, which still resolves when it
-     * points within that directory and breaks when it points out of it. No
-     * move can preserve the second kind.
+     * A moved link keeps its relative value when the target is inside the
+     * source tree, which moves with it; an external target is rebased.
+     * Absolute values, and links nested inside a moved entry, travel
+     * unchanged.
      */
     private function move_entry(string $source_entry, string $destination_entry): void
     {
@@ -270,12 +187,7 @@ class WpContentMerger
                 $resolved_target = normalize_path(
                     wp_join_unix_paths(dirname($source_entry), $link_value)
                 );
-                // A target inside the tree being merged keeps its value: it
-                // either moves in this same run, or the destination already
-                // holds its own copy at that name, and the value finds
-                // whichever is there. A target outside the tree stays where it
-                // is while the link's parent changes depth, so the value has to
-                // be recomputed to still reach it.
+                // The source tree moves; an external target does not.
                 if (
                     !path_is_same_as_or_descendant_of(
                         $resolved_target,
@@ -300,12 +212,7 @@ class WpContentMerger
                 );
             }
         } elseif (!@rename($source_entry, $destination_entry)) {
-            // Copy beside the destination and rename it into place, never into
-            // the destination itself. A copy that dies partway — a full disk,
-            // an unreadable file, a signal during a large one — would otherwise
-            // leave a partial entry that the next run reads as the destination
-            // copy and skips. Both paths sit in the same directory, so the
-            // rename is atomic.
+            // A sibling rename prevents a partial copy from occupying the destination.
             $staging_path = $destination_entry . self::STAGING_SUFFIX;
             $this->remove_path_without_following_symlinks($staging_path);
             try {
@@ -335,20 +242,7 @@ class WpContentMerger
         );
     }
 
-    /**
-     * Copy a file, symlink, or directory tree to a path that does not exist yet.
-     *
-     * This is the cross-filesystem half of a move, so it reproduces a symlink
-     * as a symlink instead of following it into its target. Values are kept
-     * verbatim: an entry and everything below it move together, so a relative
-     * value that resolves within the tree still resolves after the copy.
-     *
-     * copy() creates the destination under the umask and mkdir() takes the
-     * mode it is given, so both are followed by a chmod to the source's own
-     * permissions. Without it an executable script or a deliberately 0700
-     * directory would come out different on this path and unchanged on the
-     * rename() path.
-     */
+    /** Copy an entry without following symlinks and preserve its permissions. */
     private function copy_path(string $from, string $to): void
     {
         if (is_link($from)) {
@@ -366,8 +260,6 @@ class WpContentMerger
             return;
         }
 
-        // A failed copy or mkdir here is reported as an exception naming both
-        // paths, so the raw PHP warning would only duplicate it.
         if (!is_dir($from)) {
             if (!@copy($from, $to)) {
                 throw new RuntimeException("Failed to copy {$from} to {$to}.");
@@ -391,7 +283,7 @@ class WpContentMerger
         }
     }
 
-    /** Give $to the permission bits $from carries. */
+    /** Copy permission bits. */
     private function copy_permissions(string $from, string $to): void
     {
         $permissions = @fileperms($from);
@@ -403,13 +295,7 @@ class WpContentMerger
         }
     }
 
-    /**
-     * Create the directories leading to $path.
-     *
-     * mkdir() is given the conventional directory mode rather than one copied
-     * from the source: these directories exist on the destination side only,
-     * and no source directory corresponds to them.
-     */
+    /** Create a destination parent directory. */
     private function create_parent_directory(string $path): void
     {
         $parent = dirname($path);
@@ -427,12 +313,7 @@ class WpContentMerger
         return !is_link($path) && is_dir($path);
     }
 
-    /**
-     * Delete a file, symlink, or directory tree without following symlinks.
-     *
-     * Returns false rather than throwing so the caller can name the path in
-     * an error which says what it had already done.
-     */
+    /** Remove a path without following symlinks. */
     private function remove_path_without_following_symlinks(string $path): bool
     {
         if (!file_exists($path) && !is_link($path)) {
@@ -462,14 +343,7 @@ class WpContentMerger
         return true === @rmdir($path);
     }
 
-    /**
-     * Compute a relative path from $from to $to.
-     *
-     * Both paths must be absolute. Returns a relative path such that a symlink
-     * at $from/$name pointing to the result resolves to $to.
-     *
-     * Example: compute_relative_path('/a/b/c', '/a/d/e') => '../../d/e'
-     */
+    /** Compute a relative path between absolute paths. */
     private static function compute_relative_path(string $from, string $to): string
     {
         $from_parts = explode("/", trim($from, "/"));

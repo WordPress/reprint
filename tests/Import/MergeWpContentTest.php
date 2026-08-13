@@ -6,14 +6,6 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
-/**
- * Verify the merge-wp-content command.
- *
- * The command folds the wp-content under --from into the one the file pull
- * wrote, so entries only the local site holds survive whatever the caller does
- * to that directory next — flat-docroot replacing it with a symlink being the
- * case it exists for.
- */
 class MergeWpContentTest extends TestCase
 {
     private const REMOTE_URL = 'https://source.example/export.php';
@@ -40,7 +32,6 @@ class MergeWpContentTest extends TestCase
         mkdir($this->stateDir, 0755, true);
         mkdir($this->pulledWpContent, 0755, true);
         mkdir($this->localWpContent, 0755, true);
-        // The guard reads this file as the record of a finished file pull.
         mkdir($this->remoteStateDir, 0755, true);
         file_put_contents($this->remoteStateDir . '/local_index.jsonl', '');
     }
@@ -75,9 +66,7 @@ class MergeWpContentTest extends TestCase
 
     public function testAPluginBothSidesHaveIsNeverMerged(): void
     {
-        // The pull carries WooCommerce 9.2; the local site has 8.5. Merging
-        // them would leave files 9.0 dropped inside a directory claiming to
-        // be 9.2, and push those files to the source site later.
+        // A same-name plugin is a whole unit.
         $this->writePulled('plugins/woocommerce/woocommerce.php', 'Version: 9.2');
         $this->writePulled('plugins/woocommerce/includes/class-wc-new.php', 'new');
         $this->writeLocal('plugins/woocommerce/woocommerce.php', 'Version: 8.5');
@@ -121,8 +110,6 @@ class MergeWpContentTest extends TestCase
 
     public function testUploadsMergeFileByFile(): void
     {
-        // Media is not a versioned payload: a photo the pull lacks is its own
-        // thing, so uploads merges to the leaf where plugins does not.
         $this->writePulled('uploads/2026/01/pulled.jpg', 'pulled');
         $this->writeLocal('uploads/2026/01/local.jpg', 'local');
         $this->writeLocal('uploads/2025/12/older.jpg', 'local');
@@ -140,9 +127,6 @@ class MergeWpContentTest extends TestCase
 
     public function testAnUnknownDirectoryBothSidesHaveIsLeftToThePull(): void
     {
-        // Nothing here says what the directory holds, so it is treated as one
-        // unit. The local-only file inside it stays where it is; a directory
-        // only the local site has still moves.
         $this->writePulled('languages/admin-en_GB.mo', 'pulled');
         $this->writeLocal('languages/plugins/local-only.mo', 'local');
         $this->writeLocal('my-own-folder/keep.txt', 'local');
@@ -160,8 +144,7 @@ class MergeWpContentTest extends TestCase
         $this->writePulled('plugins/from-the-pull/plugin.php', '<?php');
         $this->writeFile($this->siteDir . '/shared-store/local-plugin/plugin.php', '<?php // shared store');
         mkdir($this->localWpContent . '/plugins', 0755, true);
-        // A relative value read against a parent two levels below the site
-        // directory; the destination parent sits at a different depth.
+        // The destination parent is at a different depth.
         symlink(
             '../../shared-store/local-plugin',
             $this->localWpContent . '/plugins/linked-plugin',
@@ -188,11 +171,7 @@ class MergeWpContentTest extends TestCase
 
     public function testASymlinkToASiblingStillResolvesAfterBothMove(): void
     {
-        // A child theme pointing at its parent. Both move in the same run, so
-        // a value recomputed against where the parent used to be would dangle
-        // the moment the parent left. The destination needs a theme of its own
-        // for the merge to descend into the container and move each child
-        // separately, rather than renaming the whole directory across.
+        // A destination theme makes the merger move each source child.
         $this->writePulled('themes/twentytwentyfive/style.css', '/* pulled */');
         $this->writeLocal('themes/parent-theme/style.css', '/* parent */');
         symlink('parent-theme', $this->localWpContent . '/themes/child-theme');
@@ -214,9 +193,6 @@ class MergeWpContentTest extends TestCase
 
     public function testASymlinkToASkippedSiblingResolvesToThePulledCopy(): void
     {
-        // The destination already has its own parent theme, so that one never
-        // moves. The kept value finds the pulled copy, which is the one the
-        // site should be using.
         $this->writePulled('themes/parent-theme/style.css', '/* pulled parent */');
         $this->writeLocal('themes/parent-theme/style.css', '/* local parent */');
         symlink('parent-theme', $this->localWpContent . '/themes/child-theme');
@@ -233,8 +209,7 @@ class MergeWpContentTest extends TestCase
 
     public function testTheExplodedLayoutRoutesEachComponentToItsOwnSource(): void
     {
-        // uploads outside content_dir is the WP Cloud shape: each component
-        // has to land under the directory preflight reports for it.
+        // Uploads are detached from wp-content.
         $this->writeFile(
             $this->filesystemRoot . '/srv/htdocs/wp-content/plugins/from-the-pull/plugin.php',
             '<?php',
@@ -265,10 +240,7 @@ class MergeWpContentTest extends TestCase
 
     public function testARoutedComponentDirectoryIsRenamedIntoAPathThePullNeverWrote(): void
     {
-        // A pull scoped with --only can leave the uploads directory absent
-        // while preflight still reports where it belongs. The uploads volume
-        // sits on its own path here, so nothing the pull wrote shares a parent
-        // with it.
+        // A scoped pull can leave a detached destination absent.
         $this->writeFile(
             $this->filesystemRoot . '/var/www/wp-content/plugins/from-the-pull/plugin.php',
             '<?php',
@@ -321,8 +293,7 @@ class MergeWpContentTest extends TestCase
 
         $this->merge();
 
-        // What flat-docroot leaves behind: the site's wp-content is a symlink
-        // into the filesystem root, so both sides are the same tree.
+        // flat-docroot replaces wp-content with a symlink into the pulled tree.
         $this->recursiveDelete($this->localWpContent);
         symlink($this->pulledWpContent, $this->localWpContent);
         $beforeSecondRun = $this->describeTree($this->filesystemRoot);
@@ -344,8 +315,7 @@ class MergeWpContentTest extends TestCase
 
         $this->writePulled('plugins/from-the-pull/plugin.php', '<?php');
         $this->writeLocal('plugins/local-only/plugin.php', '<?php // local');
-        // rename() into a read-only plugins directory fails, and so does the
-        // copy fallback, because both write there.
+        // Both rename and the copy fallback write to this directory.
         chmod($this->pulledWpContent . '/plugins', 0555);
 
         try {
@@ -373,9 +343,7 @@ class MergeWpContentTest extends TestCase
         $this->writeLocal('plugins/local-only/first.php', '<?php // copied');
         $this->writeLocal('plugins/local-only/second.php', '<?php // unreadable');
         $this->writeLocal('plugins/local-only/third.php', '<?php // never reached');
-        // rename() needs to write to the entry's parent, so a read-only parent
-        // sends the move down the cross-filesystem copy path, and an unreadable
-        // file part-way through that copy fails it after it has written some.
+        // Force the copy fallback to encounter an unreadable file.
         chmod($this->localWpContent . '/plugins/local-only/second.php', 0000);
         chmod($this->localWpContent . '/plugins', 0555);
 
@@ -405,13 +373,7 @@ class MergeWpContentTest extends TestCase
         );
     }
 
-    /**
-     * rename() keeps permissions; the copy behind EXDEV has to reproduce them.
-     *
-     * A second filesystem is not something a test can rely on having, so this
-     * exercises the copy itself, which is the only part of a move that ever
-     * creates a file.
-     */
+    /** Exercise the copy path directly because filesystem boundaries are not portable. */
     public function testTheCopyFallbackKeepsPermissions(): void
     {
         if (function_exists('posix_getuid') && posix_getuid() === 0) {
@@ -445,8 +407,6 @@ class MergeWpContentTest extends TestCase
 
     public function testARelativeFromIsResolvedAgainstTheWorkingDirectory(): void
     {
-        // The form the command's own help documents: --from=./site, run from
-        // the directory holding it.
         $this->writePulled('plugins/from-the-pull/plugin.php', '<?php');
         $this->writeLocal('plugins/local-only/plugin.php', '<?php // local');
 
@@ -505,22 +465,10 @@ class MergeWpContentTest extends TestCase
 
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('one holds the other');
-        // The site directory the pull itself wrote: --from/wp-content is the
-        // destination, so the walk would read what it had just moved.
+        // --from/wp-content is the destination.
         $this->merge([], $this->filesystemRoot . self::ABSPATH);
     }
 
-    // ---- helpers ----
-
-    /**
-     * Run merge-wp-content against the layout built by the write helpers.
-     *
-     * @param array  $pathsUrls Extra preflight paths_urls keys, for layouts
-     *                          where wp-content or its sub-components sit
-     *                          outside ABSPATH.
-     * @param string $from      Site directory to merge from; the site
-     *                          directory the tests build by default.
-     */
     private function merge(array $pathsUrls = [], ?string $from = null): void
     {
         $this->writeState([
@@ -562,18 +510,13 @@ class MergeWpContentTest extends TestCase
         file_put_contents($path, $contents);
     }
 
-    /** The permission bits of $path as four octal digits. */
     private function permissionsOf(string $path): string
     {
         clearstatcache(true, $path);
         return substr(sprintf('%o', fileperms($path)), -4);
     }
 
-    /**
-     * List every path under $dir with its type, for comparing two runs.
-     *
-     * @return string[] Sorted "type relative/path" lines.
-     */
+    /** @return string[] */
     private function describeTree(string $dir): array
     {
         $described = [];

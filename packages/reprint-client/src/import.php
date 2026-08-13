@@ -80,7 +80,6 @@ require_once __DIR__ . '/lib/host/load.php';
 // Load target runtime appliers (consume a manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
 
-// Load the wp-content merge engine
 require_once __DIR__ . '/lib/merge/load.php';
 
 require_once __DIR__ . '/lib/sort-index-file.php';
@@ -4673,13 +4672,7 @@ class ImportClient
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions carry CLI option values and filesystem paths, never HTML output.
-    /**
-     * Command: merge-wp-content
-     *
-     * Folds the wp-content directory under --from into the one the file pull
-     * wrote, so entries only the local site has survive whatever the caller
-     * does to that directory next.
-     */
+    /** Move source-only wp-content entries into the pulled tree. */
     public function run_merge_wp_content(array $options): void
     {
         $from = $options["from"] ?? null;
@@ -4688,12 +4681,7 @@ class ImportClient
                 "merge-wp-content requires --from=DIR, the site directory whose wp-content is merged in.",
             );
         }
-        // Everything below works in absolute paths: the overlap guard and the
-        // symlink rewrite both resolve against the real filesystem, and the
-        // audit log and the result are read after the command has exited, when
-        // the working directory it ran in is gone. realpath() cannot do this —
-        // --from need not exist yet, and realpath() returns false for a path
-        // that does not.
+        // Keep a lexical absolute path because --from may not exist yet.
         $from = trim_right_slash($from);
         if (strpos($from, "/") !== 0) {
             $from = normalize_path(wp_join_unix_paths(getcwd(), $from));
@@ -4703,9 +4691,7 @@ class ImportClient
         $this->assert_file_pull_completed();
         $state = $this->get_state();
 
-        // Where the source site kept wp-content. WordPress falls back to
-        // ABSPATH/wp-content when WP_CONTENT_DIR is unset, and so does
-        // flat-docroot, which sources wp-content from its ABSPATH scan.
+        // WP_CONTENT_DIR defaults to ABSPATH/wp-content.
         $content_dir = $this->clean_preflight_path(
             $state->get('preflight.database.wp.paths_urls.content_dir')
         );
@@ -4740,11 +4726,8 @@ class ImportClient
             }
         }
 
-        // A source which is not a real directory holds nothing of its own, so
-        // there is nothing to merge and nothing to guard. Checking that first
-        // is what keeps a second run harmless once flat-docroot has replaced
-        // the site's wp-content with a symlink into the destination: resolving
-        // symlinks, the guard below would see the two sides as one path.
+        // Guard only a real source directory. A flattened one resolves to the
+        // destination, and the merge below already does nothing with it.
         if (!is_link($source_wp_content) && is_dir($source_wp_content)) {
             foreach (array_merge([$destination_wp_content], array_values($component_destinations)) as $destination) {
                 $this->assert_merge_paths_do_not_overlap($source_wp_content, $destination);
@@ -4769,8 +4752,6 @@ class ImportClient
             true,
         );
 
-        // The audit log already holds one line per moved entry, so the result
-        // reports a count: a merged uploads tree runs to thousands of paths.
         $result = [
             "status" => "complete",
             "from" => $source_wp_content,
@@ -4785,18 +4766,7 @@ class ImportClient
         $this->output_progress(array_merge(["type" => "merge_wp_content_complete"], $result));
     }
 
-    /**
-     * Refuse to merge while the destination is still missing pulled files.
-     *
-     * Mid-download every unfetched path looks absent, so local copies move in
-     * and the pull then writes the remote version over them. Inside
-     * flat-docroot the ordering was structural; as a command of its own it is
-     * not, and these two files are what say the file pull ran and finished.
-     * PullIndexJournal::open() creates pull/index.wal and only
-     * remove_empty_wal(), at the end of run_files_pull(), removes it;
-     * ensure_local_index_exists() in that same method is what guarantees
-     * local_index.jsonl afterwards.
-     */
+    /** Refuse to merge until files-pull has completed. */
     private function assert_file_pull_completed(): void
     {
         if (is_file($this->pull_index_wal_path)) {
@@ -4812,12 +4782,7 @@ class ImportClient
         }
     }
 
-    /**
-     * Refuse a --from which is the destination, holds it, or sits inside it.
-     *
-     * Any of those walks a tree into itself: the merge would read entries it
-     * has already moved and move them again, deeper each time.
-     */
+    /** Refuse overlapping source and destination paths. */
     private function assert_merge_paths_do_not_overlap(
         string $source_wp_content,
         string $destination
