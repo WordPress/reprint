@@ -63,8 +63,12 @@
  *   the first available spelling from the URL prefix, configured source path,
  *   or following candidate path. A scheme-less authority with no slash stays
  *   unchanged when the target has a path.
- * - Target ports, user information, queries, fragments, IPv4/IPv6 addresses,
- *   and Unicode domains are not supported. Punycode domains are supported.
+ * - A target port copies the colon spelling after the matched scheme. A
+ *   protocol-relative or scheme-less candidate has no scheme colon to copy, so
+ *   its target port uses a literal `:`. This may not match the escaping rules
+ *   of the surrounding text.
+ * - Target user information, queries, fragments, IPv4/IPv6 addresses, and
+ *   Unicode domains are not supported. Punycode domains are supported.
  * - Unicode source domains and paths are not supported.
  *
  * CSS hexadecimal escapes such as https\3a \2f \2f ... and percent-encoded
@@ -108,6 +112,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     target_domain: string,
      *     target_scheme: string,
      *     target_path: string,
+     *     target_port: int|null,
      *     pattern: string
      * }>
      */
@@ -125,6 +130,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     target_domain: string,
      *     target_scheme: string,
      *     target_path: string,
+     *     target_port: int|null,
      *     pattern: string,
      *     start: int,
      *     base_length: int,
@@ -144,7 +150,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *
      * A source may include an initial path containing only bytes from `!`
      * (0x21) through `~` (0x7E). A target must be an HTTP(S) URL with a
-     * supported domain and an optional restricted path:
+     * supported domain, optional port, and optional restricted path:
      *
      * ```
      * [
@@ -266,6 +272,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     target_domain: string,
      *     target_scheme: string,
      *     target_path: string,
+     *     target_port: int|null,
      *     pattern: string,
      *     start: int,
      *     base_length: int,
@@ -301,13 +308,23 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                     ? $matches['path_slash'][0]
                     : $matches['url_slash'][0];
             }
+            $target_port = '';
+            if ($mapping['target_port'] !== null) {
+                // No escaped colon is available here. Use an unescaped colon.
+                // This risks breaking an unknown format, but ':' is not a
+                // common string terminator in popular formats.
+                $target_port_colon = $matches['scheme_colon'][1] === -1
+                    ? ':'
+                    : $matches['scheme_colon'][0];
+                $target_port = $target_port_colon . $mapping['target_port'];
+            }
 
             $next_match = array_merge(
                 $mapping,
                 [
                     'start'         => $authority_start,
                     'base_length'   => strlen($matches['base'][0]),
-                    'replacement'   => $mapping['target_domain'] . str_replace(
+                    'replacement'   => $mapping['target_domain'] . $target_port . str_replace(
                         '/',
                         $target_path_slash,
                         $mapping['target_path']
@@ -368,7 +385,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             (?:
                 (?:
                     (?<scheme>(?i:' . preg_quote($source_scheme, '~') . '))
-                    ' . $separator_escape . ':
+                    (?<scheme_colon>' . $separator_escape . ':)
                     |
                     (?<!:)
                 )
@@ -392,6 +409,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     target_domain: string,
      *     target_scheme: string,
      *     target_path: string,
+     *     target_port: int|null,
      *     pattern: string
      * }|null
      */
@@ -414,6 +432,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             'target_domain'    => $target['host'],
             'target_scheme'    => $target['scheme'],
             'target_path'      => $target['path'],
+            'target_port'      => $target['port'],
             'pattern'          => $this->create_url_candidate_pattern(
                 $source['scheme'],
                 $source['authority'],
@@ -424,7 +443,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     }
 
     /**
-     * @return array{scheme: string, host: string, authority: string, path: string}|null
+     * @return array{scheme: string, host: string, authority: string, path: string, port: int|null}|null
      */
     private function get_supported_url_parts(string $url, bool $is_source_url): ?array
     {
@@ -447,7 +466,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             && $path !== ''
             && preg_match('#^/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$#', $path) !== 1;
         if (( $scheme !== 'http' && $scheme !== 'https' )
-            || ( !$is_source_url && ( array_key_exists('port', $parts) || $has_unsupported_target_path ) )
+            || ( !$is_source_url && $has_unsupported_target_path )
             || !( $this->is_alphanumeric_dot_hyphen_domain_name($host) || ( $is_source_url && $this->is_ip_address($host) ) )
             || !$this->contains_only_exclamation_mark_through_tilde_bytes($path)) {
             return null;
@@ -458,6 +477,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             'host'      => $host,
             'authority' => $host . ( isset( $parts['port'] ) ? ':' . $parts['port'] : '' ),
             'path'      => $path,
+            'port'      => isset($parts['port']) ? (int) $parts['port'] : null,
         ];
     }
 

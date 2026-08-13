@@ -307,6 +307,31 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'not-the-source.com/media/logo.png destination.com/assets/media/logo.png',
                 ['https://source.com' => 'https://destination.com/assets'],
             ],
+            'literal target port' => [
+                'https://source.example/media/logo.png',
+                'https://destination.example:8443/media/logo.png',
+                ['https://source.example' => 'https://destination.example:8443'],
+            ],
+            'target port copies the scheme colon spelling' => [
+                'https\\:\\/\\/source.example\\/media\\/logo.png',
+                'https\\:\\/\\/destination.example\\:8443\\/media\\/logo.png',
+                ['https://source.example' => 'https://destination.example:8443'],
+            ],
+            'protocol-relative target port uses a literal colon' => [
+                '\\/\\/source.example\\/media\\/logo.png',
+                '\\/\\/destination.example:8443\\/media\\/logo.png',
+                ['https://source.example' => 'https://destination.example:8443'],
+            ],
+            'scheme-less target port uses a literal colon' => [
+                'source.example\\/media\\/logo.png',
+                'destination.example:8443\\/media\\/logo.png',
+                ['https://source.example' => 'https://destination.example:8443'],
+            ],
+            'target port and path use their captured spellings' => [
+                'https\\:\\/\\/source.example\\/media\\/logo.png',
+                'https\\:\\/\\/destination.example\\:8443\\/assets\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example:8443/assets'],
+            ],
         ];
     }
 
@@ -372,11 +397,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://source.example/media/logo.png',
                 'https://source.example/media/logo.png',
                 ['https://source.example/media' => 'https://destination.example/über-uns'],
-            ],
-            'target has a port' => [
-                'https://source.example/media/logo.png',
-                'https://source.example/media/logo.png',
-                ['https://source.example/media' => 'https://destination.example:8443'],
             ],
             'target has a username and password' => [
                 'https://source.example/media/logo.png',
