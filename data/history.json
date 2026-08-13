@@ -16243,6 +16243,85 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "1050e03c322b802262c90269e11eae043700968f",
+      "shortSha": "1050e03",
+      "date": "2026-08-13T01:57:12+02:00",
+      "message": "[PHP] Cautious URL processor rewrites mapped protocols (#568)",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+ plus targeted file-transfer scenarios",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.9",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "preflightImporter": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 146.5627889999996,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 10810.335122,
+          "attempts": 2,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 105308.96939100002,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 37051.991507,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 109.38287299999502,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-pull",
+          "elapsedMs": 283027.500871,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-apply",
+          "elapsedMs": 61857.66740500007,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-untuned-random",
+          "elapsedMs": 199.13335899997037,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-binary-compression",
+          "elapsedMs": 120.03175600001123,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull-large-part-peak-memory",
+          "elapsedMs": 4540.059119999991,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
