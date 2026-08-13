@@ -364,8 +364,6 @@ final class FileIndexProcessorTest extends TestCase {
      * @param bool     $includeCaches        Whether generated caches are included.
      * @param bool     $resumeAfterEveryStep Whether to reopen from the cursor each step.
      * @return array {
-     *     Completed traversal.
-     *
      *     @type array[]  $entries  File-index entries.
      *     @type string[] $statuses Status returned by every step.
      * }

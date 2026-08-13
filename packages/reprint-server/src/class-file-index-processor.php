@@ -99,8 +99,7 @@ final class FileIndexProcessor {
         bool $include_caches,
         string $storage_path
     ): self {
-        // Canonical paths keep configured roots and followed links in one
-        // namespace. A root may also be one file named by --include.
+        // A root may be one file named by --include.
         $canonical_index_directory = \WordPress\Reprint\Exporter\canonical_root_path($index_directory);
         if ($canonical_index_directory === null) {
             throw new InvalidArgumentException(
@@ -182,13 +181,11 @@ final class FileIndexProcessor {
             }
         }
 
-        // These share the first step's cursor boundary: the endpoint always takes
-        // one step before its budget check, and resume() begins with none of them.
+        // Emitted by the first step; resume() begins with none of them.
         foreach ($path_roots as $path_root) {
             clearstatcache(true, $path_root);
             $stat = @lstat($path_root);
             if ($stat === false) {
-                // Present when canonicalized moments ago, so it has just disappeared.
                 continue;
             }
             $inspected_path = self::index_entries_for_path($path_root, $stat, $follow_symlinks);
@@ -745,11 +742,7 @@ final class FileIndexProcessor {
      * @param array  $stat            lstat() result for the path.
      * @param bool   $follow_symlinks Whether directory links may reveal intermediate links.
      * @return array {
-     *     Entries and the type recorded for this path.
-     *
-     *     @type array[] $entries Intermediate link entries, then the path's own
-     *                            entry. A non-empty directory contributes no
-     *                            entry of its own because its descendants imply it.
+     *     @type array[] $entries Intermediate links, then the path's own entry.
      *     @type string  $type    One of file, link, dir, or other.
      * }
      */
@@ -758,9 +751,6 @@ final class FileIndexProcessor {
         array $stat,
         bool $follow_symlinks
     ): array {
-        // Translate platform mode bits into the four types understood by the
-        // file index. A directory link may also reveal intermediate links that
-        // canonicalization would otherwise hide.
         $mode = $stat["mode"] & self::STAT_TYPE_MASK;
         $type = "file";
         $link_target = null;
@@ -778,9 +768,7 @@ final class FileIndexProcessor {
             $type = "other";
         }
 
-        // Build the index entry from the one successful lstat() call. File and
-        // link sizes participate in push change detection; directory size does
-        // not describe its descendants and is normalized to zero.
+        // Directory size does not describe its descendants, so it is zeroed.
         $item = [
             "path" => $path,
             "ctime" => (int) ( isset($stat["ctime"]) ? $stat["ctime"] : 0 ),
@@ -791,10 +779,8 @@ final class FileIndexProcessor {
             $item["target"] = $link_target;
         }
         if ($type === "dir") {
-            // The index describes physical emptiness, not emptiness after
-            // exclusions. A cache or Reprint-storage child still makes its
-            // parent non-empty; calling that parent empty could turn an
-            // intentionally omitted descendant into destructive push work.
+            // Physical emptiness, not emptiness after exclusions: calling an
+            // excluded child's parent empty would make push delete it.
             $directory_handle = @opendir($path);
             if ($directory_handle !== false) {
                 $item["empty"] = true;
@@ -810,17 +796,12 @@ final class FileIndexProcessor {
                 }
                 closedir($directory_handle);
             }
-            // When the directory cannot be inspected, leave "empty" absent.
-            // Pull reports the later directory-open failure. A push index
-            // builder can stop instead of treating unknown descendants as
-            // deletions.
+            // An absent "empty" means unknown, so push must not infer deletions.
         }
 
-        // Intermediate links and the inspected path belong to the same step
-        // because the cursor cannot stop between them without losing one.
+        // One step: the cursor cannot stop between a link and its intermediates.
         $entries = $intermediate_symlinks;
-        // A descendant implies its non-empty ancestors. Keep explicit rows
-        // only for empty directories, which have no descendant to imply them.
+        // A descendant implies its ancestors, so only empty directories need a row.
         if (
             $type !== "dir"
             || !isset($item["empty"])
