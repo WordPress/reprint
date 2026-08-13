@@ -215,33 +215,59 @@ final class FileSyncPatchPlannerTest extends TestCase
         $planner->close();
     }
 
-    public function testCursorBase64EncodesArbitraryByteSelectionRoots(): void
+    public function testCursorBase64EncodesArbitraryBytePaths(): void
     {
         $included_root = "selected-\xff";
-        $patch_base_index = $this->write_index('base.jsonl', [
+        $patch_base_index =
+            $this->temp_dir . "/base-\xfe.jsonl";
+        $patch_result_index = $this->write_index('result.jsonl', [
             $included_root . '/file.txt' =>
                 $this->entry($included_root . '/file.txt'),
         ]);
-        $patch_result_index = $this->write_index('result.jsonl', []);
+        $active_deletion_roots_file =
+            $this->active_deletion_roots_file();
         $planner = FileSyncPatchPlanner::create(
             $patch_base_index,
             $patch_result_index,
-            $this->active_deletion_roots_file(),
+            $active_deletion_roots_file,
             [$included_root]
         );
-        $cursor = $planner->get_cursor();
+        $cursor = json_decode(
+            json_encode($planner->get_cursor(), JSON_THROW_ON_ERROR),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertIsArray($cursor);
         $this->assertSame(
             [base64_encode($included_root)],
             $cursor['included_index_path_roots_b64']
         );
-        $this->assertIsString(
-            json_encode($cursor, JSON_THROW_ON_ERROR)
+        $this->assertSame(
+            base64_encode($patch_base_index),
+            $cursor['patch_base_index_file_b64']
+        );
+        $this->assertSame(
+            base64_encode($patch_result_index),
+            $cursor['patch_result_index_file_b64']
+        );
+        $this->assertSame(
+            base64_encode($active_deletion_roots_file),
+            $cursor['active_deletion_roots_file_b64']
         );
         $planner->close();
 
         $resumed = FileSyncPatchPlanner::resume($cursor);
         $this->assertSame(
-            [$this->delete_operation($included_root)],
+            [
+                $this->copy_operation(
+                    'copy',
+                    $included_root . '/file.txt',
+                    'file',
+                    1,
+                    1
+                ),
+            ],
             $this->collect_operations($resumed)
         );
         $resumed->close();

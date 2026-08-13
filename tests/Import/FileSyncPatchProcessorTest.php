@@ -216,24 +216,25 @@ final class FileSyncPatchProcessorTest extends TestCase {
             $this->entry($included_root . '/file.txt', 1),
         ]);
         $work_directory = $this->work_directory('arbitrary-byte-root');
+        $storage_path = $work_directory . "/storage-\xfd";
         $processor = FileSyncPatchProcessor::start_to_fresh_local_tree(
             $work_directory,
             $this->filesystem_root,
             $saved_index,
-            $work_directory,
+            $storage_path,
             [$included_root],
             [$excluded_root]
         );
-        $cursor = $processor->get_cursor();
+        $cursor = $this->serialize_cursor($processor->get_cursor());
         $this->assertSame(
-            ['fresh_local_index_file', 'position'],
+            ['fresh_local_index_file_b64', 'position'],
             array_keys($cursor)
         );
         $this->assertSame(
             [
                 'phase',
-                'patch_base_index_file',
-                'patch_result_index_file',
+                'patch_base_index_file_b64',
+                'patch_result_index_file_b64',
                 'included_index_path_roots_b64',
                 'excluded_index_path_roots_b64',
                 'fresh_local_index_cursor',
@@ -248,8 +249,9 @@ final class FileSyncPatchProcessorTest extends TestCase {
             [base64_encode($excluded_root)],
             $cursor['position']['excluded_index_path_roots_b64']
         );
-        $this->assertIsString(
-            json_encode($cursor, JSON_THROW_ON_ERROR)
+        $this->assertSame(
+            base64_encode($storage_path),
+            $cursor['position']['fresh_local_index_cursor']['storage_path_b64']
         );
         $processor->close();
 
@@ -257,28 +259,21 @@ final class FileSyncPatchProcessorTest extends TestCase {
         while ($resumed->get_phase() !== 'sorting') {
             $this->assertTrue($resumed->next_step());
         }
-        $sorting_cursor = $resumed->get_cursor();
-        $this->assertIsString(
-            json_encode($sorting_cursor, JSON_THROW_ON_ERROR)
-        );
+        $sorting_cursor = $this->serialize_cursor($resumed->get_cursor());
         $resumed->close();
 
         $resumed = FileSyncPatchProcessor::resume($sorting_cursor);
         $this->assertTrue($resumed->next_step());
-        $starting_patch_cursor = $resumed->get_cursor();
-        $this->assertSame('starting_patch', $resumed->get_phase());
-        $this->assertIsString(
-            json_encode($starting_patch_cursor, JSON_THROW_ON_ERROR)
+        $starting_patch_cursor = $this->serialize_cursor(
+            $resumed->get_cursor()
         );
+        $this->assertSame('starting_patch', $resumed->get_phase());
         $resumed->close();
 
         $resumed = FileSyncPatchProcessor::resume($starting_patch_cursor);
         $this->assertTrue($resumed->next_step());
-        $planning_cursor = $resumed->get_cursor();
+        $planning_cursor = $this->serialize_cursor($resumed->get_cursor());
         $this->assertSame('planning', $resumed->get_phase());
-        $this->assertIsString(
-            json_encode($planning_cursor, JSON_THROW_ON_ERROR)
-        );
         $resumed->close();
 
         $resumed = FileSyncPatchProcessor::resume($planning_cursor);
@@ -290,6 +285,75 @@ final class FileSyncPatchProcessorTest extends TestCase {
                 ],
             ],
             $this->operation_names($this->run_to_completion($resumed))
+        );
+        $complete_cursor = $this->serialize_cursor($resumed->get_cursor());
+        $resumed = FileSyncPatchProcessor::resume($complete_cursor);
+        $this->assertFalse($resumed->next_step());
+        $resumed->close();
+    }
+
+    public function testCursorKeepsArbitraryByteWorkAndIndexPathsThroughEveryPhase(): void
+    {
+        $filesystem_root =
+            $this->temporary_directory . "/filesystem-root-\xff";
+        if (!@mkdir($filesystem_root)) {
+            $this->markTestSkipped(
+                'This filesystem does not accept non-UTF-8 path components.'
+            );
+        }
+        $work_directory = $this->work_directory("work-\xfe");
+        $storage_path = $this->temporary_directory . "/storage-\xfd";
+        mkdir($storage_path);
+        $current_path = "current-\xfc.txt";
+        $saved_path = "saved-\xfb.txt";
+        file_put_contents($filesystem_root . '/' . $current_path, 'current');
+        $saved_index = $this->write_index("saved-\xfa.jsonl", [
+            $this->entry($saved_path, 5),
+        ]);
+        $fresh_local_index_file =
+            $work_directory . '/fresh_local_index.jsonl';
+
+        $processor = FileSyncPatchProcessor::start_to_fresh_local_tree(
+            $work_directory,
+            $filesystem_root,
+            $saved_index,
+            $storage_path
+        );
+        $seen_phases = [];
+        $operations = [];
+        for ($step = 0; $step < 100; ++$step) {
+            $processor->flush_pending_outputs();
+            $cursor = $this->serialize_cursor($processor->get_cursor());
+            $phase = $cursor['position']['phase'];
+            $seen_phases[$phase] = true;
+            $this->assertSame(
+                $fresh_local_index_file,
+                base64_decode($cursor['fresh_local_index_file_b64'], true)
+            );
+            $processor->close();
+            $processor = FileSyncPatchProcessor::resume($cursor);
+            if ($phase === 'complete') {
+                $this->assertFalse($processor->next_step());
+                $processor->close();
+                break;
+            }
+            $processor->next_step();
+            $operation = $processor->get_operation();
+            if ($operation !== null) {
+                $operations[] = $operation;
+            }
+        }
+
+        $this->assertSame(
+            ['indexing', 'sorting', 'starting_patch', 'planning', 'complete'],
+            array_keys($seen_phases)
+        );
+        $this->assertSame(
+            [
+                ['action' => 'copy', 'path' => $current_path],
+                ['action' => 'delete', 'path' => $saved_path],
+            ],
+            $this->operation_names($operations)
         );
     }
 
@@ -348,6 +412,22 @@ final class FileSyncPatchProcessorTest extends TestCase {
             }
         }
         $this->fail('File sync patch processing did not complete in 100 steps.');
+    }
+
+    /**
+     * @param array<string,mixed> $cursor
+     * @return array<string,mixed>
+     */
+    private function serialize_cursor(array $cursor): array
+    {
+        $stored_cursor = json_decode(
+            json_encode($cursor, JSON_THROW_ON_ERROR),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertIsArray($stored_cursor);
+        return $stored_cursor;
     }
 
     /**

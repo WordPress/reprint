@@ -47,12 +47,18 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * @phpstan-type SortingPosition array{phase:'sorting'}
  * @phpstan-type CompletePosition array{phase:'complete'}
  * @phpstan-type Position IndexingPosition|SortingPosition|CompletePosition
- * @phpstan-type Cursor array{fresh_local_index_file:string,filesystem_root:string,storage_path:string,include_caches:bool,position:Position}
+ * @phpstan-type Cursor array{fresh_local_index_file_b64:string,filesystem_root_b64:string,storage_path_b64:string,include_caches:bool,position:Position}
  */
 final class FreshLocalIndexProcessor
 {
     /** @var Cursor Current cursor returned to the caller. */
     private array $cursor;
+
+    /** Fresh local index path decoded from the cursor. */
+    private string $fresh_local_index_file;
+
+    /** Filesystem root decoded from the cursor. */
+    private string $filesystem_root;
 
     /** Filesystem traversal retained during indexing. */
     private FileIndexProcessor $file_index_processor;
@@ -82,6 +88,8 @@ final class FreshLocalIndexProcessor
     ): self {
         $processor = new self();
         $filesystem_root = $processor->resolve_filesystem_root($filesystem_root);
+        $processor->fresh_local_index_file = $fresh_local_index_file;
+        $processor->filesystem_root = $filesystem_root;
         $processor->fresh_local_index_handle = fopen(
             $fresh_local_index_file,
             "w+b"
@@ -99,9 +107,11 @@ final class FreshLocalIndexProcessor
             $storage_path
         );
         $processor->cursor = [
-            "fresh_local_index_file" => $fresh_local_index_file,
-            "filesystem_root" => $filesystem_root,
-            "storage_path" => $storage_path,
+            "fresh_local_index_file_b64" => base64_encode(
+                $fresh_local_index_file
+            ),
+            "filesystem_root_b64" => base64_encode($filesystem_root),
+            "storage_path_b64" => base64_encode($storage_path),
             "include_caches" => $include_caches,
             "position" => [
                 "phase" => "indexing",
@@ -127,27 +137,39 @@ final class FreshLocalIndexProcessor
     {
         $processor = new self();
         $processor->cursor = $cursor;
+        $processor->fresh_local_index_file = self::decode_cursor_path(
+            $cursor["fresh_local_index_file_b64"],
+            "fresh local index file"
+        );
+        $processor->filesystem_root = self::decode_cursor_path(
+            $cursor["filesystem_root_b64"],
+            "filesystem root"
+        );
+        $storage_path = self::decode_cursor_path(
+            $cursor["storage_path_b64"],
+            "storage path"
+        );
         $position = $cursor["position"];
         if ($position["phase"] !== "indexing") {
             return $processor;
         }
 
         $filesystem_root = $processor->resolve_filesystem_root(
-            $cursor["filesystem_root"]
+            $processor->filesystem_root
         );
-        if ($filesystem_root !== $cursor["filesystem_root"]) {
+        if ($filesystem_root !== $processor->filesystem_root) {
             throw new RuntimeException(
                 "The fresh local index filesystem root no longer resolves to its saved path."
             );
         }
         $processor->fresh_local_index_handle = fopen(
-            $cursor["fresh_local_index_file"],
+            $processor->fresh_local_index_file,
             "r+b"
         );
         if (!is_resource($processor->fresh_local_index_handle)) {
             throw new RuntimeException(
                 "Failed to reopen the fresh local index: "
-                . $cursor["fresh_local_index_file"]
+                . $processor->fresh_local_index_file
             );
         }
         if (
@@ -176,7 +198,7 @@ final class FreshLocalIndexProcessor
             ),
             false,
             $cursor["include_caches"],
-            $cursor["storage_path"]
+            $storage_path
         );
         return $processor;
     }
@@ -200,10 +222,10 @@ final class FreshLocalIndexProcessor
         }
 
         if ($position["phase"] === "sorting") {
-            if (!sort_index_file($this->cursor["fresh_local_index_file"])) {
+            if (!sort_index_file($this->fresh_local_index_file)) {
                 throw new RuntimeException(
                     "Failed to sort the fresh local index: "
-                    . $this->cursor["fresh_local_index_file"]
+                    . $this->fresh_local_index_file
                 );
             }
             $this->cursor["position"] = ["phase" => "complete"];
@@ -255,7 +277,7 @@ final class FreshLocalIndexProcessor
 
                     $local_relative_path = relative_path_under(
                         $file_index_processor_entry["path"],
-                        $this->cursor["filesystem_root"]
+                        $this->filesystem_root
                     );
                     if ($local_relative_path === null) {
                         throw new LogicException(
@@ -364,6 +386,20 @@ final class FreshLocalIndexProcessor
             );
         }
         return trim_right_slash($resolved_filesystem_root);
+    }
+
+    /** Decodes one arbitrary-byte path stored in the JSON cursor. */
+    private static function decode_cursor_path(
+        string $encoded_path,
+        string $field_name
+    ): string {
+        $path = base64_decode($encoded_path, true);
+        if ($path === false) {
+            throw new InvalidArgumentException(
+                "Fresh local index cursor contains an invalid base64 {$field_name}."
+            );
+        }
+        return $path;
     }
 
     /** Closes the fresh local index retained during filesystem traversal. */

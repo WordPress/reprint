@@ -47,17 +47,20 @@ require_once __DIR__ . '/class-fresh-local-index-processor.php';
  *
  * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
  * @phpstan-type FreshIndexPosition array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}|array{phase:'sorting'}|array{phase:'complete'}
- * @phpstan-type FreshIndexCursor array{fresh_local_index_file:string,filesystem_root:string,storage_path:string,include_caches:bool,position:FreshIndexPosition}
+ * @phpstan-type FreshIndexCursor array{fresh_local_index_file_b64:string,filesystem_root_b64:string,storage_path_b64:string,include_caches:bool,position:FreshIndexPosition}
  * @phpstan-type PlannerIndexDiffCursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
- * @phpstan-type PlannerCursor array{patch_base_index_file:string,patch_result_index_file:string,active_deletion_roots_file:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,index_diff_cursor:PlannerIndexDiffCursor,active_deletion_root_byte_offset:int|null}
- * @phpstan-type FreshTreePosition array{phase:'indexing'|'sorting'|'starting_patch',patch_base_index_file:string,patch_result_index_file:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,fresh_local_index_cursor:FreshIndexCursor}
+ * @phpstan-type PlannerCursor array{patch_base_index_file_b64:string,patch_result_index_file_b64:string,active_deletion_roots_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,index_diff_cursor:PlannerIndexDiffCursor,active_deletion_root_byte_offset:int|null}
+ * @phpstan-type FreshTreePosition array{phase:'indexing'|'sorting'|'starting_patch',patch_base_index_file_b64:string,patch_result_index_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,fresh_local_index_cursor:FreshIndexCursor}
  * @phpstan-type Position FreshTreePosition|array{phase:'planning',file_sync_patch_planner_cursor:PlannerCursor}|array{phase:'complete'}
- * @phpstan-type Cursor array{fresh_local_index_file:string,position:Position}
+ * @phpstan-type Cursor array{fresh_local_index_file_b64:string,position:Position}
  * @phpstan-type SyncOperation array{action:'copy'|'delete'|'replace',path:string,expected_source?:array{type:string,size:int,ctime:int}}
  */
 final class FileSyncPatchProcessor {
     /** @var Cursor */
     private array $cursor;
+
+    /** Fresh local index path decoded from the cursor. */
+    private string $fresh_local_index_file;
 
     private FreshLocalIndexProcessor $fresh_local_index_processor;
 
@@ -142,6 +145,10 @@ final class FileSyncPatchProcessor {
     {
         $processor = new self();
         $processor->cursor = $cursor;
+        $processor->fresh_local_index_file = self::decode_cursor_path(
+            $cursor["fresh_local_index_file_b64"],
+            "fresh local index file"
+        );
         $position = $cursor["position"];
         if (
             $position["phase"] === "indexing"
@@ -235,10 +242,16 @@ final class FileSyncPatchProcessor {
                 $excluded_index_path_roots[] = $excluded_index_path_root;
             }
             $this->patch_planner = FileSyncPatchPlanner::create(
-                $position["patch_base_index_file"],
-                $position["patch_result_index_file"],
+                self::decode_cursor_path(
+                    $position["patch_base_index_file_b64"],
+                    "patch base index file"
+                ),
+                self::decode_cursor_path(
+                    $position["patch_result_index_file_b64"],
+                    "patch result index file"
+                ),
                 wp_join_unix_paths(
-                    dirname($this->cursor["fresh_local_index_file"]),
+                    dirname($this->fresh_local_index_file),
                     "deleted_directories_stack.jsonl"
                 ),
                 $included_index_path_roots,
@@ -309,7 +322,7 @@ final class FileSyncPatchProcessor {
     /** Returns the processor-owned fresh local index path. */
     public function get_fresh_local_index_path(): string
     {
-        return $this->cursor["fresh_local_index_file"];
+        return $this->fresh_local_index_file;
     }
 
     /**
@@ -331,19 +344,23 @@ final class FileSyncPatchProcessor {
         }
         $file_sync_patch_planner_cursor =
             $position["file_sync_patch_planner_cursor"];
+        $patch_base_index_file = self::decode_cursor_path(
+            $file_sync_patch_planner_cursor["patch_base_index_file_b64"],
+            "patch base index file"
+        );
+        $patch_result_index_file = self::decode_cursor_path(
+            $file_sync_patch_planner_cursor["patch_result_index_file_b64"],
+            "patch result index file"
+        );
         $patch_base_index_bytes = is_file(
-            $file_sync_patch_planner_cursor["patch_base_index_file"]
+            $patch_base_index_file
         )
-            ? filesize(
-                $file_sync_patch_planner_cursor["patch_base_index_file"]
-            )
+            ? filesize($patch_base_index_file)
             : 0;
         $patch_result_index_bytes = is_file(
-            $file_sync_patch_planner_cursor["patch_result_index_file"]
+            $patch_result_index_file
         )
-            ? filesize(
-                $file_sync_patch_planner_cursor["patch_result_index_file"]
-            )
+            ? filesize($patch_result_index_file)
             : 0;
         if (
             !is_int($patch_base_index_bytes)
@@ -411,6 +428,7 @@ final class FileSyncPatchProcessor {
             $work_directory,
             "fresh_local_index.jsonl"
         );
+        $processor->fresh_local_index_file = $fresh_local_index_file;
         $processor->fresh_local_index_processor =
             FreshLocalIndexProcessor::start(
                 $fresh_local_index_file,
@@ -419,11 +437,17 @@ final class FileSyncPatchProcessor {
                 $include_caches
             );
         $processor->cursor = [
-            "fresh_local_index_file" => $fresh_local_index_file,
+            "fresh_local_index_file_b64" => base64_encode(
+                $fresh_local_index_file
+            ),
             "position" => [
                 "phase" => "indexing",
-                "patch_base_index_file" => $patch_base_index_file,
-                "patch_result_index_file" => $patch_result_index_file,
+                "patch_base_index_file_b64" => base64_encode(
+                    $patch_base_index_file
+                ),
+                "patch_result_index_file_b64" => base64_encode(
+                    $patch_result_index_file
+                ),
                 "included_index_path_roots_b64" => array_map(
                     "base64_encode",
                     $included_index_path_roots
@@ -437,5 +461,19 @@ final class FileSyncPatchProcessor {
             ],
         ];
         return $processor;
+    }
+
+    /** Decodes one arbitrary-byte path stored in the JSON cursor. */
+    private static function decode_cursor_path(
+        string $encoded_path,
+        string $field_name
+    ): string {
+        $path = base64_decode($encoded_path, true);
+        if ($path === false) {
+            throw new InvalidArgumentException(
+                "File sync patch processor cursor contains an invalid base64 {$field_name}."
+            );
+        }
+        return $path;
     }
 }

@@ -618,7 +618,7 @@ final class PushPlanTest extends TestCase
             'local_file_bytes_to_push',
         ], array_keys($cursor['position']));
         $this->assertSame([
-            'fresh_local_index_file',
+            'fresh_local_index_file_b64',
             'position',
         ], array_keys($cursor['position']['file_sync_patch_processor_cursor']));
         $this->assertSame([
@@ -626,9 +626,9 @@ final class PushPlanTest extends TestCase
             'file_sync_patch_planner_cursor',
         ], array_keys($cursor['position']['file_sync_patch_processor_cursor']['position']));
         $this->assertSame([
-            'patch_base_index_file',
-            'patch_result_index_file',
-            'active_deletion_roots_file',
+            'patch_base_index_file_b64',
+            'patch_result_index_file_b64',
+            'active_deletion_roots_file_b64',
             'included_index_path_roots_b64',
             'excluded_index_path_roots_b64',
             'index_diff_cursor',
@@ -662,10 +662,10 @@ final class PushPlanTest extends TestCase
 
         try {
             $this->assertSame(
-                '/',
+                base64_encode('/'),
                 $plan->get_cursor()['position'][
                     'file_sync_patch_processor_cursor'
-                ]['position']['fresh_local_index_cursor']['filesystem_root']
+                ]['position']['fresh_local_index_cursor']['filesystem_root_b64']
             );
         } finally {
             $plan->close();

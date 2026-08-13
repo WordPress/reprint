@@ -86,7 +86,7 @@ require_once __DIR__ . '/class-file-index-diff-processor.php';
  * interruption. resume() ignores those bytes.
  *
  * @phpstan-type IndexDiffCursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
- * @phpstan-type Cursor array{patch_base_index_file:string,patch_result_index_file:string,active_deletion_roots_file:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,index_diff_cursor:IndexDiffCursor,active_deletion_root_byte_offset:int|null}
+ * @phpstan-type Cursor array{patch_base_index_file_b64:string,patch_result_index_file_b64:string,active_deletion_roots_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,index_diff_cursor:IndexDiffCursor,active_deletion_root_byte_offset:int|null}
  * @phpstan-type ActiveDeletionRoot array{path:string,previous_byte_offset:int|null}
  * @phpstan-type ExpectedSource array{type:string,size:int,ctime:int}
  * @phpstan-type DeleteOperation array{action:'delete',path:string}
@@ -152,9 +152,15 @@ final class FileSyncPatchPlanner
         }
         return self::resume(
             [
-                "patch_base_index_file" => $patch_base_index_file,
-                "patch_result_index_file" => $patch_result_index_file,
-                "active_deletion_roots_file" => $active_deletion_roots_file,
+                "patch_base_index_file_b64" => base64_encode(
+                    $patch_base_index_file
+                ),
+                "patch_result_index_file_b64" => base64_encode(
+                    $patch_result_index_file
+                ),
+                "active_deletion_roots_file_b64" => base64_encode(
+                    $active_deletion_roots_file
+                ),
                 "included_index_path_roots_b64" => array_map(
                     "base64_encode",
                     $included_index_path_roots
@@ -182,9 +188,9 @@ final class FileSyncPatchPlanner
      * @param array $cursor {
      *     Cursor returned by get_cursor().
      *
-     *     @type string       $patch_base_index_file                    Tree state before the patch.
-     *     @type string       $patch_result_index_file                  Tree state described by the patch.
-     *     @type string       $active_deletion_roots_file               State for active directory deletions.
+     *     @type string       $patch_base_index_file_b64                Base64-encoded path to the tree state before the patch.
+     *     @type string       $patch_result_index_file_b64              Base64-encoded path to the tree state described by the patch.
+     *     @type string       $active_deletion_roots_file_b64           Base64-encoded path to the active directory-deletion state.
      *     @type list<string> $included_index_path_roots_b64            Base64-encoded roots within which changes may be planned.
      *     @type list<string> $excluded_index_path_roots_b64            Base64-encoded roots which changes must not affect.
      *     @type array        $index_diff_cursor                        File-index diff cursor.
@@ -197,6 +203,18 @@ final class FileSyncPatchPlanner
     {
         $planner = new self();
         $planner->cursor = $cursor;
+        $patch_base_index_file = self::decode_cursor_path(
+            $cursor["patch_base_index_file_b64"],
+            "patch base index file"
+        );
+        $patch_result_index_file = self::decode_cursor_path(
+            $cursor["patch_result_index_file_b64"],
+            "patch result index file"
+        );
+        $active_deletion_roots_file = self::decode_cursor_path(
+            $cursor["active_deletion_roots_file_b64"],
+            "active deletion roots file"
+        );
         $planner->included_index_path_roots = array_map(
             [self::class, "decode_index_path_root"],
             $cursor["included_index_path_roots_b64"]
@@ -206,19 +224,19 @@ final class FileSyncPatchPlanner
             $cursor["excluded_index_path_roots_b64"]
         );
         $planner->index_diff = FileIndexDiffProcessor::resume(
-            $cursor["patch_base_index_file"],
-            $cursor["patch_result_index_file"],
+            $patch_base_index_file,
+            $patch_result_index_file,
             $cursor["index_diff_cursor"]
         );
         $planner->active_deletion_roots_handle = fopen(
-            $cursor["active_deletion_roots_file"],
+            $active_deletion_roots_file,
             "a+b"
         );
         if (!is_resource($planner->active_deletion_roots_handle)) {
             $planner->index_diff->close();
             throw new RuntimeException(
                 "Failed to open the active deletion roots file: "
-                . $cursor["active_deletion_roots_file"]
+                . $active_deletion_roots_file
             );
         }
         $planner->active_deletion_root =
@@ -475,9 +493,9 @@ final class FileSyncPatchPlanner
      * @return array {
      *     Cursor for resume().
      *
-     *     @type string       $patch_base_index_file                    Tree state before the patch.
-     *     @type string       $patch_result_index_file                  Tree state described by the patch.
-     *     @type string       $active_deletion_roots_file               State for active directory deletions.
+     *     @type string       $patch_base_index_file_b64                Base64-encoded path to the tree state before the patch.
+     *     @type string       $patch_result_index_file_b64              Base64-encoded path to the tree state described by the patch.
+     *     @type string       $active_deletion_roots_file_b64           Base64-encoded path to the active directory-deletion state.
      *     @type list<string> $included_index_path_roots_b64            Base64-encoded roots within which changes may be planned.
      *     @type list<string> $excluded_index_path_roots_b64            Base64-encoded roots which changes must not affect.
      *     @type array        $index_diff_cursor                        File-index diff cursor.
@@ -694,6 +712,20 @@ final class FileSyncPatchPlanner
             );
         }
         return $index_path_root;
+    }
+
+    /** Decodes one arbitrary-byte file path stored in the JSON cursor. */
+    private static function decode_cursor_path(
+        string $encoded_path,
+        string $field_name
+    ): string {
+        $path = base64_decode($encoded_path, true);
+        if ($path === false) {
+            throw new InvalidArgumentException(
+                "File sync patch planner cursor contains an invalid base64 {$field_name}."
+            );
+        }
+        return $path;
     }
 
     /** Rejects calls after close(). */

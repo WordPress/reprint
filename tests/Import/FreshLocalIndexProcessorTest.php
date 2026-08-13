@@ -141,6 +141,68 @@ final class FreshLocalIndexProcessorTest extends TestCase {
         );
     }
 
+    public function testCursorSerializesAndResumesEveryPhaseWithArbitraryBytePaths(): void
+    {
+        $arbitrary_byte_directory =
+            $this->temporary_directory . "/paths-\xff";
+        if (!@mkdir($arbitrary_byte_directory)) {
+            $this->markTestSkipped(
+                'This filesystem does not accept non-UTF-8 path components.'
+            );
+        }
+        $this->filesystem_root =
+            $arbitrary_byte_directory . "/filesystem-root-\xfe";
+        $this->storage_path =
+            $arbitrary_byte_directory . "/storage-\xfd";
+        $this->fresh_local_index_file =
+            $arbitrary_byte_directory . "/fresh-index-\xfc.jsonl";
+        mkdir($this->filesystem_root);
+        mkdir($this->storage_path);
+        file_put_contents($this->filesystem_root . '/value.txt', 'value');
+
+        $processor = FreshLocalIndexProcessor::start(
+            $this->fresh_local_index_file,
+            $this->filesystem_root,
+            $this->storage_path
+        );
+        $seen_phases = [];
+        for ($step = 0; $step < 100; ++$step) {
+            $processor->flush_pending_output();
+            $cursor = $this->serialize_cursor($processor->get_cursor());
+            $phase = $cursor['position']['phase'];
+            $seen_phases[$phase] = true;
+            $this->assertSame(
+                $this->fresh_local_index_file,
+                base64_decode($cursor['fresh_local_index_file_b64'], true)
+            );
+            $this->assertSame(
+                realpath($this->filesystem_root),
+                base64_decode($cursor['filesystem_root_b64'], true)
+            );
+            $this->assertSame(
+                $this->storage_path,
+                base64_decode($cursor['storage_path_b64'], true)
+            );
+            $processor->close();
+            $processor = FreshLocalIndexProcessor::resume($cursor);
+            if ($phase === 'complete') {
+                $this->assertFalse($processor->next_step());
+                $processor->close();
+                break;
+            }
+            $processor->next_step();
+        }
+
+        $this->assertSame(
+            ['indexing', 'sorting', 'complete'],
+            array_keys($seen_phases)
+        );
+        $this->assertSame(
+            ['value.txt'],
+            array_column($this->read_index_entries(), 'decoded_path')
+        );
+    }
+
     private function run_to_completion(
         FreshLocalIndexProcessor $processor
     ): void {
@@ -151,6 +213,22 @@ final class FreshLocalIndexProcessorTest extends TestCase {
             }
         }
         $this->fail('Fresh local index did not complete within 100 steps.');
+    }
+
+    /**
+     * @param array<string,mixed> $cursor
+     * @return array<string,mixed>
+     */
+    private function serialize_cursor(array $cursor): array
+    {
+        $stored_cursor = json_decode(
+            json_encode($cursor, JSON_THROW_ON_ERROR),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertIsArray($stored_cursor);
+        return $stored_cursor;
     }
 
     /** @return list<array<string,mixed>> */
