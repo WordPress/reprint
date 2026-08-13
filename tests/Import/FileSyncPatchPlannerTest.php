@@ -132,6 +132,99 @@ final class FileSyncPatchPlannerTest extends TestCase
         $planner->close();
     }
 
+    public function testExactDeletionsKeepEveryIndexedPath(): void
+    {
+        $patch_base_index = $this->write_index('exact-base.jsonl', [
+            'gone/child.txt' => $this->entry('gone/child.txt'),
+            'gone/nested/leaf.txt' => $this->entry('gone/nested/leaf.txt'),
+            'stays.txt' => $this->entry('stays.txt'),
+        ]);
+        $patch_result_index = $this->write_index('exact-result.jsonl', [
+            'stays.txt' => $this->entry('stays.txt'),
+        ]);
+        $planner = FileSyncPatchPlanner::create_with_exact_deletions(
+            $patch_base_index,
+            $patch_result_index,
+            $this->active_deletion_roots_file()
+        );
+
+        $this->assertSame(
+            [
+                $this->exact_delete_operation('gone/child.txt'),
+                $this->exact_delete_operation('gone/nested/leaf.txt'),
+                null,
+            ],
+            $this->collect_operations($planner)
+        );
+        $planner->close();
+    }
+
+    public function testExactDeletionsDoNotReplaceAParentBeforeItsChildren(): void
+    {
+        $patch_base_index = $this->write_index('exact-parent-base.jsonl', [
+            'tree/child.txt' => $this->entry('tree/child.txt'),
+            'tree/nested/leaf.txt' => $this->entry('tree/nested/leaf.txt'),
+        ]);
+        $patch_result_index = $this->write_index('exact-parent-result.jsonl', [
+            'tree' => $this->entry('tree', 2),
+        ]);
+        $planner = FileSyncPatchPlanner::create_with_exact_deletions(
+            $patch_base_index,
+            $patch_result_index,
+            $this->active_deletion_roots_file()
+        );
+
+        $this->assertTrue($planner->next_path());
+        $this->assertSame(
+            $this->copy_operation('copy', 'tree', 'file', 1, 2),
+            $planner->get_operation()
+        );
+        $planner->flush_pending_outputs();
+        $cursor = $planner->get_cursor();
+        $this->assertSame('exact', $cursor['deletion_policy']);
+        $planner->close();
+
+        $resumed = FileSyncPatchPlanner::resume($cursor);
+        $this->assertSame(
+            [
+                $this->exact_delete_operation('tree/child.txt'),
+                $this->exact_delete_operation('tree/nested/leaf.txt'),
+            ],
+            $this->collect_operations($resumed)
+        );
+        $resumed->close();
+    }
+
+    public function testExactDeletionsReplaceATypeChangeAtTheSamePath(): void
+    {
+        $patch_base_index = $this->write_index('exact-type-base.jsonl', [
+            'entry' => $this->entry('entry', 1, 1, 'link'),
+        ]);
+        $patch_result_index = $this->write_index('exact-type-result.jsonl', [
+            'entry' => $this->entry('entry', 2, 1, 'file'),
+        ]);
+        $planner = FileSyncPatchPlanner::create_with_exact_deletions(
+            $patch_base_index,
+            $patch_result_index,
+            $this->active_deletion_roots_file()
+        );
+
+        $this->assertSame(
+            [
+                $this->copy_operation(
+                    'replace',
+                    'entry',
+                    'file',
+                    1,
+                    2,
+                    ['type' => 'link', 'size' => 1, 'ctime' => 1]
+                ),
+            ],
+            $this->collect_operations($planner)
+        );
+        $planner->close();
+    }
+
     public function testCollapsesADeletedSubtreeAtANestedIncludedRoot(): void
     {
         $patch_base_index = $this->write_index('base.jsonl', [
@@ -343,6 +436,7 @@ final class FileSyncPatchPlannerTest extends TestCase
             base64_encode($active_deletion_roots_file),
             $cursor['active_deletion_roots_file_b64']
         );
+        $this->assertSame('collapsed', $cursor['deletion_policy']);
         $planner->close();
 
         $resumed = FileSyncPatchPlanner::resume($cursor);
@@ -409,6 +503,7 @@ final class FileSyncPatchPlannerTest extends TestCase
 
     /**
      * @param 'copy'|'replace' $action Whether the source entry replaces a conflicting path.
+     * @param array{type:string,size:int,ctime:int}|null $expected_base Base entry removed by replace.
      * @return SyncOperation
      */
     private function copy_operation(
@@ -416,9 +511,10 @@ final class FileSyncPatchPlannerTest extends TestCase
         string $path,
         string $type,
         int $size,
-        int $ctime
+        int $ctime,
+        ?array $expected_base = null
     ): array {
-        return [
+        $operation = [
             'action' => $action,
             'path' => $path,
             'expected_source' => [
@@ -427,6 +523,10 @@ final class FileSyncPatchPlannerTest extends TestCase
                 'ctime' => $ctime,
             ],
         ];
+        if ($expected_base !== null) {
+            $operation['expected_base'] = $expected_base;
+        }
+        return $operation;
     }
 
     /** @return SyncOperation */
@@ -435,6 +535,18 @@ final class FileSyncPatchPlannerTest extends TestCase
         return [
             'action' => 'delete',
             'path' => $path,
+        ];
+    }
+
+    /** @return SyncOperation */
+    private function exact_delete_operation(string $path): array
+    {
+        return $this->delete_operation($path) + [
+            'expected_base' => [
+                'type' => 'file',
+                'size' => 1,
+                'ctime' => 1,
+            ],
         ];
     }
 

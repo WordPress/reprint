@@ -631,6 +631,7 @@ final class PushPlanTest extends TestCase
             'active_deletion_roots_file_b64',
             'included_index_path_roots_b64',
             'excluded_index_path_roots_b64',
+            'deletion_policy',
             'index_diff_cursor',
             'active_deletion_root_byte_offset',
         ], array_keys($cursor['position']['file_sync_patch_processor_cursor']['position']['file_sync_patch_planner_cursor']));

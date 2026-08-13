@@ -52,6 +52,8 @@ final class FileSyncPatchProcessorTest extends TestCase {
         );
 
         $from_fresh_work_directory = $this->work_directory('from-fresh');
+        $current_stat = lstat($this->filesystem_root . '/current.txt');
+        $this->assertIsArray($current_stat);
         $from_fresh = FileSyncPatchProcessor::start_from_fresh_local_tree(
             $from_fresh_work_directory,
             $this->filesystem_root,
@@ -63,6 +65,11 @@ final class FileSyncPatchProcessorTest extends TestCase {
                 [
                     'action' => 'delete',
                     'path' => 'current.txt',
+                    'expected_base' => [
+                        'type' => 'file',
+                        'size' => 7,
+                        'ctime' => (int) $current_stat['ctime'],
+                    ],
                 ],
                 [
                     'action' => 'copy',
@@ -75,6 +82,53 @@ final class FileSyncPatchProcessorTest extends TestCase {
                 ],
             ],
             $this->run_to_completion($from_fresh)
+        );
+    }
+
+    public function testFromFreshUsesExactDeletionPlanning(): void
+    {
+        mkdir($this->filesystem_root . '/tree');
+        file_put_contents(
+            $this->filesystem_root . '/tree/child.txt',
+            'child'
+        );
+        $patch_result_index = $this->write_index('parent-result.jsonl', [
+            $this->entry('tree', 4),
+        ]);
+        $work_directory = $this->work_directory('exact-from-fresh');
+        $child_stat = lstat(
+            $this->filesystem_root . '/tree/child.txt'
+        );
+        $this->assertIsArray($child_stat);
+        $processor = FileSyncPatchProcessor::start_from_fresh_local_tree(
+            $work_directory,
+            $this->filesystem_root,
+            $patch_result_index,
+            $work_directory
+        );
+
+        $this->assertSame(
+            [
+                [
+                    'action' => 'copy',
+                    'path' => 'tree',
+                    'expected_source' => [
+                        'type' => 'file',
+                        'size' => 4,
+                        'ctime' => 1,
+                    ],
+                ],
+                [
+                    'action' => 'delete',
+                    'path' => 'tree/child.txt',
+                    'expected_base' => [
+                        'type' => 'file',
+                        'size' => 5,
+                        'ctime' => (int) $child_stat['ctime'],
+                    ],
+                ],
+            ],
+            $this->run_to_completion($processor)
         );
     }
 
@@ -237,6 +291,7 @@ final class FileSyncPatchProcessorTest extends TestCase {
                 'patch_result_index_file_b64',
                 'included_index_path_roots_b64',
                 'excluded_index_path_roots_b64',
+                'deletion_policy',
                 'fresh_local_index_cursor',
             ],
             array_keys($cursor['position'])
@@ -248,6 +303,10 @@ final class FileSyncPatchProcessorTest extends TestCase {
         $this->assertSame(
             [base64_encode($excluded_root)],
             $cursor['position']['excluded_index_path_roots_b64']
+        );
+        $this->assertSame(
+            'collapsed',
+            $cursor['position']['deletion_policy']
         );
         $this->assertSame(
             base64_encode($storage_path),

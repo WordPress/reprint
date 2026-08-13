@@ -1,7 +1,9 @@
 <?php
 
+use function Reprint\Importer\append_file_sync_path_stack_entry;
 use function Reprint\Importer\file_sync_index_path_may_change;
 use function Reprint\Importer\find_file_sync_deletion_root;
+use function Reprint\Importer\read_file_sync_path_stack_entry;
 use function WordPress\Reprint\Exporter\path_is_descendant_of;
 use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 
@@ -54,6 +56,11 @@ require_once __DIR__ . '/file-sync-path-functions.php';
  * and `tree/child`, so each active root links to the preceding one instead of
  * assuming all descendants are adjacent.
  *
+ * create_with_exact_deletions() emits every removed base entry by its exact
+ * path. A new result entry above old descendants is copied without deleting
+ * the parent first. The old descendants appear as later delete operations.
+ * This lets a caller remove them without walking into unindexed children.
+ *
  * ## Selection
  *
  * Included and excluded roots use the same coordinates as the index paths. An
@@ -87,11 +94,11 @@ require_once __DIR__ . '/file-sync-path-functions.php';
  * interruption. resume() ignores those bytes.
  *
  * @phpstan-type IndexDiffCursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
- * @phpstan-type Cursor array{patch_base_index_file_b64:string,patch_result_index_file_b64:string,active_deletion_roots_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,index_diff_cursor:IndexDiffCursor,active_deletion_root_byte_offset:int|null}
+ * @phpstan-type Cursor array{patch_base_index_file_b64:string,patch_result_index_file_b64:string,active_deletion_roots_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,deletion_policy:'collapsed'|'exact',index_diff_cursor:IndexDiffCursor,active_deletion_root_byte_offset:int|null}
  * @phpstan-type ActiveDeletionRoot array{path:string,previous_byte_offset:int|null}
  * @phpstan-type ExpectedSource array{type:string,size:int,ctime:int}
- * @phpstan-type DeleteOperation array{action:'delete',path:string}
- * @phpstan-type CopyOperation array{action:'copy'|'replace',path:string,expected_source:ExpectedSource}
+ * @phpstan-type DeleteOperation array{action:'delete',path:string,expected_base?:ExpectedSource}
+ * @phpstan-type CopyOperation array{action:'copy'|'replace',path:string,expected_source:ExpectedSource,expected_base?:ExpectedSource}
  * @phpstan-type SyncOperation DeleteOperation|CopyOperation
  */
 final class FileSyncPatchPlanner
@@ -107,6 +114,9 @@ final class FileSyncPatchPlanner
 
     /** @var list<string> Index path roots which no planned operation may affect. */
     private array $excluded_index_path_roots;
+
+    /** Whether removed index entries collapse into one directory deletion. */
+    private string $deletion_policy;
 
     /** @var ActiveDeletionRoot|null Top active deleted-directory root. */
     private ?array $active_deletion_root = null;
@@ -146,6 +156,55 @@ final class FileSyncPatchPlanner
         array $included_index_path_roots = [""],
         array $excluded_index_path_roots = []
     ): self {
+        return self::create_with_deletion_policy(
+            $patch_base_index_file,
+            $patch_result_index_file,
+            $active_deletion_roots_file,
+            $included_index_path_roots,
+            $excluded_index_path_roots,
+            "collapsed"
+        );
+    }
+
+    /**
+     * Creates a plan whose deletions name only indexed paths.
+     *
+     * This form is used before a pull writes new paths into the local tree.
+     * A recursive deletion at a shared directory could remove an excluded or
+     * unindexed child. Exact deletions leave those children in place.
+     *
+     * @param string       $patch_base_index_file          Tree state before the patch, or a missing path for an empty tree.
+     * @param string       $patch_result_index_file        Tree state described by the patch.
+     * @param string       $active_deletion_roots_file     Work file retained for the common cursor format.
+     * @param list<string> $included_index_path_roots      Roots within which changes may be planned.
+     * @param list<string> $excluded_index_path_roots      Roots which changes must not affect.
+     * @return self Open planner positioned before the first path.
+     */
+    public static function create_with_exact_deletions(
+        string $patch_base_index_file,
+        string $patch_result_index_file,
+        string $active_deletion_roots_file,
+        array $included_index_path_roots = [""],
+        array $excluded_index_path_roots = []
+    ): self {
+        return self::create_with_deletion_policy(
+            $patch_base_index_file,
+            $patch_result_index_file,
+            $active_deletion_roots_file,
+            $included_index_path_roots,
+            $excluded_index_path_roots,
+            "exact"
+        );
+    }
+
+    private static function create_with_deletion_policy(
+        string $patch_base_index_file,
+        string $patch_result_index_file,
+        string $active_deletion_roots_file,
+        array $included_index_path_roots,
+        array $excluded_index_path_roots,
+        string $deletion_policy
+    ): self {
         if (file_put_contents($active_deletion_roots_file, "") !== 0) {
             throw new RuntimeException(
                 "Failed to initialize the active deletion roots file: {$active_deletion_roots_file}"
@@ -170,6 +229,7 @@ final class FileSyncPatchPlanner
                     "base64_encode",
                     $excluded_index_path_roots
                 ),
+                "deletion_policy" => $deletion_policy,
                 "index_diff_cursor" => [
                     "old_index_byte_offset" => 0,
                     "new_index_byte_offset" => 0,
@@ -183,7 +243,8 @@ final class FileSyncPatchPlanner
     /**
      * Reopens a planner at its last stored cursor.
      *
-     * Both index files must still contain the same snapshots used by create().
+     * Both index files must still contain the same snapshots used by the
+     * create method which made the cursor.
      * The active deletion roots file must still belong to this plan.
      *
      * @param array $cursor {
@@ -194,6 +255,7 @@ final class FileSyncPatchPlanner
      *     @type string       $active_deletion_roots_file_b64           Base64-encoded path to the active directory-deletion state.
      *     @type list<string> $included_index_path_roots_b64            Base64-encoded roots within which changes may be planned.
      *     @type list<string> $excluded_index_path_roots_b64            Base64-encoded roots which changes must not affect.
+     *     @type string       $deletion_policy                          `collapsed` or `exact` deletion planning.
      *     @type array        $index_diff_cursor                        File-index diff cursor.
      *     @type int|null     $active_deletion_root_byte_offset    Active deletion-root offset.
      * }
@@ -224,6 +286,16 @@ final class FileSyncPatchPlanner
             [self::class, "decode_index_path_root"],
             $cursor["excluded_index_path_roots_b64"]
         );
+        if (
+            $cursor["deletion_policy"] !== "collapsed"
+            && $cursor["deletion_policy"] !== "exact"
+        ) {
+            throw new InvalidArgumentException(
+                "File sync patch planner cursor has an invalid deletion policy: "
+                . $cursor["deletion_policy"]
+            );
+        }
+        $planner->deletion_policy = $cursor["deletion_policy"];
         $planner->index_diff = FileIndexDiffProcessor::resume(
             $patch_base_index_file,
             $patch_result_index_file,
@@ -241,9 +313,12 @@ final class FileSyncPatchPlanner
             );
         }
         $planner->active_deletion_root =
-            $planner->read_active_deletion_root(
-                $cursor["active_deletion_root_byte_offset"]
-            );
+            $cursor["active_deletion_root_byte_offset"] === null
+                ? null
+                : read_file_sync_path_stack_entry(
+                    $planner->active_deletion_roots_handle,
+                    $cursor["active_deletion_root_byte_offset"]
+                );
         return $planner;
     }
 
@@ -286,7 +361,8 @@ final class FileSyncPatchPlanner
             $this->cursor["active_deletion_root_byte_offset"];
 
         if (
-            $patch_base_path_type !== null
+            $this->deletion_policy === "collapsed"
+            && $patch_base_path_type !== null
             && $this->active_deletion_root !== null
         ) {
             // Byte sorting can place `a-other` before `a/child`. Keep the
@@ -303,9 +379,12 @@ final class FileSyncPatchPlanner
                 $active_deletion_root_byte_offset =
                     $this->active_deletion_root["previous_byte_offset"];
                 $this->active_deletion_root =
-                    $this->read_active_deletion_root(
-                        $active_deletion_root_byte_offset
-                    );
+                    $active_deletion_root_byte_offset === null
+                        ? null
+                        : read_file_sync_path_stack_entry(
+                            $this->active_deletion_roots_handle,
+                            $active_deletion_root_byte_offset
+                        );
             }
         }
 
@@ -319,7 +398,8 @@ final class FileSyncPatchPlanner
                     $index_path
                 );
             if (
-                $patch_result_entry_replaces_patch_base_subtree
+                $this->deletion_policy === "collapsed"
+                && $patch_result_entry_replaces_patch_base_subtree
                 && file_sync_index_path_may_change(
                     $index_path,
                     $this->included_index_path_roots,
@@ -328,11 +408,19 @@ final class FileSyncPatchPlanner
                 && !$this->active_deletion_root_covers_path($index_path)
             ) {
                 $path_to_delete = $index_path;
+                $previous_active_deletion_root_byte_offset =
+                    $active_deletion_root_byte_offset;
                 $active_deletion_root_byte_offset =
-                    $this->append_active_deletion_root(
+                    append_file_sync_path_stack_entry(
+                        $this->active_deletion_roots_handle,
                         $index_path,
                         $active_deletion_root_byte_offset
                     );
+                $this->active_deletion_root = [
+                    "path" => $index_path,
+                    "previous_byte_offset" =>
+                        $previous_active_deletion_root_byte_offset,
+                ];
             }
             if (
                 file_sync_index_path_may_change(
@@ -344,30 +432,55 @@ final class FileSyncPatchPlanner
                 $path_to_copy = $index_path;
             }
         } elseif ($path_transition === "deleted") {
-            $candidate_path_to_delete = find_file_sync_deletion_root(
-                $index_path,
-                $this->index_diff->get_preceding_path_in_new_index(),
-                $this->index_diff->get_following_path_in_new_index(),
-                function (string $candidate_path): bool {
-                    return file_sync_index_path_may_change(
-                        $candidate_path,
+            if ($this->deletion_policy === "exact") {
+                $candidate_path_to_delete =
+                    file_sync_index_path_may_change(
+                        $index_path,
                         $this->included_index_path_roots,
                         $this->excluded_index_path_roots
-                    );
-                },
-                $patch_base_entry_shape === "empty_directory"
-            );
+                    )
+                        ? $index_path
+                        : null;
+            } else {
+                $candidate_path_to_delete = find_file_sync_deletion_root(
+                    $index_path,
+                    $this->index_diff->get_preceding_path_in_new_index(),
+                    $this->index_diff->get_following_path_in_new_index(),
+                    function (string $candidate_path): bool {
+                        return file_sync_index_path_may_change(
+                            $candidate_path,
+                            $this->included_index_path_roots,
+                            $this->excluded_index_path_roots
+                        );
+                    },
+                    $patch_base_entry_shape === "empty_directory"
+                );
+            }
             if (
                 $candidate_path_to_delete !== null
-                && !$this->active_deletion_root_covers_path($index_path)
+                && (
+                    $this->deletion_policy === "exact"
+                    || !$this->active_deletion_root_covers_path($index_path)
+                )
             ) {
                 $path_to_delete = $candidate_path_to_delete;
-                if ($candidate_path_to_delete !== $index_path) {
+                if (
+                    $this->deletion_policy === "collapsed"
+                    && $candidate_path_to_delete !== $index_path
+                ) {
+                    $previous_active_deletion_root_byte_offset =
+                        $active_deletion_root_byte_offset;
                     $active_deletion_root_byte_offset =
-                        $this->append_active_deletion_root(
+                        append_file_sync_path_stack_entry(
+                            $this->active_deletion_roots_handle,
                             $candidate_path_to_delete,
                             $active_deletion_root_byte_offset
                         );
+                    $this->active_deletion_root = [
+                        "path" => $candidate_path_to_delete,
+                        "previous_byte_offset" =>
+                            $previous_active_deletion_root_byte_offset,
+                    ];
                 }
             }
         } else {
@@ -385,9 +498,10 @@ final class FileSyncPatchPlanner
                 && $path_transition === "modified";
             // The diff defines modification by type, size, and ctime. Only a
             // modified file or symlink needs its result value copied.
-            $needs_delete =
-                $patch_result_entry_is_file_or_symlink
-                !== $patch_base_entry_is_file_or_symlink;
+            $needs_delete = $this->deletion_policy === "exact"
+                ? $patch_result_path_type !== $patch_base_path_type
+                : $patch_result_entry_is_file_or_symlink
+                    !== $patch_base_entry_is_file_or_symlink;
             $path_may_change = file_sync_index_path_may_change(
                 $index_path,
                 $this->included_index_path_roots,
@@ -397,7 +511,10 @@ final class FileSyncPatchPlanner
             if (
                 $needs_delete
                 && $path_may_change
-                && !$this->active_deletion_root_covers_path($index_path)
+                && (
+                    $this->deletion_policy === "exact"
+                    || !$this->active_deletion_root_covers_path($index_path)
+                )
             ) {
                 $path_to_delete = $index_path;
             }
@@ -426,6 +543,17 @@ final class FileSyncPatchPlanner
                 "path" => $path_to_delete,
             ];
         }
+        if (
+            $this->deletion_policy === "exact"
+            && $path_to_delete === $index_path
+            && $patch_base_path_type !== null
+        ) {
+            $this->operation["expected_base"] = [
+                "type" => $patch_base_path_type,
+                "size" => $this->index_diff->get_size_in_old_index(),
+                "ctime" => $this->index_diff->get_ctime_in_old_index(),
+            ];
+        }
 
         $this->complete = !$this->index_diff->next_path();
         $this->index_diff_path_selected = !$this->complete;
@@ -448,10 +576,10 @@ final class FileSyncPatchPlanner
     /**
      * Returns the operation selected for the current path.
      *
-     * Null means the current path needs no operation. A `delete` operation has
-     * only an action and path. A `copy` or `replace` operation also records the
-     * source state expected when the operation is performed. `replace` means
-     * delete the path before copying the patch-result entry there.
+     * Null means the current path needs no operation. A `copy` or `replace`
+     * operation records the patch-result entry which must be copied. An exact
+     * `delete` or `replace` also records the patch-base entry which may be
+     * removed. A collapsed directory deletion has only an action and path.
      *
      * @return array|null {
      *     Current sync operation, or null.
@@ -460,6 +588,14 @@ final class FileSyncPatchPlanner
      *     @type string $path            Path on which to operate.
      *     @type array  $expected_source {
      *         Source state required by `copy` and `replace`. Absent for `delete`.
+     *
+     *         @type string $type  Expected `file`, `link`, or `dir` type.
+     *         @type int    $size  Expected size.
+     *         @type int    $ctime Expected inode change time.
+     *     }
+     *     @type array  $expected_base {
+     *         Base state which an exact `delete` or `replace` removes. Absent
+     *         from copy operations and collapsed directory deletions.
      *
      *         @type string $type  Expected `file`, `link`, or `dir` type.
      *         @type int    $size  Expected size.
@@ -485,6 +621,7 @@ final class FileSyncPatchPlanner
      *     @type string       $active_deletion_roots_file_b64           Base64-encoded path to the active directory-deletion state.
      *     @type list<string> $included_index_path_roots_b64            Base64-encoded roots within which changes may be planned.
      *     @type list<string> $excluded_index_path_roots_b64            Base64-encoded roots which changes must not affect.
+     *     @type string       $deletion_policy                          `collapsed` or `exact` deletion planning.
      *     @type array        $index_diff_cursor                        File-index diff cursor.
      *     @type int|null     $active_deletion_root_byte_offset    Active deletion-root offset.
      * }
@@ -528,89 +665,6 @@ final class FileSyncPatchPlanner
             return "symlink";
         }
         return "empty_directory";
-    }
-
-    /** Adds one active deletion root and returns its byte offset. */
-    private function append_active_deletion_root(
-        string $index_path,
-        ?int $previous_byte_offset
-    ): int {
-        if (fseek($this->active_deletion_roots_handle, 0, SEEK_END) !== 0) {
-            throw new RuntimeException(
-                "Failed to seek to the end of the active deletion roots file."
-            );
-        }
-        $byte_offset = ftell($this->active_deletion_roots_handle);
-        if (!is_int($byte_offset)) {
-            throw new RuntimeException(
-                "Failed to determine the active deletion roots byte offset."
-            );
-        }
-        $line = json_encode(
-            [
-                "path_b64" => base64_encode($index_path),
-                "previous_byte_offset" => $previous_byte_offset,
-            ],
-            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-        ) . "\n";
-        if (
-            fwrite($this->active_deletion_roots_handle, $line)
-            !== strlen($line)
-        ) {
-            throw new RuntimeException(
-                "Failed to append to the active deletion roots file."
-            );
-        }
-        $this->active_deletion_root = [
-            "path" => $index_path,
-            "previous_byte_offset" => $previous_byte_offset,
-        ];
-        return $byte_offset;
-    }
-
-    /** Returns one active deletion root addressed by its byte offset. */
-    private function read_active_deletion_root(
-        ?int $byte_offset
-    ): ?array {
-        if ($byte_offset === null) {
-            return null;
-        }
-        if (
-            fseek(
-                $this->active_deletion_roots_handle,
-                $byte_offset
-            ) !== 0
-        ) {
-            throw new RuntimeException(
-                "Failed to seek in the active deletion roots file."
-            );
-        }
-        $line = fgets($this->active_deletion_roots_handle);
-        if (!is_string($line)) {
-            throw new RuntimeException(
-                "Failed to read the active deletion root at byte {$byte_offset}."
-            );
-        }
-        try {
-            $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
-        } catch (JsonException $exception) {
-            throw new RuntimeException(
-                "Failed to decode the active deletion root at byte {$byte_offset}.",
-                0,
-                $exception
-            );
-        }
-        /** @var array{path_b64:string,previous_byte_offset:int|null} $entry */
-        $index_path = base64_decode($entry["path_b64"], true);
-        if ($index_path === false) {
-            throw new RuntimeException(
-                "Failed to decode the deleted-directory path at byte {$byte_offset}."
-            );
-        }
-        return [
-            "path" => $index_path,
-            "previous_byte_offset" => $entry["previous_byte_offset"],
-        ];
     }
 
     /** Reports whether the active deletion root contains the index path. */

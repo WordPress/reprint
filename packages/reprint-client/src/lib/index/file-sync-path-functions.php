@@ -2,6 +2,8 @@
 
 namespace Reprint\Importer;
 
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Index paths and byte offsets are CLI values, never HTML output.
+
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
 use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
@@ -143,4 +145,97 @@ function file_sync_result_contains_path_or_descendant(
         $following_result_index_path,
         $index_path
     );
+}
+
+/**
+ * Appends one path to a linked stack stored in a file.
+ *
+ * Each entry points to the preceding stack entry by byte offset. Entries from
+ * an interrupted step can remain at the end of the file without joining the
+ * saved stack. A caller which needs to reclaim those bytes may truncate the
+ * file to its separately stored output byte offset before appending again.
+ *
+ * @param resource $stack_handle        Open file used by this stack.
+ * @param string   $path                Arbitrary-byte path to push.
+ * @param int|null $previous_byte_offset Byte offset of the preceding entry.
+ * @param int|null $expected_ctime       Expected directory ctime, when the
+ *                                       caller will remove this path later.
+ * @return int Byte offset of the appended entry.
+ */
+function append_file_sync_path_stack_entry(
+    $stack_handle,
+    string $path,
+    ?int $previous_byte_offset,
+    ?int $expected_ctime = null
+): int {
+    if (fseek($stack_handle, 0, SEEK_END) !== 0) {
+        throw new \RuntimeException(
+            "Failed to seek to the end of the file sync path stack."
+        );
+    }
+    $byte_offset = ftell($stack_handle);
+    if (!is_int($byte_offset)) {
+        throw new \RuntimeException(
+            "Failed to determine the file sync path stack byte offset."
+        );
+    }
+    $entry = [
+        "path_b64" => base64_encode($path),
+        "previous_byte_offset" => $previous_byte_offset,
+        "expected_ctime" => $expected_ctime,
+    ];
+    $line = json_encode(
+        $entry,
+        JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+    ) . "\n";
+    if (fwrite($stack_handle, $line) !== strlen($line)) {
+        throw new \RuntimeException(
+            "Failed to append to the file sync path stack."
+        );
+    }
+    return $byte_offset;
+}
+
+/**
+ * Reads one linked path-stack entry at its byte offset.
+ *
+ * @param resource $stack_handle Open file used by this stack.
+ * @return array{path:string,previous_byte_offset:int|null,expected_ctime:int|null} Decoded stack entry.
+ */
+function read_file_sync_path_stack_entry(
+    $stack_handle,
+    int $byte_offset
+): array {
+    if (fseek($stack_handle, $byte_offset) !== 0) {
+        throw new \RuntimeException(
+            "Failed to seek to file sync path stack byte {$byte_offset}."
+        );
+    }
+    $line = fgets($stack_handle);
+    if (!is_string($line)) {
+        throw new \RuntimeException(
+            "Failed to read the file sync path stack at byte {$byte_offset}."
+        );
+    }
+    try {
+        $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+    } catch (\JsonException $exception) {
+        throw new \RuntimeException(
+            "Failed to decode the file sync path stack at byte {$byte_offset}.",
+            0,
+            $exception
+        );
+    }
+    /** @var array{path_b64:string,previous_byte_offset:int|null,expected_ctime:int|null} $entry */
+    $path = base64_decode($entry["path_b64"], true);
+    if ($path === false) {
+        throw new \RuntimeException(
+            "Failed to decode the file sync path at byte {$byte_offset}."
+        );
+    }
+    return [
+        "path" => $path,
+        "previous_byte_offset" => $entry["previous_byte_offset"],
+        "expected_ctime" => $entry["expected_ctime"],
+    ];
 }

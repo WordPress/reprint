@@ -49,11 +49,11 @@ require_once __DIR__ . '/class-fresh-local-index-processor.php';
  * @phpstan-type FreshIndexPosition array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}|array{phase:'sorting'}|array{phase:'complete'}
  * @phpstan-type FreshIndexCursor array{fresh_local_index_file_b64:string,filesystem_root_b64:string,storage_path_b64:string,include_caches:bool,position:FreshIndexPosition}
  * @phpstan-type PlannerIndexDiffCursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
- * @phpstan-type PlannerCursor array{patch_base_index_file_b64:string,patch_result_index_file_b64:string,active_deletion_roots_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,index_diff_cursor:PlannerIndexDiffCursor,active_deletion_root_byte_offset:int|null}
- * @phpstan-type FreshTreePosition array{phase:'indexing'|'sorting'|'starting_patch',patch_base_index_file_b64:string,patch_result_index_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,fresh_local_index_cursor:FreshIndexCursor}
+ * @phpstan-type PlannerCursor array{patch_base_index_file_b64:string,patch_result_index_file_b64:string,active_deletion_roots_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,deletion_policy:'collapsed'|'exact',index_diff_cursor:PlannerIndexDiffCursor,active_deletion_root_byte_offset:int|null}
+ * @phpstan-type FreshTreePosition array{phase:'indexing'|'sorting'|'starting_patch',patch_base_index_file_b64:string,patch_result_index_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,deletion_policy:'collapsed'|'exact',fresh_local_index_cursor:FreshIndexCursor}
  * @phpstan-type Position FreshTreePosition|array{phase:'planning',file_sync_patch_planner_cursor:PlannerCursor}|array{phase:'complete'}
  * @phpstan-type Cursor array{fresh_local_index_file_b64:string,position:Position}
- * @phpstan-type SyncOperation array{action:'copy'|'delete'|'replace',path:string,expected_source?:array{type:string,size:int,ctime:int}}
+ * @phpstan-type SyncOperation array{action:'copy'|'delete'|'replace',path:string,expected_source?:array{type:string,size:int,ctime:int},expected_base?:array{type:string,size:int,ctime:int}}
  */
 final class FileSyncPatchProcessor {
     /** @var Cursor */
@@ -100,7 +100,8 @@ final class FileSyncPatchProcessor {
             $storage_path,
             $included_index_path_roots,
             $excluded_index_path_roots,
-            $include_caches
+            $include_caches,
+            "collapsed"
         );
     }
 
@@ -108,7 +109,9 @@ final class FileSyncPatchProcessor {
      * Plans the patch which changes the current local tree into a saved index.
      *
      * Copy and replace operations read their expected source state from the
-     * supplied patch-result index.
+     * supplied patch-result index. Deleted local entries keep their exact
+     * paths. A caller can remove them with unlink() or rmdir() without walking
+     * through skipped or excluded children.
      *
      * @param string       $work_directory             Existing directory for the fresh index and planner state.
      * @param string       $filesystem_root            Filesystem root scanned for the fresh index.
@@ -136,7 +139,8 @@ final class FileSyncPatchProcessor {
             $storage_path,
             $included_index_path_roots,
             $excluded_index_path_roots,
-            $include_caches
+            $include_caches,
+            "exact"
         );
     }
 
@@ -241,22 +245,41 @@ final class FileSyncPatchProcessor {
                 }
                 $excluded_index_path_roots[] = $excluded_index_path_root;
             }
-            $this->patch_planner = FileSyncPatchPlanner::create(
-                self::decode_cursor_path(
-                    $position["patch_base_index_file_b64"],
-                    "patch base index file"
-                ),
-                self::decode_cursor_path(
-                    $position["patch_result_index_file_b64"],
-                    "patch result index file"
-                ),
-                wp_join_unix_paths(
-                    dirname($this->fresh_local_index_file),
-                    "deleted_directories_stack.jsonl"
-                ),
-                $included_index_path_roots,
-                $excluded_index_path_roots
+            $patch_base_index_file = self::decode_cursor_path(
+                $position["patch_base_index_file_b64"],
+                "patch base index file"
             );
+            $patch_result_index_file = self::decode_cursor_path(
+                $position["patch_result_index_file_b64"],
+                "patch result index file"
+            );
+            $active_deletion_roots_file = wp_join_unix_paths(
+                dirname($this->fresh_local_index_file),
+                "deleted_directories_stack.jsonl"
+            );
+            if ($position["deletion_policy"] === "exact") {
+                $this->patch_planner =
+                    FileSyncPatchPlanner::create_with_exact_deletions(
+                        $patch_base_index_file,
+                        $patch_result_index_file,
+                        $active_deletion_roots_file,
+                        $included_index_path_roots,
+                        $excluded_index_path_roots
+                    );
+            } elseif ($position["deletion_policy"] === "collapsed") {
+                $this->patch_planner = FileSyncPatchPlanner::create(
+                    $patch_base_index_file,
+                    $patch_result_index_file,
+                    $active_deletion_roots_file,
+                    $included_index_path_roots,
+                    $excluded_index_path_roots
+                );
+            } else {
+                throw new InvalidArgumentException(
+                    "File sync patch processor cursor has an invalid deletion policy: "
+                    . $position["deletion_policy"]
+                );
+            }
             $this->cursor["position"] = [
                 "phase" => "planning",
                 "file_sync_patch_planner_cursor" =>
@@ -285,15 +308,23 @@ final class FileSyncPatchProcessor {
     /**
      * Returns the operation selected by the latest planning step.
      *
-     * Delete operations contain only `action` and `path`. Copy and replace
-     * operations also contain the result index entry which must be copied.
-     * Non-planning steps and processed paths which need no change return null.
+     * Copy and replace operations contain the result index entry which must
+     * be copied. Exact delete and replace operations also contain the base
+     * entry which will be removed. Non-planning steps and processed paths
+     * which need no change return null.
      *
      * @return array|null {
      *     @type string $action          `copy`, `delete`, or `replace`.
      *     @type string $path            Local relative path selected by the patch.
      *     @type array  $expected_source {
      *         Result index entry required by `copy` and `replace`.
+     *
+     *         @type string $type  Expected `file`, `link`, or `dir` type.
+     *         @type int    $size  Expected size.
+     *         @type int    $ctime Expected inode change time.
+     *     }
+     *     @type array  $expected_base {
+     *         Base index entry removed by an exact `delete` or `replace`.
      *
      *         @type string $type  Expected `file`, `link`, or `dir` type.
      *         @type int    $size  Expected size.
@@ -416,7 +447,8 @@ final class FileSyncPatchProcessor {
         string $storage_path,
         array $included_index_path_roots,
         array $excluded_index_path_roots,
-        bool $include_caches
+        bool $include_caches,
+        string $deletion_policy
     ): self {
         if (!is_dir($work_directory)) {
             throw new LogicException(
@@ -456,6 +488,7 @@ final class FileSyncPatchProcessor {
                     "base64_encode",
                     $excluded_index_path_roots
                 ),
+                "deletion_policy" => $deletion_policy,
                 "fresh_local_index_cursor" =>
                     $processor->fresh_local_index_processor->get_cursor(),
             ],
