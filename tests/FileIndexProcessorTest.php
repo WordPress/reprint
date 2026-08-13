@@ -320,8 +320,7 @@ final class FileIndexProcessorTest extends TestCase {
 
     public function testFileRootInsideASkippedDirectoryIsOmitted(): void
     {
-        // Selecting one file must not reach what selecting its directory cannot:
-        // a directory root here indexes nothing, because its children are skipped.
+        // A directory root here indexes nothing, so a file root must not either.
         $docroot = $this->tempDir . '/site';
         mkdir($docroot . '/wp-content/cache', 0755, true);
         file_put_contents($docroot . '/wp-content/cache/keep.php', '<?php // keep');

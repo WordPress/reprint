@@ -3,9 +3,7 @@
 declare(strict_types=1);
 
 /**
- * Runs endpoint_file_index() in a subprocess and returns the paths it indexed.
- *
- * A subprocess because the endpoint streams to stdout and installs handlers.
+ * Runs endpoint_file_index() in a subprocess, since it streams to stdout.
  */
 trait FileIndexEndpointRunnerTrait
 {
