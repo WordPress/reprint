@@ -515,7 +515,16 @@ final class PushFilesSender
         $progress = ['phase' => $phase];
         if ($phase === 'planning') {
             $plan_progress = $this->plan->get_progress();
-            $progress['planning_phase'] = $plan_progress['phase'];
+            if ($plan_progress['phase'] === 'indexing') {
+                $progress['planning_phase'] = 'indexing';
+            } elseif (
+                $plan_progress['phase'] === 'sorting'
+                || $plan_progress['phase'] === 'starting_patch'
+            ) {
+                $progress['planning_phase'] = 'starting_diff';
+            } else {
+                $progress['planning_phase'] = 'diffing';
+            }
             if (isset($plan_progress['index_bytes_done'], $plan_progress['index_bytes_total'])) {
                 $progress['index_bytes_done'] = $plan_progress['index_bytes_done'];
                 $progress['index_bytes_total'] = $plan_progress['index_bytes_total'];
@@ -755,20 +764,19 @@ final class PushFilesSender
             // output before storing the cursor. This avoids one flush and
             // state write per path while preserving each phase boundary.
             $has_next_step = true;
-            $plan_cursor = $this->plan->get_cursor();
-            $plan_phase = $plan_cursor['position']['phase'];
+            $plan_phase = $this->plan->get_phase();
             for (
                 $steps_processed = 0;
                 $has_next_step && $steps_processed < self::MAXIMUM_PUSH_PLAN_STEPS_PER_SENDER_STEP;
                 ++$steps_processed
             ) {
                 $has_next_step = $this->plan->next_step();
-                $plan_cursor = $this->plan->get_cursor();
-                if ($plan_cursor['position']['phase'] !== $plan_phase) {
+                if ($this->plan->get_phase() !== $plan_phase) {
                     break;
                 }
             }
             $this->plan->flush_pending_outputs();
+            $plan_cursor = $this->plan->get_cursor();
         } catch (RuntimeException $exception) {
             $this->fail('local_io_error', $exception->getMessage());
             return;

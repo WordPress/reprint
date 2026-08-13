@@ -86,7 +86,7 @@ require_once __DIR__ . '/class-file-index-diff-processor.php';
  * interruption. resume() ignores those bytes.
  *
  * @phpstan-type IndexDiffCursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
- * @phpstan-type Cursor array{patch_base_index_file:string,patch_result_index_file:string,active_deletion_roots_file:string,included_index_path_roots:list<string>,excluded_index_path_roots:list<string>,index_diff_cursor:IndexDiffCursor,active_deletion_root_byte_offset:int|null}
+ * @phpstan-type Cursor array{patch_base_index_file:string,patch_result_index_file:string,active_deletion_roots_file:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,index_diff_cursor:IndexDiffCursor,active_deletion_root_byte_offset:int|null}
  * @phpstan-type ActiveDeletionRoot array{path:string,previous_byte_offset:int|null}
  * @phpstan-type ExpectedSource array{type:string,size:int,ctime:int}
  * @phpstan-type DeleteOperation array{action:'delete',path:string}
@@ -155,8 +155,14 @@ final class FileSyncPatchPlanner
                 "patch_base_index_file" => $patch_base_index_file,
                 "patch_result_index_file" => $patch_result_index_file,
                 "active_deletion_roots_file" => $active_deletion_roots_file,
-                "included_index_path_roots" => $included_index_path_roots,
-                "excluded_index_path_roots" => $excluded_index_path_roots,
+                "included_index_path_roots_b64" => array_map(
+                    "base64_encode",
+                    $included_index_path_roots
+                ),
+                "excluded_index_path_roots_b64" => array_map(
+                    "base64_encode",
+                    $excluded_index_path_roots
+                ),
                 "index_diff_cursor" => [
                     "old_index_byte_offset" => 0,
                     "new_index_byte_offset" => 0,
@@ -179,8 +185,8 @@ final class FileSyncPatchPlanner
      *     @type string       $patch_base_index_file                    Tree state before the patch.
      *     @type string       $patch_result_index_file                  Tree state described by the patch.
      *     @type string       $active_deletion_roots_file               State for active directory deletions.
-     *     @type list<string> $included_index_path_roots                Roots within which changes may be planned.
-     *     @type list<string> $excluded_index_path_roots                Roots which changes must not affect.
+     *     @type list<string> $included_index_path_roots_b64            Base64-encoded roots within which changes may be planned.
+     *     @type list<string> $excluded_index_path_roots_b64            Base64-encoded roots which changes must not affect.
      *     @type array        $index_diff_cursor                        File-index diff cursor.
      *     @type int|null     $active_deletion_root_byte_offset    Active deletion-root offset.
      * }
@@ -191,10 +197,14 @@ final class FileSyncPatchPlanner
     {
         $planner = new self();
         $planner->cursor = $cursor;
-        $planner->included_index_path_roots =
-            $cursor["included_index_path_roots"];
-        $planner->excluded_index_path_roots =
-            $cursor["excluded_index_path_roots"];
+        $planner->included_index_path_roots = array_map(
+            [self::class, "decode_index_path_root"],
+            $cursor["included_index_path_roots_b64"]
+        );
+        $planner->excluded_index_path_roots = array_map(
+            [self::class, "decode_index_path_root"],
+            $cursor["excluded_index_path_roots_b64"]
+        );
         $planner->index_diff = FileIndexDiffProcessor::resume(
             $cursor["patch_base_index_file"],
             $cursor["patch_result_index_file"],
@@ -314,9 +324,13 @@ final class FileSyncPatchPlanner
                 );
 
             // Find the highest patch-base directory without a patch-result
-            // entry below it. Only the adjacent result entries can neighbor
-            // each parent in byte order, so no index rescan is needed.
-            $candidate_path_to_delete = $index_path;
+            // entry below it which path selection allows us to delete. A
+            // higher directory may sit outside an included root or contain an
+            // excluded root, so keep looking below it. Only the adjacent
+            // result entries can neighbor each parent in byte order, so no
+            // index rescan is needed.
+            $candidate_path_to_delete =
+                $this->path_may_change($index_path) ? $index_path : null;
             $index_path_components = wp_unix_path_segments($index_path);
             $candidate_path_components = [];
             for (
@@ -335,6 +349,7 @@ final class FileSyncPatchPlanner
                         $this->index_diff->get_preceding_path_in_new_index(),
                         $this->index_diff->get_following_path_in_new_index()
                     )
+                    && $this->path_may_change($candidate_path)
                 ) {
                     $candidate_path_to_delete = $candidate_path;
                     break;
@@ -342,7 +357,7 @@ final class FileSyncPatchPlanner
             }
             if (
                 !$patch_base_empty_directory_is_implied_by_patch_result_descendant
-                && $this->path_may_change($candidate_path_to_delete)
+                && $candidate_path_to_delete !== null
                 && !$this->active_deletion_root_covers_path($index_path)
             ) {
                 $path_to_delete = $candidate_path_to_delete;
@@ -463,8 +478,8 @@ final class FileSyncPatchPlanner
      *     @type string       $patch_base_index_file                    Tree state before the patch.
      *     @type string       $patch_result_index_file                  Tree state described by the patch.
      *     @type string       $active_deletion_roots_file               State for active directory deletions.
-     *     @type list<string> $included_index_path_roots                Roots within which changes may be planned.
-     *     @type list<string> $excluded_index_path_roots                Roots which changes must not affect.
+     *     @type list<string> $included_index_path_roots_b64            Base64-encoded roots within which changes may be planned.
+     *     @type list<string> $excluded_index_path_roots_b64            Base64-encoded roots which changes must not affect.
      *     @type array        $index_diff_cursor                        File-index diff cursor.
      *     @type int|null     $active_deletion_root_byte_offset    Active deletion-root offset.
      * }
@@ -666,6 +681,19 @@ final class FileSyncPatchPlanner
             }
         }
         return true;
+    }
+
+    /** Decodes one arbitrary-byte path root stored in a JSON cursor. */
+    private static function decode_index_path_root(
+        string $index_path_root_b64
+    ): string {
+        $index_path_root = base64_decode($index_path_root_b64, true);
+        if ($index_path_root === false) {
+            throw new InvalidArgumentException(
+                "File sync patch planner cursor contains an invalid base64 path root."
+            );
+        }
+        return $index_path_root;
     }
 
     /** Rejects calls after close(). */

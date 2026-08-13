@@ -47,7 +47,7 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * @phpstan-type SortingPosition array{phase:'sorting'}
  * @phpstan-type CompletePosition array{phase:'complete'}
  * @phpstan-type Position IndexingPosition|SortingPosition|CompletePosition
- * @phpstan-type Cursor array{fresh_local_index_file:string,filesystem_root:string,storage_path:string,position:Position}
+ * @phpstan-type Cursor array{fresh_local_index_file:string,filesystem_root:string,storage_path:string,include_caches:bool,position:Position}
  */
 final class FreshLocalIndexProcessor
 {
@@ -72,11 +72,13 @@ final class FreshLocalIndexProcessor
      * @param string $fresh_local_index_file Output JSONL file.
      * @param string $filesystem_root        Filesystem root represented by the index.
      * @param string $storage_path           Reprint storage path omitted by FileIndexProcessor.
+     * @param bool   $include_caches          Whether generated caches and development files are indexed.
      */
     public static function start(
         string $fresh_local_index_file,
         string $filesystem_root,
-        string $storage_path
+        string $storage_path,
+        bool $include_caches = false
     ): self {
         $processor = new self();
         $filesystem_root = $processor->resolve_filesystem_root($filesystem_root);
@@ -93,13 +95,14 @@ final class FreshLocalIndexProcessor
             [$filesystem_root],
             $filesystem_root,
             false,
-            false,
+            $include_caches,
             $storage_path
         );
         $processor->cursor = [
             "fresh_local_index_file" => $fresh_local_index_file,
             "filesystem_root" => $filesystem_root,
             "storage_path" => $storage_path,
+            "include_caches" => $include_caches,
             "position" => [
                 "phase" => "indexing",
                 "file_index_cursor" =>
@@ -172,7 +175,7 @@ final class FreshLocalIndexProcessor
                 JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
             ),
             false,
-            false,
+            $cursor["include_caches"],
             $cursor["storage_path"]
         );
         return $processor;

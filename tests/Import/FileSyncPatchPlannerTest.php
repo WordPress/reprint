@@ -130,6 +130,56 @@ final class FileSyncPatchPlannerTest extends TestCase
         $planner->close();
     }
 
+    public function testCollapsesADeletedSubtreeAtANestedIncludedRoot(): void
+    {
+        $patch_base_index = $this->write_index('base.jsonl', [
+            'outside/selected/child.txt' =>
+                $this->entry('outside/selected/child.txt'),
+        ]);
+        $patch_result_index = $this->write_index('result.jsonl', []);
+        $planner = FileSyncPatchPlanner::create(
+            $patch_base_index,
+            $patch_result_index,
+            $this->active_deletion_roots_file(),
+            ['outside/selected']
+        );
+
+        $this->assertSame(
+            [
+                $this->delete_operation('outside/selected'),
+            ],
+            $this->collect_operations($planner)
+        );
+        $planner->close();
+    }
+
+    public function testCollapsesAnAllowedSiblingWithoutDeletingAnExcludedSubtree(): void
+    {
+        $patch_base_index = $this->write_index('base.jsonl', [
+            'selected/delete/child.txt' =>
+                $this->entry('selected/delete/child.txt'),
+            'selected/keep/child.txt' =>
+                $this->entry('selected/keep/child.txt'),
+        ]);
+        $patch_result_index = $this->write_index('result.jsonl', []);
+        $planner = FileSyncPatchPlanner::create(
+            $patch_base_index,
+            $patch_result_index,
+            $this->active_deletion_roots_file(),
+            ['selected'],
+            ['selected/keep']
+        );
+
+        $this->assertSame(
+            [
+                $this->delete_operation('selected/delete'),
+                null,
+            ],
+            $this->collect_operations($planner)
+        );
+        $planner->close();
+    }
+
     public function testIncludedAndExcludedRootsLimitBothOperations(): void
     {
         $patch_base_index = $this->write_index('base.jsonl', [
@@ -163,6 +213,38 @@ final class FileSyncPatchPlannerTest extends TestCase
             $operations
         );
         $planner->close();
+    }
+
+    public function testCursorBase64EncodesArbitraryByteSelectionRoots(): void
+    {
+        $included_root = "selected-\xff";
+        $patch_base_index = $this->write_index('base.jsonl', [
+            $included_root . '/file.txt' =>
+                $this->entry($included_root . '/file.txt'),
+        ]);
+        $patch_result_index = $this->write_index('result.jsonl', []);
+        $planner = FileSyncPatchPlanner::create(
+            $patch_base_index,
+            $patch_result_index,
+            $this->active_deletion_roots_file(),
+            [$included_root]
+        );
+        $cursor = $planner->get_cursor();
+        $this->assertSame(
+            [base64_encode($included_root)],
+            $cursor['included_index_path_roots_b64']
+        );
+        $this->assertIsString(
+            json_encode($cursor, JSON_THROW_ON_ERROR)
+        );
+        $planner->close();
+
+        $resumed = FileSyncPatchPlanner::resume($cursor);
+        $this->assertSame(
+            [$this->delete_operation($included_root)],
+            $this->collect_operations($resumed)
+        );
+        $resumed->close();
     }
 
     public function testResumeKeepsAnActiveDeletionRootAcrossASibling(): void

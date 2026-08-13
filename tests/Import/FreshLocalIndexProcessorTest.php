@@ -114,6 +114,33 @@ final class FreshLocalIndexProcessorTest extends TestCase {
         $resumed_processor->close();
     }
 
+    public function testIncludeCachesIsRetainedByTheCursor(): void
+    {
+        mkdir($this->filesystem_root . '/node_modules');
+        file_put_contents(
+            $this->filesystem_root . '/node_modules/package.js',
+            'package'
+        );
+        $processor = FreshLocalIndexProcessor::start(
+            $this->fresh_local_index_file,
+            $this->filesystem_root,
+            $this->storage_path,
+            true
+        );
+        $this->assertTrue($processor->next_step());
+        $processor->flush_pending_output();
+        $cursor = $processor->get_cursor();
+        $processor->close();
+
+        $resumed_processor = FreshLocalIndexProcessor::resume($cursor);
+        $this->run_to_completion($resumed_processor);
+
+        $this->assertSame(
+            ['node_modules/package.js'],
+            array_column($this->read_index_entries(), 'decoded_path')
+        );
+    }
+
     private function run_to_completion(
         FreshLocalIndexProcessor $processor
     ): void {

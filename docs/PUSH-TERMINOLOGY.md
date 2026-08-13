@@ -66,6 +66,9 @@ local relative path to a document-root-relative path.
   patch result. To copy only source changes, the source snapshots from the
   last sync and now are the patch base and result. The planner owns the index
   diff and the active deletion roots file.
+- A **file sync patch processor** builds a fresh local index, then runs a file
+  sync patch planner in the direction selected by its start method. Its cursor
+  owns both phases, so a caller can store it unchanged.
 - The **pull index WAL** records completed pull mutations awaiting application
   to the remote and local indexes.
 - A **pull plan** lists remote absolute paths still scheduled for download or
@@ -306,18 +309,19 @@ The local index contains the fresh filesystem-root scan the sender saved after
 a target-confirmed files-push commit, advanced path by path by later completed
 files-pull mutations.
 Files-pull does not scan unrelated paths or accept their pending local changes.
-PushPlan diffs its fresh local index against the local index its caller
-supplies. Its FileSyncPatchPlanner owns the FileIndexDiffProcessor and the
-active deletion roots file. That file remembers directory deletions which
-cover index paths the planner has not processed yet.
+PushPlan starts FileSyncPatchProcessor with the supplied local index as the
+patch base and the fresh local index as the patch result. The processor owns
+FreshLocalIndexProcessor and FileSyncPatchPlanner. The planner owns
+FileIndexDiffProcessor and the active deletion roots file. That file remembers
+directory deletions which cover index paths the planner has not processed yet.
 
 The PushPlan cursor is stored in `sender.json`. It contains `plan_directory`,
-`local_index_file`, and the current
-planning position. During `indexing`, that position contains the complete
-FreshLocalIndexProcessor cursor. During `diffing`, it contains the output
-offsets and the complete FileSyncPatchPlanner cursor. PushPlan stores either
-nested cursor without unpacking or rebuilding it. The active
-deletion roots file is append-only; each entry links to the preceding active
+`local_index_file`, and the current planning position. While processing, that
+position contains the complete FileSyncPatchProcessor cursor and both output
+offsets. PushPlan stores the processor cursor without unpacking or rebuilding
+it. The processor cursor contains the complete FreshLocalIndexProcessor cursor
+while scanning and the complete FileSyncPatchPlanner cursor while planning.
+The active deletion roots file is append-only; each entry links to the preceding active
 directory. The exclusions have a maximum of 100 paths. The `sender.json`
 phases are `creating`, `finishing_previous_commit`,
 `starting_plan`, `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
@@ -523,15 +527,9 @@ Use these names verbatim inside `PushPlan`:
 | Index entry and shape | `$index_entry`, `$local_index_entry`, `$local_index_entry_shape`, `index_entry_shape()` |
 | Cursor | `$cursor`, `get_cursor()` |
 | Plan-owned excluded paths | `$excluded_paths_file` |
-| Fresh local index processor | `FreshLocalIndexProcessor`, `$fresh_local_index_processor` |
-| Fresh local indexing cursor | `fresh_local_index_cursor`, `$fresh_local_index_cursor` |
-| Fresh local index byte offset | `$fresh_local_index_byte_offset` |
-| Open fresh local index | `$fresh_local_index_handle` |
-| Combined index bytes | `$index_bytes_total` |
-| File-sync planner cursor | `file_sync_planner_cursor`, `$file_sync_planner_cursor` |
+| File sync patch processor | `FileSyncPatchProcessor`, `$file_sync_patch_processor` |
+| File sync patch processor cursor | `file_sync_patch_processor_cursor`, `$file_sync_patch_processor_cursor` |
 | Plan progress | `get_progress()` |
-| Start index diff | `start_index_diff()` |
-| Seek an index file | `seek_index_file_to_byte_offset()`, `$index_file_handle` |
 | Open push-plan output file | `open_push_plan_output_file_at_byte_offset()`, `$push_plan_output_file_handle` |
 
 ## Protocol names
