@@ -522,7 +522,7 @@ class StructuredDataUrlRewriterTest extends TestCase
      * @param array<string, string> $mapping
      */
     #[DataProvider('structured_target_base_cases')]
-    public function testKnownStructuredUrlsAcceptTargetsWhichOpaqueTextCannotSafelyWrite(
+    public function testKnownStructuredUrlsUseTargetBase(
         string $input,
         string $expected,
         array $mapping
@@ -545,7 +545,7 @@ class StructuredDataUrlRewriterTest extends TestCase
             ],
             'initial path' => [
                 '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
-                '<a href="https://new.example/base/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://new.example/base/media/image.jpg">Image</a>[vc_video link="https:\/\/new.example\/base\/media\/video.mp4"]',
                 ['https://old-site.com' => 'https://new.example/base'],
             ],
             'port' => [

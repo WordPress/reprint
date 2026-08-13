@@ -246,6 +246,16 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https:\\/\\/destination.example\\/assets?download=1',
                 ['https://source.example' => 'https://destination.example/assets'],
             ],
+            'target path skips a preceding scheme-less occurrence' => [
+                'source.example https:\\/\\/source.example',
+                'source.example https:\\/\\/destination.example\\/assets',
+                ['https://source.example' => 'https://destination.example/assets'],
+            ],
+            'target path and protocol change use the same match' => [
+                'http:\\/\\/source.example\\/media\\/logo.png',
+                'https:\\/\\/destination.example\\/assets\\/logo.png',
+                ['http://source.example/media' => 'https://destination.example/assets'],
+            ],
         ];
     }
 

@@ -31,9 +31,9 @@
  * of those formats and could corrupt the value.
  *
  * Instead, the processor performs one narrow operation: find the configured
- * source base as bytes and replace that entire slice with a target domain. It
- * replaces the literal protocol separately when the mapping changes it. It does
- * not decode, normalize, or re-encode the input.
+ * source base as bytes and replace that entire slice with a target domain and
+ * optional path. It replaces the literal protocol separately when the mapping
+ * changes it. It does not decode, normalize, or re-encode the input.
  *
  * Supported sources:
  *
@@ -143,11 +143,11 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *
      * A source may include an initial path containing only bytes from `!`
      * (0x21) through `~` (0x7E). A target must be an HTTP(S) URL with a
-     * supported domain and no path or other URL components:
+     * supported domain and an optional restricted path:
      *
      * ```
      * [
-     *     'https://source.example/media' => 'https://destination.example',
+     *     'https://source.example/media' => 'https://destination.example/assets',
      * ]
      * ```
      *
@@ -301,7 +301,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                     'base_length'   => strlen($matches['base'][0]),
                     'replacement'   => $mapping['target_domain'] . str_replace(
                         '/',
-                        $matches['protocol_path_separator'][0],
+                        $matches['protocol_slash'][0],
                         $mapping['target_path']
                     ),
                     'scheme_start'  => $matches['scheme'][1] === -1
@@ -337,21 +337,17 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
             $escaped_separator . '/',
             preg_quote($source_path, '~')
         );
-
-        $protocol_pattern = '
-            (?<scheme>(?i:' . preg_quote($source_scheme, '~') . '))
-            ' . $escaped_separator . ':
-            (?<protocol_path_separator>' . $escaped_separator . '/)
-            ' . $escaped_separator . '/
-            (?:[^\s<>@/\\\\]+@)?
-        ';
-        if (!$requires_protocol) {
-            $protocol_pattern = '(?:' . $protocol_pattern . ')?';
-        }
+        $protocol_optional_quantifier = $requires_protocol ? '' : '?';
 
         return '~
             (?<![A-Za-z0-9._%+\\/@-])
-            ' . $protocol_pattern . '
+            (?:
+                (?<scheme>(?i:' . preg_quote($source_scheme, '~') . '))
+                ' . $escaped_separator . ':
+                (?<protocol_slash>' . $escaped_separator . '/)
+                ' . $escaped_separator . '/
+                (?:[^\s<>@/\\\\]+@)?
+            )' . $protocol_optional_quantifier . '
             (?<base>
                 (?<authority>(?i:' . preg_quote($source_authority, '~') . '))
                 ' . $source_path_pattern . '
