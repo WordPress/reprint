@@ -139,6 +139,9 @@
     },
     "db-index-interruption": {
       "port": 8125
+    },
+    "only-symlinked-directory-root": {
+      "port": 8126
     }
   }
 }

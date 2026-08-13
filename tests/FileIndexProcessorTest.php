@@ -191,6 +191,111 @@ final class FileIndexProcessorTest extends TestCase {
         );
     }
 
+    public function testFollowedDirectorySymlinkRootPreservesTheSelectedLink(): void
+    {
+        $site = $this->tempDir . '/site';
+        $target = $this->tempDir . '/shared/akismet-5.7';
+        $link = $site . '/wp-content/plugins/akismet';
+        mkdir($target, 0755, true);
+        mkdir(dirname($link), 0755, true);
+        file_put_contents($target . '/akismet.php', '<?php // akismet');
+        symlink('../../../shared/akismet-5.7', $link);
+        $canonical_link = (string) realpath(dirname($link)) . '/akismet';
+
+        $processor = FileIndexProcessor::start(
+            [ (string) realpath($target) ],
+            $link,
+            true,
+            true,
+            ''
+        );
+        $entries = [];
+        while ($processor->next_index_step()) {
+            foreach ($processor->get_index_entries() as $entry) {
+                $entries[] = $entry;
+            }
+        }
+        $processor->close();
+
+        $root_entries = array_values(array_filter(
+            $entries,
+            static fn(array $entry): bool => $entry['path'] === $canonical_link
+        ));
+        $this->assertSame(
+            [[
+                'path' => $canonical_link,
+                'ctime' => (int) lstat($canonical_link)['ctime'],
+                'size' => 0,
+                'type' => 'link',
+                'target' => '../../../shared/akismet-5.7',
+                'intermediate' => true,
+            ]],
+            $root_entries
+        );
+        $this->assertContains( (string) realpath($target) . '/akismet.php', array_column($entries, 'path') );
+    }
+
+    public function testRealDirectoryRootDoesNotAddAnIndexEntry(): void
+    {
+        $directory = $this->tempDir . '/site/wp-content/plugins/akismet';
+        mkdir($directory, 0755, true);
+        file_put_contents($directory . '/akismet.php', '<?php // akismet');
+
+        $processor = FileIndexProcessor::start(
+            [ (string) realpath($directory) ],
+            $directory,
+            true,
+            true,
+            ''
+        );
+        $entries = [];
+        while ($processor->next_index_step()) {
+            foreach ($processor->get_index_entries() as $entry) {
+                $entries[] = $entry;
+            }
+        }
+        $processor->close();
+
+        $this->assertSame( [ (string) realpath($directory) . '/akismet.php' ], array_column($entries, 'path') );
+    }
+
+    public function testUnscopedDirectoryIndexKeepsItsExistingSymlinkEntry(): void
+    {
+        $site = $this->tempDir . '/site';
+        $target = $this->tempDir . '/shared/akismet-5.7';
+        $link = $site . '/wp-content/plugins/akismet';
+        mkdir($target, 0755, true);
+        mkdir(dirname($link), 0755, true);
+        file_put_contents($target . '/akismet.php', '<?php // akismet');
+        symlink('../../../shared/akismet-5.7', $link);
+        $canonical_link = (string) realpath(dirname($link)) . '/akismet';
+
+        $processor = FileIndexProcessor::start(
+            [ (string) realpath($site) ],
+            $site,
+            true,
+            true,
+            ''
+        );
+        $entries = [];
+        while ($processor->next_index_step()) {
+            foreach ($processor->get_index_entries() as $entry) {
+                $entries[] = $entry;
+            }
+        }
+        $processor->close();
+
+        $link_entries = array_values(array_filter(
+            $entries,
+            static fn(array $entry): bool => $entry['path'] === $canonical_link
+        ));
+        $this->assertSame(
+            (string) realpath($target),
+            $link_entries[0]['target']
+        );
+        $this->assertArrayNotHasKey('intermediate', $link_entries[0]);
+    }
+
     public function testResumeWithACompletedCursorRemainsComplete(): void
     {
         $docroot = $this->tempDir . '/site';

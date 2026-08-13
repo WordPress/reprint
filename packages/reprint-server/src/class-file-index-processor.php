@@ -99,10 +99,24 @@ final class FileIndexProcessor {
         bool $include_caches,
         string $storage_path
     ): self {
+        // A selected directory may itself be a symlink. Preserve it before
+        // realpath() collapses its spelling into the directory it targets.
+        $initial_index_entries = [];
+        clearstatcache(true, $index_directory);
+        $index_directory_stat = @lstat($index_directory);
+        if (
+            $follow_symlinks
+            && is_array($index_directory_stat)
+            && ( $index_directory_stat["mode"] & self::STAT_TYPE_MASK ) === self::STAT_TYPE_LINK
+        ) {
+            // find_parent_symlinks() also inspects its final component, so this
+            // emits the selected link with the exact readlink() target spelling.
+            $initial_index_entries = self::find_parent_symlinks($index_directory);
+        }
+
         // Anchor traversal to a real directory. All later comparisons use
         // canonical paths so configured roots and followed links share one
         // path namespace.
-        clearstatcache(true, $index_directory);
         $canonical_index_directory = realpath($index_directory);
         if ($canonical_index_directory === false || !is_dir($canonical_index_directory)) {
             throw new InvalidArgumentException(
@@ -155,7 +169,6 @@ final class FileIndexProcessor {
         // Keep parent-link discovery as the first traversal event. This
         // preserves the endpoint's established ordering: any link entries
         // found here must precede ordinary directory entries.
-        $initial_index_entries = [];
         if ($follow_symlinks) {
             foreach ($ordered_directories as $directory) {
                 $initial_index_entries = array_merge(
