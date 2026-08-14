@@ -152,7 +152,7 @@
     "file-db-pull-artifact-guards": {
       "port": 8130
     },
-    "direct-mysql-db-pull-safety": {
+    "mysql-db-pull-pipeline": {
       "port": 8131
     },
     "db-pull-index-interruption": {

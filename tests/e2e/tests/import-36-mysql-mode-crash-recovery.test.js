@@ -1,11 +1,9 @@
 /**
  * Test 36: MySQL Mode Source Interruption
  *
- * When using --sql-output=mysql with short execution times, the server
- * may pause mid-query (x-query-complete: 0). The importer buffers the
- * partial SQL in memory while it requests the next response in the same
- * process. A different importer process cannot align that buffer and cursor
- * with the target database.
+ * When using --sql-output=mysql with short execution times, the server may
+ * pause mid-query. The importer appends every received fragment to db.sql,
+ * confirms the completed dump, and then applies it through db-apply.
  *
  * This test forces many source-response cycles with --max-exec=1 and verifies
  * same-process completion.
@@ -77,9 +75,9 @@ describe('Import: MySQL Mode Source Interruption', { timeout: 120000 }, () => {
                 `counts=${JSON.stringify(comparison.rowCounts)}`);
         });
 
-        it('no db.sql on disk', () => {
-            assert.ok(!existsSync(join(tempDir, 'db.sql')),
-                'Expected no db.sql file when using --sql-output=mysql');
+        it('keeps the confirmed db.sql on disk', () => {
+            assert.ok(existsSync(join(tempDir, 'db.sql')),
+                'Expected db.sql when using --sql-output=mysql');
         });
     });
 

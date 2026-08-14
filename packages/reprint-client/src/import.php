@@ -429,23 +429,8 @@ class ImportClient
     /** @var string Path to progress.json — machine-readable progress for external readers. */
     private $progress_file;
 
-    /** @var string SQL output mode: 'file' (default), 'stdout', or 'mysql'. */
+    /** @var string SQL download mode: 'file' (default) or 'stdout'. */
     private $sql_output_mode = 'file';
-
-    /** @var string|null MySQL host for --sql-output=mysql. */
-    private $mysql_host;
-
-    /** @var int|null MySQL port for --sql-output=mysql. */
-    private $mysql_port;
-
-    /** @var string|null MySQL user for --sql-output=mysql. */
-    private $mysql_user;
-
-    /** @var string|null MySQL password for --sql-output=mysql. */
-    private $mysql_password;
-
-    /** @var string|null MySQL database for --sql-output=mysql. */
-    private $mysql_database;
 
     /** @var resource File descriptor for progress output — STDOUT normally, STDERR in stdout mode. */
     private $progress_fd;
@@ -849,6 +834,46 @@ class ImportClient
             );
         }
 
+        // Keep --sql-output=mysql as the db-pull spelling for the database-only
+        // pull pipeline. Reprint downloads all of db.sql before db-apply opens
+        // the target, so a later process can continue either stage safely.
+        if ($command === 'db-pull' && ( $options['sql_output'] ?? null ) === 'mysql') {
+            if (empty($options['mysql_database'])) {
+                throw new InvalidArgumentException(
+                    '--mysql-database is required when using --sql-output=mysql',
+                );
+            }
+
+            $target_host = $options['mysql_host'] ?? '127.0.0.1';
+            $target_port = isset($options['mysql_port']) ? (int) $options['mysql_port'] : 3306;
+            if (strpos($target_host, ':') !== false) {
+                list($host, $port_or_socket) = explode(':', $target_host, 2);
+                if ($port_or_socket !== '' && $port_or_socket[0] !== '/') {
+                    $target_host = $host;
+                    if (!isset($options['mysql_port'])) {
+                        $target_port = (int) $port_or_socket;
+                    }
+                }
+            }
+
+            $options['sql_output'] = 'file';
+            $options['target_engine'] = 'mysql';
+            $options['target_host'] = $target_host;
+            $options['target_port'] = $target_port;
+            $options['target_user'] = $options['mysql_user'] ?? 'root';
+            $options['target_pass'] = $options['mysql_password']
+                ?? ( getenv('MYSQL_PASSWORD') !== false ? getenv('MYSQL_PASSWORD') : '' );
+            $options['target_db'] = $options['mysql_database'];
+            unset(
+                $options['mysql_host'],
+                $options['mysql_port'],
+                $options['mysql_user'],
+                $options['mysql_password'],
+                $options['mysql_database'],
+            );
+            $command = 'pull-db';
+        }
+
         $progress_output_mode = $options['progress'] ?? 'auto';
         if (
             !is_string($progress_output_mode)
@@ -1121,50 +1146,7 @@ class ImportClient
             $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
         }
 
-        // MySQL connection parameters for --sql-output=mysql.
-        if (isset($options["mysql_host"])) {
-            $this->mysql_host = $options["mysql_host"];
-            $this->get_state()->mysql_host = $this->mysql_host;
-        } elseif (isset($this->get_state()->mysql_host)) {
-            $this->mysql_host = $this->get_state()->mysql_host;
-        }
-
-        if (isset($options["mysql_port"])) {
-            $this->mysql_port = (int) $options["mysql_port"];
-            $this->get_state()->mysql_port = $this->mysql_port;
-        } elseif (isset($this->get_state()->mysql_port)) {
-            $this->mysql_port = (int) $this->get_state()->mysql_port;
-        }
-
-        if (isset($options["mysql_user"])) {
-            $this->mysql_user = $options["mysql_user"];
-            $this->get_state()->mysql_user = $this->mysql_user;
-        } elseif (isset($this->get_state()->mysql_user)) {
-            $this->mysql_user = $this->get_state()->mysql_user;
-        }
-
-        if (isset($options["mysql_database"])) {
-            $this->mysql_database = $options["mysql_database"];
-            $this->get_state()->mysql_database = $this->mysql_database;
-        } elseif (isset($this->get_state()->mysql_database)) {
-            $this->mysql_database = $this->get_state()->mysql_database;
-        }
-
         $this->save_state();
-
-        // Password is never persisted — must be supplied each run or via env.
-        if (isset($options["mysql_password"])) {
-            $this->mysql_password = $options["mysql_password"];
-        } elseif (getenv("MYSQL_PASSWORD") !== false) {
-            $this->mysql_password = getenv("MYSQL_PASSWORD");
-        }
-
-        // Validate mysql mode requirements.
-        if ($this->sql_output_mode === "mysql" && empty($this->mysql_database)) {
-            throw new InvalidArgumentException(
-                "--mysql-database is required when using --sql-output=mysql",
-            );
-        }
 
         $this->initialize_tuner($options);
 
@@ -4034,7 +4016,7 @@ class ImportClient
             // Transition to sql stage
             $this->get_state()->active_resumable_command->current_stage = "sql";
             $this->get_state()->active_resumable_command->remote_cursor = null;
-            if (in_array($this->sql_output_mode, ['stdout', 'mysql'], true)) {
+            if ($this->sql_output_mode === 'stdout') {
                 $this->write_json_file(
                     wp_join_unix_paths(
                         $this->pull_state_directory,
@@ -4125,8 +4107,6 @@ class ImportClient
             $this->progress->show_lifecycle_line("SQL file: {$sql_file}\n");
         } elseif ($this->sql_output_mode === "stdout") {
             $this->progress->show_lifecycle_line("SQL written to stdout\n");
-        } elseif ($this->sql_output_mode === "mysql") {
-            $this->progress->show_lifecycle_line("SQL applied to {$this->mysql_database}\n");
         }
         $this->progress->show_lifecycle_line("Audit log: {$this->audit_log_file}\n");
         $db_sync_complete = [
@@ -6245,7 +6225,7 @@ class ImportClient
 
             // Only EOF makes the buffered tail a complete query. An orderly
             // stop leaves a partial statement unexecuted; the next process
-            // replays the dump from byte zero.
+            // starts reading db.sql again from the beginning.
             if (!$this->shutdown_requested) {
                 $query_stream->mark_input_complete();
             }
@@ -6524,7 +6504,17 @@ class ImportClient
         $target_pass = $target['pass'];
         $target_db = $target['db'];
 
-        $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
+        $target_socket = null;
+        if (strpos($target_host, ':') !== false) {
+            list($host, $port_or_socket) = explode(':', $target_host, 2);
+            if ($port_or_socket !== '' && $port_or_socket[0] === '/') {
+                $target_host = $host;
+                $target_socket = $port_or_socket;
+            }
+        }
+        $dsn = $target_socket === null
+            ? "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4"
+            : "mysql:unix_socket={$target_socket};dbname={$target_db};charset=utf8mb4";
         try {
             $pdo = new PDO($dsn, $target_user, $target_pass, [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
@@ -6542,9 +6532,10 @@ class ImportClient
         return [
             $pdo,
             sprintf(
-                "engine=mysql host=%s port=%d db=%s user=%s",
+                "engine=mysql host=%s port=%d%s db=%s user=%s",
                 $target_host,
                 $target_port,
+                $target_socket === null ? '' : " socket={$target_socket}",
                 $target_db,
                 $target_user,
             ),
@@ -8051,9 +8042,7 @@ class ImportClient
         // ── Set up write strategy based on output mode ──────────────
 
         $sql_handle = null;
-        $mysql_conn = null;
         $sql_bytes_written = 0;
-        $sql_buffer = "";
 
         if ($mode === "file") {
             $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
@@ -8120,39 +8109,6 @@ class ImportClient
 
         } elseif ($mode === "stdout") {
             $sql_bytes_written = $this->get_state()->sql_bytes ?? 0;
-
-        } elseif ($mode === "mysql") {
-            $sql_bytes_written = $this->get_state()->sql_bytes ?? 0;
-
-            $host = $this->mysql_host ?? "127.0.0.1";
-            $user = $this->mysql_user ?? "root";
-            $pass = $this->mysql_password ?? "";
-            $name = $this->mysql_database;
-
-            // Parse host for port/socket (same format as WordPress DB_HOST).
-            // An explicit --mysql-port takes precedence over a port embedded
-            // in the host string.
-            $port = $this->mysql_port ?? 3306;
-            $socket = null;
-            if (strpos($host, ":") !== false) {
-                list($host, $port_or_socket) = explode(":", $host, 2);
-                if ($port_or_socket[0] === "/") {
-                    $socket = $port_or_socket;
-                } elseif ($this->mysql_port === null) {
-                    $port = (int) $port_or_socket;
-                }
-            }
-
-            $mysql_conn = new \mysqli($host, $user, $pass, $name, $port, $socket);
-            if ($mysql_conn->connect_error) {
-                throw new RuntimeException("MySQL connection failed: " . $mysql_conn->connect_error);
-            }
-            $mysql_conn->set_charset("utf8mb4");
-
-            $this->audit_log(
-                "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
-                true,
-            );
         }
 
         // Domain discovery and statement counting: scan SQL for URLs during download
@@ -8200,13 +8156,11 @@ class ImportClient
             false,
         );
 
-        $caught_exception = null;
-        $buffer_not_flushed = "";
         $chunks_since_save = 0;
         try {
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
-                // A completed file dump may be replayed from byte zero only
+                // db-apply may read a completed db.sql again from the beginning only
                 // when every dumped base table replaces its target table.
                 if ($mode === 'file') {
                     $params['create_table_query'] = true;
@@ -8219,8 +8173,6 @@ class ImportClient
                     &$cursor,
                     &$complete,
                     &$sql_handle,
-                    $mysql_conn,
-                    &$sql_buffer,
                     &$sql_bytes_written,
                     $context,
                     $query_stream,
@@ -8244,7 +8196,6 @@ class ImportClient
                     $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
                     if ($chunk_type === "sql") {
-                        $query_complete = ($chunk["headers"]["x-query-complete"] ?? "1") === "1";
                         $data = $chunk["body"];
 
                         switch ($mode) {
@@ -8274,37 +8225,6 @@ class ImportClient
                                 $sql_bytes_written += $bytes;
                                 break;
 
-                            case "mysql":
-                                // The incomplete statement stays in memory while source
-                                // responses retry inside this process. A new process is
-                                // rejected because it cannot align this buffer with the target.
-                                $sql_buffer .= $data;
-                                $sql_bytes_written += strlen($data);
-
-                                if ($query_complete) {
-                                    if (!$mysql_conn->multi_query($sql_buffer)) {
-                                        throw new RuntimeException("MySQL execution failed: " . $mysql_conn->error);
-                                    }
-                                    // Drain all result sets from multi_query before sending the
-                                    // next chunk — mysqli requires this.
-                                    while (true) {
-                                        $result = $mysql_conn->store_result();
-                                        if ($result) { $result->free(); }
-                                        if ($mysql_conn->errno) {
-                                            throw new RuntimeException("MySQL statement error: " . $mysql_conn->error);
-                                        }
-                                        if (!$mysql_conn->more_results()) {
-                                            break;
-                                        }
-                                        if (!$mysql_conn->next_result()) {
-                                            throw new RuntimeException(
-                                                "MySQL statement error: " . $mysql_conn->error,
-                                            );
-                                        }
-                                    }
-                                    $sql_buffer = "";
-                                }
-                                break;
                         }
 
                         // Feed data to query stream for domain discovery and statement counting
@@ -8383,7 +8303,6 @@ class ImportClient
                     if (
                         $mode === 'file'
                         && $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
-                        && $sql_buffer === ""
                     ) {
                         if ($sql_handle) {
                             if (!fflush($sql_handle)) {
@@ -8424,11 +8343,10 @@ class ImportClient
                         $cursor,
                         $e,
                     );
-                    $retry_log = "SQL RETRY | resuming source request | mode={$mode}";
-                    if ($sql_buffer !== "") {
-                        $retry_log .= " | buffered_sql=" . strlen($sql_buffer) . " bytes";
-                    }
-                    $this->audit_log($retry_log, true);
+                    $this->audit_log(
+                        "SQL RETRY | resuming source request | mode={$mode}",
+                        true,
+                    );
                     continue;
                 }
                 $this->get_state()->consecutive_interrupted_responses = 0;
@@ -8492,41 +8410,11 @@ class ImportClient
                     );
                 }
             }
-        } catch (\Throwable $e) {
-            $caught_exception = $e;
-            throw $e;
         } finally {
             if ($sql_handle) {
                 fclose($sql_handle);
             }
-            if ($mysql_conn) {
-                $pending = $sql_buffer;
-                $mysql_conn->close();
-                $mysql_conn = null;
-                if ($pending !== "") {
-                    if ($caught_exception !== null) {
-                        // An exception is already in flight (e.g. curl error,
-                        // MySQL error). Do not mask it with the discarded
-                        // in-memory tail. The saved output status makes a later
-                        // process stop instead of sending more SQL to this target.
-                        $this->audit_log(
-                            "BUFFER NOT FLUSHED | " . strlen($pending) .
-                            " bytes in SQL buffer during exception unwind" .
-                            " (original error: " . $caught_exception->getMessage() . ")",
-                            true,
-                        );
-                    } else {
-                        $buffer_not_flushed = $pending;
-                    }
-                }
-            }
-        }
 
-        if ($buffer_not_flushed !== "") {
-            throw new RuntimeException(
-                "Buffered SQL was never executed (" . strlen($buffer_not_flushed) .
-                " bytes) — incomplete export?"
-            );
         }
     }
 
@@ -12198,7 +12086,7 @@ if (
             'type' => 'value',
             'target' => 'sql_output',
             'placeholder' => 'MODE',
-            'help' => 'Output mode: file (default), stdout, mysql',
+            'help' => 'Output mode: file (default), stdout, mysql (download then apply)',
             'commands' => ['db-pull'],
         ],
         [
@@ -12206,7 +12094,7 @@ if (
             'type' => 'value',
             'target' => 'mysql_host',
             'placeholder' => 'HOST',
-            'help' => 'MySQL host (default: 127.0.0.1, for --sql-output=mysql)',
+            'help' => 'Target MySQL host (default: 127.0.0.1, for --sql-output=mysql)',
             'commands' => ['db-pull'],
         ],
         [
@@ -12214,7 +12102,7 @@ if (
             'type' => 'value',
             'target' => 'mysql_port',
             'placeholder' => 'PORT',
-            'help' => 'MySQL port (default: 3306, for --sql-output=mysql)',
+            'help' => 'Target MySQL port (default: 3306, for --sql-output=mysql)',
             'commands' => ['db-pull'],
         ],
         [
@@ -12222,7 +12110,7 @@ if (
             'type' => 'value',
             'target' => 'mysql_user',
             'placeholder' => 'USER',
-            'help' => 'MySQL user (default: root, for --sql-output=mysql)',
+            'help' => 'Target MySQL user (default: root, for --sql-output=mysql)',
             'commands' => ['db-pull'],
         ],
         [
@@ -12230,7 +12118,7 @@ if (
             'type' => 'value',
             'target' => 'mysql_password',
             'placeholder' => 'PASS',
-            'help' => 'MySQL password (or set MYSQL_PASSWORD env)',
+            'help' => 'Target MySQL password (or set MYSQL_PASSWORD env)',
             'commands' => ['db-pull'],
         ],
         [
@@ -12238,7 +12126,7 @@ if (
             'type' => 'value',
             'target' => 'mysql_database',
             'placeholder' => 'DB',
-            'help' => 'MySQL database (required for --sql-output=mysql)',
+            'help' => 'Target MySQL database (required for --sql-output=mysql)',
             'commands' => ['db-pull'],
         ],
 
@@ -13087,17 +12975,18 @@ if (
             "short" => "Pull the database as a SQL dump (index + download)",
             "description" =>
                 "Indexes remote tables, then streams the full SQL dump into\n" .
-                "--state-dir/db.sql (default), to stdout, or directly into a\n" .
-                "MySQL connection. File output resumes from its saved cursor. Source\n" .
-                "interruptions retry within this process.\n" .
-                "If that process stops, Reprint cannot tell how much SQL reached stdout or MySQL.\n" .
-                "Reset or restore the destination, then abort and restart as file output.\n" .
+                "--state-dir/db.sql (default) or to stdout. With --sql-output=mysql,\n" .
+                "it downloads db.sql completely before applying it to MySQL. File\n" .
+                "downloads continue from the last saved source position. An interrupted\n" .
+                "MySQL apply starts db.sql from the beginning on a new connection.\n" .
+                "If stdout stops, reset the receiving program or file, then abort and\n" .
+                "restart as file output.\n" .
                 "Discovered domains are cached for later use by db-apply.\n",
             "extra" =>
                 "Output modes:\n" .
                 "  file    Write to --state-dir/db.sql (default)\n" .
                 "  stdout  Write raw SQL to stdout; progress goes to stderr\n" .
-                "  mysql   Stream directly into a MySQL connection\n",
+                "  mysql   Download db.sql, then apply it to MySQL\n",
         ],
         "db-index" => [
             "level" => "low",

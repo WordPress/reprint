@@ -168,7 +168,7 @@ Entries in `paths_to_remove` under `wp-content/plugins/` also trigger automatic 
 
 ### SQL Streaming Source Retries
 
-When one SQL response ends in the middle of a statement, the importer keeps those bytes in memory and requests the next response in the same process. File output can continue in a new process from the last file size and source position Reprint saved. If a process stops while writing to stdout or MySQL, Reprint cannot tell how much SQL the destination received or kept. A new process refuses to continue until the destination is reset or restored and `db-pull --abort` is run.
+When one SQL response ends in the middle of a statement, the importer requests the next response in the same process. File and MySQL output can continue downloading in a new process from the last file size and source position Reprint saved. MySQL is not changed until the download finishes. If applying the SQL stops, the next process starts `db.sql` from the beginning on a new connection, which runs the dump header again. Stdout cannot continue in another process because Reprint cannot tell how much SQL the receiving program or file got. Reset that program or file before running `db-pull --abort`.
 
 ### Progress Tracking
 
