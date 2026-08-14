@@ -244,7 +244,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 			array_pop( $this->inspecting_html_attributes );
 		}
 
-		while ( ! empty( $this->inspecting_html_attributes ) ) {
+		while ( count( $this->inspecting_html_attributes ) > 0 ) {
 			$attr      = $this->inspecting_html_attributes[ count( $this->inspecting_html_attributes ) - 1 ];
 			$url_maybe = $this->get_attribute( $attr );
 			if ( ! is_string( $url_maybe ) ) {
@@ -523,7 +523,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	 *        handling their subsyntax. A generic URL matcher might be good enough.
 	 */
 	public const HTML_ATTRIBUTES_WITH_SUBSYNTAX_TO_ACCEPT_RELATIVE_URLS_FROM = array(
-		'*'      => array( 'style' ), // CSS background properties.
+		'*'      => array( 'style' ), // background(), background-image().
 		'APPLET' => array( 'archive' ),
 		'IMG'    => array( 'srcset' ),
 		'META'   => array( 'content' ),
