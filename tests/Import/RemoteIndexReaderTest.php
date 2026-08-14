@@ -173,6 +173,50 @@ final class RemoteIndexReaderTest extends TestCase
         }
     }
 
+    public function testDirectoryEmptyValueIsReturned(): void
+    {
+        $line = json_encode(
+            [
+                'path' => base64_encode('/site/empty'),
+                'ctime' => 10,
+                'size' => 0,
+                'type' => 'dir',
+                'empty' => true,
+            ],
+            JSON_THROW_ON_ERROR
+        );
+
+        $this->assertTrue(
+            \RemoteIndexReader::decode_index_line($line)['empty'] ?? false
+        );
+    }
+
+    /** @dataProvider invalidEmptyValueProvider */
+    public function testRejectsInvalidDirectoryEmptyValue(
+        string $type,
+        mixed $directory_is_empty
+    ): void {
+        $line = json_encode(
+            [
+                'path' => base64_encode('/site/path'),
+                'type' => $type,
+                'empty' => $directory_is_empty,
+            ],
+            JSON_THROW_ON_ERROR
+        );
+
+        $this->expectException(\RuntimeException::class);
+        \RemoteIndexReader::decode_index_line($line);
+    }
+
+    /** @return iterable<string,array{string,mixed}> */
+    public static function invalidEmptyValueProvider(): iterable
+    {
+        yield 'non-boolean' => ['dir', 1];
+        yield 'file' => ['file', true];
+        yield 'link' => ['link', false];
+    }
+
     private function indexLine(
         string $path,
         int $ctime,
