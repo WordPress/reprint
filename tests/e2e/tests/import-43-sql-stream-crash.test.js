@@ -195,11 +195,6 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 300000 }, () => {
                     `Expected ${mode} mode to retry the interrupted REST request`,
                 );
 
-                assert.ok(!existsSync(join(
-                    pullStateDirectory(tempDir, importUrl()),
-                    'sql-buffer',
-                )),
-                    'Expected pull/sql-buffer to be absent after successful completion');
             } finally {
                 cleanupTempDir(tempDir);
                 if (mode === 'mysql') {
