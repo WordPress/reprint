@@ -185,7 +185,7 @@ class NewSiteUrlTest extends TestCase
         $this->callResolve($client, $options);
     }
 
-    public function testUsesTheSourceSiteUrlFromPriorStateWithoutAnExportUrl(): void
+    public function testRequiresAnExplicitMappingWithoutARemoteUrl(): void
     {
         $client = new \ImportClient(
             '',
@@ -206,17 +206,15 @@ class NewSiteUrlTest extends TestCase
             ],
         ]);
 
-        $options = $this->callResolve($client, [
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            '--new-site-url requires a positional remote Reprint API URL. ' .
+            'Use --rewrite-url FROM TO when no remote URL is available.'
+        );
+
+        $this->callResolve($client, [
             'new_site_url' => 'https://new-site.example.com',
         ]);
-
-        $this->assertSame(
-            [
-                ['https://saved-source.example:8443', 'https://new-site.example.com'],
-                ['http://saved-source.example:8443', 'https://new-site.example.com'],
-            ],
-            $options['rewrite_url']
-        );
     }
 
     public function testNewUrlUsedVerbatim(): void
