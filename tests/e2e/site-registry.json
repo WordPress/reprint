@@ -142,6 +142,9 @@
     },
     "mysql-session-settings-resume": {
       "port": 8126
+    },
+    "sqlite-legacy": {
+      "port": 8127
     }
   }
 }

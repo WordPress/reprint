@@ -168,6 +168,66 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $this->assertEquals($data3, $rows[2]['content']);
     }
 
+    public function testRetainedRowKeepsItsQueryBoundaryAcrossResume(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE retained_boundary (id INT PRIMARY KEY, content LONGBLOB)"
+        );
+        $insert = $this->pdo->prepare("INSERT INTO retained_boundary VALUES (?, ?)");
+        $insert->execute([1, str_repeat('x', 20 * 1024)]);
+        $insert->execute([2, 'second']);
+        $insert->execute([3, 'third']);
+
+        $options = [
+            'batch_size' => 2,
+            'max_statement_size' => 8 * 1024,
+        ];
+        $producer = $this->createProducer($options);
+        do {
+            $this->assertTrue($producer->next_sql_fragment());
+            $fragment = (string) $producer->get_sql_fragment();
+        } while (strpos($fragment, 'INSERT INTO `retained_boundary`') !== 0);
+
+        $options['cursor'] = $producer->get_reentrancy_cursor();
+        $producer = $this->createProducer($options);
+        do {
+            $this->assertTrue($producer->next_sql_fragment());
+            $fragment = (string) $producer->get_sql_fragment();
+        } while (
+            strpos($fragment, 'INSERT INTO `retained_boundary`') !== 0 ||
+            strpos($fragment, base64_encode('second')) === false
+        );
+
+        $cursor = json_decode($producer->get_reentrancy_cursor(), true);
+        $this->assertNull($cursor['current_row']);
+        $this->assertSame(['id' => 2], $cursor['last_pk_values']);
+    }
+
+    public function testRowEmitterStopsAtTheReaderQueryBoundary(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE emitted_boundary (id INT PRIMARY KEY, content LONGBLOB)"
+        );
+        $insert = $this->pdo->prepare("INSERT INTO emitted_boundary VALUES (?, ?)");
+        $insert->execute([1, str_repeat('x', 20 * 1024)]);
+        $insert->execute([2, 'second']);
+        $insert->execute([3, 'third']);
+        $insert->execute([4, 'fourth']);
+
+        $producer = $this->createProducer([
+            'batch_size' => 3,
+            'max_statement_size' => 8 * 1024,
+        ]);
+        do {
+            $this->assertTrue($producer->next_sql_fragment());
+            $fragment = (string) $producer->get_sql_fragment();
+        } while (strpos($fragment, base64_encode('third')) === false);
+
+        $cursor = json_decode($producer->get_reentrancy_cursor(), true);
+        $this->assertNull($cursor['current_row']);
+        $this->assertSame(['id' => 3], $cursor['last_pk_values']);
+    }
+
     /**
      * Test with composite primary key.
      */

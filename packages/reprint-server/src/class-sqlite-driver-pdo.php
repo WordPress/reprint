@@ -9,10 +9,9 @@
  * driver does not implement so the dump producer can use either supported
  * plugin version without knowing it is talking to SQLite.
  *
- * Every MySQL query goes through the driver's AST-based translator, which
- * converts it to SQLite on the fly. The result is transparent: the dump
- * producer sends MySQL queries, gets rows back, and produces valid MySQL
- * SQL output.
+ * Every MySQL query goes through the active driver's translator, which converts
+ * it to SQLite on the fly. The result is transparent: the dump producer sends
+ * MySQL queries, gets rows back, and produces valid MySQL SQL output.
  */
 
 /**
@@ -164,6 +163,13 @@ class SqliteDriverPDOStatement
         }
 
         $result = $this->driver->query($sql);
+        $supply_table_types = false;
+        if ($result === false && strcasecmp(trim($sql), 'SHOW FULL TABLES') === 0) {
+            // The version 2 driver cannot parse SHOW FULL TABLES. Its public
+            // SHOW TABLE STATUS path already removes SQLite system tables.
+            $result = $this->driver->query('SHOW TABLE STATUS;');
+            $supply_table_types = true;
+        }
         if ($result instanceof PDOStatement) {
             $this->rows = $result->fetchAll(PDO::FETCH_ASSOC);
         } else {
@@ -171,11 +177,37 @@ class SqliteDriverPDOStatement
             $this->rows = is_array($result) ? $result : [];
         }
 
+        if (
+            count($this->rows) === 0 &&
+            preg_match(
+                '/\ASHOW (?:INDEX|FULL COLUMNS) FROM `([A-Za-z0-9_$]+)`\z/i',
+                trim($sql),
+                $matches
+            )
+        ) {
+            // The version 2 parser treats backticks as part of the table name
+            // in these SHOW forms. Retry only identifiers which are safe bare.
+            $legacy_sql = str_replace("`{$matches[1]}`", $matches[1], trim($sql));
+            $result = $this->driver->query($legacy_sql);
+            if ($result instanceof PDOStatement) {
+                $this->rows = $result->fetchAll(PDO::FETCH_ASSOC);
+            } else {
+                $result = $this->driver->get_query_results();
+                $this->rows = is_array($result) ? $result : [];
+            }
+        }
+
         // The version 2 driver returns arrays of objects. Convert those rows
         // to the same associative arrays returned by the version 3 driver.
         foreach ($this->rows as $i => $row) {
             if (is_object($row)) {
                 $this->rows[$i] = (array) $row;
+            }
+            if ($supply_table_types) {
+                $this->rows[$i] = [
+                    'Name' => $this->rows[$i]['Name'],
+                    'Table_type' => 'BASE TABLE',
+                ];
             }
         }
 

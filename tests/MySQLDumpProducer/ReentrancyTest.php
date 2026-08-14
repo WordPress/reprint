@@ -505,7 +505,7 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             }
         }
 
-        // Get cursor - should be at row 5
+        // Get cursor at the completed batch boundary after row 5.
         $cursor = $producer->get_reentrancy_cursor();
 
         // DELETE remaining rows - simulate data disappearing
@@ -532,13 +532,11 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         $this->assertStringNotContainsString(",\n\n", $completeSQL);
         $this->assertStringNotContainsString(",\nCOMMIT", $completeSQL);
 
-        // Verify it imports correctly
-        // Note: We expect 6 rows because row 6 was cached in the cursor
-        // even though rows 6-10 were deleted from the database.
-        // The cursor represents a consistent snapshot.
+        // The producer does not prefetch beyond the completed batch boundary,
+        // so rows deleted before resume are not emitted from saved state.
         $importPdo = $this->executeDumpInNewDatabase($completeSQL);
         $count = $importPdo->query("SELECT COUNT(*) FROM resume_test")->fetchColumn();
-        $this->assertEquals(6, $count, "Should have 6 rows (5 from first batch + 1 cached row)");
+        $this->assertEquals(5, $count);
     }
 
     /**

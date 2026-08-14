@@ -236,17 +236,26 @@ class MySQLDumpProducer
         $header = "INSERT INTO " . $this->row_reader->quote_identifier($this->row_reader->get_current_table()) . " ({$column_list}) VALUES\n";
         $this->current_statement_size = strlen($header);
 
+        $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
         $first_row_sql = $this->format_row_for_insert($this->row_reader->get_current_record());
         $this->current_statement_size += strlen($first_row_sql) + 1;
 
         $this->row_reader->clear_current_record();
         $this->rows_in_batch = 1;
 
-        $has_next_row = $this->row_reader->next_record();
-
         // Oversized updates require closing this INSERT with a semicolon so the
         // subsequent UPDATE statements are syntactically separate.
         $has_oversized = $this->has_pending_oversized_updates();
+
+        if (
+            $current_record_ends_query_batch ||
+            $this->rows_in_batch >= $this->row_reader->get_batch_size()
+        ) {
+            $this->finish_insert_batch($header . $first_row_sql, $has_oversized);
+            return true;
+        }
+
+        $has_next_row = $this->row_reader->next_record();
 
         if (!$has_next_row) {
             $sql = $header . $first_row_sql . ";";
@@ -258,16 +267,12 @@ class MySQLDumpProducer
             } else {
                 $this->state = self::STATE_NEXT_TABLE;
             }
-        } elseif ($this->rows_in_batch >= $this->row_reader->get_batch_size() || $has_oversized) {
+        } elseif ($has_oversized) {
             $sql = $header . $first_row_sql . ";";
             $this->current_sql_fragment = $sql;
             $this->current_statement_size = 0;
-            if ($has_oversized) {
-                $this->state_after_oversized = self::STATE_START_INSERT;
-                $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
-            } else {
-                $this->state = self::STATE_START_INSERT;
-            }
+            $this->state_after_oversized = self::STATE_START_INSERT;
+            $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
         } else {
             $sql = $header . $first_row_sql . ",";
             $this->current_sql_fragment = $sql;
@@ -288,13 +293,23 @@ class MySQLDumpProducer
             return false;
         }
 
+        $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
         $row_sql = $this->format_row_for_insert($this->row_reader->get_current_record());
         $this->current_statement_size += strlen($row_sql) + 2;
         $this->row_reader->clear_current_record();
         $this->rows_in_batch++;
 
-        $has_next_row = $this->row_reader->next_record();
         $has_oversized = $this->has_pending_oversized_updates();
+
+        if (
+            $current_record_ends_query_batch ||
+            $this->rows_in_batch >= $this->row_reader->get_batch_size()
+        ) {
+            $this->finish_insert_batch($row_sql, $has_oversized);
+            return true;
+        }
+
+        $has_next_row = $this->row_reader->next_record();
 
         if (!$has_next_row) {
             $this->current_sql_fragment = $row_sql . ";";
@@ -305,20 +320,29 @@ class MySQLDumpProducer
             } else {
                 $this->state = self::STATE_NEXT_TABLE;
             }
-        } elseif ($this->rows_in_batch >= $this->row_reader->get_batch_size() || $has_oversized) {
+        } elseif ($has_oversized) {
             $this->current_sql_fragment = $row_sql . ";";
             $this->current_statement_size = 0;
-            if ($has_oversized) {
-                $this->state_after_oversized = self::STATE_START_INSERT;
-                $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
-            } else {
-                $this->state = self::STATE_START_INSERT;
-            }
+            $this->state_after_oversized = self::STATE_START_INSERT;
+            $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
         } else {
             $this->current_sql_fragment = $row_sql . ",";
         }
 
         return true;
+    }
+
+    /** Finishes an INSERT batch at its bounded row limit. */
+    private function finish_insert_batch($sql, $has_oversized)
+    {
+        $this->current_sql_fragment = $sql . ";";
+        $this->current_statement_size = 0;
+        if ($has_oversized) {
+            $this->state_after_oversized = self::STATE_START_INSERT;
+            $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
+        } else {
+            $this->state = self::STATE_START_INSERT;
+        }
     }
 
     /**

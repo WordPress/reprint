@@ -66,6 +66,9 @@ class DatabaseRowsReader {
     /** @var array|null */
     private $current_row = null;
 
+    /** @var bool */
+    private $current_row_ends_query_batch = false;
+
     /** @var array|null */
     private $current_column_types = null;
 
@@ -133,6 +136,7 @@ class DatabaseRowsReader {
      */
     public function next_record()
     {
+        $this->current_row_ends_query_batch = false;
         if (!$this->current_result_set) {
             $query = $this->build_select_query();
             try {
@@ -178,7 +182,24 @@ class DatabaseRowsReader {
         }
 
         $this->current_row = $record;
+        if ($this->rows_fetched_from_current_query >= $this->batch_size) {
+            $this->current_row_ends_query_batch = true;
+            $this->release_current_result_set();
+        }
         return true;
+    }
+
+    /** Drains unconsumed records and releases the active LIMIT-sized result set. */
+    private function release_current_result_set()
+    {
+        if ($this->current_result_set === null) {
+            return;
+        }
+        $record = $this->current_result_set->fetch(PDO::FETCH_ASSOC);
+        while ($record !== false) {
+            $record = $this->current_result_set->fetch(PDO::FETCH_ASSOC);
+        }
+        $this->current_result_set = null;
     }
 
     /** Returns whether the table list has been initialized. */
@@ -203,6 +224,13 @@ class DatabaseRowsReader {
     public function clear_current_record()
     {
         $this->current_row = null;
+        $this->current_row_ends_query_batch = false;
+    }
+
+    /** Returns whether the retained record is the final row of its bounded query. */
+    public function is_current_record_at_query_batch_boundary()
+    {
+        return $this->current_row_ends_query_batch;
     }
 
     /** Returns column names in table order. */
@@ -232,6 +260,7 @@ class DatabaseRowsReader {
      *     @type array|null  $last_pk_values      Encoded primary key values.
      *     @type int         $current_offset      Offset for a table without a primary key.
      *     @type array|null  $current_row         Encoded retained record.
+     *     @type bool        $current_row_ends_query_batch Whether the retained record ends its query batch.
      *     @type array|null  $current_column_names Current column names.
      * }
      */
@@ -243,6 +272,7 @@ class DatabaseRowsReader {
             "last_pk_values" => $this->encode_database_values_for_cursor($this->last_pk_values),
             "current_offset" => $this->current_offset,
             "current_row" => $this->encode_database_values_for_cursor($this->current_row),
+            "current_row_ends_query_batch" => $this->current_row_ends_query_batch,
             "current_column_names" => $this->current_column_names,
         ];
     }
@@ -275,37 +305,39 @@ class DatabaseRowsReader {
         $this->current_row = $this->decode_database_values_from_cursor(
             $cursor_data["current_row"] ?? null
         );
+        $this->current_row_ends_query_batch = $cursor_data["current_row_ends_query_batch"] ?? false;
+        if (!is_bool($this->current_row_ends_query_batch)) {
+            throw new \InvalidArgumentException(
+                "Invalid cursor: current_row_ends_query_batch must be boolean, got " .
+                gettype($this->current_row_ends_query_batch)
+            );
+        }
         $this->current_column_names = $cursor_data["current_column_names"] ?? null;
 
         if ($this->tables_to_process === null) {
             $this->initialize_tables_to_process();
-            if ($this->current_table) {
-                $found = false;
-                reset($this->tables_to_process);
-                while (true) {
-                    $table = current($this->tables_to_process);
-                    if ($table === false) {
-                        break;
-                    }
-                    if ($table === $this->current_table) {
-                        $found = true;
-                        break;
-                    }
-                    next($this->tables_to_process);
-                }
-                // Table was dropped between requests — let the producer restart discovery.
-                if (!$found) {
-                    $this->current_table = null;
-                    return false;
-                }
-            }
         }
         if ($this->current_table) {
+            $position = array_search($this->current_table, $this->tables_to_process, true);
+            if ($position === false) {
+                $this->current_table = null;
+                return false;
+            }
+            reset($this->tables_to_process);
+            while (key($this->tables_to_process) !== $position) {
+                next($this->tables_to_process);
+            }
+            if ($this->get_primary_key_columns($this->current_table) !== $this->current_pk_columns) {
+                throw new \RuntimeException(
+                    "Cannot restore the database row cursor because the primary key for table " .
+                    $this->quote_identifier($this->current_table) . " changed."
+                );
+            }
             $this->current_column_types = $this->get_column_types($this->current_table);
             if (empty($this->current_column_types)) {
                 throw new \RuntimeException(
                     "Table " . $this->quote_identifier($this->current_table) . " was dropped between export requests " .
-                    "(no columns found in INFORMATION_SCHEMA)"
+                    "(no columns found in SHOW FULL COLUMNS)"
                 );
             }
         }
@@ -466,16 +498,11 @@ class DatabaseRowsReader {
     private function get_primary_key_columns($table)
     {
         $primary_key_columns = [];
-        $query = "SELECT COLUMN_NAME
-            FROM information_schema.KEY_COLUMN_USAGE
-            WHERE TABLE_SCHEMA = ?
-            AND TABLE_NAME = ?
-            AND CONSTRAINT_NAME = 'PRIMARY'
-            ORDER BY ORDINAL_POSITION";
+        $columns_by_position = [];
+        $has_usable_positions = true;
+        $query = "SHOW INDEX FROM " . $this->quote_identifier($table);
         try {
-            $database_name = $this->db->query("SELECT DATABASE()")->fetchColumn();
-            $statement = $this->db->prepare($query);
-            $statement->execute([$database_name, $table]);
+            $statement = $this->db->query($query);
         } catch (\PDOException $e) {
             throw new \RuntimeException(
                 "Failed to get primary key columns for " . $this->quote_identifier($table) . ": " . $e->getMessage() . " Query: {$query}"
@@ -483,10 +510,34 @@ class DatabaseRowsReader {
         }
         $row = $statement->fetch(PDO::FETCH_ASSOC);
         while ($row !== false) {
-            $primary_key_columns[] = $row["COLUMN_NAME"];
+            if (!isset($row["Key_name"]) || strcasecmp($row["Key_name"], "PRIMARY") !== 0) {
+                $row = $statement->fetch(PDO::FETCH_ASSOC);
+                continue;
+            }
+
+            $column = $row["Column_name"];
+            $primary_key_columns[] = $column;
+            $position = $row["Seq_in_index"] ?? null;
+            if (is_string($position) && ctype_digit($position)) {
+                $position = intval($position);
+            }
+            if (
+                !is_int($position) ||
+                $position < 1 ||
+                isset($columns_by_position[$position])
+            ) {
+                $has_usable_positions = false;
+            } else {
+                $columns_by_position[$position] = $column;
+            }
             $row = $statement->fetch(PDO::FETCH_ASSOC);
         }
-        return $primary_key_columns;
+
+        if (!$has_usable_positions) {
+            return $primary_key_columns;
+        }
+        ksort($columns_by_position, SORT_NUMERIC);
+        return array_values($columns_by_position);
     }
 
     public function move_to_next_table()
@@ -506,6 +557,7 @@ class DatabaseRowsReader {
             $this->current_column_types = $this->get_column_types($this->current_table);
             $this->current_column_names = null;
             $this->current_row = null;
+            $this->current_row_ends_query_batch = false;
         }
         return (bool) $this->current_table;
     }
@@ -518,38 +570,27 @@ class DatabaseRowsReader {
     public function initialize_tables_to_process()
     {
         $this->tables_to_process = [];
-        $database_name = $this->db->query("SELECT DATABASE()")->fetchColumn();
-        $statement = $this->db->prepare(
-            "SELECT TABLE_NAME
-             FROM INFORMATION_SCHEMA.TABLES
-             WHERE TABLE_SCHEMA = ?
-               AND TABLE_TYPE = 'BASE TABLE'
-             ORDER BY TABLE_NAME"
-        );
-        $statement->execute([$database_name]);
+        $statement = $this->db->query("SHOW FULL TABLES");
         $row = $statement->fetch(PDO::FETCH_ASSOC);
         while ($row !== false) {
-            $this->tables_to_process[] = $row["TABLE_NAME"];
+            $values = array_values($row);
+            if (isset($values[0], $values[1]) && strcasecmp($values[1], "BASE TABLE") === 0) {
+                $this->tables_to_process[] = $values[0];
+            }
             $row = $statement->fetch(PDO::FETCH_ASSOC);
         }
     }
 
-    /** Returns cached INFORMATION_SCHEMA column metadata for a table. */
+    /** Returns cached column metadata for a table. */
     private function get_column_types($table_name)
     {
         if (isset($this->column_type_cache[$table_name])) {
             return $this->column_type_cache[$table_name];
         }
         try {
-            $database_name = $this->db->query("SELECT DATABASE()")->fetchColumn();
-            $statement = $this->db->prepare(
-                'SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE
-                 FROM INFORMATION_SCHEMA.COLUMNS
-                 WHERE TABLE_SCHEMA = ?
-                   AND TABLE_NAME = ?
-                 ORDER BY ORDINAL_POSITION'
+            $statement = $this->db->query(
+                "SHOW FULL COLUMNS FROM " . $this->quote_identifier($table_name)
             );
-            $statement->execute([$database_name, $table_name]);
         } catch (\PDOException $e) {
             throw new \RuntimeException(
                 "Failed to get column types for " . $this->quote_identifier($table_name) . ": " . $e->getMessage()
@@ -558,9 +599,10 @@ class DatabaseRowsReader {
         $columns = [];
         $row = $statement->fetch(PDO::FETCH_ASSOC);
         while ($row !== false) {
-            $columns[$row["COLUMN_NAME"]] = [
-                "data_type" => $row["DATA_TYPE"],
-                "column_type" => $row["COLUMN_TYPE"],
+            $column_type = $row["Type"];
+            $columns[$row["Field"]] = [
+                "data_type" => preg_replace('/[\s(].*$/', '', $column_type),
+                "column_type" => $column_type,
             ];
             $row = $statement->fetch(PDO::FETCH_ASSOC);
         }
@@ -599,7 +641,7 @@ class DatabaseRowsReader {
             throw new \RuntimeException(
                 "No column type info for '{$column}' in table " .
                 $this->quote_identifier($this->current_table) .
-                ". This is a bug — INFORMATION_SCHEMA should have returned it."
+                ". This is a bug — SHOW FULL COLUMNS should have returned it."
             );
         }
         return $this->current_column_types[$column]["data_type"];

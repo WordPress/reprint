@@ -192,7 +192,7 @@ final class CreateDbConnectionTest extends TestCase {
         $this->assertSame('sqlite-3', $result['stdout']);
     }
 
-    public function testSqliteDatabaseIntegrationTwoDriverStillWorks(): void
+    public function testSqliteDatabaseIntegrationTwoLegacyDriverStillWorks(): void
     {
         if (!extension_loaded('pdo_sqlite')) {
             $this->markTestSkipped('pdo_sqlite extension required');
@@ -200,13 +200,24 @@ final class CreateDbConnectionTest extends TestCase {
 
         $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
         $export_path = realpath(__DIR__ . '/../packages/reprint-server/src/export.php');
-        $sqlite_load_path = realpath(
-            __DIR__ . '/../lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php'
-        );
         $this->assertIsString($autoload_path);
         $this->assertIsString($export_path);
-        $this->assertIsString($sqlite_load_path);
         $connection_script = <<<'PHP'
+        class LegacySqliteDriverTestDouble {
+            private $pdo;
+            public function __construct($pdo) {
+                $this->pdo = $pdo;
+            }
+            public function query($query) {
+                return $this->pdo->query($query);
+            }
+            public function get_query_results() {
+                return [];
+            }
+            public function get_pdo() {
+                return $this->pdo;
+            }
+        }
         class SqliteTwoWordPressDatabaseTestDouble {
             public $dbh;
             public function __construct($driver) {
@@ -215,12 +226,8 @@ final class CreateDbConnectionTest extends TestCase {
         }
         require $argv[1];
         require $argv[2];
-        require $argv[3];
         $pdo = new PDO('sqlite::memory:');
-        $driver = new WP_SQLite_Driver(
-            new WP_SQLite_Connection(['pdo' => $pdo]),
-            'wp_test'
-        );
+        $driver = new LegacySqliteDriverTestDouble($pdo);
         $GLOBALS['wpdb'] = new SqliteTwoWordPressDatabaseTestDouble($driver);
         $connection = create_db_connection(['db_engine' => 'sqlite']);
         fwrite(STDOUT, $connection->query('SELECT 2')->fetchColumn());
@@ -232,7 +239,6 @@ final class CreateDbConnectionTest extends TestCase {
             $connection_script,
             $autoload_path,
             $export_path,
-            $sqlite_load_path,
         ]);
         $this->assertSame(
             0,
