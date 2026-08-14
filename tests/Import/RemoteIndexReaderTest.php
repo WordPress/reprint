@@ -8,6 +8,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+require_once __DIR__ . '/RemoteIndexReadFailureStream.php';
 
 final class RemoteIndexReaderTest extends TestCase
 {
@@ -145,6 +146,31 @@ final class RemoteIndexReaderTest extends TestCase
         $this->expectExceptionMessage('Invalid index line format');
 
         \RemoteIndexReader::decode_index_line("\n");
+    }
+
+    public function testReadFailureDoesNotLookLikeEndOfFile(): void
+    {
+        $scheme = 'failingremoteindex';
+        $this->assertTrue(
+            stream_wrapper_register(
+                $scheme,
+                RemoteIndexReadFailureStream::class
+            )
+        );
+        $reader = new \RemoteIndexReader($scheme . '://index');
+        try {
+            $reader->open();
+            $reader->next_entry();
+            $this->fail('Expected the remote index read failure to throw.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'Failed to read the remote index file',
+                $exception->getMessage()
+            );
+        } finally {
+            $reader->close();
+            stream_wrapper_unregister($scheme);
+        }
     }
 
     private function indexLine(

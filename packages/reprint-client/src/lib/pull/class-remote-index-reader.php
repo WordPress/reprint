@@ -148,8 +148,8 @@ class RemoteIndexReader
      *     @type int    $size  Size in bytes.
      *     @type string $type  `file`, `dir`, or `link`.
      * }
-     * @throws RuntimeException When a non-blank line is not a decodable index
-     *                          entry.
+     * @throws RuntimeException When the index cannot be read or a non-blank
+     *                          line is not a decodable entry.
      * @throws InvalidArgumentException When the decoded path is not a valid
      *                                  remote absolute path.
      */
@@ -163,6 +163,11 @@ class RemoteIndexReader
                 continue;
             }
             return self::decode_index_line($remote_index_json_line);
+        }
+        if (!feof($this->remote_index_file_handle)) {
+            throw new RuntimeException(
+                "Failed to read the remote index file: {$this->remote_index_path}"
+            );
         }
         return null;
     }
