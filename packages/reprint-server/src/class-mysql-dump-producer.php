@@ -103,6 +103,9 @@ class MySQLDumpProducer
     /** @var int */
     private $current_statement_size = 0;
 
+    /** @var string */
+    private $current_sql_fragment_type = "sql";
+
     /**
      * @param PDO $db Database connection — either a real PDO (MySQL) or a
      *        PDO-compatible adapter (SQLite sites). No type hint because the
@@ -130,6 +133,12 @@ class MySQLDumpProducer
         return $this->current_sql_fragment;
     }
 
+    /** Returns "replace_table" for a DROP + CREATE pair, or "sql" otherwise. */
+    public function get_sql_fragment_type(): string
+    {
+        return $this->current_sql_fragment_type;
+    }
+
     public function is_finished(): bool
     {
         return self::STATE_FINISHED === $this->state;
@@ -146,6 +155,8 @@ class MySQLDumpProducer
         if ($this->is_finished()) {
             return false;
         }
+
+        $this->current_sql_fragment_type = "sql";
 
         if (self::STATE_INIT === $this->state) {
             if (!$this->row_reader->has_initialized_tables()) {
@@ -376,6 +387,7 @@ class MySQLDumpProducer
             $header = "--\n-- Table structure for table ".str_replace("\n",'\n',$quoted_table)."\n--\n\n";
             $drop = "DROP TABLE IF EXISTS {$quoted_table};\n";
             $this->current_sql_fragment = $header . $drop . $sql . ";";
+            $this->current_sql_fragment_type = "replace_table";
         } else {
             $keys = $row ? implode(", ", array_keys($row)) : "(no row returned)";
             throw new \RuntimeException(

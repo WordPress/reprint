@@ -367,13 +367,18 @@ The three modes:
 | `stdout` | Streams SQL to stdout, progress/status goes to stderr | none |
 | `mysql` | Connects via `mysqli::multi_query()` and executes statements as they arrive | none |
 
-When a source response stops mid-stream, the same importer asks for the
-remaining SQL and keeps an unfinished statement in memory. Direct MySQL
-output stores the last committed source position in the target table
+When a source response stops mid-stream, the importer asks for the remaining
+SQL again. Direct MySQL output also survives importer process death. It stores
+the last committed source position in the target table
 `__reprint_db_pull_progress`. For transactional target tables, each completed
-SQL group and its source position are committed together. If the importer
-process stops, the next `db-pull` starts the dump from the beginning rather
-than relying on unfinished SQL from the dead process.
+SQL group and its source position are committed together. A replacement
+process reads the target position before it asks for more SQL. Incomplete SQL
+stays in memory and is requested again after process death. The source sends
+each `DROP TABLE` + `CREATE TABLE` pair as one replacement action. While a
+table is being filled, the target also keeps the position before that pair.
+After process death, the replacement process rebuilds the unfinished table
+before inserting its rows again. This also works for nontransactional tables
+such as MyISAM.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
@@ -672,8 +677,9 @@ are absent while the plan is still being built.
 
 This is the pull state store. Pull commands read it on startup and write it
 back periodically and on shutdown. It stores the current command, cursor
-position, AIMD tuning state, and per-phase bookmarks. Direct MySQL output also
-records each committed source position in the target database.
+position, AIMD tuning state, and per-phase bookmarks. Direct MySQL output uses
+the source position committed in the target database instead of the cursor in
+this file.
 
 Written atomically (temp file + rename) so a crash mid-write never corrupts it.
 If the JSON is invalid on load, the importer renames it to

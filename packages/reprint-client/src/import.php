@@ -3742,7 +3742,11 @@ class ImportClient
 
         $has_progress =
             $state_command === "db-pull" &&
-            ($this->get_state()->active_resumable_command->completion_state ?? null) === "in_progress";
+            in_array(
+                $this->get_state()->active_resumable_command->completion_state ?? null,
+                ["in_progress", "partial"],
+                true,
+            );
         $current_status =
             $state_command === "db-pull"
                 ? $this->get_state()->active_resumable_command->completion_state ?? null
@@ -3769,6 +3773,8 @@ class ImportClient
         }
 
         if ($has_progress) {
+            $this->get_state()->active_resumable_command->completion_state = "in_progress";
+            $this->save_state();
             $stage = $this->get_state()->active_resumable_command->current_stage ?? "db-index";
             $this->audit_log(
                 sprintf(
@@ -3847,7 +3853,7 @@ class ImportClient
             "message" => "Downloading SQL dump",
         ]);
 
-        $this->fetch_sql();
+        $this->fetch_sql($has_progress);
 
         // Interrupted response during SQL download — state already saved, exit partial.
         if (($this->get_state()->active_resumable_command->completion_state ?? null) === "partial") {
@@ -7447,7 +7453,7 @@ class ImportClient
     /**
      * Download SQL from remote.
      */
-    private function fetch_sql(): void
+    private function fetch_sql(bool $is_resuming_database_pull = false): void
     {
         $cursor = $this->get_state()->active_resumable_command->remote_cursor ?? null;
         $complete = false;
@@ -7561,100 +7567,28 @@ class ImportClient
                 throw new RuntimeException("MySQL connection failed: " . $mysql_conn->connect_error);
             }
             $mysql_conn->set_charset("utf8mb4");
+            $this->acquire_mysql_output_lock($mysql_conn);
 
-            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
-            $create_table_sql = "CREATE TABLE IF NOT EXISTS `{$table}` (" .
-                "`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY," .
-                "`source_hash` CHAR(64) CHARACTER SET ascii NOT NULL," .
-                "`source_cursor` MEDIUMTEXT NOT NULL" .
-                ") ENGINE=InnoDB COMMENT='" . self::MYSQL_DB_PULL_PROGRESS_TABLE_COMMENT . "'";
-            if (!$mysql_conn->query($create_table_sql)) {
-                throw new RuntimeException(
-                    "MySQL could not create the db-pull progress table: " . $mysql_conn->error
-                );
-            }
-
-            $table_result = $mysql_conn->query(
-                "SELECT `ENGINE`, `TABLE_COMMENT` FROM `INFORMATION_SCHEMA`.`TABLES` " .
-                "WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = '{$table}'"
+            $cursor = $this->start_or_resume_mysql_output(
+                $mysql_conn,
+                $is_resuming_database_pull,
             );
-            if (!$table_result) {
-                throw new RuntimeException(
-                    "MySQL could not inspect the db-pull progress table: " . $mysql_conn->error
-                );
-            }
-            $table_info = $table_result->fetch_assoc();
-            $table_result->free();
-            $table_engine = strtoupper($table_info["ENGINE"] ?? "");
-            $table_comment = $table_info["TABLE_COMMENT"] ?? "";
-            if (
-                !$table_info ||
-                $table_engine !== "INNODB" ||
-                $table_comment !== self::MYSQL_DB_PULL_PROGRESS_TABLE_COMMENT
-            ) {
-                throw new RuntimeException(
-                    "The target database already has a table named {$table}, and Reprint did not create it. " .
-                    "Rename or remove that table before using --sql-output=mysql."
-                );
-            }
+            $mysql_committed_cursor = $cursor;
 
-            $columns_result = $mysql_conn->query(
-                "SELECT `COLUMN_NAME`, `DATA_TYPE`, `COLUMN_TYPE`, `CHARACTER_MAXIMUM_LENGTH`, " .
-                "`IS_NULLABLE`, `COLUMN_KEY` FROM `INFORMATION_SCHEMA`.`COLUMNS` " .
-                "WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = '{$table}' " .
-                "ORDER BY `ORDINAL_POSITION`"
-            );
-            if (!$columns_result) {
-                throw new RuntimeException(
-                    "MySQL could not inspect the db-pull progress columns: " . $mysql_conn->error
-                );
-            }
-            $columns = [];
-            while (true) {
-                $column = $columns_result->fetch_assoc();
-                if (!$column) {
-                    break;
+            if ($cursor !== null) {
+                $session_setup_sql = @file_get_contents($session_setup_file);
+                if ($session_setup_sql === false || trim($session_setup_sql) === "") {
+                    throw new RuntimeException(
+                        "Cannot resume db-pull because db-session-setup.sql is missing or empty. " .
+                        "Run db-pull --abort and start again.",
+                    );
                 }
-                $columns[$column["COLUMN_NAME"]] = $column;
-            }
-            $columns_result->free();
-            $id_column = $columns["id"] ?? [];
-            $source_hash_column = $columns["source_hash"] ?? [];
-            $source_cursor_column = $columns["source_cursor"] ?? [];
-            $id_data_type = $id_column["DATA_TYPE"] ?? null;
-            $id_column_type = $id_column["COLUMN_TYPE"] ?? "";
-            $id_is_nullable = $id_column["IS_NULLABLE"] ?? null;
-            $id_key = $id_column["COLUMN_KEY"] ?? null;
-            $source_hash_data_type = $source_hash_column["DATA_TYPE"] ?? null;
-            $source_hash_length = $source_hash_column["CHARACTER_MAXIMUM_LENGTH"] ?? 0;
-            $source_hash_is_nullable = $source_hash_column["IS_NULLABLE"] ?? null;
-            $source_cursor_data_type = $source_cursor_column["DATA_TYPE"] ?? null;
-            $source_cursor_is_nullable = $source_cursor_column["IS_NULLABLE"] ?? null;
-            $has_expected_columns =
-                array_keys($columns) === ["id", "source_hash", "source_cursor"] &&
-                $id_data_type === "tinyint" &&
-                strpos($id_column_type, "unsigned") !== false &&
-                $id_is_nullable === "NO" &&
-                $id_key === "PRI" &&
-                $source_hash_data_type === "char" &&
-                (int) $source_hash_length === 64 &&
-                $source_hash_is_nullable === "NO" &&
-                $source_cursor_data_type === "mediumtext" &&
-                $source_cursor_is_nullable === "NO";
-            if (!$has_expected_columns) {
-                throw new RuntimeException(
-                    "The target table {$table} does not have the columns Reprint expects. " .
-                    "Remove it before using --sql-output=mysql."
+                $this->execute_mysql_queries($mysql_conn, $session_setup_sql);
+                $this->audit_log(
+                    "SQL OUTPUT mysql | ran saved session setup after reconnect",
+                    true,
                 );
             }
-
-            if (!$mysql_conn->query("DELETE FROM `{$table}` WHERE `id` = 1")) {
-                throw new RuntimeException(
-                    "MySQL could not reset the previous db-pull position: " . $mysql_conn->error
-                );
-            }
-            $cursor = null;
-            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
             $this->audit_log(
                 "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
@@ -7757,6 +7691,7 @@ class ImportClient
                     }
 
                     if ($chunk_type === "sql") {
+                        $sql_action = $chunk["headers"]["x-sql-action"] ?? "sql";
                         $query_complete = ($chunk["headers"]["x-query-complete"] ?? "1") === "1";
                         $data = $chunk["body"];
 
@@ -7788,8 +7723,15 @@ class ImportClient
                                 $sql_bytes_written += strlen($data);
 
                                 if ($query_complete) {
+                                    $table_start_cursor = $sql_action === "replace_table"
+                                        ? $mysql_committed_cursor
+                                        : null;
                                     $this->execute_mysql_queries($mysql_conn, $sql_buffer);
-                                    $this->save_mysql_output_cursor($mysql_conn, $cursor);
+                                    $this->save_mysql_output_cursor(
+                                        $mysql_conn,
+                                        $cursor,
+                                        $table_start_cursor,
+                                    );
                                     $mysql_committed_cursor = $cursor;
                                     $sql_buffer = "";
                                 }
@@ -7943,7 +7885,7 @@ class ImportClient
                     if ($caught_exception !== null) {
                         $this->audit_log(
                             "DISCARDED INCOMPLETE SQL | " . strlen($pending) .
-                            " bytes | a new process will request the dump from the beginning",
+                            " bytes | the next process will continue from the target database position",
                             true,
                         );
                     } else {
@@ -7961,26 +7903,203 @@ class ImportClient
         }
     }
 
-    /** Saves the source cursor and commits the current target transaction. */
-    private function save_mysql_output_cursor(\mysqli $connection, ?string $cursor): void
+    /** Waits until no earlier db-pull connection is still changing this target. */
+    private function acquire_mysql_output_lock(\mysqli $connection): void
     {
+        $lock_name = "reprint-db-pull-" . substr(
+            hash("sha256", (string) $this->mysql_database),
+            0,
+            40,
+        );
+        $result = $connection->query(
+            "SELECT GET_LOCK('{$lock_name}', 60) AS `lock_acquired`"
+        );
+        $row = $result ? $result->fetch_assoc() : null;
+        if ($result) {
+            $result->free();
+        }
+        if ( (int) ( $row["lock_acquired"] ?? 0 ) !== 1) {
+            throw new RuntimeException(
+                "The target database is still being changed by another db-pull. Try again after it finishes."
+            );
+        }
+    }
+
+    /** Starts a fresh target import or returns the source cursor saved by MySQL. */
+    private function start_or_resume_mysql_output(
+        \mysqli $connection,
+        bool $is_resuming_database_pull
+    ): ?string {
         // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+        $table = self::MYSQL_DB_PULL_PROGRESS_TABLE;
+        $create_table_sql = "CREATE TABLE IF NOT EXISTS `{$table}` (" .
+            "`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY," .
+            "`source_hash` CHAR(64) CHARACTER SET ascii NOT NULL," .
+            "`source_cursor` MEDIUMTEXT NOT NULL," .
+            "`table_start_cursor` MEDIUMTEXT NULL" .
+            ") ENGINE=InnoDB COMMENT='" . self::MYSQL_DB_PULL_PROGRESS_TABLE_COMMENT . "'";
+        if (!$connection->query($create_table_sql)) {
+            throw new RuntimeException("MySQL could not create the db-pull progress table: " . $connection->error);
+        }
+
+        $table_result = $connection->query(
+            "SELECT `ENGINE`, `TABLE_COMMENT` FROM `INFORMATION_SCHEMA`.`TABLES` " .
+            "WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = '{$table}'"
+        );
+        if (!$table_result) {
+            throw new RuntimeException(
+                "MySQL could not inspect the db-pull progress table: " . $connection->error
+            );
+        }
+        $table_info = $table_result->fetch_assoc();
+        $table_result->free();
+        $table_engine = strtoupper($table_info["ENGINE"] ?? "");
+        $table_comment = $table_info["TABLE_COMMENT"] ?? "";
+        if (
+            !$table_info ||
+            $table_engine !== "INNODB" ||
+            $table_comment !== self::MYSQL_DB_PULL_PROGRESS_TABLE_COMMENT
+        ) {
+            throw new RuntimeException(
+                "The target database already has a table named {$table}, and Reprint did not create it. " .
+                "Rename or remove that table before using --sql-output=mysql."
+            );
+        }
+
+        $columns_result = $connection->query(
+            "SELECT `COLUMN_NAME`, `DATA_TYPE`, `COLUMN_TYPE`, `CHARACTER_MAXIMUM_LENGTH`, " .
+            "`IS_NULLABLE`, `COLUMN_KEY` FROM `INFORMATION_SCHEMA`.`COLUMNS` " .
+            "WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = '{$table}' " .
+            "ORDER BY `ORDINAL_POSITION`"
+        );
+        if (!$columns_result) {
+            throw new RuntimeException(
+                "MySQL could not inspect the db-pull progress columns: " . $connection->error
+            );
+        }
+        $columns = [];
+        while (true) {
+            $column = $columns_result->fetch_assoc();
+            if (!$column) {
+                break;
+            }
+            $columns[$column["COLUMN_NAME"]] = $column;
+        }
+        $columns_result->free();
+        $id_column = $columns["id"] ?? [];
+        $source_hash_column = $columns["source_hash"] ?? [];
+        $source_cursor_column = $columns["source_cursor"] ?? [];
+        $table_start_column = $columns["table_start_cursor"] ?? null;
+        $id_data_type = $id_column["DATA_TYPE"] ?? null;
+        $id_column_type = $id_column["COLUMN_TYPE"] ?? "";
+        $id_is_nullable = $id_column["IS_NULLABLE"] ?? null;
+        $id_key = $id_column["COLUMN_KEY"] ?? null;
+        $source_hash_data_type = $source_hash_column["DATA_TYPE"] ?? null;
+        $source_hash_length = $source_hash_column["CHARACTER_MAXIMUM_LENGTH"] ?? 0;
+        $source_hash_is_nullable = $source_hash_column["IS_NULLABLE"] ?? null;
+        $source_cursor_data_type = $source_cursor_column["DATA_TYPE"] ?? null;
+        $source_cursor_is_nullable = $source_cursor_column["IS_NULLABLE"] ?? null;
+        $column_names = array_keys($columns);
+        $has_table_start_cursor = $table_start_column !== null;
+        $has_base_column_names = $column_names === ["id", "source_hash", "source_cursor"];
+        $has_table_start_column_names =
+            $column_names === ["id", "source_hash", "source_cursor", "table_start_cursor"];
+        $table_start_data_type = $table_start_column["DATA_TYPE"] ?? null;
+        $table_start_is_nullable = $table_start_column["IS_NULLABLE"] ?? null;
+        $has_expected_column_names = $has_base_column_names || $has_table_start_column_names;
+        $has_expected_table_start_column =
+            !$has_table_start_cursor ||
+            $table_start_data_type === "mediumtext" && $table_start_is_nullable === "YES";
+        $has_expected_columns =
+            $has_expected_column_names &&
+            $id_data_type === "tinyint" &&
+            strpos($id_column_type, "unsigned") !== false &&
+            $id_is_nullable === "NO" &&
+            $id_key === "PRI" &&
+            $source_hash_data_type === "char" &&
+            (int) $source_hash_length === 64 &&
+            $source_hash_is_nullable === "NO" &&
+            $source_cursor_data_type === "mediumtext" &&
+            $source_cursor_is_nullable === "NO" &&
+            $has_expected_table_start_column;
+        if (!$has_expected_columns) {
+            throw new RuntimeException(
+                "The target table {$table} does not have the columns Reprint expects. " .
+                "Remove it before using --sql-output=mysql."
+            );
+        }
+
+        if (!$has_table_start_cursor) {
+            if (!$connection->query(
+                "ALTER TABLE `{$table}` ADD COLUMN `table_start_cursor` MEDIUMTEXT NULL"
+            )) {
+                throw new RuntimeException(
+                    "MySQL could not prepare the db-pull progress table for table replacement: " .
+                    $connection->error
+                );
+            }
+            // The earlier table has no position before DROP + CREATE. Start the
+            // dump over rather than continue through a possibly unfinished table.
+            $is_resuming_database_pull = false;
+        }
+
+        if (!$is_resuming_database_pull) {
+            if (!$connection->query("DELETE FROM `{$table}` WHERE `id` = 1")) {
+                throw new RuntimeException("MySQL could not reset the previous db-pull position: " . $connection->error);
+            }
+            return null;
+        }
+
+        $result = $connection->query(
+            "SELECT `source_hash`, `source_cursor`, `table_start_cursor` " .
+            "FROM `{$table}` WHERE `id` = 1"
+        );
+        if (!$result) {
+            throw new RuntimeException("MySQL could not read the saved db-pull position: " . $connection->error);
+        }
+        $row = $result->fetch_assoc();
+        $result->free();
+        if (!$row) {
+            return null;
+        }
+
+        $source_hash = hash("sha256", $this->remote_reprint_api_url);
+        if (!hash_equals($source_hash, $row["source_hash"])) {
+            if (!$connection->query("DELETE FROM `{$table}` WHERE `id` = 1")) {
+                throw new RuntimeException("MySQL could not reset the saved db-pull position: " . $connection->error);
+            }
+            return null;
+        }
+
+        $this->audit_log("SQL OUTPUT mysql | continuing from the position saved in the target database", true);
+        return $row["table_start_cursor"] ?? $row["source_cursor"];
+    }
+
+    /** Saves the source cursor and commits the current target transaction. */
+    private function save_mysql_output_cursor(
+        \mysqli $connection,
+        ?string $cursor,
+        ?string $table_start_cursor = null
+    ): void
+    {
         if ($cursor === null) {
             throw new RuntimeException("The source returned SQL without a position to save.");
         }
 
         $table = self::MYSQL_DB_PULL_PROGRESS_TABLE;
         $statement = $connection->prepare(
-            "INSERT INTO `{$table}` (`id`, `source_hash`, `source_cursor`) VALUES (1, ?, ?) " .
+            "INSERT INTO `{$table}` (`id`, `source_hash`, `source_cursor`, `table_start_cursor`) " .
+            "VALUES (1, ?, ?, ?) " .
             "ON DUPLICATE KEY UPDATE `source_hash` = VALUES(`source_hash`), " .
-            "`source_cursor` = VALUES(`source_cursor`)"
+            "`source_cursor` = VALUES(`source_cursor`), " .
+            "`table_start_cursor` = COALESCE(VALUES(`table_start_cursor`), `table_start_cursor`)"
         );
         if (!$statement) {
             throw new RuntimeException("MySQL could not prepare the db-pull position update: " . $connection->error);
         }
 
         $source_hash = hash("sha256", $this->remote_reprint_api_url);
-        $statement->bind_param("ss", $source_hash, $cursor);
+        $statement->bind_param("sss", $source_hash, $cursor, $table_start_cursor);
         if (!$statement->execute()) {
             $error = $statement->error;
             $statement->close();

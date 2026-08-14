@@ -148,6 +148,9 @@
     },
     "mysql-target-cursor-resume": {
       "port": 8128
+    },
+    "mysql-table-replacement-resume": {
+      "port": 8129
     }
   }
 }

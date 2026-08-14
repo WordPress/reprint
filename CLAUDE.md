@@ -168,7 +168,7 @@ Entries in `paths_to_remove` under `wp-content/plugins/` also trigger automatic 
 
 ### SQL Streaming Crash Recovery
 
-Direct MySQL output keeps incomplete SQL only in memory while one importer process requests more source responses. After each complete SQL group, it updates `__reprint_db_pull_progress` and commits the current target transaction. For transactional target tables, the imported rows and source position commit together. If the importer process stops, the next `db-pull` starts the dump from the beginning rather than using incomplete SQL from the dead process.
+Direct MySQL output keeps incomplete SQL only in memory while one importer process requests more source responses. After each complete SQL group, it updates `__reprint_db_pull_progress` and commits the current target transaction. For transactional tables, the imported rows and source position commit together. `DROP TABLE` and `CREATE TABLE` are one source fragment and one client action. The target also saves the position before that pair while the table is being filled. A replacement process rebuilds the unfinished table before inserting its rows again, including for nontransactional tables.
 
 ### Progress Tracking
 

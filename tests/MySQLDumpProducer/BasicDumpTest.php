@@ -42,6 +42,26 @@ class BasicDumpTest extends MySQLDumpProducerTestBase
         $this->assertSQLNotContains('INSERT INTO', $sql, 'Empty table should have no INSERTs');
     }
 
+    public function testTableReplacementIsOneFragment(): void
+    {
+        $this->pdo->exec('CREATE TABLE replace_me (id INT PRIMARY KEY)');
+
+        $producer = $this->createProducer();
+        $this->assertTrue($producer->next_sql_fragment());
+        $this->assertSame('sql', $producer->get_sql_fragment_type());
+        $this->assertTrue($producer->next_sql_fragment());
+
+        $fragment = $producer->get_sql_fragment();
+        $this->assertNotNull($fragment);
+        $this->assertSame('replace_table', $producer->get_sql_fragment_type());
+        $this->assertStringContainsString('DROP TABLE IF EXISTS `replace_me`;', $fragment);
+        $this->assertStringContainsString('CREATE TABLE `replace_me`', $fragment);
+        $this->assertLessThan(
+            strpos($fragment, 'CREATE TABLE `replace_me`'),
+            strpos($fragment, 'DROP TABLE IF EXISTS `replace_me`;'),
+        );
+    }
+
     public function testSingleTableWithData(): void
     {
         $this->pdo->exec("
