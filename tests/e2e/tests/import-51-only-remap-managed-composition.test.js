@@ -31,12 +31,12 @@
  *
  * Phase 2 — scoped delta re-sync (--include :wp-content:/plugins). Verifies the
  * re-sync behavior against the same managed target:
- *   A. Delta-delete   — a file the SOURCE removed that is IN the current scope
- *                       and was previously synced is deleted on the target.
+ *   A. Delta-delete   — a tracked file the SOURCE removed that is IN the
+ *                       current scope and was previously synced is deleted on
+ *                       the target. Its empty directory may remain.
  *   B. Scope-survival — content synced by the earlier, broader run but OUTSIDE
- *                       the current scope is NOT deleted (the delete-drain is
- *                       guarded by in_scope(); the remote index is a union across
- *                       scoped runs).
+ *                       the current scope is protected by that completed
+ *                       broader selection.
  *   plus a control: an in-scope file the source still has is retained.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -64,7 +64,8 @@ describe('Import: --include + --remap onto a managed Atomic docroot', () => {
                 const wpContent = join(remoteSiteDir, 'wp-content');
 
                 // custom-plugin — imported in phase 1, then REMOVED from the
-                // source before the phase 2 delta (in-scope deletion).
+                // source before the phase 2 delta. Its tracked PHP file is the
+                // in-scope target deletion.
                 const pluginDir = join(wpContent, 'plugins', 'custom-plugin');
                 mkdirSync(pluginDir, { recursive: true });
                 writeFileSync(join(pluginDir, 'custom-plugin.php'),
@@ -240,9 +241,9 @@ describe('Import: --include + --remap onto a managed Atomic docroot', () => {
     });
 
     // A — delta delete
-    it('delta-deletes the in-scope plugin the source removed', () => {
-        assert.ok(!existsSync(tgtPlugin('custom-plugin')),
-            'custom-plugin should be deleted (in scope, removed from source)');
+    it('delta-deletes the tracked file from the in-scope plugin the source removed', () => {
+        assert.ok(!existsSync(join(tgtPlugin('custom-plugin'), 'custom-plugin.php')),
+            'custom-plugin.php should be deleted (in scope, removed from source)');
     });
 
     // control — in-scope, still on source
@@ -254,7 +255,7 @@ describe('Import: --include + --remap onto a managed Atomic docroot', () => {
     // B — scope survival
     it('preserves the out-of-scope theme synced by the earlier broader run', () => {
         assert.ok(existsSync(join(tgtTheme('custom-theme'), 'style.css')),
-            'custom-theme should survive (out of scope in the delta run — delete-drain skips it)');
+            'custom-theme should survive under the earlier completed broader selection');
     });
 
     it('managed layer stays intact through the delta', () => {

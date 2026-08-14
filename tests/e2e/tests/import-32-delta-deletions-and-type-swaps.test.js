@@ -2,9 +2,10 @@
  * Test 32: Delta sync deletions + type swaps (file/dir/symlink)
  *
  * Covers:
- * - Deleting file, deep directory tree, symlink to file, symlink to directory
+ * - Deleting files within a deep directory tree, symlink to file, symlink to directory
+ * - Retaining directory containers when omitted cache paths make recursive removal unsafe
  * - Replacing paths across types: file<->dir<->symlink
- * - Ensuring local directory deletion does not follow symlink targets
+ * - Ensuring tracked-content deletion does not follow symlink targets
  * - State path persistence uses base64-encoded values
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -166,17 +167,35 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });
 
-    it('deleted file, deep directory tree, and symlinks are removed locally', () => {
+    it('deleted files and symlinks are removed without recursively deleting directories', () => {
         const base = localScenarioRoot();
 
         assert.equal(existsSync(join(base, 'file-delete.txt')), false, 'Expected deleted file to be removed');
-        assert.equal(existsSync(join(base, 'dir-delete')), false, 'Expected deleted deep directory tree to be removed');
+        assert.equal(
+            existsSync(join(base, 'dir-delete', 'level1', 'level2', 'level3', 'deep.txt')),
+            false,
+            'Expected deleted deep file to be removed',
+        );
+        assert.equal(
+            existsSync(join(base, 'dir-delete', 'level1', 'level2', 'sibling.txt')),
+            false,
+            'Expected deleted sibling file to be removed',
+        );
         assert.equal(lstatIfExists(join(base, 'symlink-delete-file')), null, 'Expected deleted file symlink to be removed');
         assert.equal(lstatIfExists(join(base, 'symlink-delete-dir')), null, 'Expected deleted directory symlink to be removed');
-        assert.equal(existsSync(join(base, 'delete-dir-with-symlink')), false, 'Expected deleted directory with symlink to be removed');
+        assert.equal(
+            existsSync(join(base, 'delete-dir-with-symlink', 'sub', 'nested.txt')),
+            false,
+            'Expected the deleted nested file to be removed',
+        );
+        assert.equal(
+            lstatIfExists(join(base, 'delete-dir-with-symlink', 'escape-link')),
+            null,
+            'Expected the deleted escape symlink to be removed',
+        );
     });
 
-    it('directory deletion does not follow symlinks outside the deleted directory', () => {
+    it('deleting tracked directory contents does not follow symlinks outside it', () => {
         const preserveFile = localPreserveFile();
         assert.equal(existsSync(preserveFile), true, `Expected preserve file to remain: ${preserveFile}`);
         assert.equal(readFileSync(preserveFile, 'utf-8'), 'must-survive-local-delete\n');
