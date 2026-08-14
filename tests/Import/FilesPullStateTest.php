@@ -73,6 +73,7 @@ class FilesPullStateTest extends TestCase
     {
         \write_current_pull_state($this->makeClient(), array_replace_recursive([
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
+            "remote_protocol_version" => PULL_PROTOCOL_VERSION,
             "follow_symlinks" => false,
             "fs_root_nonempty_behavior" => "preserve-local",
         ], $state));

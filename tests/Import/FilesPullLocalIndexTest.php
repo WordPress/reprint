@@ -868,6 +868,7 @@ final class FilesPullLocalIndexTest extends TestCase
     {
         mkdir($this->pullStateDirectory, 0700, true);
         $state = new \PullState();
+        $state->remote_protocol_version = PULL_PROTOCOL_VERSION;
         $state->set_preflight_record([
             'http_code' => 200,
             'data' => [
@@ -993,6 +994,7 @@ if ($endpoint === 'preflight') {
     header('Content-Type: application/json');
     echo json_encode(array(
         'ok' => true,
+        'protocol_version' => %d,
         'runtime' => array(
             'document_root' => '/var/www/html',
             'ini_get_all' => array(),
@@ -1126,7 +1128,8 @@ echo "--{$boundary}--\r\n";
 PHP,
             base64_encode( (string) json_encode($remoteFiles)),
             base64_encode(self::PULLED_PATH),
-            base64_encode($this->root . '/remote-overrides.json')
+            base64_encode($this->root . '/remote-overrides.json'),
+            PULL_PROTOCOL_VERSION
         ));
 
         $socket = stream_socket_server('tcp://127.0.0.1:0', $errorNumber, $errorMessage);

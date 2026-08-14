@@ -118,13 +118,14 @@ require_once __DIR__ . '/lib/pull/class-pull-index-journal.php';
  * The wire-protocol version this importer speaks.
  *
  * The export plugin and importer report this value during preflight so a
- * mismatched deployment fails before any content is transferred.
+ * mismatched deployment fails before a file-index request using this
+ * versioned format begins.
  *
  * Bump this whenever a change to the wire protocol (cursor encoding,
  * multipart structure, header names, endpoint parameters, response format)
  * would break an older export plugin.
  */
-define('PULL_PROTOCOL_VERSION', 1);
+define('PULL_PROTOCOL_VERSION', 2);
 
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -2822,18 +2823,10 @@ class ImportClient
         }
 
         // 3. Protocol version
-        $remote_ver = $this->get_state()->remote_protocol_version ?? null;
-        if ($remote_ver === null) {
-            $proto_ok = false;
-            $proto_detail = "Remote export plugin does not report a protocol version. Update the export plugin.";
-        } elseif ($remote_ver < PULL_PROTOCOL_VERSION) {
-            $proto_ok = false;
-            $proto_detail = "Remote protocol v{$remote_ver} does not match client protocol v" . PULL_PROTOCOL_VERSION . ". Update the export plugin.";
-        } elseif ($remote_ver > PULL_PROTOCOL_VERSION) {
-            $proto_ok = false;
-            $proto_detail = "Remote protocol v{$remote_ver} does not match client protocol v" . PULL_PROTOCOL_VERSION . ". Update the Reprint client.";
-        } else {
-            $proto_ok = true;
+        $remote_ver = $this->get_state()->remote_protocol_version;
+        $proto_detail = $this->remote_protocol_mismatch_message();
+        $proto_ok = $proto_detail === null;
+        if ($proto_ok) {
             $proto_detail = "remote v{$remote_ver}, client v" . PULL_PROTOCOL_VERSION;
         }
         $checks[] = [
@@ -3054,6 +3047,8 @@ class ImportClient
      */
     public function run_files_pull(): void
     {
+        $this->assert_file_index_protocol_version();
+
         $sender_state_path = wp_join_unix_paths(
             dirname($this->pull_state_directory),
             "push",
@@ -3397,6 +3392,8 @@ class ImportClient
      */
     private function run_files_index(): void
     {
+        $this->assert_file_index_protocol_version();
+
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
         $current_status =
             $state_command === "files-index"
@@ -3535,6 +3532,35 @@ class ImportClient
             "audit_log" => $this->audit_log_file,
             "message" => "files-index complete: {$next_remote_index_entry_count} entries indexed",
         ], true);
+    }
+
+    /** Refuse file-index work when preflight reported another protocol version. */
+    public function assert_file_index_protocol_version(): void
+    {
+        $protocol_mismatch = $this->remote_protocol_mismatch_message();
+        if ($protocol_mismatch !== null) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI protocol guidance is not HTML.
+            throw new RuntimeException($protocol_mismatch);
+        }
+    }
+
+    /** Return pointed upgrade guidance for a protocol mismatch. */
+    private function remote_protocol_mismatch_message(): ?string
+    {
+        $remote_protocol_version = $this->get_state()->remote_protocol_version;
+        if ($remote_protocol_version === null) {
+            return "Remote export plugin does not report a protocol version. " .
+                "Update the export plugin.";
+        }
+        if ($remote_protocol_version < PULL_PROTOCOL_VERSION) {
+            return "Remote protocol v{$remote_protocol_version} does not match client protocol v" .
+                PULL_PROTOCOL_VERSION . ". Update the export plugin.";
+        }
+        if ($remote_protocol_version > PULL_PROTOCOL_VERSION) {
+            return "Remote protocol v{$remote_protocol_version} does not match client protocol v" .
+                PULL_PROTOCOL_VERSION . ". Update the Reprint client.";
+        }
+        return null;
     }
 
     /**
@@ -11207,6 +11233,8 @@ class ImportClient
         $previous_state = $this->state;
         $this->state = new PullState();
         $this->state->set_preflight_record($previous_state->preflight_record());
+        $this->state->remote_protocol_version =
+            $previous_state->remote_protocol_version;
         $this->state->version = $previous_state->version;
         $this->state->webhost = $previous_state->webhost;
         $this->state->follow_symlinks = $previous_state->follow_symlinks;

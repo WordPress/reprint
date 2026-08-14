@@ -466,6 +466,12 @@ class Pull
 
             try {
                 $this->run_stage($stage, $options, $step, $total);
+                if (
+                    $stage === 'preflight'
+                    && in_array('files-pull', $stages, true)
+                ) {
+                    $this->client->assert_file_index_protocol_version();
+                }
             } catch (\Exception $e) {
                 $this->report_failure($command, $stage, $stages, $i, $e);
                 throw new PullFailureReportedException($e->getMessage(), 0, $e);

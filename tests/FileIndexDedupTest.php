@@ -75,11 +75,54 @@ final class FileIndexDedupTest extends TestCase
         );
     }
 
+    public function testFileIndexMetadataReportsCanonicalIndexedRoots(): void
+    {
+        $target = $this->tempDir . '/target';
+        $link = $this->tempDir . '/link';
+        mkdir($target, 0755, true);
+        symlink($target, $link);
+
+        $response = $this->runFileIndexResponse([$link], $link);
+        $matched = preg_match(
+            '/X-Chunk-Type: metadata\r\n(?:[^\r\n]+\r\n)*\r\n(\{[^\r\n]+\})\r\n/',
+            $response,
+            $matches
+        );
+        $this->assertSame(1, $matched, 'Expected file-index metadata part.');
+        $metadata = json_decode($matches[1], true, 512, JSON_THROW_ON_ERROR);
+        $this->assertIsArray($metadata);
+        $canonicalTarget = realpath($target);
+        $this->assertIsString($canonicalTarget);
+        $this->assertSame(
+            [base64_encode($canonicalTarget)],
+            $metadata['indexed_roots']
+        );
+        $this->assertSame(
+            base64_encode($canonicalTarget),
+            $metadata['list_dir']
+        );
+    }
+
     /**
      * @param string[] $directories
      * @return string[]
      */
     private function runFileIndex(array $directories, string $listDir): array
+    {
+        $decoded = $this->runFileIndexResponse($directories, $listDir);
+        preg_match_all('/"path":"([^"]+)"/', $decoded, $matches);
+
+        return array_map(
+            static fn(string $encodedPath): string => (string) base64_decode($encodedPath, true),
+            $matches[1],
+        );
+    }
+
+    /** @param string[] $directories */
+    private function runFileIndexResponse(
+        array $directories,
+        string $listDir
+    ): string
     {
         $configPath = $this->tempDir . '/config.json';
         file_put_contents(
@@ -129,13 +172,7 @@ PHP,
 
         $decoded = gzdecode($stdout);
         $this->assertNotFalse($decoded, 'Expected gzip-compressed multipart response');
-
-        preg_match_all('/"path":"([^"]+)"/', $decoded, $matches);
-
-        return array_map(
-            static fn(string $encodedPath): string => (string) base64_decode($encodedPath, true),
-            $matches[1],
-        );
+        return $decoded;
     }
 
     private function recursiveDelete(string $dir): void

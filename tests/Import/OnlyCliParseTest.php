@@ -186,6 +186,7 @@ PHP, var_export($requestsLog, true)));
                     'data' => $data,
                     'http_code' => 200,
                 ),
+                'remote_protocol_version' => PULL_PROTOCOL_VERSION,
             )
         );
     }

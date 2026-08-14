@@ -24,14 +24,15 @@ if (!ob_get_level()) {
  * The wire-protocol version this export plugin speaks.
  *
  * The export plugin and importer report this value during preflight so a
- * mismatched deployment fails before any content is transferred.
+ * mismatched deployment fails before a file-index request using this
+ * versioned format begins.
  *
  * EXPORT_PROTOCOL_VERSION is sent to the importer in the preflight JSON
  * response as `protocol_version`.  Bump it whenever a change to the wire
  * protocol (cursor encoding, multipart structure, header names, endpoint
  * parameters, response format) would break an older importer.
  */
-define('EXPORT_PROTOCOL_VERSION', 1);
+define('EXPORT_PROTOCOL_VERSION', 2);
 
 // File type mask + file type values (top bits of st_mode)
 define('STAT_TYPE_MASK',   0170000);
@@ -2605,9 +2606,15 @@ function endpoint_file_index(
     $abort_payload = null;
 
     try {
+        // Configured directories may be symlinks. Report the canonical roots
+        // used by the index so a later pull can match retained index paths.
         $metadata = [
             "filesystem_root" => base64_encode($filesystem_root),
             "list_dir" => base64_encode($list_directory),
+            "indexed_roots" => array_map(
+                "base64_encode",
+                $file_index->get_index_roots()
+            ),
         ];
         $metadata_json = json_encode_or_throw($metadata);
         $gz->write(

@@ -90,6 +90,7 @@ class PullFilterFakeClient extends \ImportClient
                 ],
             ],
         ]);
+        $state->remote_protocol_version = PULL_PROTOCOL_VERSION;
         $state->active_resumable_command->completion_state = "complete";
         $this->save_state();
     }

@@ -117,25 +117,10 @@ final class FileIndexProcessor {
         // Visit the requested directory first, followed by every other root in
         // stable byte order. Stable ordering makes a cursor independent of the
         // order in which configuration discovered the additional roots.
-        $ordered_directories = [$canonical_index_directory];
-        $extra_directories = [];
-        foreach ($directories as $directory) {
-            if ($directory !== $canonical_index_directory) {
-                $extra_directories[] = $directory;
-            }
-        }
-        sort($extra_directories, SORT_STRING);
-        foreach ($extra_directories as $directory) {
-            // Parent and child roots both remain scheduled. On wp.com Atomic,
-            // for example, the document root may be a parent of the primary
-            // WordPress root while also containing a separate wp-content.
-            // Dropping the parent would hide those plugins and themes. When
-            // traversal later reaches the scheduled child, the root check
-            // prevents entering it a second time.
-            if (!in_array($directory, $ordered_directories, true)) {
-                $ordered_directories[] = $directory;
-            }
-        }
+        $ordered_directories = self::ordered_index_roots(
+            $canonical_index_directory,
+            $directories
+        );
 
         // The last stack element is visited next, so reverse the desired order
         // while constructing the depth-first traversal stack.
@@ -194,8 +179,49 @@ final class FileIndexProcessor {
         if (!is_array($cursor)) {
             throw new InvalidArgumentException("Invalid index cursor format");
         }
-        if (!isset($cursor["stack"]) || !is_array($cursor["stack"])) {
-            throw new InvalidArgumentException("Index cursor missing stack");
+        if (
+            !isset(
+                $cursor["stack"],
+                $cursor["list_directory"],
+                $cursor["selection_fingerprint"]
+            )
+            || !is_array($cursor["stack"])
+            || array_values($cursor["stack"]) !== $cursor["stack"]
+            || !is_string($cursor["list_directory"])
+            || !is_string($cursor["selection_fingerprint"])
+        ) {
+            throw new InvalidArgumentException(
+                "Index cursor must contain its traversal stack, list directory, and selection fingerprint"
+            );
+        }
+        $index_directory = base64_decode($cursor["list_directory"], true);
+        if (
+            !is_string($index_directory)
+            || base64_encode($index_directory) !== $cursor["list_directory"]
+        ) {
+            throw new InvalidArgumentException(
+                "Index cursor list_directory contains invalid base64"
+            );
+        }
+        \WordPress\Reprint\Exporter\assert_valid_path(
+            $index_directory,
+            "index cursor list_directory path"
+        );
+        if (
+            !hash_equals(
+                self::selection_fingerprint(
+                    $index_directory,
+                    $directories,
+                    $follow_symlinks,
+                    $include_caches,
+                    $storage_path
+                ),
+                $cursor["selection_fingerprint"]
+            )
+        ) {
+            throw new InvalidArgumentException(
+                "The file-index selection changed while resuming the traversal"
+            );
         }
 
         // Paths are base64 text because filesystem names are arbitrary bytes
@@ -232,13 +258,6 @@ final class FileIndexProcessor {
                 "after" => $after,
             ];
         }
-
-        // During continuation, the active directory is the best description
-        // of what this request is indexing. A completed cursor has no active
-        // directory, so it falls back to the first configured root.
-        $index_directory = !empty($directory_stack)
-            ? $directory_stack[count($directory_stack) - 1]["dir"]
-            : ( isset($directories[0]) ? $directories[0] : "/" );
 
         return new self(
             $directories,
@@ -445,7 +464,9 @@ final class FileIndexProcessor {
      * @return array {
      *     File-index cursor.
      *
-     *     @type array[] $stack Active directories with base64-encoded path names.
+     *     @type array[] $stack                 Active directories with base64 path names.
+     *     @type string  $list_directory        Canonical list directory, stored as base64.
+     *     @type string  $selection_fingerprint SHA-256 of every traversal selection field.
      * }
      */
     public function get_cursor(): array
@@ -457,7 +478,17 @@ final class FileIndexProcessor {
                 "after" => $frame["after"] !== null ? base64_encode($frame["after"]) : null,
             ];
         }
-        return ["stack" => $encoded_stack];
+        return [
+            "stack" => $encoded_stack,
+            "list_directory" => base64_encode($this->index_directory),
+            "selection_fingerprint" => self::selection_fingerprint(
+                $this->index_directory,
+                $this->directories,
+                $this->follow_symlinks,
+                $this->include_caches,
+                $this->storage_path
+            ),
+        ];
     }
 
     /**
@@ -468,6 +499,15 @@ final class FileIndexProcessor {
     public function get_index_directory(): string
     {
         return $this->index_directory;
+    }
+
+    /** @return string[] Canonical roots scheduled by this traversal. */
+    public function get_index_roots(): array
+    {
+        return self::ordered_index_roots(
+            $this->index_directory,
+            $this->directories
+        );
     }
 
     /**
@@ -587,6 +627,64 @@ final class FileIndexProcessor {
         $this->directory_stack = $directory_stack;
         $this->index_directory = $index_directory;
         $this->initial_index_entries = $initial_index_entries;
+    }
+
+    /**
+     * Returns the stable roots scheduled for one traversal.
+     *
+     * Parent and child roots both remain scheduled. On wp.com Atomic, for
+     * example, the document root may be a parent of the primary WordPress root
+     * while also containing a separate wp-content. Dropping the parent would
+     * hide those plugins and themes. When traversal later reaches the scheduled
+     * child, the root check prevents entering it a second time.
+     *
+     * @param string   $index_directory Canonical directory visited first.
+     * @param string[] $directories     Canonical configured directories.
+     * @return string[] Stable scheduled roots.
+     */
+    private static function ordered_index_roots(
+        string $index_directory,
+        array $directories
+    ): array {
+        $ordered_directories = [$index_directory];
+        $extra_directories = [];
+        foreach ($directories as $directory) {
+            if ($directory !== $index_directory) {
+                $extra_directories[] = $directory;
+            }
+        }
+        sort($extra_directories, SORT_STRING);
+        foreach ($extra_directories as $directory) {
+            if (!in_array($directory, $ordered_directories, true)) {
+                $ordered_directories[] = $directory;
+            }
+        }
+        return $ordered_directories;
+    }
+
+    /** Returns a byte-safe digest of every selection affecting traversal. */
+    private static function selection_fingerprint(
+        string $index_directory,
+        array $directories,
+        bool $follow_symlinks,
+        bool $include_caches,
+        string $storage_path
+    ): string {
+        $canonical_directories = array_values(array_unique($directories));
+        sort($canonical_directories, SORT_STRING);
+        $selection_json = json_encode([
+            "list_directory_b64" => base64_encode($index_directory),
+            "directories_b64" => array_map("base64_encode", $canonical_directories),
+            "follow_symlinks" => $follow_symlinks,
+            "include_caches" => $include_caches,
+            "storage_path_b64" => base64_encode(
+                self::canonical_storage_path($storage_path)
+            ),
+        ], JSON_UNESCAPED_SLASHES);
+        if ($selection_json === false) {
+            throw new LogicException("Failed to encode the file-index selection");
+        }
+        return hash("sha256", $selection_json);
     }
 
     /**

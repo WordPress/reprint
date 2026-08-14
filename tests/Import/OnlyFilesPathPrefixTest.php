@@ -129,6 +129,7 @@ class OnlyFilesPathPrefixTest extends TestCase
                 ),
                 'http_code' => 200,
             ),
+            'remote_protocol_version' => PULL_PROTOCOL_VERSION,
             'follow_symlinks' => false,
             'fs_root_nonempty_behavior' => 'preserve-local',
             'filter' => 'none',

@@ -89,6 +89,7 @@ final class IndexLifecycleOwnershipTest extends TestCase
             $this->stateDirectory,
             $this->filesystemRoot
         );
+        $client->get_state()->remote_protocol_version = PULL_PROTOCOL_VERSION;
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage(

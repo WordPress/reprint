@@ -225,6 +225,200 @@ final class FileIndexProcessorTest extends TestCase {
         $resumed->close();
     }
 
+    public function testCursorKeepsTheCanonicalRootsScheduledAtStart(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        $target = $this->tempDir . '/target';
+        $link = $docroot . '/link';
+        mkdir($docroot, 0755, true);
+        mkdir($target, 0755, true);
+        symlink($target, $link);
+        $canonicalDocroot = (string) realpath($docroot);
+        $canonicalTarget = (string) realpath($target);
+
+        $processor = FileIndexProcessor::start(
+            [$canonicalDocroot],
+            $link,
+            true,
+            true,
+            ''
+        );
+        $this->assertSame(
+            [$canonicalTarget, $canonicalDocroot],
+            $processor->get_index_roots()
+        );
+        $this->assertTrue($processor->next_index_step());
+        $cursor = json_encode($processor->get_cursor(), JSON_THROW_ON_ERROR);
+        $processor->close();
+
+        $resumed = FileIndexProcessor::resume(
+            [$canonicalDocroot],
+            $cursor,
+            true,
+            true,
+            ''
+        );
+        $this->assertSame(
+            [$canonicalTarget, $canonicalDocroot],
+            $resumed->get_index_roots()
+        );
+        $this->assertSame($canonicalTarget, $resumed->get_index_directory());
+        $resumed->close();
+    }
+
+    public function testResumeRejectsChangedCanonicalDirectories(): void
+    {
+        $first = $this->tempDir . '/first';
+        $second = $this->tempDir . '/second';
+        mkdir($first, 0755, true);
+        mkdir($second, 0755, true);
+        $first = (string) realpath($first);
+        $second = (string) realpath($second);
+
+        $processor = FileIndexProcessor::start(
+            [$first],
+            $first,
+            true,
+            true,
+            ''
+        );
+        $cursor = json_encode($processor->get_cursor(), JSON_THROW_ON_ERROR);
+        $processor->close();
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'The file-index selection changed while resuming the traversal'
+        );
+        FileIndexProcessor::resume(
+            [$second],
+            $cursor,
+            true,
+            true,
+            ''
+        );
+    }
+
+    public function testResumeAcceptsTheSameCanonicalDirectoriesInAnotherOrder(): void
+    {
+        $first = $this->tempDir . '/first';
+        $second = $this->tempDir . '/second';
+        mkdir($first, 0755, true);
+        mkdir($second, 0755, true);
+        $first = (string) realpath($first);
+        $second = (string) realpath($second);
+
+        $processor = FileIndexProcessor::start(
+            [$first, $second],
+            $first,
+            true,
+            true,
+            ''
+        );
+        $cursor = json_encode($processor->get_cursor(), JSON_THROW_ON_ERROR);
+        $processor->close();
+
+        $resumed = FileIndexProcessor::resume(
+            [$second, $first, $second],
+            $cursor,
+            true,
+            true,
+            ''
+        );
+        $this->assertSame([$first, $second], $resumed->get_index_roots());
+        $resumed->close();
+    }
+
+    public function testResumeRejectsCursorWithoutTraversalRoots(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'Index cursor must contain its traversal stack, list directory, and selection fingerprint'
+        );
+        FileIndexProcessor::resume(
+            [ (string) realpath( $docroot ) ],
+            json_encode(['stack' => []], JSON_THROW_ON_ERROR),
+            false,
+            true,
+            ''
+        );
+    }
+
+    public function testResumeRejectsTamperedSelectionFingerprint(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        $canonical_docroot = (string) realpath($docroot);
+
+        $processor = FileIndexProcessor::start(
+            [$canonical_docroot],
+            $canonical_docroot,
+            true,
+            false,
+            ''
+        );
+        $cursor = $processor->get_cursor();
+        $processor->close();
+        $cursor['selection_fingerprint'] = str_repeat('0', 64);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'The file-index selection changed while resuming the traversal'
+        );
+        FileIndexProcessor::resume(
+            [$canonical_docroot],
+            json_encode($cursor, JSON_THROW_ON_ERROR),
+            true,
+            false,
+            ''
+        );
+    }
+
+    public function testResumeRejectsChangedTraversalSettings(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        $storage = $this->tempDir . '/storage';
+        mkdir($docroot, 0755, true);
+        mkdir($storage, 0755, true);
+        $canonical_docroot = (string) realpath($docroot);
+
+        $processor = FileIndexProcessor::start(
+            [$canonical_docroot],
+            $canonical_docroot,
+            true,
+            true,
+            $storage
+        );
+        $cursor = json_encode($processor->get_cursor(), JSON_THROW_ON_ERROR);
+        $processor->close();
+
+        foreach (
+            [
+                [false, true, $storage],
+                [true, false, $storage],
+                [true, true, ''],
+            ] as [$follow_symlinks, $include_caches, $next_storage]
+        ) {
+            try {
+                FileIndexProcessor::resume(
+                    [$canonical_docroot],
+                    $cursor,
+                    $follow_symlinks,
+                    $include_caches,
+                    $next_storage
+                );
+                $this->fail('Expected changed traversal settings to be rejected.');
+            } catch (InvalidArgumentException $exception) {
+                $this->assertStringContainsString(
+                    'file-index selection changed',
+                    $exception->getMessage()
+                );
+            }
+        }
+    }
+
     public function testStepAfterCloseIsRejected(): void
     {
         $docroot = $this->tempDir . '/site';
