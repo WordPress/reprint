@@ -175,6 +175,7 @@ class ImportClient
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
     private const DATABASE_DUMP_INTENT_FILE = 'database-dump.intent';
     private const DATABASE_DUMP_RECORD_FILE = 'database-dump.json';
+    private const DATABASE_APPLY_ATTEMPT_FILE = 'database-apply.json';
     private const DATABASE_PULL_OUTPUT_STATUS_FILE = 'database-pull-output.json';
 
     /**
@@ -462,17 +463,35 @@ class ImportClient
         // Register the command's signal behavior before constructor work can
         // create state or receive a signal under another command's policy.
         if (function_exists("pcntl_signal")) {
-            // Enable async signals (PHP 7.1+) so signals work during blocking operations
-            if (function_exists("pcntl_async_signals")) {
-                pcntl_async_signals(true);
-            }
-            if ($signal_handling_command === 'files-push') {
-                $this->enable_files_push_signal_handling();
-            } elseif ($signal_handling_command !== 'files-diff') {
-                // files-diff must not save the pull command's state from a
-                // shutdown handler; default signal behavior ends the report.
-                pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
-                pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
+            if ($signal_handling_command === 'db-apply') {
+                // PDO drivers and the SQLite compatibility layer are not safe
+                // to interrupt inside an executing SQL file chunk. The apply
+                // loop dispatches pending signals between chunks.
+                if (function_exists('pcntl_sigprocmask')) {
+                    pcntl_sigprocmask(SIG_BLOCK, [SIGINT, SIGTERM]);
+                }
+                if (function_exists('pcntl_async_signals')) {
+                    pcntl_async_signals(false);
+                }
+                pcntl_signal(SIGINT, [$this, 'handle_database_apply_shutdown']);
+                pcntl_signal(SIGTERM, [$this, 'handle_database_apply_shutdown']);
+                // pcntl_signal() unblocks the signal whose handler it installs.
+                if (function_exists('pcntl_sigprocmask')) {
+                    pcntl_sigprocmask(SIG_BLOCK, [SIGINT, SIGTERM]);
+                }
+            } else {
+                // Enable async signals (PHP 7.1+) so signals work during blocking operations
+                if (function_exists("pcntl_async_signals")) {
+                    pcntl_async_signals(true);
+                }
+                if ($signal_handling_command === 'files-push') {
+                    $this->enable_files_push_signal_handling();
+                } elseif ($signal_handling_command !== 'files-diff') {
+                    // files-diff must not save the pull command's state from a
+                    // shutdown handler; default signal behavior ends the report.
+                    pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
+                    pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
+                }
             }
         }
 
@@ -2271,6 +2290,20 @@ class ImportClient
         die("\nForced exit.\n");
     }
 
+    /** Stops db-apply before it reads another SQL file chunk. */
+    // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- PHP passes the signal number to handlers.
+    public function handle_database_apply_shutdown(int $signal): void
+    {
+        if (!$this->shutdown_requested) {
+            $this->shutdown_requested = true;
+            return;
+        }
+        if (function_exists('posix_kill') && function_exists('posix_getpid')) {
+            posix_kill(posix_getpid(), SIGKILL);
+        }
+        die("\nForced exit.\n");
+    }
+
     /** Installs the files-push first-signal stop behavior when PCNTL exists. */
     public function enable_files_push_signal_handling(): void
     {
@@ -2370,6 +2403,13 @@ class ImportClient
                     "RESTART | Clearing db-apply state",
                     true,
                 );
+                $apply_attempt_file = wp_join_unix_paths(
+                    $this->pull_state_directory,
+                    self::DATABASE_APPLY_ATTEMPT_FILE,
+                );
+                if (file_exists($apply_attempt_file) && !unlink($apply_attempt_file)) {
+                    throw new RuntimeException('Reprint could not delete the saved db-apply information.');
+                }
                 $this->reset_state();
                 $this->save_state();
                 break;
@@ -4013,6 +4053,15 @@ class ImportClient
                     'create_table_query' => true,
                 ],
             );
+            $apply_attempt_file = wp_join_unix_paths(
+                $this->pull_state_directory,
+                self::DATABASE_APPLY_ATTEMPT_FILE,
+            );
+            if (file_exists($apply_attempt_file) && !unlink($apply_attempt_file)) {
+                throw new RuntimeException(
+                    'Reprint could not clear the saved db-apply information for the previous db.sql.',
+                );
+            }
         }
 
         // Mark the completed bytes before removing the download intent. If
@@ -4067,13 +4116,6 @@ class ImportClient
     // db-apply: Apply SQL dump to a target MySQL database with URL rewriting
     // =========================================================================
 
-    /**
-     * Command: db-apply
-     *
-     * Reads db.sql, optionally rewrites URLs, and executes statements against
-     * a target MySQL database. Supports resumption via statement count tracking.
-     *
-     */
     private function run_db_domains(): void
     {
         $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
@@ -5714,102 +5756,13 @@ class ImportClient
         return $pdo;
     }
 
-    private function create_target_db_apply_connection(array $options): array
-    {
-        $target_engine = strtolower((string) ($options["target_engine"] ?? "mysql"));
-        if (!in_array($target_engine, ["mysql", "sqlite"], true)) {
-            throw new InvalidArgumentException(
-                "Invalid --target-engine value: {$target_engine}. Valid engines: mysql, sqlite.",
-            );
-        }
-
-        if ($target_engine === "sqlite") {
-            $target_path = $options["target_sqlite_path"] ?? null;
-            $target_db = $options["target_db"] ?? "sqlite_database";
-
-            if (!$target_path) {
-                $content_dir = $this->clean_preflight_path(
-                    $this->get_state()->get(
-                        'preflight.database.wp.paths_urls.content_dir'
-                    ),
-                );
-                if ($content_dir === null) {
-                    throw new InvalidArgumentException(
-                        "--target-sqlite-path option is required but was missing.",
-                    );
-                }
-                $target_path = wp_join_unix_paths(
-                    $this->filesystem_root,
-                    $content_dir,
-                    'database',
-                    '.ht.sqlite'
-                );
-                $this->audit_log("DB-APPLY | defaulting SQLite path to: {$target_path}");
-                $this->progress->show_lifecycle_line("SQLite path: {$target_path}\n");
-            }
-
-            // Persist target database configuration for apply-runtime.
-            $this->get_state()->apply->target_engine = "sqlite";
-            $this->get_state()->apply->target_db = $target_db;
-            $this->get_state()->apply->target_sqlite_path = $target_path;
-
-            return [
-                $this->create_sqlite_target_pdo($target_path, $target_db),
-                sprintf(
-                    "engine=sqlite path=%s db=%s",
-                    $target_path,
-                    $target_db,
-                ),
-            ];
-        }
-
-        $target_host = $options["target_host"] ?? "127.0.0.1";
-        $target_port = (int) ($options["target_port"] ?? 3306);
-        $target_user = $options["target_user"] ?? null;
-        $target_pass = $options["target_pass"] ?? "";
-        $target_db = $options["target_db"] ?? null;
-
-        if (!$target_user || !$target_db) {
-            throw new InvalidArgumentException(
-                "db-apply with --target-engine=mysql requires --target-user and --target-db.",
-            );
-        }
-
-        // Persist target database configuration for apply-runtime.
-        $this->get_state()->apply->target_engine = "mysql";
-        $this->get_state()->apply->target_db = $target_db;
-        $this->get_state()->apply->target_host = $target_host;
-        $this->get_state()->apply->target_port = $target_port;
-        $this->get_state()->apply->target_user = $target_user;
-        $this->get_state()->apply->target_pass = $target_pass;
-
-        $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
-        try {
-            $pdo = new PDO($dsn, $target_user, $target_pass, [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::MYSQL_ATTR_LOCAL_INFILE => false,
-            ]);
-        } catch (PDOException $e) {
-            throw new RuntimeException(
-                "Cannot connect to target MySQL database: " . $e->getMessage(),
-                0,
-                $e,
-            );
-        }
-
-        return [
-            $pdo,
-            sprintf(
-                "engine=mysql host=%s port=%d db=%s user=%s",
-                $target_host,
-                $target_port,
-                $target_db,
-                $target_user,
-            ),
-        ];
-    }
-
+    /**
+     * Reads db.sql, optionally rewrites URLs, and executes statements against
+     * the target database. A complete db-pull output starts again at the
+     * beginning after interruption, so the new connection runs the SQL header
+     * and does not skip queries which may not have committed. Other SQL files
+     * cannot start again safely.
+     */
     public function run_db_apply(array $options): void
     {
         $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
@@ -5830,6 +5783,11 @@ class ImportClient
         $is_confirmed_replacement_dump =
             ( $dump_record['create_table_query'] ?? false ) === true
             && hash_equals((string) ( $dump_record['sha256'] ?? '' ), $sql_hash);
+        $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
+        $current_status =
+            $state_command === 'db-apply'
+                ? $this->get_state()->active_resumable_command->completion_state ?? null
+                : null;
         $has_unconfirmed_download_intent =
             is_file(wp_join_unix_paths(
                 $this->pull_state_directory,
@@ -5882,64 +5840,145 @@ class ImportClient
             }
         }
 
-        // Check state for resume
-        $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
-        $current_status = $state_command === "db-apply" ? ($this->get_state()->active_resumable_command->completion_state ?? null) : null;
-
         if ($current_status === "complete") {
             throw new RuntimeException(
-                "db-apply already completed. Use --abort flag to re-run.",
+                'db-apply already finished. To apply db.sql again, run db-apply --abort first.',
             );
         }
 
         $apply_state = $this->get_state()->apply;
-        $statements_executed = $apply_state->statements_executed;
-        $bytes_read = $apply_state->bytes_read;
-        $is_resume = $current_status === "in_progress" && $statements_executed > 0;
-
-        if ($is_resume) {
+        if (empty($url_mapping) && !empty($apply_state->rewrite_url)) {
+            $url_mapping = $apply_state->rewrite_url;
+        } elseif (
+            !empty($url_mapping)
+            && !empty($apply_state->rewrite_url)
+            && $url_mapping !== $apply_state->rewrite_url
+            && in_array($current_status, ["in_progress", "partial"], true)
+        ) {
+            throw new RuntimeException(
+                'db-apply has not finished. Use the same --rewrite-url values as before, ' .
+                'or restore or reset the target database, run db-apply --abort, and start again.',
+            );
+        }
+        $target = $this->resolve_database_apply_target($options);
+        $target_identity = $target;
+        unset($target_identity['pass']);
+        $apply_behavior = [
+            'target' => $target_identity,
+            'rewrite_url' => $url_mapping,
+            'new_site_url' => (string) ( $options['new_site_url'] ?? '' ),
+            'table_prefix' => $this->get_state()->get(
+                'preflight.database.wp.table_prefix'
+            ),
+            'host_plugin_directories' => $this->host_plugin_directories(),
+        ];
+        $behavior_json = json_encode($apply_behavior, JSON_UNESCAPED_SLASHES);
+        if ($behavior_json === false) {
+            throw new RuntimeException('Reprint could not save the db-apply settings.');
+        }
+        $behavior_hash = hash('sha256', $behavior_json);
+        $attempt_file = wp_join_unix_paths(
+            $this->pull_state_directory,
+            self::DATABASE_APPLY_ATTEMPT_FILE,
+        );
+        $attempt = $this->read_json_file($attempt_file);
+        $attempt_exists = is_file($attempt_file);
+        $attempt_status = $attempt['status'] ?? null;
+        if (
+            $attempt_exists
+            && !in_array($attempt_status, ['in_progress', 'complete'], true)
+        ) {
+            throw new RuntimeException(
+                'db-apply stopped after it may have changed the target database. Reprint ' .
+                'cannot safely run this SQL again. Restore or reset the target database, then ' .
+                'run db-apply --abort and start again.',
+            );
+        }
+        if ($attempt_status === 'complete') {
+            $matches_completed_attempt =
+                hash_equals((string) ( $attempt['sql_sha256'] ?? '' ), $sql_hash)
+                && hash_equals(
+                    (string) ( $attempt['behavior_sha256'] ?? '' ),
+                    $behavior_hash,
+                );
+            if (!$matches_completed_attempt) {
+                throw new RuntimeException(
+                    'db-apply already finished, but db.sql, the target database, or the apply ' .
+                    'options are different now. Run db-apply --abort before applying this SQL again.',
+                );
+            }
+            if ($current_status !== 'complete') {
+                $this->get_state()->active_resumable_command->command_name = 'db-apply';
+                $this->get_state()->active_resumable_command->completion_state = 'complete';
+                $this->record_database_apply_target($target);
+                $this->get_state()->apply->statements_executed =
+                    (int) ( $attempt['statements_executed'] ?? 0 );
+                $this->get_state()->apply->bytes_read = (int) ( $attempt['bytes_read'] ?? 0 );
+                if (!empty($url_mapping)) {
+                    $this->get_state()->apply->rewrite_url = $url_mapping;
+                }
+                $this->save_state();
+                $this->audit_log('RECOVER db-apply | target work was already complete', true);
+                return;
+            }
+            throw new RuntimeException(
+                'db-apply already finished. To apply db.sql again, run db-apply --abort first.',
+            );
+        }
+        if (
+            in_array($current_status, ['in_progress', 'partial'], true)
+            && $attempt_status !== 'in_progress'
+        ) {
+            throw new RuntimeException(
+                'db-apply stopped after it may have changed the target database. Reprint ' .
+                'cannot safely run this SQL again. Restore or reset the target database, then ' .
+                'run db-apply --abort and start again.',
+            );
+        }
+        $is_restart = $attempt_status === 'in_progress';
+        if ($is_restart) {
+            $can_restart =
+                $attempt_status === 'in_progress'
+                && $is_confirmed_replacement_dump
+                && hash_equals( (string) ( $attempt['sql_sha256'] ?? '' ), $sql_hash )
+                && hash_equals( (string) ( $attempt['behavior_sha256'] ?? '' ), $behavior_hash );
+            if (!$can_restart) {
+                throw new RuntimeException(
+                    'db-apply stopped after it may have changed the target database. Reprint ' .
+                    'cannot safely run this SQL again because db.sql, the target database, or ' .
+                    'the apply options changed. Restore or reset the target database, then run ' .
+                    'db-apply --abort and start again.',
+                );
+            }
             $this->audit_log(
                 sprintf(
-                    "RESUME db-apply | statements=%d | bytes_read=%d",
-                    $statements_executed,
-                    $bytes_read,
+                    "RESTART db-apply | prior_statements=%d | prior_bytes_read=%d",
+                    $apply_state->statements_executed,
+                    $apply_state->bytes_read,
                 ),
                 true,
             );
-            $this->progress->show_lifecycle_line("Resuming db-apply (executed: {$statements_executed} statements)\n");
-            $this->output_progress([
-                "type" => "lifecycle",
-                "event" => "resuming",
-                "command" => "db-apply",
-                "statements_executed" => $statements_executed,
-                "bytes_read" => $bytes_read,
-                "message" => "Resuming db-apply (executed: {$statements_executed} statements)",
-            ], true);
-        } else {
             $this->get_state()->active_resumable_command->command_name = "db-apply";
             $this->get_state()->active_resumable_command->completion_state = "in_progress";
             $this->get_state()->apply = new DatabaseApplyCommandState();
+            $this->record_database_apply_target($target);
             if (!empty($url_mapping)) {
                 $this->get_state()->apply->rewrite_url = $url_mapping;
             }
             $this->save_state();
-            $statements_executed = 0;
-            $bytes_read = 0;
-
-            $this->audit_log("START db-apply", true);
-            $this->progress->show_lifecycle_line("Starting db-apply\n");
-            $this->output_progress([
-                "type" => "lifecycle",
-                "event" => "starting",
-                "command" => "db-apply",
-                "message" => "Starting db-apply",
-            ], true);
         }
+        $statements_executed = 0;
 
-        // On resume, use the persisted URL mapping if none provided on CLI
-        if (empty($url_mapping) && !empty($apply_state->rewrite_url)) {
-            $url_mapping = $apply_state->rewrite_url;
-        }
+        $event = $is_restart ? "restarting" : "starting";
+        $verb = $is_restart ? "Restarting" : "Starting";
+        $this->audit_log( ( $is_restart ? "RESTART" : "START" ) . " db-apply", true );
+        $this->progress->show_lifecycle_line("{$verb} db-apply\n");
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => $event,
+            "command" => "db-apply",
+            "message" => "{$verb} db-apply",
+        ], true);
 
         // Set up SQL statement rewriter if we have URL mappings
         $stmt_rewriter = null;
@@ -5963,12 +6002,12 @@ class ImportClient
             );
         }
 
-        [$pdo, $connection_label] = $this->create_target_db_apply_connection($options);
+        [$pdo, $connection_label] = $this->create_target_db_apply_connection($target);
         $sqlite_prepared_pdo = null;
         $sqlite_prepared_statement_cache = [];
         $sqlite_prepared_statement_cache_order = [];
         if (
-            strtolower((string) ($options["target_engine"] ?? "mysql")) === "sqlite"
+            $target['engine'] === 'sqlite'
             && method_exists($pdo, 'get_connection')
         ) {
             $sqlite_prepared_pdo = $pdo->get_connection()->get_pdo();
@@ -6015,6 +6054,24 @@ class ImportClient
         if (!$sql_handle) {
             throw new RuntimeException("Reprint could not open db.sql for reading: {$sql_file}");
         }
+        $mysql_apply_lock_name = null;
+        if ($target['engine'] === 'mysql') {
+            $mysql_apply_lock_name =
+                'reprint-db-apply:' . substr(hash('sha256', $target['db']), 0, 47);
+            $lock_statement = $pdo->prepare('SELECT GET_LOCK(?, 30)');
+            if (
+                !$lock_statement
+                || !$lock_statement->execute([$mysql_apply_lock_name])
+                || (int) $lock_statement->fetchColumn() !== 1
+            ) {
+                fclose($sql_handle);
+                throw new RuntimeException(
+                    'Another db-apply is still using the target database. Wait for it to finish, ' .
+                    'then try again.',
+                );
+            }
+            $this->audit_log("DB-APPLY LOCK | acquired {$mysql_apply_lock_name}", false);
+        }
 
         $sql_file_size = filesize($sql_file);
         $total_bytes_read = 0;
@@ -6032,21 +6089,6 @@ class ImportClient
             }
         }
 
-        // If resuming, seek to saved position. bytes_read is the byte offset
-        // right after the last successfully executed query (tracked via
-        // query_stream->get_bytes_consumed()), so no statement skipping is
-        // needed after seeking — we're exactly at the next un-executed query.
-        $seek_offset = 0;
-        $stmts_to_skip = 0;
-        if ($bytes_read > 0 && $bytes_read < $sql_file_size) {
-            fseek($sql_handle, $bytes_read);
-            $total_bytes_read = $bytes_read;
-            $seek_offset = $bytes_read;
-        } elseif ($statements_executed > 0) {
-            // Can't seek — need to scan from beginning and skip statements
-            $stmts_to_skip = $statements_executed;
-        }
-
         $this->output_progress([
             "status" => "starting",
             "phase" => "db-apply",
@@ -6055,16 +6097,39 @@ class ImportClient
         ]);
 
         try {
+            // Save restart information only after the target connection, SQL file,
+            // and MySQL lock are ready, but before reading the first SQL statement.
+            if (!$is_restart) {
+                $this->write_json_file($attempt_file, [
+                    'status' => 'in_progress',
+                    'sql_sha256' => $sql_hash,
+                    'behavior_sha256' => $behavior_hash,
+                ]);
+                $this->get_state()->active_resumable_command->command_name = "db-apply";
+                $this->get_state()->active_resumable_command->completion_state = "in_progress";
+                $this->get_state()->apply = new DatabaseApplyCommandState();
+                $this->record_database_apply_target($target);
+                if (!empty($url_mapping)) {
+                    $this->get_state()->apply->rewrite_url = $url_mapping;
+                }
+                $this->save_state();
+            }
+
             $chunk_size = 64 * 1024; // 64KB read chunks
 
             while (!feof($sql_handle)) {
-                // Check shutdown
-                if ($this->shutdown_requested) {
-                    $this->audit_log("SHUTDOWN REQUESTED | saving state", true);
-                    break;
+                if (function_exists('pcntl_sigprocmask')) {
+                    pcntl_sigprocmask(SIG_UNBLOCK, [SIGINT, SIGTERM]);
                 }
                 if (function_exists("pcntl_signal_dispatch")) {
                     pcntl_signal_dispatch();
+                }
+                if (function_exists('pcntl_sigprocmask')) {
+                    pcntl_sigprocmask(SIG_BLOCK, [SIGINT, SIGTERM]);
+                }
+                if ($this->shutdown_requested) {
+                    $this->audit_log("SHUTDOWN REQUESTED | saving state", true);
+                    break;
                 }
 
                 $data = fread($sql_handle, $chunk_size);
@@ -6077,12 +6142,6 @@ class ImportClient
                 while ($query_stream->next_query()) {
                     $query = $query_stream->get_query();
                     $stmt_count++;
-
-                    // Skip already-executed statements on resume
-                    if ($stmts_to_skip > 0) {
-                        $stmts_to_skip--;
-                        continue;
-                    }
 
                     // Execute against target database
                     $executed_query = $query;
@@ -6115,14 +6174,13 @@ class ImportClient
                     $statements_executed++;
                     $stmts_since_save++;
 
-                    // Save state periodically. bytes_read is the file offset
-                    // right after the last extracted query — NOT total_bytes_read,
-                    // which includes bytes buffered in the query stream that haven't
-                    // formed a complete query yet. This ensures resumption starts at
-                    // the exact boundary between executed and un-executed queries.
+                    // Save diagnostic counters periodically. bytes_read is the
+                    // file offset after the last extracted query, not
+                    // total_bytes_read, which includes an incomplete query in
+                    // the parser. An unfinished apply still restarts the dump.
                     if ($stmts_since_save >= $save_every) {
                         $this->get_state()->apply->statements_executed = $statements_executed;
-                        $this->get_state()->apply->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                        $this->get_state()->apply->bytes_read = $query_stream->get_bytes_consumed();
                         $this->save_state();
                         $stmts_since_save = 0;
 
@@ -6154,16 +6212,15 @@ class ImportClient
                 }
             }
 
-            // Drain any remaining buffered query
-            $query_stream->mark_input_complete();
-            while ($query_stream->next_query()) {
+            // Only EOF makes the buffered tail a complete query. An orderly
+            // stop leaves a partial statement unexecuted; the next process
+            // replays the dump from byte zero.
+            if (!$this->shutdown_requested) {
+                $query_stream->mark_input_complete();
+            }
+            while (!$this->shutdown_requested && $query_stream->next_query()) {
                 $query = $query_stream->get_query();
                 $stmt_count++;
-
-                if ($stmts_to_skip > 0) {
-                    $stmts_to_skip--;
-                    continue;
-                }
 
                 $executed_query = $query;
                 try {
@@ -6198,7 +6255,7 @@ class ImportClient
             if ($this->shutdown_requested) {
                 // Save partial progress
                 $this->get_state()->apply->statements_executed = $statements_executed;
-                $this->get_state()->apply->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                $this->get_state()->apply->bytes_read = $query_stream->get_bytes_consumed();
                 $this->get_state()->active_resumable_command->completion_state = "partial";
                 $this->save_state();
                 $this->audit_log(
@@ -6241,9 +6298,20 @@ class ImportClient
                     $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
                 }
 
-                // Mark complete
+                $completed_bytes = $query_stream->get_bytes_consumed();
+                $this->write_json_file($attempt_file, [
+                    'status' => 'complete',
+                    'sql_sha256' => $sql_hash,
+                    'behavior_sha256' => $behavior_hash,
+                    'statements_executed' => $statements_executed,
+                    'bytes_read' => $completed_bytes,
+                ]);
+
+                // The sidecar reaches complete first. If state persistence is
+                // interrupted, the next invocation repairs state without
+                // executing the target SQL again.
                 $this->get_state()->apply->statements_executed = $statements_executed;
-                $this->get_state()->apply->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                $this->get_state()->apply->bytes_read = $completed_bytes;
                 $this->get_state()->active_resumable_command->completion_state = "complete";
                 $this->save_state();
 
@@ -6271,7 +6339,213 @@ class ImportClient
             }
         } finally {
             fclose($sql_handle);
+            if ($mysql_apply_lock_name !== null) {
+                try {
+                    $release_statement = $pdo->prepare('SELECT RELEASE_LOCK(?)');
+                    if ($release_statement) {
+                        $release_statement->execute([$mysql_apply_lock_name]);
+                    }
+                } catch (Throwable $release_error) {
+                    $this->audit_log(
+                        'DB-APPLY LOCK | release failed: ' . $release_error->getMessage(),
+                        true,
+                    );
+                }
+            }
         }
+    }
+
+    /**
+     * Resolves the effective db-apply target without opening a connection.
+     *
+     * @param array $options {
+     *     db-apply target options.
+     *
+     *     @type string $target_engine      mysql or sqlite.
+     *     @type string $target_host        MySQL host.
+     *     @type int    $target_port        MySQL port.
+     *     @type string $target_user        MySQL user.
+     *     @type string $target_pass        MySQL password.
+     *     @type string $target_db          Target database name.
+     *     @type string $target_sqlite_path SQLite file path.
+     * }
+     * @return array {
+     *     Resolved target fields.
+     *
+     *     @type string $engine      mysql or sqlite.
+     *     @type string $db          Target database name.
+     *     @type string $sqlite_path SQLite file path. Present only for SQLite.
+     *     @type string $host        MySQL host. Present only for MySQL.
+     *     @type int    $port        MySQL port. Present only for MySQL.
+     *     @type string $user        MySQL user. Present only for MySQL.
+     *     @type string $pass        MySQL password. Present only for MySQL.
+     * }
+     */
+    private function resolve_database_apply_target(array $options): array
+    {
+        $target_engine = strtolower( (string) ( $options['target_engine'] ?? 'mysql' ) );
+        if (!in_array($target_engine, ['mysql', 'sqlite'], true)) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The message reports the caller's CLI value.
+            throw new InvalidArgumentException(
+                "Invalid --target-engine value: {$target_engine}. Valid engines: mysql, sqlite.",
+            );
+        }
+
+        if ($target_engine === 'sqlite') {
+            $target_path = $options['target_sqlite_path'] ?? null;
+            $target_db = $options['target_db'] ?? 'sqlite_database';
+            if (!$target_path) {
+                $content_dir = $this->clean_preflight_path(
+                    $this->get_state()->get(
+                        'preflight.database.wp.paths_urls.content_dir'
+                    ),
+                );
+                if ($content_dir === null) {
+                    throw new InvalidArgumentException(
+                        '--target-sqlite-path option is required but was missing.',
+                    );
+                }
+                $target_path = wp_join_unix_paths(
+                    $this->filesystem_root,
+                    $content_dir,
+                    'database',
+                    '.ht.sqlite'
+                );
+                $this->audit_log("DB-APPLY | defaulting SQLite path to: {$target_path}");
+                $this->progress->show_lifecycle_line("SQLite path: {$target_path}\n");
+            }
+            if ($target_path !== ':memory:' && strpos($target_path, '/') !== 0) {
+                $working_directory = getcwd();
+                if ($working_directory === false) {
+                    throw new RuntimeException(
+                        'Cannot resolve the current working directory for --target-sqlite-path.',
+                    );
+                }
+                $target_path = wp_join_unix_paths($working_directory, $target_path);
+            }
+            if ($target_path !== ':memory:') {
+                $target_path = realpath_with_missing_tail($target_path);
+            }
+            return [
+                'engine' => 'sqlite',
+                'db' => $target_db,
+                'sqlite_path' => $target_path,
+            ];
+        }
+
+        $target_user = $options['target_user'] ?? null;
+        $target_db = $options['target_db'] ?? null;
+        if (!$target_user || !$target_db) {
+            throw new InvalidArgumentException(
+                'db-apply with --target-engine=mysql requires --target-user and --target-db.',
+            );
+        }
+        return [
+            'engine' => 'mysql',
+            'host' => $options['target_host'] ?? '127.0.0.1',
+            'port' => (int) ( $options['target_port'] ?? 3306 ),
+            'user' => $target_user,
+            'pass' => $options['target_pass'] ?? '',
+            'db' => $target_db,
+        ];
+    }
+
+    /**
+     * Opens the resolved db-apply target.
+     *
+     * @param array $target {
+     *     Resolved target from resolve_database_apply_target().
+     *
+     *     @type string $engine      mysql or sqlite.
+     *     @type string $db          Target database name.
+     *     @type string $sqlite_path SQLite file path for a SQLite target.
+     *     @type string $host        MySQL host for a MySQL target.
+     *     @type int    $port        MySQL port for a MySQL target.
+     *     @type string $user        MySQL user for a MySQL target.
+     *     @type string $pass        MySQL password for a MySQL target.
+     * }
+     * @return array {
+     *     Open target connection and diagnostic label.
+     *
+     *     @type PDO    $0 Target connection.
+     *     @type string $1 Target label.
+     * }
+     */
+    private function create_target_db_apply_connection(array $target): array
+    {
+        if ($target['engine'] === 'sqlite') {
+            $target_path = $target['sqlite_path'];
+            $target_db = $target['db'];
+
+            return [
+                $this->create_sqlite_target_pdo($target_path, $target_db),
+                sprintf(
+                    "engine=sqlite path=%s db=%s",
+                    $target_path,
+                    $target_db,
+                ),
+            ];
+        }
+
+        $target_host = $target['host'];
+        $target_port = $target['port'];
+        $target_user = $target['user'];
+        $target_pass = $target['pass'];
+        $target_db = $target['db'];
+
+        $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
+        try {
+            $pdo = new PDO($dsn, $target_user, $target_pass, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::MYSQL_ATTR_LOCAL_INFILE => false,
+            ]);
+        } catch (PDOException $e) {
+            throw new RuntimeException(
+                "Cannot connect to target MySQL database: " . $e->getMessage(),
+                0,
+                $e,
+            );
+        }
+
+        return [
+            $pdo,
+            sprintf(
+                "engine=mysql host=%s port=%d db=%s user=%s",
+                $target_host,
+                $target_port,
+                $target_db,
+                $target_user,
+            ),
+        ];
+    }
+
+    /**
+     * Records the resolved target needed by apply-runtime before target SQL begins.
+     *
+     * @param array $target {
+     *     Resolved target from resolve_database_apply_target().
+     *
+     *     @type string $engine      mysql or sqlite.
+     *     @type string $db          Target database name.
+     *     @type string $sqlite_path SQLite file path for a SQLite target.
+     *     @type string $host        MySQL host for a MySQL target.
+     *     @type int    $port        MySQL port for a MySQL target.
+     *     @type string $user        MySQL user for a MySQL target.
+     *     @type string $pass        MySQL password for a MySQL target.
+     * }
+     */
+    private function record_database_apply_target(array $target): void
+    {
+        $apply = $this->get_state()->apply;
+        $apply->target_engine = $target['engine'];
+        $apply->target_db = $target['db'];
+        $apply->target_host = $target['engine'] === 'mysql' ? $target['host'] : null;
+        $apply->target_port = $target['engine'] === 'mysql' ? $target['port'] : null;
+        $apply->target_user = $target['engine'] === 'mysql' ? $target['user'] : null;
+        $apply->target_pass = $target['engine'] === 'mysql' ? $target['pass'] : null;
+        $apply->target_sqlite_path =
+            $target['engine'] === 'sqlite' ? $target['sqlite_path'] : null;
     }
 
     private function execute_db_apply_query(
@@ -6345,6 +6619,20 @@ class ImportClient
      */
     private function deactivate_host_plugins(PDO $pdo): array
     {
+        return $this->deactivate_plugins_by_dir(
+            $pdo,
+            $this->host_plugin_directories(),
+            "host-specific",
+        );
+    }
+
+    /**
+     * Returns plugin directories removed by the current source-host analysis.
+     *
+     * @return string[] Plugin directory names.
+     */
+    private function host_plugin_directories(): array
+    {
         $webhost = $this->get_state()->webhost ?? "other";
         $analyzer = host_analyzer_for($webhost);
         $preflight_data = $this->get_state()->preflight_record()["data"] ?? [];
@@ -6356,8 +6644,7 @@ class ImportClient
                 $plugin_dirs[] = $m[1];
             }
         }
-
-        return $this->deactivate_plugins_by_dir($pdo, $plugin_dirs, "host-specific");
+        return $plugin_dirs;
     }
 
     /**
@@ -6460,8 +6747,8 @@ class ImportClient
         $pdo->exec(
             "UPDATE {$options_table} SET option_value = FROM_BASE64('{$encoded_value}') WHERE option_name = 'active_plugins'"
         );
-        // The SQL dump runs with AUTOCOMMIT=0 and issues a final COMMIT,
-        // but autocommit stays off. Our UPDATE needs an explicit COMMIT.
+        // The managed MySQL dump leaves AUTOCOMMIT=0 after its final COMMIT.
+        // Our UPDATE needs an explicit COMMIT.
         $pdo->exec('COMMIT');
 
         $this->audit_log(
@@ -12823,7 +13110,8 @@ if (
             "short" => "Apply the SQL dump to a local MySQL or SQLite database",
             "description" =>
                 "Reads db.sql from --state-dir, optionally rewrites URLs, and executes\n" .
-                "all statements against a target database. Resumable. Saves target\n" .
+                "all statements against a target database. After an interruption, a complete\n" .
+                "db-pull output starts again at the beginning and reruns its SQL header. Saves target\n" .
                 "database credentials to state for use by apply-runtime.\n",
             "extra" =>
                 "MySQL example:\n" .

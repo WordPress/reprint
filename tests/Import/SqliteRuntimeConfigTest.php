@@ -388,10 +388,15 @@ class SqliteRuntimeConfigTest extends TestCase
             $this->fsRoot,
         );
         $this->loadClientState($client);
+        $target = $this->callPrivate(
+            $client,
+            'resolve_database_apply_target',
+            [['target_engine' => 'sqlite']],
+        );
         [$connection] = $this->callPrivate(
             $client,
             'create_target_db_apply_connection',
-            [['target_engine' => 'sqlite']],
+            [$target],
         );
         $resolved_filesystem_root = realpath($this->fsRoot);
         $this->assertIsString($resolved_filesystem_root);
@@ -399,7 +404,7 @@ class SqliteRuntimeConfigTest extends TestCase
         $this->assertIsObject($connection);
         $this->assertSame(
             $resolved_filesystem_root . '/database/.ht.sqlite',
-            $this->callPrivate($client, 'get_state')->apply->target_sqlite_path,
+            $target['sqlite_path'],
         );
     }
 

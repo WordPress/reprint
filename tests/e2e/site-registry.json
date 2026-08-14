@@ -140,6 +140,9 @@
     "db-index-interruption": {
       "port": 8125
     },
+    "db-apply-process-death": {
+      "port": 8126
+    },
     "stdout-db-pull-process-death": {
       "port": 8127
     },
