@@ -7534,6 +7534,8 @@ class ImportClient
         $sql_buffer_handle = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
+        // A cursor means this connection starts after the dump header.
+        $mysql_session_is_configured = $mode !== "mysql" || $cursor === null;
 
         if ($mode === "file") {
             $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
@@ -7686,6 +7688,7 @@ class ImportClient
                     $mysql_conn,
                     &$sql_buffer_handle,
                     &$sql_buffer,
+                    &$mysql_session_is_configured,
                     &$sql_bytes_written,
                     $context,
                     $query_stream,
@@ -7702,6 +7705,19 @@ class ImportClient
                     // Allow signal handlers to run
                     if (function_exists("pcntl_signal_dispatch")) {
                         pcntl_signal_dispatch();
+                    }
+
+                    $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
+                    if ($chunk_type === "sql_session_setup") {
+                        if ($mode === "mysql" && !$mysql_session_is_configured) {
+                            $this->execute_mysql_queries($mysql_conn, $chunk["body"]);
+                            $mysql_session_is_configured = true;
+                            $this->audit_log(
+                                "SQL OUTPUT mysql | applied session settings after reconnect",
+                                true,
+                            );
+                        }
+                        return;
                     }
 
                     $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
@@ -7738,8 +7754,6 @@ class ImportClient
                             }
                         }
                     }
-
-                    $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
                     if ($chunk_type === "sql") {
                         $query_complete = ($chunk["headers"]["x-query-complete"] ?? "1") === "1";
@@ -7780,18 +7794,7 @@ class ImportClient
                                 $sql_bytes_written += strlen($data);
 
                                 if ($query_complete) {
-                                    if (!$mysql_conn->multi_query($sql_buffer)) {
-                                        throw new RuntimeException("MySQL execution failed: " . $mysql_conn->error);
-                                    }
-                                    // Drain all result sets from multi_query before sending the
-                                    // next chunk — mysqli requires this.
-                                    do {
-                                        $result = $mysql_conn->store_result();
-                                        if ($result) { $result->free(); }
-                                        if ($mysql_conn->errno) {
-                                            throw new RuntimeException("MySQL statement error: " . $mysql_conn->error);
-                                        }
-                                    } while ($mysql_conn->more_results() && $mysql_conn->next_result());
+                                    $this->execute_mysql_queries($mysql_conn, $sql_buffer);
 
                                     // Query executed — truncate the buffer file and reset.
                                     if ($sql_buffer_handle) {
@@ -7999,6 +8002,32 @@ class ImportClient
                 " bytes) — incomplete export?"
             );
         }
+    }
+
+    /** Executes SQL and consumes every result before the next query. */
+    private function execute_mysql_queries(\mysqli $connection, string $sql): void
+    {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+        if (!$connection->multi_query($sql)) {
+            throw new RuntimeException("MySQL execution failed: " . $connection->error);
+        }
+
+        while (true) {
+            $result = $connection->store_result();
+            if ($result) {
+                $result->free();
+            }
+            if ($connection->errno) {
+                throw new RuntimeException("MySQL statement error: " . $connection->error);
+            }
+            if (!$connection->more_results()) {
+                break;
+            }
+            if (!$connection->next_result()) {
+                throw new RuntimeException("MySQL statement error: " . $connection->error);
+            }
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
     }
 
     /**

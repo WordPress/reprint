@@ -908,6 +908,20 @@ function endpoint_sql_chunk(
         _e2e_call_hook('test_hook_after_gzip_init', $hook_args);
     }
 
+    // A resumed source cursor starts after the dump header. Send the required
+    // connection settings separately so a new MySQL process can run them first.
+    $session_setup = WordPress\DataLiberation\MySQLDumpProducer::get_session_setup_sql();
+    $gz->write(
+        "--{$boundary}\r\n" .
+        "Content-Type: application/sql\r\n" .
+        "Content-Length: " . strlen($session_setup) . "\r\n" .
+        "X-Chunk-Type: sql_session_setup\r\n" .
+        "\r\n"
+    );
+    $gz->write($session_setup);
+    $gz->write("\r\n");
+    $gz->sync();
+
     // -- Stream SQL fragments --
     // Pull SQL fragments from the producer in batches, writing each batch
     // as a multipart chunk. Stop when the producer is exhausted or the
