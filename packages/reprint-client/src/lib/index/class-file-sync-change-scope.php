@@ -30,8 +30,9 @@ use function WordPress\Reprint\Exporter\relative_path_under;
  *
  * @phpstan-type MapperConfig array{filesystem_root_b64:string,original_remote_roots_b64:list<string>,resolved_path_mappings:list<array{remote_prefix_b64:string,local_prefix_b64:string}>,local_followed_symlinks_root_b64:string|null}
  * @phpstan-type RemoteAbsoluteConfig array{index_path_coordinates:'remote_absolute',ownership_directory_b64:string,current_snapshot_id:string,prior_snapshot_ids:list<string>,protected_snapshot_ids:list<string>,excluded_remote_absolute_path_roots_b64:list<string>,include_caches:bool}
- * @phpstan-type LocalRelativeConfig array{index_path_coordinates:'local_relative',ownership_directory_b64:string,current_snapshot_id:string,prior_snapshot_ids:list<string>,protected_snapshot_ids:list<string>,excluded_remote_absolute_path_roots_b64:list<string>,include_caches:bool,remote_to_local_path_mapper_config:MapperConfig}
+ * @phpstan-type LocalRelativeConfig array{index_path_coordinates:'local_relative',ownership_directory_b64:string,current_snapshot_id:string,prior_snapshot_ids:list<string>,protected_snapshot_ids:list<string>,excluded_remote_absolute_path_roots_b64:list<string>,include_caches:bool,remote_to_local_path_mapper_config:MapperConfig,selected_default_skipped_index_paths_file_b64:string}
  * @phpstan-type Config RemoteAbsoluteConfig|LocalRelativeConfig
+ * @phpstan-type SelectedAtomCursor array{selection_fingerprint:string,selected_snapshot_index:int,paths_byte_offset:int}
  */
 final class FileSyncChangeScope
 {
@@ -42,6 +43,7 @@ final class FileSyncChangeScope
     private array $config;
     private string $ownership_directory;
     private ?RemoteToLocalPathMapper $remote_to_local_path_mapper = null;
+    private ?string $selected_default_skipped_index_paths_file = null;
     /** @var list<string> */
     private array $excluded_remote_absolute_path_roots = [];
     private ?string $open_snapshot_id = null;
@@ -310,6 +312,147 @@ final class FileSyncChangeScope
         return $this->config['include_caches'];
     }
 
+    /**
+     * Reports whether root ownership can change any entry in a remote region.
+     *
+     * A full exclusion blocks the region. Current root ownership wins over
+     * another selection, while a protected root blocks prior ownership.
+     */
+    public function root_owned_region_may_change(
+        string $remote_absolute_path
+    ): bool {
+        $this->assert_open();
+        $this->assert_remote_atom_enumeration();
+        self::assert_remote_absolute_path($remote_absolute_path);
+        if ($this->path_is_excluded($remote_absolute_path)) {
+            return false;
+        }
+        if ($this->snapshots_have_root_at_or_above(
+            [$this->config['current_snapshot_id']],
+            $remote_absolute_path
+        )) {
+            return true;
+        }
+        if ($this->snapshots_have_root_at_or_above(
+            $this->config['protected_snapshot_ids'],
+            $remote_absolute_path
+        )) {
+            return false;
+        }
+        return $this->snapshots_have_root_at_or_above(
+            $this->config['prior_snapshot_ids'],
+            $remote_absolute_path
+        );
+    }
+
+    /**
+     * Returns the sorted path-only sidecar for default-skipped local paths.
+     */
+    public function get_selected_default_skipped_index_paths_file(): string
+    {
+        $this->get_local_path_mapper();
+        if ($this->selected_default_skipped_index_paths_file === null) {
+            throw new LogicException(
+                'Local-relative file-sync change scope has no selected default-skipped paths file.'
+            );
+        }
+        return $this->selected_default_skipped_index_paths_file;
+    }
+
+    /** @phpstan-return SelectedAtomCursor */
+    public function initial_selected_ownership_atom_cursor(): array
+    {
+        $this->assert_open();
+        $this->assert_remote_atom_enumeration();
+        return [
+            'selection_fingerprint' => $this->selected_snapshot_fingerprint(),
+            'selected_snapshot_index' => 0,
+            'paths_byte_offset' => 0,
+        ];
+    }
+
+    /** @phpstan-return SelectedAtomCursor */
+    public function completed_selected_ownership_atom_cursor(): array
+    {
+        $cursor = $this->initial_selected_ownership_atom_cursor();
+        $cursor['selected_snapshot_index'] = count(
+            $this->selected_snapshot_ids()
+        );
+        return $cursor;
+    }
+
+    /**
+     * Validates one selected-atom cursor and reports whether it reached EOF.
+     *
+     * @phpstan-param SelectedAtomCursor $cursor
+     */
+    public function selected_ownership_atom_cursor_is_complete(
+        array $cursor
+    ): bool {
+        $this->assert_open();
+        $this->assert_remote_atom_enumeration();
+        $this->assert_selected_atom_cursor($cursor);
+        return $cursor['selected_snapshot_index']
+            === count($this->selected_snapshot_ids());
+    }
+
+    /**
+     * Reads one current-or-prior ownership atom or advances one snapshot.
+     *
+     * Protected snapshots decide whether work is blocked, but never supply
+     * work candidates. Callers retain the returned cursor unchanged between
+     * bounded steps.
+     *
+     * @phpstan-param SelectedAtomCursor $cursor
+     * @return array {
+     *     @type array|null $atom     One ownership atom, or null for a snapshot transition.
+     *     @type array      $cursor   Cursor for the next bounded read.
+     *     @type bool       $complete Whether every selected snapshot is consumed.
+     * }
+     * @phpstan-return array{atom:array{kind:'root'|'exact'|'ancestor',path:string}|null,cursor:SelectedAtomCursor,complete:bool}
+     */
+    public function read_next_selected_ownership_atom(array $cursor): array
+    {
+        $this->assert_open();
+        $this->assert_remote_atom_enumeration();
+        $this->assert_selected_atom_cursor($cursor);
+        $snapshot_ids = $this->selected_snapshot_ids();
+        $snapshot_index = $cursor['selected_snapshot_index'];
+        if ($snapshot_index === count($snapshot_ids)) {
+            return ['atom' => null, 'cursor' => $cursor, 'complete' => true];
+        }
+
+        $snapshot_id = $snapshot_ids[$snapshot_index];
+        $this->open_snapshot($snapshot_id);
+        if ($cursor['paths_byte_offset'] === $this->open_paths_bytes) {
+            ++$cursor['selected_snapshot_index'];
+            $cursor['paths_byte_offset'] = 0;
+            return [
+                'atom' => null,
+                'cursor' => $cursor,
+                'complete' => $cursor['selected_snapshot_index'] === count($snapshot_ids),
+            ];
+        }
+        if ($cursor['paths_byte_offset'] > $this->open_paths_bytes) {
+            throw new UnexpectedValueException(
+                "Ownership snapshot {$snapshot_id} atom cursor exceeds its paths file."
+            );
+        }
+
+        $atom = $this->read_path_atom(
+            $snapshot_id,
+            $cursor['paths_byte_offset']
+        );
+        $next_paths_byte_offset = ftell($this->open_paths_handle);
+        if (!is_int($next_paths_byte_offset)) {
+            throw new RuntimeException(
+                "Ownership snapshot {$snapshot_id} path position cannot be read."
+            );
+        }
+        $cursor['paths_byte_offset'] = $next_paths_byte_offset;
+        return ['atom' => $atom, 'cursor' => $cursor, 'complete' => false];
+    }
+
     public function close(): void
     {
         if ($this->closed) {
@@ -379,7 +522,7 @@ final class FileSyncChangeScope
         }
         if (
             $owning_root !== null
-            && !$this->root_traversal_has_default_skip(
+            && !FileIndexProcessor::path_is_default_skipped_below_root(
                 $owning_root,
                 $remote_absolute_path
             )
@@ -438,6 +581,21 @@ final class FileSyncChangeScope
     }
 
     /** @param list<string> $snapshot_ids */
+    private function snapshots_have_root_at_or_above(
+        array $snapshot_ids,
+        string $remote_absolute_path
+    ): bool {
+        return $this->snapshots_contain_atom(
+            $snapshot_ids,
+            'root',
+            $remote_absolute_path
+        ) || $this->deepest_owning_root(
+            $snapshot_ids,
+            $remote_absolute_path
+        ) !== null;
+    }
+
+    /** @param list<string> $snapshot_ids */
     private function deepest_owning_root(
         array $snapshot_ids,
         string $remote_absolute_path
@@ -454,27 +612,6 @@ final class FileSyncChangeScope
             $ancestor = self::strict_parent($ancestor);
         }
         return null;
-    }
-
-    private function root_traversal_has_default_skip(
-        string $root,
-        string $remote_absolute_path
-    ): bool {
-        // The producer schedules the root without classifying it, then checks
-        // each child using that child's full absolute path.
-        $relative_path = $root === '/'
-            ? substr($remote_absolute_path, 1)
-            : substr($remote_absolute_path, strlen($root) + 1);
-        $prefix = $root;
-        foreach (explode('/', $relative_path) as $component) {
-            $prefix = $prefix === '/'
-                ? '/' . $component
-                : $prefix . '/' . $component;
-            if (FileIndexProcessor::path_is_default_skipped($prefix)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private function snapshot_contains_atom(
@@ -758,6 +895,7 @@ final class FileSyncChangeScope
         ];
         if ($index_path_coordinates === 'local_relative') {
             $expected_keys[] = 'remote_to_local_path_mapper_config';
+            $expected_keys[] = 'selected_default_skipped_index_paths_file_b64';
         }
         $actual_keys = array_keys($config);
         sort($actual_keys, SORT_STRING);
@@ -838,6 +976,11 @@ final class FileSyncChangeScope
                 }
             }
             $this->remote_to_local_path_mapper = $path_mapper;
+            $this->selected_default_skipped_index_paths_file =
+                self::decode_config_path(
+                    $config['selected_default_skipped_index_paths_file_b64'],
+                    'selected default-skipped index paths file'
+                );
         }
         /** @var Config $config */
         $this->config = $config;
@@ -955,6 +1098,84 @@ final class FileSyncChangeScope
         return $last_separator === 0
             ? '/'
             : substr($remote_absolute_path, 0, $last_separator);
+    }
+
+    /** @return list<string> */
+    private function selected_snapshot_ids(): array
+    {
+        return array_values(array_unique(array_merge(
+            [$this->config['current_snapshot_id']],
+            $this->config['prior_snapshot_ids']
+        )));
+    }
+
+    private function selected_snapshot_fingerprint(): string
+    {
+        $framed_selection = pack(
+            'N',
+            strlen($this->ownership_directory)
+        ) . $this->ownership_directory;
+        foreach ($this->selected_snapshot_ids() as $snapshot_id) {
+            $framed_selection .= pack('N', strlen($snapshot_id)) . $snapshot_id;
+        }
+        return hash('sha256', $framed_selection);
+    }
+
+    private function assert_remote_atom_enumeration(): void
+    {
+        if ($this->config['index_path_coordinates'] !== 'remote_absolute') {
+            throw new LogicException(
+                'Selected ownership atoms may be read only from a remote_absolute file-sync change scope.'
+            );
+        }
+    }
+
+    /** @phpstan-param SelectedAtomCursor $cursor */
+    private function assert_selected_atom_cursor(array $cursor): void
+    {
+        $actual_keys = array_keys($cursor);
+        sort($actual_keys, SORT_STRING);
+        $expected_keys = [
+            'selection_fingerprint',
+            'selected_snapshot_index',
+            'paths_byte_offset',
+        ];
+        sort($expected_keys, SORT_STRING);
+        if ($actual_keys !== $expected_keys) {
+            throw new InvalidArgumentException(
+                'Selected ownership-atom cursor fields are invalid.'
+            );
+        }
+        if (
+            !is_string($cursor['selection_fingerprint'])
+            || preg_match(
+                '/^[0-9a-f]{64}$/D',
+                $cursor['selection_fingerprint']
+            ) !== 1
+            || !hash_equals(
+                $this->selected_snapshot_fingerprint(),
+                $cursor['selection_fingerprint']
+            )
+        ) {
+            throw new InvalidArgumentException(
+                'Selected ownership-atom cursor does not match the change scope.'
+            );
+        }
+        if (
+            !is_int($cursor['selected_snapshot_index'])
+            || $cursor['selected_snapshot_index'] < 0
+            || $cursor['selected_snapshot_index'] > count($this->selected_snapshot_ids())
+            || !is_int($cursor['paths_byte_offset'])
+            || $cursor['paths_byte_offset'] < 0
+            || (
+                $cursor['selected_snapshot_index'] === count($this->selected_snapshot_ids())
+                && $cursor['paths_byte_offset'] !== 0
+            )
+        ) {
+            throw new InvalidArgumentException(
+                'Selected ownership-atom cursor positions are invalid.'
+            );
+        }
     }
 
     private function assert_open(): void

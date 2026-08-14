@@ -541,6 +541,108 @@ final class FileIndexProcessor {
      */
     public static function path_is_default_skipped(string $path): bool
     {
+        if (self::path_has_persistent_default_skip($path)) {
+            return true;
+        }
+
+        // Operating-system metadata matches only the basename.
+        $basename = basename($path);
+        static $skipped_basenames = [
+            ".DS_Store", "._.DS_Store",
+            "Thumbs.db", "desktop.ini", "ehthumbs.db",
+        ];
+        if (in_array($basename, $skipped_basenames, true)) {
+            return true;
+        }
+        // Editor and merge scratch files: Emacs locks and autosaves, trailing
+        // tildes, Vim swaps, backups, and conflict leftovers.
+        if ($basename !== "" && $basename[0] === "." && isset($basename[1]) && $basename[1] === "#") {
+            return true;
+        }
+        if (strlen($basename) >= 3 && $basename[0] === "#" && substr($basename, -1) === "#") {
+            return true;
+        }
+        if (preg_match("/(?:~|\\.(?:swp|swo|swn|bak|orig|rej))$/", $basename) === 1) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Reports whether ordinary traversal skips a candidate below its scheduled root.
+     *
+     * The scheduled root itself bypasses default-skip classification. Every
+     * strict prefix through a descendant is classified exactly as it is when
+     * directory traversal reaches that path.
+     *
+     * @param string $scheduled_root Scheduled traversal root.
+     * @param string $candidate      Same path or one descendant to classify.
+     * @return bool Whether ordinary traversal omits the candidate.
+     */
+    public static function path_is_default_skipped_below_root(
+        string $scheduled_root,
+        string $candidate
+    ): bool {
+        if ($candidate === $scheduled_root) {
+            return false;
+        }
+        $descendant_prefix = $scheduled_root === "/"
+            ? "/"
+            : $scheduled_root . "/";
+        if (strncmp($candidate, $descendant_prefix, strlen($descendant_prefix)) !== 0) {
+            throw new InvalidArgumentException(
+                "Default-skip candidate {$candidate} is outside scheduled root {$scheduled_root}."
+            );
+        }
+
+        $relative_path = substr($candidate, strlen($descendant_prefix));
+        $prefix = $scheduled_root;
+        foreach (explode("/", $relative_path) as $component) {
+            if ($component === "") {
+                throw new InvalidArgumentException(
+                    "Default-skip candidate {$candidate} contains an empty path component."
+                );
+            }
+            $prefix = wp_join_unix_paths($prefix, $component);
+            if (self::path_is_default_skipped($prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Classifies which default skips may apply below a path already reached.
+     *
+     * The scheduled traversal root is reached without classifying its own
+     * basename. Once a persistent skipped component or wp-content cache
+     * directory has been reached, every suffix remains skipped. An exact
+     * wp-content basename has a narrower rule for its direct descendants.
+     * Basename and editor-file skips do not persist into a suffix.
+     *
+     * @param string $path Filesystem path whose possible descendants are classified.
+     * @return string One of ordinary, wp_content, or all_descendants.
+     */
+    public static function default_skip_descendant_context(string $path): string
+    {
+        if (self::path_has_persistent_default_skip($path)) {
+            return "all_descendants";
+        }
+        if (basename($path) === "wp-content") {
+            return "wp_content";
+        }
+        return "ordinary";
+    }
+
+    /**
+     * Reports whether one reached path places every descendant in the skip set.
+     *
+     * @param string $path Filesystem path to classify.
+     * @return bool Whether every suffix stays default-skipped.
+     */
+    private static function path_has_persistent_default_skip(string $path): bool
+    {
         // Sentinel slashes make component matches independent of whether the
         // component appears at the beginning, middle, or end of the path.
         $path_with_boundaries = "/" . trim($path, "/") . "/";
@@ -575,28 +677,6 @@ final class FileIndexProcessor {
                 return true;
             }
         }
-
-        // Operating-system metadata matches only the basename.
-        $basename = basename($path);
-        static $skipped_basenames = [
-            ".DS_Store", "._.DS_Store",
-            "Thumbs.db", "desktop.ini", "ehthumbs.db",
-        ];
-        if (in_array($basename, $skipped_basenames, true)) {
-            return true;
-        }
-        // Editor and merge scratch files: Emacs locks and autosaves, trailing
-        // tildes, Vim swaps, backups, and conflict leftovers.
-        if ($basename !== "" && $basename[0] === "." && isset($basename[1]) && $basename[1] === "#") {
-            return true;
-        }
-        if (strlen($basename) >= 3 && $basename[0] === "#" && substr($basename, -1) === "#") {
-            return true;
-        }
-        if (preg_match("/(?:~|\\.(?:swp|swo|swn|bak|orig|rej))$/", $basename) === 1) {
-            return true;
-        }
-
         return false;
     }
 

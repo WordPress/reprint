@@ -161,6 +161,81 @@ final class FileIndexSkipDefaultsTest extends TestCase
         ];
     }
 
+    public function testDescendantContextUsesTheSamePersistentSkipGrammar(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-server/src/export.php';
+
+        $this->assertSame(
+            'ordinary',
+            FileIndexProcessor::default_skip_descendant_context(
+                '/srv/wp-content/plugins'
+            )
+        );
+        $this->assertSame(
+            'wp_content',
+            FileIndexProcessor::default_skip_descendant_context(
+                '/srv/wp-content'
+            )
+        );
+        $this->assertSame(
+            'all_descendants',
+            FileIndexProcessor::default_skip_descendant_context(
+                '/srv/wp-content/cache'
+            )
+        );
+        $this->assertSame(
+            'all_descendants',
+            FileIndexProcessor::default_skip_descendant_context('/srv/.git')
+        );
+        $this->assertSame(
+            'ordinary',
+            FileIndexProcessor::default_skip_descendant_context('/srv/.gitmodules')
+        );
+        $this->assertSame(
+            'ordinary',
+            FileIndexProcessor::default_skip_descendant_context('/srv/file.php~')
+        );
+    }
+
+    public function testDefaultSkipBelowRootPreservesTheScheduledBoundary(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-server/src/export.php';
+
+        $this->assertFalse(
+            FileIndexProcessor::path_is_default_skipped_below_root('/', '/')
+        );
+        $this->assertTrue(
+            FileIndexProcessor::path_is_default_skipped_below_root(
+                '/',
+                '/.DS_Store/child'
+            )
+        );
+        $this->assertFalse(
+            FileIndexProcessor::path_is_default_skipped_below_root(
+                '/scratch~',
+                '/scratch~/child'
+            )
+        );
+        $this->assertTrue(
+            FileIndexProcessor::path_is_default_skipped_below_root(
+                '/site',
+                '/site/wp-content/cache/file'
+            )
+        );
+        $this->assertTrue(
+            FileIndexProcessor::path_is_default_skipped_below_root(
+                '/site',
+                "/site/.DS_Store/child-\xFF"
+            )
+        );
+        $this->assertFalse(
+            FileIndexProcessor::path_is_default_skipped_below_root(
+                '/site',
+                "/site/\xFF.gitmodules/child"
+            )
+        );
+    }
+
     // ------------------------------------------------------------------
     // Integration tests — endpoint_file_index() over the fixture
     // ------------------------------------------------------------------

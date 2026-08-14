@@ -13,6 +13,7 @@ require_once __DIR__ . '/../../packages/reprint-client/src/lib/index/class-file-
 class FileSyncChangeScopeTest extends TestCase {
     private string $temporaryDirectory;
     private string $ownershipDirectory;
+    private string $selectedDefaultSkippedPathsFile;
     private int $nextSnapshotNumber = 0;
 
     protected function setUp(): void
@@ -23,6 +24,9 @@ class FileSyncChangeScopeTest extends TestCase {
         $this->ownershipDirectory = $this->temporaryDirectory
             . "/ownership-\nname";
         mkdir($this->ownershipDirectory . '/snapshots', 0777, true);
+        $this->selectedDefaultSkippedPathsFile = $this->temporaryDirectory
+            . '/selected-default-skipped-paths.jsonl';
+        file_put_contents($this->selectedDefaultSkippedPathsFile, '');
     }
 
     protected function tearDown(): void
@@ -361,7 +365,10 @@ class FileSyncChangeScopeTest extends TestCase {
                 '/protected' => '/local/shared',
             ]
         );
-        $localScope = $mapper->map_change_scope_to_local_index($remoteScope);
+        $localScope = $mapper->map_change_scope_to_local_index(
+            $remoteScope,
+            $this->selectedDefaultSkippedPathsFile
+        );
         $this->assertFalse(
             $localScope->index_entry_may_change('shared/file.php', 'file')
         );
@@ -372,7 +379,10 @@ class FileSyncChangeScopeTest extends TestCase {
             ['/current'],
             ['/current' => '/local/shared']
         );
-        $localScope = $mapper->map_change_scope_to_local_index($remoteScope);
+        $localScope = $mapper->map_change_scope_to_local_index(
+            $remoteScope,
+            $this->selectedDefaultSkippedPathsFile
+        );
         $this->assertTrue(
             $localScope->index_entry_may_change('shared/file.php', 'file')
         );
@@ -402,7 +412,8 @@ class FileSyncChangeScopeTest extends TestCase {
             ['/a' => '/local/shared']
         );
         $localScope = $continuousMapper->map_change_scope_to_local_index(
-            $remoteScope
+            $remoteScope,
+            $this->selectedDefaultSkippedPathsFile
         );
         $this->assertTrue($localScope->subtree_may_change('shared/dir'));
         $localScope->close();
@@ -417,7 +428,8 @@ class FileSyncChangeScopeTest extends TestCase {
             ]
         );
         $localScope = $mapperWithFilledHole->map_change_scope_to_local_index(
-            $remoteScope
+            $remoteScope,
+            $this->selectedDefaultSkippedPathsFile
         );
         $this->assertFalse($localScope->subtree_may_change('shared/dir'));
         $localScope->close();
@@ -444,7 +456,10 @@ class FileSyncChangeScopeTest extends TestCase {
             [],
             [$protectedSnapshotId]
         );
-        $localScope = $mapper->map_change_scope_to_local_index($remoteScope);
+        $localScope = $mapper->map_change_scope_to_local_index(
+            $remoteScope,
+            $this->selectedDefaultSkippedPathsFile
+        );
         $this->assertFalse(
             $localScope->index_entry_may_change(
                 'followed/outside/file.php',
@@ -455,7 +470,10 @@ class FileSyncChangeScopeTest extends TestCase {
         $remoteScope->close();
 
         $remoteScope = $this->scope($currentSnapshotId);
-        $localScope = $mapper->map_change_scope_to_local_index($remoteScope);
+        $localScope = $mapper->map_change_scope_to_local_index(
+            $remoteScope,
+            $this->selectedDefaultSkippedPathsFile
+        );
         $this->assertTrue(
             $localScope->index_entry_may_change(
                 'followed/outside/file.php',
@@ -487,7 +505,10 @@ class FileSyncChangeScopeTest extends TestCase {
             [$remoteRoot],
             [$remoteRoot => $localPrefix]
         );
-        $localScope = $mapper->map_change_scope_to_local_index($remoteScope);
+        $localScope = $mapper->map_change_scope_to_local_index(
+            $remoteScope,
+            $this->selectedDefaultSkippedPathsFile
+        );
         $localRelativeLink = "mapped-\xFE/link-\xFC";
 
         $this->assertTrue(
@@ -502,6 +523,10 @@ class FileSyncChangeScopeTest extends TestCase {
         );
         $this->assertSame($filesystemRoot, $localScope->get_filesystem_root());
         $this->assertTrue($localScope->includes_caches());
+        $this->assertSame(
+            $this->selectedDefaultSkippedPathsFile,
+            $localScope->get_selected_default_skipped_index_paths_file()
+        );
 
         $config = $localScope->get_config();
         $this->assertSame('local_relative', $config['index_path_coordinates']);
@@ -542,6 +567,15 @@ class FileSyncChangeScopeTest extends TestCase {
                 $exception->getMessage()
             );
         }
+        try {
+            $remoteScope->get_selected_default_skipped_index_paths_file();
+            $this->fail('Remote-coordinate scope exposed a local selected-path file.');
+        } catch (\LogicException $exception) {
+            $this->assertStringContainsString(
+                'uses remote_absolute index paths',
+                $exception->getMessage()
+            );
+        }
 
         $mapper = new \RemoteToLocalPathMapper('/local', ['/site']);
         $config = $remoteScope->get_config();
@@ -556,9 +590,15 @@ class FileSyncChangeScopeTest extends TestCase {
             );
         }
 
-        $localScope = $mapper->map_change_scope_to_local_index($remoteScope);
+        $localScope = $mapper->map_change_scope_to_local_index(
+            $remoteScope,
+            $this->selectedDefaultSkippedPathsFile
+        );
         try {
-            $mapper->map_change_scope_to_local_index($localScope);
+            $mapper->map_change_scope_to_local_index(
+                $localScope,
+                $this->selectedDefaultSkippedPathsFile
+            );
             $this->fail('A local-relative scope was mapped a second time.');
         } catch (\InvalidArgumentException $exception) {
             $this->assertStringContainsString(

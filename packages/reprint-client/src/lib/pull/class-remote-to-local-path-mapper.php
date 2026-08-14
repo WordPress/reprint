@@ -147,7 +147,8 @@ final class RemoteToLocalPathMapper
      * Re-expresses a remote-absolute change scope in local-index coordinates.
      */
     public function map_change_scope_to_local_index(
-        FileSyncChangeScope $remote_change_scope
+        FileSyncChangeScope $remote_change_scope,
+        string $selected_default_skipped_index_paths_file
     ): FileSyncChangeScope {
         $config = $remote_change_scope->get_config();
         if ($config["index_path_coordinates"] !== "remote_absolute") {
@@ -157,7 +158,17 @@ final class RemoteToLocalPathMapper
         }
         $config["index_path_coordinates"] = "local_relative";
         $config["remote_to_local_path_mapper_config"] = $this->get_config();
+        $config["selected_default_skipped_index_paths_file_b64"] =
+            base64_encode($selected_default_skipped_index_paths_file);
         return FileSyncChangeScope::from_config($config);
+    }
+
+    /** @return list<string> Byte-sorted explicit remote mapping prefixes. */
+    public function get_resolved_remote_mapping_prefixes(): array
+    {
+        $remote_prefixes = array_keys($this->resolved_path_mappings);
+        sort($remote_prefixes, SORT_STRING);
+        return $remote_prefixes;
     }
 
     /** Returns the local filesystem root used by map_path(). */
