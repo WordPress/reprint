@@ -6,7 +6,7 @@ use Reprint\Importer\State\DatabaseTableIndexState;
 use Reprint\Importer\State\FetchListProgressState;
 use Reprint\Importer\State\FileDiffProgressState;
 use Reprint\Importer\State\FilesPullSummaryState;
-use Reprint\Importer\State\RemoteFileIndexCursorState;
+use Reprint\Importer\State\RemoteFileIndexState;
 
 use function WordPress\Filesystem\wp_join_unix_paths;
 
@@ -371,7 +371,7 @@ class Pull
                 $state->current_file = null;
                 $state->current_file_bytes = null;
                 $state->diff = new FileDiffProgressState();
-                $state->index = new RemoteFileIndexCursorState();
+                $state->index = new RemoteFileIndexState();
                 $state->fetch = new FetchListProgressState();
                 $state->files_pull_summary = new FilesPullSummaryState();
                 $state->files_pull_path_selection_fingerprint = null;
@@ -933,7 +933,7 @@ class Pull
                     $state->files_pull_summary = new FilesPullSummaryState();
                 }
                 if ($reset_file_selection_state) {
-                    $state->index = new RemoteFileIndexCursorState();
+                    $state->index = new RemoteFileIndexState();
                     $state->files_pull_path_selection_fingerprint = null;
                 }
                 if ($reset_db_state) {

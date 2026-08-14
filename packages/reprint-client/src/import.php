@@ -18,7 +18,7 @@ use Reprint\Importer\State\DatabaseTableIndexState;
 use Reprint\Importer\State\FetchListProgressState;
 use Reprint\Importer\State\FileDiffProgressState;
 use Reprint\Importer\State\FilesPullSummaryState;
-use Reprint\Importer\State\RemoteFileIndexCursorState;
+use Reprint\Importer\State\RemoteFileIndexState;
 use Reprint\Importer\StreamingContext;
 use Reprint\Importer\TransientInterruptionException;
 use Reprint\Importer\Tuning\AdaptiveTuner;
@@ -2330,7 +2330,7 @@ class ImportClient
                         $state->active_resumable_command->current_stage = null;
                         $state->include_caches = false;
                         $state->extra_directory = null;
-                        $state->index = new RemoteFileIndexCursorState();
+                        $state->index = new RemoteFileIndexState();
                     },
                     [$this, 'save_state']
                 );
@@ -2431,7 +2431,7 @@ class ImportClient
             @unlink($this->volatile_files_file);
             $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
         }
-        $this->get_state()->index = new RemoteFileIndexCursorState();
+        $this->get_state()->index = new RemoteFileIndexState();
         $this->get_state()->fetch = new FetchListProgressState();
 
         // Applying the WAL replaces the remote index read by the diff cursor.
@@ -3183,7 +3183,7 @@ class ImportClient
                     $state->files_pull_path_selection_fingerprint =
                         $path_selection_fingerprint;
                     $state->diff = new FileDiffProgressState();
-                    $state->index = new RemoteFileIndexCursorState();
+                    $state->index = new RemoteFileIndexState();
                     $state->fetch = new FetchListProgressState();
                     $state->files_pull_summary = new FilesPullSummaryState();
                 },
@@ -3419,7 +3419,7 @@ class ImportClient
                     $state->follow_symlinks = $this->follow_symlinks;
                     $state->include_caches = $this->include_caches;
                     $state->extra_directory = $this->extra_directory;
-                    $state->index = new RemoteFileIndexCursorState();
+                    $state->index = new RemoteFileIndexState();
                 },
                 [$this, 'save_state']
             );
@@ -3622,6 +3622,17 @@ class ImportClient
                             "directory" => $dir,
                             "message" => "Skipped (server rejected): {$dir}",
                         ], true);
+                        // Deliberately abandon the rejected target's saved
+                        // traversal before trying the next queued target. Keep
+                        // the byte offset confirmed by earlier traversals so
+                        // the next target appends after their durable entries.
+                        reprint_update_and_save_state_without_signal_interruption(
+                            function (): void {
+                                $this->get_state()->index->cursor = null;
+                                $this->get_state()->index->active_traversal = null;
+                            },
+                            [$this, 'save_state']
+                        );
                         continue 2;
                     }
 
@@ -6815,43 +6826,17 @@ class ImportClient
      */
     private function fetch_next_remote_index(?string $list_dir_override = null): bool
     {
-        $cursor = $this->get_state()->index->cursor;
-
-        $roots = $this->get_root_directories_from_preflight();
-        if (empty($roots)) {
-            throw new RuntimeException(
-                "No root directories found. Either add directory[]=... to the " .
-                    "export URL, or run preflight first so directories can be auto-detected.",
-            );
-        }
-
-        $next_remote_index_file_mode = file_exists($this->next_remote_index_file) ? "a" : "w";
-        // Initialize the index counter from the existing file so resume
-        // shows a monotonically increasing count.
-        if ($next_remote_index_file_mode === "a" && $this->next_remote_index_entries_counted === 0) {
-            $this->next_remote_index_entries_counted = $this->count_newlines($this->next_remote_index_file);
-        }
-        if ($next_remote_index_file_mode === "w") {
-            $this->audit_log(
-                "FILE CREATE | {$this->next_remote_index_file} | downloading next remote index from the beginning",
-            );
-        } else {
-            $this->audit_log(
-                "FILE APPEND | {$this->next_remote_index_file} | resuming next remote index download",
-            );
-        }
-        $next_remote_index_file_handle = fopen($this->next_remote_index_file, $next_remote_index_file_mode);
-        if (!$next_remote_index_file_handle) {
-            throw new RuntimeException("Failed to open next remote index file");
-        }
-
-        $next_remote_index_is_complete = false;
-        $chunks_since_save = 0;
-
-        $export_dirs = $this->get_export_directories();
-        $params = $this->get_tuned_params("file_index");
-
-        if ($cursor === null) {
+        $index_state = $this->get_state()->index;
+        $traversal = $index_state->active_traversal_request();
+        if ($traversal === null) {
+            $roots = $this->get_root_directories_from_preflight();
+            if (empty($roots)) {
+                throw new RuntimeException(
+                    "No root directories found. Either add directory[]=... to the " .
+                        "export URL, or run preflight first so directories can be auto-detected.",
+                );
+            }
+            $export_dirs = $this->get_export_directories();
             $start = $roots[0];
             if (!empty($this->pull_only_files_with_path_prefixes)) {
                 // With --include, get_export_directories() returns only the resolved
@@ -6862,13 +6847,106 @@ class ImportClient
                 // the remaining directory[] entries.
                 $start = $export_dirs[0] ?? $roots[0];
             }
-
-            $params["list_dir"] = $list_dir_override ?? $start;
+            $request_list_directory = $list_dir_override ?? $start;
+            reprint_update_and_save_state_without_signal_interruption(
+                function () use (
+                    $request_list_directory,
+                    $export_dirs
+                ): void {
+                    $this->get_state()->index->start_traversal(
+                        $request_list_directory,
+                        $export_dirs,
+                        $this->follow_symlinks,
+                        $this->include_caches
+                    );
+                },
+                [$this, 'save_state']
+            );
+            $traversal = $index_state->active_traversal_request();
+            if ($traversal === null) {
+                throw new LogicException(
+                    "A saved remote-index traversal must remain active before its request."
+                );
+            }
         }
-        if ($this->follow_symlinks) {
+        $request_list_directory = $traversal["list_directory"];
+        $export_dirs = $traversal["requested_directories"];
+        $request_follow_symlinks = $traversal["follow_symlinks"];
+        $request_include_caches = $traversal["include_caches"];
+        $cursor = $index_state->cursor;
+        $next_remote_index_byte_offset =
+            $index_state->next_remote_index_byte_offset;
+
+        $next_remote_index_file_handle = fopen(
+            $this->next_remote_index_file,
+            "c+b"
+        );
+        $next_remote_index_file_stat = is_resource($next_remote_index_file_handle)
+            ? fstat($next_remote_index_file_handle)
+            : false;
+        if (
+            !is_resource($next_remote_index_file_handle)
+            || $next_remote_index_file_stat === false
+            || $next_remote_index_byte_offset > $next_remote_index_file_stat["size"]
+            || !ftruncate(
+                $next_remote_index_file_handle,
+                $next_remote_index_byte_offset
+            )
+            || fseek(
+                $next_remote_index_file_handle,
+                $next_remote_index_byte_offset
+            ) !== 0
+        ) {
+            if (is_resource($next_remote_index_file_handle)) {
+                fclose($next_remote_index_file_handle);
+            }
+            throw new RuntimeException(
+                "Failed to resume the next remote index at its saved byte offset."
+            );
+        }
+
+        // Each fully parsed index batch becomes durable with the cursor reported
+        // on that multipart part. An intact completion part confirms any later
+        // cursor-only progress. Bytes after the last such boundary are removed
+        // before its cursor is reused, so replay never appends duplicates.
+        if ($next_remote_index_byte_offset === 0) {
+            $this->audit_log(
+                "FILE CREATE | {$this->next_remote_index_file} | downloading next remote index from the beginning",
+            );
+        } else {
+            $this->audit_log(
+                "FILE APPEND | {$this->next_remote_index_file} | resuming next remote index download",
+            );
+        }
+        // Initialize progress from durable existing bytes so a resumed scan
+        // keeps its displayed entry count monotonically increasing.
+        if ($this->next_remote_index_entries_counted === 0) {
+            $this->next_remote_index_entries_counted = $this->count_newlines(
+                $this->next_remote_index_file,
+                $next_remote_index_byte_offset
+            );
+        }
+        $entries_counted_before_request =
+            $this->next_remote_index_entries_counted;
+        $confirmed_next_remote_index_byte_offset =
+            $next_remote_index_byte_offset;
+        $confirmed_cursor = $cursor;
+        $entries_counted_at_confirmed_boundary =
+            $entries_counted_before_request;
+
+        $next_remote_index_is_complete = false;
+        $completion_cursor = null;
+        $remote_index_error = null;
+
+        $params = $this->get_tuned_params("file_index");
+
+        if ($cursor === null) {
+            $params["list_dir"] = $request_list_directory;
+        }
+        if ($request_follow_symlinks) {
             $params["follow_symlinks"] = "1";
         }
-        if ($this->include_caches) {
+        if ($request_include_caches) {
             // Server defaults to skipping caches/VCS metadata/OS junk.
             // Opt in to include them when the consumer explicitly asks.
             $params["include_caches"] = "1";
@@ -6887,8 +6965,12 @@ class ImportClient
 
         $context->on_chunk = function ($chunk) use (
             &$cursor,
+            &$completion_cursor,
+            &$confirmed_cursor,
+            &$confirmed_next_remote_index_byte_offset,
+            &$entries_counted_at_confirmed_boundary,
             &$next_remote_index_is_complete,
-            &$chunks_since_save,
+            &$remote_index_error,
             $next_remote_index_file_handle,
             $context
         ) {
@@ -6900,20 +6982,23 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            $chunks_since_save++;
-            if ($chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                $this->get_state()->index->cursor = $cursor;
-                $this->save_state();
-                $chunks_since_save = 0;
-            }
-
+            $chunk_cursor = null;
             if (isset($chunk["headers"]["x-cursor"])) {
-                $cursor = $chunk["headers"]["x-cursor"];
+                $chunk_cursor = $chunk["headers"]["x-cursor"];
+                if (!is_string($chunk_cursor) || $chunk_cursor === "") {
+                    throw new RuntimeException(
+                        "The remote file index response reported an invalid cursor."
+                    );
+                }
+                $cursor = $chunk_cursor;
             }
 
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
             if ($chunk_type === "index_batch") {
+                if ($remote_index_error !== null) {
+                    return;
+                }
                 $body = $chunk["body"] ?? "";
                 if ($body === "") {
                     return;
@@ -6976,15 +7061,59 @@ class ImportClient
                     if ($next_remote_index_json_line === false) {
                         continue;
                     }
+                    $next_remote_index_json_line .= "\n";
                     $next_remote_index_bytes_written = fwrite(
                         $next_remote_index_file_handle,
-                        $next_remote_index_json_line . "\n"
+                        $next_remote_index_json_line
                     );
-                    if ($next_remote_index_bytes_written === false) {
+                    if (
+                        $next_remote_index_bytes_written
+                        !== strlen($next_remote_index_json_line)
+                    ) {
                         throw new RuntimeException("Failed to write to next remote index file (disk full?)");
                     }
                     $this->next_remote_index_entries_counted++;
                 }
+                if ($chunk_cursor === null) {
+                    throw new RuntimeException(
+                        "The remote file index batch did not report a cursor."
+                    );
+                }
+                if (!fflush($next_remote_index_file_handle)) {
+                    throw new RuntimeException(
+                        "Failed to flush a confirmed remote index batch."
+                    );
+                }
+                $confirmed_byte_offset = ftell(
+                    $next_remote_index_file_handle
+                );
+                if (!is_int($confirmed_byte_offset)) {
+                    throw new RuntimeException(
+                        "Failed to read the confirmed remote index byte offset."
+                    );
+                }
+                // Promote the in-memory discard boundary before saving. If
+                // the save fails, exception cleanup retains the same
+                // target-confirmed bytes described by the mutated state.
+                $confirmed_cursor = $chunk_cursor;
+                $confirmed_next_remote_index_byte_offset =
+                    $confirmed_byte_offset;
+                $entries_counted_at_confirmed_boundary =
+                    $this->next_remote_index_entries_counted;
+                reprint_update_and_save_state_without_signal_interruption(
+                    function () use (
+                        $chunk_cursor,
+                        $confirmed_byte_offset
+                    ): void {
+                        $this->get_state()
+                            ->consecutive_interrupted_responses = 0;
+                        $this->get_state()->index->cursor = $chunk_cursor;
+                        $this->get_state()->index
+                            ->next_remote_index_byte_offset =
+                                $confirmed_byte_offset;
+                    },
+                    [$this, 'save_state']
+                );
                 if ($this->next_remote_index_entries_counted > 0) {
                     $this->progress->show_progress_line(
                         "Scanning remote files — " .
@@ -6998,11 +7127,26 @@ class ImportClient
             } elseif ($chunk_type === "metadata") {
                 $this->handle_metadata_chunk($chunk);
             } elseif ($chunk_type === "completion") {
+                $completion_status =
+                    $chunk["headers"]["x-status"] ?? null;
+                if (
+                    !is_string($completion_status)
+                    || !in_array(
+                        $completion_status,
+                        ["partial", "complete"],
+                        true
+                    )
+                ) {
+                    throw new RuntimeException(
+                        "The remote file index completion status must be partial or complete."
+                    );
+                }
+                $completion_cursor = $chunk_cursor;
                 $next_remote_index_is_complete =
-                    ($chunk["headers"]["x-status"] ?? "") === "complete";
+                    $completion_status === "complete";
                 $context->saw_completion = true;
                 $context->response_stats = [
-                    "status" => $chunk["headers"]["x-status"] ?? null,
+                    "status" => $completion_status,
                     "entries_processed" =>
                         isset($chunk["headers"]["x-total-entries"])
                             ? (int) $chunk["headers"]["x-total-entries"]
@@ -7021,38 +7165,128 @@ class ImportClient
                             : null,
                 ];
             } elseif ($chunk_type === "error") {
-                $this->handle_error_chunk($chunk, "index", $context);
+                $remote_index_error =
+                    $this->handle_error_chunk($chunk, "index", $context)
+                    ?? [
+                        "error_type" => "unknown",
+                        "path" => "",
+                        "message" => "The server returned an unreadable index error.",
+                    ];
             }
         };
 
         $cursor_before = $cursor;
         $request_start = microtime(true);
+        $discard_unconfirmed_response = function () use (
+            $next_remote_index_file_handle,
+            &$confirmed_next_remote_index_byte_offset,
+            &$entries_counted_at_confirmed_boundary
+        ): void {
+            if (!ftruncate(
+                $next_remote_index_file_handle,
+                $confirmed_next_remote_index_byte_offset
+            )) {
+                fclose($next_remote_index_file_handle);
+                throw new RuntimeException(
+                    "Failed to discard an unconfirmed remote index response."
+                );
+            }
+            $this->next_remote_index_entries_counted =
+                $entries_counted_at_confirmed_boundary;
+        };
         try {
             $this->fetch_streaming($url, $cursor, $context, null, "file_index");
         } catch (TransientInterruptionException $e) {
+            $discard_unconfirmed_response();
+            fclose($next_remote_index_file_handle);
             $this->assert_can_resume_after_interrupted_response(
                 "file_index",
                 $cursor_before,
-                $cursor,
+                $confirmed_cursor,
                 $e,
             );
-            fclose($next_remote_index_file_handle);
-            $this->get_state()->index->cursor = $cursor;
             $this->get_state()->active_resumable_command->completion_state = "partial";
             $this->save_state();
             return false;
+        } catch (RuntimeException $e) {
+            $discard_unconfirmed_response();
+            fclose($next_remote_index_file_handle);
+            throw $e;
+        } catch (Throwable $e) {
+            $discard_unconfirmed_response();
+            fclose($next_remote_index_file_handle);
+            throw $e;
         }
-        $this->get_state()->consecutive_interrupted_responses = 0;
+        if ($remote_index_error !== null) {
+            $discard_unconfirmed_response();
+            fclose($next_remote_index_file_handle);
+            $remote_index_error_path = base64_decode(
+                $remote_index_error["path"] ?? "",
+                true
+            );
+            $remote_index_error_path = is_string($remote_index_error_path)
+                && $remote_index_error_path !== ""
+                ? $remote_index_error_path
+                : "unknown path";
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Remote path and protocol message are CLI values, never HTML output.
+            throw new RuntimeException(
+                "Remote file indexing could not scan {$remote_index_error_path}: "
+                . ( $remote_index_error["message"] ?? "unknown error" )
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
+        if (!$next_remote_index_is_complete && $completion_cursor === null) {
+            $discard_unconfirmed_response();
+            fclose($next_remote_index_file_handle);
+            throw new RuntimeException(
+                "The partial remote file index response did not report a cursor."
+            );
+        }
         $wall_time = microtime(true) - $request_start;
+        if (!fflush($next_remote_index_file_handle)) {
+            fclose($next_remote_index_file_handle);
+            throw new RuntimeException(
+                "Failed to flush the next remote index before saving its cursor."
+            );
+        }
+        $next_remote_index_byte_offset = ftell(
+            $next_remote_index_file_handle
+        );
+        if (!is_int($next_remote_index_byte_offset)) {
+            fclose($next_remote_index_file_handle);
+            throw new RuntimeException(
+                "Failed to read the next remote index byte offset."
+            );
+        }
         $this->finalize_tuned_request(
             "file_index",
             $wall_time,
             $context->response_stats ?? [],
         );
-        fclose($next_remote_index_file_handle);
 
-        $this->get_state()->index->cursor = $next_remote_index_is_complete ? null : $cursor;
-        $this->save_state();
+        try {
+            reprint_update_and_save_state_without_signal_interruption(
+                function () use (
+                    $completion_cursor,
+                    $next_remote_index_byte_offset,
+                    $next_remote_index_is_complete
+                ): void {
+                    $this->get_state()->consecutive_interrupted_responses = 0;
+                    $this->get_state()->index->cursor =
+                        $next_remote_index_is_complete
+                            ? null
+                            : $completion_cursor;
+                    $this->get_state()->index->next_remote_index_byte_offset =
+                        $next_remote_index_byte_offset;
+                    if ($next_remote_index_is_complete) {
+                        $this->get_state()->index->active_traversal = null;
+                    }
+                },
+                [$this, 'save_state']
+            );
+        } finally {
+            fclose($next_remote_index_file_handle);
+        }
 
         return $next_remote_index_is_complete;
     }
@@ -9807,26 +10041,38 @@ class ImportClient
 
     /**
      * Handle an error chunk from the server.
+     *
+     * @return array|null {
+     *     Parsed error fields, or null when the body is not valid JSON.
+     *
+     *     @type string $error_type Protocol error type.
+     *     @type string $path       Base64 path from the protocol.
+     *     @type string $message    Human-readable error message.
+     * }
      */
     private function handle_error_chunk(
         array $chunk,
         string $phase,
         StreamingContext $context
-    ): void {
+    ): ?array {
         $body = $chunk["body"] ?? "";
         $data = json_decode($body, true);
-        if (!$data) {
+        if (!is_array($data)) {
             $this->audit_log(
                 "REMOTE ERROR | phase={$phase} | raw (JSON decode failed): " .
                     substr($body, 0, 500),
                 true,
             );
-            return;
+            return null;
         }
 
-        $error_type = $data["error_type"] ?? "unknown";
-        $path = $data["path"] ?? "";
-        $message = $data["message"] ?? "Error";
+        $error_type = is_string($data["error_type"] ?? null)
+            ? $data["error_type"]
+            : "unknown";
+        $path = is_string($data["path"] ?? null) ? $data["path"] : "";
+        $message = is_string($data["message"] ?? null)
+            ? $data["message"]
+            : "Error";
 
         $this->audit_log(
             "REMOTE ERROR | phase={$phase} | type={$error_type} | path={$path} | message={$message}",
@@ -9871,6 +10117,11 @@ class ImportClient
             ],
             true,
         );
+        return [
+            "error_type" => $error_type,
+            "path" => $path,
+            "message" => $message,
+        ];
     }
 
     /**

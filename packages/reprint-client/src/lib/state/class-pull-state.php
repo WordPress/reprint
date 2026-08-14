@@ -8,7 +8,7 @@ use Reprint\Importer\State\FetchListProgressState;
 use Reprint\Importer\State\FileDiffProgressState;
 use Reprint\Importer\State\FilesPullSummaryState;
 use Reprint\Importer\State\PullPipelineCheckpointState;
-use Reprint\Importer\State\RemoteFileIndexCursorState;
+use Reprint\Importer\State\RemoteFileIndexState;
 use Reprint\Importer\State\ResumableCommandCheckpointState;
 
 /**
@@ -67,7 +67,7 @@ class PullState
     public FilesPullSummaryState $files_pull_summary;
     public DatabaseTableIndexState $db_index;
     public FileDiffProgressState $diff;
-    public RemoteFileIndexCursorState $index;
+    public RemoteFileIndexState $index;
     public FetchListProgressState $fetch;
     /** @var string|null Path to the file being written for crash recovery. */
     public ?string $current_file = null;
@@ -104,7 +104,7 @@ class PullState
         $this->active_resumable_command = new ResumableCommandCheckpointState();
         $this->db_index = new DatabaseTableIndexState();
         $this->diff = new FileDiffProgressState();
-        $this->index = new RemoteFileIndexCursorState();
+        $this->index = new RemoteFileIndexState();
         $this->fetch = new FetchListProgressState();
         $this->files_pull_summary = new FilesPullSummaryState();
         $this->apply = new DatabaseApplyCommandState();
@@ -144,7 +144,7 @@ class PullState
         $state->files_pull_summary = FilesPullSummaryState::from_array($data['files_pull_summary']);
         $state->db_index = DatabaseTableIndexState::from_array($data['db_index']);
         $state->diff = FileDiffProgressState::from_array($data['diff']);
-        $state->index = RemoteFileIndexCursorState::from_array($data['index']);
+        $state->index = RemoteFileIndexState::from_array($data['index']);
         $state->fetch = FetchListProgressState::from_array($data['fetch']);
         $state->current_file = $data['current_file'];
         $state->current_file_bytes = $data['current_file_bytes'];

@@ -1,7 +1,7 @@
 /**
  * Test 07: Permission Errors via import.php
- * Tests chmod-denied and mysql-restricted sites complete gracefully
- * and produce appropriate error chunks in the audit log.
+ * Tests chmod-denied file indexing stops at an unreadable directory and
+ * mysql-restricted sites complete gracefully.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -11,8 +11,8 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    assertTreesMatch, readAuditLog,
-    fsRootDir, pullStateDirectory,
+    readAuditLog,
+    pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -45,25 +45,23 @@ describe('Import: Permission Errors', () => {
             return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         }
 
-        it('file sync completes', () => {
+        it('file sync stops rather than confirming an incomplete remote index', () => {
             const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
             });
-            assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
-        });
-
-        it('readable files are downloaded and match source', () => {
-            // hashDirectory skips unreadable files on both sides,
-            // so this verifies all readable files match exactly
-            const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
-            assertTreesMatch(getSiteDir(site), importedRoot);
-        });
-
-        it('audit log records error for unreadable files', () => {
+            assert.notEqual(result.exitCode, 0, `Expected file indexing to fail\nstdout: ${result.stdout}`);
+            assert.ok(
+                result.stderr.includes('Remote file indexing could not scan'),
+                `Expected a pointed remote-index error\nstderr: ${result.stderr}`
+            );
             const audit = readAuditLog(tempDir);
             assert.ok(audit.includes('REMOTE ERROR'), 'Expected REMOTE ERROR in audit log');
-            assert.ok(audit.includes('type=file_open'), 'Expected type=file_open in audit log');
-            assert.ok(audit.includes('unreadable.txt'), 'Expected unreadable.txt mentioned in audit log');
+            assert.ok(audit.includes('type=dir_open'), 'Expected type=dir_open in audit log');
+            const unreadableDirectory = join(getSiteDir(site), 'test-data', 'unreadable-dir');
+            assert.ok(
+                audit.includes(Buffer.from(unreadableDirectory).toString('base64')),
+                'Expected the unreadable directory path in the audit log'
+            );
         });
     });
 

@@ -13,7 +13,7 @@ require_once __DIR__ . '/state-functions.php';
 require_once __DIR__ . '/class-resumable-command-checkpoint-state.php';
 require_once __DIR__ . '/class-database-table-index-state.php';
 require_once __DIR__ . '/class-file-diff-progress-state.php';
-require_once __DIR__ . '/class-remote-file-index-cursor-state.php';
+require_once __DIR__ . '/class-remote-file-index-state.php';
 require_once __DIR__ . '/class-fetch-list-progress-state.php';
 require_once __DIR__ . '/class-files-pull-summary-state.php';
 require_once __DIR__ . '/class-database-apply-command-state.php';

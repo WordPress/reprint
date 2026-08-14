@@ -87,6 +87,20 @@ class CurlTimeoutRecoveryTest extends TestCase
         return json_decode($contents, true);
     }
 
+    private function activeIndexState(string $cursor): array
+    {
+        $indexState = new \Reprint\Importer\State\RemoteFileIndexState();
+        $indexState->start_traversal(
+            '/srv/htdocs',
+            ['/srv/htdocs'],
+            false,
+            false
+        );
+        $indexState->cursor = $cursor;
+
+        return $indexState->to_array();
+    }
+
     public static function fileCursorForBytes(int $bytes): string
     {
         return base64_encode(json_encode([
@@ -297,9 +311,9 @@ class CurlTimeoutRecoveryTest extends TestCase
                 "completion_state" => "in_progress",
                 "current_stage" => "index",
             ],
-            "index" => [
-                "cursor" => base64_encode('{"dir":"/wp-content","offset":500}'),
-            ],
+            "index" => $this->activeIndexState(
+                base64_encode('{"dir":"/wp-content","offset":500}')
+            ),
             "preflight" => [
                 "data" => [
                     "ok" => true,
@@ -332,6 +346,16 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->assertNotNull(
             $state["index"]["cursor"] ?? null,
             "Index cursor should be preserved for resumption"
+        );
+        $this->assertSame(
+            0,
+            $state['index']['next_remote_index_byte_offset']
+        );
+        $this->assertSame(
+            '',
+            file_get_contents(
+                $this->pullStateDirectory . '/remote-index.next.jsonl'
+            )
         );
     }
 
@@ -654,9 +678,9 @@ PHP);
                 "completion_state" => "in_progress",
                 "current_stage" => "index",
             ],
-            "index" => [
-                "cursor" => base64_encode('{"dir":"/wp-content","offset":500}'),
-            ],
+            "index" => $this->activeIndexState(
+                base64_encode('{"dir":"/wp-content","offset":500}')
+            ),
             "consecutive_interrupted_responses" => 2,
             "preflight" => [
                 "data" => [
@@ -767,7 +791,12 @@ class SuccessTestClient extends \ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
-        // Signal completion
-        $context->saw_completion = true;
+        ( $context->on_chunk )([
+            'headers' => [
+                'x-chunk-type' => 'completion',
+                'x-status' => 'complete',
+            ],
+            'body' => '',
+        ]);
     }
 }

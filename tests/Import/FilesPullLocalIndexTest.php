@@ -1031,7 +1031,10 @@ $write_part = static function (array $headers, string $body = '') use ($boundary
 
 if ($endpoint === 'file_index') {
     $write_part(
-        array('X-Chunk-Type' => 'index_batch'),
+        array(
+            'X-Chunk-Type' => 'index_batch',
+            'X-Cursor' => 'index-complete',
+        ),
         json_encode(array_values($remote_index), JSON_UNESCAPED_SLASHES)
     );
     $write_part(array(
