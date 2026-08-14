@@ -236,6 +236,7 @@ class MySQLDumpProducer
         $header = "INSERT INTO " . $this->row_reader->quote_identifier($this->row_reader->get_current_table()) . " ({$column_list}) VALUES\n";
         $this->current_statement_size = strlen($header);
 
+        $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
         $first_row_sql = $this->format_row_for_insert($this->row_reader->get_current_record());
         $this->current_statement_size += strlen($first_row_sql) + 1;
 
@@ -246,7 +247,10 @@ class MySQLDumpProducer
         // subsequent UPDATE statements are syntactically separate.
         $has_oversized = $this->has_pending_oversized_updates();
 
-        if ($this->rows_in_batch >= $this->row_reader->get_batch_size()) {
+        if (
+            $current_record_ends_query_batch ||
+            $this->rows_in_batch >= $this->row_reader->get_batch_size()
+        ) {
             $this->finish_insert_batch($header . $first_row_sql, $has_oversized);
             return true;
         }
@@ -289,6 +293,7 @@ class MySQLDumpProducer
             return false;
         }
 
+        $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
         $row_sql = $this->format_row_for_insert($this->row_reader->get_current_record());
         $this->current_statement_size += strlen($row_sql) + 2;
         $this->row_reader->clear_current_record();
@@ -296,7 +301,10 @@ class MySQLDumpProducer
 
         $has_oversized = $this->has_pending_oversized_updates();
 
-        if ($this->rows_in_batch >= $this->row_reader->get_batch_size()) {
+        if (
+            $current_record_ends_query_batch ||
+            $this->rows_in_batch >= $this->row_reader->get_batch_size()
+        ) {
             $this->finish_insert_batch($row_sql, $has_oversized);
             return true;
         }

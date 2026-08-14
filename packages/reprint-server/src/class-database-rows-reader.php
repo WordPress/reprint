@@ -66,6 +66,9 @@ class DatabaseRowsReader {
     /** @var array|null */
     private $current_row = null;
 
+    /** @var bool */
+    private $current_row_ends_query_batch = false;
+
     /** @var array|null */
     private $current_column_types = null;
 
@@ -133,6 +136,7 @@ class DatabaseRowsReader {
      */
     public function next_record()
     {
+        $this->current_row_ends_query_batch = false;
         if (!$this->current_result_set) {
             $query = $this->build_select_query();
             try {
@@ -179,6 +183,7 @@ class DatabaseRowsReader {
 
         $this->current_row = $record;
         if ($this->rows_fetched_from_current_query >= $this->batch_size) {
+            $this->current_row_ends_query_batch = true;
             $this->release_current_result_set();
         }
         return true;
@@ -219,6 +224,13 @@ class DatabaseRowsReader {
     public function clear_current_record()
     {
         $this->current_row = null;
+        $this->current_row_ends_query_batch = false;
+    }
+
+    /** Returns whether the retained record is the final row of its bounded query. */
+    public function is_current_record_at_query_batch_boundary()
+    {
+        return $this->current_row_ends_query_batch;
     }
 
     /** Returns column names in table order. */
@@ -248,6 +260,7 @@ class DatabaseRowsReader {
      *     @type array|null  $last_pk_values      Encoded primary key values.
      *     @type int         $current_offset      Offset for a table without a primary key.
      *     @type array|null  $current_row         Encoded retained record.
+     *     @type bool        $current_row_ends_query_batch Whether the retained record ends its query batch.
      *     @type array|null  $current_column_names Current column names.
      * }
      */
@@ -259,6 +272,7 @@ class DatabaseRowsReader {
             "last_pk_values" => $this->encode_database_values_for_cursor($this->last_pk_values),
             "current_offset" => $this->current_offset,
             "current_row" => $this->encode_database_values_for_cursor($this->current_row),
+            "current_row_ends_query_batch" => $this->current_row_ends_query_batch,
             "current_column_names" => $this->current_column_names,
         ];
     }
@@ -291,6 +305,13 @@ class DatabaseRowsReader {
         $this->current_row = $this->decode_database_values_from_cursor(
             $cursor_data["current_row"] ?? null
         );
+        $this->current_row_ends_query_batch = $cursor_data["current_row_ends_query_batch"] ?? false;
+        if (!is_bool($this->current_row_ends_query_batch)) {
+            throw new \InvalidArgumentException(
+                "Invalid cursor: current_row_ends_query_batch must be boolean, got " .
+                gettype($this->current_row_ends_query_batch)
+            );
+        }
         $this->current_column_names = $cursor_data["current_column_names"] ?? null;
 
         if ($this->tables_to_process === null) {
@@ -536,6 +557,7 @@ class DatabaseRowsReader {
             $this->current_column_types = $this->get_column_types($this->current_table);
             $this->current_column_names = null;
             $this->current_row = null;
+            $this->current_row_ends_query_batch = false;
         }
         return (bool) $this->current_table;
     }
