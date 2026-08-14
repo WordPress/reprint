@@ -1936,6 +1936,57 @@ class StructuredDataUrlRewriterTest extends TestCase
         ];
     }
 
+    public function testStructuredReplacementUsesTheMatchedSourceBase(): void
+    {
+        $rewriter = $this->createRewriter([
+            'http://first.example/base' => 'https://first-new.example/root',
+            'http://old.example/media' => 'https://new.example/assets',
+        ]);
+        $input = '<a href="http://old.example/m%65dia/a/./b?raw=%2f">Link</a>';
+        $expected = '<a href="https://new.example/assets/a/./b?raw=%2f">Link</a>';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    public function testStructuredMappingCacheDoesNotReuseRenderedUrlSpelling(): void
+    {
+        $rewriter = $this->createRewriter([
+            'http://old.example/media' => 'https://new.example/assets',
+        ]);
+        $input = '<a href="http://old.example/media/a/./b?raw=%2f">Dots</a>'
+            . '<a href="HTTP://OLD.EXAMPLE:80/media/a/b?raw=%2f">No dots</a>';
+        $expected = '<a href="https://new.example/assets/a/./b?raw=%2f">Dots</a>'
+            . '<a href="https://new.example/assets/a/b?raw=%2f">No dots</a>';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    #[DataProvider('ambiguous_structured_source_cases')]
+    public function testAmbiguousStructuredSourceIsNotRewritten(string $url): void
+    {
+        $rewriter = $this->createRewriter([
+            'http://old.example/media' => 'https://new.example/assets',
+        ]);
+        $input = '<a href="' . $url . '">Link</a>';
+
+        $this->assertSame($input, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    /**
+     * @return array<string, array{0:string}>
+     */
+    public static function ambiguous_structured_source_cases(): array
+    {
+        return [
+            'parent segment hides a different lexical base' => [
+                'http://old.example/x/../media/file',
+            ],
+            'encoded slash crosses the mapped boundary' => [
+                'http://old.example/media%2Ffile',
+            ],
+        ];
+    }
+
     public function testBlockMarkupCautiouslyRewritesEncodedSiteOriginInputValue(): void
     {
         $rewriter = $this->createRewriter();
@@ -2001,7 +2052,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $result = $rewriter->rewrite_known_block_markup_value($input);
 
         $this->assertStringContainsString('https://new-site.com/literal', $result);
-        $this->assertStringContainsString('https://new-site.com/case-variant', $result);
+        $this->assertStringContainsString('HTTPS://new-site.com/case-variant', $result);
         $this->assertStringNotContainsString('old-site.com', strtolower($result));
     }
 
@@ -2055,7 +2106,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $result = $rewriter->rewrite_known_block_markup_value($input);
 
         $this->assertStringContainsString('https:\/\/new-site.com\/img.jpg', $result);
-        $this->assertStringContainsString('src="https://new-site.com/img.jpg"', $result);
+        $this->assertStringContainsString('src="HTTPS://new-site.com/img.jpg"', $result);
         $this->assertStringNotContainsString('old-site.com', strtolower($result));
     }
 
@@ -2300,9 +2351,10 @@ class StructuredDataUrlRewriterTest extends TestCase
         $shapes = [
             'absolute'          => ['https://old-site.com/uploads/a.jpg', 'https://new-site.com/uploads/a.jpg'],
             'relative path'     => ['/uploads/b.jpg', '/uploads/b.jpg'],
-            'protocol-relative' => ['//old-site.com/uploads/c.jpg', '/uploads/c.jpg'],
-            'relative no-slash' => ['uploads/d.jpg', '/uploads/d.jpg'],
-            'relative dotted'   => ['../uploads/e.jpg', '/uploads/e.jpg'],
+            'protocol-relative' => ['//old-site.com/uploads/c.jpg', '//new-site.com/uploads/c.jpg'],
+            // Path-relative links resolve against the page, not the site root.
+            'relative no-slash' => ['uploads/d.jpg', 'uploads/d.jpg'],
+            'relative dotted'   => ['../uploads/e.jpg', '../uploads/e.jpg'],
             'query embedded'    => ['/page?ref=https://old-site.com/x', '/page?ref=https://new-site.com/x'],
         ];
 
