@@ -391,6 +391,48 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
         );
     }
 
+    public function testProcessorReplaysAnUncheckpointedUpdateWithoutRewritingItsResult(): void
+    {
+        $database = $this->open_mysql_on_sqlite_database();
+        $statement_rewriter = new \SqlStatementRewriter(
+            new \StructuredDataUrlRewriter([
+                'https://old.example' => 'https://new.example',
+                'https://new.example' => 'https://processed-twice.example',
+            ]),
+            'wp_'
+        );
+        $processor = new \Reprint\Importer\DatabaseUrlRewriteProcessor(
+            $database,
+            $statement_rewriter
+        );
+
+        $processor->next_step();
+        $processor->next_step();
+        $cursor_before_update = $processor->get_cursor();
+
+        $this->assertSame(0, $processor->get_progress()['records_processed']);
+
+        $processor->next_step();
+        $resumed_processor = new \Reprint\Importer\DatabaseUrlRewriteProcessor(
+            $this->open_mysql_on_sqlite_database(),
+            $statement_rewriter,
+            $cursor_before_update
+        );
+        $resumed_processor->next_step();
+
+        $sqlite = new \PDO('sqlite:' . $this->database_path);
+        $this->assertSame(
+            'https://new.example/one',
+            $sqlite->query('SELECT post_content FROM wp_posts WHERE ID = 1')->fetchColumn()
+        );
+        $this->assertSame(
+            1,
+            $sqlite->query('SELECT updates FROM z_rewrite_counts WHERE record_id = 1')->fetchColumn()
+        );
+        $this->assertSame(1, $resumed_processor->get_progress()['records_processed']);
+        $this->assertSame(1, $resumed_processor->get_progress()['records_changed']);
+    }
+
     public function testStateRoundTripsTheLiveRewriteCursorAndCounters(): void
     {
         $state = new DatabaseUrlRewriteCommandState();

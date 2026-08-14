@@ -6,7 +6,7 @@ namespace Reprint\Importer\State;
 /** Durable progress for db-rewrite-urls. */
 class DatabaseUrlRewriteCommandState {
 
-    /** @var string|null MySQLDumpProducer cursor after the last completed step. */
+    /** @var string|null DatabaseUrlRewriteProcessor cursor after the last completed step. */
     public ?string $cursor = null;
 
     /** @var int Database records whose rewrite decision is complete. */

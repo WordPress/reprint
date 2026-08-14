@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace Reprint\Importer;
 
+use PDO;
 use RuntimeException;
 use SqlStatementRewriter;
 use WordPress\DataLiberation\DatabaseRowsReader;
@@ -20,6 +21,7 @@ class DatabaseUrlRewriteProcessor {
 
     private const READER_PHASE_NEXT_TABLE = 'next_table';
     private const READER_PHASE_NEXT_RECORD = 'next_record';
+    private const READER_PHASE_PROCESS_RECORD = 'process_record';
 
     /** Native PDO connection used for bound updates. */
     private $update_database;
@@ -63,6 +65,7 @@ class DatabaseUrlRewriteProcessor {
             if (!in_array($this->reader_phase, [
                 self::READER_PHASE_NEXT_TABLE,
                 self::READER_PHASE_NEXT_RECORD,
+                self::READER_PHASE_PROCESS_RECORD,
             ], true)) {
                 throw new RuntimeException(
                     'The saved db-rewrite-urls reader phase is invalid. Use --abort.'
@@ -109,13 +112,25 @@ class DatabaseUrlRewriteProcessor {
             return true;
         }
 
-        if ($this->row_reader->next_record()) {
+        if ($this->reader_phase === self::READER_PHASE_PROCESS_RECORD) {
+            $record = $this->row_reader->get_current_record();
+            if (!is_array($record)) {
+                throw new RuntimeException(
+                    'The saved db-rewrite-urls record is missing. Use --abort.'
+                );
+            }
             $this->rewrite_record(
                 $this->row_reader->get_current_table(),
-                $this->row_reader->get_current_record(),
+                $record,
                 $this->row_reader->get_current_primary_key_columns()
             );
             $this->row_reader->clear_current_record();
+            $this->reader_phase = self::READER_PHASE_NEXT_RECORD;
+            return true;
+        }
+
+        if ($this->row_reader->next_record()) {
+            $this->reader_phase = self::READER_PHASE_PROCESS_RECORD;
             return true;
         }
 
@@ -258,11 +273,52 @@ class DatabaseUrlRewriteProcessor {
         if ($statement === false || $statement->execute($params) === false) {
             throw new RuntimeException("Failed to update the selected {$table} record.");
         }
-        if ($statement->rowCount() !== 1) {
-            throw new RuntimeException(
-                "The selected {$table} record changed before its URLs could be rewritten. Run the command again."
+        if ($statement->rowCount() === 1) {
+            return;
+        }
+
+        $select_parts = [];
+        $params = [];
+        foreach ($changes as $column => $rewritten_value) {
+            $quoted_column = $this->quote_identifier($column);
+            $select_parts[] = "HEX({$quoted_column}) = ? AS {$quoted_column}";
+            $params[] = strtoupper( bin2hex( $rewritten_value ) );
+        }
+        $where_parts = [];
+        foreach ($primary_key_columns as $column) {
+            $this->add_primary_key_condition(
+                $where_parts,
+                $params,
+                $column,
+                $record[$column]
             );
         }
+        $sql = 'SELECT ' . implode(', ', $select_parts)
+            . " FROM {$this->quote_identifier($table)}"
+            . ' WHERE ' . implode(' AND ', $where_parts);
+        $statement = $this->update_database->prepare($sql);
+        if ($statement === false || $statement->execute($params) === false) {
+            throw new RuntimeException("Failed to verify the selected {$table} record.");
+        }
+        $current_values = $statement->fetch(PDO::FETCH_ASSOC);
+        if (is_array($current_values)) {
+            foreach (array_keys($changes) as $column) {
+                if (
+                    !array_key_exists($column, $current_values)
+                    || (int) $current_values[$column] !== 1
+                ) {
+                    $current_values = false;
+                    break;
+                }
+            }
+        }
+        if ($current_values !== false) {
+            return;
+        }
+
+        throw new RuntimeException(
+            "The selected {$table} record changed before its URLs could be rewritten. Run the command again."
+        );
     }
 
     /**
