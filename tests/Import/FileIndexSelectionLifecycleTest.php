@@ -111,6 +111,7 @@ final class FileIndexSelectionLifecycleTest extends TestCase
                     'current_stage' => 'index',
                     'remote_cursor' => null,
                 ],
+                'files_pull_intent' => 'catch-up',
                 'include_caches' => true,
                 'extra_directory' => $this->extraDirectory,
             ]
@@ -145,6 +146,7 @@ final class FileIndexSelectionLifecycleTest extends TestCase
         $options = [
             'command' => 'pull-files',
             'fs_root_nonempty_behavior' => 'preserve-local',
+            'intent' => 'catch-up',
             'progress' => 'jsonl',
         ];
         if ($includeCaches !== null) {

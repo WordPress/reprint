@@ -480,11 +480,14 @@ final class FilesPullDiffCheckpointTest extends TestCase
 
     private function newClient(): DiffCheckpointTestClient
     {
-        return new DiffCheckpointTestClient(
+        $client = new DiffCheckpointTestClient(
             $this->remoteReprintApiUrl,
             $this->stateDirectory,
             $this->filesystemRoot
         );
+        ( new \ReflectionProperty(\ImportClient::class, 'files_pull_intent') )
+            ->setValue($client, 'catch-up');
+        return $client;
     }
 
     /** Creates a client whose next files-pull operation starts at diff. */
@@ -515,6 +518,7 @@ final class FilesPullDiffCheckpointTest extends TestCase
             'remote_protocol_version' => PULL_PROTOCOL_VERSION,
             'follow_symlinks' => false,
             'fs_root_nonempty_behavior' => 'preserve-local',
+            'files_pull_intent' => 'catch-up',
             'files_pull_path_selection_fingerprint' => hash(
                 'sha256',
                 json_encode([

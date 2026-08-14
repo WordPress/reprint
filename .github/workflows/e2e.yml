@@ -214,7 +214,7 @@ jobs:
           while { [ "$files_pull_status" -eq 2 ] || [ "$files_pull_status" -eq 124 ]; } \
                 && [ "$files_pull_attempt" -lt "$files_pull_max_attempts" ]; do
             files_pull_attempt=$((files_pull_attempt + 1))
-            files_pull_output="$(timeout 60 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" && files_pull_status=0 || files_pull_status=$?
+            files_pull_output="$(timeout 60 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" --intent=catch-up 2>&1)" && files_pull_status=0 || files_pull_status=$?
             echo "$files_pull_output" | head -50
             files_pull_count="$(find "$FS_ROOT" -type f 2>/dev/null | wc -l | tr -d ' ')"
             if [ "$files_pull_status" -eq 2 ]; then

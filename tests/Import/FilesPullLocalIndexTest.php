@@ -778,6 +778,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->targetUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->rawFileRoot,
+            '--intent=catch-up',
         ]);
         $readyPath = $this->root . '/remote-overrides.json.pause-ready';
         $walPath = $this->pullStateDirectory . '/index.wal';
@@ -851,6 +852,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->targetUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->rawFileRoot,
+            '--intent=catch-up',
         ], $extraArguments));
     }
 

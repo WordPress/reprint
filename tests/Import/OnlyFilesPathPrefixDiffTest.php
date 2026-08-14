@@ -153,6 +153,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             "follow_symlinks" => false,
             "include_caches" => false,
             "fs_root_nonempty_behavior" => "preserve-local",
+            "files_pull_intent" => "catch-up",
             "files_pull_path_selection_fingerprint" => $selectionFingerprint,
             "files_pull_ownership" => [
                 "committed_snapshot_ids_by_selection_fingerprint" => [],
@@ -171,6 +172,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $r->getProperty('state')->setValue($client, $r->getMethod('load_state')->invoke($client));
         $r->getProperty('is_tty')->setValue($client, false);
         $r->getProperty('fs_root_nonempty_behavior')->setValue($client, 'preserve-local');
+        $r->getProperty('files_pull_intent')->setValue($client, 'catch-up');
         $r->getProperty('pull_only_files_with_path_prefixes')->setValue($client, $pull_only_files_with_path_prefixes);
         $r->getProperty('pull_excluded_files_with_path_prefixes')->setValue($client, $pull_excluded_files_with_path_prefixes);
         return [$client, $r];

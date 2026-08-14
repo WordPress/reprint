@@ -232,6 +232,21 @@ It can be interrupted and resumed at any time — just re-run the same command:
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
+File pulls default to `--intent=mirror`. Mirror makes the selected local tree
+match the selected remote tree, including removing selected local paths which
+are absent remotely. Paths outside the selected scope, including excluded
+paths, remain untouched. Use `--intent=catch-up` when the command should apply
+remote content without removing unrelated local content:
+
+```bash
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+    --intent=catch-up
+```
+
+An interrupted pull resumes its saved intent when `--intent` is omitted. The
+intent remains part of the retained files-pull state after completion; run
+with `--abort` before starting a pull with a different intent.
+
 The command returns one of three exit codes:
 
 - 0: sync completed
@@ -246,7 +261,7 @@ By default, `files-pull` refuses to start if `--fs-root` is non-empty. If you ne
 the `--on-fs-root-nonempty` flag controls this behavior. It takes the following values:
 
 - `--on-fs-root-nonempty=error` (default): throw an error and abort.
-- `--on-fs-root-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
+- `--on-fs-root-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content. This requires `--intent=catch-up`.
 
 **Filtering files**
 

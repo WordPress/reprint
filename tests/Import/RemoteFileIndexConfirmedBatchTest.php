@@ -316,6 +316,10 @@ final class RemoteFileIndexConfirmedBatchTest extends TestCase
         ]);
         $reflection = new \ReflectionClass(\ImportClient::class);
         $reflection->getProperty('follow_symlinks')->setValue($client, true);
+        $reflection->getProperty('files_pull_intent')->setValue(
+            $client,
+            'catch-up'
+        );
 
         $client->run_files_pull();
         $this->assertSame(

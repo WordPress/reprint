@@ -169,6 +169,13 @@ class FilesPullStateTest extends TestCase
 
         $behaviorProp = $reflection->getProperty('fs_root_nonempty_behavior');
         $behaviorProp->setValue($client, 'preserve-local');
+        $savedIntent = $client->get_state()->files_pull_intent;
+        if (is_string($savedIntent)) {
+            $reflection->getProperty('files_pull_intent')->setValue(
+                $client,
+                $savedIntent
+            );
+        }
 
         return [$client, $reflection];
     }
@@ -250,6 +257,10 @@ class FilesPullStateTest extends TestCase
 
         // Step 2: new client, try run_files_pull
         [$client2, $reflection2] = $this->prepareClient();
+        $reflection2->getProperty('files_pull_intent')->setValue(
+            $client2,
+            'catch-up'
+        );
 
         try {
             $reflection2->getMethod('run_files_pull')->invoke($client2);
@@ -456,6 +467,7 @@ class FilesPullStateTest extends TestCase
         ], JSON_UNESCAPED_SLASHES));
         $snapshotId = str_repeat('a', 64);
         $this->writeState([
+            'files_pull_intent' => 'catch-up',
             'active_resumable_command' => [
                 'command_name' => 'files-pull',
                 'completion_state' => 'in_progress',
@@ -519,6 +531,7 @@ class FilesPullStateTest extends TestCase
         file_put_contents($localFile, 'old content');
 
         $this->writeState([
+            "files_pull_intent" => "catch-up",
             "active_resumable_command" => [
                 "command_name" => "files-pull",
                 "completion_state" => "in_progress",
@@ -559,6 +572,7 @@ class FilesPullStateTest extends TestCase
         file_put_contents($localFile, 'local drop-in');
 
         $this->writeState([
+            "files_pull_intent" => "catch-up",
             "active_resumable_command" => [
                 "command_name" => "files-pull",
                 "completion_state" => "in_progress",

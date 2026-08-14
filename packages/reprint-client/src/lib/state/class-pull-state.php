@@ -65,6 +65,10 @@ class PullState
     public ?string $resolved_path_mappings_fingerprint = null;
     /** @var string|null Files-pull path-selection fingerprint; guards resume. */
     public ?string $files_pull_path_selection_fingerprint = null;
+    /** @var string|null Active or last completed files-pull intent: mirror or catch-up. */
+    public ?string $files_pull_intent = null;
+    /** @var array|null Opaque cursor for the processor owned by the current files-pull stage. */
+    public ?array $files_pull_processor_cursor = null;
     public FilesPullOwnershipState $files_pull_ownership;
     public FilesPullSummaryState $files_pull_summary;
     public DatabaseTableIndexState $db_index;
@@ -144,6 +148,47 @@ class PullState
         $state->max_allowed_packet = $data['max_allowed_packet'];
         $state->resolved_path_mappings_fingerprint = $data['resolved_path_mappings_fingerprint'];
         $state->files_pull_path_selection_fingerprint = $data['files_pull_path_selection_fingerprint'];
+        if (
+            $data['files_pull_intent'] !== null
+            && !in_array($data['files_pull_intent'], ['mirror', 'catch-up'], true)
+        ) {
+            throw new UnexpectedValueException(
+                'PullState files_pull_intent must be mirror, catch-up, or null.'
+            );
+        }
+        if (
+            $data['files_pull_processor_cursor'] !== null
+            && !is_array($data['files_pull_processor_cursor'])
+        ) {
+            throw new UnexpectedValueException(
+                'PullState files_pull_processor_cursor must be an array or null.'
+            );
+        }
+        $state->files_pull_intent = $data['files_pull_intent'];
+        $state->files_pull_processor_cursor = $data['files_pull_processor_cursor'];
+        if (
+            $state->files_pull_processor_cursor !== null
+            && (
+                $state->files_pull_intent !== 'mirror'
+                || $state->active_resumable_command->command_name !== 'files-pull'
+                || $state->active_resumable_command->completion_state === null
+                || $state->active_resumable_command->completion_state === 'complete'
+                || !in_array(
+                    $state->active_resumable_command->current_stage,
+                    [
+                        'local_scope',
+                        'patch_result',
+                        'cleanup',
+                        'next_local_index',
+                    ],
+                    true
+                )
+            )
+        ) {
+            throw new UnexpectedValueException(
+                'PullState files_pull_processor_cursor requires an active mirror processor stage.'
+            );
+        }
         $state->files_pull_ownership = FilesPullOwnershipState::from_array(
             $data['files_pull_ownership']
         );
@@ -253,6 +298,8 @@ class PullState
             'max_allowed_packet' => $this->max_allowed_packet,
             'resolved_path_mappings_fingerprint' => $this->resolved_path_mappings_fingerprint,
             'files_pull_path_selection_fingerprint' => $this->files_pull_path_selection_fingerprint,
+            'files_pull_intent' => $this->files_pull_intent,
+            'files_pull_processor_cursor' => $this->files_pull_processor_cursor,
             'files_pull_ownership' => $this->files_pull_ownership->to_array(),
             'files_pull_summary' => $this->files_pull_summary->to_array(),
             'db_index' => $this->db_index->to_array(),

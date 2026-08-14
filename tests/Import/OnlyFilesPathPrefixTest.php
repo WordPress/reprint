@@ -131,6 +131,7 @@ class OnlyFilesPathPrefixTest extends TestCase
             'remote_protocol_version' => PULL_PROTOCOL_VERSION,
             'follow_symlinks' => false,
             'fs_root_nonempty_behavior' => 'preserve-local',
+            'files_pull_intent' => 'catch-up',
             'filter' => 'none',
         );
 

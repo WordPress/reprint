@@ -71,6 +71,7 @@ final class FileIndexProtocolVersionTest extends TestCase
         $result = $this->runCli([
             'pull-files',
             '--on-fs-root-nonempty=preserve-local',
+            '--intent=catch-up',
         ]);
 
         $this->assertSame(1, $result['exit'], $result['output']);
@@ -94,6 +95,7 @@ final class FileIndexProtocolVersionTest extends TestCase
         $result = $this->runCli([
             'pull-files',
             '--on-fs-root-nonempty=preserve-local',
+            '--intent=catch-up',
         ]);
 
         $this->assertStringNotContainsString(

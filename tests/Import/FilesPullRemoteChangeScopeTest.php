@@ -135,6 +135,156 @@ final class FilesPullRemoteChangeScopeTest extends TestCase {
         $this->assertSame([$linkPath], $this->fetchListPaths());
     }
 
+    public function testMirrorSchedulesAnUnchangedSelectedRemoteEntry(): void
+    {
+        $path = '/site/unchanged.txt';
+        $this->writeIndexes([[$path, 'file']], [[$path, 'file']]);
+
+        $client = $this->clientAtDiffStage(
+            [['kind' => 'root', 'path' => '/site']],
+            [],
+            [],
+            [],
+            false,
+            false,
+            'mirror'
+        );
+        $this->runDiffAndApplyJournal($client);
+
+        $this->assertSame([$path], $this->fetchListPaths());
+    }
+
+    public function testMirrorDoesNotFetchCurrentEntryThroughProtectedLocalAlias(): void
+    {
+        $path = '/current/file.txt';
+        $canonicalFilesystemRoot = realpath($this->filesystemRoot);
+        $this->assertIsString($canonicalFilesystemRoot);
+        $this->writeIndexes([[$path, 'file']], [[$path, 'file']]);
+
+        $client = $this->clientAtDiffStage(
+            [['kind' => 'root', 'path' => '/current']],
+            [],
+            [[['kind' => 'root', 'path' => '/protected']]],
+            [],
+            false,
+            false,
+            'mirror',
+            [
+                '/current' => $canonicalFilesystemRoot . '/shared',
+                '/protected' => $canonicalFilesystemRoot . '/shared',
+            ],
+            ['/current', '/protected']
+        );
+        $this->runDiffAndApplyJournal($client);
+
+        $this->assertSame([], $this->fetchListPaths());
+    }
+
+    public function testMirrorDoesNotDeleteCurrentEntryThroughProtectedLocalAlias(): void
+    {
+        $path = '/current/file.txt';
+        $canonicalFilesystemRoot = realpath($this->filesystemRoot);
+        $this->assertIsString($canonicalFilesystemRoot);
+        $this->writeIndexes([[$path, 'file']]);
+        $localPath = $this->filesystemRoot . '/shared/file.txt';
+        mkdir(dirname($localPath), 0700, true);
+        file_put_contents($localPath, 'x');
+
+        $client = $this->clientAtDiffStage(
+            [['kind' => 'root', 'path' => '/current']],
+            [],
+            [[['kind' => 'root', 'path' => '/protected']]],
+            [],
+            false,
+            false,
+            'mirror',
+            [
+                '/current' => $canonicalFilesystemRoot . '/shared',
+                '/protected' => $canonicalFilesystemRoot . '/shared',
+            ],
+            ['/current', '/protected']
+        );
+        $this->runDiffAndApplyJournal($client);
+
+        $this->assertFileExists($localPath);
+        $this->assertSame([], $this->retainedRemoteIndexPaths());
+    }
+
+    public function testMirrorRecreatesOnlyLocallyAuthorizedIntermediateAlias(): void
+    {
+        $canonicalFilesystemRoot = realpath($this->filesystemRoot);
+        $this->assertIsString($canonicalFilesystemRoot);
+        $this->writeIndexes([]);
+        $client = $this->clientAtDiffStage(
+            [
+                ['kind' => 'exact', 'path' => '/current/blocked'],
+                ['kind' => 'exact', 'path' => '/allowed/link'],
+            ],
+            [],
+            [[['kind' => 'root', 'path' => '/protected']]],
+            [],
+            false,
+            false,
+            'mirror',
+            [
+                '/current' => $canonicalFilesystemRoot . '/shared',
+                '/protected' => $canonicalFilesystemRoot . '/shared',
+                '/allowed' => $canonicalFilesystemRoot . '/allowed',
+            ],
+            ['/current', '/protected', '/allowed']
+        );
+        file_put_contents(
+            $this->pullStateDirectory . '/remote-index.next.jsonl',
+            implode("\n", [
+                json_encode([
+                    'path' => base64_encode('/allowed/link'),
+                    'ctime' => 1,
+                    'size' => 6,
+                    'type' => 'link',
+                    'target' => base64_encode('target'),
+                    'intermediate' => true,
+                ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+                json_encode([
+                    'path' => base64_encode('/current/blocked'),
+                    'ctime' => 1,
+                    'size' => 6,
+                    'type' => 'link',
+                    'target' => base64_encode('target'),
+                    'intermediate' => true,
+                ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+            ]) . "\n"
+        );
+
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $scope = $reflection->getMethod(
+            'open_files_pull_local_change_scope'
+        )->invoke($client);
+        try {
+            $reflection->getMethod('recreate_intermediate_symlinks')->invoke(
+                $client,
+                $scope
+            );
+        } finally {
+            $scope->close();
+        }
+
+        $this->assertTrue(is_link($this->filesystemRoot . '/allowed/link'));
+        $this->assertFalse(is_link($this->filesystemRoot . '/shared/blocked'));
+    }
+
+    public function testCatchUpDoesNotScheduleAnUnchangedRemoteEntry(): void
+    {
+        $path = '/site/unchanged.txt';
+        $this->writeIndexes([[$path, 'file']], [[$path, 'file']]);
+
+        $client = $this->clientAtDiffStage([
+            ['kind' => 'root', 'path' => '/site'],
+        ]);
+        $this->runDiffAndApplyJournal($client);
+
+        $this->assertSame([], $this->fetchListPaths());
+    }
+
     public function testImpliedDirectoryInvalidatesOnlyItsStaleExplicitRow(): void
     {
         $directoryPath = '/site/sparse';
@@ -226,6 +376,8 @@ final class FilesPullRemoteChangeScopeTest extends TestCase {
      * @param list<array{kind:'root'|'exact',path:string}> $priorAtoms
      * @param list<list<array{kind:'root'|'exact',path:string}>> $protectedAtomGroups
      * @param list<string> $excludedRemoteAbsolutePathRoots
+     * @param array<string,string> $resolvedPathMappings
+     * @param list<string> $exportDirectories
      */
     private function clientAtDiffStage(
         array $currentAtoms,
@@ -233,7 +385,10 @@ final class FilesPullRemoteChangeScopeTest extends TestCase {
         array $protectedAtomGroups = [],
         array $excludedRemoteAbsolutePathRoots = [],
         bool $persistedIncludeCaches = false,
-        bool $invocationIncludeCaches = false
+        bool $invocationIncludeCaches = false,
+        string $filesPullIntent = 'catch-up',
+        array $resolvedPathMappings = [],
+        array $exportDirectories = ['/']
     ): \ImportClient {
         $activeSnapshotId = reprint_test_write_ownership_snapshot(
             $this->pullStateDirectory,
@@ -274,14 +429,24 @@ final class FilesPullRemoteChangeScopeTest extends TestCase {
             'preflight' => [
                 'data' => [
                     'ok' => true,
-                    'wp_detect' => ['roots' => [['path' => '/']]],
+                    'wp_detect' => [
+                        'roots' => array_map(
+                            static fn (string $path): array => [
+                                'path' => $path,
+                            ],
+                            $exportDirectories
+                        ),
+                    ],
                 ],
                 'http_code' => 200,
             ],
             'remote_protocol_version' => PULL_PROTOCOL_VERSION,
             'follow_symlinks' => false,
             'include_caches' => $persistedIncludeCaches,
-            'fs_root_nonempty_behavior' => 'preserve-local',
+            'fs_root_nonempty_behavior' => $filesPullIntent === 'mirror'
+                ? 'error'
+                : 'preserve-local',
+            'files_pull_intent' => $filesPullIntent,
             'files_pull_path_selection_fingerprint' =>
                 self::CURRENT_SELECTION,
             'files_pull_ownership' => [
@@ -301,16 +466,57 @@ final class FilesPullRemoteChangeScopeTest extends TestCase {
         $reflection->getProperty('is_tty')->setValue($client, false);
         $reflection->getProperty('fs_root_nonempty_behavior')->setValue(
             $client,
-            'preserve-local'
+            $filesPullIntent === 'mirror' ? 'error' : 'preserve-local'
+        );
+        $reflection->getProperty('files_pull_intent')->setValue(
+            $client,
+            $filesPullIntent
         );
         $reflection->getProperty('include_caches')->setValue(
             $client,
             $invocationIncludeCaches
         );
+        $reflection->getProperty('resolved_path_mappings')->setValue(
+            $client,
+            $resolvedPathMappings
+        );
         $reflection->getProperty(
             'pull_excluded_files_with_path_prefixes'
         )->setValue($client, $excludedRemoteAbsolutePathRoots);
+        if ($filesPullIntent === 'mirror') {
+            $this->writeMirrorLocalChangeScope($client, $reflection);
+        }
         return $client;
+    }
+
+    private function writeMirrorLocalChangeScope(
+        \ImportClient $client,
+        \ReflectionClass $reflection
+    ): void {
+        $remoteScope = $reflection
+            ->getMethod('create_files_pull_remote_change_scope')
+            ->invoke($client);
+        $pathMapper = $reflection
+            ->getMethod('create_files_pull_path_mapper')
+            ->invoke($client);
+        $processor = \FileSyncChangeScopeMappingProcessor::start(
+            $remoteScope,
+            $pathMapper,
+            $this->pullStateDirectory . '/files-pull-mirror/local-scope'
+        );
+        try {
+            $hasNextStep = true;
+            while ($hasNextStep) {
+                $hasNextStep = $processor->next_step();
+            }
+            $config = $processor->get_local_change_scope_config();
+        } finally {
+            $processor->close();
+            $remoteScope->close();
+        }
+        $reflection->getMethod(
+            'write_files_pull_local_change_scope_config'
+        )->invoke($client, $config);
     }
 
     private function runDiffAndApplyJournal(\ImportClient $client): void

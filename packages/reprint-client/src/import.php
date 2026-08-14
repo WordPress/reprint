@@ -87,6 +87,8 @@ require_once __DIR__ . '/lib/sort-index-file.php';
 require_once __DIR__ . '/lib/local-index-update-functions.php';
 require_once __DIR__ . '/lib/index/class-file-index-diff-processor.php';
 require_once __DIR__ . '/lib/index/class-file-sync-change-scope.php';
+require_once __DIR__ . '/lib/index/class-file-sync-cleanup-processor.php';
+require_once __DIR__ . '/lib/index/class-pull-local-index-processor.php';
 require_once __DIR__ . '/lib/index/file-sync-path-functions.php';
 require_once __DIR__ . '/lib/class-reprint-process-lock.php';
 
@@ -111,6 +113,7 @@ require_once __DIR__ . '/lib/pull/class-pull.php';
 // Pull index reader and the WAL for completed files-pull mutations.
 require_once __DIR__ . '/lib/pull/class-remote-index-reader.php';
 require_once __DIR__ . '/lib/pull/class-remote-to-local-path-mapper.php';
+require_once __DIR__ . '/lib/pull/class-file-sync-change-scope-mapping-processor.php';
 require_once __DIR__ . '/lib/pull/class-pull-index-journal.php';
 require_once __DIR__ . '/lib/pull/class-remote-index-traversal-journal.php';
 require_once __DIR__ . '/lib/pull/class-files-pull-ownership-processor.php';
@@ -152,6 +155,22 @@ register_shutdown_function(function () {
 class ImportClient
 {
     private const FILES_PULL_OWNERSHIP_CHECKPOINT_STEPS = 200;
+    public const FILES_PULL_INTENTS = ['mirror', 'catch-up'];
+    private const FILES_PULL_MIRROR_PROCESSOR_STAGES = [
+        'local_scope',
+        'patch_result',
+        'cleanup',
+        'next_local_index',
+    ];
+    private const FILES_PULL_POST_DIFF_STAGES = [
+        'diff',
+        'cleanup',
+        'fetch',
+        'recreate_intermediate_symlinks',
+        'next_local_index',
+        'install_local_index',
+        'commit_ownership',
+    ];
     /** Commands executed by ImportClient. */
     public const COMMANDS = [
         "pull",
@@ -256,6 +275,9 @@ class ImportClient
 
     private $files_pull_ownership_directory;
 
+    /** @var string Processor-owned files for a mirror files-pull lifecycle. */
+    private $files_pull_mirror_work_directory;
+
     /** @var string Path to pull/fetch-list.jsonl — files to download, computed by comparing the next remote index with the remote index. */
     private $fetch_list_file;
 
@@ -349,6 +371,9 @@ class ImportClient
      * Set via --on-fs-root-nonempty, persisted in state so it survives across invocations.
      */
     private $fs_root_nonempty_behavior = 'error';
+
+    /** @var string Files-pull behavior for this invocation: mirror or catch-up. */
+    private $files_pull_intent = 'mirror';
 
     /**
      * Selects a path-filter preset for files-pull.
@@ -506,6 +531,10 @@ class ImportClient
                 "remote-index-traversals.next.jsonl"
             );
         $this->files_pull_ownership_directory = wp_join_unix_paths($this->pull_state_directory, 'files-pull-ownership');
+        $this->files_pull_mirror_work_directory = wp_join_unix_paths(
+            $this->pull_state_directory,
+            'files-pull-mirror'
+        );
         $this->fetch_list_file =
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl");
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
@@ -651,6 +680,78 @@ class ImportClient
             $this->assert_resolved_path_mappings_consistent();
         }
     }
+
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option values are not HTML output.
+
+    /** Rejects a files-pull intent supplied by the CLI or a programmatic caller. */
+    private static function assert_files_pull_intent_value($files_pull_intent): void
+    {
+        if (
+            is_string($files_pull_intent)
+            && in_array($files_pull_intent, self::FILES_PULL_INTENTS, true)
+        ) {
+            return;
+        }
+        $invalid_files_pull_intent = is_string($files_pull_intent)
+            ? $files_pull_intent
+            : gettype($files_pull_intent);
+        throw new InvalidArgumentException(
+            "Invalid --intent value: {$invalid_files_pull_intent}. Valid values: "
+            . implode(', ', self::FILES_PULL_INTENTS)
+        );
+    }
+
+    /** Rejects the one non-empty-root behavior which contradicts mirroring. */
+    private static function assert_files_pull_intent_compatible_with_nonempty_behavior(
+        string $files_pull_intent,
+        string $fs_root_nonempty_behavior
+    ): void {
+        if (
+            $files_pull_intent !== "mirror"
+            || $fs_root_nonempty_behavior !== "preserve-local"
+        ) {
+            return;
+        }
+        throw new InvalidArgumentException(
+            "--intent=mirror cannot be combined with "
+            . "--on-fs-root-nonempty=preserve-local because mirror removes "
+            . "local paths absent from the selected remote tree. Use "
+            . "--intent=catch-up to preserve existing local content."
+        );
+    }
+
+    /** Restores and checks the intent before direct files-pull work begins. */
+    private function assert_files_pull_intent_for_lifecycle(
+        bool $has_progress
+    ): void {
+        if ($has_progress) {
+            $saved_intent = $this->get_state()->files_pull_intent;
+            if (!is_string($saved_intent)) {
+                throw new UnexpectedValueException(
+                    "The active files-pull state has no saved intent. Abort it before starting another files-pull."
+                );
+            }
+            self::assert_files_pull_intent_value($saved_intent);
+            $this->files_pull_intent = $saved_intent;
+        } else {
+            self::assert_files_pull_intent_value($this->files_pull_intent);
+        }
+
+        if (
+            $this->files_pull_intent === "catch-up"
+            && $this->get_state()->files_pull_processor_cursor !== null
+        ) {
+            throw new UnexpectedValueException(
+                "Catch-up files-pull state cannot retain a mirror processor cursor."
+            );
+        }
+        self::assert_files_pull_intent_compatible_with_nonempty_behavior(
+            $this->files_pull_intent,
+            $this->get_state()->fs_root_nonempty_behavior
+        );
+    }
+
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     /**
      * Log the executed command and full argv to the audit log.
@@ -833,6 +934,11 @@ class ImportClient
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
         $this->include_caches = $options["include_caches"] ?? false;
         $this->extra_directory = $options["extra_directory"] ?? null;
+        if (array_key_exists("intent", $options)) {
+            $files_pull_intent = $options["intent"];
+            self::assert_files_pull_intent_value($files_pull_intent);
+            $this->files_pull_intent = $files_pull_intent;
+        }
         if (isset($options["fs_root_nonempty_behavior"])) {
             $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
             if (!in_array($this->fs_root_nonempty_behavior, ['error', 'preserve-local'])) {
@@ -958,6 +1064,7 @@ class ImportClient
                 $active_command->command_name === $file_index_lifecycle_command
                 && $active_command->completion_state !== null
                 && $active_command->completion_state !== "complete";
+            $completed_high_level_file_pull_pipeline = false;
             if (in_array($command, ["pull", "pull-files"], true)) {
                 $pull_pipeline = $this->get_state()->pull_pipeline;
                 $stage_sequence = $pull_pipeline->stage_sequence;
@@ -967,6 +1074,10 @@ class ImportClient
                 $pipeline_is_complete =
                     $last_stage !== null
                     && $pull_pipeline->last_completed_stage === $last_stage;
+                $completed_high_level_file_pull_pipeline =
+                    $pull_pipeline->started_by_command === $command
+                    && $stage_sequence !== []
+                    && $pipeline_is_complete;
                 $is_resuming_file_index_lifecycle =
                     $is_resuming_file_index_lifecycle
                     || (
@@ -974,6 +1085,51 @@ class ImportClient
                         && $stage_sequence !== []
                         && !$pipeline_is_complete
                     );
+            }
+
+            if ($file_index_lifecycle_command === "files-pull") {
+                $intent_was_explicit = array_key_exists("intent", $options);
+                $saved_intent = $this->get_state()->files_pull_intent;
+                $completed_direct_files_pull =
+                    $command === "files-pull"
+                    && $active_command->command_name === "files-pull"
+                    && $active_command->completion_state === "complete";
+                // A completed command keeps its saved intent until abort, so
+                // a no-op or high-level re-pull cannot silently switch modes.
+                if (
+                    (
+                        $is_resuming_file_index_lifecycle
+                        || $completed_direct_files_pull
+                        || $completed_high_level_file_pull_pipeline
+                    )
+                    && !$abort
+                ) {
+                    if (!is_string($saved_intent)) {
+                        throw new UnexpectedValueException(
+                            "The active files-pull state has no saved intent. Abort it before starting another files-pull."
+                        );
+                    }
+                    if (
+                        $intent_was_explicit
+                        && $this->files_pull_intent !== $saved_intent
+                    ) {
+                        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option values are not HTML output.
+                        throw new RuntimeException(
+                            "Cannot change --intent from {$saved_intent} to {$this->files_pull_intent} "
+                            . "while files-pull state is retained. Use the saved intent, or use --abort "
+                                . "before starting another files-pull."
+                        );
+                        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+                    }
+                    $this->files_pull_intent = $saved_intent;
+                } elseif (!$intent_was_explicit) {
+                    $this->files_pull_intent = "mirror";
+                }
+                $options["intent"] = $this->files_pull_intent;
+                if (!$abort) {
+                    $this->get_state()->files_pull_intent =
+                        $this->files_pull_intent;
+                }
             }
 
             if (
@@ -1058,6 +1214,17 @@ class ImportClient
             $this->save_state();
         } else {
             $this->follow_symlinks = $this->get_state()->follow_symlinks;
+        }
+
+        $effective_fs_root_nonempty_behavior =
+            array_key_exists("fs_root_nonempty_behavior", $options)
+                ? $this->fs_root_nonempty_behavior
+                : $this->get_state()->fs_root_nonempty_behavior;
+        if ($file_index_lifecycle_command === "files-pull" && !$abort) {
+            self::assert_files_pull_intent_compatible_with_nonempty_behavior(
+                $this->files_pull_intent,
+                $effective_fs_root_nonempty_behavior
+            );
         }
 
         // Persist fs_root_nonempty_behavior in state so it survives across invocations.
@@ -2447,7 +2614,11 @@ class ImportClient
                 if (is_string($selection_fingerprint)) {
                     $ownership->abort_active_snapshot(
                         $selection_fingerprint,
-                        in_array($current_stage, ['diff', 'fetch'], true),
+                        in_array(
+                            $current_stage,
+                            self::FILES_PULL_POST_DIFF_STAGES,
+                            true
+                        ),
                         $processor_snapshot_id
                     );
                 }
@@ -2478,10 +2649,17 @@ class ImportClient
             @unlink($this->volatile_files_file);
             $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
         }
+        $this->remove_files_pull_mirror_artifacts();
         $this->remove_next_files_pull_ownership_snapshot();
 
         $this->pull_index_journal->apply_pending_records();
         $this->pull_index_journal->remove_empty_wal();
+    }
+
+    /** Removes processor-owned files from a mirror files-pull attempt. */
+    public function remove_files_pull_mirror_artifacts(): void
+    {
+        self::rmdir_recursive($this->files_pull_mirror_work_directory);
     }
 
     /**
@@ -3084,7 +3262,8 @@ class ImportClient
      * - Prior completed files-pull → delta mode (re-index, diff, fetch changes)
      * - In-progress files-pull → resume from saved state
      *
-     * Both modes share the same pipeline: index → ownership → sort → diff → fetch.
+     * Catch-up keeps unrelated local paths. Mirror additionally plans scoped
+     * local cleanup before fetch and verifies the installed local index after.
      */
     public function run_files_pull(): void
     {
@@ -3100,7 +3279,6 @@ class ImportClient
                 "Finish the unfinished files-push before running files-pull."
             );
         }
-        $this->remove_next_files_pull_ownership_snapshot();
         $active_resumable_command =
             $this->get_state()->active_resumable_command;
         $state_command = $active_resumable_command->command_name ?? null;
@@ -3114,6 +3292,11 @@ class ImportClient
             $current_status !== null &&
             $current_status !== "complete";
 
+        if ($current_status !== "complete") {
+            $this->assert_files_pull_intent_for_lifecycle($has_progress);
+        }
+        $this->remove_next_files_pull_ownership_snapshot();
+
         $resuming_diff =
             $has_progress
             && $active_resumable_command->current_stage === "diff";
@@ -3126,6 +3309,7 @@ class ImportClient
         // Already completed.
         if ($current_status === "complete") {
             $this->pull_index_journal->remove_empty_wal();
+            $this->remove_files_pull_mirror_artifacts();
             $remote_index_entry_count = $this->remote_index_entry_count();
             $this->progress->clear_progress_line();
 
@@ -3196,10 +3380,14 @@ class ImportClient
             // A delta sync ($is_delta) naturally has a non-empty filesystem root
             // because we put those files there during the initial sync.
             if (!$is_empty && !$is_delta && $this->fs_root_nonempty_behavior === 'error') {
+                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option guidance is not HTML output.
                 throw new RuntimeException(
                     "Filesystem root is not empty and no cursor found. " .
-                        "Either clear the filesystem root, use --abort flag, or use --on-fs-root-nonempty=preserve-local to sync while preserving the existing content.",
+                        "Either clear the filesystem root, use --abort flag, or combine " .
+                        "--intent=catch-up with --on-fs-root-nonempty=preserve-local " .
+                        "to sync while preserving the existing content.",
                 );
+                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
             }
 
             // The empty WAL blocks files-diff and files-push before the first
@@ -3218,6 +3406,8 @@ class ImportClient
                     $state->extra_directory = $this->extra_directory;
                     $state->files_pull_path_selection_fingerprint =
                         $path_selection_fingerprint;
+                    $state->files_pull_intent = $this->files_pull_intent;
+                    $state->files_pull_processor_cursor = null;
                     $state->diff = new FileDiffProgressState();
                     $state->index = new RemoteFileIndexState();
                     $state->fetch = new FetchListProgressState();
@@ -3267,7 +3457,17 @@ class ImportClient
         $this->save_state();
 
         $stage = $this->get_state()->active_resumable_command->current_stage ?? "index";
-        if ($stage !== "diff") {
+        if (in_array(
+            $stage,
+            [
+                "index",
+                "ownership",
+                "sort",
+                "fetch",
+                "recreate_intermediate_symlinks",
+            ],
+            true
+        )) {
             $this->pull_index_journal->open();
         }
 
@@ -3378,7 +3578,10 @@ class ImportClient
 
         if ($stage === "sort") {
             $this->sort_next_remote_index_file();
-            $this->get_state()->active_resumable_command->current_stage = "diff";
+            $next_stage = $this->files_pull_intent === "mirror"
+                ? "local_scope"
+                : "diff";
+            $this->set_files_pull_stage($next_stage, null);
             $this->get_state()->diff = new FileDiffProgressState();
             $this->pull_index_journal->close();
             if (file_exists($this->fetch_list_file)) {
@@ -3387,8 +3590,25 @@ class ImportClient
                     "FILE DELETE | {$this->fetch_list_file} | clearing before diff stage",
                 );
             }
+            if ($next_stage === "local_scope") {
+                $this->get_state()->active_resumable_command
+                    ->completion_state = "partial";
+            }
             $this->save_state();
-            $stage = "diff";
+            $stage = $next_stage;
+            if ($stage === "local_scope") {
+                return;
+            }
+        }
+
+        if ($stage === "local_scope") {
+            $this->take_files_pull_local_scope_step();
+            return;
+        }
+
+        if ($stage === "patch_result") {
+            $this->take_files_pull_patch_result_step();
+            return;
         }
 
         if ($stage === "diff") {
@@ -3402,10 +3622,12 @@ class ImportClient
             $has_files_to_fetch =
                 file_exists($this->fetch_list_file) &&
                 filesize($this->fetch_list_file) > 0;
-            $stage = "fetch";
-            $this->get_state()->active_resumable_command->current_stage = $stage;
-            // Save the fetch stage before applying the WAL. From this stage,
-            // startup applies any pending WAL before it resumes the fetch list.
+            $stage = $this->files_pull_intent === "mirror"
+                ? "cleanup"
+                : "fetch";
+            $this->set_files_pull_stage($stage, null);
+            // Save the post-diff stage before applying the WAL. From this
+            // stage, startup applies any pending WAL before local work resumes.
             $this->save_state();
             $this->pull_index_journal->apply_pending_records();
 
@@ -3432,6 +3654,18 @@ class ImportClient
                     "FILE DELETE | {$this->fetch_list_file} | no files to fetch",
                 );
             }
+
+            if ($this->files_pull_intent === "mirror") {
+                $this->get_state()->active_resumable_command
+                    ->completion_state = "partial";
+                $this->save_state();
+                return;
+            }
+        }
+
+        if ($stage === "cleanup") {
+            $this->take_files_pull_cleanup_step();
+            return;
         }
 
         if ($stage === "fetch") {
@@ -3450,25 +3684,75 @@ class ImportClient
                 );
             }
 
+            if ($this->files_pull_intent === "mirror") {
+                $this->set_files_pull_stage(
+                    "recreate_intermediate_symlinks",
+                    null
+                );
+                $this->get_state()->active_resumable_command
+                    ->completion_state = "partial";
+                $this->save_state();
+                return;
+            }
         }
 
         // Recreate intermediate path symlinks so the full symlink chain
         // works locally.  The server discovers these (e.g. /srv/wordpress
         // -> /wordpress) and includes them in the next remote index.
-        if ($this->follow_symlinks) {
-            $file_sync_change_scope =
-                $this->create_files_pull_remote_change_scope();
-            try {
-                $this->recreate_intermediate_symlinks(
-                    $file_sync_change_scope
-                );
-            } finally {
-                $file_sync_change_scope->close();
+        if (
+            $stage === "fetch"
+            || $stage === "recreate_intermediate_symlinks"
+        ) {
+            if ($this->follow_symlinks) {
+                $file_sync_change_scope =
+                    $this->files_pull_intent === "mirror"
+                        ? $this->open_files_pull_local_change_scope()
+                        : $this->create_files_pull_remote_change_scope();
+                try {
+                    $this->recreate_intermediate_symlinks(
+                        $file_sync_change_scope
+                    );
+                } finally {
+                    $file_sync_change_scope->close();
+                }
             }
+            $this->pull_index_journal->apply_pending_records();
         }
-        $this->pull_index_journal->apply_pending_records();
 
-        $this->ensure_local_index_exists();
+        if (
+            $stage === "recreate_intermediate_symlinks"
+            && $this->files_pull_intent === "mirror"
+        ) {
+            $this->set_files_pull_stage("next_local_index", null);
+            $this->get_state()->active_resumable_command
+                ->completion_state = "partial";
+            $this->save_state();
+            return;
+        }
+
+        if ($stage === "next_local_index") {
+            $this->take_files_pull_next_local_index_step();
+            return;
+        }
+
+        if ($stage === "install_local_index") {
+            $this->install_files_pull_mirror_local_index();
+            $this->set_files_pull_stage("commit_ownership", null);
+            $this->get_state()->active_resumable_command
+                ->completion_state = "partial";
+            $this->save_state();
+            return;
+        }
+
+        if ($this->files_pull_intent === "catch-up") {
+            $this->ensure_local_index_exists();
+        } elseif ($stage !== "commit_ownership") {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Durable stage names are CLI values, never HTML output.
+            throw new UnexpectedValueException(
+                "Mirror files-pull reached an invalid completion stage: {$stage}."
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
         $selection_fingerprint = $this->get_state()->files_pull_path_selection_fingerprint;
         if (!is_string($selection_fingerprint)) {
             throw new RuntimeException('Completed files-pull has no path-selection fingerprint.');
@@ -3477,11 +3761,12 @@ class ImportClient
             function () use ($selection_fingerprint): void {
                 $this->get_state()->files_pull_ownership->commit_active_snapshot($selection_fingerprint);
                 $this->get_state()->active_resumable_command->completion_state = "complete";
-                $this->get_state()->active_resumable_command->current_stage = null;
+                $this->set_files_pull_stage(null, null);
             },
             [$this, 'save_state']
         );
         $this->pull_index_journal->remove_empty_wal();
+        $this->remove_files_pull_mirror_artifacts();
 
         $this->progress->clear_progress_line();
         $remote_index_entry_count = $this->remote_index_entry_count();
@@ -3997,6 +4282,10 @@ class ImportClient
         if (!$next_remote_index_file_handle) {
             return;
         }
+        $scope_uses_local_coordinates =
+            $file_sync_change_scope->get_config()[
+                'index_path_coordinates'
+            ] === 'local_relative';
 
         $created = 0;
         while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
@@ -4036,25 +4325,42 @@ class ImportClient
                 continue;
             }
 
-            if (
-                !$file_sync_change_scope->index_entry_may_change(
-                    $remote_absolute_path,
-                    'link'
-                )
-            ) {
-                continue;
-            }
+            if ($scope_uses_local_coordinates) {
+                $local_relative_path = $file_sync_change_scope
+                    ->map_changeable_remote_index_entry_to_local_index_path(
+                        $remote_absolute_path,
+                        'link'
+                    );
+                if ($local_relative_path === null) {
+                    continue;
+                }
+                $local_absolute_path = $local_relative_path === ""
+                    ? $this->filesystem_root
+                    : wp_join_unix_paths(
+                        $this->filesystem_root,
+                        $local_relative_path
+                    );
+            } else {
+                if (
+                    !$file_sync_change_scope->index_entry_may_change(
+                        $remote_absolute_path,
+                        'link'
+                    )
+                ) {
+                    continue;
+                }
 
-            try {
-                $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
-                    $remote_absolute_path
-                );
-            } catch (RuntimeException $e) {
-                $this->audit_log(
-                    "INTERMEDIATE SYMLINK SKIP: invalid path {$remote_absolute_path}: " . $e->getMessage(),
-                    true,
-                );
-                continue;
+                try {
+                    $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
+                        $remote_absolute_path
+                    );
+                } catch (RuntimeException $e) {
+                    $this->audit_log(
+                        "INTERMEDIATE SYMLINK SKIP: invalid path {$remote_absolute_path}: " . $e->getMessage(),
+                        true,
+                    );
+                    continue;
+                }
             }
 
             $preserve_local_skip_reason =
@@ -7633,23 +7939,25 @@ class ImportClient
         }
 
         $file_diff_progress_state = $this->get_state()->diff;
-        $file_sync_change_scope =
-            $this->create_files_pull_remote_change_scope();
+        $file_sync_change_scope = null;
+        $remote_change_scope = null;
         $index_diff = null;
         $fetch_list_file_handle = null;
         try {
+            $file_sync_change_scope = $this->files_pull_intent === "mirror"
+                ? $this->open_files_pull_local_change_scope()
+                : $this->create_files_pull_remote_change_scope();
+            $remote_change_scope = $this->files_pull_intent === "mirror"
+                ? $this->create_files_pull_remote_change_scope()
+                : null;
             $index_diff = FileIndexDiffProcessor::resume(
                 $this->remote_index_file,
                 $this->next_remote_index_file,
                 $file_diff_progress_state->index_diff_cursor,
                 [RemoteIndexReader::class, "decode_index_line"]
             );
-            $remote_to_local_path_mapper = new RemoteToLocalPathMapper(
-                $this->filesystem_root,
-                $this->get_export_directories(),
-                $this->resolved_path_mappings,
-                $this->local_followed_symlinks_root
-            );
+            $remote_to_local_path_mapper =
+                $this->create_files_pull_path_mapper();
             $fetch_list_file_handle = fopen($this->fetch_list_file, "c+b");
             $fetch_list_file_stat = is_resource($fetch_list_file_handle)
                 ? fstat($fetch_list_file_handle)
@@ -7698,7 +8006,44 @@ class ImportClient
 
                     $remote_absolute_path = $index_diff->get_path();
                     $transition = $index_diff->get_path_transition();
-                    if ($transition === "deleted") {
+                    if (
+                        $transition === "deleted"
+                        && $this->files_pull_intent === "mirror"
+                    ) {
+                        $deleted_path_type =
+                            $index_diff->get_path_type_in_old_index();
+                        if ($remote_change_scope === null) {
+                            throw new LogicException(
+                                "Mirror diff requires its remote change scope."
+                            );
+                        }
+                        $deleted_index_entry_may_change =
+                            $remote_change_scope->index_entry_may_change(
+                                $remote_absolute_path,
+                                $deleted_path_type
+                            );
+                        $empty_directory_is_now_implied_by_a_descendant =
+                            $deleted_path_type === "dir"
+                            && file_sync_result_contains_path_or_descendant(
+                                $remote_absolute_path,
+                                $index_diff
+                                    ->get_preceding_path_in_new_index(),
+                                $index_diff
+                                    ->get_following_path_in_new_index()
+                            );
+                        if (
+                            $deleted_index_entry_may_change
+                            || $empty_directory_is_now_implied_by_a_descendant
+                        ) {
+                            // Cleanup owns the local mutation. The WAL only
+                            // removes the confirmed remote entry before that
+                            // bounded processor starts.
+                            $this->pull_index_journal
+                                ->record_remote_invalidation(
+                                    $remote_absolute_path
+                                );
+                        }
+                    } elseif ($transition === "deleted") {
                         $deleted_path_type =
                             $index_diff->get_path_type_in_old_index();
                         $deleted_path_is_empty_directory =
@@ -7821,10 +8166,24 @@ class ImportClient
                             }
                         }
                     } elseif (
-                        $transition !== "unchanged"
-                        && $file_sync_change_scope->index_entry_may_change(
-                            $remote_absolute_path,
-                            $index_diff->get_path_type_in_new_index()
+                        (
+                            $this->files_pull_intent === "mirror"
+                            || $transition !== "unchanged"
+                        )
+                        && (
+                            $this->files_pull_intent === "mirror"
+                                ? $file_sync_change_scope
+                                    ->map_changeable_remote_index_entry_to_local_index_path(
+                                        $remote_absolute_path,
+                                        $index_diff
+                                            ->get_path_type_in_new_index()
+                                    ) !== null
+                                : $file_sync_change_scope
+                                    ->index_entry_may_change(
+                                        $remote_absolute_path,
+                                        $index_diff
+                                            ->get_path_type_in_new_index()
+                                    )
                         )
                     ) {
                         // Preserve-local protects only paths which no earlier
@@ -7889,7 +8248,12 @@ class ImportClient
             if ($index_diff !== null) {
                 $index_diff->close();
             }
-            $file_sync_change_scope->close();
+            if ($file_sync_change_scope !== null) {
+                $file_sync_change_scope->close();
+            }
+            if ($remote_change_scope !== null) {
+                $remote_change_scope->close();
+            }
             if (is_resource($fetch_list_file_handle)) {
                 fclose($fetch_list_file_handle);
             }
@@ -7917,6 +8281,391 @@ class ImportClient
                 $this->get_state()->include_caches
             );
     }
+
+    /** Creates the one remote-to-local mapper used by this files-pull lifecycle. */
+    private function create_files_pull_path_mapper(): RemoteToLocalPathMapper
+    {
+        return new RemoteToLocalPathMapper(
+            $this->filesystem_root,
+            $this->get_export_directories(),
+            $this->resolved_path_mappings,
+            $this->local_followed_symlinks_root
+        );
+    }
+
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI filesystem paths, never HTML output.
+    /** Stores a files-pull stage and the cursor owned by that stage. */
+    private function set_files_pull_stage(
+        ?string $stage,
+        ?array $processor_cursor
+    ): void {
+        if (
+            $processor_cursor !== null
+            && (
+                $this->files_pull_intent !== "mirror"
+                || !in_array(
+                    $stage,
+                    self::FILES_PULL_MIRROR_PROCESSOR_STAGES,
+                    true
+                )
+            )
+        ) {
+            throw new LogicException(
+                "Only an active mirror processor stage may retain the files-pull processor cursor."
+            );
+        }
+        $this->get_state()->active_resumable_command->current_stage = $stage;
+        $this->get_state()->files_pull_processor_cursor =
+            $processor_cursor;
+    }
+
+    /** Takes one durable selected-path materialization step. */
+    private function take_files_pull_local_scope_step(): void
+    {
+        $remote_change_scope =
+            $this->create_files_pull_remote_change_scope();
+        $path_mapper = $this->create_files_pull_path_mapper();
+        $work_directory = $this->files_pull_mirror_stage_work_directory(
+            'local-scope'
+        );
+        $saved_cursor =
+            $this->get_state()->files_pull_processor_cursor;
+        $processor = null;
+        try {
+            $processor = $saved_cursor === null
+                ? FileSyncChangeScopeMappingProcessor::start(
+                    $remote_change_scope,
+                    $path_mapper,
+                    $work_directory
+                )
+                : FileSyncChangeScopeMappingProcessor::resume(
+                    $remote_change_scope,
+                    $path_mapper,
+                    $work_directory,
+                    $saved_cursor
+                );
+            $has_next_step = $processor->next_step();
+            $processor_cursor = $processor->get_cursor();
+            if ($has_next_step) {
+                $this->set_files_pull_stage(
+                    'local_scope',
+                    $processor_cursor
+                );
+            } else {
+                $this->write_files_pull_local_change_scope_config(
+                    $processor->get_local_change_scope_config()
+                );
+                $this->set_files_pull_stage('patch_result', null);
+            }
+        } finally {
+            if ($processor !== null) {
+                $processor->close();
+            }
+            $remote_change_scope->close();
+        }
+        $this->get_state()->active_resumable_command->completion_state =
+            'partial';
+        $this->save_state();
+    }
+
+    /** Takes one patch-result index processor step. */
+    private function take_files_pull_patch_result_step(): void
+    {
+        $saved_cursor =
+            $this->get_state()->files_pull_processor_cursor;
+        $processor = null;
+        $change_scope = null;
+        try {
+            if ($saved_cursor === null) {
+                $change_scope = $this->open_files_pull_local_change_scope();
+                $processor = PullLocalIndexProcessor::start_patch_result(
+                    $this->files_pull_mirror_stage_work_directory(
+                        'patch-result'
+                    ),
+                    $this->next_remote_index_file,
+                    $this->local_index_file,
+                    $change_scope
+                );
+                $change_scope = null;
+            } else {
+                $processor = PullLocalIndexProcessor::resume($saved_cursor);
+            }
+
+            $has_next_step = $processor->next_step();
+            $processor->flush_pending_output();
+            $processor_cursor = $processor->get_cursor();
+            if ($has_next_step) {
+                $this->set_files_pull_stage(
+                    'patch_result',
+                    $processor_cursor
+                );
+            } elseif ($processor->get_status() === 'restart') {
+                $processor->close();
+                $this->restart_files_pull_mirror();
+                return;
+            } elseif ($processor->get_status() === 'complete') {
+                $this->set_files_pull_stage('diff', null);
+                $this->get_state()->diff = new FileDiffProgressState();
+            } else {
+                throw new LogicException(
+                    'Pull local patch-result processor stopped without a terminal status.'
+                );
+            }
+        } finally {
+            if ($processor !== null) {
+                $processor->close();
+            }
+            if ($change_scope !== null) {
+                $change_scope->close();
+            }
+        }
+        $this->get_state()->active_resumable_command->completion_state =
+            'partial';
+        $this->save_state();
+    }
+
+    /** Takes one ownership-scoped local cleanup step. */
+    private function take_files_pull_cleanup_step(): void
+    {
+        $saved_cursor =
+            $this->get_state()->files_pull_processor_cursor;
+        $processor = $saved_cursor === null
+            ? FileSyncCleanupProcessor::start(
+                $this->files_pull_mirror_stage_work_directory('cleanup'),
+                $this->files_pull_patch_result_index_path(),
+                $this->state_dir,
+                $this->read_files_pull_local_change_scope_config()
+            )
+            : FileSyncCleanupProcessor::resume($saved_cursor);
+        try {
+            $has_next_step = $processor->next_step();
+            $processor->flush_pending_output();
+            $processor_cursor = $processor->get_cursor();
+            if ($has_next_step) {
+                $this->set_files_pull_stage('cleanup', $processor_cursor);
+            } elseif ($processor->get_status() === 'restart') {
+                $processor->close();
+                $this->restart_files_pull_mirror();
+                return;
+            } elseif ($processor->get_status() === 'complete') {
+                $this->set_files_pull_stage('fetch', null);
+            } else {
+                throw new LogicException(
+                    'File sync cleanup processor stopped without a terminal status.'
+                );
+            }
+        } finally {
+            $processor->close();
+        }
+        $this->get_state()->active_resumable_command->completion_state =
+            'partial';
+        $this->save_state();
+    }
+
+    /** Takes one next-local-index mapping or verification step. */
+    private function take_files_pull_next_local_index_step(): void
+    {
+        $saved_cursor =
+            $this->get_state()->files_pull_processor_cursor;
+        $processor = null;
+        $change_scope = null;
+        try {
+            if ($saved_cursor === null) {
+                $change_scope = $this->open_files_pull_local_change_scope();
+                $processor = PullLocalIndexProcessor::start_next_local_index(
+                    $this->files_pull_mirror_stage_work_directory(
+                        'next-local-index'
+                    ),
+                    $this->next_remote_index_file,
+                    $this->remote_index_file,
+                    $this->local_index_file,
+                    $change_scope,
+                    $this->state_dir
+                );
+                $change_scope = null;
+            } else {
+                $processor = PullLocalIndexProcessor::resume($saved_cursor);
+            }
+
+            $has_next_step = $processor->next_step();
+            $processor->flush_pending_output();
+            $processor_cursor = $processor->get_cursor();
+            if ($has_next_step) {
+                $this->set_files_pull_stage(
+                    'next_local_index',
+                    $processor_cursor
+                );
+            } elseif ($processor->get_status() === 'restart') {
+                $processor->close();
+                $this->restart_files_pull_mirror();
+                return;
+            } elseif ($processor->get_status() === 'complete') {
+                $this->set_files_pull_stage('install_local_index', null);
+            } else {
+                throw new LogicException(
+                    'Pull local index processor stopped without a terminal status.'
+                );
+            }
+        } finally {
+            if ($processor !== null) {
+                $processor->close();
+            }
+            if ($change_scope !== null) {
+                $change_scope->close();
+            }
+        }
+        $this->get_state()->active_resumable_command->completion_state =
+            'partial';
+        $this->save_state();
+    }
+
+    /** Atomically installs the verified mirror candidate local index. */
+    private function install_files_pull_mirror_local_index(): void
+    {
+        $candidate_index = $this->files_pull_next_local_index_path();
+        if (!is_file($candidate_index)) {
+            throw new RuntimeException(
+                "Verified next local index not found: {$candidate_index}."
+            );
+        }
+        $swap_index = $this->local_index_file . '.mirror.swap';
+        if (!copy($candidate_index, $swap_index)) {
+            throw new RuntimeException(
+                "Failed to copy the verified next local index: {$swap_index}."
+            );
+        }
+        if (!rename($swap_index, $this->local_index_file)) {
+            @unlink($swap_index);
+            throw new RuntimeException(
+                "Failed to install the verified local index: {$this->local_index_file}."
+            );
+        }
+    }
+
+    /** Restarts mirror planning without publishing its candidate ownership. */
+    private function restart_files_pull_mirror(): void
+    {
+        $saved_follow_symlinks = $this->get_state()->follow_symlinks;
+        $saved_include_caches = $this->get_state()->include_caches;
+        $saved_extra_directory = $this->get_state()->extra_directory;
+        $saved_filter = $this->get_state()->filter;
+        $saved_followed_root_fingerprint =
+            $this->get_state()->local_followed_symlinks_root_fingerprint;
+        $this->clear_files_pull_progress();
+
+        $state = $this->get_state();
+        $state->active_resumable_command->command_name = 'files-pull';
+        $state->active_resumable_command->completion_state = 'partial';
+        $state->active_resumable_command->current_stage = 'index';
+        $state->follow_symlinks = $saved_follow_symlinks;
+        $state->include_caches = $saved_include_caches;
+        $state->extra_directory = $saved_extra_directory;
+        $state->filter = $saved_filter;
+        $state->local_followed_symlinks_root_fingerprint =
+            $saved_followed_root_fingerprint;
+        $state->files_pull_intent = 'mirror';
+        $state->files_pull_processor_cursor = null;
+        $state->files_pull_path_selection_fingerprint =
+            $this->files_pull_path_selection_fingerprint();
+        $this->save_state();
+    }
+
+    /** Opens the completed local-coordinate change scope. */
+    private function open_files_pull_local_change_scope(): FileSyncChangeScope
+    {
+        return FileSyncChangeScope::from_config(
+            $this->read_files_pull_local_change_scope_config()
+        );
+    }
+
+    /** @return array<string,mixed> */
+    private function read_files_pull_local_change_scope_config(): array
+    {
+        $path = $this->files_pull_local_change_scope_config_path();
+        $json = @file_get_contents($path);
+        if (!is_string($json)) {
+            throw new RuntimeException(
+                "Failed to read the files-pull local change scope: {$path}."
+            );
+        }
+        $config = json_decode($json, true);
+        if (!is_array($config)) {
+            throw new UnexpectedValueException(
+                "Files-pull local change scope is not a JSON object: {$path}."
+            );
+        }
+        return $config;
+    }
+
+    /** @param array<string,mixed> $config */
+    private function write_files_pull_local_change_scope_config(
+        array $config
+    ): void {
+        $path = $this->files_pull_local_change_scope_config_path();
+        $temporary_path = $path . '.swap';
+        $json = json_encode(
+            $config,
+            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+        ) . "\n";
+        if (file_put_contents($temporary_path, $json) !== strlen($json)) {
+            throw new RuntimeException(
+                "Failed to write the files-pull local change scope: {$temporary_path}."
+            );
+        }
+        if (!rename($temporary_path, $path)) {
+            @unlink($temporary_path);
+            throw new RuntimeException(
+                "Failed to publish the files-pull local change scope: {$path}."
+            );
+        }
+    }
+
+    private function files_pull_local_change_scope_config_path(): string
+    {
+        $this->files_pull_mirror_stage_work_directory('local-scope');
+        return wp_join_unix_paths(
+            $this->files_pull_mirror_work_directory,
+            'local-change-scope.json'
+        );
+    }
+
+    private function files_pull_patch_result_index_path(): string
+    {
+        return wp_join_unix_paths(
+            $this->files_pull_mirror_stage_work_directory('patch-result'),
+            'pull_patch_result_index.jsonl'
+        );
+    }
+
+    private function files_pull_next_local_index_path(): string
+    {
+        return wp_join_unix_paths(
+            $this->files_pull_mirror_stage_work_directory(
+                'next-local-index'
+            ),
+            'next_local_index.jsonl'
+        );
+    }
+
+    private function files_pull_mirror_stage_work_directory(
+        string $directory_name
+    ): string {
+        $work_directory = wp_join_unix_paths(
+            $this->files_pull_mirror_work_directory,
+            $directory_name
+        );
+        if (
+            !is_dir($work_directory)
+            && !mkdir($work_directory, 0755, true)
+            && !is_dir($work_directory)
+        ) {
+            throw new RuntimeException(
+                "Failed to create files-pull mirror work directory: {$work_directory}."
+            );
+        }
+        return $work_directory;
+    }
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     /**
      * Count newlines in a file using buffered reads.  Much faster than
@@ -9706,12 +10455,9 @@ class ImportClient
     private function map_remote_absolute_path_to_local_absolute_path(
         string $remote_absolute_path
     ): string {
-        return ( new RemoteToLocalPathMapper(
-            $this->filesystem_root,
-            $this->get_export_directories(),
-            $this->resolved_path_mappings,
-            $this->local_followed_symlinks_root
-        ) )->map_path($remote_absolute_path);
+        return $this->create_files_pull_path_mapper()->map_path(
+            $remote_absolute_path
+        );
     }
 
 
@@ -12302,6 +13048,15 @@ if (
         ],
 
         // ── files-pull options ───────────────────────────────────
+        [
+            'name' => 'intent',
+            'type' => 'value',
+            'target' => 'intent',
+            'placeholder' => 'MODE',
+            'valid_values' => ImportClient::FILES_PULL_INTENTS,
+            'help' => 'File pull intent: mirror (default) or catch-up',
+            'commands' => ['pull', 'pull-files', 'files-pull'],
+        ],
         [
             'name' => 'filter',
             'type' => 'value',

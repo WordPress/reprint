@@ -312,7 +312,15 @@ export function runImporter(url, outputDir, command, options = {}) {
         }
     }
 
-    const commandExtraArgs = options.extraArgs || [];
+    const commandExtraArgs = [...(options.extraArgs || [])];
+    if (
+        ['pull', 'pull-files', 'files-pull'].includes(command) &&
+        !commandExtraArgs.some(
+            (argument) => argument === '--intent' || argument.startsWith('--intent=')
+        )
+    ) {
+        commandExtraArgs.push('--intent=catch-up');
+    }
     // Wall-clock budget across all resume attempts. Set high enough to cover several
     // WASM PHP invocations (~12s startup each) plus their actual work.
     const wallTimeout = options.wallTimeout || 240000;

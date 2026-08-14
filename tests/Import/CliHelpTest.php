@@ -28,6 +28,19 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--exclude=SOURCE', $output);
     }
 
+    public function testFilePullCommandsDescribeTheirIntentOption(): void
+    {
+        foreach (array('pull', 'pull-files', 'files-pull') as $command) {
+            $output = $this->runHelp($command);
+            $this->assertStringContainsString('--intent=MODE', $output, $command);
+            $this->assertStringContainsString(
+                'mirror (default) or catch-up',
+                $output,
+                $command
+            );
+        }
+    }
+
     public function testFilesIndexHelpNamesTheNextRemoteIndexFile(): void
     {
         $output = $this->runHelp('files-index');

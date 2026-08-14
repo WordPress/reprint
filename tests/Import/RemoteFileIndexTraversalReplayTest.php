@@ -526,6 +526,7 @@ PHP,
                 $client,
                 [
                     'command' => 'files-pull',
+                    'intent' => 'catch-up',
                     'follow_symlinks' => true,
                     'fs_root_nonempty_behavior' => 'preserve-local',
                 ]
@@ -633,6 +634,116 @@ PHP,
                 . '/files-pull-ownership/snapshots/'
                 . $snapshotId . '.lookup'
         );
+    }
+
+    public function testFilesPullIntentReconcilesOnlySelectedLocalPaths(): void
+    {
+        $selectedRemoteDirectory = $this->siteDir . '/selected';
+        mkdir($selectedRemoteDirectory);
+        $selectedRemoteDirectory = realpath($selectedRemoteDirectory);
+        $canonicalSiteDirectory = realpath($this->siteDir);
+        $this->assertIsString($selectedRemoteDirectory);
+        $this->assertIsString($canonicalSiteDirectory);
+        $remoteFile = $selectedRemoteDirectory . '/remote.txt';
+        file_put_contents($remoteFile, 'remote');
+
+        $selectedLocalDirectory = $this->filesystemRoot
+            . $selectedRemoteDirectory;
+        $localFile = $selectedLocalDirectory . '/remote.txt';
+        $localOnlyFile = $selectedLocalDirectory . '/local-only.txt';
+        $outsideLocalFile = $this->filesystemRoot
+            . $canonicalSiteDirectory . '/outside/local-only.txt';
+
+        $this->writeFilesPullState();
+        $options = [
+            'command' => 'files-pull',
+            'include' => [$selectedRemoteDirectory],
+            'follow_symlinks' => false,
+        ];
+        $this->runFilesPullUntilComplete($options);
+        $this->assertSame('remote', file_get_contents($localFile));
+
+        $this->runClient(
+            $this->newClient(),
+            array_merge($options, ['abort' => true])
+        );
+        file_put_contents($localFile, 'local drift');
+        file_put_contents($localOnlyFile, 'local only');
+        mkdir(dirname($outsideLocalFile), 0755, true);
+        file_put_contents($outsideLocalFile, 'outside');
+
+        $this->runFilesPullUntilComplete($options);
+        $this->assertSame('remote', file_get_contents($localFile));
+        $this->assertFileDoesNotExist($localOnlyFile);
+        $this->assertSame('outside', file_get_contents($outsideLocalFile));
+
+        $this->runClient(
+            $this->newClient(),
+            array_merge($options, ['abort' => true])
+        );
+        file_put_contents($localFile, 'local drift');
+        file_put_contents($localOnlyFile, 'local only');
+
+        $this->runFilesPullUntilComplete(
+            array_merge($options, ['intent' => 'catch-up'])
+        );
+        $this->assertSame('local drift', file_get_contents($localFile));
+        $this->assertSame('local only', file_get_contents($localOnlyFile));
+        $this->assertSame('outside', file_get_contents($outsideLocalFile));
+    }
+
+    private function writeFilesPullState(): void
+    {
+        \write_current_pull_state($this->newClient(), [
+            'preflight' => [
+                'data' => [
+                    'ok' => true,
+                    'runtime' => ['document_root' => $this->siteDir],
+                    'wp_detect' => [
+                        'roots' => [
+                            ['path' => $this->siteDir],
+                            ['path' => $this->extraDir],
+                        ],
+                    ],
+                ],
+                'http_code' => 200,
+            ],
+            'remote_protocol_version' => PULL_PROTOCOL_VERSION,
+            'follow_symlinks' => false,
+            'include_caches' => false,
+            'fs_root_nonempty_behavior' => 'error',
+        ]);
+    }
+
+    /**
+     * Runs direct files-pull invocations through completion.
+     *
+     * @param array $options {
+     *     Files-pull command options.
+     *
+     *     @type string       $command         The files-pull command.
+     *     @type list<string> $include         Selected remote roots.
+     *     @type bool         $follow_symlinks Whether to follow symlinks.
+     *     @type string       $intent          Optional files-pull intent.
+     * }
+     */
+    private function runFilesPullUntilComplete(array $options): void
+    {
+        for ($attempt = 0; $attempt < 1000; ++$attempt) {
+            $this->runClient($this->newClient(), $options);
+            $state = $this->readState();
+            if (
+                $state['active_resumable_command']['completion_state']
+                    === 'complete'
+            ) {
+                return;
+            }
+            $this->assertSame(
+                'partial',
+                $state['active_resumable_command']['completion_state']
+            );
+        }
+        $this->fail('files-pull did not complete after 1000 invocations.');
     }
 
     private function newFilesIndexClient(bool $followSymlinks): \ImportClient

@@ -161,11 +161,15 @@ final class RemoteIndexSortResumeTest extends TestCase
 
     private function runClient(\ImportClient $client, string $command): void
     {
-        $client->run([
+        $options = [
             'command' => $command,
             'follow_symlinks' => false,
             'progress' => 'jsonl',
-        ]);
+        ];
+        if ($command === 'files-pull') {
+            $options['intent'] = 'catch-up';
+        }
+        $client->run($options);
     }
 
     private function writePreflightState(): void

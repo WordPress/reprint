@@ -307,6 +307,7 @@ class PullFilterOptionTest extends TestCase
     public function testPullResumesAfterFilesPullCompletedBeforePipelineStageWasMarked(): void
     {
         $this->writeState([
+            "files_pull_intent" => "mirror",
             "active_resumable_command" => [
                 "command_name" => "files-pull",
                 "completion_state" => "complete",
@@ -338,6 +339,7 @@ class PullFilterOptionTest extends TestCase
     public function testPullResumesSameUnfinishedPipelineWithoutConflict(): void
     {
         $this->writeState([
+            "files_pull_intent" => "mirror",
             "active_resumable_command" => [
                 "command_name" => "files-pull",
                 "completion_state" => "in_progress",
@@ -511,6 +513,7 @@ class PullFilterOptionTest extends TestCase
     public function testPullFilesResumesAfterFilesPullCompletedBeforePipelineStageWasMarked(): void
     {
         $this->writeState([
+            "files_pull_intent" => "mirror",
             "active_resumable_command" => [
                 "command_name" => "files-pull",
                 "completion_state" => "complete",
