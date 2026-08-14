@@ -99,6 +99,22 @@ file_put_contents($log, json_encode(array(
 
 $boundary = 'reprint-test-boundary';
 header('Content-Type: multipart/mixed; boundary=' . $boundary);
+if (($_GET['endpoint'] ?? null) === 'file_index') {
+    $directories = $_GET['directory'] ?? array();
+    $list_directory = $_GET['list_dir'] ?? ($directories[0] ?? '/');
+    $indexed_roots = array_values(array_unique(array_merge(
+        array($list_directory),
+        $directories
+    )));
+    $metadata = json_encode(array(
+        'list_dir' => base64_encode($list_directory),
+        'indexed_roots' => array_map('base64_encode', $indexed_roots),
+    ), JSON_UNESCAPED_SLASHES);
+    echo "--{$boundary}\r\n";
+    echo "X-Chunk-Type: metadata\r\n";
+    echo 'Content-Length: ' . strlen($metadata) . "\r\n\r\n";
+    echo $metadata . "\r\n";
+}
 echo "--{$boundary}\r\n";
 echo "X-Chunk-Type: completion\r\n";
 echo "X-Status: complete\r\n";

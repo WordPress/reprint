@@ -1032,6 +1032,18 @@ $write_part = static function (array $headers, string $body = '') use ($boundary
 };
 
 if ($endpoint === 'file_index') {
+    $list_directory = $_GET['list_dir'] ?? '/var/www/html';
+    $indexed_roots = array_values(array_unique(array_merge(
+        array($list_directory),
+        $selected_directories
+    )));
+    $write_part(
+        array('X-Chunk-Type' => 'metadata'),
+        json_encode(array(
+            'list_dir' => base64_encode($list_directory),
+            'indexed_roots' => array_map('base64_encode', $indexed_roots),
+        ), JSON_UNESCAPED_SLASHES)
+    );
     $write_part(
         array(
             'X-Chunk-Type' => 'index_batch',

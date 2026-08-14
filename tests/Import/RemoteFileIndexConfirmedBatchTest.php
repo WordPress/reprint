@@ -69,7 +69,7 @@ final class RemoteFileIndexConfirmedBatchTest extends TestCase
         parent::tearDown();
     }
 
-    public function testRejectedFollowedTargetIsAbandonedBeforeTheNextQueuedTarget(): void
+    public function testRejectedFollowedTargetStopsBeforeTheNextTarget(): void
     {
         $rejectedTarget = $this->tempDir . '/remote-target-a';
         $indexedTarget = $this->tempDir . '/remote-target-b';
@@ -88,12 +88,20 @@ final class RemoteFileIndexConfirmedBatchTest extends TestCase
         ]);
 
         $client = $this->newFilesIndexClient();
-        $client->run([
-            'command' => 'files-index',
-            'follow_symlinks' => true,
-            'include_caches' => false,
-            'progress' => 'jsonl',
-        ]);
+        try {
+            $client->run([
+                'command' => 'files-index',
+                'follow_symlinks' => true,
+                'include_caches' => false,
+                'progress' => 'jsonl',
+            ]);
+            $this->fail('Expected the rejected followed target to stop the run.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'The requested directory is no longer available.',
+                $exception->getMessage()
+            );
+        }
 
         $startedDirectories = [];
         foreach ($this->fileIndexRequests() as $request) {
@@ -109,21 +117,254 @@ final class RemoteFileIndexConfirmedBatchTest extends TestCase
             [
                 $this->siteDir,
                 $canonicalRejectedTarget,
-                $canonicalIndexedTarget,
             ],
             $startedDirectories
         );
         $this->assertFalse(is_dir($rejectedTarget));
-        $this->assertContains(
+        $this->assertNotContains(
             base64_encode( (string) realpath($indexedFile) ),
             $this->nextRemoteIndexPaths()
         );
         $state = $this->readState();
         $this->assertSame(
-            'complete',
+            'in_progress',
             $state['active_resumable_command']['completion_state']
         );
-        $this->assertNull($state['index']['active_traversal']);
+        $this->assertSame(
+            base64_encode($canonicalRejectedTarget),
+            $state['index']['active_traversal']['list_directory_b64']
+        );
+    }
+
+    public function testInitialRequestFailureEndsTheInvocationAndResumeContinuesProtocolPartial(): void
+    {
+        $largeDirectory = $this->siteDir . '/initial-request-failure';
+        mkdir($largeDirectory);
+        for ($index = 0; $index < 360; ++$index) {
+            file_put_contents(
+                $largeDirectory . '/file-' . str_pad(
+                    (string) $index,
+                    3,
+                    '0',
+                    STR_PAD_LEFT
+                ),
+                'x'
+            );
+        }
+        $this->writeControl([
+            'file_index_batch_size' => 100,
+            'file_index_max_execution_time' => 60,
+            'interrupt_before_file_index_batch' => 2,
+        ]);
+
+        $client = $this->newFilesIndexClient();
+        $client->run([
+            'command' => 'files-index',
+            'follow_symlinks' => true,
+            'include_caches' => false,
+            'progress' => 'jsonl',
+        ]);
+
+        $this->assertCount(
+            1,
+            $this->fileIndexRequests(),
+            'A request failure must end the current invocation before another request.'
+        );
+        $state = $this->readState();
+        $this->assertSame(
+            'partial',
+            $state['active_resumable_command']['completion_state']
+        );
+        $this->assertNotNull($state['index']['cursor']);
+        $this->assertNotNull($state['index']['active_traversal']);
+
+        $this->writeControl([
+            'file_index_batch_size' => 100,
+            'file_index_max_execution_time' => 1,
+            'file_index_batch_delay_microseconds' => 600000,
+        ]);
+        $this->newLoadedClient()->run([
+            'command' => 'files-index',
+            'follow_symlinks' => true,
+            'include_caches' => false,
+            'progress' => 'jsonl',
+        ]);
+
+        $resumedRequests = array_slice($this->fileIndexRequests(), 1);
+        $this->assertGreaterThan(1, count($resumedRequests));
+        foreach ($resumedRequests as $resumedRequest) {
+            $this->assertIsString($resumedRequest['cursor']);
+        }
+        $this->assertSame(
+            'complete',
+            $this->readState()['active_resumable_command']['completion_state']
+        );
+    }
+
+    public function testFollowedRequestFailureEndsTheCurrentFilesIndexInvocation(): void
+    {
+        $followedTarget = $this->tempDir . '/interrupted-followed-target';
+        mkdir($followedTarget);
+        $followedTargetHookDirectory = $followedTarget
+            . '/wp-content/plugins/site-export';
+        mkdir($followedTargetHookDirectory, 0755, true);
+        copy(
+            $this->siteDir . '/wp-content/plugins/site-export/test-hooks.php',
+            $followedTargetHookDirectory . '/test-hooks.php'
+        );
+        for ($index = 0; $index < 240; ++$index) {
+            file_put_contents(
+                $followedTarget . '/file-' . str_pad(
+                    (string) $index,
+                    3,
+                    '0',
+                    STR_PAD_LEFT
+                ),
+                'x'
+            );
+        }
+        $canonicalFollowedTarget = realpath($followedTarget);
+        $this->assertIsString($canonicalFollowedTarget);
+        symlink($followedTarget, $this->siteDir . '/followed-link');
+        $this->writeControl([
+            'file_index_batch_size' => 100,
+            'file_index_max_execution_time' => 60,
+            'interrupt_before_file_index_batch' => 2,
+            'interrupt_file_index_directory' => $canonicalFollowedTarget,
+        ]);
+
+        $client = $this->newFilesIndexClient();
+        $client->run([
+            'command' => 'files-index',
+            'follow_symlinks' => true,
+            'include_caches' => false,
+            'progress' => 'jsonl',
+        ]);
+
+        $requests = $this->fileIndexRequests();
+        $this->assertCount(
+            2,
+            $requests,
+            'A followed-target request failure must end the current invocation.'
+        );
+        $this->assertSame(
+            base64_encode($canonicalFollowedTarget),
+            $requests[1]['list_directory_b64']
+        );
+        $state = $this->readState();
+        $this->assertSame(
+            'partial',
+            $state['active_resumable_command']['completion_state']
+        );
+        $this->assertNotNull($state['index']['cursor']);
+        $this->assertSame(
+            base64_encode($canonicalFollowedTarget),
+            $state['index']['active_traversal']['list_directory_b64']
+        );
+    }
+
+    public function testResumedPartialFilesPullContinuesNormalFollowedTraversalResponses(): void
+    {
+        $followedTarget = $this->tempDir . '/normal-partial-followed-target';
+        $followedTargetHookDirectory = $followedTarget
+            . '/wp-content/plugins/site-export';
+        mkdir($followedTargetHookDirectory, 0755, true);
+        copy(
+            $this->siteDir . '/wp-content/plugins/site-export/test-hooks.php',
+            $followedTargetHookDirectory . '/test-hooks.php'
+        );
+        file_put_contents($followedTarget . '/target.txt', 'target');
+        for ($index = 0; $index < 360; ++$index) {
+            $fileName = '/file-' . str_pad(
+                (string) $index,
+                3,
+                '0',
+                STR_PAD_LEFT
+            );
+            file_put_contents($this->siteDir . $fileName, 'site');
+            file_put_contents($followedTarget . $fileName, 'target');
+        }
+        $canonicalFollowedTarget = realpath($followedTarget);
+        $this->assertIsString($canonicalFollowedTarget);
+        symlink($followedTarget, $this->siteDir . '/followed-link');
+        $this->writeControl([
+            'file_index_batch_size' => 100,
+            'file_index_max_execution_time' => 60,
+            'interrupt_before_file_index_batch' => 2,
+            'interrupt_file_index_directory' => $canonicalFollowedTarget,
+        ]);
+
+        $client = $this->newClient();
+        \write_current_pull_state($client, [
+            'preflight' => [
+                'data' => [
+                    'ok' => true,
+                    'runtime' => ['document_root' => $this->siteDir],
+                    'wp_detect' => [
+                        'roots' => [
+                            ['path' => $this->siteDir],
+                            ['path' => $this->extraDir],
+                        ],
+                    ],
+                ],
+                'http_code' => 200,
+            ],
+            'remote_protocol_version' => PULL_PROTOCOL_VERSION,
+            'follow_symlinks' => true,
+            'include_caches' => false,
+            'fs_root_nonempty_behavior' => 'preserve-local',
+        ]);
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection->getProperty('follow_symlinks')->setValue($client, true);
+
+        $client->run_files_pull();
+        $this->assertSame(
+            'partial',
+            $this->readState()['active_resumable_command']['completion_state']
+        );
+        $stateAfterFailure = $this->readState();
+        $this->assertCount(2, $this->fileIndexRequests());
+        $this->assertSame(
+            'index',
+            $stateAfterFailure['active_resumable_command']['current_stage']
+        );
+        $this->assertSame(
+            base64_encode($canonicalFollowedTarget),
+            $stateAfterFailure['index']['active_traversal']
+                ['list_directory_b64']
+        );
+
+        $this->writeControl([
+            'file_index_batch_size' => 100,
+            'file_index_max_execution_time' => 1,
+            'file_index_batch_delay_microseconds' => 600000,
+            'interrupt_file_index_directory' => $canonicalFollowedTarget,
+        ]);
+        $this->newLoadedClient()->run_files_pull();
+
+        $this->assertSame(
+            'complete',
+            $this->readState()['active_resumable_command']['completion_state']
+        );
+        $followedRequests = array_values(array_filter(
+            $this->fileIndexRequests(),
+            static function (array $request) use (
+                $canonicalFollowedTarget
+            ): bool {
+                return ( $request['list_directory_b64'] ?? null )
+                    === base64_encode($canonicalFollowedTarget)
+                    || (
+                        ( $request['list_directory_b64'] ?? null ) === null
+                        && ( $request['requested_directories_b64'] ?? null )
+                            === [base64_encode($canonicalFollowedTarget)]
+                    );
+            }
+        ));
+        $this->assertGreaterThan(2, count($followedRequests));
+        $this->assertNull($followedRequests[0]['cursor']);
+        foreach (array_slice($followedRequests, 1) as $resumedRequest) {
+            $this->assertIsString($resumedRequest['cursor']);
+        }
     }
 
     public function testDirectoryErrorDiscardsTheRealWireResponseAtTheSavedBoundary(): void
@@ -401,9 +642,20 @@ final class RemoteFileIndexConfirmedBatchTest extends TestCase
 
     private function fetchNextRemoteIndex(\ImportClient $client): bool
     {
-        return ( new \ReflectionClass(\ImportClient::class) )
-            ->getMethod('fetch_next_remote_index')
-            ->invoke($client);
+        $journal = new \RemoteIndexTraversalJournal(
+            $this->pullStateDirectory()
+            . '/remote-index-traversals.next.jsonl'
+        );
+        $journal->open_and_truncate_to_saved_byte_offset(
+            $client->get_state()->index->traversal_journal_byte_offset
+        );
+        try {
+            return ( new \ReflectionClass(\ImportClient::class) )
+                ->getMethod('fetch_next_remote_index_with_journal')
+                ->invoke($client, $journal, null, 0);
+        } finally {
+            $journal->close();
+        }
     }
 
     private function readState(): array
@@ -466,9 +718,25 @@ function test_hook_during_dir_scan($directory, &$entries) {
 }
 
 function test_hook_before_index_batch(&$batch_items, $directory_stack) {
+    $control = json_decode((string) file_get_contents(%s), true);
+    $interrupt_directory = $control['interrupt_file_index_directory'] ?? null;
+    if (is_string($interrupt_directory)) {
+        $matches_interrupt_directory = false;
+        foreach ($directory_stack as $frame) {
+            if (($frame['dir'] ?? null) === $interrupt_directory) {
+                $matches_interrupt_directory = true;
+                break;
+            }
+        }
+        if (!$matches_interrupt_directory) {
+            return;
+        }
+    }
+    if (isset($control['file_index_batch_delay_microseconds'])) {
+        usleep((int) $control['file_index_batch_delay_microseconds']);
+    }
     static $batch_count = 0;
     ++$batch_count;
-    $control = json_decode((string) file_get_contents(%s), true);
     if (
         isset($control['interrupt_before_file_index_batch'])
         && $batch_count === (int) $control['interrupt_before_file_index_batch']
@@ -529,6 +797,12 @@ if (
     && isset($control['file_index_batch_size'])
 ) {
     $_GET['batch_size'] = (string) $control['file_index_batch_size'];
+}
+if (
+    ($_GET['endpoint'] ?? null) === 'file_index'
+    && isset($control['file_index_max_execution_time'])
+) {
+    $_GET['max_execution_time'] = (string) $control['file_index_max_execution_time'];
 }
 if (
     ($_GET['endpoint'] ?? null) === 'file_index'

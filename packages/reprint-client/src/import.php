@@ -113,6 +113,7 @@ require_once __DIR__ . '/lib/pull/class-pull.php';
 require_once __DIR__ . '/lib/pull/class-remote-index-reader.php';
 require_once __DIR__ . '/lib/pull/class-remote-to-local-path-mapper.php';
 require_once __DIR__ . '/lib/pull/class-pull-index-journal.php';
+require_once __DIR__ . '/lib/pull/class-remote-index-traversal-journal.php';
 
 /**
  * The wire-protocol version this importer speaks.
@@ -249,6 +250,9 @@ class ImportClient
      * directory `empty` fields when available.
      */
     private $next_remote_index_file;
+
+    /** @var string Durable traversal boundaries for pull/remote-index.next.jsonl. */
+    private $next_remote_index_traversal_journal_file;
 
     /** @var string Path to pull/fetch-list.jsonl — files to download, computed by comparing the next remote index with the remote index. */
     private $fetch_list_file;
@@ -494,6 +498,11 @@ class ImportClient
             wp_join_unix_paths($this->pull_state_directory, "index.wal");
         $this->next_remote_index_file =
             wp_join_unix_paths($this->pull_state_directory, "remote-index.next.jsonl");
+        $this->next_remote_index_traversal_journal_file =
+            wp_join_unix_paths(
+                $this->pull_state_directory,
+                "remote-index-traversals.next.jsonl"
+            );
         $this->fetch_list_file =
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl");
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
@@ -2339,6 +2348,12 @@ class ImportClient
                     @unlink($this->next_remote_index_file);
                     $this->audit_log("FILE DELETE | {$this->next_remote_index_file}");
                 }
+                if (file_exists($this->next_remote_index_traversal_journal_file)) {
+                    @unlink($this->next_remote_index_traversal_journal_file);
+                    $this->audit_log(
+                        "FILE DELETE | {$this->next_remote_index_traversal_journal_file}"
+                    );
+                }
                 break;
 
             case "db-pull":
@@ -2423,6 +2438,12 @@ class ImportClient
         if (file_exists($this->next_remote_index_file)) {
             @unlink($this->next_remote_index_file);
             $this->audit_log("FILE DELETE | {$this->next_remote_index_file}");
+        }
+        if (file_exists($this->next_remote_index_traversal_journal_file)) {
+            @unlink($this->next_remote_index_traversal_journal_file);
+            $this->audit_log(
+                "FILE DELETE | {$this->next_remote_index_traversal_journal_file}"
+            );
         }
         if (file_exists($this->fetch_list_file)) {
             @unlink($this->fetch_list_file);
@@ -3231,19 +3252,44 @@ class ImportClient
         }
 
         if ($stage === "index") {
-            $complete = $this->fetch_next_remote_index();
-            if (!$complete) {
-                $this->get_state()->active_resumable_command->completion_state = "partial";
-                $this->save_state();
-                return;
-            }
-            if ($this->follow_symlinks) {
-                $this->discover_symlink_targets();
-                if ($this->shutdown_requested) {
-                    $this->get_state()->active_resumable_command->completion_state = "partial";
-                    $this->save_state();
-                    return;
+            $traversal_journal = new RemoteIndexTraversalJournal(
+                $this->next_remote_index_traversal_journal_file
+            );
+            $traversal_journal->open_and_truncate_to_saved_byte_offset(
+                $this->get_state()->index->traversal_journal_byte_offset
+            );
+            try {
+                if (
+                    $this->get_state()->index
+                        ->discovery_next_remote_index_byte_offset === null
+                ) {
+                    $complete = $this->fetch_next_remote_index_with_journal(
+                        $traversal_journal,
+                        null,
+                        0
+                    );
+                    if (!$complete) {
+                        $this->get_state()->active_resumable_command->completion_state = "partial";
+                        $this->save_state();
+                        return;
+                    }
                 }
+                if ($this->follow_symlinks) {
+                    $this->discover_symlink_targets($traversal_journal);
+                    if (
+                        $this->get_state()->active_resumable_command
+                            ->completion_state === "partial"
+                    ) {
+                        return;
+                    }
+                    if ($this->shutdown_requested) {
+                        $this->get_state()->active_resumable_command->completion_state = "partial";
+                        $this->save_state();
+                        return;
+                    }
+                }
+            } finally {
+                $traversal_journal->close();
             }
             // Sorting replaces the index atomically. Save its phase first so
             // interruption after the replacement reruns the idempotent sort
@@ -3447,45 +3493,86 @@ class ImportClient
         }
 
         $this->get_state()->active_resumable_command->command_name = "files-index";
+        $this->get_state()->active_resumable_command->completion_state = "in_progress";
         $this->save_state();
 
         $stage = $this->get_state()->active_resumable_command->current_stage ?? "index";
         if ($stage === "index") {
-            $attempts = 0;
-            $last_cursor = $this->get_state()->index->cursor ?? null;
-            while (true) {
-                $complete = $this->fetch_next_remote_index();
-                if ($complete) {
-                    break;
+            $traversal_journal = new RemoteIndexTraversalJournal(
+                $this->next_remote_index_traversal_journal_file
+            );
+            $traversal_journal->open_and_truncate_to_saved_byte_offset(
+                $this->get_state()->index->traversal_journal_byte_offset
+            );
+            try {
+                if (
+                    $this->get_state()->index
+                        ->discovery_next_remote_index_byte_offset === null
+                ) {
+                    $attempts = 0;
+                    $last_cursor = $this->get_state()->index->cursor ?? null;
+                    while (true) {
+                        $complete = $this->fetch_next_remote_index_with_journal(
+                            $traversal_journal,
+                            null,
+                            0
+                        );
+                        if ($complete) {
+                            break;
+                        }
+
+                        // A request failure ends the current run. A normal
+                        // protocol partial response keeps the lifecycle in
+                        // progress and may continue in this invocation.
+                        if (
+                            $this->get_state()->active_resumable_command
+                                ->completion_state === "partial"
+                        ) {
+                            return;
+                        }
+                        if ($this->shutdown_requested) {
+                            $this->get_state()->active_resumable_command->completion_state = "partial";
+                            $this->save_state();
+                            return;
+                        }
+
+                        $current_cursor = $this->get_state()->index->cursor ?? null;
+                        if ($current_cursor === $last_cursor) {
+                            throw new RuntimeException(
+                                "files-index made no progress (cursor unchanged)",
+                            );
+                        }
+                        $last_cursor = $current_cursor;
+
+                        $attempts++;
+                        if ($attempts > 100000) {
+                            throw new RuntimeException(
+                                "files-index exceeded maximum attempts",
+                            );
+                        }
+                    }
                 }
 
-                if ($this->shutdown_requested) {
-                    $this->get_state()->active_resumable_command->completion_state = "partial";
-                    $this->save_state();
-                    return;
+                // Follow symlinks: discover symlink targets outside known roots and
+                // index them as additional directories. Repeats until no new targets
+                // are found, with cycle detection through durable root markers.
+                if ($this->follow_symlinks) {
+                    $this->discover_symlink_targets($traversal_journal);
+                    if (
+                        $this->get_state()->active_resumable_command
+                            ->completion_state === "partial"
+                    ) {
+                        return;
+                    }
+                    if ($this->shutdown_requested) {
+                        $this->get_state()->active_resumable_command
+                            ->completion_state = "partial";
+                        $this->save_state();
+                        return;
+                    }
                 }
-
-                $current_cursor = $this->get_state()->index->cursor ?? null;
-                if ($current_cursor === $last_cursor) {
-                    throw new RuntimeException(
-                        "files-index made no progress (cursor unchanged)",
-                    );
-                }
-                $last_cursor = $current_cursor;
-
-                $attempts++;
-                if ($attempts > 100000) {
-                    throw new RuntimeException(
-                        "files-index exceeded maximum attempts",
-                    );
-                }
-            }
-
-            // Follow symlinks: discover symlink targets outside known roots and
-            // index them as additional directories.  Repeats until no new targets
-            // are found, with cycle detection via realpath.
-            if ($this->follow_symlinks) {
-                $this->discover_symlink_targets();
+            } finally {
+                $traversal_journal->close();
             }
 
             // Sorting replaces the index atomically. Save its phase first so
@@ -3567,196 +3654,213 @@ class ImportClient
      * Recursively discover directories that need indexing beyond the primary
      * export roots.
      *
-     * Scans the next remote index for symlink entries with a "target" field,
-     * resolves relative targets to absolute paths, and indexes each target
-     * directory. Repeats until the queue is drained, with cycle detection.
+     * Reads the growing next index once. A followed traversal appends entries
+     * behind the retained handle, so nested targets join the same forward pass.
+     * Disk-backed canonical-root markers provide bounded cycle detection.
      */
-    private function discover_symlink_targets(): void
+    private function discover_symlink_targets(
+        RemoteIndexTraversalJournal $traversal_journal
+    ): void
     {
-        // Seed "already covered" from the dirs actually enumerated this run (the
-        // --include prefixes when scoped), not the full preflight roots — otherwise a
-        // narrow --include skips a target under a root but outside its scope.
-        $roots = $this->get_export_directories();
+        $durable_next_remote_index_byte_offset = $this->get_state()->index
+            ->next_remote_index_byte_offset;
+        $discovery_byte_offset = $this->get_state()->index
+            ->discovery_next_remote_index_byte_offset;
+        // Truncate before opening the retained reader. Opening it first may
+        // buffer bytes past the durable boundary while a nested resumed
+        // traversal replaces that tail.
+        $next_remote_index_truncation_handle = fopen(
+            $this->next_remote_index_file,
+            "r+b"
+        );
+        $next_remote_index_stat = is_resource(
+            $next_remote_index_truncation_handle
+        )
+            ? fstat($next_remote_index_truncation_handle)
+            : false;
+        if (
+            !is_resource($next_remote_index_truncation_handle)
+            || !is_int($discovery_byte_offset)
+            || $next_remote_index_stat === false
+            || $discovery_byte_offset
+                > $durable_next_remote_index_byte_offset
+            || $durable_next_remote_index_byte_offset
+                > $next_remote_index_stat["size"]
+            || !ftruncate(
+                $next_remote_index_truncation_handle,
+                $durable_next_remote_index_byte_offset
+            )
+        ) {
+            if (is_resource($next_remote_index_truncation_handle)) {
+                fclose($next_remote_index_truncation_handle);
+            }
+            throw new RuntimeException(
+                "Cannot resume followed-target discovery at its saved byte offset."
+            );
+        }
+        fclose($next_remote_index_truncation_handle);
 
-        // Collect all indexed directory real paths for containment checks
-        $visited = [];
-        foreach ($roots as $root) {
-            $visited[$root] = true;
+        $next_remote_index_file_handle = fopen(
+            $this->next_remote_index_file,
+            "r"
+        );
+        if (
+            !is_resource($next_remote_index_file_handle)
+            || fseek($next_remote_index_file_handle, $discovery_byte_offset) !== 0
+        ) {
+            if (is_resource($next_remote_index_file_handle)) {
+                fclose($next_remote_index_file_handle);
+            }
+            throw new RuntimeException(
+                "Cannot resume followed-target discovery at its saved byte offset."
+            );
         }
 
-        $queue = $this->extract_symlink_directories_from_next_remote_index($visited);
-
-        while (!empty($queue)) {
-            $dir = array_shift($queue);
-            if (isset($visited[$dir])) {
-                continue;
-            }
-            // Skip if this directory is a subdirectory of an already-visited path,
-            // since those files were already included in the parent's index.
-            if (path_is_same_as_or_descendant_of($dir, array_keys($visited))) {
-                $this->audit_log(
-                    "FOLLOW SYMLINK SKIP | {$dir} already covered by a visited parent",
-                    true,
-                );
-                continue;
-            }
-            $visited[$dir] = true;
-
-            $this->audit_log(
-                "FOLLOW SYMLINK | indexing remote directory: {$dir}",
-                true,
-            );
-            $this->progress->show_lifecycle_line("Following symlink target: {$dir}\n");
-            $this->output_progress([
-                "type" => "symlink_follow",
-                "directory" => $dir,
-                "message" => "Following symlink target: {$dir}",
-            ], true);
-
-            // Reset the index cursor so fetch_next_remote_index starts fresh
-            // for this directory, but appends to the existing index file.
-            // Note we are not losing the previous cursor position. This code
-            // runs only after the previous directory was fully indexed so
-            // we won't need any prior cursor information again.
-            $this->get_state()->index->cursor = null;
-            $this->save_state();
-
-            $attempts = 0;
-            $last_cursor = null;
+        try {
+            $bytes_since_discovery_checkpoint = 0;
             while (true) {
-                try {
-                $complete = $this->fetch_next_remote_index($dir);
-                } catch (RuntimeException $e) {
-                    // We won't be able to follow every symlink. If
-                    // the response seems like the remote server rejecting
-                    // our attempt to index this directory, log a warning
-                    // and skip to the next directory instead of crashing.
-                    $msg = $e->getMessage();
-                    if (
-                        strpos($msg, "HTTP error 4") !== false ||
-                        strpos($msg, "dir_outside_root") !== false ||
-                        strpos($msg, "outside of allowed roots") !== false
-                    ) {
-                        $this->audit_log(
-                            "FOLLOW SYMLINK SKIP | server rejected {$dir}: " .
-                                substr($msg, 0, 200),
-                            true,
-                        );
-                        $this->progress->show_lifecycle_line("  Skipped (server rejected): {$dir}\n");
-                        $this->output_progress([
-                            "type" => "symlink_follow_rejected",
-                            "directory" => $dir,
-                            "message" => "Skipped (server rejected): {$dir}",
-                        ], true);
-                        // Deliberately abandon the rejected target's saved
-                        // traversal before trying the next queued target. Keep
-                        // the byte offset confirmed by earlier traversals so
-                        // the next target appends after their durable entries.
-                        reprint_update_and_save_state_without_signal_interruption(
-                            function (): void {
-                                $this->get_state()->index->cursor = null;
-                                $this->get_state()->index->active_traversal = null;
-                            },
-                            [$this, 'save_state']
-                        );
-                        continue 2;
-                    }
-
-                    // Still throw all the other errors.
-                    throw $e;
-                }
-                if ($complete) {
+                $next_remote_index_json_line = fgets(
+                    $next_remote_index_file_handle
+                );
+                if ($next_remote_index_json_line === false) {
                     break;
                 }
-
-                if ($this->shutdown_requested) {
-                    return;
-                }
-
-                $current_cursor = $this->get_state()->index->cursor ?? null;
-                if ($current_cursor === $last_cursor) {
+                $next_entry_byte_offset = ftell(
+                    $next_remote_index_file_handle
+                );
+                if (!is_int($next_entry_byte_offset)) {
                     throw new RuntimeException(
-                        "files-index (symlink follow) made no progress (cursor unchanged)",
+                        "Failed to read the followed-target discovery byte offset."
                     );
                 }
-                $last_cursor = $current_cursor;
-
-                $attempts++;
-                if ($attempts > 10_000) {
-                    // @TODO: Consider a configurable maximum attempts for really large sites that
-                    //        require more than 10,000 requests to index.
-                    throw new RuntimeException(
-                        "files-index (symlink follow) exceeded maximum attempts",
+                $next_remote_index_entry = json_decode(
+                    $next_remote_index_json_line,
+                    true
+                );
+                $dir = null;
+                // Intermediate links describe path components which the pull
+                // recreates locally. Only ordinary link targets start another
+                // remote-index traversal.
+                if (
+                    is_array($next_remote_index_entry)
+                    && ($next_remote_index_entry["type"] ?? "") === "link"
+                    && empty($next_remote_index_entry["intermediate"])
+                ) {
+                    $symlink_target_encoded =
+                        $next_remote_index_entry["target"] ?? null;
+                    if (
+                        is_string($symlink_target_encoded)
+                        && $symlink_target_encoded !== ""
+                    ) {
+                        $dir = RemoteIndexTraversalJournal::decode_canonical_path(
+                            $symlink_target_encoded,
+                            "remote-index symlink target"
+                        );
+                    }
+                }
+                if (
+                    $dir !== null
+                    && !$traversal_journal->covers_canonical_path(
+                        $dir,
+                        $this->get_state()->index
+                            ->traversal_journal_byte_offset
+                    )
+                ) {
+                    $this->audit_log(
+                        "FOLLOW SYMLINK | indexing remote directory: {$dir}",
+                        true,
                     );
+                    $this->progress->show_lifecycle_line("Following symlink target: {$dir}\n");
+                    $this->output_progress([
+                        "type" => "symlink_follow",
+                        "directory" => $dir,
+                        "message" => "Following symlink target: {$dir}",
+                    ], true);
+
+                    $attempts = 0;
+                    $last_cursor = $this->get_state()->index->cursor;
+                    while (true) {
+                        $complete =
+                            $this->fetch_next_remote_index_with_journal(
+                                $traversal_journal,
+                                $dir,
+                                $next_entry_byte_offset
+                            );
+                        if ($complete) {
+                            break;
+                        }
+
+                        // A request failure ends the current run. A normal
+                        // protocol partial response keeps the lifecycle in
+                        // progress and may continue in this invocation.
+                        if (
+                            $this->get_state()->active_resumable_command
+                                ->completion_state === "partial"
+                        ) {
+                            return;
+                        }
+                        if ($this->shutdown_requested) {
+                            return;
+                        }
+
+                        $current_cursor = $this->get_state()->index->cursor;
+                        if ($current_cursor === $last_cursor) {
+                            throw new RuntimeException(
+                                "files-index (symlink follow) made no progress (cursor unchanged)",
+                            );
+                        }
+                        $last_cursor = $current_cursor;
+
+                        $attempts++;
+                        if ($attempts > 10_000) {
+                            // @TODO: Consider a configurable maximum attempts for really large sites that
+                            //        require more than 10,000 requests to index.
+                            throw new RuntimeException(
+                                "files-index (symlink follow) exceeded maximum attempts",
+                            );
+                        }
+                    }
+                    $bytes_since_discovery_checkpoint = 0;
+                    continue;
+                }
+
+                $bytes_since_discovery_checkpoint += strlen(
+                    $next_remote_index_json_line
+                );
+                if ($bytes_since_discovery_checkpoint >= 256 * 1024) {
+                    reprint_update_and_save_state_without_signal_interruption(
+                        function () use ($next_entry_byte_offset): void {
+                            $this->get_state()->index
+                                ->discovery_next_remote_index_byte_offset =
+                                    $next_entry_byte_offset;
+                        },
+                        [$this, 'save_state']
+                    );
+                    $bytes_since_discovery_checkpoint = 0;
+                    if ($this->shutdown_requested) {
+                        return;
+                    }
                 }
             }
-
-            // Scan newly added entries for more symlink targets
-            $new_targets = $this->extract_symlink_directories_from_next_remote_index($visited);
-            foreach ($new_targets as $target) {
-                if (!isset($visited[$target])) {
-                    $queue[] = $target;
-                }
+            $next_entry_byte_offset = ftell($next_remote_index_file_handle);
+            if (
+                is_int($next_entry_byte_offset)
+                && $next_entry_byte_offset
+                    !== $this->get_state()->index
+                        ->discovery_next_remote_index_byte_offset
+            ) {
+                reprint_update_and_save_state_without_signal_interruption(
+                    function () use ($next_entry_byte_offset): void {
+                        $this->get_state()->index
+                            ->discovery_next_remote_index_byte_offset =
+                                $next_entry_byte_offset;
+                    },
+                    [$this, 'save_state']
+                );
             }
+        } finally {
+            fclose($next_remote_index_file_handle);
         }
-    }
-
-    /**
-     * Scan the next remote index file for symlink entries whose targets are
-     * directories not already in $visited.  Returns an array of real paths.
-     *
-     * Skips entries marked as "intermediate" — those are path-component
-     * symlinks (e.g. /srv/wordpress -> /wordpress) emitted by the server's
-     * discover_path_symlinks() for local recreation only, not for indexing.
-     */
-    private function extract_symlink_directories_from_next_remote_index(array $visited): array
-    {
-        $symlink_targets = [];
-        if (!file_exists($this->next_remote_index_file)) {
-            return $symlink_targets;
-        }
-
-        $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
-        if (!$next_remote_index_file_handle) {
-            return $symlink_targets;
-        }
-
-        while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
-            $next_remote_index_entry = json_decode($next_remote_index_json_line, true);
-            if (!is_array($next_remote_index_entry)) {
-                continue;
-            }
-            if (($next_remote_index_entry["type"] ?? "") !== "link") {
-                continue;
-            }
-            if (!empty($next_remote_index_entry["intermediate"])) {
-                continue;
-            }
-            $symlink_target_encoded = $next_remote_index_entry["target"] ?? null;
-            if (!is_string($symlink_target_encoded) || $symlink_target_encoded === "") {
-                continue;
-            }
-            $symlink_target = base64_decode($symlink_target_encoded);
-            if ($symlink_target === false || $symlink_target === "") {
-                continue;
-            }
-
-            // If we've seen this symlink target already, we can move on
-            // to the next one.
-            if (isset($visited[$symlink_target])) {
-                continue;
-            }
-
-            // Check containment: skip if already under a visited root
-            if (path_is_same_as_or_descendant_of($symlink_target, array_keys($visited))) {
-                continue;
-            }
-
-            $symlink_targets[] = $symlink_target;
-        }
-        fclose($next_remote_index_file_handle);
-
-        return array_values(array_unique($symlink_targets));
     }
 
     /**
@@ -6609,7 +6713,7 @@ class ImportClient
         }
 
         $params = $this->get_tuned_params("file_fetch");
-        // Always send directory[] – see comment in fetch_next_remote_index().
+        // Always send directory[] – see comment in fetch_next_remote_index_with_journal().
         $export_dirs = $this->get_export_directories();
         if (!empty($export_dirs)) {
             $params["directory"] = $export_dirs;
@@ -6847,10 +6951,12 @@ class ImportClient
         return $complete;
     }
 
-    /**
-     * Download the next remote index stream and write to disk.
-     */
-    private function fetch_next_remote_index(?string $list_dir_override = null): bool
+    /** Downloads one request while retaining the traversal journal handle. */
+    private function fetch_next_remote_index_with_journal(
+        RemoteIndexTraversalJournal $traversal_journal,
+        ?string $list_dir_override,
+        int $discovery_byte_offset_after_completion
+    ): bool
     {
         $index_state = $this->get_state()->index;
         $traversal = $index_state->active_traversal_request();
@@ -6874,14 +6980,17 @@ class ImportClient
                 $start = $export_dirs[0] ?? $roots[0];
             }
             $request_list_directory = $list_dir_override ?? $start;
+            $requested_directories = $list_dir_override === null
+                ? $export_dirs
+                : [$request_list_directory];
             reprint_update_and_save_state_without_signal_interruption(
                 function () use (
                     $request_list_directory,
-                    $export_dirs
+                    $requested_directories
                 ): void {
                     $this->get_state()->index->start_traversal(
                         $request_list_directory,
-                        $export_dirs,
+                        $requested_directories,
                         $this->follow_symlinks,
                         $this->include_caches
                     );
@@ -6963,6 +7072,8 @@ class ImportClient
         $next_remote_index_is_complete = false;
         $completion_cursor = null;
         $remote_index_error = null;
+        $canonical_list_directory_from_remote = null;
+        $indexed_roots_from_remote = null;
 
         $params = $this->get_tuned_params("file_index");
 
@@ -6997,6 +7108,8 @@ class ImportClient
             &$entries_counted_at_confirmed_boundary,
             &$next_remote_index_is_complete,
             &$remote_index_error,
+            &$canonical_list_directory_from_remote,
+            &$indexed_roots_from_remote,
             $next_remote_index_file_handle,
             $context
         ) {
@@ -7151,6 +7264,31 @@ class ImportClient
             } elseif ($chunk_type === "progress") {
                 $this->handle_progress($chunk, "index");
             } elseif ($chunk_type === "metadata") {
+                $metadata = json_decode($chunk["body"] ?? "", true);
+                if (
+                    !is_array($metadata)
+                    || !isset($metadata["list_dir"])
+                    || !is_string($metadata["list_dir"])
+                    || !isset($metadata["indexed_roots"])
+                    || !is_array($metadata["indexed_roots"])
+                    || array_values($metadata["indexed_roots"])
+                        !== $metadata["indexed_roots"]
+                    || $metadata["indexed_roots"] === []
+                ) {
+                    throw new RuntimeException(
+                        "Remote file index metadata must contain its canonical list directory and indexed roots."
+                    );
+                }
+                $canonical_list_directory_from_remote =
+                    RemoteIndexTraversalJournal::decode_canonical_path(
+                        $metadata["list_dir"],
+                        "list directory"
+                    );
+                $indexed_roots_from_remote =
+                    RemoteIndexTraversalJournal::decode_canonical_paths(
+                        $metadata["indexed_roots"],
+                        "indexed root"
+                    );
                 $this->handle_metadata_chunk($chunk);
             } elseif ($chunk_type === "completion") {
                 $completion_status =
@@ -7261,6 +7399,19 @@ class ImportClient
             );
             // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         }
+        if (
+            $next_remote_index_is_complete
+            && (
+                !is_string($canonical_list_directory_from_remote)
+                || !is_array($indexed_roots_from_remote)
+            )
+        ) {
+            $discard_unconfirmed_response();
+            fclose($next_remote_index_file_handle);
+            throw new RuntimeException(
+                "The completed remote file index response did not report its canonical traversal roots."
+            );
+        }
         if (!$next_remote_index_is_complete && $completion_cursor === null) {
             $discard_unconfirmed_response();
             fclose($next_remote_index_file_handle);
@@ -7290,12 +7441,33 @@ class ImportClient
             $context->response_stats ?? [],
         );
 
+        $traversal_journal_byte_offset =
+            $this->get_state()->index->traversal_journal_byte_offset;
         try {
+            if ($next_remote_index_is_complete) {
+                $active_traversal = $this->get_state()->index
+                    ->active_traversal;
+                if (!is_array($active_traversal)) {
+                    throw new LogicException(
+                        "A completed remote index requires an active traversal."
+                    );
+                }
+                $traversal_journal_byte_offset =
+                    $traversal_journal->complete_traversal(
+                        $active_traversal['next_remote_index_start_byte_offset'],
+                        $next_remote_index_byte_offset,
+                        $canonical_list_directory_from_remote,
+                        $indexed_roots_from_remote
+                    );
+            }
+
             reprint_update_and_save_state_without_signal_interruption(
                 function () use (
                     $completion_cursor,
                     $next_remote_index_byte_offset,
-                    $next_remote_index_is_complete
+                    $next_remote_index_is_complete,
+                    $traversal_journal_byte_offset,
+                    $discovery_byte_offset_after_completion
                 ): void {
                     $this->get_state()->consecutive_interrupted_responses = 0;
                     $this->get_state()->index->cursor =
@@ -7304,8 +7476,13 @@ class ImportClient
                             : $completion_cursor;
                     $this->get_state()->index->next_remote_index_byte_offset =
                         $next_remote_index_byte_offset;
+                    $this->get_state()->index->traversal_journal_byte_offset =
+                        $traversal_journal_byte_offset;
                     if ($next_remote_index_is_complete) {
                         $this->get_state()->index->active_traversal = null;
+                        $this->get_state()->index
+                            ->discovery_next_remote_index_byte_offset =
+                                $discovery_byte_offset_after_completion;
                     }
                 },
                 [$this, 'save_state']

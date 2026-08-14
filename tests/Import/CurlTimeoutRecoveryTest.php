@@ -13,9 +13,10 @@ require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 /**
  * Verify recovery from cURL timeouts during streaming fetches.
  *
- * Each fetch method (fetch_sql, fetch_file_batch, fetch_next_remote_index,
- * fetch_database_index) is tested by injecting a CurlTimeoutException. SQL retries
- * in the same invocation; the other phases save partial state for a later run.
+ * Each fetch method (fetch_sql, fetch_file_batch,
+ * fetch_next_remote_index_with_journal, fetch_database_index) is tested by
+ * injecting a CurlTimeoutException. SQL retries in the same invocation; the
+ * other phases save partial state for a later run.
  *
  * Also verifies the no-progress safety net: after repeated interrupted
  * responses with no cursor progress, the importer gives up.
@@ -96,9 +97,11 @@ class CurlTimeoutRecoveryTest extends TestCase
             false,
             false
         );
-        $indexState->cursor = $cursor;
 
-        return $indexState->to_array();
+        return [
+            'cursor' => $cursor,
+            'active_traversal' => $indexState->active_traversal,
+        ];
     }
 
     public static function fileCursorForBytes(int $bytes): string
@@ -300,7 +303,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // fetch_next_remote_index: timeout saves state and returns false
+    // fetch_next_remote_index_with_journal: timeout saves state and returns false
     // ---------------------------------------------------------------
 
     public function testNextRemoteIndexTimeoutSavesPartialState()
@@ -329,12 +332,11 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $fetchNextRemoteIndex = $reflection->getMethod('fetch_next_remote_index');
-        $result = $fetchNextRemoteIndex->invoke($client);
+        $result = $this->fetchNextRemoteIndex($client, $reflection);
 
         $this->assertFalse(
             $result,
-            "fetch_next_remote_index should return false on timeout"
+            "Remote-index fetch should return false on timeout"
         );
 
         $state = $this->readState();
@@ -699,8 +701,7 @@ PHP);
             SuccessTestClient::class,
         );
 
-        $fetchNextRemoteIndex = $reflection->getMethod('fetch_next_remote_index');
-        $fetchNextRemoteIndex->invoke($client);
+        $this->fetchNextRemoteIndex($client, $reflection);
 
         $state = $this->readState();
         $this->assertEquals(
@@ -708,6 +709,25 @@ PHP);
             $state["consecutive_interrupted_responses"],
             "Successful request should reset consecutive_interrupted_responses to 0"
         );
+    }
+
+    private function fetchNextRemoteIndex(
+        \ImportClient $client,
+        \ReflectionClass $reflection
+    ): bool {
+        $journal = new \RemoteIndexTraversalJournal(
+            $this->pullStateDirectory . '/remote-index-traversals.next.jsonl'
+        );
+        $journal->open_and_truncate_to_saved_byte_offset(
+            $client->get_state()->index->traversal_journal_byte_offset
+        );
+        try {
+            return $reflection
+                ->getMethod('fetch_next_remote_index_with_journal')
+                ->invoke($client, $journal, null, 0);
+        } finally {
+            $journal->close();
+        }
     }
 
 }
@@ -791,6 +811,14 @@ class SuccessTestClient extends \ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
+        ( $context->on_chunk )([
+            'headers' => ['x-chunk-type' => 'metadata'],
+            'body' => json_encode([
+                'list_dir' => base64_encode('/srv/htdocs'),
+                'requested_directories' => [base64_encode('/srv/htdocs')],
+                'indexed_roots' => [base64_encode('/srv/htdocs')],
+            ]),
+        ]);
         ( $context->on_chunk )([
             'headers' => [
                 'x-chunk-type' => 'completion',

@@ -9,13 +9,18 @@ class RemoteFileIndexState {
     public ?string $cursor = null;
     /** Next remote index bytes which are safe to keep when resuming from cursor. */
     public int $next_remote_index_byte_offset = 0;
+    /** Next traversal journal byte after the durable completion records. */
+    public int $traversal_journal_byte_offset = 0;
+    /** @var int|null First next-index byte not durably inspected for followed targets. */
+    public ?int $discovery_next_remote_index_byte_offset = null;
     /**
      * @var array|null JSON-safe request identity retained until traversal completion.
      * @phpstan-var array{
      *     list_directory_b64:string,
      *     requested_directories_b64:list<string>,
      *     follow_symlinks:bool,
-     *     include_caches:bool
+     *     include_caches:bool,
+     *     next_remote_index_start_byte_offset:int
      * }|null
      */
     public ?array $active_traversal = null;
@@ -33,16 +38,35 @@ class RemoteFileIndexState {
             );
         }
         $state->cursor = $data['cursor'];
+        foreach (
+            [
+                'next_remote_index_byte_offset',
+                'traversal_journal_byte_offset',
+            ] as $field
+        ) {
+            if (!is_int($data[$field]) || $data[$field] < 0) {
+                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Persisted field name, never HTML.
+                throw new \UnexpectedValueException(
+                    self::class . " {$field} must be a non-negative integer."
+                );
+                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+            }
+            $state->{$field} = $data[$field];
+        }
+        $discovery_byte_offset = $data['discovery_next_remote_index_byte_offset'];
         if (
-            !is_int($data['next_remote_index_byte_offset'])
-            || $data['next_remote_index_byte_offset'] < 0
+            $discovery_byte_offset !== null
+            && (
+                !is_int($discovery_byte_offset)
+                || $discovery_byte_offset < 0
+                || $discovery_byte_offset > $state->next_remote_index_byte_offset
+            )
         ) {
             throw new \UnexpectedValueException(
-                self::class . ' next remote index byte offset must be a non-negative integer.'
+                self::class . ' discovery byte offset must be null or inside the durable next index.'
             );
         }
-        $state->next_remote_index_byte_offset =
-            $data['next_remote_index_byte_offset'];
+        $state->discovery_next_remote_index_byte_offset = $discovery_byte_offset;
         $state->active_traversal = self::validate_active_traversal(
             $data['active_traversal']
         );
@@ -51,16 +75,25 @@ class RemoteFileIndexState {
                 self::class . ' remote file-index cursor requires an active traversal.'
             );
         }
+        if (
+            $state->active_traversal !== null
+            && $state->active_traversal['next_remote_index_start_byte_offset']
+                > $state->next_remote_index_byte_offset
+        ) {
+            throw new \UnexpectedValueException(
+                self::class . ' active traversal starts after the durable next index.'
+            );
+        }
         return $state;
     }
 
     /**
      * Retains one traversal request as base64-safe state before network I/O.
      *
-     * @param string   $list_directory       Raw list_dir request value.
+     * @param string   $list_directory     Raw list_dir request value.
      * @param string[] $requested_directories Raw directory[] request values.
-     * @param bool     $follow_symlinks      Whether links may leave requested roots.
-     * @param bool     $include_caches       Whether cache paths are included.
+     * @param bool     $follow_symlinks    Whether links may leave requested roots.
+     * @param bool     $include_caches     Whether cache paths are included.
      */
     public function start_traversal(
         string $list_directory,
@@ -76,6 +109,8 @@ class RemoteFileIndexState {
             ),
             'follow_symlinks' => $follow_symlinks,
             'include_caches' => $include_caches,
+            'next_remote_index_start_byte_offset' =>
+                $this->next_remote_index_byte_offset,
         ]);
         $this->cursor = null;
     }
@@ -86,10 +121,11 @@ class RemoteFileIndexState {
      * @return array|null {
      *     Active request, or null before one starts or after it completes.
      *
-     *     @type string   $list_directory       Raw list_dir value.
-     *     @type string[] $requested_directories Raw directory[] values.
-     *     @type bool     $follow_symlinks      Whether links may leave roots.
-     *     @type bool     $include_caches       Whether caches are included.
+     *     @type string   $list_directory                      Raw list_dir value.
+     *     @type string[] $requested_directories                Raw directory[] values.
+     *     @type bool     $follow_symlinks                      Whether links may leave roots.
+     *     @type bool     $include_caches                       Whether caches are included.
+     *     @type int      $next_remote_index_start_byte_offset  Raw index range start.
      * }
      */
     public function active_traversal_request(): ?array
@@ -110,6 +146,8 @@ class RemoteFileIndexState {
             ),
             'follow_symlinks' => $this->active_traversal['follow_symlinks'],
             'include_caches' => $this->active_traversal['include_caches'],
+            'next_remote_index_start_byte_offset' =>
+                $this->active_traversal['next_remote_index_start_byte_offset'],
         ];
     }
 
@@ -119,6 +157,10 @@ class RemoteFileIndexState {
             'cursor' => $this->cursor,
             'next_remote_index_byte_offset' =>
                 $this->next_remote_index_byte_offset,
+            'traversal_journal_byte_offset' =>
+                $this->traversal_journal_byte_offset,
+            'discovery_next_remote_index_byte_offset' =>
+                $this->discovery_next_remote_index_byte_offset,
             'active_traversal' => $this->active_traversal,
         ];
     }
@@ -136,9 +178,12 @@ class RemoteFileIndexState {
                 'requested_directories_b64',
                 'follow_symlinks',
                 'include_caches',
+                'next_remote_index_start_byte_offset',
             ]
             || !is_bool($traversal['follow_symlinks'])
             || !is_bool($traversal['include_caches'])
+            || !is_int($traversal['next_remote_index_start_byte_offset'])
+            || $traversal['next_remote_index_start_byte_offset'] < 0
             || !self::is_encoded_path($traversal['list_directory_b64'])
             || !is_array($traversal['requested_directories_b64'])
             || $traversal['requested_directories_b64'] === []

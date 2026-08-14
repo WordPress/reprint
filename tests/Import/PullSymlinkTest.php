@@ -110,32 +110,6 @@ class PullSymlinkTest extends TestCase
         $this->assertSame(strlen($remoteTarget), $record['remote_path_size']);
     }
 
-    public function testSymlinkTargetBesideVisitedRootRemainsQueued()
-    {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
-        $indexPath = $this->tempDir . '/remote-index.jsonl';
-        file_put_contents($indexPath, implode("\n", [
-            json_encode([
-                'type' => 'link',
-                'target' => base64_encode('/srv/site/covered'),
-            ]),
-            json_encode([
-                'type' => 'link',
-                'target' => base64_encode('/srv/site-old/queued'),
-            ]),
-            '',
-        ]));
-
-        $reflection = new \ReflectionClass($client);
-        $reflection->getProperty('next_remote_index_file')->setValue($client, $indexPath);
-        $targets = $reflection->getMethod('extract_symlink_directories_from_next_remote_index')->invoke(
-            $client,
-            ['/srv/site' => true]
-        );
-
-        $this->assertSame(['/srv/site-old/queued'], $targets);
-    }
-
     /**
      * A relative symlink that escapes the filesystem root should be rejected.
      * Path /a/link with target ../../../escape resolves to

@@ -16,6 +16,7 @@ final class RemoteFileIndexStateTest extends TestCase
         $listDirectory = "/srv/site-\xff";
         $requestedDirectories = [$listDirectory, '/srv/shared'];
         $state = new RemoteFileIndexState();
+        $state->next_remote_index_byte_offset = 17;
         $state->start_traversal(
             $listDirectory,
             $requestedDirectories,
@@ -24,17 +25,23 @@ final class RemoteFileIndexStateTest extends TestCase
         );
         $state->cursor = 'cursor-1';
         $state->next_remote_index_byte_offset = 123;
+        $state->traversal_journal_byte_offset = 91;
 
         $loaded = RemoteFileIndexState::from_array($state->to_array());
 
         $this->assertSame('cursor-1', $loaded->cursor);
         $this->assertSame(123, $loaded->next_remote_index_byte_offset);
+        $this->assertSame(91, $loaded->traversal_journal_byte_offset);
+        $this->assertNull(
+            $loaded->discovery_next_remote_index_byte_offset
+        );
         $this->assertSame(
             [
                 'list_directory' => $listDirectory,
                 'requested_directories' => $requestedDirectories,
                 'follow_symlinks' => true,
                 'include_caches' => false,
+                'next_remote_index_start_byte_offset' => 17,
             ],
             $loaded->active_traversal_request()
         );
@@ -61,7 +68,8 @@ final class RemoteFileIndexStateTest extends TestCase
     {
         $this->expectException(\UnexpectedValueException::class);
         $this->expectExceptionMessage(
-            'missing active_traversal, next_remote_index_byte_offset'
+            'missing active_traversal, discovery_next_remote_index_byte_offset, ' .
+            'next_remote_index_byte_offset, traversal_journal_byte_offset'
         );
 
         RemoteFileIndexState::from_array(['cursor' => null]);
@@ -87,6 +95,16 @@ final class RemoteFileIndexStateTest extends TestCase
 
         $invalidOffset = $valid;
         $invalidOffset['next_remote_index_byte_offset'] = '1';
+
+        $invalidJournalOffset = $valid;
+        $invalidJournalOffset['traversal_journal_byte_offset'] = -1;
+
+        $invalidDiscoveryOffset = $valid;
+        $invalidDiscoveryOffset['discovery_next_remote_index_byte_offset'] = 1;
+
+        $invalidTraversalStart = $valid;
+        $invalidTraversalStart['active_traversal']
+            ['next_remote_index_start_byte_offset'] = 1;
 
         $relativeListDirectory = $valid;
         $relativeListDirectory['active_traversal']['list_directory_b64'] =
@@ -115,7 +133,19 @@ final class RemoteFileIndexStateTest extends TestCase
             ],
             'numeric-string offset' => [
                 $invalidOffset,
-                'byte offset must be a non-negative integer',
+                'next_remote_index_byte_offset must be a non-negative integer',
+            ],
+            'negative journal offset' => [
+                $invalidJournalOffset,
+                'traversal_journal_byte_offset must be a non-negative integer',
+            ],
+            'discovery beyond durable index' => [
+                $invalidDiscoveryOffset,
+                'discovery byte offset must be null or inside the durable next index',
+            ],
+            'traversal starts beyond durable index' => [
+                $invalidTraversalStart,
+                'active traversal starts after the durable next index',
             ],
             'relative list directory' => [
                 $relativeListDirectory,
