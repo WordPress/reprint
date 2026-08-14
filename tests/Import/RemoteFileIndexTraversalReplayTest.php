@@ -508,6 +508,133 @@ PHP,
         );
     }
 
+    public function testFilesPullOwnershipRecordsFollowedTraversalRootAndIntermediateLink(): void
+    {
+        $realTarget = $this->tempDir . '/real/target';
+        $alias = $this->tempDir . '/alias';
+        mkdir($realTarget, 0755, true);
+        file_put_contents($realTarget . '/outside.txt', 'outside');
+        for ($index = 0; $index < 205; ++$index) {
+            file_put_contents($realTarget . "/file-{$index}.txt", 'content');
+        }
+        symlink($this->tempDir . '/real', $alias);
+        symlink('../alias/./target', $this->siteDir . '/followed-link');
+
+        $client = $this->newFilesPullClientThatStopsAfterOwnership();
+        try {
+            $this->runClient(
+                $client,
+                [
+                    'command' => 'files-pull',
+                    'follow_symlinks' => true,
+                    'fs_root_nonempty_behavior' => 'preserve-local',
+                ]
+            );
+            $this->fail('Expected the post-ownership checkpoint to stop the command.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame(
+                'Stop after files-pull ownership.',
+                $exception->getMessage()
+            );
+        }
+
+        $state = $this->readState();
+        $this->assertSame(
+            'sort',
+            $state['active_resumable_command']['current_stage']
+        );
+        $snapshotId = $state['files_pull_ownership']['active_snapshot_id'];
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{64}$/D', $snapshotId);
+        $pathsFile = $this->pullStateDirectory()
+            . '/files-pull-ownership/snapshots/'
+            . $snapshotId . '.paths.jsonl';
+        $atoms = [];
+        foreach (file($pathsFile, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+            $atom = json_decode($line, true);
+            $atoms[] = [
+                'kind' => $atom['kind'],
+                'path' => base64_decode($atom['path_b64'], true),
+            ];
+        }
+        $this->assertContains(
+            ['kind' => 'root', 'path' => (string) realpath($this->siteDir)],
+            $atoms
+        );
+        $this->assertContains(
+            ['kind' => 'root', 'path' => (string) realpath($realTarget)],
+            $atoms
+        );
+        $canonicalAlias = (string) realpath(dirname($alias)) . '/alias';
+        $this->assertContains(
+            ['kind' => 'exact', 'path' => $canonicalAlias],
+            $atoms
+        );
+        $this->assertNotContains(
+            [
+                'kind' => 'exact',
+                'path' => (string) realpath($this->siteDir) . '/followed-link',
+            ],
+            $atoms
+        );
+        $this->assertCount(1, array_filter(
+            $this->fileIndexRequests(),
+            static function (array $request) use ($realTarget): bool {
+                return $request['list_directory_b64'] === base64_encode(
+                    (string) realpath($realTarget)
+                );
+            }
+        ));
+        $ownershipStateSaves = $client->ownership_state_saves();
+        $savedPhases = array_column($ownershipStateSaves, 'processor_phase');
+        foreach ([
+            'scanning',
+            'starting_paths_sort',
+            'sorting_paths:publishing_output',
+            'sorting_paths:cleaning_work_files',
+            'building_lookup',
+            'starting_lookup_sort',
+            'sorting_lookup:publishing_output',
+            'sorting_lookup:cleaning_work_files',
+            'preparing_snapshot',
+            'snapshot_prepared',
+            'paths_published',
+            'lookup_published',
+            'cleaning_work_files',
+        ] as $phase) {
+            $this->assertContains($phase, $savedPhases);
+        }
+        $this->assertSame(
+            ['stage' => 'sort', 'processor_phase' => null, 'cursor' => false, 'active' => true],
+            array_diff_key(end($ownershipStateSaves), ['async_signals_enabled' => true])
+        );
+        if (function_exists('pcntl_async_signals')) {
+            $signalStates = array_column($ownershipStateSaves, 'async_signals_enabled');
+            $this->assertFalse(array_shift($signalStates));
+            $this->assertFalse(array_pop($signalStates));
+            $this->assertNotContains(false, $signalStates);
+        }
+
+        $this->runClient(
+            $this->newLoadedClient(),
+            ['command' => 'files-pull', 'abort' => true]
+        );
+        $abortedOwnership = $this->readState()['files_pull_ownership'];
+        $this->assertNull($abortedOwnership['active_snapshot_id']);
+        $this->assertSame([], $abortedOwnership[
+            'committed_snapshot_ids_by_selection_fingerprint'
+        ]);
+        $this->assertSame(
+            [],
+            $abortedOwnership['snapshot_ids_pending_removal']
+        );
+        $this->assertFileDoesNotExist($pathsFile);
+        $this->assertFileDoesNotExist(
+            $this->pullStateDirectory()
+                . '/files-pull-ownership/snapshots/'
+                . $snapshotId . '.lookup'
+        );
+    }
+
     private function newFilesIndexClient(bool $followSymlinks): \ImportClient
     {
         $client = $this->newClient();
@@ -569,6 +696,36 @@ PHP,
         );
         $this->configureClientOutput($client);
         return $this->loadClientState($client);
+    }
+
+    private function newFilesPullClientThatStopsAfterOwnership(): \ImportClient
+    {
+        $client = new StopAfterFilesPullOwnershipClient(
+            $this->remoteUrl,
+            $this->stateDir,
+            $this->filesystemRoot
+        );
+        $this->configureClientOutput($client);
+        \write_current_pull_state($client, [
+            'preflight' => [
+                'data' => [
+                    'ok' => true,
+                    'runtime' => ['document_root' => $this->siteDir],
+                    'wp_detect' => [
+                        'roots' => [
+                            ['path' => $this->siteDir],
+                            ['path' => $this->extraDir],
+                        ],
+                    ],
+                ],
+                'http_code' => 200,
+            ],
+            'remote_protocol_version' => PULL_PROTOCOL_VERSION,
+            'follow_symlinks' => true,
+            'include_caches' => false,
+            'fs_root_nonempty_behavior' => 'preserve-local',
+        ]);
+        return $client;
     }
 
     private function loadClientState(\ImportClient $client): \ImportClient
@@ -828,5 +985,62 @@ final class FailAfterRemoteIndexDiscoveryCheckpointClient extends \ImportClient
                 'Stop after the followed-target discovery checkpoint.'
             );
         }
+    }
+}
+
+final class StopAfterFilesPullOwnershipClient extends \ImportClient
+{
+    private $failed = false;
+    private $ownershipStateSaves = [];
+
+    public function save_state(): void
+    {
+        if (
+            $this->get_state()->active_resumable_command->command_name
+                === 'files-pull'
+            && in_array(
+                $this->get_state()->active_resumable_command->current_stage,
+                ['ownership', 'sort'],
+                true
+            )
+        ) {
+            $ownership = $this->get_state()->files_pull_ownership;
+            $processorPhase = $ownership->processor_cursor['phase'] ?? null;
+            if ($processorPhase === 'sorting_paths') {
+                $processorPhase .= ':' . $ownership->processor_cursor
+                    ['paths_sort_cursor']['phase'];
+            } elseif ($processorPhase === 'sorting_lookup') {
+                $processorPhase .= ':' . $ownership->processor_cursor
+                    ['lookup_sort_cursor']['phase'];
+            }
+            $this->ownershipStateSaves[] = [
+                'stage' => $this->get_state()->active_resumable_command
+                    ->current_stage,
+                'processor_phase' => $processorPhase,
+                'cursor' => $ownership->processor_cursor !== null,
+                'active' => $ownership->active_snapshot_id !== null,
+                'async_signals_enabled' =>
+                    function_exists('pcntl_async_signals')
+                        ? pcntl_async_signals()
+                        : null,
+            ];
+        }
+        parent::save_state();
+        $activeCommand = $this->get_state()->active_resumable_command;
+        if (
+            !$this->failed
+            && $activeCommand->command_name === 'files-pull'
+            && $activeCommand->current_stage === 'sort'
+            && $this->get_state()->files_pull_ownership->active_snapshot_id
+                !== null
+        ) {
+            $this->failed = true;
+            throw new \RuntimeException('Stop after files-pull ownership.');
+        }
+    }
+
+    public function ownership_state_saves(): array
+    {
+        return $this->ownershipStateSaves;
     }
 }

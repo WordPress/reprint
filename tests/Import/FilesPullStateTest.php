@@ -2,6 +2,8 @@
 
 namespace ImportTests;
 
+// phpcs:disable Generic.Files.OneObjectStructurePerFile.MultipleFound -- Boundary client records ownership state saves for lifecycle tests.
+
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\StreamingContext;
 
@@ -123,10 +125,10 @@ class FilesPullStateTest extends TestCase
     /**
      * Set up a client with state loaded and preserve-local mode.
      */
-    private function prepareClient(): array
+    private function prepareClient(?\ImportClient $client = null): array
     {
-        $client = $this->makeClient();
-        $reflection = new \ReflectionClass($client);
+        $client = $client ?? $this->makeClient();
+        $reflection = new \ReflectionClass(\ImportClient::class);
 
         $stateProperty = $reflection->getProperty('state');
         $loadState = $reflection->getMethod('load_state');
@@ -232,6 +234,232 @@ class FilesPullStateTest extends TestCase
             "After abort + re-run, the sync should start fresh, not report 'already complete'",
         );
         $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
+    }
+
+    public function testAbortResumesOneOwnershipSnapshotRemovalPerInvocation(): void
+    {
+        $firstSnapshotId = str_repeat('a', 64);
+        $secondSnapshotId = str_repeat('b', 64);
+        $ownershipDirectory =
+            $this->pullStateDirectory . '/files-pull-ownership';
+        $snapshotsDirectory = $ownershipDirectory . '/snapshots';
+        mkdir($snapshotsDirectory, 0755, true);
+        foreach (['paths.jsonl', 'lookup'] as $suffix) {
+            file_put_contents(
+                "{$snapshotsDirectory}/{$firstSnapshotId}.{$suffix}",
+                'first'
+            );
+        }
+        // The paths artifact was removed before the earlier process stopped.
+        file_put_contents(
+            "{$snapshotsDirectory}/{$secondSnapshotId}.lookup",
+            'second'
+        );
+        $this->writeState([
+            'files_pull_ownership' => [
+                'committed_snapshot_ids_by_selection_fingerprint' => [],
+                'active_snapshot_id' => null,
+                'processor_cursor' => null,
+                'snapshot_ids_pending_removal' => [
+                    $firstSnapshotId,
+                    $secondSnapshotId,
+                ],
+            ],
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        $reflection->getMethod('handle_abort')->invoke($client, 'files-pull');
+
+        $this->assertFileExists(
+            "{$snapshotsDirectory}/{$firstSnapshotId}.paths.jsonl"
+        );
+        $this->assertFileDoesNotExist(
+            "{$snapshotsDirectory}/{$secondSnapshotId}.lookup"
+        );
+        $this->assertSame(
+            [$firstSnapshotId],
+            $this->readState()['files_pull_ownership']
+                ['snapshot_ids_pending_removal']
+        );
+
+        // Both artifacts were removed before the next state save completed.
+        \FilesPullOwnershipProcessor::remove_snapshot(
+            $ownershipDirectory,
+            $firstSnapshotId
+        );
+        [$resumedClient, $resumedReflection] = $this->prepareClient();
+        $resumedReflection->getMethod('handle_abort')->invoke(
+            $resumedClient,
+            'files-pull'
+        );
+        $this->assertSame(
+            [],
+            $this->readState()['files_pull_ownership']
+                ['snapshot_ids_pending_removal']
+        );
+    }
+
+    /** @dataProvider cursorOwnedSnapshotAbortProvider */
+    public function testAbortRemovesCursorOwnedSnapshotArtifacts(
+        string $savedPhase,
+        array $publishedArtifactSuffixes
+    ): void
+    {
+        $selectionFingerprint = str_repeat('1', 64);
+        $snapshotId = str_repeat('a', 64);
+        $cursor = \FilesPullOwnershipProcessor::initial_cursor();
+        $cursor['phase'] = $savedPhase;
+        $cursor['snapshot_id'] = $snapshotId;
+        $snapshotsDirectory = $this->pullStateDirectory
+            . '/files-pull-ownership/snapshots';
+        mkdir($snapshotsDirectory, 0755, true);
+        foreach ($publishedArtifactSuffixes as $suffix) {
+            file_put_contents(
+                "{$snapshotsDirectory}/{$snapshotId}.{$suffix}",
+                "published before state save\n"
+            );
+        }
+        $this->writeState([
+            'active_resumable_command' => [
+                'command_name' => 'files-pull',
+                'completion_state' => 'in_progress',
+                'current_stage' => 'ownership',
+            ],
+            'files_pull_path_selection_fingerprint' => $selectionFingerprint,
+            'files_pull_ownership' => [
+                'committed_snapshot_ids_by_selection_fingerprint' => [],
+                'active_snapshot_id' => null,
+                'processor_cursor' => $cursor,
+                'snapshot_ids_pending_removal' => [],
+            ],
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        $reflection->getMethod('handle_abort')->invoke($client, 'files-pull');
+
+        $ownership = $this->readState()['files_pull_ownership'];
+        $this->assertNull($ownership['processor_cursor']);
+        $this->assertNull($ownership['active_snapshot_id']);
+        $this->assertSame([], $ownership['snapshot_ids_pending_removal']);
+        foreach ($publishedArtifactSuffixes as $suffix) {
+            $this->assertFileDoesNotExist(
+                "{$snapshotsDirectory}/{$snapshotId}.{$suffix}"
+            );
+        }
+    }
+
+    public static function cursorOwnedSnapshotAbortProvider(): array
+    {
+        return [
+            'after paths rename' => [
+                'snapshot_prepared',
+                ['paths.jsonl'],
+            ],
+            'after lookup rename before cursor save' => [
+                'paths_published',
+                ['paths.jsonl', 'lookup'],
+            ],
+        ];
+    }
+
+    public function testOwnershipAbortAndClearedStateShareSignalBoundary(): void
+    {
+        $selectionFingerprint = str_repeat('1', 64);
+        $snapshotId = str_repeat('a', 64);
+        $cursor = \FilesPullOwnershipProcessor::initial_cursor();
+        $cursor['phase'] = 'snapshot_prepared';
+        $cursor['snapshot_id'] = $snapshotId;
+        $snapshotsDirectory = $this->pullStateDirectory
+            . '/files-pull-ownership/snapshots';
+        mkdir($snapshotsDirectory, 0755, true);
+        file_put_contents(
+            "{$snapshotsDirectory}/{$snapshotId}.paths.jsonl",
+            "published before abort\n"
+        );
+        $this->writeState([
+            'active_resumable_command' => [
+                'command_name' => 'files-pull',
+                'completion_state' => 'in_progress',
+                'current_stage' => 'ownership',
+            ],
+            'files_pull_path_selection_fingerprint' => $selectionFingerprint,
+            'files_pull_ownership' => [
+                'committed_snapshot_ids_by_selection_fingerprint' => [],
+                'active_snapshot_id' => null,
+                'processor_cursor' => $cursor,
+                'snapshot_ids_pending_removal' => [],
+            ],
+        ]);
+        $client = new OwnershipStateBoundaryClient(
+            'http://fake.url',
+            $this->stateDir,
+            $this->filesystem_root
+        );
+        [$client] = $this->prepareClient($client);
+
+        $client->clear_files_pull_progress();
+
+        $saves = $client->ownership_abort_saves();
+        $this->assertSame([
+            'cursor' => false,
+            'pending' => [$snapshotId],
+            'stage' => null,
+            'async_signals_enabled' => function_exists('pcntl_async_signals')
+                ? false
+                : null,
+        ], $saves[0]);
+        $this->assertSame([], $saves[1]['pending']);
+        foreach ($saves as $save) {
+            $this->assertFalse($save['cursor'] && $save['pending'] !== []);
+            $this->assertFalse($save['stage'] === 'ownership' && !$save['cursor']);
+        }
+    }
+
+    public function testOwnershipCommitAndCommandCompletionShareSignalBoundary(): void
+    {
+        $selectionFingerprint = hash('sha256', json_encode([
+            'only_path_prefixes_b64' => [],
+            'excluded_path_prefixes_b64' => [],
+            'extra_directory_b64' => null,
+            'follow_symlinks' => false,
+            'include_caches' => false,
+        ], JSON_UNESCAPED_SLASHES));
+        $snapshotId = str_repeat('a', 64);
+        $this->writeState([
+            'active_resumable_command' => [
+                'command_name' => 'files-pull',
+                'completion_state' => 'in_progress',
+                'current_stage' => 'fetch',
+            ],
+            'files_pull_path_selection_fingerprint' => $selectionFingerprint,
+            'files_pull_ownership' => [
+                'committed_snapshot_ids_by_selection_fingerprint' => [],
+                'active_snapshot_id' => $snapshotId,
+                'processor_cursor' => null,
+                'snapshot_ids_pending_removal' => [],
+            ],
+        ]);
+        $client = new OwnershipStateBoundaryClient(
+            'http://fake.url',
+            $this->stateDir,
+            $this->filesystem_root
+        );
+        [$client, $reflection] = $this->prepareClient($client);
+        $reflection->getProperty('follow_symlinks')->setValue($client, false);
+
+        $reflection->getMethod('run_files_pull')->invoke($client);
+
+        $this->assertSame([[
+            'completion_state' => 'complete',
+            'stage' => null,
+            'active' => null,
+            'committed' => [
+                $selectionFingerprint => [$snapshotId],
+            ],
+            'async_signals_enabled' => function_exists('pcntl_async_signals')
+                ? false
+                : null,
+        ]], $client->ownership_completion_saves());
     }
 
     // ---------------------------------------------------------------
@@ -373,5 +601,54 @@ class FilesPullStateTest extends TestCase
             file_get_contents($localFile),
             "Fetch stage must overwrite existing files that were placed in the fetch list",
         );
+    }
+}
+
+final class OwnershipStateBoundaryClient extends \ImportClient {
+    private $ownershipCompletionSaves = [];
+    private $ownershipAbortSaves = [];
+
+    public function save_state(): void
+    {
+        $ownership = $this->get_state()->files_pull_ownership;
+        if ($ownership->committed_snapshot_ids_by_selection_fingerprint !== []) {
+            $command = $this->get_state()->active_resumable_command;
+            $this->ownershipCompletionSaves[] = [
+                'completion_state' => $command->completion_state,
+                'stage' => $command->current_stage,
+                'active' => $ownership->active_snapshot_id,
+                'committed' =>
+                    $ownership->committed_snapshot_ids_by_selection_fingerprint,
+                'async_signals_enabled' =>
+                    function_exists('pcntl_async_signals')
+                        ? pcntl_async_signals()
+                        : null,
+            ];
+        } elseif (
+            $ownership->processor_cursor === null
+            && $ownership->active_snapshot_id === null
+        ) {
+            $this->ownershipAbortSaves[] = [
+                'cursor' => false,
+                'pending' => $ownership->snapshot_ids_pending_removal,
+                'stage' => $this->get_state()->active_resumable_command
+                    ->current_stage,
+                'async_signals_enabled' =>
+                    function_exists('pcntl_async_signals')
+                        ? pcntl_async_signals()
+                        : null,
+            ];
+        }
+        parent::save_state();
+    }
+
+    public function ownership_completion_saves(): array
+    {
+        return $this->ownershipCompletionSaves;
+    }
+
+    public function ownership_abort_saves(): array
+    {
+        return $this->ownershipAbortSaves;
     }
 }

@@ -114,6 +114,7 @@ require_once __DIR__ . '/lib/pull/class-remote-index-reader.php';
 require_once __DIR__ . '/lib/pull/class-remote-to-local-path-mapper.php';
 require_once __DIR__ . '/lib/pull/class-pull-index-journal.php';
 require_once __DIR__ . '/lib/pull/class-remote-index-traversal-journal.php';
+require_once __DIR__ . '/lib/pull/class-files-pull-ownership-processor.php';
 
 /**
  * The wire-protocol version this importer speaks.
@@ -151,7 +152,7 @@ register_shutdown_function(function () {
 
 class ImportClient
 {
-
+    private const FILES_PULL_OWNERSHIP_CHECKPOINT_STEPS = 200;
     /** Commands executed by ImportClient. */
     public const COMMANDS = [
         "pull",
@@ -253,6 +254,8 @@ class ImportClient
 
     /** @var string Durable traversal boundaries for pull/remote-index.next.jsonl. */
     private $next_remote_index_traversal_journal_file;
+
+    private $files_pull_ownership_directory;
 
     /** @var string Path to pull/fetch-list.jsonl — files to download, computed by comparing the next remote index with the remote index. */
     private $fetch_list_file;
@@ -503,6 +506,7 @@ class ImportClient
                 $this->pull_state_directory,
                 "remote-index-traversals.next.jsonl"
             );
+        $this->files_pull_ownership_directory = wp_join_unix_paths($this->pull_state_directory, 'files-pull-ownership');
         $this->fetch_list_file =
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl");
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
@@ -2431,9 +2435,31 @@ class ImportClient
             "RESTART | Clearing files-pull progress (keeping remote index and files)",
             true,
         );
-        $this->reset_state();
-        $this->get_state()->include_caches = false;
-        $this->get_state()->extra_directory = null;
+        $ownership = $this->get_state()->files_pull_ownership;
+        $selection_fingerprint = $this->get_state()->files_pull_path_selection_fingerprint;
+        $current_stage = $this->get_state()->active_resumable_command->current_stage;
+        $processor_snapshot_id = FilesPullOwnershipProcessor::snapshot_id_from_cursor($ownership->processor_cursor);
+        // Save cleared ownership before deleting transient inputs so a signal cannot
+        // persist an ID in both cursor and cleanup. Applying the WAL replaces the
+        // remote index read by the diff cursor. Save the cleared cursor first so the
+        // next run applies the WAL again after interruption.
+        reprint_update_and_save_state_without_signal_interruption(
+            function () use ($ownership, $selection_fingerprint, $current_stage, $processor_snapshot_id): void {
+                if (is_string($selection_fingerprint)) {
+                    $ownership->abort_active_snapshot(
+                        $selection_fingerprint,
+                        in_array($current_stage, ['diff', 'fetch'], true),
+                        $processor_snapshot_id
+                    );
+                }
+                $this->reset_state();
+                $this->get_state()->include_caches = false;
+                $this->get_state()->extra_directory = null;
+                $this->get_state()->index = new RemoteFileIndexState();
+                $this->get_state()->fetch = new FetchListProgressState();
+            },
+            [$this, 'save_state']
+        );
 
         if (file_exists($this->next_remote_index_file)) {
             @unlink($this->next_remote_index_file);
@@ -2453,13 +2479,8 @@ class ImportClient
             @unlink($this->volatile_files_file);
             $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
         }
-        $this->get_state()->index = new RemoteFileIndexState();
-        $this->get_state()->fetch = new FetchListProgressState();
+        $this->remove_next_files_pull_ownership_snapshot();
 
-        // Applying the WAL replaces the remote index read by the diff cursor.
-        // Save the cleared cursor first. If applying the WAL stops partway, the
-        // next run starts with the cleared cursor and applies the WAL again.
-        $this->save_state();
         $this->pull_index_journal->apply_pending_records();
         $this->pull_index_journal->remove_empty_wal();
     }
@@ -3064,7 +3085,7 @@ class ImportClient
      * - Prior completed files-pull → delta mode (re-index, diff, fetch changes)
      * - In-progress files-pull → resume from saved state
      *
-     * Both modes share the same pipeline: index → sort → diff → fetch.
+     * Both modes share the same pipeline: index → ownership → sort → diff → fetch.
      */
     public function run_files_pull(): void
     {
@@ -3080,7 +3101,7 @@ class ImportClient
                 "Finish the unfinished files-push before running files-pull."
             );
         }
-
+        $this->remove_next_files_pull_ownership_snapshot();
         $active_resumable_command =
             $this->get_state()->active_resumable_command;
         $state_command = $active_resumable_command->command_name ?? null;
@@ -3291,11 +3312,68 @@ class ImportClient
             } finally {
                 $traversal_journal->close();
             }
-            // Sorting replaces the index atomically. Save its phase first so
-            // interruption after the replacement reruns the idempotent sort
-            // instead of requesting the remote index again.
-            $this->get_state()->active_resumable_command->current_stage = "sort";
-            $this->save_state();
+            // Ownership must consume the raw traversal ranges before sorting
+            // replaces the index and removes their byte positions.
+            reprint_update_and_save_state_without_signal_interruption(
+                function (): void {
+                    $this->get_state()->files_pull_ownership->processor_cursor = FilesPullOwnershipProcessor::initial_cursor();
+                    $this->get_state()->active_resumable_command->current_stage = "ownership";
+                },
+                [$this, 'save_state']
+            );
+            $stage = "ownership";
+        }
+
+        if ($stage === "ownership") {
+            $ownership_processor = FilesPullOwnershipProcessor::resume(
+                $this->next_remote_index_traversal_journal_file,
+                $this->get_state()->index->traversal_journal_byte_offset,
+                $this->next_remote_index_file,
+                $this->get_state()->index->next_remote_index_byte_offset,
+                $this->files_pull_ownership_directory,
+                $this->get_state()->files_pull_ownership->processor_cursor
+            );
+            try {
+                $steps_since_checkpoint = 0;
+                $saved_processor_phase = $ownership_processor->get_checkpoint_phase();
+                while ($ownership_processor->next_step()) {
+                    if ($this->shutdown_requested) {
+                        $this->get_state()->files_pull_ownership->processor_cursor = $ownership_processor->get_cursor();
+                        $this->get_state()->active_resumable_command->completion_state = "partial";
+                        $this->save_state();
+                        return;
+                    }
+                    if (
+                        ++$steps_since_checkpoint === self::FILES_PULL_OWNERSHIP_CHECKPOINT_STEPS
+                        || $ownership_processor->get_checkpoint_phase() !== $saved_processor_phase
+                    ) {
+                        $this->get_state()->files_pull_ownership->processor_cursor = $ownership_processor->get_cursor();
+                        $this->save_state();
+                        $saved_processor_phase = $ownership_processor->get_checkpoint_phase();
+                        $steps_since_checkpoint = 0;
+                    }
+                }
+                $snapshot_id = $ownership_processor->get_snapshot_id();
+                if (FilesPullOwnershipProcessor::snapshot_id_from_cursor(
+                    $this->get_state()->files_pull_ownership->processor_cursor
+                ) !== $snapshot_id) {
+                    throw new RuntimeException('Completed ownership snapshot ID does not match its durable cursor.');
+                }
+                // Save the snapshot and sort phase together so a signal cannot
+                // leave ownership without either its cursor or completed ID.
+                // Sorting replaces the index atomically. Save its phase first so
+                // interruption after the replacement reruns the idempotent sort
+                // instead of requesting the remote index again.
+                reprint_update_and_save_state_without_signal_interruption(
+                    function () use ($snapshot_id): void {
+                        $this->get_state()->files_pull_ownership->complete_processor($snapshot_id);
+                        $this->get_state()->active_resumable_command->current_stage = "sort";
+                    },
+                    [$this, 'save_state']
+                );
+            } finally {
+                $ownership_processor->close();
+            }
             $stage = "sort";
         }
 
@@ -3384,9 +3462,18 @@ class ImportClient
         $this->pull_index_journal->apply_pending_records();
 
         $this->ensure_local_index_exists();
-        $this->get_state()->active_resumable_command->completion_state = "complete";
-        $this->get_state()->active_resumable_command->current_stage = null;
-        $this->save_state();
+        $selection_fingerprint = $this->get_state()->files_pull_path_selection_fingerprint;
+        if (!is_string($selection_fingerprint)) {
+            throw new RuntimeException('Completed files-pull has no path-selection fingerprint.');
+        }
+        reprint_update_and_save_state_without_signal_interruption(
+            function () use ($selection_fingerprint): void {
+                $this->get_state()->files_pull_ownership->commit_active_snapshot($selection_fingerprint);
+                $this->get_state()->active_resumable_command->completion_state = "complete";
+                $this->get_state()->active_resumable_command->current_stage = null;
+            },
+            [$this, 'save_state']
+        );
         $this->pull_index_journal->remove_empty_wal();
 
         $this->progress->clear_progress_line();
@@ -3411,6 +3498,18 @@ class ImportClient
         ], true);
 
         $this->report_volatile_files();
+    }
+
+    private function remove_next_files_pull_ownership_snapshot(): void
+    {
+        $ownership = $this->get_state()->files_pull_ownership;
+        $snapshot_id = $ownership->next_snapshot_id_pending_removal();
+        if ($snapshot_id === null) {
+            return;
+        }
+        FilesPullOwnershipProcessor::remove_snapshot($this->files_pull_ownership_directory, $snapshot_id);
+        $ownership->confirm_snapshot_removed($snapshot_id);
+        $this->save_state();
     }
 
     /** Creates an empty local index when files-pull recorded no local paths. */
@@ -11420,6 +11519,7 @@ class ImportClient
         $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
         $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
         $this->state->resolved_path_mappings_fingerprint = $previous_state->resolved_path_mappings_fingerprint;
+        $this->state->files_pull_ownership = $previous_state->files_pull_ownership;
         $this->state->pull_pipeline = $previous_state->pull_pipeline;
     }
 

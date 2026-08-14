@@ -208,6 +208,84 @@ final class RemoteIndexTraversalJournal
         return $paths;
     }
 
+    /**
+     * Reads one completed traversal from a durable forward journal position.
+     *
+     * The returned byte offset is the start of the next completion. Null means
+     * the supplied position is exactly the saved journal boundary.
+     *
+     * @return array|null {
+     *     One durable traversal completion, or null at the saved boundary.
+     *
+     *     @type string[] $indexed_roots                         Canonical indexed roots.
+     *     @type int      $next_remote_index_start_byte_offset   Raw range start.
+     *     @type int      $next_remote_index_end_byte_offset     Raw range end.
+     *     @type int      $next_traversal_journal_byte_offset    Following journal byte.
+     * }
+     */
+    public function read_completed_traversal_at(
+        int $record_byte_offset,
+        int $journal_byte_offset
+    ): ?array {
+        $this->require_handle();
+        if ($record_byte_offset === $journal_byte_offset) {
+            return null;
+        }
+        if (
+            $record_byte_offset < 0
+            || $record_byte_offset > $journal_byte_offset
+            || fseek($this->handle, $record_byte_offset) !== 0
+        ) {
+            throw new UnexpectedValueException(
+                'Remote-index traversal completion offset is invalid.'
+            );
+        }
+        $line = fgets($this->handle);
+        $next_record_byte_offset = ftell($this->handle);
+        $record = is_string($line) && substr($line, -1) === "\n"
+            ? json_decode(substr($line, 0, -1), true)
+            : null;
+        if (
+            !is_int($next_record_byte_offset)
+            || $next_record_byte_offset > $journal_byte_offset
+            || !is_array($record)
+            || array_keys($record) !== [
+                'type',
+                'indexed_roots_b64',
+                'next_remote_index_start_byte_offset',
+                'next_remote_index_end_byte_offset',
+            ]
+            || $record['type'] !== 'traversal_complete'
+            || !is_int($record['next_remote_index_start_byte_offset'])
+            || $record['next_remote_index_start_byte_offset'] < 0
+            || !is_int($record['next_remote_index_end_byte_offset'])
+            || $record['next_remote_index_end_byte_offset']
+                < $record['next_remote_index_start_byte_offset']
+        ) {
+            throw new UnexpectedValueException(
+                'Remote-index traversal completion is outside the durable journal or invalid.'
+            );
+        }
+        $indexed_roots = self::decode_canonical_paths(
+            $record['indexed_roots_b64'],
+            'indexed_roots_b64'
+        );
+        if (count($indexed_roots) !== count(array_unique($indexed_roots))) {
+            throw new UnexpectedValueException(
+                'Remote-index traversal roots must contain no duplicates.'
+            );
+        }
+        return [
+            'indexed_roots' => $indexed_roots,
+            'next_remote_index_start_byte_offset' =>
+                $record['next_remote_index_start_byte_offset'],
+            'next_remote_index_end_byte_offset' =>
+                $record['next_remote_index_end_byte_offset'],
+            'next_traversal_journal_byte_offset' =>
+                $next_record_byte_offset,
+        ];
+    }
+
     /** Idempotently closes the journal. */
     public function close(): void
     {
@@ -227,50 +305,16 @@ final class RemoteIndexTraversalJournal
         int $record_byte_offset,
         int $journal_byte_offset
     ): array {
-        $this->require_handle();
-        if (
-            $record_byte_offset < 0
-            || $record_byte_offset >= $journal_byte_offset
-            || fseek($this->handle, $record_byte_offset) !== 0
-        ) {
+        $completion = $this->read_completed_traversal_at(
+            $record_byte_offset,
+            $journal_byte_offset
+        );
+        if ($completion === null) {
             throw new UnexpectedValueException(
                 'Remote-index traversal completion offset is invalid.'
             );
         }
-        $line = fgets($this->handle);
-        $end_byte_offset = ftell($this->handle);
-        $record = is_string($line) && substr($line, -1) === "\n"
-            ? json_decode(substr($line, 0, -1), true)
-            : null;
-        if (
-            !is_int($end_byte_offset)
-            || $end_byte_offset > $journal_byte_offset
-            || !is_array($record)
-            || count($record) !== 4
-            || ( $record['type'] ?? null ) !== 'traversal_complete'
-            || !isset($record['indexed_roots_b64'])
-            || !isset($record['next_remote_index_start_byte_offset'])
-            || !is_int($record['next_remote_index_start_byte_offset'])
-            || $record['next_remote_index_start_byte_offset'] < 0
-            || !isset($record['next_remote_index_end_byte_offset'])
-            || !is_int($record['next_remote_index_end_byte_offset'])
-            || $record['next_remote_index_end_byte_offset']
-                < $record['next_remote_index_start_byte_offset']
-        ) {
-            throw new UnexpectedValueException(
-                'Remote-index traversal completion is outside the durable journal or invalid.'
-            );
-        }
-        $indexed_roots = self::decode_canonical_paths(
-            $record['indexed_roots_b64'],
-            'indexed_roots_b64'
-        );
-        if (count($indexed_roots) !== count(array_unique($indexed_roots))) {
-            throw new UnexpectedValueException(
-                'Remote-index traversal roots must contain no duplicates.'
-            );
-        }
-        return $indexed_roots;
+        return $completion['indexed_roots'];
     }
 
     private function root_marker_path(string $canonical_root): string

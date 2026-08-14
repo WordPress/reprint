@@ -16,6 +16,7 @@ require_once __DIR__ . '/class-file-diff-progress-state.php';
 require_once __DIR__ . '/class-remote-file-index-state.php';
 require_once __DIR__ . '/class-fetch-list-progress-state.php';
 require_once __DIR__ . '/class-files-pull-summary-state.php';
+require_once __DIR__ . '/class-files-pull-ownership-state.php';
 require_once __DIR__ . '/class-database-apply-command-state.php';
 require_once __DIR__ . '/class-adaptive-tuning-state.php';
 require_once __DIR__ . '/class-pull-pipeline-checkpoint-state.php';
