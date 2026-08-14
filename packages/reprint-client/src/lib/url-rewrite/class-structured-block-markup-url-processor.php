@@ -5,6 +5,8 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupProcessor;
 use WordPress\DataLiberation\URL\CSSURLProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 
+use function WordPress\DataLiberation\URL\is_child_url_of;
+
 /**
  * Reports URLs in structured block markup and enables rewriting them.
  *
@@ -45,6 +47,16 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	private $base_url_object;
 	private $css_url_processor;
 	private $css_url_processor_updated;
+
+	/**
+	 * Whether a structured URL in this token failed source-boundary validation.
+	 *
+	 * The cautious pass cannot exclude that URL from its raw-token scan. Skipping
+	 * the pass for this token prevents it from bypassing the failed validation.
+	 *
+	 * @var bool
+	 */
+	private $structured_url_source_boundary_failed = false;
 
 	/**
 	 * The list of names of URL-related HTML attributes that may be available on
@@ -96,6 +108,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		$this->parsed_url                 = null;
 		$this->inspecting_html_attributes = null;
 		$this->css_url_processor          = null;
+		$this->structured_url_source_boundary_failed = false;
 		/*
 		 * Do not reset css_url_processor_updated – it is reset in
 		 * get_updated_html() which is called in parent::next_token().
@@ -138,6 +151,9 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	 */
 	public function replace_url_bases_in_current_token( CautiousURLBaseRewriteMapping $prepared_url_mapping ): bool {
 		$html = $this->get_updated_html();
+		if ( $this->structured_url_source_boundary_failed ) {
+			return false;
+		}
 		if ( ! $this->set_bookmark( 'cautious URL base replacement' ) ) {
 			return false;
 		}
@@ -378,6 +394,11 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		if ( null === $this->raw_url ) {
 			return false;
 		}
+		if ( $raw_url === $this->raw_url ) {
+			// A relative URL may resolve against a new base without changing its source spelling.
+			$this->parsed_url = $parsed_url;
+			return true;
+		}
 		$this->raw_url    = $raw_url;
 		$this->parsed_url = $parsed_url;
 		switch ( parent::get_token_type() ) {
@@ -407,11 +428,16 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	 * Rewrites the components of the currently matched URL from ones
 	 * provided in $from_url to ones specified in $to_url.
 	 *
-	 * It preserves the relative nature of the matched URL.
+	 * It keeps absolute URLs absolute, does not add a scheme to relative URLs,
+	 * and preserves every decoded URL byte outside the mapped scheme,
+	 * authority, and pathname prefix. Unsupported source spellings are left
+	 * unchanged.
 	 */
 	public function replace_base_url( $to_url, $base_url = null ) {
 		$base_url = $base_url ?? $this->base_url_object;
-		if ( ! $base_url ) {
+		$base_url = WPURL::parse( $base_url );
+		$to_url   = WPURL::parse( $to_url );
+		if ( false === $base_url || false === $to_url ) {
 			return false;
 		}
 
@@ -429,9 +455,186 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 			return false;
 		}
 
-		$this->set_url( $result . '', $result->new_url );
+		$source_preserving_raw_url = self::create_source_preserving_raw_url(
+			$this->get_raw_url(),
+			$this->get_parsed_url(),
+			$result,
+			$base_url,
+			$to_url
+		);
+		if ( null === $source_preserving_raw_url ) {
+			/*
+			 * The cautious token pass cannot distinguish this structured URL from
+			 * opaque token content. Skip that pass rather than bypassing the failed
+			 * source-boundary check.
+			 */
+			$this->structured_url_source_boundary_failed = true;
+			return false;
+		}
 
-		return true;
+		return $this->set_url(
+			$source_preserving_raw_url,
+			WPURL::parse( $source_preserving_raw_url, $to_url->toString() )
+		);
+	}
+
+	/**
+	 * Creates a decoded URL with only its base components replaced.
+	 *
+	 * Only spellings whose base-component boundaries can be located from
+	 * literal delimiters are accepted. Ambiguous spellings return null. The
+	 * edited string is reparsed and returned only when it matches the normal
+	 * semantic conversion.
+	 *
+	 * @return string|null
+	 */
+	private static function create_source_preserving_raw_url( $raw_url, $url, $converted_url, $old_base_url, $new_base_url ) {
+		$updated_url = $converted_url->new_url;
+		$source_url = WPURL::parse( $raw_url, $old_base_url->toString() );
+		if (
+			false === $source_url ||
+			$source_url->toString() !== $url->toString() ||
+			! is_child_url_of( $source_url, $old_base_url )
+		) {
+			return null;
+		}
+
+		$is_absolute          = 1 === preg_match( '/\A([A-Za-z][A-Za-z0-9+.\-]*):\/\//', $raw_url, $absolute_match );
+		$is_protocol_relative = 0 === strpos( $raw_url, '//' );
+		$is_path_relative     = ! $is_absolute && ! $is_protocol_relative && 0 !== strpos( $raw_url, '/' );
+		if (
+			( $is_absolute && 'file' === strtolower( $absolute_match[1] ) ) ||
+			( ! $is_absolute && 1 === preg_match( '/\A[A-Za-z][A-Za-z0-9+.\-]*:/', $raw_url ) ) ||
+			( $is_path_relative && ( 0 === strpos( $raw_url, './' ) || 0 === strpos( $raw_url, '../' ) ) )
+		) {
+			return null;
+		}
+
+		$path_end     = strcspn( $raw_url, '?#' );
+		$path_start   = 0;
+		$replacements = array();
+		if ( $is_absolute || $is_protocol_relative ) {
+			$scheme_end      = $is_absolute ? strpos( $raw_url, ':' ) : null;
+			$authority_start = $is_absolute ? $scheme_end + 3 : 2;
+			$path_start      = $authority_start + strcspn( $raw_url, '/?#', $authority_start );
+			if ( $authority_start === $path_start ) {
+				return null;
+			}
+
+			$authority   = substr( $raw_url, $authority_start, $path_start - $authority_start );
+			$userinfo_at = strrpos( $authority, '@' );
+			$host_start  = $authority_start + ( false === $userinfo_at ? 0 : $userinfo_at + 1 );
+			$raw_host    = substr( $raw_url, $host_start, $path_start - $host_start );
+			if ( $is_absolute && $url->protocol !== $updated_url->protocol ) {
+				$replacements[] = array(
+					'start'       => 0,
+					'length'      => $scheme_end,
+					'replacement' => rtrim( $updated_url->protocol, ':' ),
+				);
+			}
+			if (
+				$url->host !== $updated_url->host ||
+				(
+					$url->protocol !== $updated_url->protocol &&
+					1 === preg_match( '/:\d+$/', $raw_host )
+				)
+			) {
+				$replacements[] = array(
+					'start'       => $host_start,
+					'length'      => $path_start - $host_start,
+					'replacement' => $updated_url->host,
+				);
+			}
+		}
+
+		if ( $old_base_url->pathname !== $new_base_url->pathname ) {
+			$raw_path = substr( $raw_url, $path_start, $path_end - $path_start );
+
+			/*
+			 * Rooted spellings use the parsed base's number of slash-delimited
+			 * segments. Relative spellings use the leading reference that resolves
+			 * to the base. Parsing that prefix validates its normalized path. Split
+			 * before decoding so "%2F" cannot become a delimiter.
+			 */
+			$source_segment_count = substr_count( rtrim( $old_base_url->pathname, '/' ), '/' );
+			if ( $is_path_relative ) {
+				$source_segment_count = (
+					'' === $raw_path ||
+					0 === $source_segment_count ||
+					'/' === substr( $old_base_url->pathname, -1 )
+				) ? 0 : 1;
+			}
+
+			$raw_path_segments = explode( '/', $raw_path );
+			$segments_to_use   = $source_segment_count + ( 0 === strpos( $raw_path, '/' ) ? 1 : 0 );
+			$source_length     = strlen( implode( '/', array_slice( $raw_path_segments, 0, $segments_to_use ) ) );
+
+			$source_prefix_url = WPURL::parse(
+				substr( $raw_url, 0, $path_start + $source_length ),
+				$old_base_url->toString()
+			);
+			if (
+				false === $source_prefix_url ||
+				$source_prefix_url->protocol !== $old_base_url->protocol ||
+				$source_prefix_url->hostname !== $old_base_url->hostname ||
+				array_map( 'rawurldecode', explode( '/', rtrim( $source_prefix_url->pathname, '/' ) ) ) !==
+					array_map( 'rawurldecode', explode( '/', rtrim( $old_base_url->pathname, '/' ) ) )
+			) {
+				return null;
+			}
+
+			$unmatched_path = substr( $raw_path, $source_length );
+			$target_path    = '/' === $new_base_url->pathname ? '' : rtrim( $new_base_url->pathname, '/' );
+			if (
+				'' !== $target_path &&
+				(
+					( '' !== $unmatched_path && '/' !== $unmatched_path[0] ) ||
+					( '' === $unmatched_path && $path_end < strlen( $raw_url ) ) ||
+					( $is_path_relative && '' === $raw_path && '/' === substr( $old_base_url->pathname, -1 ) )
+				)
+			) {
+				$target_path .= '/';
+			} elseif (
+				'' === $unmatched_path &&
+				'' === $target_path &&
+				( ! $is_path_relative || '' === $raw_path )
+			) {
+				$target_path = '/';
+			}
+			$replacements[] = array(
+				'start'       => $path_start,
+				'length'      => $source_length,
+				'replacement' => $target_path,
+			);
+		}
+
+		foreach ( $replacements as $replacement ) {
+			if ( false !== strpos( substr( $raw_url, $replacement['start'], $replacement['length'] ), '\\' ) ) {
+				return null;
+			}
+		}
+
+		$source_preserving_raw_url = $raw_url;
+		foreach ( array_reverse( $replacements ) as $replacement ) {
+			$source_preserving_raw_url = substr_replace(
+				$source_preserving_raw_url,
+				$replacement['replacement'],
+				$replacement['start'],
+				$replacement['length']
+			);
+		}
+
+		$source_preserving_url = WPURL::parse( $source_preserving_raw_url, $new_base_url->toString() );
+		$expected_url          = WPURL::parse( (string) $converted_url, $new_base_url->toString() );
+		if (
+			false === $source_preserving_url ||
+			false === $expected_url ||
+			$source_preserving_url->toString() !== $expected_url->toString()
+		) {
+			return null;
+		}
+
+		return $source_preserving_raw_url;
 	}
 
 	/**

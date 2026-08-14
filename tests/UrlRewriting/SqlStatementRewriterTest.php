@@ -236,7 +236,7 @@ class SqlStatementRewriterTest extends TestCase
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
         $this->assertStringContainsString('https://new-site.com/literal', $values[0]);
-        $this->assertStringContainsString('https://new-site.com/case-variant', $values[0]);
+        $this->assertStringContainsString('HTTPS://new-site.com/case-variant', $values[0]);
         $this->assertStringNotContainsString('old-site.com', strtolower($values[0]));
     }
 
