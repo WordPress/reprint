@@ -34,9 +34,20 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
         || join(projectRoot, 'packages', 'reprint-client', 'bin', 'reprint-client');
     const phpBinary = process.env.PHP_BINARY || 'php';
     let tempDir;
+    let fileTempDir;
 
     function importUrl() {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
+    }
+
+    function targetMysqlArguments() {
+        return [
+            '--target-engine=mysql',
+            '--target-host=127.0.0.1',
+            '--target-user=e2e_admin',
+            '--target-pass=e2e_password',
+            `--target-db=${targetDb}`,
+        ];
     }
 
     function mysqlArguments() {
@@ -64,6 +75,31 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             `--fs-root=${fsRootDir(tempDir)}`,
             `--secret=${getSiteSecret(site)}`,
             ...mysqlArguments(),
+        ], {
+            env: { ...process.env },
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        childProcess.stdout.setEncoding('utf8');
+        childProcess.stderr.setEncoding('utf8');
+        childProcess.stdout.on('data', chunk => { output.stdout += chunk; });
+        childProcess.stderr.on('data', chunk => { output.stderr += chunk; });
+        const exit = new Promise(resolve => {
+            childProcess.once('exit', (code, signal) => resolve({ code, signal }));
+        });
+        return { childProcess, output, exit };
+    }
+
+    function spawnDatabaseApply(stateDir) {
+        const output = { stdout: '', stderr: '' };
+        const childProcess = spawn(phpBinary, [
+            importerPath,
+            'db-apply',
+            importUrl(),
+            `--state-dir=${stateDir}`,
+            `--fs-root=${fsRootDir(stateDir)}`,
+            `--secret=${getSiteSecret(site)}`,
+            ...targetMysqlArguments(),
+            '--progress=jsonl',
         ], {
             env: { ...process.env },
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -174,6 +210,9 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
         if (tempDir) {
             cleanupTempDir(tempDir);
         }
+        if (fileTempDir) {
+            cleanupTempDir(fileTempDir);
+        }
         const connection = await createMysqlConnection();
         await connection.query(`DROP DATABASE IF EXISTS \`${targetDb}\``);
         await connection.end();
@@ -225,6 +264,106 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             resumed.exitCode,
             0,
             `resumed db-pull failed:\n${resumed.stderr}\n${resumed.stdout}`,
+        );
+
+        const targetConnection = await createMysqlConnection(targetDb);
+        try {
+            const [rows] = await targetConnection.query(
+                `SELECT value, value + 0 AS enumIndex FROM \`${sqlModeTable}\``
+            );
+            assert.equal(rows.length, 1);
+            assert.equal(rows[0].value, '');
+            assert.equal(Number(rows[0].enumIndex), 0);
+        } finally {
+            await targetConnection.end();
+        }
+    });
+
+    it('runs locally saved dump settings before resumed db-apply SQL', async () => {
+        fileTempDir = createTempDir('e2e-mysql-file-session-settings-resume');
+        writeTestHooks(site, [
+            'function test_hook_before_sql_batch(&$sql, $cursor) {',
+            "    if (substr(rtrim($sql), -1) === ';') {",
+            "        $sql .= \"\\nDO SLEEP(0.03);\\n\";",
+            '    }',
+            '}',
+        ].join('\n'));
+
+        const preflight = runImporter(importUrl(), fileTempDir, 'preflight', {
+            secret: getSiteSecret(site),
+        });
+        assert.equal(
+            preflight.exitCode,
+            0,
+            `preflight failed:\n${preflight.stderr}\n${preflight.stdout}`,
+        );
+
+        const pulled = runImporter(importUrl(), fileTempDir, 'db-pull', {
+            secret: getSiteSecret(site),
+            extraArgs: [
+                '--sql-output=file',
+                '--sql-fragments-start=1',
+                '--sql-fragments-min=1',
+                '--sql-fragments-max=1',
+            ],
+            wallTimeout: 240000,
+        });
+        removeTestHooks(site);
+        assert.equal(
+            pulled.exitCode,
+            0,
+            `file db-pull failed:\n${pulled.stderr}\n${pulled.stdout}`,
+        );
+        assert.equal(
+            existsSync(join(fileTempDir, 'db-session-setup.sql')),
+            true,
+            'db-pull did not save the MySQL session setup beside db.sql',
+        );
+
+        const connection = await createMysqlConnection();
+        await connection.query(`DROP DATABASE IF EXISTS \`${targetDb}\``);
+        await connection.query(`CREATE DATABASE \`${targetDb}\``);
+        await connection.end();
+
+        const first = spawnDatabaseApply(fileTempDir);
+        const statePath = join(pullStateDirectory(fileTempDir, importUrl()), 'state.json');
+        const deadline = Date.now() + 60000;
+        let statementsExecuted = 0;
+
+        while (Date.now() < deadline) {
+            if (first.childProcess.exitCode !== null || first.childProcess.signalCode !== null) {
+                const result = await first.exit;
+                assert.fail(
+                    `db-apply exited before its first saved position (${result.code}/${result.signal}):\n`
+                    + first.output.stderr + first.output.stdout,
+                );
+            }
+            if (existsSync(statePath)) {
+                const state = JSON.parse(readFileSync(statePath, 'utf8'));
+                statementsExecuted = Number(state.apply?.statements_executed || 0);
+            }
+            if (statementsExecuted >= 100) {
+                break;
+            }
+            await sleep(10);
+        }
+
+        assert.ok(statementsExecuted >= 100, 'db-apply did not save a position');
+        assert.equal(first.childProcess.kill('SIGKILL'), true);
+        const killed = await first.exit;
+        assert.equal(killed.code, null);
+        assert.equal(killed.signal, 'SIGKILL');
+        await sleep(100);
+
+        const resumed = runImporter(importUrl(), fileTempDir, 'db-apply', {
+            secret: getSiteSecret(site),
+            extraArgs: targetMysqlArguments(),
+            wallTimeout: 240000,
+        });
+        assert.equal(
+            resumed.exitCode,
+            0,
+            `resumed db-apply failed:\n${resumed.stderr}\n${resumed.stdout}`,
         );
 
         const targetConnection = await createMysqlConnection(targetDb);

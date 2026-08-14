@@ -2236,6 +2236,16 @@ class ImportClient
                         );
                     }
                 }
+                $session_setup_file = wp_join_unix_paths(
+                    $this->state_dir,
+                    "db-session-setup.sql",
+                );
+                if (file_exists($session_setup_file)) {
+                    unlink($session_setup_file);
+                    $this->audit_log(
+                        "FILE DELETE | {$session_setup_file} | abort db-pull",
+                    );
+                }
                 $tables_file = wp_join_unix_paths($this->state_dir, "db-tables.jsonl");
                 if (file_exists($tables_file)) {
                     unlink($tables_file);
@@ -5634,6 +5644,10 @@ class ImportClient
     public function run_db_apply(array $options): void
     {
         $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
+        $session_setup_file = wp_join_unix_paths(
+            $this->state_dir,
+            "db-session-setup.sql",
+        );
         if (!file_exists($sql_file)) {
             throw new RuntimeException(
                 "db.sql not found in {$this->state_dir}. Run db-pull first.",
@@ -5783,6 +5797,21 @@ class ImportClient
             "CONNECTED | {$connection_label}",
             false,
         );
+
+        if ($is_resume && $this->get_state()->apply->target_engine === "mysql") {
+            $session_setup_sql = @file_get_contents($session_setup_file);
+            if ($session_setup_sql === false || trim($session_setup_sql) === "") {
+                throw new RuntimeException(
+                    "Cannot resume db-apply because db-session-setup.sql is missing or empty. " .
+                    "Run db-apply --abort and start again.",
+                );
+            }
+            $pdo->exec($session_setup_sql);
+            $this->audit_log(
+                "DB-APPLY | ran saved MySQL session setup after reconnect",
+                true,
+            );
+        }
 
         // Stream db.sql through the query stream and execute. Use the
         // fast strcspn-based parser by default; it self-falls-back to
@@ -7534,8 +7563,10 @@ class ImportClient
         $sql_buffer_handle = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
-        // A cursor means this connection starts after the dump header.
-        $mysql_session_ran_initial_SET_statements = $mode !== "mysql" || $cursor === null;
+        $session_setup_file = wp_join_unix_paths(
+            $this->state_dir,
+            "db-session-setup.sql",
+        );
 
         if ($mode === "file") {
             $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
@@ -7600,6 +7631,21 @@ class ImportClient
                 throw new RuntimeException("MySQL connection failed: " . $mysql_conn->connect_error);
             }
             $mysql_conn->set_charset("utf8mb4");
+
+            if ($cursor !== null) {
+                $session_setup_sql = @file_get_contents($session_setup_file);
+                if ($session_setup_sql === false || trim($session_setup_sql) === "") {
+                    throw new RuntimeException(
+                        "Cannot resume db-pull because db-session-setup.sql is missing or empty. " .
+                        "Run db-pull --abort and start again.",
+                    );
+                }
+                $this->execute_mysql_queries($mysql_conn, $session_setup_sql);
+                $this->audit_log(
+                    "SQL OUTPUT mysql | ran saved session setup after reconnect",
+                    true,
+                );
+            }
 
             $this->audit_log(
                 "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
@@ -7688,7 +7734,7 @@ class ImportClient
                     $mysql_conn,
                     &$sql_buffer_handle,
                     &$sql_buffer,
-                    &$mysql_session_ran_initial_SET_statements,
+                    $session_setup_file,
                     &$sql_bytes_written,
                     $context,
                     $query_stream,
@@ -7709,12 +7755,18 @@ class ImportClient
 
                     $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
                     if ($chunk_type === "sql_session_setup") {
-                        if ($mode === "mysql" && !$mysql_session_ran_initial_SET_statements) {
-                            $this->execute_mysql_queries($mysql_conn, $chunk["body"]);
-                            $mysql_session_ran_initial_SET_statements = true;
-                            $this->audit_log(
-                                "SQL OUTPUT mysql | applied session settings after reconnect",
-                                true,
+                        $session_setup_sql = $chunk["body"];
+                        $session_setup_tmp_file = $session_setup_file . ".tmp";
+                        $written = file_put_contents(
+                            $session_setup_tmp_file,
+                            $session_setup_sql,
+                        );
+                        if (
+                            $written !== strlen($session_setup_sql)
+                            || !rename($session_setup_tmp_file, $session_setup_file)
+                        ) {
+                            throw new RuntimeException(
+                                "Cannot save MySQL session setup to db-session-setup.sql",
                             );
                         }
                         return;

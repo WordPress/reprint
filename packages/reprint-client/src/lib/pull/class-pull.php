@@ -324,6 +324,7 @@ class Pull
                 $this->client->save_state();
                 foreach ([
                     "{$state_dir}/db.sql",
+                    "{$state_dir}/db-session-setup.sql",
                     "{$state_dir}/db-tables.jsonl",
                     "{$pull_state_directory}/domains.json",
                 ] as $path) {
@@ -830,6 +831,7 @@ class Pull
         }
         if ($reset_db_state) {
             $paths[] = wp_join_unix_paths($state_dir, 'db.sql');
+            $paths[] = wp_join_unix_paths($state_dir, 'db-session-setup.sql');
             $paths[] = wp_join_unix_paths($state_dir, 'db-tables.jsonl');
             $paths[] = wp_join_unix_paths($pull_state_directory, 'domains.json');
         }
