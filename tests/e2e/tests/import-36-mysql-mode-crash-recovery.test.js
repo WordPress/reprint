@@ -1,29 +1,27 @@
 /**
- * Test 36: MySQL Mode Crash Recovery
+ * Test 36: MySQL Mode Source Interruption
  *
  * When using --sql-output=mysql with short execution times, the server
  * may pause mid-query (x-query-complete: 0). The importer buffers the
- * partial SQL in memory and persists it to pull/sql-buffer on disk as each
- * chunk arrives. If the process dies at any point, the next run reloads
- * whatever was accumulated.
+ * partial SQL in memory while it requests the next response in the same
+ * process. A different importer process cannot align that buffer and cursor
+ * with the target database.
  *
- * This test forces many resume cycles with --max-exec=1, verifies the
- * database is correct after completion, and confirms pull/sql-buffer is
- * cleaned up.
+ * This test forces many source-response cycles with --max-exec=1 and verifies
+ * same-process completion.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, compareDatabases, createMysqlConnection,
-    readAuditLog, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
-describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
+describe('Import: MySQL Mode Source Interruption', { timeout: 120000 }, () => {
     const site = 'basic';
 
     beforeAll(async () => {
@@ -42,7 +40,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
         '--mysql-password=e2e_password',
     ];
 
-    describe('resume with short --max-exec completes correctly', () => {
+    describe('same-process source retries with short --max-exec', () => {
         let tempDir;
         const importDb = 'e2e_basic_import_36_resume';
 
@@ -61,9 +59,9 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
             await conn.end();
         });
 
-        it('completes via multiple resume cycles and database matches source', async () => {
+        it('completes and matches the source database', async () => {
             // Use --max-exec=1 to force the server to pause frequently,
-            // creating many resume cycles. auto-resume handles exit code 2.
+            // creating many source responses within one importer process.
             const result = runImporter(importUrl(), tempDir, 'db-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: [...mysqlArgs(importDb), '--max-exec=1'],
@@ -79,65 +77,10 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
                 `counts=${JSON.stringify(comparison.rowCounts)}`);
         });
 
-        it('pull/sql-buffer is cleaned up after completion', () => {
-            assert.ok(!existsSync(join(pullStateDirectory(tempDir, importUrl()), 'sql-buffer')),
-                'Expected pull/sql-buffer to be cleaned up after successful completion');
-        });
-
         it('no db.sql on disk', () => {
             assert.ok(!existsSync(join(tempDir, 'db.sql')),
                 'Expected no db.sql file when using --sql-output=mysql');
         });
     });
 
-    describe('pre-seeded pull/sql-buffer is loaded on resume', () => {
-        let tempDir;
-        const importDb = 'e2e_basic_import_36_seeded';
-
-        beforeAll(async () => {
-            tempDir = createTempDir('e2e-mysql-seeded-buffer');
-            const conn = await createMysqlConnection();
-            await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
-            await conn.query(`CREATE DATABASE \`${importDb}\``);
-            await conn.end();
-        });
-
-        afterAll(async () => {
-            cleanupTempDir(tempDir);
-            const conn = await createMysqlConnection();
-            await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
-            await conn.end();
-        });
-
-        it('loads pull/sql-buffer from disk and logs recovery', { timeout: 300000 }, () => {
-            // Run preflight so db-pull can proceed
-            runImporter(importUrl(), tempDir, 'preflight', {
-                secret: getSiteSecret(site),
-            });
-
-            // Seed a pull/sql-buffer file before running db-pull.
-            // The content is a harmless SQL comment that won't affect execution
-            // — the point is to verify the importer reads it and logs recovery.
-            const bufferFile = join(pullStateDirectory(tempDir, importUrl()), 'sql-buffer');
-            writeFileSync(bufferFile, '-- pre-seeded buffer\n');
-
-            // Run a fresh db-pull — the importer should detect the buffer file
-            const result = runImporter(importUrl(), tempDir, 'db-pull', {
-                secret: getSiteSecret(site),
-                extraArgs: mysqlArgs(importDb),
-                skipPreflight: true,
-            });
-            assert.equal(result.exitCode, 0,
-                `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}`);
-
-            // Verify recovery was logged
-            const audit = readAuditLog(tempDir);
-            assert.ok(audit.includes('CRASH RECOVERY') && audit.includes('pull/sql-buffer'),
-                'Expected audit log to mention pull/sql-buffer crash recovery');
-
-            // Buffer should be cleaned up
-            assert.ok(!existsSync(bufferFile),
-                'Expected pull/sql-buffer to be removed after completion');
-        });
-    });
 });

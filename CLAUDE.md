@@ -166,9 +166,9 @@ The `WpcloudHostAnalyzer` auto-detects WP Cloud production infrastructure that w
 
 Entries in `paths_to_remove` under `wp-content/plugins/` also trigger automatic plugin deactivation: at the end of `db-apply`, while the target database connection is still open, the importer instantiates the host analyzer, extracts plugin directory names from `paths_to_remove`, and removes matching entries from the `active_plugins` option. This prevents "plugin file does not exist" warnings in wp-admin. The deactivation is derived from `paths_to_remove` — there is no separate manifest field for it. We skip WordPress's `deactivate_plugins()` because the plugin files will already be gone from disk by the time WordPress boots, so firing deactivation hooks into absent code is pointless.
 
-### SQL Streaming Crash Recovery
+### SQL Streaming Source Retries
 
-When the export server crashes mid-SQL-stream (`--sql-output=mysql` mode), the importer detects the transport failure (missing completion chunk, curl communication errors), saves the cursor, persists accumulated SQL in `<remote-state-directory>/pull/sql-buffer`, and exits with code 2 for automatic retry. The next run reloads the buffer and continues. The `finally` block avoids masking the original exception with a secondary buffer-related throw.
+When one SQL response ends in the middle of a statement, the importer keeps those bytes in memory and requests the next response in the same process. If that process stops while writing to stdout or MySQL, Reprint cannot tell how much SQL the destination received or kept. A new process refuses to continue until the destination is reset or restored and `db-pull --abort` is run.
 
 ### Progress Tracking
 

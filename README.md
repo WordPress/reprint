@@ -367,12 +367,11 @@ The three modes:
 | `stdout` | Streams SQL to stdout, progress/status goes to stderr | none |
 | `mysql` | Connects via `mysqli::multi_query()` and executes statements as they arrive | none |
 
-All three modes recover from server crashes mid-stream (PHP fatal errors,
-OOM kills, `max_execution_time` expiry). When the server dies before sending
-a completion chunk, the importer detects the transport failure, saves its
-cursor, and exits with code 2 for automatic retry. Accumulated SQL is
-persisted in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/sql-buffer`
-so the next run reloads it and continues.
+All three modes retry a source crash inside the same importer process. If the
+importer itself stops while writing to `stdout` or `mysql`, Reprint cannot tell
+how much SQL the receiving program or database got. It refuses to continue.
+Reset or restore that destination, abort the pull, download `db.sql`, and use
+`db-apply`.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`

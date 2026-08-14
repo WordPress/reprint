@@ -173,6 +173,7 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
+    private const DATABASE_PULL_OUTPUT_STATUS_FILE = 'database-pull-output.json';
 
     /**
      * Maximum number of consecutive interrupted responses with no cursor
@@ -911,6 +912,64 @@ class ImportClient
         }
 
         $this->state = $this->load_state();
+
+        $output_status_file = wp_join_unix_paths(
+            $this->pull_state_directory,
+            self::DATABASE_PULL_OUTPUT_STATUS_FILE,
+        );
+        $output_status = $this->read_json_file($output_status_file);
+        $has_unfinished_database_pull_output =
+            is_file($output_status_file)
+            && ( $output_status['status'] ?? null ) !== 'complete';
+        $saved_command = $this->get_state()->active_resumable_command;
+        $has_unfinished_sql_stage =
+            $saved_command->command_name === 'db-pull'
+            && $saved_command->current_stage === 'sql'
+            && in_array($saved_command->completion_state, ['in_progress', 'partial'], true);
+        $saved_output = $this->get_state()->sql_output;
+        if (
+            !$abort
+            && in_array($command, ['db-pull', 'pull', 'pull-db', 'db-apply'], true)
+            && $has_unfinished_sql_stage
+            && in_array($saved_output, ['stdout', 'mysql'], true)
+            && (
+                ( $output_status['status'] ?? null ) !== 'in_progress'
+                || ( $output_status['mode'] ?? null ) !== $saved_output
+            )
+        ) {
+            throw new RuntimeException(
+                'This db-pull did not finish, and Reprint cannot tell where to continue. ' .
+                'Run db-pull --abort, then start db-pull again.',
+            );
+        }
+        if (
+            !$abort
+            && in_array($command, ['db-pull', 'pull', 'pull-db'], true)
+            && $has_unfinished_database_pull_output
+        ) {
+            $saved_output = $output_status['mode'] ?? null;
+            if ($saved_output === 'stdout') {
+                throw new RuntimeException(
+                    'db-pull stopped while writing SQL to stdout. Reprint does not know how ' .
+                    'much SQL the receiving program or file got. Reset that program or file, ' .
+                    'then run db-pull --abort. Start again with --sql-output=file and apply ' .
+                    'db.sql with db-apply.',
+                );
+            }
+            if ($saved_output === 'mysql') {
+                throw new RuntimeException(
+                    'db-pull stopped while writing SQL to MySQL. Reprint does not know which ' .
+                    'database changes MySQL kept. Restore or reset the target database, then ' .
+                    'run db-pull --abort. Start again with --sql-output=file and apply db.sql ' .
+                    'with db-apply.',
+                );
+            }
+            throw new RuntimeException(
+                'db-pull did not finish, and its saved output setting is not valid. Reset ' .
+                'anything that may have received the SQL, then run db-pull --abort and start ' .
+                'db-pull again.',
+            );
+        }
 
         if ($command === "pull-metadata") {
             $this->run_pull_metadata();
@@ -2224,9 +2283,6 @@ class ImportClient
                     "RESTART | Clearing db-pull state",
                     true,
                 );
-                $this->reset_state();
-                $this->save_state();
-
                 if ($this->sql_output_mode === "file") {
                     $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
                     if (file_exists($sql_file)) {
@@ -2250,6 +2306,9 @@ class ImportClient
                         "FILE DELETE | {$domains_file} | abort db-pull",
                     );
                 }
+                $this->clear_database_pull_records();
+                $this->reset_state();
+                $this->save_state();
                 break;
 
             case "db-index":
@@ -3731,7 +3790,7 @@ class ImportClient
      * Command: db-pull
      *
      * Rules:
-     * - Stream next portion of SQL from last saved cursor
+     * - File output continues from a saved cursor; direct output retries only in this process
      * - If already completed and db.sql exists: require --abort flag
      * - If db.sql missing but state says complete: warn and require --abort flag
      * - Otherwise: error
@@ -3798,6 +3857,7 @@ class ImportClient
             $this->get_state()->active_resumable_command->current_stage = "db-index";
             $this->get_state()->diff = new FileDiffProgressState();
             $this->get_state()->db_index = new DatabaseTableIndexState();
+            $this->get_state()->sql_output = $this->sql_output_mode;
             $this->save_state();
 
             $this->audit_log("START db-pull", true);
@@ -3838,6 +3898,18 @@ class ImportClient
             // Transition to sql stage
             $this->get_state()->active_resumable_command->current_stage = "sql";
             $this->get_state()->active_resumable_command->remote_cursor = null;
+            if (in_array($this->sql_output_mode, ['stdout', 'mysql'], true)) {
+                $this->write_json_file(
+                    wp_join_unix_paths(
+                        $this->pull_state_directory,
+                        self::DATABASE_PULL_OUTPUT_STATUS_FILE,
+                    ),
+                    [
+                        'mode' => $this->sql_output_mode,
+                        'status' => 'in_progress',
+                    ],
+                );
+            }
             $this->save_state();
         }
 
@@ -3858,6 +3930,18 @@ class ImportClient
         // Mark as complete
         $this->get_state()->active_resumable_command->completion_state = "complete";
         $this->save_state();
+        if (in_array($this->sql_output_mode, ['stdout', 'mysql'], true)) {
+            $this->write_json_file(
+                wp_join_unix_paths(
+                    $this->pull_state_directory,
+                    self::DATABASE_PULL_OUTPUT_STATUS_FILE,
+                ),
+                [
+                    'mode' => $this->sql_output_mode,
+                    'status' => 'complete',
+                ],
+            );
+        }
 
         $this->audit_log("db-pull complete", true);
 
@@ -7531,7 +7615,6 @@ class ImportClient
 
         $sql_handle = null;
         $mysql_conn = null;
-        $sql_buffer_handle = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
 
@@ -7603,25 +7686,6 @@ class ImportClient
                 "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
                 true,
             );
-
-            // Open a persistent buffer file so partial queries survive crashes.
-            // Each SQL chunk is appended to this file as it arrives; when the
-            // query completes and executes, the file is truncated. If the process
-            // dies at any point, the next run reloads whatever was accumulated.
-            $sql_buffer_file = wp_join_unix_paths($this->pull_state_directory, "sql-buffer");
-            if (file_exists($sql_buffer_file)) {
-                $sql_buffer = file_get_contents($sql_buffer_file);
-                $this->audit_log(
-                    sprintf("CRASH RECOVERY | Restored %d bytes from pull/sql-buffer", strlen($sql_buffer)),
-                    true,
-                );
-            }
-            // Open in write mode (truncate) if we loaded nothing, append if we
-            // have a partial query to continue accumulating into.
-            $sql_buffer_handle = fopen($sql_buffer_file, $sql_buffer !== "" ? "a" : "w");
-            if (!$sql_buffer_handle) {
-                throw new RuntimeException("Cannot open SQL buffer file: {$sql_buffer_file}");
-            }
         }
 
         // Domain discovery and statement counting: scan SQL for URLs during download
@@ -7684,7 +7748,6 @@ class ImportClient
                     &$complete,
                     &$sql_handle,
                     $mysql_conn,
-                    &$sql_buffer_handle,
                     &$sql_buffer,
                     &$sql_bytes_written,
                     $context,
@@ -7706,13 +7769,12 @@ class ImportClient
 
                     $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
 
-                    // Save cursor periodically (every 50 chunks).
-                    // Skip saving when there's buffered SQL waiting for a
-                    // complete statement — crash recovery would replay the
-                    // cursor but miss the buffered bytes.
+                    // File output saves both the SQL bytes and their source cursor.
+                    // stdout and MySQL keep the cursor only for retries in this process.
                     $chunks_since_save++;
                     if (
-                        $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
+                        $mode === 'file'
+                        && $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
                         && $sql_buffer === ""
                     ) {
                         if ($sql_handle) {
@@ -7759,23 +7821,23 @@ class ImportClient
 
                             case "stdout":
                                 $bytes = @fwrite(STDOUT, $data);
-                                if ($bytes === false) {
-                                    // Broken pipe — save state and exit cleanly so the
-                                    // pipe reader (e.g. `mysql`) can finish on its own.
-                                    $this->save_state();
-                                    exit(0);
+                                if ($bytes === false || $bytes !== strlen($data)) {
+                                    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI stream byte counts are not HTML.
+                                    throw new RuntimeException(
+                                        'SQL stdout write failed after ' .
+                                        ( $bytes === false ? '0' : $bytes ) . '/' . strlen($data) .
+                                        ' bytes. The program reading stdout may have received only part ' .
+                                        'of the SQL. Reset it before trying again.',
+                                    );
+                                    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
                                 }
                                 $sql_bytes_written += $bytes;
                                 break;
 
                             case "mysql":
-                                // Append to disk immediately so the buffer survives
-                                // even if the process is killed mid-chunk.
-                                if ($sql_buffer_handle) {
-                                    fwrite($sql_buffer_handle, $data);
-                                    fflush($sql_buffer_handle);
-                                }
-
+                                // The incomplete statement stays in memory while source
+                                // responses retry inside this process. A new process is
+                                // rejected because it cannot align this buffer with the target.
                                 $sql_buffer .= $data;
                                 $sql_bytes_written += strlen($data);
 
@@ -7785,18 +7847,20 @@ class ImportClient
                                     }
                                     // Drain all result sets from multi_query before sending the
                                     // next chunk — mysqli requires this.
-                                    do {
+                                    while (true) {
                                         $result = $mysql_conn->store_result();
                                         if ($result) { $result->free(); }
                                         if ($mysql_conn->errno) {
                                             throw new RuntimeException("MySQL statement error: " . $mysql_conn->error);
                                         }
-                                    } while ($mysql_conn->more_results() && $mysql_conn->next_result());
-
-                                    // Query executed — truncate the buffer file and reset.
-                                    if ($sql_buffer_handle) {
-                                        ftruncate($sql_buffer_handle, 0);
-                                        rewind($sql_buffer_handle);
+                                        if (!$mysql_conn->more_results()) {
+                                            break;
+                                        }
+                                        if (!$mysql_conn->next_result()) {
+                                            throw new RuntimeException(
+                                                "MySQL statement error: " . $mysql_conn->error,
+                                            );
+                                        }
                                     }
                                     $sql_buffer = "";
                                 }
@@ -7902,15 +7966,13 @@ class ImportClient
                     $context->response_stats ?? [],
                 );
 
-                // Save cursor for resumption (keep it even when complete for reference)
                 if ($sql_handle) {
                     fflush($sql_handle);
+                    $this->get_state()->active_resumable_command->remote_cursor = $cursor;
+                    // Clear sql_bytes when complete, otherwise save current position.
+                    $this->get_state()->sql_bytes = $complete ? null : $sql_bytes_written;
+                    $this->save_state();
                 }
-
-                $this->get_state()->active_resumable_command->remote_cursor = $cursor;
-                // Clear sql_bytes when complete, otherwise save current position
-                $this->get_state()->sql_bytes = $complete ? null : $sql_bytes_written;
-                $this->save_state();
             }
 
             // Drain any remaining statements after download completes
@@ -7960,26 +8022,16 @@ class ImportClient
             if ($sql_handle) {
                 fclose($sql_handle);
             }
-            if ($sql_buffer_handle) {
-                fclose($sql_buffer_handle);
-                $sql_buffer_handle = null;
-            }
             if ($mysql_conn) {
                 $pending = $sql_buffer;
                 $mysql_conn->close();
                 $mysql_conn = null;
-                // Clean up buffer file — if we got here with an empty buffer,
-                // all queries were executed successfully.
-                $sql_buffer_file = wp_join_unix_paths($this->pull_state_directory, "sql-buffer");
-                if ($pending === "" && file_exists($sql_buffer_file)) {
-                    unlink($sql_buffer_file);
-                }
                 if ($pending !== "") {
                     if ($caught_exception !== null) {
                         // An exception is already in flight (e.g. curl error,
-                        // MySQL error). Don't mask it by throwing about the
-                        // buffer — the buffer data is safely persisted in
-                        // pull/sql-buffer and will be recovered on the next run.
+                        // MySQL error). Do not mask it with the discarded
+                        // in-memory tail. The saved output status makes a later
+                        // process stop instead of sending more SQL to this target.
                         $this->audit_log(
                             "BUFFER NOT FLUSHED | " . strlen($pending) .
                             " bytes in SQL buffer during exception unwind" .
@@ -10160,13 +10212,13 @@ class ImportClient
      * Track consecutive interrupted responses and decide whether to resume.
      *
      * Compares the cursor before and after the request. A cursor advance means
-     * the request produced another durable part, so the counter resets. If the
+     * the request handler accepted another complete part, so the counter resets. If the
      * cursor did not move, the counter increments. After
      * MAX_CONSECUTIVE_INTERRUPTED_RESPONSES with no progress, the runner stops.
      *
      * @param string                           $phase         Human-readable phase name.
      * @param ?string                          $cursor_before Cursor at request start.
-     * @param ?string                          $cursor_after  Last durable cursor.
+     * @param ?string                          $cursor_after  Last accepted cursor in this process.
      * @param TransientInterruptionException   $exception     Response failure.
      */
     protected function assert_can_resume_after_interrupted_response(
@@ -10862,6 +10914,67 @@ class ImportClient
         $this->state->pull_pipeline = $previous_state->pull_pipeline;
     }
 
+    /** Removes the files that describe a database pull. */
+    public function clear_database_pull_records(): void
+    {
+        $path = wp_join_unix_paths(
+            $this->pull_state_directory,
+            self::DATABASE_PULL_OUTPUT_STATUS_FILE,
+        );
+        if (file_exists($path) && !unlink($path)) {
+            throw new RuntimeException('Cannot delete the saved database output status.');
+        }
+    }
+
+    /**
+     * Reads a JSON object, returning an empty array when it is absent or invalid.
+     *
+     * @return array<string,mixed> Decoded JSON object.
+     */
+    private function read_json_file(string $path): array
+    {
+        if (!is_file($path)) {
+            return [];
+        }
+        $contents = file_get_contents($path);
+        if ($contents === false) {
+            return [];
+        }
+        $value = json_decode($contents, true);
+        return is_array($value) ? $value : [];
+    }
+
+    /**
+     * Writes a JSON object without exposing a partly written file.
+     *
+     * @param array<string,mixed> $value JSON object fields.
+     */
+    private function write_json_file(string $path, array $value): void
+    {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These CLI errors name the state file and its directory.
+        $json = json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if ($json === false) {
+            throw new RuntimeException(
+                'Reprint could not encode ' . basename($path) . ' as JSON: ' . json_last_error_msg(),
+            );
+        }
+        $contents = $json . "\n";
+        $temporary_path = $path . '.tmp';
+        if (file_put_contents($temporary_path, $contents) !== strlen($contents)) {
+            throw new RuntimeException(
+                'Reprint could not save ' . basename($path) . '. Check that ' . dirname($path) .
+                ' is writable and has free space.',
+            );
+        }
+        if (!rename($temporary_path, $path)) {
+            throw new RuntimeException(
+                'Reprint could not finish saving ' . basename($path) .
+                '. Check the state directory permissions.',
+            );
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+    }
+
     /** Return the in-process pull state. */
     public function get_state(): PullState
     {
@@ -11146,19 +11259,7 @@ class ImportClient
         }
         $state = $this->encode_state_paths($state);
 
-        // Write to temp file first, then atomic rename
-        $json = json_encode($state, JSON_PRETTY_PRINT);
-        if ($json === false) {
-            throw new RuntimeException("Failed to encode state: " . json_last_error_msg());
-        }
-        $tmp_file = $this->pull_state_file . '.tmp';
-        $bytes = file_put_contents($tmp_file, $json);
-        if ($bytes === false) {
-            throw new RuntimeException("Failed to write state file: $tmp_file (disk full?)");
-        }
-        if (!rename($tmp_file, $this->pull_state_file)) {
-            throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->pull_state_file}");
-        }
+        $this->write_json_file($this->pull_state_file, $state);
 
         $remote_index_entry_count = $this->remote_index_entry_count();
         $files_pulled = $this->files_pulled; // Completed in this run
@@ -12506,7 +12607,9 @@ if (
             "description" =>
                 "Indexes remote tables, then streams the full SQL dump into\n" .
                 "--state-dir/db.sql (default), to stdout, or directly into a\n" .
-                "MySQL connection. Resumes from the last cursor if interrupted.\n" .
+                "MySQL connection. Source interruptions retry within this process.\n" .
+                "If that process stops, Reprint cannot tell how much SQL reached stdout or MySQL.\n" .
+                "Reset or restore the destination, then abort and restart as file output.\n" .
                 "Discovered domains are cached for later use by db-apply.\n",
             "extra" =>
                 "Output modes:\n" .

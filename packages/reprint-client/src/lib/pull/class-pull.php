@@ -321,7 +321,6 @@ class Pull
                 $state->consecutive_interrupted_responses = 0;
                 $state->sql_bytes = null;
                 $state->db_index = new DatabaseTableIndexState();
-                $this->client->save_state();
                 foreach ([
                     "{$state_dir}/db.sql",
                     "{$state_dir}/db-tables.jsonl",
@@ -331,6 +330,8 @@ class Pull
                         @unlink($path);
                     }
                 }
+                $this->client->clear_database_pull_records();
+                $this->client->save_state();
             }
         }
 
@@ -821,8 +822,6 @@ class Pull
             $state->apply = new DatabaseApplyCommandState();
             $state->sql_output = null;
         }
-        $this->client->save_state();
-
         $paths = [];
         if ($reset_file_transfer_state) {
             $paths[] = wp_join_unix_paths($pull_state_directory, 'remote-index.next.jsonl');
@@ -839,6 +838,10 @@ class Pull
                 @unlink($path);
             }
         }
+        if ($reset_db_state) {
+            $this->client->clear_database_pull_records();
+        }
+        $this->client->save_state();
 
         $this->client->audit_log(strtoupper($command) . " | prepared for delta re-pull", true);
     }
