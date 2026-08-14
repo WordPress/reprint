@@ -3,6 +3,8 @@
 use PHPUnit\Framework\TestCase;
 use WordPress\DataLiberation\DatabaseRowsReader;
 
+require_once __DIR__ . '/fixtures/DatabaseRowsReaderMetadataConnection.php';
+
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
 final class DatabaseRowsReaderMetadataTest extends TestCase {
 
@@ -28,61 +30,24 @@ final class DatabaseRowsReaderMetadataTest extends TestCase {
             $database->queries
         );
     }
-}
 
-// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
-final class DatabaseRowsReaderMetadataConnection {
-    /** @var string[] */
-    private $tables;
-
-    /** @var string[] */
-    public $queries = [];
-
-    /** @param string[] $tables */
-    public function __construct(array $tables)
+    public function testRestoreAlignsAProvidedTableListWithTheCurrentTable(): void
     {
-        $this->tables = $tables;
-    }
+        $database = new DatabaseRowsReaderMetadataConnection(['first', 'second', 'third']);
+        $reader = new DatabaseRowsReader($database, [
+            'tables_to_process' => ['first', 'second', 'third'],
+        ]);
 
-    public function query(string $query): DatabaseRowsReaderMetadataStatement
-    {
-        $this->queries[] = $query;
-        if ($query === 'SHOW FULL TABLES') {
-            return new DatabaseRowsReaderMetadataStatement(array_map(static function ($table) {
-                return ['table' => $table, 'type' => 'BASE TABLE'];
-            }, $this->tables));
-        }
-        if (strpos($query, 'SHOW INDEX FROM ') === 0) {
-            return new DatabaseRowsReaderMetadataStatement([
-                ['Column_name' => 'id', 'Seq_in_index' => 1],
-            ]);
-        }
-        if (strpos($query, 'SHOW FULL COLUMNS FROM ') === 0) {
-            return new DatabaseRowsReaderMetadataStatement([
-                ['Field' => 'id', 'Type' => 'int(11)'],
-            ]);
-        }
-        throw new RuntimeException("Unexpected query: {$query}");
-    }
-}
+        $this->assertTrue($reader->restore_cursor_state([
+            'current_table' => 'second',
+            'current_pk_columns' => ['id'],
+            'last_pk_values' => ['id' => 1],
+            'current_offset' => 0,
+            'current_row' => null,
+            'current_column_names' => ['id'],
+        ]));
 
-// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
-final class DatabaseRowsReaderMetadataStatement {
-    /** @var array[] */
-    private $rows;
-
-    /** @param array[] $rows */
-    public function __construct(array $rows)
-    {
-        $this->rows = $rows;
-    }
-
-    /** @return array|false */
-    public function fetch()
-    {
-        if (count($this->rows) === 0) {
-            return false;
-        }
-        return array_shift($this->rows);
+        $this->assertTrue($reader->move_to_next_table());
+        $this->assertSame('third', $reader->get_current_table());
     }
 }

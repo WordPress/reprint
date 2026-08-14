@@ -48,7 +48,7 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
         $this->assertSame('wp_posts', $reader->get_current_table());
         $this->assertSame(['ID'], $reader->get_current_primary_key_columns());
         $this->assertSame(
-            ['ID' => '1', 'post_content' => 'https://old.example/one'],
+            ['ID' => 1, 'post_content' => 'https://old.example/one'],
             $reader->get_current_record()
         );
     }
