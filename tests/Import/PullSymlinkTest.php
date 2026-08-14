@@ -76,6 +76,40 @@ class PullSymlinkTest extends TestCase
         $this->assertEquals('target', readlink($symlinkPath), 'Symlink target should match');
     }
 
+    public function testSymlinkJournalRecordsTheRemoteTargetSize(): void
+    {
+        $client = new \ImportClient(
+            'http://fake.url',
+            $this->tempDir,
+            $this->tempDir . '/fs-root'
+        );
+        $reflection = new \ReflectionClass($client);
+        $remoteTarget = '../target/file.php';
+
+        $reflection->getMethod('handle_symlink_chunk')->invoke($client, [
+            'headers' => [
+                'x-symlink-path' => base64_encode('/test/link'),
+                'x-symlink-target' => base64_encode($remoteTarget),
+                'x-symlink-ctime' => '1234567890',
+            ],
+        ]);
+
+        $journal = $reflection->getProperty('pull_index_journal')->getValue(
+            $client
+        );
+        $journal->flush();
+        $journal->close();
+        $walRecords = file(
+            $client->pull_state_directory . '/index.wal',
+            FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES
+        );
+        $this->assertIsArray($walRecords);
+        $this->assertCount(1, $walRecords);
+        $record = json_decode($walRecords[0], true, 512, JSON_THROW_ON_ERROR);
+
+        $this->assertSame(strlen($remoteTarget), $record['remote_path_size']);
+    }
+
     public function testSymlinkTargetBesideVisitedRootRemainsQueued()
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');

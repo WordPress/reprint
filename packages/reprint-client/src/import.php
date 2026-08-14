@@ -9620,7 +9620,7 @@ class ImportClient
             $this->pull_index_journal->record_remote_upsert(
                 $path,
                 $ctime,
-                0,
+                strlen($target),
                 "link",
                 $local_absolute_path
             );
