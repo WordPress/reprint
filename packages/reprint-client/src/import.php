@@ -173,6 +173,8 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
+    private const DATABASE_DUMP_INTENT_FILE = 'database-dump.intent';
+    private const DATABASE_DUMP_RECORD_FILE = 'database-dump.json';
     private const DATABASE_PULL_OUTPUT_STATUS_FILE = 'database-pull-output.json';
 
     /**
@@ -922,10 +924,38 @@ class ImportClient
             is_file($output_status_file)
             && ( $output_status['status'] ?? null ) !== 'complete';
         $saved_command = $this->get_state()->active_resumable_command;
-        $has_unfinished_sql_stage =
+        $has_unfinished_db_pull =
             $saved_command->command_name === 'db-pull'
-            && $saved_command->current_stage === 'sql'
             && in_array($saved_command->completion_state, ['in_progress', 'partial'], true);
+        $has_unfinished_sql_stage =
+            $has_unfinished_db_pull
+            && $saved_command->current_stage === 'sql';
+        if (
+            !$abort
+            && in_array($command, ['db-pull', 'pull', 'pull-db', 'db-apply'], true)
+            && $has_unfinished_db_pull
+            && !in_array($this->get_state()->sql_output, ['file', 'stdout', 'mysql'], true)
+        ) {
+            throw new RuntimeException(
+                'This db-pull did not finish, and Reprint did not save where it was writing ' .
+                'SQL. Run db-pull --abort, then start db-pull again.',
+            );
+        }
+        if (
+            !$abort
+            && in_array($command, ['db-pull', 'pull', 'pull-db', 'db-apply'], true)
+            && $has_unfinished_db_pull
+            && $this->get_state()->sql_output === 'file'
+            && !is_file(wp_join_unix_paths(
+                $this->pull_state_directory,
+                self::DATABASE_DUMP_INTENT_FILE,
+            ))
+        ) {
+            throw new RuntimeException(
+                'This db-pull did not finish, and Reprint cannot tell whether db.sql belongs ' .
+                'to that pull. Run db-pull --abort, then start db-pull again.',
+            );
+        }
         $saved_output = $this->get_state()->sql_output;
         if (
             !$abort
@@ -1069,6 +1099,19 @@ class ImportClient
             if (!in_array($mode, ["file", "stdout", "mysql"])) {
                 throw new InvalidArgumentException(
                     "Invalid --sql-output mode: {$mode}. Valid modes: file, stdout, mysql",
+                );
+            }
+            $saved_sql_output = $this->get_state()->sql_output;
+            if (
+                !$abort
+                && $has_unfinished_db_pull
+                && $saved_sql_output !== null
+                && $saved_sql_output !== $mode
+            ) {
+                throw new RuntimeException(
+                    "Cannot change --sql-output from {$saved_sql_output}" .
+                    " to {$mode} while db-pull is unfinished. Resume with the original mode " .
+                    'or run db-pull --abort.',
                 );
             }
             $this->sql_output_mode = $mode;
@@ -2283,28 +2326,22 @@ class ImportClient
                     "RESTART | Clearing db-pull state",
                     true,
                 );
-                if ($this->sql_output_mode === "file") {
-                    $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
-                    if (file_exists($sql_file)) {
-                        unlink($sql_file);
-                        $this->audit_log(
-                            "FILE DELETE | {$sql_file} | abort db-pull",
-                        );
+                foreach ([
+                    wp_join_unix_paths($this->state_dir, "db.sql"),
+                    wp_join_unix_paths($this->state_dir, "db-tables.jsonl"),
+                    wp_join_unix_paths($this->pull_state_directory, "domains.json"),
+                    wp_join_unix_paths($this->pull_state_directory, "sql-stats.json"),
+                ] as $path) {
+                    if (file_exists($path)) {
+                        if (!unlink($path)) {
+                            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path belongs to the caller-selected state directory.
+                            throw new RuntimeException(
+                                "Reprint could not delete db-pull file: {$path}. " .
+                                "Check its permissions, then run db-pull --abort again.",
+                            );
+                        }
+                        $this->audit_log("FILE DELETE | {$path} | abort db-pull");
                     }
-                }
-                $tables_file = wp_join_unix_paths($this->state_dir, "db-tables.jsonl");
-                if (file_exists($tables_file)) {
-                    unlink($tables_file);
-                    $this->audit_log(
-                        "FILE DELETE | {$tables_file} | abort db-pull",
-                    );
-                }
-                $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
-                if (file_exists($domains_file)) {
-                    unlink($domains_file);
-                    $this->audit_log(
-                        "FILE DELETE | {$domains_file} | abort db-pull",
-                    );
                 }
                 $this->clear_database_pull_records();
                 $this->reset_state();
@@ -3799,10 +3836,18 @@ class ImportClient
     {
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
         $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
+        $dump_intent_file = wp_join_unix_paths(
+            $this->pull_state_directory,
+            self::DATABASE_DUMP_INTENT_FILE,
+        );
 
         $has_progress =
             $state_command === "db-pull" &&
-            ($this->get_state()->active_resumable_command->completion_state ?? null) === "in_progress";
+            in_array(
+                $this->get_state()->active_resumable_command->completion_state ?? null,
+                ["in_progress", "partial"],
+                true,
+            );
         $current_status =
             $state_command === "db-pull"
                 ? $this->get_state()->active_resumable_command->completion_state ?? null
@@ -3829,6 +3874,8 @@ class ImportClient
         }
 
         if ($has_progress) {
+            $this->get_state()->active_resumable_command->completion_state = "in_progress";
+            $this->save_state();
             $stage = $this->get_state()->active_resumable_command->current_stage ?? "db-index";
             $this->audit_log(
                 sprintf(
@@ -3857,7 +3904,25 @@ class ImportClient
             $this->get_state()->active_resumable_command->current_stage = "db-index";
             $this->get_state()->diff = new FileDiffProgressState();
             $this->get_state()->db_index = new DatabaseTableIndexState();
+            $this->get_state()->sql_bytes = null;
             $this->get_state()->sql_output = $this->sql_output_mode;
+            if ($this->sql_output_mode === 'file') {
+                // Remove the old db.sql before removing the information which marks it
+                // complete. If the process stops here, either both still exist or db.sql is gone.
+                if (file_exists($sql_file)) {
+                    if (!unlink($sql_file)) {
+                        throw new RuntimeException(
+                            "Reprint could not remove the old db.sql: {$sql_file}. " .
+                            "Check its permissions, then start db-pull again.",
+                        );
+                    }
+                    $this->audit_log("FILE DELETE | {$sql_file} | start db-pull");
+                }
+                $this->clear_database_pull_records();
+                $this->write_json_file($dump_intent_file, [
+                    'create_table_query' => true,
+                ]);
+            }
             $this->save_state();
 
             $this->audit_log("START db-pull", true);
@@ -3927,10 +3992,40 @@ class ImportClient
             return;
         }
 
-        // Mark as complete
+        if ($this->sql_output_mode === 'file') {
+            $dump_intent = $this->read_json_file($dump_intent_file);
+            $dump_hash = hash_file('sha256', $sql_file);
+            if (
+                ( $dump_intent['create_table_query'] ?? false ) !== true
+                || !is_string($dump_hash)
+            ) {
+                throw new RuntimeException(
+                    'Reprint could not confirm that db.sql finished downloading.',
+                );
+            }
+            $this->write_json_file(
+                wp_join_unix_paths(
+                    $this->pull_state_directory,
+                    self::DATABASE_DUMP_RECORD_FILE,
+                ),
+                [
+                    'sha256' => $dump_hash,
+                    'create_table_query' => true,
+                ],
+            );
+        }
+
+        // Mark the completed bytes before removing the download intent. If
+        // the process stops between these writes, the matching dump record
+        // still classifies db.sql and the leftover intent is harmless.
+        $this->get_state()->sql_bytes = null;
         $this->get_state()->active_resumable_command->completion_state = "complete";
         $this->save_state();
-        if (in_array($this->sql_output_mode, ['stdout', 'mysql'], true)) {
+        if ($this->sql_output_mode === 'file') {
+            if (file_exists($dump_intent_file)) {
+                @unlink($dump_intent_file);
+            }
+        } else {
             $this->write_json_file(
                 wp_join_unix_paths(
                     $this->pull_state_directory,
@@ -3999,7 +4094,7 @@ class ImportClient
 
             $sql_handle = fopen($sql_file, "r");
             if (!$sql_handle) {
-                throw new RuntimeException("Cannot open SQL file: {$sql_file}");
+                throw new RuntimeException("Reprint could not open db.sql for reading: {$sql_file}");
             }
 
             try {
@@ -5723,6 +5818,30 @@ class ImportClient
                 "db.sql not found in {$this->state_dir}. Run db-pull first.",
             );
         }
+        $sql_hash = hash_file('sha256', $sql_file);
+        if (!is_string($sql_hash)) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is the caller-selected CLI state directory.
+            throw new RuntimeException("Reprint could not read db.sql: {$sql_file}");
+        }
+        $dump_record = $this->read_json_file(wp_join_unix_paths(
+            $this->pull_state_directory,
+            self::DATABASE_DUMP_RECORD_FILE,
+        ));
+        $is_confirmed_replacement_dump =
+            ( $dump_record['create_table_query'] ?? false ) === true
+            && hash_equals((string) ( $dump_record['sha256'] ?? '' ), $sql_hash);
+        $has_unconfirmed_download_intent =
+            is_file(wp_join_unix_paths(
+                $this->pull_state_directory,
+                self::DATABASE_DUMP_INTENT_FILE,
+            ))
+            && !$is_confirmed_replacement_dump;
+        if ($has_unconfirmed_download_intent) {
+            throw new RuntimeException(
+                'db.sql is still downloading. Finish db-pull or run db-pull --abort ' .
+                'before db-apply.',
+            );
+        }
 
         // If --new-site-url is provided, derive the source origin from the
         // export URL and add an implicit --rewrite-url mapping.
@@ -5894,7 +6013,7 @@ class ImportClient
         });
         $sql_handle = fopen($sql_file, "r");
         if (!$sql_handle) {
-            throw new RuntimeException("Cannot open SQL file: {$sql_file}");
+            throw new RuntimeException("Reprint could not open db.sql for reading: {$sql_file}");
         }
 
         $sql_file_size = filesize($sql_file);
@@ -7621,34 +7740,64 @@ class ImportClient
         if ($mode === "file") {
             $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
 
-            // Crash recovery: if SQL file is larger than expected, truncate it.
-            // This happens if we crashed after writing but before saving the new cursor.
+            // Remove bytes written after the last saved source position before
+            // appending the next part of the dump.
             $tracked_bytes = $this->get_state()->sql_bytes ?? null;
-            if ($tracked_bytes !== null && file_exists($sql_file)) {
+            if ($cursor !== null) {
+                if (!is_int($tracked_bytes) || $tracked_bytes < 0 || !file_exists($sql_file)) {
+                    throw new RuntimeException(
+                        'db-pull cannot continue because db.sql is missing or Reprint did not save ' .
+                        'its size. Run db-pull --abort, then start db-pull again.',
+                    );
+                }
                 $actual_size = filesize($sql_file);
+                if ($actual_size === false || $actual_size < $tracked_bytes) {
+                    throw new RuntimeException(
+                        sprintf(
+                            'db-pull cannot continue because db.sql has %d bytes, but Reprint had saved ' .
+                            'a size of %d bytes. Run db-pull --abort, then start db-pull again.',
+                            $actual_size === false ? 0 : $actual_size,
+                            $tracked_bytes,
+                        ),
+                    );
+                }
                 if ($actual_size > $tracked_bytes) {
                     $this->audit_log(
                         sprintf(
-                            "CRASH RECOVERY | Truncating db.sql from %d to %d bytes",
+                            "RESUME | Truncating db.sql from %d to %d bytes",
                             $actual_size,
                             $tracked_bytes,
                         ),
                         true,
                     );
                     $handle = fopen($sql_file, "r+");
-                    if ($handle) {
-                        ftruncate($handle, $tracked_bytes);
-                        fclose($handle);
+                    if (!$handle || !ftruncate($handle, $tracked_bytes)) {
+                        if ($handle) {
+                            fclose($handle);
+                        }
+                        throw new RuntimeException(
+                            'Reprint could not remove unfinished bytes from db.sql. ' .
+                            'Run db-pull --abort, then start db-pull again.',
+                        );
                     }
+                    fclose($handle);
                 }
             }
 
-            $sql_bytes_written = file_exists($sql_file) ? filesize($sql_file) : 0;
+            if ($cursor === null) {
+                $sql_bytes_written = 0;
+            } else {
+                $existing_size = filesize($sql_file);
+                if ($existing_size === false) {
+                    throw new RuntimeException("Reprint could not read the size of db.sql: {$sql_file}");
+                }
+                $sql_bytes_written = $existing_size;
+            }
 
             // Open in write mode if no cursor (starting fresh), append mode if resuming
             $sql_handle = fopen($sql_file, $cursor ? "a" : "w");
             if (!$sql_handle) {
-                throw new RuntimeException("Cannot open SQL file: {$sql_file}");
+                throw new RuntimeException("Reprint could not open db.sql for writing: {$sql_file}");
             }
 
         } elseif ($mode === "stdout") {
@@ -7739,6 +7888,11 @@ class ImportClient
         try {
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
+                // A completed file dump may be replayed from byte zero only
+                // when every dumped base table replaces its target table.
+                if ($mode === 'file') {
+                    $params['create_table_query'] = true;
+                }
                 $url = $this->build_url("sql_chunk", $cursor, $params);
 
                 $context = new StreamingContext();
@@ -7767,39 +7921,7 @@ class ImportClient
                         pcntl_signal_dispatch();
                     }
 
-                    $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
-
-                    // File output saves both the SQL bytes and their source cursor.
-                    // stdout and MySQL keep the cursor only for retries in this process.
-                    $chunks_since_save++;
-                    if (
-                        $mode === 'file'
-                        && $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
-                        && $sql_buffer === ""
-                    ) {
-                        if ($sql_handle) {
-                            fflush($sql_handle);
-                        }
-                        $this->get_state()->active_resumable_command->remote_cursor = $cursor;
-                        $this->get_state()->sql_bytes = $sql_bytes_written;
-                        $this->get_state()->sql_statements_counted = $sql_statements_counted;
-                        $this->save_state();
-                        $chunks_since_save = 0;
-
-                        // Also persist discovered domains so they survive crashes.
-                        // On resume, the SQL download picks up from the cursor,
-                        // skipping already-downloaded data — so domains from that
-                        // earlier data would be lost without periodic saves.
-                        if ($domain_collector) {
-                            $domains = $domain_collector->get_domains();
-                            if (!empty($domains)) {
-                                file_put_contents(
-                                    $domains_file,
-                                    json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-                                );
-                            }
-                        }
-                    }
+                    $chunk_cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
 
                     $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
@@ -7934,6 +8056,39 @@ class ImportClient
                     } elseif ($chunk_type === "error") {
                         $this->handle_error_chunk($chunk, "sql", $context);
                     }
+
+                    // The cursor names the part just processed. Only file output
+                    // persists it after flushing the matching bytes. Direct output
+                    // retains it in memory for source retries in this process.
+                    $cursor = $chunk_cursor;
+                    $chunks_since_save++;
+                    if (
+                        $mode === 'file'
+                        && $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
+                        && $sql_buffer === ""
+                    ) {
+                        if ($sql_handle) {
+                            if (!fflush($sql_handle)) {
+                                throw new RuntimeException('Reprint could not finish writing db.sql before saving progress.');
+                            }
+                        }
+                        // Persist discovered domains before the cursor because
+                        // resume skips SQL from before that cursor.
+                        if ($domain_collector) {
+                            $domains = $domain_collector->get_domains();
+                            if (!empty($domains)) {
+                                file_put_contents(
+                                    $domains_file,
+                                    json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
+                                );
+                            }
+                        }
+                        $this->get_state()->active_resumable_command->remote_cursor = $cursor;
+                        $this->get_state()->sql_bytes = $sql_bytes_written;
+                        $this->get_state()->sql_statements_counted = $sql_statements_counted;
+                        $this->save_state();
+                        $chunks_since_save = 0;
+                    }
                 };
 
                 $cursor_before = $cursor;
@@ -7966,11 +8121,15 @@ class ImportClient
                     $context->response_stats ?? [],
                 );
 
+                // Save the file size and source position together.
                 if ($sql_handle) {
-                    fflush($sql_handle);
+                    if (!fflush($sql_handle)) {
+                        throw new RuntimeException('Reprint could not finish writing db.sql before saving progress.');
+                    }
                     $this->get_state()->active_resumable_command->remote_cursor = $cursor;
-                    // Clear sql_bytes when complete, otherwise save current position.
-                    $this->get_state()->sql_bytes = $complete ? null : $sql_bytes_written;
+                    // Keep the final file size until run_db_sync records overall
+                    // completion; that last state write may itself be interrupted.
+                    $this->get_state()->sql_bytes = $sql_bytes_written;
                     $this->save_state();
                 }
             }
@@ -10917,12 +11076,16 @@ class ImportClient
     /** Removes the files that describe a database pull. */
     public function clear_database_pull_records(): void
     {
-        $path = wp_join_unix_paths(
-            $this->pull_state_directory,
+        foreach ([
+            self::DATABASE_DUMP_INTENT_FILE,
+            self::DATABASE_DUMP_RECORD_FILE,
             self::DATABASE_PULL_OUTPUT_STATUS_FILE,
-        );
-        if (file_exists($path) && !unlink($path)) {
-            throw new RuntimeException('Cannot delete the saved database output status.');
+        ] as $filename) {
+            $path = wp_join_unix_paths($this->pull_state_directory, $filename);
+            if (file_exists($path) && !unlink($path)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- basename is one of the fixed record names above.
+                throw new RuntimeException('Cannot delete saved database pull file: ' . basename($path));
+            }
         }
     }
 
@@ -12607,7 +12770,8 @@ if (
             "description" =>
                 "Indexes remote tables, then streams the full SQL dump into\n" .
                 "--state-dir/db.sql (default), to stdout, or directly into a\n" .
-                "MySQL connection. Source interruptions retry within this process.\n" .
+                "MySQL connection. File output resumes from its saved cursor. Source\n" .
+                "interruptions retry within this process.\n" .
                 "If that process stops, Reprint cannot tell how much SQL reached stdout or MySQL.\n" .
                 "Reset or restore the destination, then abort and restart as file output.\n" .
                 "Discovered domains are cached for later use by db-apply.\n",
@@ -12647,7 +12811,7 @@ if (
             "short" => "Print local pull metadata for host integrations as JSON",
             "usage" => "reprint pull-metadata <remote-reprint-api-url> --state-dir=DIR",
             "description" =>
-                "Prints pull lifecycle, artifact availability, and source-site\n" .
+                "Prints pull progress, available downloads, and source-site\n" .
                 "metadata for host integrations. The remote Reprint API URL selects\n" .
                 "the state; no network calls are made.\n",
             "extra" =>

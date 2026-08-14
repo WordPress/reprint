@@ -123,7 +123,7 @@ class Pull
      * Handle --abort for high-level pull commands.
      *
      * File pipelines keep downloaded site files in place. The database
-     * pipeline removes stale database artifacts so the next pull-db fetches
+     * pipeline removes old database files so the next pull-db fetches
      * and applies a fresh dump.
      */
     public function abort(string $command = 'pull'): void
@@ -142,7 +142,7 @@ class Pull
         $label = $command === 'pull' ? 'Pull' : $command;
         $message = "{$label} state cleared.";
         $message .= $command === 'pull-db'
-            ? " Database artifacts will be downloaded again."
+            ? " Database files will be downloaded again."
             : " Downloaded files are preserved.";
         $this->progress->show_lifecycle_line("{$message}\n");
         $this->client->output_progress([
@@ -312,7 +312,7 @@ class Pull
                     }
                 }
             } elseif ($state_command === 'db-pull' && in_array('db-pull', $stages, true)) {
-                // Discard database dump artifacts from any previous runs.
+                // Discard database files from previous runs.
                 $state = $this->client->get_state();
                 $state->active_resumable_command->command_name = null;
                 $state->active_resumable_command->completion_state = null;
@@ -325,9 +325,17 @@ class Pull
                     "{$state_dir}/db.sql",
                     "{$state_dir}/db-tables.jsonl",
                     "{$pull_state_directory}/domains.json",
+                    "{$pull_state_directory}/sql-stats.json",
                 ] as $path) {
                     if (file_exists($path)) {
-                        @unlink($path);
+                        if (!unlink($path)) {
+                            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path belongs to the caller-selected state directory.
+                            throw new RuntimeException(
+                                "Reprint could not delete pull file: {$path}. " .
+                                "Check its permissions, then try again.",
+                            );
+                            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+                        }
                     }
                 }
                 $this->client->clear_database_pull_records();
@@ -831,11 +839,19 @@ class Pull
             $paths[] = wp_join_unix_paths($state_dir, 'db.sql');
             $paths[] = wp_join_unix_paths($state_dir, 'db-tables.jsonl');
             $paths[] = wp_join_unix_paths($pull_state_directory, 'domains.json');
+            $paths[] = wp_join_unix_paths($pull_state_directory, 'sql-stats.json');
         }
 
         foreach ($paths as $path) {
             if (file_exists($path)) {
-                @unlink($path);
+                if (!unlink($path)) {
+                    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path belongs to the caller-selected state directory.
+                    throw new RuntimeException(
+                        "Reprint could not delete pull file: {$path}. " .
+                        "Check its permissions, then try again.",
+                    );
+                    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+                }
             }
         }
         if ($reset_db_state) {

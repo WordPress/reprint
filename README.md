@@ -367,11 +367,12 @@ The three modes:
 | `stdout` | Streams SQL to stdout, progress/status goes to stderr | none |
 | `mysql` | Connects via `mysqli::multi_query()` and executes statements as they arrive | none |
 
-All three modes retry a source crash inside the same importer process. If the
-importer itself stops while writing to `stdout` or `mysql`, Reprint cannot tell
-how much SQL the receiving program or database got. It refuses to continue.
-Reset or restore that destination, abort the pull, download `db.sql`, and use
-`db-apply`.
+All three modes retry a source crash inside the same importer process. A new
+process can continue `file` output from the last file size and source position
+Reprint saved. It first removes any later bytes from `db.sql`. If the importer
+itself stops while writing to `stdout` or `mysql`, Reprint cannot tell how much
+SQL the receiving program or database got. It refuses to continue. Reset or
+restore that destination, abort the pull, download `db.sql`, and use `db-apply`.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
@@ -383,7 +384,7 @@ The command returns one of three exit codes:
 
 - 0: sync completed
 - 1: failure
-- 2: partial completion, needs re-running
+- 2: partial completion; re-run the same command when its output is resumable
 
 #### Step 4 — Download files delta.
 
@@ -669,9 +670,10 @@ are absent while the plan is still being built.
 #### `<remote-state-directory>/pull/state.json` — the pull state store
 
 This is the pull state store. Pull commands read it on startup and write it
-back periodically and on shutdown. It stores everything needed to resume after
-a crash or interruption: the current command, cursor position, AIMD tuning
-state, and per-phase bookmarks.
+back periodically and on shutdown. It stores command, cursor, AIMD tuning, and
+phase state. Some commands also need the file they were writing or the last
+position the other server confirmed. This state file alone cannot continue
+direct SQL output.
 
 Written atomically (temp file + rename) so a crash mid-write never corrupts it.
 If the JSON is invalid on load, the importer renames it to
@@ -810,4 +812,4 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from the pull state selected by the remote Reprint API URL. No network calls are made. See [Step 6](#step-6--generate-runtime-configuration).
 
-All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the remote index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the remote index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. File downloads resume from the last saved cursor. After direct `stdout` or MySQL output stops, reset or restore its external destination before aborting that pull.
