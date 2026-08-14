@@ -22,10 +22,6 @@ parameters:
             - packages/reprint-server/src/class-sqlite-driver-pdo.php
             - packages/reprint-client/src/lib/mysql-query-stream/
             - reprint-server-wp/vendor/
-    ignoreErrors:
-        -
-            message: '#^Call to an undefined method WordPress\\DataLiberation\\BlockMarkup\\BlockMarkupUrlProcessor::get_tag\(\)\.$#'
-            path: packages/reprint-client/src/lib/url-rewrite/class-domain-collector.php
     treatPhpDocTypesAsCertain: false
     scanDirectories:
         - packages/reprint-server/src

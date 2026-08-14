@@ -714,7 +714,7 @@ class StructuredDataUrlRewriterTest extends TestCase
     public function testDefaultHintUsesPlainTextUrlScanning(): void
     {
         $rewriter = $this->createRewriter();
-        // A plain URL string is handled by URLInTextProcessor.
+        // A plain URL string is handled by the cautious text processor.
         $input = 'Visit https://old-site.com/about for more.';
         $result = $rewriter->rewrite($input);
         $this->assertStringContainsString('https://new-site.com/about', $result);
