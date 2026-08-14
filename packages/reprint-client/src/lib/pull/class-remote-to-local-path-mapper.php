@@ -32,8 +32,10 @@ use function WordPress\Reprint\Exporter\path_remainder_under;
  *     $mapper->map_path('/srv/site/wp-content/plugin.php');
  *     // /local/content/plugin.php
  *
- * Paths remain byte strings in memory. This class does not encode them as
- * JSON or require them to be valid UTF-8.
+ * Mapped paths remain byte strings and need not be valid UTF-8. get_config()
+ * base64-encodes each configured path for storage in a JSON cursor.
+ *
+ * @phpstan-type Config array{filesystem_root_b64:string,original_remote_roots_b64:list<string>,resolved_path_mappings:list<array{remote_prefix_b64:string,local_prefix_b64:string}>,local_followed_symlinks_root_b64:string|null}
  */
 final class RemoteToLocalPathMapper
 {
@@ -71,6 +73,80 @@ final class RemoteToLocalPathMapper
         $this->original_remote_roots = $original_remote_roots;
         $this->resolved_path_mappings = $resolved_path_mappings;
         $this->local_followed_symlinks_root = $local_followed_symlinks_root;
+    }
+
+    /**
+     * Recreates a mapper from get_config().
+     *
+     * @phpstan-param Config $config
+     */
+    public static function from_config(array $config): self
+    {
+        $resolved_path_mappings = [];
+        foreach ($config["resolved_path_mappings"] as $resolved_path_mapping) {
+            $resolved_path_mappings[
+                self::decode_config_path(
+                    $resolved_path_mapping["remote_prefix_b64"]
+                )
+            ] = self::decode_config_path(
+                $resolved_path_mapping["local_prefix_b64"]
+            );
+        }
+
+        return new self(
+            self::decode_config_path($config["filesystem_root_b64"]),
+            array_map(
+                [self::class, "decode_config_path"],
+                $config["original_remote_roots_b64"]
+            ),
+            $resolved_path_mappings,
+            $config["local_followed_symlinks_root_b64"] === null
+                ? null
+                : self::decode_config_path(
+                    $config["local_followed_symlinks_root_b64"]
+                )
+        );
+    }
+
+    /**
+     * Returns the mapping settings with every path base64-encoded.
+     *
+     * @return array {
+     *     @type string       $filesystem_root_b64              Local filesystem root.
+     *     @type list<string> $original_remote_roots_b64        Original remote roots.
+     *     @type list<array>  $resolved_path_mappings           Remote and local prefix pairs.
+     *     @type string|null  $local_followed_symlinks_root_b64 Local followed-symlinks root.
+     * }
+     * @phpstan-return Config
+     */
+    public function get_config(): array
+    {
+        $resolved_path_mappings = [];
+        foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
+            $resolved_path_mappings[] = [
+                "remote_prefix_b64" => base64_encode($remote_prefix),
+                "local_prefix_b64" => base64_encode($local_prefix),
+            ];
+        }
+
+        return [
+            "filesystem_root_b64" => base64_encode($this->filesystem_root),
+            "original_remote_roots_b64" => array_map(
+                "base64_encode",
+                $this->original_remote_roots
+            ),
+            "resolved_path_mappings" => $resolved_path_mappings,
+            "local_followed_symlinks_root_b64" =>
+                $this->local_followed_symlinks_root === null
+                    ? null
+                    : base64_encode($this->local_followed_symlinks_root),
+        ];
+    }
+
+    /** Returns the local filesystem root used by map_path(). */
+    public function get_filesystem_root(): string
+    {
+        return $this->filesystem_root;
     }
 
     /**
@@ -156,5 +232,17 @@ final class RemoteToLocalPathMapper
         }
 
         return true;
+    }
+
+    /** Decodes one arbitrary-byte path from a stored configuration. */
+    private static function decode_config_path(string $path_b64): string
+    {
+        $path = base64_decode($path_b64, true);
+        if ($path === false) {
+            throw new InvalidArgumentException(
+                "Remote-to-local path mapper configuration contains an invalid base64 path."
+            );
+        }
+        return $path;
     }
 }

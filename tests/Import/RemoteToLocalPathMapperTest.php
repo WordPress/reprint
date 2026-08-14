@@ -128,4 +128,27 @@ final class RemoteToLocalPathMapperTest extends TestCase
             $mapper->map_path($remote_content . '/file.txt')
         );
     }
+
+    public function testConfigurationRoundTripPreservesArbitraryPathBytes(): void
+    {
+        $mapper = new RemoteToLocalPathMapper(
+            "/local-\xff",
+            ["/remote-\xfe"],
+            ["/remote-\xfe/content" => "/local-\xff/content-\xfd"],
+            "/local-\xff/followed-\xfc"
+        );
+
+        $config = $mapper->get_config();
+        $this->assertIsString(json_encode($config, JSON_THROW_ON_ERROR));
+        $resumed = RemoteToLocalPathMapper::from_config($config);
+
+        $this->assertSame(
+            "/local-\xff/content-\xfd/file.txt",
+            $resumed->map_path("/remote-\xfe/content/file.txt")
+        );
+        $this->assertSame(
+            "/local-\xff/followed-\xfc/outside/file.txt",
+            $resumed->map_path('/outside/file.txt')
+        );
+    }
 }
