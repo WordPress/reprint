@@ -37,7 +37,8 @@
  *
  * Supported sources:
  *
- * - ASCII domains and IPv4 or IPv6 addresses, with an optional port.
+ * - ASCII or Unicode IDN source domains and IPv4 or IPv6 addresses, with
+ *   an optional port. Unicode and Punycode spellings of the same IDN match.
  * - An optional initial path containing valid UTF-8 without whitespace or
  *   control characters. NFC and NFD spellings of the configured path match
  *   the same source base. That path is part of the source base and is removed
@@ -70,14 +71,16 @@
  *   of the surrounding text.
  * - Target user information, queries, fragments, IPv4/IPv6 addresses, and
  *   Unicode domains are not supported. Punycode domains are supported.
- * - Unicode source domains are not supported.
  *
  * CSS hexadecimal escapes such as https\3a \2f \2f ... and percent-encoded
  * separators are not recognized. They need a parser for the enclosing format.
  * Complete PHP serializations, JSON documents, and block markup must likewise
  * be parsed first; pass only the resulting text leaves to this processor.
  *
- * The HTTP(S) scheme and authority are matched case-insensitively. A configured
+ * Ordinary ASCII authorities use a literal pattern and never run IDNA. A
+ * mapping with a Unicode or `xn--` source hostname also checks literal Unicode
+ * candidates through IDNA. The HTTP(S) scheme and authority are matched
+ * case-insensitively. A configured
  * source path remains case-sensitive because URL paths may name different
  * resources when their case differs. Canonically equivalent composed and
  * decomposed Unicode spellings match. A scheme may begin at the start of the
@@ -110,6 +113,8 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * @var array<int, array{
      *     source_authority: string,
+     *     source_ascii_host: string,
+     *     source_host_uses_idn: bool,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -128,6 +133,8 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * @var array{
      *     source_authority: string,
+     *     source_ascii_host: string,
+     *     source_host_uses_idn: bool,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -247,6 +254,8 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * @return array{
      *     source_authority: string,
+     *     source_ascii_host: string,
+     *     source_host_uses_idn: bool,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -266,13 +275,45 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     {
         $next_match = null;
         foreach ($this->url_mappings as $mapping) {
-            $found = preg_match(
-                $mapping['pattern'],
-                $this->text,
-                $matches,
-                PREG_OFFSET_CAPTURE,
-                $this->bytes_already_scanned
-            );
+            if (!$mapping['source_host_uses_idn']) {
+                $found = preg_match(
+                    $mapping['pattern'],
+                    $this->text,
+                    $matches,
+                    PREG_OFFSET_CAPTURE,
+                    $this->bytes_already_scanned
+                );
+            } else {
+                $search_from = $this->bytes_already_scanned;
+                while (true) {
+                    $found = preg_match(
+                        $mapping['pattern'],
+                        $this->text,
+                        $matches,
+                        PREG_OFFSET_CAPTURE,
+                        $search_from
+                    );
+                    if (
+                        $found !== 1
+                        || !isset($matches['unicode_host'])
+                        || $matches['unicode_host'][1] === -1
+                    ) {
+                        break;
+                    }
+
+                    $candidate_ascii_host =
+                        CautiousURLBaseRewriteMapping::to_ascii_idn_hostname(
+                            $matches['unicode_host'][0]
+                        );
+                    if ($candidate_ascii_host === $mapping['source_ascii_host']) {
+                        break;
+                    }
+
+                    $search_from =
+                        $matches['authority'][1]
+                        + strlen($matches['authority'][0]);
+                }
+            }
             if ($found !== 1) {
                 continue;
             }

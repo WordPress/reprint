@@ -10,6 +10,7 @@
         "php": ">=7.4",
         "ext-pdo": "*",
         "ext-pdo_mysql": "*",
+        "symfony/polyfill-intl-idn": "^1.31",
         "symfony/polyfill-intl-normalizer": "^1.31",
         "wp-php-toolkit/data-liberation": "^0.8.0",
         "wp-php-toolkit/html": "^0.8.0",

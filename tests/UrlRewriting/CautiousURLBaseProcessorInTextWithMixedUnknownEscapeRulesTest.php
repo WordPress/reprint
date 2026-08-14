@@ -173,6 +173,41 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'url("https:\\/\\/xn--bcher-kva.example\\/media\\/logo.png");',
                 ['https://source.example' => 'https://xn--bcher-kva.example'],
             ],
+            'decomposed Unicode source host' => [
+                'https://mu' . "\u{0308}" . 'nich.example/media/logo.png',
+                'https://destination.example/media/logo.png',
+                ['https://münich.example' => 'https://destination.example'],
+            ],
+            'all-Arabic Unicode source host' => [
+                'https://مثال.إختبار/media/logo.png',
+                'https://destination.example/media/logo.png',
+                ['https://مثال.إختبار' => 'https://destination.example'],
+            ],
+            'Unicode source host with a configured path' => [
+                'https://bücher.example/media/logo.png',
+                'https://destination.example/logo.png',
+                ['https://bücher.example/media' => 'https://destination.example'],
+            ],
+            'Punycode candidate for a Unicode source host' => [
+                'https://xn--mnich-kva.example/media/logo.png',
+                'https://destination.example/media/logo.png',
+                ['https://münich.example' => 'https://destination.example'],
+            ],
+            'Unicode candidate for a Punycode source host' => [
+                'https://münich.example/media/logo.png',
+                'https://destination.example/media/logo.png',
+                ['https://xn--mnich-kva.example' => 'https://destination.example'],
+            ],
+            'escaped Unicode source host with a configured port' => [
+                'https:\\/\\/mu' . "\u{0308}" . 'nich.example:8443\\/media\\/logo.png',
+                'https:\\/\\/destination.example\\/media\\/logo.png',
+                ['https://münich.example:8443' => 'https://destination.example'],
+            ],
+            'configured Unicode host after a different Unicode host' => [
+                'https://zürich.example/media/a.png https://münich.example/media/b.png',
+                'https://zürich.example/media/a.png https://destination.example/media/b.png',
+                ['https://münich.example' => 'https://destination.example'],
+            ],
             'complete literal source base' => [
                 'https://source.example/media/logo.png',
                 'https://destination.example/logo.png',
@@ -470,11 +505,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://source.example/media/logo.png',
                 ['https://source.example/media' => 'https://destination.example#part'],
             ],
-            'source domain contains Unicode characters' => [
-                'https://bücher.example/media/logo.png',
-                'https://bücher.example/media/logo.png',
-                ['https://bücher.example/media' => 'https://destination.example'],
-            ],
             'source mapping has a username and password' => [
                 'https://user:password@source.example/media/logo.png',
                 'https://user:password@source.example/media/logo.png',
@@ -559,6 +589,21 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://source.example/media/logo.png',
                 'https://source.example/media/logo.png',
                 ['https://source.example' => 'https://🚤.example'],
+            ],
+            'Unicode target domain' => [
+                'https://source.example/media/logo.png',
+                'https://source.example/media/logo.png',
+                ['https://source.example' => 'https://bücher.example'],
+            ],
+            'Unicode candidate has an unconfigured port' => [
+                'https://münich.example:8443/media/logo.png',
+                'https://münich.example:8443/media/logo.png',
+                ['https://münich.example' => 'https://destination.example'],
+            ],
+            'Unicode candidate is a subdomain of the configured host' => [
+                'https://cdn.münich.example/media/logo.png',
+                'https://cdn.münich.example/media/logo.png',
+                ['https://münich.example' => 'https://destination.example'],
             ],
             'source domain contains an emoji' => [
                 'https://🚤.example/media/logo.png',
