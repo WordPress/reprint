@@ -214,14 +214,14 @@ function merge_local_index_mutations(
  * @type string $path Decoded filesystem path.
  * @type int $ctime Indexed change timestamp.
  * @type int $size Indexed size.
- * @type string $type `file`, `link`, or `dir`.
+ * @type string $type `file`, `link`, `dir`, or temporary `other`.
  * @type bool $empty Whether a directory has no descendant entries in
  *                         this index.
  * }
- * @phpstan-return array{path:string,ctime:int,size:int,type:'file'|'link'|'dir',empty?:bool}
+ * @phpstan-return array{path:string,ctime:int,size:int,type:'file'|'link'|'dir'|'other',empty?:bool}
  */
 function decode_local_index_entry( string $local_index_json_line ): array {
-	/** @var array{path:string,ctime:int,size:int,type:'file'|'link'|'dir',empty?:bool} $encoded_local_index_entry */
+	/** @var array{path:string,ctime:int,size:int,type:'file'|'link'|'dir'|'other',empty?:bool} $encoded_local_index_entry */
 	$encoded_local_index_entry = json_decode(
 		$local_index_json_line,
 		true,
@@ -251,7 +251,7 @@ function decode_local_index_entry( string $local_index_json_line ): array {
  *
  * @param  resource|null  $local_index_handle  Open index, or null when no index exists.
  *
- * @return \Generator<int,array{path:string,ctime:int,size:int,type:'file'|'link'|'dir',empty?:bool},mixed,void>
+ * @return \Generator<int,array{path:string,ctime:int,size:int,type:'file'|'link'|'dir'|'other',empty?:bool},mixed,void>
  */
 function read_local_index_entries( $local_index_handle ): \Generator {
 	if ( ! is_resource( $local_index_handle ) ) {
@@ -333,7 +333,7 @@ function read_local_index_updates( $sorted_local_index_updates_handle ): \Genera
  * @type string $path Path bytes.
  * @type int $ctime Entry ctime.
  * @type int $size Entry size.
- * @type string $type `file`, `link`, or `dir`.
+ * @type string $type `file`, `link`, `dir`, or temporary `other`.
  * @type bool $empty Whether a directory has no descendant entries in
  *                         this index.
  * }

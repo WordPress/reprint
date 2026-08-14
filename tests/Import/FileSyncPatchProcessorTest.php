@@ -453,6 +453,135 @@ final class FileSyncPatchProcessorTest extends TestCase {
         );
     }
 
+    public function testSelectedDefaultSkippedPathsSurvivePatchProcessorResume(): void
+    {
+        mkdir($this->filesystem_root . '/.git');
+        symlink('target.txt', $this->filesystem_root . '/.git/link');
+        $link_stat = lstat($this->filesystem_root . '/.git/link');
+        $this->assertIsArray($link_stat);
+        $patch_result_index = $this->write_index(
+            'selected-result.jsonl',
+            [
+                [
+                    'path' => '.git/link',
+                    'ctime' => (int) $link_stat['ctime'],
+                    'size' => (int) $link_stat['size'],
+                    'type' => 'link',
+                ],
+                [
+                    'path' => '.git/missing',
+                    'ctime' => 1,
+                    'size' => 10,
+                    'type' => 'link',
+                ],
+            ]
+        );
+        $selected_paths_file = $this->write_selected_paths([
+            '.git/link',
+            '.git/missing',
+        ]);
+        $work_directory = $this->work_directory('selected-path-resume');
+        $processor = FileSyncPatchProcessor::start_from_fresh_local_tree_with_selected_default_skipped_paths(
+            $work_directory,
+            $this->filesystem_root,
+            $patch_result_index,
+            $work_directory,
+            $selected_paths_file
+        );
+        $this->assertSame(
+            [
+                'mode' => 'selected_default_skipped_paths',
+                'file_b64' => base64_encode($selected_paths_file),
+            ],
+            $processor->get_cursor()['position'][
+                'fresh_local_index_cursor'
+            ]['selected_paths']
+        );
+        for ($step = 0; $step < 100; ++$step) {
+            if ($processor->get_phase() === 'supplementing') {
+                break;
+            }
+            $this->assertTrue($processor->next_step());
+        }
+        $this->assertSame('supplementing', $processor->get_phase());
+        $this->assertTrue($processor->next_step());
+        $processor->flush_pending_outputs();
+        $cursor = $this->serialize_cursor($processor->get_cursor());
+        $processor->close();
+
+        $resumed = FileSyncPatchProcessor::resume($cursor);
+        $this->assertSame(
+            [
+                [
+                    'action' => 'copy',
+                    'path' => '.git/missing',
+                    'expected_source' => [
+                        'type' => 'link',
+                        'size' => 10,
+                        'ctime' => 1,
+                    ],
+                ],
+            ],
+            $this->run_to_completion($resumed)
+        );
+    }
+
+    public function testSelectedLinkReplacesAnUnsupportedLocalPath(): void
+    {
+        if (!function_exists('posix_mkfifo')) {
+            $this->markTestSkipped('This PHP build cannot create a FIFO.');
+        }
+        mkdir($this->filesystem_root . '/.git');
+        $selected_path = '.git/link';
+        $absolute_selected_path = $this->filesystem_root
+            . '/' . $selected_path;
+        posix_mkfifo($absolute_selected_path, 0600);
+        $fifo_stat = lstat($absolute_selected_path);
+        $this->assertIsArray($fifo_stat);
+        $patch_result_index = $this->write_index(
+            'selected-link-result.jsonl',
+            [
+                [
+                    'path' => $selected_path,
+                    'ctime' => 1,
+                    'size' => 6,
+                    'type' => 'link',
+                ],
+            ]
+        );
+        $selected_paths_file = $this->write_selected_paths([
+            $selected_path,
+        ]);
+        $work_directory = $this->work_directory('selected-link-over-fifo');
+        $processor = FileSyncPatchProcessor::start_from_fresh_local_tree_with_selected_default_skipped_paths(
+            $work_directory,
+            $this->filesystem_root,
+            $patch_result_index,
+            $work_directory,
+            $selected_paths_file
+        );
+
+        $this->assertSame(
+            [
+                [
+                    'action' => 'replace',
+                    'path' => $selected_path,
+                    'expected_source' => [
+                        'type' => 'link',
+                        'size' => 6,
+                        'ctime' => 1,
+                    ],
+                    'expected_base' => [
+                        'type' => 'other',
+                        'size' => 0,
+                        'ctime' => (int) $fifo_stat['ctime'],
+                    ],
+                ],
+            ],
+            $this->run_to_completion($processor)
+        );
+    }
+
     /** @return list<array<string,mixed>> */
     private function run_to_completion(
         FileSyncPatchProcessor $processor
@@ -520,6 +649,26 @@ final class FileSyncPatchProcessorTest extends TestCase {
         return $path;
     }
 
+    /** @param list<string> $paths */
+    private function write_selected_paths(array $paths): string
+    {
+        $lines = array_map(
+            static function (string $path): string {
+                return json_encode(
+                    ['path_b64' => base64_encode($path)],
+                    JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+                );
+            },
+            $paths
+        );
+        $path = $this->temporary_directory . '/selected-paths.jsonl';
+        file_put_contents(
+            $path,
+            empty($lines) ? '' : implode("\n", $lines) . "\n"
+        );
+        return $path;
+    }
+
     /** @return array{path:string,ctime:int,size:int,type:string} */
     private function entry(string $path, int $size): array
     {
@@ -566,7 +715,11 @@ final class FileSyncPatchProcessorTest extends TestCase {
 
     private function remove_path(string $path): void
     {
-        if (is_link($path) || is_file($path)) {
+        if (
+            is_link($path)
+            || is_file($path)
+            || ( @lstat($path) !== false && !is_dir($path) )
+        ) {
             unlink($path);
             return;
         }

@@ -16,8 +16,10 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * A filesystem index is a path-sorted list describing a filesystem tree at one
  * point in time. Each index entry records one path, whether that path is a file,
  * link, or directory, its size, its inode change time (ctime), and, for some
- * directories, whether it was empty. Both indexes must use the same path
- * coordinate system; paths may be local relative paths or remote absolute paths.
+ * directories, whether it was empty. A temporary fresh local index may also
+ * use `other` for a selected unsupported local type. Both indexes must use the
+ * same path coordinate system; paths may be local relative paths or remote
+ * absolute paths.
  * Each physical line must decode to one entry. A decoder cannot filter lines;
  * blank or invalid records must throw.
  *
@@ -115,7 +117,7 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * while the processor retains unread entries. The cursor still names only
  * consumed entries and can always be passed to `resume()`.
  *
- * @phpstan-type IndexEntry array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool}
+ * @phpstan-type IndexEntry array{path:string,type:'file'|'link'|'dir'|'other',ctime:int,size:int,empty?:bool}
  * @phpstan-type Cursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
  */
 final class FileIndexDiffProcessor

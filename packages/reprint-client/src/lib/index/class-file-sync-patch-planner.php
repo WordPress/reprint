@@ -355,6 +355,13 @@ final class FileSyncPatchPlanner
         $patch_base_entry_shape = $patch_base_path_type === null
             ? null
             : $this->index_entry_shape($patch_base_path_type);
+        if ($patch_result_entry_shape === "other") {
+            throw new UnexpectedValueException(
+                "Patch result index contains an unsupported path type at: "
+                . base64_encode($index_path)
+                . "."
+            );
+        }
         $path_to_delete = null;
         $path_to_copy = null;
         $active_deletion_root_byte_offset =
@@ -597,7 +604,7 @@ final class FileSyncPatchPlanner
      *         Base state which an exact `delete` or `replace` removes. Absent
      *         from copy operations and collapsed directory deletions.
      *
-     *         @type string $type  Expected `file`, `link`, or `dir` type.
+     *         @type string $type  Expected `file`, `link`, `dir`, or temporary `other` type.
      *         @type int    $size  Expected size.
      *         @type int    $ctime Expected inode change time.
      *     }
@@ -655,7 +662,12 @@ final class FileSyncPatchPlanner
         $this->closed = true;
     }
 
-    /** Returns the logical entry kind used by the plan transition table. */
+    /**
+     * Returns the logical entry kind used by the plan transition table.
+     *
+     * @return string `file`, `symlink`, `empty_directory`, or `other`.
+     * @phpstan-return 'file'|'symlink'|'empty_directory'|'other'
+     */
     private function index_entry_shape(string $path_type): string
     {
         if ($path_type === "file") {
@@ -664,7 +676,15 @@ final class FileSyncPatchPlanner
         if ($path_type === "link") {
             return "symlink";
         }
-        return "empty_directory";
+        if ($path_type === "dir") {
+            return "empty_directory";
+        }
+        if ($path_type === "other") {
+            return "other";
+        }
+        throw new UnexpectedValueException(
+            "File sync patch index has an invalid path type: {$path_type}."
+        );
     }
 
     /** Reports whether the active deletion root contains the index path. */

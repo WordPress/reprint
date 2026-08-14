@@ -23,6 +23,9 @@ require_once __DIR__ . '/class-fresh-local-index-processor.php';
  * current local tree is the result. start_from_fresh_local_tree() reverses
  * that direction: the current local tree is the patch base and the supplied
  * index is the result.
+ * start_from_fresh_local_tree_with_selected_default_skipped_paths() uses the
+ * same direction after adding the named path-only sidecar to the caches-off
+ * fresh scan.
  *
  * The supplied index must describe the same filesystem root on the same
  * machine. File and symlink changes use ctime, which cannot be compared across
@@ -46,11 +49,13 @@ require_once __DIR__ . '/class-fresh-local-index-processor.php';
  *     $processor->close();
  *
  * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
- * @phpstan-type FreshIndexPosition array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}|array{phase:'sorting'}|array{phase:'complete'}
- * @phpstan-type FreshIndexCursor array{fresh_local_index_file_b64:string,filesystem_root_b64:string,storage_path_b64:string,include_caches:bool,position:FreshIndexPosition}
+ * @phpstan-type FreshSelectedPathsConfig array{mode:'ordinary'}|array{mode:'selected_default_skipped_paths',file_b64:string}
+ * @phpstan-type FreshIndexPosition array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}|array{phase:'supplementing',selected_paths_byte_offset:int,preceding_selected_path_b64:string|null,fresh_local_index_byte_offset:int}|array{phase:'sorting'}|array{phase:'complete'}
+ * @phpstan-type FreshIndexCursor array{fresh_local_index_file_b64:string,filesystem_root_b64:string,storage_path_b64:string,include_caches:bool,selected_paths:FreshSelectedPathsConfig,position:FreshIndexPosition}
+ * @phpstan-type FreshIndexSelection array{mode:'ordinary',include_caches:bool}|array{mode:'selected_default_skipped_paths',file:string}
  * @phpstan-type PlannerIndexDiffCursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
  * @phpstan-type PlannerCursor array{patch_base_index_file_b64:string,patch_result_index_file_b64:string,active_deletion_roots_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,deletion_policy:'collapsed'|'exact',index_diff_cursor:PlannerIndexDiffCursor,active_deletion_root_byte_offset:int|null}
- * @phpstan-type FreshTreePosition array{phase:'indexing'|'sorting'|'starting_patch',patch_base_index_file_b64:string,patch_result_index_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,deletion_policy:'collapsed'|'exact',fresh_local_index_cursor:FreshIndexCursor}
+ * @phpstan-type FreshTreePosition array{phase:'indexing'|'supplementing'|'sorting'|'starting_patch',patch_base_index_file_b64:string,patch_result_index_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,deletion_policy:'collapsed'|'exact',fresh_local_index_cursor:FreshIndexCursor}
  * @phpstan-type Position FreshTreePosition|array{phase:'planning',file_sync_patch_planner_cursor:PlannerCursor}|array{phase:'complete'}
  * @phpstan-type Cursor array{fresh_local_index_file_b64:string,position:Position}
  * @phpstan-type SyncOperation array{action:'copy'|'delete'|'replace',path:string,expected_source?:array{type:string,size:int,ctime:int},expected_base?:array{type:string,size:int,ctime:int}}
@@ -100,7 +105,10 @@ final class FileSyncPatchProcessor {
             $storage_path,
             $included_index_path_roots,
             $excluded_index_path_roots,
-            $include_caches,
+            [
+                "mode" => "ordinary",
+                "include_caches" => $include_caches,
+            ],
             "collapsed"
         );
     }
@@ -139,7 +147,47 @@ final class FileSyncPatchProcessor {
             $storage_path,
             $included_index_path_roots,
             $excluded_index_path_roots,
-            $include_caches,
+            [
+                "mode" => "ordinary",
+                "include_caches" => $include_caches,
+            ],
+            "exact"
+        );
+    }
+
+    /**
+     * Plans from a fresh tree including selected default-skipped paths.
+     *
+     * @param string       $work_directory                             Existing directory for processor state.
+     * @param string       $filesystem_root                            Filesystem root scanned for the fresh index.
+     * @param string       $patch_result_index_file                    Tree which the patch must produce.
+     * @param string       $storage_path                               Reprint storage path omitted from the fresh index.
+     * @param string       $selected_default_skipped_index_paths_file  Immutable sorted path-only JSONL file.
+     * @param list<string> $included_index_path_roots                  Roots within which changes may be planned.
+     * @param list<string> $excluded_index_path_roots                  Roots which changes must not affect.
+     */
+    public static function start_from_fresh_local_tree_with_selected_default_skipped_paths(
+        string $work_directory,
+        string $filesystem_root,
+        string $patch_result_index_file,
+        string $storage_path,
+        string $selected_default_skipped_index_paths_file,
+        array $included_index_path_roots = [""],
+        array $excluded_index_path_roots = []
+    ): self {
+        $work_directory = trim_right_slash($work_directory);
+        return self::create(
+            $work_directory,
+            $filesystem_root,
+            wp_join_unix_paths($work_directory, "fresh_local_index.jsonl"),
+            $patch_result_index_file,
+            $storage_path,
+            $included_index_path_roots,
+            $excluded_index_path_roots,
+            [
+                "mode" => "selected_default_skipped_paths",
+                "file" => $selected_default_skipped_index_paths_file,
+            ],
             "exact"
         );
     }
@@ -156,6 +204,7 @@ final class FileSyncPatchProcessor {
         $position = $cursor["position"];
         if (
             $position["phase"] === "indexing"
+            || $position["phase"] === "supplementing"
             || $position["phase"] === "sorting"
             || $position["phase"] === "starting_patch"
         ) {
@@ -195,6 +244,7 @@ final class FileSyncPatchProcessor {
 
         if (
             $position["phase"] === "indexing"
+            || $position["phase"] === "supplementing"
             || $position["phase"] === "sorting"
         ) {
             $this->fresh_local_index_processor->next_step();
@@ -326,7 +376,7 @@ final class FileSyncPatchProcessor {
      *     @type array  $expected_base {
      *         Base index entry removed by an exact `delete` or `replace`.
      *
-     *         @type string $type  Expected `file`, `link`, or `dir` type.
+     *         @type string $type  Expected `file`, `link`, `dir`, or temporary `other` type.
      *         @type int    $size  Expected size.
      *         @type int    $ctime Expected inode change time.
      *     }
@@ -344,7 +394,10 @@ final class FileSyncPatchProcessor {
         return $this->cursor;
     }
 
-    /** Returns `indexing`, `sorting`, `starting_patch`, `planning`, or `complete`. */
+    /**
+     * Returns `indexing`, `supplementing`, `sorting`, `starting_patch`,
+     * `planning`, or `complete`.
+     */
     public function get_phase(): string
     {
         return $this->cursor["position"]["phase"];
@@ -439,6 +492,7 @@ final class FileSyncPatchProcessor {
         $this->closed = true;
     }
 
+    /** @phpstan-param FreshIndexSelection $fresh_index_selection */
     private static function create(
         string $work_directory,
         string $filesystem_root,
@@ -447,7 +501,7 @@ final class FileSyncPatchProcessor {
         string $storage_path,
         array $included_index_path_roots,
         array $excluded_index_path_roots,
-        bool $include_caches,
+        array $fresh_index_selection,
         string $deletion_policy
     ): self {
         if (!is_dir($work_directory)) {
@@ -461,13 +515,22 @@ final class FileSyncPatchProcessor {
             "fresh_local_index.jsonl"
         );
         $processor->fresh_local_index_file = $fresh_local_index_file;
-        $processor->fresh_local_index_processor =
-            FreshLocalIndexProcessor::start(
+        if ($fresh_index_selection["mode"] === "ordinary") {
+            $processor->fresh_local_index_processor = FreshLocalIndexProcessor::start(
                 $fresh_local_index_file,
                 $filesystem_root,
                 $storage_path,
-                $include_caches
+                $fresh_index_selection["include_caches"]
             );
+        } else {
+            $processor->fresh_local_index_processor =
+                FreshLocalIndexProcessor::start_with_selected_default_skipped_paths(
+                    $fresh_local_index_file,
+                    $filesystem_root,
+                    $storage_path,
+                    $fresh_index_selection["file"]
+                );
+        }
         $processor->cursor = [
             "fresh_local_index_file_b64" => base64_encode(
                 $fresh_local_index_file
