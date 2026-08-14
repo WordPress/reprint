@@ -13,6 +13,10 @@ class PullFilterFakeClient extends \ImportClient
     public int $files_pull_runs = 0;
     public int $db_sync_runs = 0;
     public int $db_apply_runs = 0;
+    public int $database_apply_signal_enables = 0;
+    public int $command_signal_restores = 0;
+    public bool $db_apply_stops_partial_once = false;
+    public bool $db_apply_throws = false;
     public array $progress_events = [];
     public array $progress_file_errors = [];
 
@@ -128,12 +132,30 @@ class PullFilterFakeClient extends \ImportClient
     public function run_db_apply(array $options): void
     {
         $this->db_apply_runs++;
+        if ($this->db_apply_throws) {
+            throw new \RuntimeException('Injected db-apply failure.');
+        }
         $state = $this->get_state();
         $state->active_resumable_command->command_name = "db-apply";
-        $state->active_resumable_command->completion_state = "complete";
+        if ($this->db_apply_stops_partial_once) {
+            $this->db_apply_stops_partial_once = false;
+            $state->active_resumable_command->completion_state = "partial";
+        } else {
+            $state->active_resumable_command->completion_state = "complete";
+        }
         $state->active_resumable_command->current_stage = null;
         $state->apply->statements_executed = 42;
         $this->save_state();
+    }
+
+    public function enable_database_apply_signal_handling(): void
+    {
+        ++$this->database_apply_signal_enables;
+    }
+
+    public function restore_command_signal_handling(): void
+    {
+        ++$this->command_signal_restores;
     }
 }
 
@@ -647,6 +669,139 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
         $this->assertSame('db-apply', $state["active_resumable_command"]["command_name"]);
         $this->assertSame(42, $state["apply"]["statements_executed"]);
+    }
+
+    public function testPullDbReturnsAfterAPartialApplyWithoutAdvancingThePipeline(): void
+    {
+        $client = $this->makeClient();
+        $client->db_apply_stops_partial_once = true;
+
+        ob_start();
+        $client->run([
+            "command" => "pull-db",
+            "target_engine" => "sqlite",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(2, $client->exit_code);
+        $this->assertSame(1, $client->db_apply_runs);
+        $this->assertSame(1, $client->database_apply_signal_enables);
+        $this->assertSame(1, $client->command_signal_restores);
+        $this->assertSame('db-pull', $state["pull_pipeline"]["last_completed_stage"]);
+        $this->assertSame('db-apply', $state["active_resumable_command"]["command_name"]);
+        $this->assertSame('partial', $state["active_resumable_command"]["completion_state"]);
+
+        $resumedClient = $this->makeClient();
+        ob_start();
+        $resumedClient->run([
+            "command" => "pull-db",
+            "target_engine" => "sqlite",
+        ]);
+        ob_end_clean();
+
+        $completedState = $this->readState();
+        $this->assertSame(0, $resumedClient->exit_code);
+        $this->assertSame(1, $resumedClient->db_apply_runs);
+        $this->assertSame(1, $resumedClient->database_apply_signal_enables);
+        $this->assertSame(1, $resumedClient->command_signal_restores);
+        $this->assertSame('db-apply', $completedState["pull_pipeline"]["last_completed_stage"]);
+        $this->assertSame('complete', $completedState["active_resumable_command"]["completion_state"]);
+    }
+
+    public function testDatabaseApplySignalScopeRestoresTheWrapperPolicy(): void
+    {
+        if (
+            !function_exists('pcntl_async_signals')
+            || !function_exists('pcntl_signal')
+            || !function_exists('pcntl_signal_get_handler')
+            || !function_exists('pcntl_sigprocmask')
+        ) {
+            $this->markTestSkipped('The signal policy test requires PCNTL signal APIs.');
+        }
+
+        $originalAsyncSignals = pcntl_async_signals();
+        $originalSigintHandler = pcntl_signal_get_handler(SIGINT);
+        $originalSigtermHandler = pcntl_signal_get_handler(SIGTERM);
+        pcntl_sigprocmask(SIG_BLOCK, [SIGINT, SIGTERM], $originalSignalMask);
+        pcntl_sigprocmask(SIG_SETMASK, $originalSignalMask);
+
+        try {
+            $client = new \ImportClient(
+                'http://fake.invalid',
+                $this->stateDir,
+                $this->filesystem_root,
+                'pull-db',
+            );
+            $client->enable_database_apply_signal_handling();
+
+            $this->assertFalse(pcntl_async_signals());
+            pcntl_sigprocmask(SIG_BLOCK, [SIGINT, SIGTERM], $databaseApplySignalMask);
+            pcntl_sigprocmask(SIG_SETMASK, $databaseApplySignalMask);
+            $this->assertContains(SIGINT, $databaseApplySignalMask);
+            $this->assertContains(SIGTERM, $databaseApplySignalMask);
+            $databaseApplySigintHandler = pcntl_signal_get_handler(SIGINT);
+            $databaseApplySigtermHandler = pcntl_signal_get_handler(SIGTERM);
+            $this->assertIsArray($databaseApplySigintHandler);
+            $this->assertSame($client, $databaseApplySigintHandler[0]);
+            $this->assertSame(
+                'handle_database_apply_shutdown',
+                $databaseApplySigintHandler[1],
+            );
+            $this->assertIsArray($databaseApplySigtermHandler);
+            $this->assertSame($client, $databaseApplySigtermHandler[0]);
+            $this->assertSame(
+                'handle_database_apply_shutdown',
+                $databaseApplySigtermHandler[1],
+            );
+
+            $client->restore_command_signal_handling();
+
+            $this->assertTrue(pcntl_async_signals());
+            pcntl_sigprocmask(SIG_BLOCK, [SIGINT, SIGTERM], $restoredSignalMask);
+            pcntl_sigprocmask(SIG_SETMASK, $restoredSignalMask);
+            $this->assertNotContains(SIGINT, $restoredSignalMask);
+            $this->assertNotContains(SIGTERM, $restoredSignalMask);
+            $restoredSigintHandler = pcntl_signal_get_handler(SIGINT);
+            $restoredSigtermHandler = pcntl_signal_get_handler(SIGTERM);
+            $this->assertIsArray($restoredSigintHandler);
+            $this->assertSame($client, $restoredSigintHandler[0]);
+            $this->assertSame('handle_shutdown', $restoredSigintHandler[1]);
+            $this->assertIsArray($restoredSigtermHandler);
+            $this->assertSame($client, $restoredSigtermHandler[0]);
+            $this->assertSame('handle_shutdown', $restoredSigtermHandler[1]);
+        } finally {
+            pcntl_sigprocmask(SIG_BLOCK, [SIGINT, SIGTERM]);
+            pcntl_async_signals(false);
+            pcntl_signal(SIGINT, $originalSigintHandler);
+            pcntl_signal(SIGTERM, $originalSigtermHandler);
+            pcntl_sigprocmask(SIG_BLOCK, [SIGINT, SIGTERM]);
+            pcntl_async_signals($originalAsyncSignals);
+            pcntl_sigprocmask(SIG_SETMASK, $originalSignalMask);
+        }
+    }
+
+    public function testPullDbRestoresItsSignalPolicyWhenApplyFails(): void
+    {
+        $client = $this->makeClient();
+        $client->db_apply_throws = true;
+
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull-db",
+                "target_engine" => "sqlite",
+            ]);
+            $this->fail('Expected db-apply to fail.');
+        } catch (\RuntimeException $error) {
+            $this->assertSame('Injected db-apply failure.', $error->getMessage());
+        } finally {
+            ob_end_clean();
+        }
+
+        $this->assertSame(1, $client->db_apply_runs);
+        $this->assertSame(1, $client->database_apply_signal_enables);
+        $this->assertSame(1, $client->command_signal_restores);
     }
 
     public function testPullDbRejectsConflictingInProgressPullFiles(): void

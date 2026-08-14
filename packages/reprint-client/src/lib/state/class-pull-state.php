@@ -74,19 +74,15 @@ class PullState
     /** @var int SQL statements counted while streaming db.sql. */
     public int $sql_statements_counted = 0;
     public DatabaseApplyCommandState $apply;
-    /** @var string|null SQL output mode persisted for resume: file, stdout, or mysql. */
+    /** @var string|null SQL download mode persisted for resume: file or stdout. */
     public ?string $sql_output = null;
-    /**
-     * @var string|null MySQL host persisted for resume.
-     *
-     * The password is deliberately excluded from pull state.
-     */
+    /** @var string|null Unused direct-output host field retained in the state shape. */
     public ?string $mysql_host = null;
-    /** @var int|null MySQL port persisted for resume. */
+    /** @var int|null Unused direct-output port field retained in the state shape. */
     public ?int $mysql_port = null;
-    /** @var string|null MySQL user persisted for resume. */
+    /** @var string|null Unused direct-output user field retained in the state shape. */
     public ?string $mysql_user = null;
-    /** @var string|null MySQL database persisted for resume. */
+    /** @var string|null Unused direct-output database field retained in the state shape. */
     public ?string $mysql_database = null;
     /** Number of consecutive interrupted responses without cursor progress. */
     public int $consecutive_interrupted_responses = 0;

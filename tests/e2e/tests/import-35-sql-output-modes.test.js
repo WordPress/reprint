@@ -86,7 +86,7 @@ describe('Import: SQL Output Modes', () => {
             await conn.end();
         });
 
-        it('streams SQL directly into MySQL and matches source', async () => {
+        it('downloads SQL, applies it to MySQL, and matches source', async () => {
             const result = runImporter(
                 `${getSiteUrl(site)}&directory=${getSiteDir(site)}`,
                 tempDir, 'db-pull', {
@@ -103,9 +103,8 @@ describe('Import: SQL Output Modes', () => {
             assert.equal(result.exitCode, 0,
                 `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            // No db.sql should be on disk
-            assert.ok(!existsSync(join(tempDir, 'db.sql')),
-                'Expected no db.sql file when using --sql-output=mysql');
+            assert.ok(existsSync(join(tempDir, 'db.sql')),
+                'Expected the confirmed db.sql used by --sql-output=mysql');
 
             // Compare imported database against source
             const comparison = await compareDatabases(getDbName(site), importDb);
@@ -114,7 +113,7 @@ describe('Import: SQL Output Modes', () => {
                 `counts=${JSON.stringify(comparison.rowCounts)}`);
         });
 
-        it('state file records sql_output mode', () => {
+        it('state records the completed file and apply stages', () => {
             const stateFile = join(
                 pullStateDirectory(
                     tempDir,
@@ -124,8 +123,12 @@ describe('Import: SQL Output Modes', () => {
             );
             assert.ok(existsSync(stateFile), 'Expected state file to exist');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-            assert.equal(state.sql_output, 'mysql',
-                `Expected sql_output=mysql in state, got ${state.sql_output}`);
+            assert.equal(state.sql_output, 'file',
+                `Expected sql_output=file in state, got ${state.sql_output}`);
+            assert.equal(state.pull_pipeline.started_by_command, 'pull-db');
+            assert.equal(state.pull_pipeline.last_completed_stage, 'db-apply');
+            assert.equal(state.active_resumable_command.command_name, 'db-apply');
+            assert.equal(state.active_resumable_command.completion_state, 'complete');
         });
     });
 });

@@ -346,15 +346,15 @@ By default, this streams a SQL dump into `$STATE_DIR/db.sql`:
 php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
-You can also pipe the SQL directly to stdout or stream it into a MySQL server
-without writing a file to disk. Use `--sql-output` to choose the mode:
+You can also pipe the SQL directly to stdout or download and apply it to a
+MySQL server in one command. Use `--sql-output` to choose the mode:
 
 ```bash
 # Pipe to stdout — useful for feeding into mysql CLI or another tool
 php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --sql-output=stdout | mysql -u root my_database
 
-# Stream directly into MySQL — no intermediate file, no pipe
+# Download all of db.sql, then apply it to MySQL
 php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --sql-output=mysql --mysql-database=my_database --mysql-host=127.0.0.1 --mysql-user=root --mysql-password=secret
 ```
@@ -365,14 +365,16 @@ The three modes:
 |------|-------------|-------------|
 | `file` (default) | Writes SQL to `$STATE_DIR/db.sql` | `db.sql` |
 | `stdout` | Streams SQL to stdout, progress/status goes to stderr | none |
-| `mysql` | Connects via `mysqli::multi_query()` and executes statements as they arrive | none |
+| `mysql` | Writes `db.sql`, confirms it is complete, then applies it through `db-apply` | `db.sql` |
 
-All three modes recover from server crashes mid-stream (PHP fatal errors,
-OOM kills, `max_execution_time` expiry). When the server dies before sending
-a completion chunk, the importer detects the transport failure, saves its
-cursor, and exits with code 2 for automatic retry. Accumulated SQL is
-persisted in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/sql-buffer`
-so the next run reloads it and continues.
+File and MySQL modes save the size of `db.sql` with the source position. After
+a stopped process, they remove any later bytes and continue the download. MySQL
+is not changed until the download finishes. If applying the SQL stops, the next
+process opens a new target connection and starts `db.sql` from the beginning.
+This runs its SQL mode, foreign-key, unique-check, and autocommit settings again.
+Stdout cannot continue in another process because Reprint cannot tell how much
+SQL the receiving program or file got. Reset that program or file before
+aborting the stdout pull.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
@@ -384,7 +386,7 @@ The command returns one of three exit codes:
 
 - 0: sync completed
 - 1: failure
-- 2: partial completion, needs re-running
+- 2: partial completion; re-run the same command when its output is resumable
 
 #### Step 4 — Download files delta.
 
@@ -552,9 +554,9 @@ created by your environment. We won't need them. Furthermore, they may
 not get deleted during the database import if the site doesn't use
 the same table prefix as your environment.
 
-If you used `--sql-output=mysql`, the SQL was already executed — there's
-no `db.sql` to import. For `--sql-output=stdout`, the SQL was piped to
-whatever tool was reading stdout (typically `mysql` CLI).
+If you used `--sql-output=mysql`, the SQL was already applied and the complete
+`db.sql` remains in the state directory. For `--sql-output=stdout`, the SQL was
+piped to whatever tool was reading stdout (typically `mysql` CLI).
 
 ### State and progress files
 
@@ -670,9 +672,10 @@ are absent while the plan is still being built.
 #### `<remote-state-directory>/pull/state.json` — the pull state store
 
 This is the pull state store. Pull commands read it on startup and write it
-back periodically and on shutdown. It stores everything needed to resume after
-a crash or interruption: the current command, cursor position, AIMD tuning
-state, and per-phase bookmarks.
+back periodically and on shutdown. It stores command, cursor, AIMD tuning, and
+phase state. Some commands also need the file they were writing or the last
+position the other server confirmed. This state file alone cannot continue
+direct SQL output.
 
 Written atomically (temp file + rename) so a crash mid-write never corrupts it.
 If the JSON is invalid on load, the importer renames it to
@@ -724,7 +727,7 @@ fresh.
   "current_file": "wp-content/uploads/photo.jpg",
   "current_file_bytes": 1048576,  // expected size after last complete write
   "sql_bytes": 524288,            // expected db.sql size
-  "sql_output": "file",           // "file" | "stdout" | "mysql"
+  "sql_output": "file",           // "file" | "stdout"; MySQL uses "file"
 
   "tuning": {
     "config": { ... },            // AIMD parameters
@@ -803,7 +806,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `pull-db` — Runs `preflight`, `db-pull`, and `db-apply` as one resumable high-level command.
 * `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
-* `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
+* `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` to stream it, or `--sql-output=mysql` to download and apply it through the database-only pull pipeline.
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
 * `db-domains` — Lists domains discovered in the SQL dump. Reads `<remote-state-directory>/pull/domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
@@ -811,4 +814,4 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from the pull state selected by the remote Reprint API URL. No network calls are made. See [Step 6](#step-6--generate-runtime-configuration).
 
-All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the remote index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the remote index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. File downloads resume from the last saved cursor. After direct stdout output stops, reset or restore the receiving program or file before aborting that pull. After an interrupted `db-apply`, Reprint starts `db.sql` from the beginning. This runs the SQL header again on the new connection and does not assume that earlier, uncommitted queries were saved.

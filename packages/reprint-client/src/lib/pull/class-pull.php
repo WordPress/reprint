@@ -123,7 +123,7 @@ class Pull
      * Handle --abort for high-level pull commands.
      *
      * File pipelines keep downloaded site files in place. The database
-     * pipeline removes stale database artifacts so the next pull-db fetches
+     * pipeline removes old database files so the next pull-db fetches
      * and applies a fresh dump.
      */
     public function abort(string $command = 'pull'): void
@@ -142,7 +142,7 @@ class Pull
         $label = $command === 'pull' ? 'Pull' : $command;
         $message = "{$label} state cleared.";
         $message .= $command === 'pull-db'
-            ? " Database artifacts will be downloaded again."
+            ? " Database files will be downloaded again."
             : " Downloaded files are preserved.";
         $this->progress->show_lifecycle_line("{$message}\n");
         $this->client->output_progress([
@@ -312,7 +312,7 @@ class Pull
                     }
                 }
             } elseif ($state_command === 'db-pull' && in_array('db-pull', $stages, true)) {
-                // Discard database dump artifacts from any previous runs.
+                // Discard database files from previous runs.
                 $state = $this->client->get_state();
                 $state->active_resumable_command->command_name = null;
                 $state->active_resumable_command->completion_state = null;
@@ -321,16 +321,27 @@ class Pull
                 $state->consecutive_interrupted_responses = 0;
                 $state->sql_bytes = null;
                 $state->db_index = new DatabaseTableIndexState();
-                $this->client->save_state();
                 foreach ([
                     "{$state_dir}/db.sql",
                     "{$state_dir}/db-tables.jsonl",
                     "{$pull_state_directory}/domains.json",
+                    "{$pull_state_directory}/sql-stats.json",
                 ] as $path) {
                     if (file_exists($path)) {
-                        @unlink($path);
+                        if (!unlink($path)) {
+                            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path belongs to the caller-selected state directory.
+                            throw new RuntimeException(
+                                "Reprint could not delete pull file: {$path}. " .
+                                "Check its permissions, then try again.",
+                            );
+                            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+                        }
                     }
                 }
+                $this->client->save_state();
+                // Remove the status files only after the saved command no
+                // longer says this database pull is running.
+                $this->client->clear_database_pull_records();
             }
         }
 
@@ -373,10 +384,14 @@ class Pull
             $this->print_stage_header($stage);
 
             try {
-                $this->run_stage($stage, $options, $step, $total);
+                $stage_completed = $this->run_stage($stage, $options, $step, $total);
             } catch (\Exception $e) {
                 $this->report_failure($command, $stage, $stages, $i, $e);
                 throw new PullFailureReportedException($e->getMessage(), 0, $e);
+            }
+
+            if (!$stage_completed) {
+                return;
             }
 
             $this->client->mark_pull_stage_complete($stage, $command, $stages);
@@ -405,11 +420,11 @@ class Pull
      * Runs one pipeline stage and prints its completion summary.
      *
      * Stages that delegate to lower-level commands rely on those commands for
-     * their own resume state. The pipeline checkpoint is saved by the caller
-     * after this method returns, so a thrown exception leaves the stage
-     * unfinished at the orchestration level.
+     * their own resume state. True lets the caller save the pipeline checkpoint;
+     * false leaves a partial stage unfinished and returns control to the process.
+     * A thrown exception also leaves the stage unfinished.
      */
-    private function run_stage(string $stage, array $options, int $step, int $total): void
+    private function run_stage(string $stage, array $options, int $step, int $total): bool
     {
         switch ($stage) {
             case 'preflight':
@@ -486,9 +501,18 @@ class Pull
                     $state->active_resumable_command->command_name !== 'db-apply' ||
                     $state->active_resumable_command->completion_state !== 'complete'
                 ) {
-                    $this->run_until_complete('db-apply', function () use ($options) {
+                    $this->client->enable_database_apply_signal_handling();
+                    try {
                         $this->client->run_db_apply($options);
-                    });
+                    } finally {
+                        $this->client->restore_command_signal_handling();
+                    }
+                    $completion_state =
+                        $this->client->get_state()->active_resumable_command->completion_state;
+                    if ($completion_state === 'partial') {
+                        $this->client->exit_code = 2;
+                        return false;
+                    }
                 }
                 $stmts = $state->apply->statements_executed;
                 $this->print_done($stage, $stmts > 0 ? number_format($stmts) . " statements" : null);
@@ -508,6 +532,7 @@ class Pull
                 $this->start_server($options);
                 break;
         }
+        return true;
     }
 
     /**
@@ -821,8 +846,6 @@ class Pull
             $state->apply = new DatabaseApplyCommandState();
             $state->sql_output = null;
         }
-        $this->client->save_state();
-
         $paths = [];
         if ($reset_file_transfer_state) {
             $paths[] = wp_join_unix_paths($pull_state_directory, 'remote-index.next.jsonl');
@@ -832,12 +855,26 @@ class Pull
             $paths[] = wp_join_unix_paths($state_dir, 'db.sql');
             $paths[] = wp_join_unix_paths($state_dir, 'db-tables.jsonl');
             $paths[] = wp_join_unix_paths($pull_state_directory, 'domains.json');
+            $paths[] = wp_join_unix_paths($pull_state_directory, 'sql-stats.json');
         }
 
         foreach ($paths as $path) {
             if (file_exists($path)) {
-                @unlink($path);
+                if (!unlink($path)) {
+                    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path belongs to the caller-selected state directory.
+                    throw new RuntimeException(
+                        "Reprint could not delete pull file: {$path}. " .
+                        "Check its permissions, then try again.",
+                    );
+                    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+                }
             }
+        }
+        $this->client->save_state();
+        if ($reset_db_state) {
+            // If cleanup stops after this save, the next --abort can remove
+            // the leftover status files without resuming database output.
+            $this->client->clear_database_pull_records();
         }
 
         $this->client->audit_log(strtoupper($command) . " | prepared for delta re-pull", true);

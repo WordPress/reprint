@@ -139,6 +139,24 @@
     },
     "db-index-interruption": {
       "port": 8125
+    },
+    "db-apply-process-death": {
+      "port": 8126
+    },
+    "stdout-db-pull-process-death": {
+      "port": 8127
+    },
+    "pull-db-shutdown": {
+      "port": 8128
+    },
+    "file-db-pull-artifact-guards": {
+      "port": 8130
+    },
+    "mysql-db-pull-pipeline": {
+      "port": 8131
+    },
+    "db-pull-index-interruption": {
+      "port": 8132
     }
   }
 }
