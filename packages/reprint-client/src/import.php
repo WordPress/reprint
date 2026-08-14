@@ -7535,7 +7535,7 @@ class ImportClient
         $sql_bytes_written = 0;
         $sql_buffer = "";
         // A cursor means this connection starts after the dump header.
-        $mysql_session_is_configured = $mode !== "mysql" || $cursor === null;
+        $mysql_session_ran_initial_SET_statements = $mode !== "mysql" || $cursor === null;
 
         if ($mode === "file") {
             $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
@@ -7688,7 +7688,7 @@ class ImportClient
                     $mysql_conn,
                     &$sql_buffer_handle,
                     &$sql_buffer,
-                    &$mysql_session_is_configured,
+                    &$mysql_session_ran_initial_SET_statements,
                     &$sql_bytes_written,
                     $context,
                     $query_stream,
@@ -7709,9 +7709,9 @@ class ImportClient
 
                     $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
                     if ($chunk_type === "sql_session_setup") {
-                        if ($mode === "mysql" && !$mysql_session_is_configured) {
+                        if ($mode === "mysql" && !$mysql_session_ran_initial_SET_statements) {
                             $this->execute_mysql_queries($mysql_conn, $chunk["body"]);
-                            $mysql_session_is_configured = true;
+                            $mysql_session_ran_initial_SET_statements = true;
                             $this->audit_log(
                                 "SQL OUTPUT mysql | applied session settings after reconnect",
                                 true,
