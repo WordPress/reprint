@@ -35,6 +35,37 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
         $this->assertSame($expected, $this->rewrite($input, $mapping));
     }
 
+    public function testPreparedMappingCanBeReusedForDifferentTextValues(): void
+    {
+        $mapping = new CautiousURLBaseRewriteMapping([
+            'https://source.example' => 'https://destination.example',
+        ]);
+
+        $first = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
+            'https://source.example/first.png',
+            $mapping
+        );
+        while ($first->next_url()) {
+            $first->replace_url_base();
+        }
+        $this->assertSame(
+            'https://destination.example/first.png',
+            $first->get_updated_text()
+        );
+
+        $second = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
+            'https://source.example/second.png',
+            $mapping
+        );
+        while ($second->next_url()) {
+            $second->replace_url_base();
+        }
+        $this->assertSame(
+            'https://destination.example/second.png',
+            $second->get_updated_text()
+        );
+    }
+
     /**
      * @return array<string, array{0:string, 1:string, 2:array<string, string>}>
      */
@@ -618,7 +649,10 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
      */
     private function rewrite(string $text, array $mapping): string
     {
-        $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules($text, $mapping);
+        $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
+            $text,
+            new CautiousURLBaseRewriteMapping($mapping)
+        );
 
         while ($processor->next_url()) {
             $processor->replace_url_base();
