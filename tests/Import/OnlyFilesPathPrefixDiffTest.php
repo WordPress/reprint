@@ -109,18 +109,57 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
     /** Load state + preserve-local, then set the file path selection. */
     private function prepareClient(
         array $pull_only_files_with_path_prefixes,
-        array $pull_excluded_files_with_path_prefixes = []
+        array $pull_excluded_files_with_path_prefixes = [],
+        array $followed_path_roots = []
     ): array
     {
+        $selectionFingerprint = hash(
+            'sha256',
+            json_encode([
+                'only_path_prefixes_b64' => array_map(
+                    'base64_encode',
+                    $pull_only_files_with_path_prefixes
+                ),
+                'excluded_path_prefixes_b64' => array_map(
+                    'base64_encode',
+                    $pull_excluded_files_with_path_prefixes
+                ),
+                'extra_directory_b64' => null,
+                'follow_symlinks' => false,
+                'include_caches' => false,
+            ], JSON_UNESCAPED_SLASHES)
+        );
+        $selectionRoots = $pull_only_files_with_path_prefixes === []
+            ? ['/']
+            : $pull_only_files_with_path_prefixes;
+        $ownershipRoots = array_merge($selectionRoots, $followed_path_roots);
+        $activeSnapshotId = reprint_test_write_root_ownership_snapshot(
+            $this->pullStateDirectory,
+            $ownershipRoots
+        );
         $state = [
             "active_resumable_command" => [
                 "command_name" => "files-pull",
                 "completion_state" => "in_progress",
                 "current_stage" => "diff",
             ],
-            "preflight" => ["data" => ["ok" => true], "http_code" => 200],
+            "preflight" => [
+                "data" => [
+                    "ok" => true,
+                    "wp_detect" => ["roots" => [["path" => "/"]]],
+                ],
+                "http_code" => 200,
+            ],
             "follow_symlinks" => false,
+            "include_caches" => false,
             "fs_root_nonempty_behavior" => "preserve-local",
+            "files_pull_path_selection_fingerprint" => $selectionFingerprint,
+            "files_pull_ownership" => [
+                "committed_snapshot_ids_by_selection_fingerprint" => [],
+                "active_snapshot_id" => $activeSnapshotId,
+                "processor_cursor" => null,
+                "snapshot_ids_pending_removal" => [],
+            ],
         ];
         \write_current_pull_state(
             new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root),
@@ -244,7 +283,11 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             $this->indexLine('/shared/themes/indice/style.css', 1000, 10)
         );
 
-        [$client, $reflection] = $this->prepareClient(['/wp-content/plugins']);
+        [$client, $reflection] = $this->prepareClient(
+            ['/wp-content/plugins'],
+            [],
+            ['/shared/themes/indice']
+        );
         $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
 
         $fetch_entry = json_decode(

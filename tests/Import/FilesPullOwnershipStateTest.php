@@ -9,6 +9,7 @@ use Reprint\Importer\State\FilesPullOwnershipState;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/state/load.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/pull/class-files-pull-ownership-processor.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/index/class-file-sync-change-scope.php';
 
 final class FilesPullOwnershipStateTest extends TestCase
 {
@@ -16,12 +17,106 @@ final class FilesPullOwnershipStateTest extends TestCase
         '1111111111111111111111111111111111111111111111111111111111111111';
     private const SECOND_SELECTION =
         '2222222222222222222222222222222222222222222222222222222222222222';
+    private const THIRD_SELECTION =
+        '3333333333333333333333333333333333333333333333333333333333333333';
     private const FIRST_SNAPSHOT =
         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     private const SECOND_SNAPSHOT =
         'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     private const THIRD_SNAPSHOT =
         'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+    private const FOURTH_SNAPSHOT =
+        'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd';
+
+    public function testCreatesRemoteScopeFromActivePriorAndProtectedOwnership(): void
+    {
+        $ownership_directory = sys_get_temp_dir()
+            . "/files-pull-ownership-state-\n-"
+            . bin2hex(random_bytes(6));
+        mkdir($ownership_directory . '/snapshots', 0700, true);
+        foreach (
+            [
+                self::FIRST_SNAPSHOT,
+                self::SECOND_SNAPSHOT,
+                self::THIRD_SNAPSHOT,
+                self::FOURTH_SNAPSHOT,
+            ] as $snapshot_id
+        ) {
+            file_put_contents(
+                "{$ownership_directory}/snapshots/{$snapshot_id}.paths.jsonl",
+                ''
+            );
+            file_put_contents(
+                "{$ownership_directory}/snapshots/{$snapshot_id}.lookup",
+                ''
+            );
+        }
+        $state = FilesPullOwnershipState::from_array([
+            'committed_snapshot_ids_by_selection_fingerprint' => [
+                self::FIRST_SELECTION => [self::FIRST_SNAPSHOT],
+                self::SECOND_SELECTION => [
+                    self::SECOND_SNAPSHOT,
+                    self::THIRD_SNAPSHOT,
+                ],
+                self::THIRD_SELECTION => [self::SECOND_SNAPSHOT],
+            ],
+            'active_snapshot_id' => self::FOURTH_SNAPSHOT,
+            'processor_cursor' => null,
+            'snapshot_ids_pending_removal' => [],
+        ]);
+        $excluded_remote_absolute_path_roots = [
+            "/z-\xFF",
+            "/a\npath",
+            "/z-\xFF",
+        ];
+
+        try {
+            $scope = $state->create_remote_change_scope(
+                $ownership_directory,
+                self::FIRST_SELECTION,
+                $excluded_remote_absolute_path_roots,
+                true
+            );
+            $this->assertSame([
+                'index_path_coordinates' => 'remote_absolute',
+                'ownership_directory_b64' => base64_encode(
+                    $ownership_directory
+                ),
+                'current_snapshot_id' => self::FOURTH_SNAPSHOT,
+                'prior_snapshot_ids' => [self::FIRST_SNAPSHOT],
+                'protected_snapshot_ids' => [
+                    self::SECOND_SNAPSHOT,
+                    self::THIRD_SNAPSHOT,
+                ],
+                'excluded_remote_absolute_path_roots_b64' => [
+                    base64_encode("/a\npath"),
+                    base64_encode("/z-\xFF"),
+                ],
+                'include_caches' => true,
+            ], $scope->get_config());
+            $scope->close();
+        } finally {
+            foreach (glob($ownership_directory . '/snapshots/*') ?: [] as $path) {
+                unlink($path);
+            }
+            rmdir($ownership_directory . '/snapshots');
+            rmdir($ownership_directory);
+        }
+    }
+
+    public function testRemoteScopeRequiresAnActiveSnapshot(): void
+    {
+        $state = new FilesPullOwnershipState();
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('no active snapshot');
+        $state->create_remote_change_scope(
+            sys_get_temp_dir(),
+            self::FIRST_SELECTION,
+            [],
+            false
+        );
+    }
 
     public function testSuccessReplacesOnlyItsSelectionAndQueuesUnreferencedSnapshots(): void
     {

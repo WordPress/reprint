@@ -50,6 +50,66 @@ class FilesPullOwnershipState {
         return $state;
     }
 
+    /**
+     * Opens the remote-index change scope for the active files-pull.
+     *
+     * @param string       $ownership_directory                       Directory containing published ownership snapshots.
+     * @param string       $selection_fingerprint                     Active path-selection fingerprint.
+     * @param list<string> $excluded_remote_absolute_path_roots       Explicit remote path exclusions.
+     * @param bool         $include_caches                            Whether the saved selection includes cache paths.
+     */
+    public function create_remote_change_scope(
+        string $ownership_directory,
+        string $selection_fingerprint,
+        array $excluded_remote_absolute_path_roots,
+        bool $include_caches
+    ): \FileSyncChangeScope {
+        self::assert_identifier($selection_fingerprint, 'path-selection fingerprint');
+        if ($this->active_snapshot_id === null) {
+            throw new \LogicException(
+                'Files-pull ownership has no active snapshot for its remote change scope.'
+            );
+        }
+
+        $protected_snapshot_ids = [];
+        foreach (
+            $this->committed_snapshot_ids_by_selection_fingerprint
+                as $committed_selection_fingerprint => $snapshot_ids
+        ) {
+            if ($committed_selection_fingerprint !== $selection_fingerprint) {
+                $protected_snapshot_ids = array_merge(
+                    $protected_snapshot_ids,
+                    $snapshot_ids
+                );
+            }
+        }
+        sort($protected_snapshot_ids, SORT_STRING);
+        $protected_snapshot_ids = array_values(array_unique(
+            $protected_snapshot_ids
+        ));
+
+        sort($excluded_remote_absolute_path_roots, SORT_STRING);
+        $excluded_remote_absolute_path_roots = array_values(array_unique(
+            $excluded_remote_absolute_path_roots
+        ));
+
+        return \FileSyncChangeScope::from_config([
+            'index_path_coordinates' => 'remote_absolute',
+            'ownership_directory_b64' => base64_encode($ownership_directory),
+            'current_snapshot_id' => $this->active_snapshot_id,
+            'prior_snapshot_ids' =>
+                $this->committed_snapshot_ids_by_selection_fingerprint[
+                    $selection_fingerprint
+                ] ?? [],
+            'protected_snapshot_ids' => $protected_snapshot_ids,
+            'excluded_remote_absolute_path_roots_b64' => array_map(
+                'base64_encode',
+                $excluded_remote_absolute_path_roots
+            ),
+            'include_caches' => $include_caches,
+        ]);
+    }
+
     /** Moves the processor's ID to active after both snapshot artifacts exist. */
     public function complete_processor(string $snapshot_id): void
     {

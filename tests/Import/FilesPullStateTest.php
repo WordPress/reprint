@@ -73,6 +73,36 @@ class FilesPullStateTest extends TestCase
      */
     private function writeState(array $state): void
     {
+        if (
+            ( $state['active_resumable_command']['current_stage'] ?? null )
+                === 'diff'
+        ) {
+            $selectionFingerprint = hash(
+                'sha256',
+                json_encode([
+                    'only_path_prefixes_b64' => [],
+                    'excluded_path_prefixes_b64' => [],
+                    'extra_directory_b64' => null,
+                    'follow_symlinks' => false,
+                    'include_caches' => false,
+                ], JSON_UNESCAPED_SLASHES)
+            );
+            $state = array_replace_recursive([
+                'include_caches' => false,
+                'files_pull_path_selection_fingerprint' =>
+                    $selectionFingerprint,
+                'files_pull_ownership' => [
+                    'committed_snapshot_ids_by_selection_fingerprint' => [],
+                    'active_snapshot_id' =>
+                        reprint_test_write_root_ownership_snapshot(
+                            $this->pullStateDirectory,
+                            ['/']
+                        ),
+                    'processor_cursor' => null,
+                    'snapshot_ids_pending_removal' => [],
+                ],
+            ], $state);
+        }
         \write_current_pull_state($this->makeClient(), array_replace_recursive([
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "remote_protocol_version" => PULL_PROTOCOL_VERSION,

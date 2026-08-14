@@ -7,6 +7,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/pull/class-files-pull-ownership-processor.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/index/class-file-sync-change-scope.php';
 
 final class FilesPullOwnershipProcessorTest extends TestCase
 {
@@ -69,6 +70,48 @@ final class FilesPullOwnershipProcessorTest extends TestCase
             $atoms
         );
         $this->assertLookupMatchesAtoms($pathsFile, $lookupFile, $atoms);
+    }
+
+    public function testPublishedSnapshotIsQueryableByFileSyncChangeScope(): void
+    {
+        [$journalByteOffset, $indexByteOffset] = $this->writeTwoTraversals();
+        $processor = $this->newProcessor(
+            $journalByteOffset,
+            $indexByteOffset,
+            $this->ownershipDirectory,
+            \FilesPullOwnershipProcessor::initial_cursor()
+        );
+        while ($processor->next_step()) {
+            $this->assertNotSame('complete', $processor->get_cursor()['phase']);
+        }
+        $snapshotId = $processor->get_snapshot_id();
+        $processor->close();
+
+        $scope = \FileSyncChangeScope::from_config([
+            'index_path_coordinates' => 'remote_absolute',
+            'ownership_directory_b64' => base64_encode(
+                $this->ownershipDirectory
+            ),
+            'current_snapshot_id' => $snapshotId,
+            'prior_snapshot_ids' => [],
+            'protected_snapshot_ids' => [],
+            'excluded_remote_absolute_path_roots_b64' => [],
+            'include_caches' => false,
+        ]);
+        try {
+            $this->assertFalse(
+                $scope->index_entry_may_change('/outside/target', 'dir')
+            );
+            $this->assertTrue($scope->index_entry_may_change(
+                '/outside/target/data.bin',
+                'file'
+            ));
+            $this->assertTrue(
+                $scope->index_entry_may_change('/outside-alias', 'link')
+            );
+        } finally {
+            $scope->close();
+        }
     }
 
     public function testResumeTruncatesUnconfirmedOutputAndPublishesSameContent(): void

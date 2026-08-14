@@ -25,7 +25,6 @@ use Reprint\Importer\Tuning\AdaptiveTuner;
 
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
-use function Reprint\Importer\file_sync_index_path_may_change;
 use function Reprint\Importer\file_sync_result_contains_path_or_descendant;
 use function Reprint\Importer\find_file_sync_deletion_root;
 use function Reprint\Importer\register_sqlite_function;
@@ -39,7 +38,6 @@ use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Exporter\path_is_descendant_of;
-use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 use function WordPress\Reprint\Exporter\relative_path_under;
 use function WordPress\Reprint\Exporter\trim_right_slash;
@@ -88,6 +86,7 @@ require_once __DIR__ . '/lib/merge/load.php';
 require_once __DIR__ . '/lib/sort-index-file.php';
 require_once __DIR__ . '/lib/local-index-update-functions.php';
 require_once __DIR__ . '/lib/index/class-file-index-diff-processor.php';
+require_once __DIR__ . '/lib/index/class-file-sync-change-scope.php';
 require_once __DIR__ . '/lib/index/file-sync-path-functions.php';
 require_once __DIR__ . '/lib/class-reprint-process-lock.php';
 
@@ -7603,20 +7602,35 @@ class ImportClient
         }
 
         $file_diff_progress_state = $this->get_state()->diff;
-        $index_diff = FileIndexDiffProcessor::resume(
-            $this->remote_index_file,
-            $this->next_remote_index_file,
-            $file_diff_progress_state->index_diff_cursor,
-            [RemoteIndexReader::class, "decode_index_line"]
-        );
-        $remote_to_local_path_mapper = new RemoteToLocalPathMapper(
-            $this->filesystem_root,
-            $this->get_export_directories(),
-            $this->resolved_path_mappings,
-            $this->local_followed_symlinks_root
-        );
+        $selection_fingerprint =
+            $this->get_state()->files_pull_path_selection_fingerprint;
+        if (!is_string($selection_fingerprint)) {
+            throw new RuntimeException(
+                'Files-pull diff has no path-selection fingerprint.'
+            );
+        }
+        $file_sync_change_scope = $this->get_state()->files_pull_ownership
+            ->create_remote_change_scope(
+                $this->files_pull_ownership_directory,
+                $selection_fingerprint,
+                $this->pull_excluded_files_with_path_prefixes,
+                $this->get_state()->include_caches
+            );
+        $index_diff = null;
         $fetch_list_file_handle = null;
         try {
+            $index_diff = FileIndexDiffProcessor::resume(
+                $this->remote_index_file,
+                $this->next_remote_index_file,
+                $file_diff_progress_state->index_diff_cursor,
+                [RemoteIndexReader::class, "decode_index_line"]
+            );
+            $remote_to_local_path_mapper = new RemoteToLocalPathMapper(
+                $this->filesystem_root,
+                $this->get_export_directories(),
+                $this->resolved_path_mappings,
+                $this->local_followed_symlinks_root
+            );
             $fetch_list_file_handle = fopen($this->fetch_list_file, "c+b");
             $fetch_list_file_stat = is_resource($fetch_list_file_handle)
                 ? fstat($fetch_list_file_handle)
@@ -7666,7 +7680,15 @@ class ImportClient
                     $remote_absolute_path = $index_diff->get_path();
                     $transition = $index_diff->get_path_transition();
                     if ($transition === "deleted") {
-                        $deleted_path_is_empty_directory = $index_diff->get_path_type_in_old_index() === "dir";
+                        $deleted_path_type =
+                            $index_diff->get_path_type_in_old_index();
+                        $deleted_path_is_empty_directory =
+                            $deleted_path_type === "dir";
+                        $deleted_index_entry_may_change =
+                            $file_sync_change_scope->index_entry_may_change(
+                                $remote_absolute_path,
+                                $deleted_path_type
+                            );
                         $empty_directory_is_now_implied_by_a_descendant =
                             $deleted_path_is_empty_directory
                             && file_sync_result_contains_path_or_descendant(
@@ -7674,13 +7696,10 @@ class ImportClient
                                 $index_diff->get_preceding_path_in_new_index(),
                                 $index_diff->get_following_path_in_new_index()
                             );
-                        // The remote index is a union across files-pull path
-                        // selections. Keep paths outside this run's selection.
+                        // The remote index is a union across completed files-pull
+                        // selections. Keep paths owned by another selection.
                         if (
-                            $this->is_selected_for_pulling(
-                                $remote_absolute_path,
-                                false
-                            )
+                            $deleted_index_entry_may_change
                             || $empty_directory_is_now_implied_by_a_descendant
                         ) {
                             $local_absolute_path =
@@ -7697,7 +7716,11 @@ class ImportClient
                                     $index_diff->get_preceding_path_in_new_index(),
                                     $index_diff->get_following_path_in_new_index(),
                                     function (string $candidate_path) use (
+                                        $deleted_index_entry_may_change,
+                                        $deleted_path_type,
                                         $local_index_path,
+                                        $remote_absolute_path,
+                                        $file_sync_change_scope,
                                         $remote_to_local_path_mapper
                                     ): bool {
                                         $candidate_local_absolute_path =
@@ -7717,6 +7740,10 @@ class ImportClient
                                         ) {
                                             return false;
                                         }
+                                        // Removing a directory is recursive even
+                                        // at the original missing path. Exact
+                                        // entry authority is enough only for a
+                                        // file or link.
                                         if (
                                             !$remote_to_local_path_mapper
                                                 ->remote_path_owns_mapped_local_subtree(
@@ -7725,11 +7752,17 @@ class ImportClient
                                         ) {
                                             return false;
                                         }
-                                        return file_sync_index_path_may_change(
-                                            $candidate_path,
-                                            $this->get_export_directories(),
-                                            $this->pull_excluded_files_with_path_prefixes
-                                        );
+                                        if (
+                                            $candidate_path ===
+                                                $remote_absolute_path
+                                            && $deleted_path_type !== 'dir'
+                                        ) {
+                                            return $deleted_index_entry_may_change;
+                                        }
+                                        return $file_sync_change_scope
+                                            ->subtree_may_change(
+                                                $candidate_path
+                                            );
                                     },
                                     $deleted_path_is_empty_directory
                                 );
@@ -7770,9 +7803,9 @@ class ImportClient
                         }
                     } elseif (
                         $transition !== "unchanged"
-                        && $this->is_selected_for_pulling(
+                        && $file_sync_change_scope->index_entry_may_change(
                             $remote_absolute_path,
-                            true
+                            $index_diff->get_path_type_in_new_index()
                         )
                     ) {
                         // Preserve-local protects only paths which no earlier
@@ -7834,7 +7867,10 @@ class ImportClient
                 }
             }
         } finally {
-            $index_diff->close();
+            if ($index_diff !== null) {
+                $index_diff->close();
+            }
+            $file_sync_change_scope->close();
             if (is_resource($fetch_list_file_handle)) {
                 fclose($fetch_list_file_handle);
             }
@@ -9530,51 +9566,6 @@ class ImportClient
         }
 
         return $minimal;
-    }
-
-    /**
-     * Whether a path is selected by the active --include and --exclude prefixes.
-     *
-     * The exporter has already applied --include to entries in the next remote
-     * index, including followed symlink targets outside an --include prefix. Other
-     * paths are checked against --include locally. An included root itself is not
-     * selected because the next remote index lists its contents, not the root
-     * entry. Exclusions always win.
-     *
-     * @param bool $is_next_remote_index_entry Whether the path came from the
-     *                                         current next remote index.
-     */
-    private function is_selected_for_pulling(
-        string $path,
-        bool $is_next_remote_index_entry
-    ): bool
-    {
-        if (!$is_next_remote_index_entry) {
-            $selected = empty($this->pull_only_files_with_path_prefixes);
-
-            foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
-                $remainder = path_remainder_under($path, $prefix);
-                if ($remainder === "") {
-                    return false;
-                }
-                if ($remainder !== null) {
-                    $selected = true;
-                    break;
-                }
-            }
-
-            if (!$selected) {
-                return false;
-            }
-        }
-
-        foreach ($this->pull_excluded_files_with_path_prefixes as $prefix) {
-            if (path_remainder_under($path, $prefix) !== null) {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     /**

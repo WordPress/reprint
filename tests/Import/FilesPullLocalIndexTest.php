@@ -133,7 +133,7 @@ final class FilesPullLocalIndexTest extends TestCase
         ]], $this->filesDiffRecords($diff['stdout']));
     }
 
-    public function testPullDoesNotAddDefaultSkippedPathsToTheLocalIndex(): void
+    public function testPullDoesNotFetchRootDerivedDefaultSkippedPathFromInvalidIndex(): void
     {
         $this->writeRemoteOverrides([
             'added_files' => [
@@ -143,11 +143,11 @@ final class FilesPullLocalIndexTest extends TestCase
 
         $this->completeFilesPull();
 
-        $this->assertSame(
-            'pulled dependency',
-            file_get_contents(
-                $this->localTree . '/node_modules/pulled-package.js'
-            )
+        // The fake router deliberately bypasses the producer's default-skip
+        // check. This guards the consumer scope against an invalid index; an
+        // exact intermediate link has separate authority.
+        $this->assertFileDoesNotExist(
+            $this->localTree . '/node_modules/pulled-package.js'
         );
         $index = $this->readIndex($this->localIndexPath());
         $this->assertArrayNotHasKey(
@@ -394,7 +394,7 @@ final class FilesPullLocalIndexTest extends TestCase
         );
     }
 
-    public function testPulledDeletionStopsAtNestedIncludedRoot(): void
+    public function testPulledDeletionKeepsLocalAdditionsUnderNestedSelection(): void
     {
         $this->completeFilesPull();
         file_put_contents($this->localTree . '/folder/local-added.txt', 'local addition');
@@ -408,7 +408,13 @@ final class FilesPullLocalIndexTest extends TestCase
         ]);
 
         $this->assertSame(0, $pull['exit'], $pull['output']);
-        $this->assertDirectoryDoesNotExist($this->localTree . '/folder');
+        $this->assertSame(
+            'local addition',
+            file_get_contents($this->localTree . '/folder/local-added.txt')
+        );
+        $this->assertFileDoesNotExist(
+            $this->localTree . '/folder/remote-deleted.txt'
+        );
         $this->assertSame(
             $this->remoteFiles['unchanged.txt'],
             file_get_contents($this->localTree . '/unchanged.txt')
@@ -429,12 +435,15 @@ final class FilesPullLocalIndexTest extends TestCase
 
         $diff = $this->runFilesDiff();
         $this->assertSame(0, $diff['exit'], $diff['output']);
-        $this->assertSame([[
-            'command' => 'files-diff',
-            'status' => 'complete',
-            'local_paths_to_push' => 0,
-            'local_paths_to_delete' => 0,
-        ]], $this->filesDiffRecords($diff['stdout']));
+        $this->assertSame([
+            $this->expectedPushRecord('folder/local-added.txt'),
+            [
+                'command' => 'files-diff',
+                'status' => 'complete',
+                'local_paths_to_push' => 1,
+                'local_paths_to_delete' => 0,
+            ],
+        ], $this->filesDiffRecords($diff['stdout']));
     }
 
     public function testPulledDeletionKeepsAnExcludedDescendant(): void
@@ -479,7 +488,7 @@ final class FilesPullLocalIndexTest extends TestCase
         );
     }
 
-    public function testPulledDeletionRemovesAnEntireRemappedSelection(): void
+    public function testPulledDeletionKeepsEmptyRemappedSelectionDirectoryTree(): void
     {
         $arguments = [
             '--include=/var/www/html',
@@ -502,7 +511,29 @@ final class FilesPullLocalIndexTest extends TestCase
         $pull = $this->runFilesPull($arguments);
 
         $this->assertSame(0, $pull['exit'], $pull['output']);
-        $this->assertDirectoryDoesNotExist($this->rawFileRoot . '/remapped');
+        // A traversal root is not an indexed entry, and omitted cache paths
+        // make recursive removal unsafe. Exact descendant deletions therefore
+        // leave the mapped selection root and now-empty parents as an empty
+        // directory tree.
+        $remappedRoot = $this->rawFileRoot . '/remapped';
+        $this->assertDirectoryExists($remappedRoot);
+        $remainingFiles = [];
+        foreach (
+            new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator(
+                    $remappedRoot,
+                    \FilesystemIterator::SKIP_DOTS
+                )
+            ) as $remainingPath => $remainingEntry
+        ) {
+            if (!$remainingEntry->isDir() || is_link($remainingPath)) {
+                $remainingFiles[] = $remainingPath;
+            }
+        }
+        $this->assertSame(
+            [],
+            $remainingFiles
+        );
         $this->assertSame(
             'outside selection',
             file_get_contents($this->rawFileRoot . '/outside.txt')
@@ -628,7 +659,7 @@ final class FilesPullLocalIndexTest extends TestCase
         );
     }
 
-    public function testPulledDirectoryDeletionRemovesItsLocalIndexSubtree(): void
+    public function testPulledDirectoryDeletionKeepsEmptyDirectoryInLocalIndex(): void
     {
         $this->writeRemoteOverrides([
             'added_directories' => ['removed-tree'],
@@ -644,9 +675,20 @@ final class FilesPullLocalIndexTest extends TestCase
         $pull = $this->runFilesPull();
 
         $this->assertSame(0, $pull['exit'], $pull['output']);
-        $this->assertDirectoryDoesNotExist($this->localTree . '/removed-tree');
+        // The tracked child is removed exactly. The explicit remote-index row
+        // is invalidated, but caches were omitted so recursive removal is
+        // unsafe and the locally retained empty directory remains indexed.
+        $removedTree = $this->localTree . '/removed-tree';
+        $this->assertDirectoryExists($removedTree);
+        $this->assertSame(
+            [],
+            array_values(array_diff(
+                scandir($removedTree) ?: [],
+                ['.', '..']
+            ))
+        );
         $index = $this->readIndex($this->localIndexPath());
-        $this->assertArrayNotHasKey(
+        $this->assertArrayHasKey(
             $this->localIndexEntryPath('removed-tree'),
             $index
         );

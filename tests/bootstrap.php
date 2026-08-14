@@ -71,6 +71,28 @@ function reprint_test_write_root_ownership_snapshot(
     string $pull_state_directory,
     array $remote_roots
 ): string {
+    return reprint_test_write_ownership_snapshot(
+        $pull_state_directory,
+        array_map(
+            static function (string $remote_root): array {
+                return ['kind' => 'root', 'path' => $remote_root];
+            },
+            $remote_roots
+        )
+    );
+}
+
+/**
+ * Write one production-shaped ownership snapshot for importer tests.
+ *
+ * @param string $pull_state_directory Pull state directory.
+ * @param list<array{kind:'root'|'exact',path:string}> $atoms Root and intermediate-link ownership atoms.
+ * @return string Opaque snapshot ID.
+ */
+function reprint_test_write_ownership_snapshot(
+    string $pull_state_directory,
+    array $atoms
+): string {
     $snapshot_id = bin2hex(random_bytes(32));
     $snapshot_directory =
         $pull_state_directory . '/files-pull-ownership/snapshots';
@@ -85,16 +107,16 @@ function reprint_test_write_root_ownership_snapshot(
         );
     }
 
-    $path_rows = [];
-    foreach ($remote_roots as $remote_root) {
-        $kind = 'root';
-        $path = $remote_root;
+    $path_rows_by_atom = [];
+    foreach ($atoms as $atom) {
+        $kind = $atom['kind'];
+        $path = $atom['path'];
         while (true) {
             $line = json_encode([
                 'kind' => $kind,
                 'path_b64' => base64_encode($path),
             ], JSON_UNESCAPED_SLASHES) . "\n";
-            $path_rows[] = [
+            $path_rows_by_atom[$kind . "\0" . $path] = [
                 'kind' => $kind,
                 'path' => $path,
                 'line' => $line,
@@ -106,10 +128,14 @@ function reprint_test_write_root_ownership_snapshot(
             $path = dirname($path);
         }
     }
+    $path_rows = array_values($path_rows_by_atom);
     usort(
         $path_rows,
         static function (array $left, array $right): int {
-            return strcmp($left['line'], $right['line']);
+            return strcmp(
+                $left['path'] . "\0" . $left['kind'],
+                $right['path'] . "\0" . $right['kind']
+            );
         }
     );
 

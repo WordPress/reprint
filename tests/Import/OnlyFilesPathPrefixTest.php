@@ -11,7 +11,6 @@ require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
  *   - resolve_remote_paths(): :token: templates / absolute paths → remote absolute
  *     prefixes (sharing --remap's WordPress path token table), with expansion for plugins, mu-plugins, and uploads
  *     directories outside WP_CONTENT_DIR and covered-prefix collapse.
- *   - is_selected_for_pulling(): per-path --include/--exclude membership.
  *   - get_export_directories(): with --include, a *replace* of the export roots.
  * Orthogonal to --remap (--include file prefixes decide what gets pulled, not where it lands).
  */
@@ -256,34 +255,6 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('preflight');
         $this->call($c, 'resolve_remote_paths', array(array(':abspath:/wp-admin'), 'include'));
-    }
-
-    public function testPullOnlyFilesPrefixSelectionDefaultsToTrueAndIsSlashAware(): void
-    {
-        $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
-        // No --include: every file path is selected (keeps the diff deleting orphans).
-        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/anything/at/all.php', false)));
-
-        $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content'));
-        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/themes/a.css', false)));
-        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-config.php', false)));
-        // Byte-order sibling must not match the prefix.
-        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content.bak/x', false)));
-    }
-
-    public function testIncludeAndExcludePathPrefixSelection(): void
-    {
-        $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
-        $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content'));
-        $this->set($c, 'pull_excluded_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
-
-        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/themes/a.css', false)));
-        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/uploads/a.jpg', false)));
-        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-config.php', false)));
-        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/uploads.backup/a.jpg', false)));
-
-        $this->set($c, 'pull_excluded_files_with_path_prefixes', array('/'));
-        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/themes/a.css', false)));
     }
 
     public function testFilterModesRewriteToUploadPathSelections(): void
