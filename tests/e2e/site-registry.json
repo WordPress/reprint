@@ -146,6 +146,9 @@
     "stdout-db-pull-process-death": {
       "port": 8127
     },
+    "pull-db-shutdown": {
+      "port": 8128
+    },
     "file-db-pull-artifact-guards": {
       "port": 8130
     },

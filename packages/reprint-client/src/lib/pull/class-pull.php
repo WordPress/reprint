@@ -382,10 +382,14 @@ class Pull
             $this->print_stage_header($stage);
 
             try {
-                $this->run_stage($stage, $options, $step, $total);
+                $stage_completed = $this->run_stage($stage, $options, $step, $total);
             } catch (\Exception $e) {
                 $this->report_failure($command, $stage, $stages, $i, $e);
                 throw new PullFailureReportedException($e->getMessage(), 0, $e);
+            }
+
+            if (!$stage_completed) {
+                return;
             }
 
             $this->client->mark_pull_stage_complete($stage, $command, $stages);
@@ -414,11 +418,11 @@ class Pull
      * Runs one pipeline stage and prints its completion summary.
      *
      * Stages that delegate to lower-level commands rely on those commands for
-     * their own resume state. The pipeline checkpoint is saved by the caller
-     * after this method returns, so a thrown exception leaves the stage
-     * unfinished at the orchestration level.
+     * their own resume state. True lets the caller save the pipeline checkpoint;
+     * false leaves a partial stage unfinished and returns control to the process.
+     * A thrown exception also leaves the stage unfinished.
      */
-    private function run_stage(string $stage, array $options, int $step, int $total): void
+    private function run_stage(string $stage, array $options, int $step, int $total): bool
     {
         switch ($stage) {
             case 'preflight':
@@ -495,9 +499,18 @@ class Pull
                     $state->active_resumable_command->command_name !== 'db-apply' ||
                     $state->active_resumable_command->completion_state !== 'complete'
                 ) {
-                    $this->run_until_complete('db-apply', function () use ($options) {
+                    $this->client->enable_database_apply_signal_handling();
+                    try {
                         $this->client->run_db_apply($options);
-                    });
+                    } finally {
+                        $this->client->restore_command_signal_handling();
+                    }
+                    $completion_state =
+                        $this->client->get_state()->active_resumable_command->completion_state;
+                    if ($completion_state === 'partial') {
+                        $this->client->exit_code = 2;
+                        return false;
+                    }
                 }
                 $stmts = $state->apply->statements_executed;
                 $this->print_done($stage, $stmts > 0 ? number_format($stmts) . " statements" : null);
@@ -517,6 +530,7 @@ class Pull
                 $this->start_server($options);
                 break;
         }
+        return true;
     }
 
     /**

@@ -285,6 +285,9 @@ class ImportClient
     /** @var bool Set to true by SIGTERM/SIGINT handler to finish the current chunk and exit cleanly. */
     private $shutdown_requested = false;
 
+    /** @var string|null Top-level command whose signal policy is restored after a scoped stage. */
+    private $signal_handling_command;
+
     /** @var int|null First signal asking files-push to stop after its active sender step. */
     private $files_push_stop_signal = null;
 
@@ -462,38 +465,8 @@ class ImportClient
     {
         // Register the command's signal behavior before constructor work can
         // create state or receive a signal under another command's policy.
-        if (function_exists("pcntl_signal")) {
-            if ($signal_handling_command === 'db-apply') {
-                // PDO drivers and the SQLite compatibility layer are not safe
-                // to interrupt inside an executing SQL file chunk. The apply
-                // loop dispatches pending signals between chunks.
-                if (function_exists('pcntl_sigprocmask')) {
-                    pcntl_sigprocmask(SIG_BLOCK, [SIGINT, SIGTERM]);
-                }
-                if (function_exists('pcntl_async_signals')) {
-                    pcntl_async_signals(false);
-                }
-                pcntl_signal(SIGINT, [$this, 'handle_database_apply_shutdown']);
-                pcntl_signal(SIGTERM, [$this, 'handle_database_apply_shutdown']);
-                // pcntl_signal() unblocks the signal whose handler it installs.
-                if (function_exists('pcntl_sigprocmask')) {
-                    pcntl_sigprocmask(SIG_BLOCK, [SIGINT, SIGTERM]);
-                }
-            } else {
-                // Enable async signals (PHP 7.1+) so signals work during blocking operations
-                if (function_exists("pcntl_async_signals")) {
-                    pcntl_async_signals(true);
-                }
-                if ($signal_handling_command === 'files-push') {
-                    $this->enable_files_push_signal_handling();
-                } elseif ($signal_handling_command !== 'files-diff') {
-                    // files-diff must not save the pull command's state from a
-                    // shutdown handler; default signal behavior ends the report.
-                    pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
-                    pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
-                }
-            }
-        }
+        $this->signal_handling_command = $signal_handling_command;
+        $this->install_signal_handling_for_command($signal_handling_command);
 
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
         $this->state_dir = trim_right_slash($state_dir);
@@ -2302,6 +2275,64 @@ class ImportClient
             posix_kill(posix_getpid(), SIGKILL);
         }
         die("\nForced exit.\n");
+    }
+
+    /** Installs the deferred signal policy for a db-apply stage. */
+    public function enable_database_apply_signal_handling(): void
+    {
+        $this->install_signal_handling_for_command('db-apply');
+    }
+
+    /** Restores the signal policy selected by the top-level command. */
+    public function restore_command_signal_handling(): void
+    {
+        $this->install_signal_handling_for_command($this->signal_handling_command);
+    }
+
+    /** Installs one command's handlers, async mode, and SIGINT/SIGTERM mask. */
+    private function install_signal_handling_for_command(?string $command): void
+    {
+        if (!function_exists('pcntl_signal')) {
+            return;
+        }
+        if (function_exists('pcntl_sigprocmask')) {
+            pcntl_sigprocmask(SIG_BLOCK, [SIGINT, SIGTERM]);
+        }
+        if (function_exists('pcntl_async_signals')) {
+            pcntl_async_signals(false);
+        }
+
+        if ($command === 'files-push') {
+            $this->enable_files_push_signal_handling();
+        } elseif ($command === 'db-apply') {
+            // PDO drivers and the SQLite compatibility layer are not safe to
+            // interrupt inside an executing SQL file chunk. The apply loop
+            // explicitly dispatches a pending signal between chunks.
+            pcntl_signal(SIGINT, [$this, 'handle_database_apply_shutdown']);
+            pcntl_signal(SIGTERM, [$this, 'handle_database_apply_shutdown']);
+            // pcntl_signal() unblocks the signal whose handler it installs.
+            if (function_exists('pcntl_sigprocmask')) {
+                pcntl_sigprocmask(SIG_BLOCK, [SIGINT, SIGTERM]);
+            }
+            return;
+        } elseif ($command === 'files-diff') {
+            // files-diff must not save the pull command's state from a
+            // shutdown handler; default signal behavior ends the report.
+            pcntl_signal(SIGINT, SIG_DFL);
+            pcntl_signal(SIGTERM, SIG_DFL);
+        } else {
+            // Enable the generic command shutdown handler outside scoped stages.
+            pcntl_signal(SIGINT, [$this, 'handle_shutdown']);
+            pcntl_signal(SIGTERM, [$this, 'handle_shutdown']);
+        }
+
+        // Enable async signals (PHP 7.1+) so signals work during blocking operations
+        if (function_exists('pcntl_async_signals')) {
+            pcntl_async_signals(true);
+        }
+        if (function_exists('pcntl_sigprocmask')) {
+            pcntl_sigprocmask(SIG_UNBLOCK, [SIGINT, SIGTERM]);
+        }
     }
 
     /** Installs the files-push first-signal stop behavior when PCNTL exists. */
