@@ -2236,6 +2236,16 @@ class ImportClient
                         );
                     }
                 }
+                $session_setup_file = wp_join_unix_paths(
+                    $this->state_dir,
+                    "db-session-setup.sql",
+                );
+                if (file_exists($session_setup_file)) {
+                    unlink($session_setup_file);
+                    $this->audit_log(
+                        "FILE DELETE | {$session_setup_file} | abort db-pull",
+                    );
+                }
                 $tables_file = wp_join_unix_paths($this->state_dir, "db-tables.jsonl");
                 if (file_exists($tables_file)) {
                     unlink($tables_file);
@@ -5634,6 +5644,10 @@ class ImportClient
     public function run_db_apply(array $options): void
     {
         $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
+        $session_setup_file = wp_join_unix_paths(
+            $this->state_dir,
+            "db-session-setup.sql",
+        );
         if (!file_exists($sql_file)) {
             throw new RuntimeException(
                 "db.sql not found in {$this->state_dir}. Run db-pull first.",
@@ -5783,6 +5797,21 @@ class ImportClient
             "CONNECTED | {$connection_label}",
             false,
         );
+
+        if ($is_resume && $this->get_state()->apply->target_engine === "mysql") {
+            $session_setup_sql = @file_get_contents($session_setup_file);
+            if ($session_setup_sql === false || trim($session_setup_sql) === "") {
+                throw new RuntimeException(
+                    "Cannot resume db-apply because db-session-setup.sql is missing or empty. " .
+                    "Run db-apply --abort and start again.",
+                );
+            }
+            $pdo->exec($session_setup_sql);
+            $this->audit_log(
+                "DB-APPLY | ran saved MySQL session setup after reconnect",
+                true,
+            );
+        }
 
         // Stream db.sql through the query stream and execute. Use the
         // fast strcspn-based parser by default; it self-falls-back to
@@ -7534,6 +7563,10 @@ class ImportClient
         $sql_buffer_handle = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
+        $session_setup_file = wp_join_unix_paths(
+            $this->state_dir,
+            "db-session-setup.sql",
+        );
 
         if ($mode === "file") {
             $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
@@ -7598,6 +7631,21 @@ class ImportClient
                 throw new RuntimeException("MySQL connection failed: " . $mysql_conn->connect_error);
             }
             $mysql_conn->set_charset("utf8mb4");
+
+            if ($cursor !== null) {
+                $session_setup_sql = @file_get_contents($session_setup_file);
+                if ($session_setup_sql === false || trim($session_setup_sql) === "") {
+                    throw new RuntimeException(
+                        "Cannot resume db-pull because db-session-setup.sql is missing or empty. " .
+                        "Run db-pull --abort and start again.",
+                    );
+                }
+                $this->execute_mysql_queries($mysql_conn, $session_setup_sql);
+                $this->audit_log(
+                    "SQL OUTPUT mysql | ran saved session setup after reconnect",
+                    true,
+                );
+            }
 
             $this->audit_log(
                 "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
@@ -7686,6 +7734,7 @@ class ImportClient
                     $mysql_conn,
                     &$sql_buffer_handle,
                     &$sql_buffer,
+                    $session_setup_file,
                     &$sql_bytes_written,
                     $context,
                     $query_stream,
@@ -7702,6 +7751,25 @@ class ImportClient
                     // Allow signal handlers to run
                     if (function_exists("pcntl_signal_dispatch")) {
                         pcntl_signal_dispatch();
+                    }
+
+                    $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
+                    if ($chunk_type === "sql_session_setup") {
+                        $session_setup_sql = $chunk["body"];
+                        $session_setup_tmp_file = $session_setup_file . ".tmp";
+                        $written = file_put_contents(
+                            $session_setup_tmp_file,
+                            $session_setup_sql,
+                        );
+                        if (
+                            $written !== strlen($session_setup_sql)
+                            || !rename($session_setup_tmp_file, $session_setup_file)
+                        ) {
+                            throw new RuntimeException(
+                                "Cannot save MySQL session setup to db-session-setup.sql",
+                            );
+                        }
+                        return;
                     }
 
                     $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
@@ -7738,8 +7806,6 @@ class ImportClient
                             }
                         }
                     }
-
-                    $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
                     if ($chunk_type === "sql") {
                         $query_complete = ($chunk["headers"]["x-query-complete"] ?? "1") === "1";
@@ -7780,18 +7846,7 @@ class ImportClient
                                 $sql_bytes_written += strlen($data);
 
                                 if ($query_complete) {
-                                    if (!$mysql_conn->multi_query($sql_buffer)) {
-                                        throw new RuntimeException("MySQL execution failed: " . $mysql_conn->error);
-                                    }
-                                    // Drain all result sets from multi_query before sending the
-                                    // next chunk — mysqli requires this.
-                                    do {
-                                        $result = $mysql_conn->store_result();
-                                        if ($result) { $result->free(); }
-                                        if ($mysql_conn->errno) {
-                                            throw new RuntimeException("MySQL statement error: " . $mysql_conn->error);
-                                        }
-                                    } while ($mysql_conn->more_results() && $mysql_conn->next_result());
+                                    $this->execute_mysql_queries($mysql_conn, $sql_buffer);
 
                                     // Query executed — truncate the buffer file and reset.
                                     if ($sql_buffer_handle) {
@@ -7999,6 +8054,32 @@ class ImportClient
                 " bytes) — incomplete export?"
             );
         }
+    }
+
+    /** Executes SQL and consumes every result before the next query. */
+    private function execute_mysql_queries(\mysqli $connection, string $sql): void
+    {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+        if (!$connection->multi_query($sql)) {
+            throw new RuntimeException("MySQL execution failed: " . $connection->error);
+        }
+
+        while (true) {
+            $result = $connection->store_result();
+            if ($result) {
+                $result->free();
+            }
+            if ($connection->errno) {
+                throw new RuntimeException("MySQL statement error: " . $connection->error);
+            }
+            if (!$connection->more_results()) {
+                break;
+            }
+            if (!$connection->next_result()) {
+                throw new RuntimeException("MySQL statement error: " . $connection->error);
+            }
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
     }
 
     /**
