@@ -630,6 +630,7 @@ final class FileSyncChangeScopeMappingProcessor
             );
         }
         if (!$is_scanning) {
+            clearstatcache(true, $this->unsorted_paths_file);
             $source_stat = @lstat($this->unsorted_paths_file);
             if (
                 !is_array($source_stat)
