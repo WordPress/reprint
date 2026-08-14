@@ -16,6 +16,7 @@ require_once __DIR__ . '/class-remote-file-index-cursor-state.php';
 require_once __DIR__ . '/class-fetch-list-progress-state.php';
 require_once __DIR__ . '/class-files-pull-summary-state.php';
 require_once __DIR__ . '/class-database-apply-command-state.php';
+require_once __DIR__ . '/class-database-url-rewrite-command-state.php';
 require_once __DIR__ . '/class-adaptive-tuning-state.php';
 require_once __DIR__ . '/class-pull-pipeline-checkpoint-state.php';
 require_once __DIR__ . '/class-pull-state.php';

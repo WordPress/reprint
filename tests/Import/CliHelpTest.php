@@ -72,6 +72,85 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--new-site-url=URL', $output);
     }
 
+    public function testDatabaseUrlRewriteHelpDescribesTheBoundedLiveDatabaseOperation(): void
+    {
+        $output = $this->runHelp('db-rewrite-urls');
+
+        $this->assertStringContainsString('live MySQL or SQLite database', $output);
+        $this->assertStringContainsString('--rewrite-url FROM TO', $output);
+        $this->assertStringContainsString('--target-engine=ENGINE', $output);
+        $this->assertStringContainsString('--abort', $output);
+        $this->assertStringContainsString('one primary-keyed record at a time', $output);
+        $this->assertStringContainsString('Resumes from the last saved record cursor', $output);
+        $this->assertStringContainsString(
+            'Usage: reprint db-rewrite-urls [<remote-reprint-api-url>] --state-dir=DIR',
+            $output
+        );
+        $this->assertStringContainsString('database recorded by db-apply', $output);
+        $this->assertStringNotContainsString('--fs-root=DIR', $output);
+    }
+
+    public function testDatabaseUrlRewriteRequiresAUrlToChooseAmongSavedRemotes(): void
+    {
+        $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+        $state_directory =
+            sys_get_temp_dir() . '/db-rewrite-multiple-remotes-' . uniqid('', true);
+        foreach (['first', 'second'] as $remote_directory) {
+            $pull_directory =
+                $state_directory . '/remotes/' . $remote_directory . '/pull';
+            mkdir($pull_directory, 0755, true);
+            file_put_contents($pull_directory . '/state.json', '{}');
+        }
+        $command =
+            escapeshellarg(PHP_BINARY)
+            . ' '
+            . escapeshellarg($entry)
+            . ' db-rewrite-urls --state-dir='
+            . escapeshellarg($state_directory)
+            . ' --rewrite-url https://old.example https://new.example 2>&1';
+
+        try {
+            $output = shell_exec($command) ?? '';
+            $this->assertStringContainsString(
+                '--state-dir contains more than one saved remote',
+                $output
+            );
+        } finally {
+            foreach (['first', 'second'] as $remote_directory) {
+                unlink(
+                    $state_directory . '/remotes/' . $remote_directory . '/pull/state.json'
+                );
+                rmdir($state_directory . '/remotes/' . $remote_directory . '/pull');
+                rmdir($state_directory . '/remotes/' . $remote_directory);
+            }
+            rmdir($state_directory . '/remotes');
+            rmdir($state_directory);
+        }
+    }
+
+    public function testDatabaseUrlRewriteRejectsAnUnusedFilesystemRoot(): void
+    {
+        $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+        $state_directory =
+            sys_get_temp_dir() . '/db-rewrite-fs-root-' . uniqid('', true);
+        $command =
+            escapeshellarg(PHP_BINARY)
+            . ' '
+            . escapeshellarg($entry)
+            . ' db-rewrite-urls --state-dir='
+            . escapeshellarg($state_directory)
+            . ' --fs-root='
+            . escapeshellarg($state_directory . '/files')
+            . ' 2>&1';
+        $output = shell_exec($command) ?? '';
+
+        $this->assertStringContainsString(
+            'db-rewrite-urls does not accept --fs-root',
+            $output
+        );
+        $this->assertDirectoryDoesNotExist($state_directory);
+    }
+
     public function testImportMetadataAliasShowsPullMetadataHelp(): void
     {
         $output = $this->runHelp('import-metadata');

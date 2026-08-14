@@ -185,6 +185,40 @@ class NewSiteUrlTest extends TestCase
         $this->callResolve($client, $options);
     }
 
+    public function testUsesTheSourceSiteUrlFromPriorStateWithoutAnExportUrl(): void
+    {
+        $client = new \ImportClient(
+            '',
+            $this->tempDir,
+            $this->tempDir . '/fs-root'
+        );
+        write_current_pull_state($client, [
+            'preflight' => [
+                'data' => [
+                    'database' => [
+                        'wp' => [
+                            'paths_urls' => [
+                                'home_url' => 'https://saved-source.example:8443/wordpress',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $options = $this->callResolve($client, [
+            'new_site_url' => 'https://new-site.example.com',
+        ]);
+
+        $this->assertSame(
+            [
+                ['https://saved-source.example:8443', 'https://new-site.example.com'],
+                ['http://saved-source.example:8443', 'https://new-site.example.com'],
+            ],
+            $options['rewrite_url']
+        );
+    }
+
     public function testNewUrlUsedVerbatim(): void
     {
         $client = new \ImportClient(
