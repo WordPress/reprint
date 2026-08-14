@@ -123,6 +123,22 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     private int $bytes_already_scanned = 0;
 
     /**
+     * The next regex match already found for each mapping. A missing key has
+     * not been searched yet. A null value means that mapping has no later
+     * match in this text.
+     *
+     * @var array<int, array{
+     *     scheme: array{0: string, 1: int},
+     *     scheme_colon: array{0: string, 1: int},
+     *     url_slash: array{0: string, 1: int},
+     *     path_slash: array{0: string, 1: int},
+     *     base: array{0: string, 1: int},
+     *     authority: array{0: string, 1: int}
+     * }|null>
+     */
+    private array $mapping_lookahead_matches = [];
+
+    /**
      * @var array{
      *     source_authority: string,
      *     source_path: string,
@@ -284,61 +300,118 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      */
     private function find_next_url_base(): ?array
     {
-        $next_match = null;
-        foreach ($this->url_mappings as $mapping) {
+        $next_mapping = null;
+        $next_matches = null;
+        $next_authority_start = null;
+        if (count($this->url_mappings) === 1) {
+            // A single mapping advances after every match, leaving no future
+            // lookahead to reuse on the next call.
+            $next_mapping = $this->url_mappings[0];
             $found = preg_match(
-                $mapping['pattern'],
+                $next_mapping['pattern'],
                 $this->text,
-                $matches,
+                $next_matches,
                 PREG_OFFSET_CAPTURE,
                 $this->bytes_already_scanned
             );
             if ($found !== 1) {
-                continue;
+                return null;
             }
+            $next_authority_start = $next_matches['authority'][1];
+        } else {
+            foreach ($this->url_mappings as $mapping_index => $mapping) {
+                $has_lookahead = array_key_exists(
+                    $mapping_index,
+                    $this->mapping_lookahead_matches
+                );
+                $lookahead_matches = $has_lookahead
+                    ? $this->mapping_lookahead_matches[$mapping_index]
+                    : null;
+                if (
+                    !$has_lookahead
+                    || (
+                        $lookahead_matches !== null
+                        && $lookahead_matches['authority'][1]
+                            < $this->bytes_already_scanned
+                    )
+                ) {
+                    $found = preg_match(
+                        $mapping['pattern'],
+                        $this->text,
+                        $matches,
+                        PREG_OFFSET_CAPTURE,
+                        $this->bytes_already_scanned
+                    );
+                    $lookahead_matches = $found === 1
+                        ? [
+                            'scheme'       => $matches['scheme'],
+                            'scheme_colon' => $matches['scheme_colon'],
+                            'url_slash'    => $matches['url_slash'],
+                            'path_slash'   => $matches['path_slash'] ?? ['', -1],
+                            'base'         => $matches['base'],
+                            'authority'    => $matches['authority'],
+                        ]
+                        : null;
+                    $this->mapping_lookahead_matches[$mapping_index] =
+                        $lookahead_matches;
+                }
 
-            $authority_start = $matches['authority'][1];
-            if ($next_match !== null && $authority_start >= $next_match['start']) {
-                continue;
-            }
+                if ($lookahead_matches === null) {
+                    continue;
+                }
 
-            $target_path_slash = '';
-            if ($mapping['target_path'] !== '') {
-                $target_path_slash = $matches['url_slash'][1] === -1
-                    ? $matches['path_slash'][0]
-                    : $matches['url_slash'][0];
-            }
-            $target_port = '';
-            if ($mapping['target_port'] !== null) {
-                // No escaped colon is available here. Use an unescaped colon.
-                // This risks breaking an unknown format, but ':' is not a
-                // common string terminator in popular formats.
-                $target_port_colon = $matches['scheme_colon'][1] === -1
-                    ? ':'
-                    : $matches['scheme_colon'][0];
-                $target_port = $target_port_colon . $mapping['target_port'];
-            }
+                $authority_start = $lookahead_matches['authority'][1];
+                if (
+                    $next_authority_start !== null
+                    && $authority_start >= $next_authority_start
+                ) {
+                    continue;
+                }
 
-            $next_match = array_merge(
-                $mapping,
-                [
-                    'start'         => $authority_start,
-                    'base_length'   => strlen($matches['base'][0]),
-                    'replacement'   => $mapping['target_domain'] . $target_port . str_replace(
-                        '/',
-                        $target_path_slash,
-                        $mapping['target_path']
-                    ),
-                    'scheme_start'  => $matches['scheme'][1] === -1
-                        ? null
-                        : $matches['scheme'][1],
-                    'scheme_length'    => strlen($matches['scheme'][0]),
-                    'candidate_scheme' => strtolower($matches['scheme'][0]),
-                ]
-            );
+                $next_mapping = $mapping;
+                $next_matches = $lookahead_matches;
+                $next_authority_start = $authority_start;
+            }
         }
 
-        return $next_match;
+        if ($next_mapping === null || $next_matches === null) {
+            return null;
+        }
+
+        $target_path_slash = '';
+        if ($next_mapping['target_path'] !== '') {
+            $target_path_slash = $next_matches['url_slash'][1] === -1
+                ? $next_matches['path_slash'][0]
+                : $next_matches['url_slash'][0];
+        }
+        $target_port = '';
+        if ($next_mapping['target_port'] !== null) {
+            // No escaped colon is available here. Use an unescaped colon.
+            // This risks breaking an unknown format, but ':' is not a
+            // common string terminator in popular formats.
+            $target_port_colon = $next_matches['scheme_colon'][1] === -1
+                ? ':'
+                : $next_matches['scheme_colon'][0];
+            $target_port = $target_port_colon . $next_mapping['target_port'];
+        }
+
+        return array_merge(
+            $next_mapping,
+            [
+                'start'         => $next_authority_start,
+                'base_length'   => strlen($next_matches['base'][0]),
+                'replacement'   => $next_mapping['target_domain'] . $target_port . str_replace(
+                    '/',
+                    $target_path_slash,
+                    $next_mapping['target_path']
+                ),
+                'scheme_start'  => $next_matches['scheme'][1] === -1
+                    ? null
+                    : $next_matches['scheme'][1],
+                'scheme_length'    => strlen($next_matches['scheme'][0]),
+                'candidate_scheme' => strtolower($next_matches['scheme'][0]),
+            ]
+        );
     }
 
     /**

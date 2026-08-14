@@ -43,6 +43,22 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
         $eight_backslash_separator = str_repeat('\\', 8) . '/';
 
         return [
+            'later mapping remains available while an earlier mapping repeats' => [
+                'https://one.example/a https://one.example/b https://two.example/c',
+                'https://destination-one.example/a https://destination-one.example/b https://destination-two.example/c',
+                [
+                    'https://one.example' => 'https://destination-one.example',
+                    'https://two.example' => 'https://destination-two.example',
+                ],
+            ],
+            'shorter overlapping mapping resumes after the longer match' => [
+                'https://source.example/media/a https://source.example/b',
+                'https://media.example/a https://root.example/b',
+                [
+                    'https://source.example' => 'https://root.example',
+                    'https://source.example/media' => 'https://media.example',
+                ],
+            ],
             'unquoted CSS URL preserves its terminator' => [
                 '.hero{background-image:url(https://source.example/wp-content/uploads/2026/01/hero.jpg);}',
                 '.hero{background-image:url(https://destination.example/wp-content/uploads/2026/01/hero.jpg);}',
