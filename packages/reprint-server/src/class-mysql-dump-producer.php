@@ -424,13 +424,17 @@ class MySQLDumpProducer
      */
     private function emit_sql_header()
     {
-        $header =
-            "SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0;\n" .
+        $this->current_sql_fragment = self::get_session_setup_sql();
+    }
+
+    /** Returns the connection settings required before executing dump SQL. */
+    public static function get_session_setup_sql()
+    {
+        return "SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0;\n" .
             "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;\n" .
             // @TODO: Restore STRICT_TRANS_TABLES
             "SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='ONLY_FULL_GROUP_BY,ERROR_FOR_DIVISION_BY_ZERO';\n" .
             "SET AUTOCOMMIT=0;\n";
-        $this->current_sql_fragment = $header;
     }
 
     /** Emits COMMIT and restores the session variables saved in the header. */

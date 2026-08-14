@@ -140,8 +140,11 @@
     "db-index-interruption": {
       "port": 8125
     },
-    "sqlite-legacy": {
+    "mysql-session-settings-resume": {
       "port": 8126
+    },
+    "sqlite-legacy": {
+      "port": 8127
     }
   }
 }
