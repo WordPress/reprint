@@ -32,6 +32,13 @@ declare(strict_types=1);
  * @phpstan-type SimpleCursor array{phase:'publishing_output'|'complete',config_fingerprint:string}
  * @phpstan-type CleanupCursor array{phase:'cleaning_work_files',config_fingerprint:string,next_cleanup_slot:int}
  * @phpstan-type Cursor BuildingCursor|StartingMergeCursor|MergingCursor|MergeCompleteCursor|StartingOutputCursor|CopyingCursor|SimpleCursor|CleanupCursor
+ * @phpstan-type TransitionInput (array{phase:'starting_merge',input_slot:int,input_run_count:int}
+ *     |array{phase:'merging_runs',input_slot:int,input_run_count:int,input_run_index:int,input_byte_offset:int,left_byte_offset:int|null,left_end_byte_offset:int|null,right_byte_offset:int|null,right_end_byte_offset:int|null,output_slot:int,output_byte_offset:int,output_run_count:int,output_run_header_byte_offset:int|null,previous_key_b64:string|null}
+ *     |array{phase:'merge_pass_complete',next_input_slot:int,next_input_run_count:int,obsolete_slot:int}
+ *     |array{phase:'starting_output',final_slot:int,final_run_count:int}
+ *     |array{phase:'copying_output',final_slot:int,final_run_start_byte_offset:int,final_run_byte_offset:int,final_run_end_byte_offset:int,output_byte_offset:int}
+ *     |array{phase:'publishing_output'|'complete'}
+ *     |array{phase:'cleaning_work_files',next_cleanup_slot:int})
  */
 final class ExternalSortProcessor
 {
@@ -645,7 +652,7 @@ final class ExternalSortProcessor
         }
     }
 
-    /** @param Cursor $cursor */
+    /** @param TransitionInput $cursor */
     private function transition(array $cursor): bool
     {
         $this->close_handles();
