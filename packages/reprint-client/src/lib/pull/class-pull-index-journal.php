@@ -3,6 +3,7 @@
 use function Reprint\Importer\merge_local_index_mutations;
 use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\write_local_index_update;
+use function WordPress\Reprint\Exporter\read_file_index_entry_from_stat;
 use function WordPress\Reprint\Exporter\relative_path_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI filesystem paths, never HTML output.
@@ -310,23 +311,22 @@ class PullIndexJournal
                     "Failed to inspect the pulled local absolute path: {$local_absolute_path}."
                 );
             }
-            $local_file_type_bits = $local_path_stat["mode"] & 0170000;
-            if ($local_file_type_bits === 0120000) {
-                $local_path_type = "link";
-            } elseif ($local_file_type_bits === 0040000) {
-                $local_path_type = "dir";
-            } elseif ($local_file_type_bits === 0100000) {
-                $local_path_type = "file";
-            } else {
+            $local_index_entry = read_file_index_entry_from_stat(
+                $local_absolute_path,
+                $local_path_stat
+            );
+            $local_path_type = $local_index_entry["type"];
+            if ($local_path_type === "other") {
                 throw new RuntimeException(
                     "The pulled local absolute path has an unsupported type: {$local_absolute_path}."
                 );
             }
             $pull_index_wal_record["local_relative_path_b64"] =
                 base64_encode($local_relative_path);
-            $pull_index_wal_record["local_path_ctime"] = (int) $local_path_stat["ctime"];
+            $pull_index_wal_record["local_path_ctime"] =
+                $local_index_entry["ctime"];
             $pull_index_wal_record["local_path_size"] =
-                $local_path_type === "dir" ? 0 : (int) $local_path_stat["size"];
+                $local_index_entry["size"];
             $pull_index_wal_record["local_path_type"] = $local_path_type;
         }
         $this->write_record($pull_index_wal_record);

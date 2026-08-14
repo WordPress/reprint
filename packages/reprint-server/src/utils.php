@@ -497,6 +497,51 @@ function relative_path_under(string $path, string $root): ?string
 }
 
 /**
+ * Builds one file-index entry from a completed lstat() call.
+ *
+ * File and link sizes participate in change detection. A directory's stat
+ * size does not describe its descendants, so directory size is always zero.
+ * Symlink targets and directory contents are left to callers because neither
+ * comes from the stat record.
+ *
+ * @param string $path      Absolute path inspected by lstat().
+ * @param array  $path_stat Value returned by lstat().
+ * @return array {
+ *     File-index entry.
+ *
+ *     @type string $path  Absolute path.
+ *     @type int    $ctime Local ctime.
+ *     @type int    $size  File or link size. Other types use zero.
+ *     @type string $type  `file`, `dir`, `link`, or `other`.
+ * }
+ * @phpstan-param array{mode:int,ctime?:int,size?:int} $path_stat
+ * @phpstan-return array{path:string,ctime:int,size:int,type:'file'|'dir'|'link'|'other'}
+ */
+function read_file_index_entry_from_stat(string $path, array $path_stat): array
+{
+    $path_type_bits = $path_stat["mode"] & 0170000;
+    if ($path_type_bits === 0120000) {
+        $path_type = "link";
+    } elseif ($path_type_bits === 0040000) {
+        $path_type = "dir";
+    } elseif ($path_type_bits === 0100000) {
+        $path_type = "file";
+    } else {
+        $path_type = "other";
+    }
+
+    $entry = [
+        "path" => $path,
+        "ctime" => (int) ( $path_stat["ctime"] ?? 0 ),
+        "size" => $path_type === "file" || $path_type === "link"
+            ? (int) ( $path_stat["size"] ?? 0 )
+            : 0,
+        "type" => $path_type,
+    ];
+    return $entry;
+}
+
+/**
  * Validates that a path is a non-empty absolute string without NUL bytes
  * or dot-segments (. or ..).
  *

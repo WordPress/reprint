@@ -35,11 +35,6 @@ final class FileIndexProcessor {
     const STATUS_DIRECTORY_COMPLETE = "directory_complete";
     const STATUS_DIRECTORY_ERROR = "directory_error";
 
-    const STAT_TYPE_MASK = 0170000;
-    const STAT_TYPE_LINK = 0120000;
-    const STAT_TYPE_FILE = 0100000;
-    const STAT_TYPE_DIR = 0040000;
-
     /** @var string[] Canonical directories allowed during traversal. */
     private $directories;
 
@@ -336,35 +331,23 @@ final class FileIndexProcessor {
             return true;
         }
 
-        // Translate platform mode bits into the four types understood by the
-        // file index. A directory link may also reveal intermediate links that
+        // Build the index entry from the one successful lstat() call. A
+        // directory link may also reveal intermediate links which
         // canonicalization would otherwise hide.
-        $mode = $stat["mode"] & self::STAT_TYPE_MASK;
-        $type = "file";
+        $item = \WordPress\Reprint\Exporter\read_file_index_entry_from_stat(
+            $path,
+            $stat
+        );
+        $type = $item["type"];
         $link_target = null;
         $intermediate_symlinks = [];
-        if ($mode === self::STAT_TYPE_LINK) {
-            $type = "link";
+        if ($type === "link") {
             $resolved_symlink = self::resolve_symlink_target($path);
             $link_target = $resolved_symlink["target"];
             if ($this->follow_symlinks) {
                 $intermediate_symlinks = $resolved_symlink["intermediates"];
             }
-        } elseif ($mode === self::STAT_TYPE_DIR) {
-            $type = "dir";
-        } elseif ($mode !== self::STAT_TYPE_FILE) {
-            $type = "other";
         }
-
-        // Build the index entry from the one successful lstat() call. File and
-        // link sizes participate in push change detection; directory size does
-        // not describe its descendants and is normalized to zero.
-        $item = [
-            "path" => $path,
-            "ctime" => (int) ( isset($stat["ctime"]) ? $stat["ctime"] : 0 ),
-            "size" => $type === "file" || $type === "link" ? (int) ( isset($stat["size"]) ? $stat["size"] : 0 ) : 0,
-            "type" => $type,
-        ];
         if ($link_target !== null) {
             $item["target"] = $link_target;
         }
