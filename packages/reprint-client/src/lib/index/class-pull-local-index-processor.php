@@ -1,19 +1,18 @@
 <?php
 
-use function Reprint\Importer\file_sync_index_path_may_change;
 use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\sort_index_file_preserving_duplicate_paths;
 use function Reprint\Importer\write_local_index_entry;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\read_file_index_directory_is_empty;
 use function WordPress\Reprint\Exporter\read_file_index_entry_from_stat;
-use function WordPress\Reprint\Exporter\relative_path_under;
 
 require_once __DIR__ . '/../local-index-update-functions.php';
 require_once __DIR__ . '/../sort-index-file.php';
 require_once __DIR__ . '/../pull/class-remote-index-reader.php';
 require_once __DIR__ . '/../pull/class-remote-to-local-path-mapper.php';
 require_once __DIR__ . '/class-file-index-diff-processor.php';
+require_once __DIR__ . '/class-file-sync-change-scope.php';
 require_once __DIR__ . '/class-file-sync-patch-processor.php';
 require_once __DIR__ . '/file-sync-path-functions.php';
 
@@ -57,9 +56,8 @@ require_once __DIR__ . '/file-sync-path-functions.php';
  *         $next_remote_index_file,
  *         $remote_index_file,
  *         $local_index_file,
- *         $path_mapper,
- *         $storage_path,
- *         false
+ *         $change_scope,
+ *         $storage_path
  *     );
  *     do {
  *         $has_next_step = $processor->next_step();
@@ -71,10 +69,9 @@ require_once __DIR__ . '/file-sync-path-functions.php';
  *     }
  *     $processor->close();
  *
- * @phpstan-type MapperConfig array{filesystem_root_b64:string,original_remote_roots_b64:list<string>,resolved_path_mappings:list<array{remote_prefix_b64:string,local_prefix_b64:string}>,local_followed_symlinks_root_b64:string|null}
  * @phpstan-type IndexDiffCursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
  * @phpstan-type Position array{phase:'mapping',remote_index_byte_offset?:int,remote_index_diff_cursor?:IndexDiffCursor,mapped_index_byte_offset:int,mapped_index_parents_byte_offset:int}|array{phase:'sorting'|'sorting_parents'|'starting_merge'}|array{phase:'merging',index_diff_cursor:IndexDiffCursor,mapped_index_parent_cursor:IndexDiffCursor,index_byte_offset:int}|array{phase:'verifying',file_sync_patch_processor_cursor:array}|array{phase:'complete'|'restart'}
- * @phpstan-type Cursor array{metadata_source:'remote_recorded'|'locally_observed',next_remote_index_file_b64:string,remote_index_file_b64:string|null,remote_index_exists:bool,retained_local_index_file_b64:string,retained_local_index_exists:bool,mapped_index_file_b64:string,mapped_index_parents_file_b64:string,index_file_b64:string,path_mapper_config:MapperConfig,included_local_index_path_roots_b64:list<string>,excluded_local_index_path_roots_b64:list<string>,verification_storage_path_b64:string,verification_include_caches:bool,position:Position}
+ * @phpstan-type Cursor array{metadata_source:'remote_recorded'|'locally_observed',next_remote_index_file_b64:string,remote_index_file_b64:string|null,remote_index_exists:bool,retained_local_index_file_b64:string,retained_local_index_exists:bool,mapped_index_file_b64:string,mapped_index_parents_file_b64:string,index_file_b64:string,file_sync_change_scope_config:array,verification_storage_path_b64:string,position:Position}
  */
 final class PullLocalIndexProcessor
 {
@@ -86,13 +83,7 @@ final class PullLocalIndexProcessor
     private string $mapped_index_file;
     private string $mapped_index_parents_file;
     private string $index_file;
-    private RemoteToLocalPathMapper $path_mapper;
-
-    /** @var list<string> */
-    private array $included_local_index_path_roots;
-
-    /** @var list<string> */
-    private array $excluded_local_index_path_roots;
+    private FileSyncChangeScope $change_scope;
 
     private ?RemoteIndexReader $remote_index_reader = null;
     private ?FileIndexDiffProcessor $remote_index_diff = null;
@@ -122,28 +113,21 @@ final class PullLocalIndexProcessor
      * @param string                  $work_directory            Existing directory for processor work files.
      * @param string                  $next_remote_index_file Immutable next remote index.
      * @param string                  $retained_local_index_file Retained local index, or a missing path on the first pull.
-     * @param RemoteToLocalPathMapper $path_mapper               Path mapping used by this pull.
-     * @param list<string> $included_local_index_path_roots Local roots which the pull may change.
-     * @param list<string> $excluded_local_index_path_roots Local roots which the pull must not affect.
+     * @param FileSyncChangeScope $change_scope Local-coordinate paths this pull may change.
      */
     public static function start_patch_result(
         string $work_directory,
         string $next_remote_index_file,
         string $retained_local_index_file,
-        RemoteToLocalPathMapper $path_mapper,
-        array $included_local_index_path_roots = [""],
-        array $excluded_local_index_path_roots = []
+        FileSyncChangeScope $change_scope
     ): self {
         return self::start(
             "remote_recorded", $work_directory,
             $next_remote_index_file,
             null,
             $retained_local_index_file,
-            $path_mapper,
-            $included_local_index_path_roots,
-            $excluded_local_index_path_roots,
-            "",
-            false
+            $change_scope,
+            ""
         );
     }
 
@@ -154,33 +138,24 @@ final class PullLocalIndexProcessor
      * @param string                  $next_remote_index_file Immutable next remote index.
      * @param string                  $remote_index_file WAL-applied remote index containing confirmed fetch records, or a missing path for an empty index.
      * @param string                  $retained_local_index_file WAL-applied local index containing confirmed local metadata.
-     * @param RemoteToLocalPathMapper $path_mapper               Path mapping used by this pull.
-     * @param string       $storage_path                    Reprint storage path omitted from final verification.
-     * @param bool         $include_caches                  Whether final verification includes cache paths.
-     * @param list<string> $included_local_index_path_roots Local roots which the pull may change.
-     * @param list<string> $excluded_local_index_path_roots Local roots which the pull must not affect.
+     * @param FileSyncChangeScope $change_scope Local-coordinate paths this pull may change.
+     * @param string              $storage_path Reprint storage path omitted from final verification.
      */
     public static function start_next_local_index(
         string $work_directory,
         string $next_remote_index_file,
         string $remote_index_file,
         string $retained_local_index_file,
-        RemoteToLocalPathMapper $path_mapper,
-        string $storage_path,
-        bool $include_caches,
-        array $included_local_index_path_roots = [""],
-        array $excluded_local_index_path_roots = []
+        FileSyncChangeScope $change_scope,
+        string $storage_path
     ): self {
         return self::start(
             "locally_observed", $work_directory,
             $next_remote_index_file,
             $remote_index_file,
             $retained_local_index_file,
-            $path_mapper,
-            $included_local_index_path_roots,
-            $excluded_local_index_path_roots,
-            $storage_path,
-            $include_caches
+            $change_scope,
+            $storage_path
         );
     }
 
@@ -197,6 +172,14 @@ final class PullLocalIndexProcessor
      */
     public static function resume(array $cursor): self
     {
+        return self::open($cursor);
+    }
+
+    /** @phpstan-param Cursor $cursor */
+    private static function open(
+        array $cursor,
+        ?FileSyncChangeScope $change_scope = null
+    ): self {
         $processor = new self();
         $processor->cursor = $cursor;
         if (
@@ -212,13 +195,8 @@ final class PullLocalIndexProcessor
             $cursor["mapped_index_parents_file_b64"]
         );
         $processor->index_file = self::decode_cursor_path($cursor["index_file_b64"]);
-        $processor->path_mapper = RemoteToLocalPathMapper::from_config($cursor["path_mapper_config"]);
-        $decode_path = [self::class, "decode_cursor_path"];
-        $processor->included_local_index_path_roots = array_map(
-            $decode_path, $cursor["included_local_index_path_roots_b64"]
-        );
-        $processor->excluded_local_index_path_roots = array_map(
-            $decode_path, $cursor["excluded_local_index_path_roots_b64"]
+        $processor->change_scope = $change_scope ?? FileSyncChangeScope::from_config(
+            $cursor["file_sync_change_scope_config"]
         );
         $position = $cursor["position"];
         self::require_file($processor->index_file, "output index");
@@ -376,25 +354,33 @@ final class PullLocalIndexProcessor
                     $this->remote_index_path_selected = true;
                     $remote_absolute_path =
                         $this->remote_index_diff->get_path();
-                    $local_absolute_path = $this->path_mapper->map_path(
-                        $remote_absolute_path
-                    );
-                    $local_relative_path = relative_path_under(
-                        $local_absolute_path,
-                        $this->path_mapper->get_filesystem_root()
-                    );
-                    if ($local_relative_path === null) {
-                        throw new RuntimeException(
-                            "Remote path maps outside the writable local tree: "
-                            . base64_encode($remote_absolute_path)
-                            . "."
+                    $next_remote_path_type =
+                        $this->remote_index_diff
+                            ->get_path_type_in_new_index();
+                    $previous_remote_path_type =
+                        $this->remote_index_diff
+                            ->get_path_type_in_old_index();
+                    $governing_remote_path_type =
+                        $next_remote_path_type ?? $previous_remote_path_type;
+                    if ($governing_remote_path_type === null) {
+                        throw new LogicException(
+                            "Remote index comparison selected a path with no entry."
                         );
                     }
-                    $path_may_change = file_sync_index_path_may_change(
-                        $local_relative_path,
-                        $this->included_local_index_path_roots,
-                        $this->excluded_local_index_path_roots
-                    );
+                    $local_relative_path = $this->change_scope
+                        ->map_changeable_remote_index_entry_to_local_index_path(
+                            $remote_absolute_path,
+                            $governing_remote_path_type
+                        );
+                    $path_may_change = $local_relative_path !== null;
+                    if ($local_relative_path !== null) {
+                        $local_absolute_path = $local_relative_path === ""
+                            ? $this->change_scope->get_filesystem_root()
+                            : wp_join_unix_paths(
+                                $this->change_scope->get_filesystem_root(),
+                                $local_relative_path
+                            );
+                    }
                     if (
                         $path_may_change
                         && $this->remote_index_diff
@@ -402,9 +388,6 @@ final class PullLocalIndexProcessor
                     ) {
                         return $this->restart();
                     }
-                    $next_remote_path_type =
-                        $this->remote_index_diff
-                            ->get_path_type_in_new_index();
                     if ($next_remote_path_type !== null) {
                         $remote_index_entry = [
                             "path" => $remote_absolute_path,
@@ -459,25 +442,20 @@ final class PullLocalIndexProcessor
             }
 
             if ($local_absolute_path === null) {
-                $local_absolute_path = $this->path_mapper->map_path(
-                    $remote_index_entry["path"]
-                );
-                $local_relative_path = relative_path_under(
-                    $local_absolute_path,
-                    $this->path_mapper->get_filesystem_root()
-                );
-                if ($local_relative_path === null) {
-                    throw new RuntimeException(
-                        "Remote path maps outside the writable local tree: "
-                        . base64_encode($remote_index_entry["path"])
-                        . "."
+                $local_relative_path = $this->change_scope
+                    ->map_changeable_remote_index_entry_to_local_index_path(
+                        $remote_index_entry["path"],
+                        $remote_index_entry["type"]
                     );
+                $path_may_change = $local_relative_path !== null;
+                if ($local_relative_path !== null) {
+                    $local_absolute_path = $local_relative_path === ""
+                        ? $this->change_scope->get_filesystem_root()
+                        : wp_join_unix_paths(
+                            $this->change_scope->get_filesystem_root(),
+                            $local_relative_path
+                        );
                 }
-                $path_may_change = file_sync_index_path_may_change(
-                    $local_relative_path,
-                    $this->included_local_index_path_roots,
-                    $this->excluded_local_index_path_roots
-                );
             }
             if ($path_may_change && $local_relative_path !== "") {
                 if (
@@ -599,8 +577,32 @@ final class PullLocalIndexProcessor
         if ($position["phase"] === "verifying") {
             $has_next_verification_step =
                 $this->verification_processor->next_step();
-            if ($this->verification_processor->get_operation() !== null) {
-                return $this->restart();
+            $verification_operation =
+                $this->verification_processor->get_operation();
+            if ($verification_operation !== null) {
+                $governing_entry =
+                    $verification_operation["action"] === "delete"
+                        ? $verification_operation["expected_base"]
+                        : $verification_operation["expected_source"];
+                $base_entry = $verification_operation["expected_base"] ?? null;
+                $verification_change_is_allowed = false;
+                if ($governing_entry["type"] !== "other") {
+                    $verification_change_is_allowed =
+                        is_array($base_entry)
+                        && $base_entry["type"] === "dir"
+                            ? $this->change_scope
+                                ->directory_entry_may_change(
+                                    $verification_operation["path"],
+                                    $governing_entry["type"]
+                                )
+                            : $this->change_scope->index_entry_may_change(
+                                $verification_operation["path"],
+                                $governing_entry["type"]
+                            );
+                }
+                if ($verification_change_is_allowed) {
+                    return $this->restart();
+                }
             }
             if (!$has_next_verification_step) {
                 $this->cursor["position"] = ["phase" => "complete"];
@@ -686,13 +688,30 @@ final class PullLocalIndexProcessor
         }
 
         $write_new_entry = $new_path_type !== null;
+        $old_entry_may_change = $old_path_type === null
+            || ( $old_path_type === "dir"
+                ? $this->change_scope->directory_entry_may_change(
+                    $this->index_diff->get_path(),
+                    $new_path_type ?? "dir"
+                )
+                : $this->change_scope->index_entry_may_change(
+                    $this->index_diff->get_path(),
+                    $old_path_type
+                ) );
         $write_old_entry = $new_path_type === null
             && $old_path_type !== null
-            && !file_sync_index_path_may_change(
-                $this->index_diff->get_path(),
-                $this->included_local_index_path_roots,
-                $this->excluded_local_index_path_roots
-            );
+            && !$old_entry_may_change;
+        if (
+            $write_new_entry
+            && $old_path_type === "dir"
+            && $new_path_type !== "dir"
+            && !$old_entry_may_change
+        ) {
+            // A protected or excluded descendant reserves the retained local
+            // directory even when the new remote entry itself is selected.
+            $write_new_entry = false;
+            $write_old_entry = true;
+        }
         $has_mapped_descendant = false;
         if ($write_new_entry || $write_old_entry) {
             if (!$this->mapped_index_parent_path_selected) {
@@ -875,6 +894,7 @@ final class PullLocalIndexProcessor
             $this->verification_processor->close();
             $this->verification_processor = null;
         }
+        $this->change_scope->close();
         $this->closed = true;
     }
 
@@ -884,11 +904,8 @@ final class PullLocalIndexProcessor
         string $next_remote_index_file,
         ?string $remote_index_file,
         string $retained_local_index_file,
-        RemoteToLocalPathMapper $path_mapper,
-        array $included_local_index_path_roots,
-        array $excluded_local_index_path_roots,
-        string $verification_storage_path,
-        bool $verification_include_caches
+        FileSyncChangeScope $change_scope,
+        string $verification_storage_path
     ): self {
         if (!is_dir($work_directory)) {
             throw new LogicException("Cannot start pull local indexing without its work directory: {$work_directory}.");
@@ -953,7 +970,7 @@ final class PullLocalIndexProcessor
                 "mapped_index_parents_byte_offset" => 0,
             ];
         }
-        return self::resume([
+        return self::open([
             "metadata_source" => $metadata_source,
             "next_remote_index_file_b64" => base64_encode($next_remote_index_file),
             "remote_index_file_b64" =>
@@ -967,14 +984,11 @@ final class PullLocalIndexProcessor
             "mapped_index_parents_file_b64" =>
                 base64_encode($mapped_index_parents_file),
             "index_file_b64" => base64_encode($index_file),
-            "path_mapper_config" => $path_mapper->get_config(),
-            "included_local_index_path_roots_b64" => array_map("base64_encode", $included_local_index_path_roots),
-            "excluded_local_index_path_roots_b64" => array_map("base64_encode", $excluded_local_index_path_roots),
+            "file_sync_change_scope_config" => $change_scope->get_config(),
             "verification_storage_path_b64" =>
                 base64_encode($verification_storage_path),
-            "verification_include_caches" => $verification_include_caches,
             "position" => $position,
-        ]);
+        ], $change_scope);
     }
 
     /** Finishes the patch result or starts final next-index verification. */
@@ -993,18 +1007,31 @@ final class PullLocalIndexProcessor
             return false;
         }
 
-        $this->verification_processor =
-            FileSyncPatchProcessor::start_from_fresh_local_tree(
-                dirname($this->index_file),
-                $this->path_mapper->get_filesystem_root(),
-                $this->index_file,
-                self::decode_cursor_path(
-                    $this->cursor["verification_storage_path_b64"]
-                ),
-                $this->included_local_index_path_roots,
-                $this->excluded_local_index_path_roots,
-                $this->cursor["verification_include_caches"]
-            );
+        $verification_storage_path = self::decode_cursor_path(
+            $this->cursor["verification_storage_path_b64"]
+        );
+        if ($this->change_scope->includes_caches()) {
+            $this->verification_processor =
+                FileSyncPatchProcessor::start_from_fresh_local_tree(
+                    dirname($this->index_file),
+                    $this->change_scope->get_filesystem_root(),
+                    $this->index_file,
+                    $verification_storage_path,
+                    [""],
+                    [],
+                    true
+                );
+        } else {
+            $this->verification_processor =
+                FileSyncPatchProcessor::start_from_fresh_local_tree_with_selected_default_skipped_paths(
+                    dirname($this->index_file),
+                    $this->change_scope->get_filesystem_root(),
+                    $this->index_file,
+                    $verification_storage_path,
+                    $this->change_scope
+                        ->get_selected_default_skipped_index_paths_file()
+                );
+        }
         $this->cursor["position"] = [
             "phase" => "verifying",
             "file_sync_patch_processor_cursor" =>

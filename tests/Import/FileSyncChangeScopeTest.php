@@ -301,6 +301,140 @@ class FileSyncChangeScopeTest extends TestCase {
         $scope->close();
     }
 
+    public function testDirectoryEntryAuthorityUsesNamespacePrecedence(): void
+    {
+        $currentSnapshotId = $this->publishSnapshot([
+            ['kind' => 'root', 'path' => '/current'],
+            ['kind' => 'exact', 'path' => '/exact-blocked'],
+            ['kind' => 'exact', 'path' => '/exact-overlap'],
+            ['kind' => 'exact', 'path' => '/current-reserved'],
+            ['kind' => 'ancestor', 'path' => '/current-reserved'],
+            ['kind' => 'root', 'path' => '/current-reserved/future'],
+            ['kind' => 'ancestor', 'path' => '/selected/current-boundary'],
+            ['kind' => 'root', 'path' => '/selected/current-boundary/future'],
+        ]);
+        $priorSnapshotId = $this->publishSnapshot([
+            ['kind' => 'root', 'path' => '/selected'],
+            ['kind' => 'exact', 'path' => '/prior-link'],
+        ]);
+        $protectedSnapshotId = $this->publishSnapshot([
+            ['kind' => 'ancestor', 'path' => '/current/a'],
+            ['kind' => 'root', 'path' => '/current/a/future'],
+            ['kind' => 'ancestor', 'path' => '/exact-blocked'],
+            ['kind' => 'root', 'path' => '/exact-blocked/future'],
+            ['kind' => 'exact', 'path' => '/exact-overlap'],
+            ['kind' => 'exact', 'path' => '/selected/exact-protected'],
+        ]);
+        $scope = $this->scope(
+            $currentSnapshotId,
+            [$priorSnapshotId],
+            [$protectedSnapshotId]
+        );
+
+        $this->assertTrue(
+            $scope->directory_entry_may_change('/current/a', 'dir')
+        );
+        $this->assertTrue(
+            $scope->directory_entry_may_change('/exact-overlap', 'link')
+        );
+        $this->assertTrue(
+            $scope->directory_entry_may_change('/prior-link', 'link')
+        );
+        $this->assertTrue(
+            $scope->directory_entry_may_change('/selected/open', 'dir')
+        );
+        $this->assertFalse(
+            $scope->directory_entry_may_change('/current-reserved', 'link')
+        );
+        $this->assertFalse(
+            $scope->directory_entry_may_change('/exact-blocked', 'link')
+        );
+        $this->assertFalse(
+            $scope->directory_entry_may_change(
+                '/selected/current-boundary',
+                'dir'
+            )
+        );
+        $this->assertFalse(
+            $scope->directory_entry_may_change(
+                '/selected/exact-protected',
+                'dir'
+            )
+        );
+        $this->assertTrue(
+            $scope->index_entry_may_change('/current/a', 'link')
+        );
+        $this->assertTrue(
+            $scope->index_entry_may_change('/exact-overlap', 'link')
+        );
+        $this->assertFalse(
+            $scope->index_entry_may_change('/current-reserved', 'link')
+        );
+        $this->assertFalse(
+            $scope->index_entry_may_change('/exact-blocked', 'link')
+        );
+        $this->assertFalse(
+            $scope->index_entry_may_change(
+                '/selected/current-boundary',
+                'dir'
+            )
+        );
+        $this->assertFalse(
+            $scope->index_entry_may_change(
+                '/selected/exact-protected',
+                'dir'
+            )
+        );
+
+        $scope->close();
+    }
+
+    public function testDirectoryEntryAuthorityIgnoresGlobalCacheVisibility(): void
+    {
+        $currentSnapshotId = $this->publishSnapshot([
+            ['kind' => 'root', 'path' => '/selected'],
+            ['kind' => 'exact', 'path' => '/selected/.git/link'],
+        ]);
+        $scope = $this->scope($currentSnapshotId);
+
+        $this->assertTrue(
+            $scope->directory_entry_may_change('/selected/open', 'dir')
+        );
+        $this->assertTrue(
+            $scope->directory_entry_may_change(
+                '/selected/.git/link',
+                'link'
+            )
+        );
+        $this->assertFalse(
+            $scope->directory_entry_may_change('/selected', 'dir')
+        );
+        $this->assertFalse(
+            $scope->directory_entry_may_change(
+                '/selected/.git/directory',
+                'dir'
+            )
+        );
+        $scope->close();
+
+        $scope = $this->scope(
+            $currentSnapshotId,
+            [],
+            [],
+            ['/selected/excluded/future']
+        );
+        $this->assertFalse(
+            $scope->directory_entry_may_change('/selected/excluded', 'dir')
+        );
+        $this->assertFalse(
+            $scope->index_entry_may_change('/selected/excluded', 'link')
+        );
+        $this->assertTrue(
+            $scope->directory_entry_may_change('/selected/open', 'dir')
+        );
+        $scope->close();
+    }
+
     public function testSubtreeRejectsHiddenDefaultSkipsAndExcludedDescendants(): void
     {
         $currentSnapshotId = $this->publishSnapshot([
@@ -416,6 +550,9 @@ class FileSyncChangeScopeTest extends TestCase {
             $this->selectedDefaultSkippedPathsFile
         );
         $this->assertTrue($localScope->subtree_may_change('shared/dir'));
+        $this->assertTrue(
+            $localScope->directory_entry_may_change('shared/dir', 'dir')
+        );
         $localScope->close();
 
         $mapperWithFilledHole = new \RemoteToLocalPathMapper(
@@ -432,6 +569,9 @@ class FileSyncChangeScopeTest extends TestCase {
             $this->selectedDefaultSkippedPathsFile
         );
         $this->assertFalse($localScope->subtree_may_change('shared/dir'));
+        $this->assertFalse(
+            $localScope->directory_entry_may_change('shared/dir', 'dir')
+        );
         $localScope->close();
         $remoteScope->close();
     }

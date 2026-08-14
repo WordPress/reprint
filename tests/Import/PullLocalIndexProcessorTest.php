@@ -7,6 +7,7 @@ use function Reprint\Importer\decode_local_index_entry;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/index/class-pull-local-index-processor.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/pull/class-file-sync-change-scope-mapping-processor.php';
 
 final class PullLocalIndexProcessorTest extends TestCase {
     private string $temporary_directory;
@@ -53,14 +54,14 @@ final class PullLocalIndexProcessorTest extends TestCase {
             $this->local_entry_from_path('a-local.txt'),
             $this->local_entry_from_path('z-local.txt'),
         ]);
-        $mapper = new RemoteToLocalPathMapper(
+        $change_scope = $this->change_scope(new RemoteToLocalPathMapper(
             $this->filesystem_root,
             ['/remote'],
             [
                 '/remote/a.txt' => $this->filesystem_root . '/z-local.txt',
                 '/remote/z.txt' => $this->filesystem_root . '/a-local.txt',
             ]
-        );
+        ));
 
         $entries = $this->run_to_completion(
             PullLocalIndexProcessor::start_next_local_index(
@@ -68,9 +69,8 @@ final class PullLocalIndexProcessorTest extends TestCase {
                 $this->next_remote_index_file,
                 $this->remote_index_file,
                 $this->retained_local_index_file,
-                $mapper,
-                $this->temporary_directory . '/storage',
-                false
+                $change_scope,
+                $this->temporary_directory . '/storage'
             )
         );
 
@@ -88,6 +88,94 @@ final class PullLocalIndexProcessorTest extends TestCase {
         $this->assertSame( (int) $z_stat['size'], $entries[1]['size']);
     }
 
+    public function testPatchResultIgnoresUnownedRowCollidingWithOwnedAlias(): void
+    {
+        $this->write_remote_index([
+            $this->remote_entry('/owned/file.txt', 'file', 11, 12),
+            $this->remote_entry('/unowned/file.txt', 'file', 21, 22),
+        ]);
+        $this->write_local_index([]);
+        $shared_path = $this->filesystem_root . '/shared/file.txt';
+
+        $entries = $this->run_to_completion(
+            PullLocalIndexProcessor::start_patch_result(
+                $this->work_directory,
+                $this->next_remote_index_file,
+                $this->retained_local_index_file,
+                $this->change_scope(
+                    new RemoteToLocalPathMapper(
+                        $this->filesystem_root,
+                        ['/owned', '/unowned'],
+                        [
+                            '/owned/file.txt' => $shared_path,
+                            '/unowned/file.txt' => $shared_path,
+                        ]
+                    ),
+                    ['/owned']
+                )
+            )
+        );
+
+        $this->assertSame([
+            [
+                'path' => 'shared/file.txt',
+                'ctime' => 12,
+                'size' => 11,
+                'type' => 'file',
+            ],
+        ], $entries);
+    }
+
+    public function testUnownedCollidingAliasDriftDoesNotRestartConfirmation(): void
+    {
+        $this->write_file('shared/file.txt', 'fetched');
+        $owned_entry = $this->remote_entry('/owned/file.txt', 'file', 7, 10);
+        $this->write_remote_index_file(
+            $this->next_remote_index_file,
+            [
+                $owned_entry,
+                $this->remote_entry('/unowned/file.txt', 'file', 9, 21),
+            ]
+        );
+        $this->write_remote_index_file(
+            $this->remote_index_file,
+            [
+                $owned_entry,
+                $this->remote_entry('/unowned/file.txt', 'file', 8, 20),
+            ]
+        );
+        $this->write_local_index([
+            $this->local_entry_from_path('shared/file.txt'),
+        ]);
+        $shared_path = $this->filesystem_root . '/shared/file.txt';
+
+        $entries = $this->run_to_completion(
+            PullLocalIndexProcessor::start_next_local_index(
+                $this->work_directory,
+                $this->next_remote_index_file,
+                $this->remote_index_file,
+                $this->retained_local_index_file,
+                $this->change_scope(
+                    new RemoteToLocalPathMapper(
+                        $this->filesystem_root,
+                        ['/owned', '/unowned'],
+                        [
+                            '/owned/file.txt' => $shared_path,
+                            '/unowned/file.txt' => $shared_path,
+                        ]
+                    ),
+                    ['/owned']
+                ),
+                $this->temporary_directory . '/storage'
+            )
+        );
+
+        $this->assertSame(
+            ['shared/file.txt'],
+            array_column($entries, 'path')
+        );
+    }
+
     public function testPatchResultKeepsRemoteMetadataAndEmptyDirectory(): void
     {
         $this->write_remote_index([
@@ -101,11 +189,11 @@ final class PullLocalIndexProcessorTest extends TestCase {
                 $this->work_directory,
                 $this->next_remote_index_file,
                 $this->retained_local_index_file,
-                new RemoteToLocalPathMapper(
+                $this->change_scope(new RemoteToLocalPathMapper(
                     $this->filesystem_root,
                     ['/remote'],
                     ['/remote' => $this->filesystem_root]
-                )
+                ))
             )
         );
 
@@ -141,11 +229,11 @@ final class PullLocalIndexProcessorTest extends TestCase {
                 $this->work_directory,
                 $this->next_remote_index_file,
                 $this->retained_local_index_file,
-                new RemoteToLocalPathMapper(
+                $this->change_scope(new RemoteToLocalPathMapper(
                     $this->filesystem_root,
                     ['/remote'],
                     ['/remote' => $this->filesystem_root]
-                )
+                ))
             )
         );
 
@@ -162,11 +250,11 @@ final class PullLocalIndexProcessorTest extends TestCase {
             $this->work_directory,
             $this->next_remote_index_file,
             $this->retained_local_index_file,
-            new RemoteToLocalPathMapper(
+            $this->change_scope(new RemoteToLocalPathMapper(
                 $this->filesystem_root,
                 ['/remote'],
                 ['/remote' => $this->filesystem_root]
-            )
+            ))
         );
 
         try {
@@ -249,7 +337,7 @@ final class PullLocalIndexProcessorTest extends TestCase {
         ]);
 
         $entries = $this->run_to_completion(
-            $this->start_processor(['parent/child.txt'])
+            $this->start_processor(['parent'])
         );
 
         $this->assertSame(
@@ -279,9 +367,7 @@ final class PullLocalIndexProcessorTest extends TestCase {
         ]);
 
         $entries = $this->run_to_completion(
-            $this->start_processor(
-                ['parent-name.txt', 'parent/child.txt']
-            )
+            $this->start_processor()
         );
 
         $this->assertSame(
@@ -302,7 +388,7 @@ final class PullLocalIndexProcessorTest extends TestCase {
             $this->work_directory,
             $this->next_remote_index_file,
             $this->retained_local_index_file,
-            new RemoteToLocalPathMapper(
+            $this->change_scope(new RemoteToLocalPathMapper(
                 $this->filesystem_root,
                 ['/remote'],
                 [
@@ -312,7 +398,7 @@ final class PullLocalIndexProcessorTest extends TestCase {
                     '/remote/leaf.txt' =>
                         $this->filesystem_root . '/parent/child.txt',
                 ]
-            )
+            ))
         );
 
         $entries = $this->run_to_completion($processor);
@@ -336,7 +422,7 @@ final class PullLocalIndexProcessorTest extends TestCase {
             $this->work_directory,
             $this->next_remote_index_file,
             $this->retained_local_index_file,
-            new RemoteToLocalPathMapper(
+            $this->change_scope(new RemoteToLocalPathMapper(
                 $this->filesystem_root,
                 ['/remote'],
                 [
@@ -344,7 +430,7 @@ final class PullLocalIndexProcessorTest extends TestCase {
                     '/remote/leaf.txt' =>
                         $this->filesystem_root . '/parent/child.txt',
                 ]
-            )
+            ))
         );
 
         try {
@@ -370,8 +456,8 @@ final class PullLocalIndexProcessorTest extends TestCase {
     public function testRejectsRetainedFileOutsideNarrowSelectionWithMappedDescendant(): void
     {
         $this->write_remote_index([
-            $this->remote_entry('/remote/parent-name.txt', 'file'),
-            $this->remote_entry('/remote/parent/child.txt', 'file'),
+            $this->remote_entry('/remote/source/parent-name.txt', 'file'),
+            $this->remote_entry('/remote/source/parent/child.txt', 'file'),
         ]);
         $this->write_local_index([
             $this->local_entry('parent', 10, 10),
@@ -380,12 +466,16 @@ final class PullLocalIndexProcessorTest extends TestCase {
             $this->work_directory,
             $this->next_remote_index_file,
             $this->retained_local_index_file,
-            new RemoteToLocalPathMapper(
+            $this->change_scope(new RemoteToLocalPathMapper(
                 $this->filesystem_root,
                 ['/remote'],
-                ['/remote' => $this->filesystem_root]
-            ),
-            ['parent-name.txt', 'parent/child.txt']
+                [
+                    '/remote/source/parent-name.txt' =>
+                        $this->filesystem_root . '/parent-name.txt',
+                    '/remote/source/parent/child.txt' =>
+                        $this->filesystem_root . '/parent/child.txt',
+                ]
+            ), ['/remote/source'])
         );
 
         try {
@@ -420,9 +510,7 @@ final class PullLocalIndexProcessorTest extends TestCase {
             $this->local_entry_from_path('parent-name.txt'),
             $this->local_entry_from_path('parent/child.txt'),
         ]);
-        $processor = $this->start_processor(
-            ['parent-name.txt', 'parent/child.txt']
-        );
+        $processor = $this->start_processor();
         while ($processor->get_phase() !== 'merging') {
             $this->assertTrue($processor->next_step());
             $processor->flush_pending_output();
@@ -478,6 +566,98 @@ final class PullLocalIndexProcessorTest extends TestCase {
         );
 
         $this->assertSame(['selected/keep.txt'], array_column($entries, 'path'));
+    }
+
+    public function testProtectedDescendantKeepsDirectoryInsteadOfCurrentExactLink(): void
+    {
+        mkdir($this->filesystem_root . '/value', 0700, true);
+        $this->write_remote_index([
+            $this->remote_entry('/remote/value', 'link', 6),
+        ]);
+        $this->write_local_index([
+            $this->local_entry_from_path('value'),
+        ]);
+
+        $entries = $this->run_to_completion(
+            PullLocalIndexProcessor::start_patch_result(
+                $this->work_directory,
+                $this->next_remote_index_file,
+                $this->retained_local_index_file,
+                $this->change_scope(
+                    new RemoteToLocalPathMapper(
+                        $this->filesystem_root,
+                        ['/remote'],
+                        ['/remote' => $this->filesystem_root]
+                    ),
+                    [],
+                    [],
+                    false,
+                    ['/remote/value/future'],
+                    ['/remote/value']
+                )
+            )
+        );
+
+        $this->assertSame(['value'], array_column($entries, 'path'));
+        $this->assertSame('dir', $entries[0]['type']);
+    }
+
+    public function testExcludedDescendantKeepsDirectoryInsteadOfSelectedLink(): void
+    {
+        mkdir($this->filesystem_root . '/value', 0700, true);
+        $this->write_remote_index([
+            $this->remote_entry('/remote/value', 'link', 6),
+        ]);
+        $this->write_local_index([
+            $this->local_entry_from_path('value'),
+        ]);
+
+        $entries = $this->run_to_completion(
+            PullLocalIndexProcessor::start_patch_result(
+                $this->work_directory,
+                $this->next_remote_index_file,
+                $this->retained_local_index_file,
+                $this->change_scope(
+                    new RemoteToLocalPathMapper(
+                        $this->filesystem_root,
+                        ['/remote'],
+                        ['/remote' => $this->filesystem_root]
+                    ),
+                    ['/remote'],
+                    ['/remote/value/future']
+                )
+            )
+        );
+
+        $this->assertSame(['value'], array_column($entries, 'path'));
+        $this->assertSame('dir', $entries[0]['type']);
+    }
+
+    public function testFirstPullDoesNotCreateLeafAboveExcludedDescendant(): void
+    {
+        $this->write_remote_index([
+            $this->remote_entry('/remote/value', 'link', 6),
+        ]);
+        $this->write_local_index([]);
+
+        $entries = $this->run_to_completion(
+            PullLocalIndexProcessor::start_patch_result(
+                $this->work_directory,
+                $this->next_remote_index_file,
+                $this->retained_local_index_file,
+                $this->change_scope(
+                    new RemoteToLocalPathMapper(
+                        $this->filesystem_root,
+                        ['/remote'],
+                        ['/remote' => $this->filesystem_root]
+                    ),
+                    ['/remote'],
+                    ['/remote/value/future']
+                )
+            )
+        );
+
+        $this->assertSame([], $entries);
     }
 
     public function testSkipsARemoteParentWhichContainsAnExcludedRoot(): void
@@ -559,7 +739,7 @@ final class PullLocalIndexProcessorTest extends TestCase {
         ]);
 
         $entries = $this->run_to_completion(
-            $this->start_processor(['parent/child'])
+            $this->start_processor(['parent'])
         );
 
         $this->assertSame([], $entries);
@@ -605,16 +785,15 @@ final class PullLocalIndexProcessorTest extends TestCase {
             $this->next_remote_index_file,
             $this->remote_index_file,
             $this->retained_local_index_file,
-            new RemoteToLocalPathMapper(
+            $this->change_scope(new RemoteToLocalPathMapper(
                 $this->filesystem_root,
                 ['/remote'],
                 [
                     '/remote/a.txt' => $local_path,
                     '/remote/b.txt' => $local_path,
                 ]
-            ),
-            $this->temporary_directory . '/storage',
-            false
+            )),
+            $this->temporary_directory . '/storage'
         );
 
         try {
@@ -724,6 +903,356 @@ final class PullLocalIndexProcessorTest extends TestCase {
 
         $this->assertSame('restart', $processor->get_status());
         $processor->close();
+    }
+
+    public function testUnchangedExactGitLinkCompletesFinalVerification(): void
+    {
+        mkdir($this->filesystem_root . '/.git', 0700, true);
+        $path = $this->filesystem_root . '/.git/link';
+        symlink('target', $path);
+        $this->write_remote_index([
+            $this->remote_entry('/remote/.git/link', 'link', 6),
+        ]);
+        $this->write_local_index([
+            $this->local_entry_from_path('.git/link'),
+        ]);
+
+        $entries = $this->run_to_completion(
+            PullLocalIndexProcessor::start_next_local_index(
+                $this->work_directory,
+                $this->next_remote_index_file,
+                $this->remote_index_file,
+                $this->retained_local_index_file,
+                $this->change_scope(
+                    new RemoteToLocalPathMapper(
+                        $this->filesystem_root,
+                        ['/remote'],
+                        ['/remote' => $this->filesystem_root]
+                    ),
+                    [],
+                    [],
+                    false,
+                    [],
+                    ['/remote/.git/link']
+                ),
+                $this->temporary_directory . '/storage'
+            )
+        );
+
+        $this->assertSame(['.git/link'], array_column($entries, 'path'));
+    }
+
+    public function testOrdinaryUnownedCacheDriftCompletesFinalVerification(): void
+    {
+        $this->write_file('value.txt', 'fetched');
+        $this->write_remote_index([
+            $this->remote_entry('/remote/value.txt', 'file'),
+        ]);
+        $this->write_local_index([$this->local_entry_from_path('value.txt')]);
+        $processor = $this->start_processor();
+        while ($processor->get_phase() !== 'verifying') {
+            $this->assertTrue($processor->next_step());
+            $processor->flush_pending_output();
+        }
+        $this->write_file('.git/unowned.txt', 'cache drift');
+
+        $entries = $this->run_to_completion($processor);
+
+        $this->assertSame(['value.txt'], array_column($entries, 'path'));
+    }
+
+    public function testSelectedCacheDriftRestartsWhenCachesAreIncluded(): void
+    {
+        $this->write_file('value.txt', 'fetched');
+        $this->write_remote_index([
+            $this->remote_entry('/remote/value.txt', 'file'),
+        ]);
+        $this->write_local_index([$this->local_entry_from_path('value.txt')]);
+        $processor = PullLocalIndexProcessor::start_next_local_index(
+            $this->work_directory,
+            $this->next_remote_index_file,
+            $this->remote_index_file,
+            $this->retained_local_index_file,
+            $this->change_scope(
+                new RemoteToLocalPathMapper(
+                    $this->filesystem_root,
+                    ['/remote'],
+                    ['/remote' => $this->filesystem_root]
+                ),
+                ['/remote'],
+                [],
+                true
+            ),
+            $this->temporary_directory . '/storage'
+        );
+        while ($processor->get_phase() !== 'verifying') {
+            $this->assertTrue($processor->next_step());
+            $processor->flush_pending_output();
+        }
+        $this->write_file('.git/selected.txt', 'cache drift');
+
+        $this->run_to_completion_without_closing($processor);
+
+        $this->assertSame('restart', $processor->get_status());
+        $processor->close();
+    }
+
+    public function testFinalVerificationIgnoresOutsideAndProtectedAdditions(): void
+    {
+        $this->write_file('selected/value.txt', 'fetched');
+        $this->write_remote_index([
+            $this->remote_entry('/remote/selected/value.txt', 'file'),
+        ]);
+        $this->write_local_index([
+            $this->local_entry_from_path('selected/value.txt'),
+        ]);
+        $processor = PullLocalIndexProcessor::start_next_local_index(
+            $this->work_directory,
+            $this->next_remote_index_file,
+            $this->remote_index_file,
+            $this->retained_local_index_file,
+            $this->change_scope(
+                new RemoteToLocalPathMapper(
+                    $this->filesystem_root,
+                    ['/remote'],
+                    ['/remote' => $this->filesystem_root]
+                ),
+                ['/remote/selected'],
+                [],
+                false,
+                ['/remote/protected']
+            ),
+            $this->temporary_directory . '/storage'
+        );
+        while ($processor->get_phase() !== 'verifying') {
+            $this->assertTrue($processor->next_step());
+            $processor->flush_pending_output();
+        }
+        $this->write_file('outside.txt', 'outside');
+        $this->write_file('protected/new.txt', 'protected');
+
+        $entries = $this->run_to_completion($processor);
+
+        $this->assertSame(['selected/value.txt'], array_column($entries, 'path'));
+    }
+
+    public function testFinalVerificationSelectedDeletionReturnsRestart(): void
+    {
+        $this->write_file('value.txt', 'fetched');
+        $this->write_remote_index([
+            $this->remote_entry('/remote/value.txt', 'file'),
+        ]);
+        $this->write_local_index([$this->local_entry_from_path('value.txt')]);
+        $processor = $this->start_processor();
+        while ($processor->get_phase() !== 'verifying') {
+            $this->assertTrue($processor->next_step());
+            $processor->flush_pending_output();
+        }
+        unlink($this->filesystem_root . '/value.txt');
+
+        $this->run_to_completion_without_closing($processor);
+
+        $this->assertSame('restart', $processor->get_status());
+        $processor->close();
+    }
+
+    public function testFinalVerificationUsesReplaceSourceTypeForExactLink(): void
+    {
+        $path = $this->filesystem_root . '/value';
+        symlink('target', $path);
+        $this->write_remote_index([
+            $this->remote_entry('/remote/value', 'link', 6),
+        ]);
+        $this->write_local_index([$this->local_entry_from_path('value')]);
+        $processor = PullLocalIndexProcessor::start_next_local_index(
+            $this->work_directory,
+            $this->next_remote_index_file,
+            $this->remote_index_file,
+            $this->retained_local_index_file,
+            $this->change_scope(
+                new RemoteToLocalPathMapper(
+                    $this->filesystem_root,
+                    ['/remote'],
+                    ['/remote' => $this->filesystem_root]
+                ),
+                [],
+                [],
+                false,
+                [],
+                ['/remote/value']
+            ),
+            $this->temporary_directory . '/storage'
+        );
+        while ($processor->get_phase() !== 'verifying') {
+            $this->assertTrue($processor->next_step());
+            $processor->flush_pending_output();
+        }
+        unlink($path);
+        file_put_contents($path, 'file');
+
+        $this->run_to_completion_without_closing($processor);
+
+        $this->assertSame('restart', $processor->get_status());
+        $processor->close();
+    }
+
+    public function testFinalVerificationUsesDeleteBaseTypeForExactLink(): void
+    {
+        $path = $this->filesystem_root . '/obsolete-link';
+        symlink('target', $path);
+        $this->write_remote_index([]);
+        $this->write_local_index([
+            $this->local_entry_from_path('obsolete-link'),
+        ]);
+        $processor = PullLocalIndexProcessor::start_next_local_index(
+            $this->work_directory,
+            $this->next_remote_index_file,
+            $this->remote_index_file,
+            $this->retained_local_index_file,
+            $this->change_scope(
+                new RemoteToLocalPathMapper(
+                    $this->filesystem_root,
+                    ['/remote'],
+                    ['/remote' => $this->filesystem_root]
+                ),
+                [],
+                [],
+                false,
+                [],
+                ['/remote/obsolete-link']
+            ),
+            $this->temporary_directory . '/storage'
+        );
+
+        $this->run_to_completion_without_closing($processor);
+
+        $this->assertSame('restart', $processor->get_status());
+        $processor->close();
+    }
+
+    public function testFinalVerificationPreservesFifoAtPriorExactTombstone(): void
+    {
+        if (!function_exists('posix_mkfifo')) {
+            $this->markTestSkipped('This PHP build cannot create a FIFO.');
+        }
+        mkdir($this->filesystem_root . '/.git');
+        $fifo_path = $this->filesystem_root . '/.git/obsolete';
+        $this->assertTrue(posix_mkfifo($fifo_path, 0600));
+        $this->write_remote_index([]);
+        $this->write_local_index([
+            [
+                'path' => '.git/obsolete',
+                'ctime' => 1,
+                'size' => 6,
+                'type' => 'link',
+            ],
+        ]);
+
+        $entries = $this->run_to_completion(
+            PullLocalIndexProcessor::start_next_local_index(
+                $this->work_directory,
+                $this->next_remote_index_file,
+                $this->remote_index_file,
+                $this->retained_local_index_file,
+                $this->change_scope(
+                    new RemoteToLocalPathMapper(
+                        $this->filesystem_root,
+                        ['/remote'],
+                        ['/remote' => $this->filesystem_root]
+                    ),
+                    [],
+                    [],
+                    false,
+                    [],
+                    [],
+                    ['/remote/.git/obsolete']
+                ),
+                $this->temporary_directory . '/storage'
+            )
+        );
+
+        $this->assertSame([], $entries);
+        clearstatcache(true, $fifo_path);
+        $this->assertSame('fifo', filetype($fifo_path));
+        unlink($fifo_path);
+    }
+
+    public function testCandidateRetainsProtectedRemapSourceHole(): void
+    {
+        $this->write_file('shared/kept.txt', 'kept');
+        $this->write_file('shared/hole/protected.txt', 'protected');
+        $this->write_remote_index([
+            $this->remote_entry('/a/kept.txt', 'file'),
+        ]);
+        $this->write_local_index([
+            $this->local_entry_from_path('shared/kept.txt'),
+            $this->local_entry_from_path('shared/hole/protected.txt'),
+        ]);
+
+        $entries = $this->run_to_completion(
+            PullLocalIndexProcessor::start_next_local_index(
+                $this->work_directory,
+                $this->next_remote_index_file,
+                $this->remote_index_file,
+                $this->retained_local_index_file,
+                $this->change_scope(
+                    new RemoteToLocalPathMapper(
+                        $this->filesystem_root,
+                        ['/a', '/b'],
+                        [
+                            '/a' => $this->filesystem_root . '/shared',
+                            '/a/hole' => $this->filesystem_root . '/elsewhere',
+                            '/b' => $this->filesystem_root . '/shared/hole',
+                        ]
+                    ),
+                    ['/a'],
+                    [],
+                    false,
+                    ['/b']
+                ),
+                $this->temporary_directory . '/storage'
+            )
+        );
+
+        $this->assertSame(
+            ['shared/hole/protected.txt', 'shared/kept.txt'],
+            array_column($entries, 'path')
+        );
+    }
+
+    public function testCandidateMapsFollowedTarget(): void
+    {
+        $this->write_file('followed/outside/file.txt', 'followed');
+        $this->write_remote_index([
+            $this->remote_entry('/outside/file.txt', 'file'),
+        ]);
+        $this->write_local_index([
+            $this->local_entry_from_path('followed/outside/file.txt'),
+        ]);
+
+        $entries = $this->run_to_completion(
+            PullLocalIndexProcessor::start_next_local_index(
+                $this->work_directory,
+                $this->next_remote_index_file,
+                $this->remote_index_file,
+                $this->retained_local_index_file,
+                $this->change_scope(
+                    new RemoteToLocalPathMapper(
+                        $this->filesystem_root,
+                        ['/remote'],
+                        [],
+                        $this->filesystem_root . '/followed'
+                    ),
+                    ['/outside']
+                ),
+                $this->temporary_directory . '/storage'
+            )
+        );
+
+        $this->assertSame(
+            ['followed/outside/file.txt'],
+            array_column($entries, 'path')
+        );
     }
 
     public function testNextRemoteEntryMissingFromRemoteIndexReturnsRestart(): void
@@ -872,17 +1401,25 @@ final class PullLocalIndexProcessorTest extends TestCase {
             $this->next_remote_index_file,
             $this->remote_index_file,
             $this->retained_local_index_file,
-            new RemoteToLocalPathMapper(
-                $this->filesystem_root,
+            $this->change_scope(
+                new RemoteToLocalPathMapper(
+                    $this->filesystem_root,
+                    [$remote_root],
+                    [$remote_root . "/file-\xff.txt" => $local_path]
+                ),
                 [$remote_root],
-                [$remote_root . "/file-\xff.txt" => $local_path]
+                [$remote_root . "/excluded-\xfc"]
             ),
-            $this->temporary_directory . '/storage',
-            false,
-            ['selected'],
-            ["selected/excluded-\xfc"]
+            $this->temporary_directory . '/storage'
         );
         $cursor = $processor->get_cursor();
+        $this->assertArrayHasKey('file_sync_change_scope_config', $cursor);
+        $this->assertArrayNotHasKey('path_mapper_config', $cursor);
+        $this->assertArrayNotHasKey(
+            'included_local_index_path_roots_b64',
+            $cursor
+        );
+        $this->assertArrayNotHasKey('verification_include_caches', $cursor);
         $this->assertIsString(json_encode($cursor, JSON_THROW_ON_ERROR));
         $processor->close();
 
@@ -1213,6 +1750,134 @@ final class PullLocalIndexProcessorTest extends TestCase {
     }
 
     /**
+     * @param list<string> $remote_roots
+     * @param list<string> $excluded_remote_roots
+     * @param list<string> $protected_remote_roots
+     * @param list<string> $current_exact_remote_paths
+     * @param list<string> $prior_exact_remote_paths
+     */
+    private function change_scope(
+        RemoteToLocalPathMapper $path_mapper,
+        array $remote_roots = ['/remote'],
+        array $excluded_remote_roots = [],
+        bool $include_caches = false,
+        array $protected_remote_roots = [],
+        array $current_exact_remote_paths = [],
+        array $prior_exact_remote_paths = []
+    ): FileSyncChangeScope {
+        $current_atoms = array_map(
+            static fn (string $path): array => [
+                'kind' => 'root',
+                'path' => $path,
+            ],
+            $remote_roots
+        );
+        foreach ($current_exact_remote_paths as $path) {
+            $current_atoms[] = ['kind' => 'exact', 'path' => $path];
+        }
+        $snapshot_id = $this->publish_ownership_snapshot($current_atoms);
+        $protected_snapshot_ids = [];
+        if ($protected_remote_roots !== []) {
+            $protected_snapshot_ids[] = $this->publish_ownership_snapshot(
+                array_map(
+                    static fn (string $path): array => [
+                        'kind' => 'root',
+                        'path' => $path,
+                    ],
+                    $protected_remote_roots
+                )
+            );
+        }
+        $prior_snapshot_ids = [];
+        if ($prior_exact_remote_paths !== []) {
+            $prior_snapshot_ids[] = $this->publish_ownership_snapshot(
+                array_map(
+                    static fn (string $path): array => [
+                        'kind' => 'exact',
+                        'path' => $path,
+                    ],
+                    $prior_exact_remote_paths
+                )
+            );
+        }
+        $ownership_directory = $this->temporary_directory
+            . '/pull-state/files-pull-ownership';
+        $remote_scope = FileSyncChangeScope::from_config([
+            'index_path_coordinates' => 'remote_absolute',
+            'ownership_directory_b64' => base64_encode($ownership_directory),
+            'current_snapshot_id' => $snapshot_id,
+            'prior_snapshot_ids' => $prior_snapshot_ids,
+            'protected_snapshot_ids' => $protected_snapshot_ids,
+            'excluded_remote_absolute_path_roots_b64' => array_map(
+                'base64_encode',
+                $excluded_remote_roots
+            ),
+            'include_caches' => $include_caches,
+        ]);
+        try {
+            $mapping_processor = FileSyncChangeScopeMappingProcessor::start(
+                $remote_scope,
+                $path_mapper,
+                $this->temporary_directory
+                    . '/scope-mapping-'
+                    . bin2hex(random_bytes(6))
+            );
+            try {
+                do {
+                    $has_next_step = $mapping_processor->next_step();
+                } while ($has_next_step);
+                $local_config =
+                    $mapping_processor->get_local_change_scope_config();
+            } finally {
+                $mapping_processor->close();
+            }
+            return FileSyncChangeScope::from_config($local_config);
+        } finally {
+            $remote_scope->close();
+        }
+    }
+
+    /** @param list<array{kind:'root'|'exact',path:string}> $atoms */
+    private function publish_ownership_snapshot(array $atoms): string
+    {
+        $snapshots_directory = $this->temporary_directory
+            . '/pull-state/files-pull-ownership/snapshots';
+        if (!is_dir($snapshots_directory)) {
+            mkdir($snapshots_directory, 0777, true);
+        }
+        $expanded_atoms = [];
+        foreach ($atoms as $atom) {
+            $expanded_atoms[$atom['kind'] . "\0" . $atom['path']] = $atom;
+            if ($atom['kind'] !== 'root') {
+                continue;
+            }
+            $ancestor = $atom['path'];
+            while ($ancestor !== '/') {
+                $ancestor = dirname($ancestor);
+                $expanded_atoms['ancestor' . "\0" . $ancestor] = [
+                    'kind' => 'ancestor',
+                    'path' => $ancestor,
+                ];
+            }
+        }
+        $paths = '';
+        $lookup_rows = [];
+        foreach ($expanded_atoms as $atom) {
+            $lookup_rows[] = hash('sha256', $atom['kind'] . "\0" . $atom['path'])
+                . ' ' . sprintf('%016x', strlen($paths)) . "\n";
+            $paths .= json_encode([
+                'kind' => $atom['kind'],
+                'path_b64' => base64_encode($atom['path']),
+            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+        }
+        sort($lookup_rows, SORT_STRING);
+        $snapshot_id = bin2hex(random_bytes(32));
+        file_put_contents($snapshots_directory . '/' . $snapshot_id . '.paths.jsonl', $paths);
+        file_put_contents($snapshots_directory . '/' . $snapshot_id . '.lookup', implode('', $lookup_rows));
+        return $snapshot_id;
+    }
+
+    /**
      * @param list<string> $included_local_index_path_roots
      * @param list<string> $excluded_local_index_path_roots
      */
@@ -1221,20 +1886,30 @@ final class PullLocalIndexProcessorTest extends TestCase {
         array $excluded_local_index_path_roots = []
     ): PullLocalIndexProcessor
     {
+        $remote_roots = array_map(
+            static fn (string $path): string =>
+                $path === '' ? '/remote' : '/remote/' . $path,
+            $included_local_index_path_roots
+        );
+        $excluded_remote_roots = array_map(
+            static fn (string $path): string => '/remote/' . $path,
+            $excluded_local_index_path_roots
+        );
         return PullLocalIndexProcessor::start_next_local_index(
             $this->work_directory,
             $this->next_remote_index_file,
             $this->remote_index_file,
             $this->retained_local_index_file,
-            new RemoteToLocalPathMapper(
-                $this->filesystem_root,
-                ['/remote'],
-                ['/remote' => $this->filesystem_root]
+            $this->change_scope(
+                new RemoteToLocalPathMapper(
+                    $this->filesystem_root,
+                    ['/remote'],
+                    ['/remote' => $this->filesystem_root]
+                ),
+                $remote_roots,
+                $excluded_remote_roots
             ),
-            $this->temporary_directory . '/storage',
-            false,
-            $included_local_index_path_roots,
-            $excluded_local_index_path_roots
+            $this->temporary_directory . '/storage'
         );
     }
 

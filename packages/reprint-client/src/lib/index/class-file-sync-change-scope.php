@@ -102,11 +102,7 @@ final class FileSyncChangeScope
         string $type
     ): bool {
         $this->assert_open();
-        if (!in_array($type, ['file', 'link', 'dir'], true)) {
-            throw new InvalidArgumentException(
-                "Index entry type must be file, link, or dir; got {$type}."
-            );
-        }
+        self::assert_supported_index_entry_type($type);
         if ($this->config['index_path_coordinates'] === 'remote_absolute') {
             return $this->remote_index_entry_change_decision(
                 $index_path,
@@ -140,18 +136,58 @@ final class FileSyncChangeScope
     ): string {
         $this->assert_open();
         self::assert_remote_absolute_path($remote_absolute_path);
+        if (
+            $type !== 'dir'
+            && $this->subtree_intersects_exclusion($remote_absolute_path)
+        ) {
+            return 'block';
+        }
         $current_ownership = $this->snapshots_entry_ownership(
             [$this->config['current_snapshot_id']],
             $remote_absolute_path,
             $type
         );
         if ($current_ownership !== 'unowned') {
-            return $this->entry_is_blocked(
-                $remote_absolute_path,
-                $current_ownership
-            )
-                ? 'block'
-                : 'allow';
+            if (
+                $this->entry_is_blocked(
+                    $remote_absolute_path,
+                    $current_ownership
+                )
+            ) {
+                return 'block';
+            }
+
+            // A current root above the path owns the whole namespace and wins
+            // protected overlap. Exact ownership controls only the link entry,
+            // so it cannot replace a namespace reserved for a descendant.
+            if (
+                $type === 'link'
+                && $this->snapshots_subtree_relation(
+                    [$this->config['current_snapshot_id']],
+                    $remote_absolute_path
+                ) !== 'owns'
+                && (
+                    $this->snapshots_reserve_subtree_namespace(
+                        [$this->config['current_snapshot_id']],
+                        $remote_absolute_path
+                    )
+                    || $this->snapshots_reserve_subtree_namespace(
+                        $this->config['protected_snapshot_ids'],
+                        $remote_absolute_path
+                    )
+                )
+            ) {
+                return 'block';
+            }
+            return 'allow';
+        }
+        if (
+            $this->snapshots_subtree_relation(
+                [$this->config['current_snapshot_id']],
+                $remote_absolute_path
+            ) === 'intersects'
+        ) {
+            return 'block';
         }
         $protected_ownership = $this->snapshots_entry_ownership(
             $this->config['protected_snapshot_ids'],
@@ -159,6 +195,14 @@ final class FileSyncChangeScope
             $type
         );
         if ($protected_ownership !== 'unowned') {
+            return 'block';
+        }
+        if (
+            $this->snapshots_subtree_relation(
+                $this->config['protected_snapshot_ids'],
+                $remote_absolute_path
+            ) !== 'none'
+        ) {
             return 'block';
         }
         $prior_ownership = $this->snapshots_entry_ownership(
@@ -200,10 +244,90 @@ final class FileSyncChangeScope
     public function subtree_may_change(
         string $index_path
     ): bool {
+        return $this->subtree_change_is_allowed(
+            $index_path,
+            null,
+            true
+        );
+    }
+
+    /**
+     * Reports whether this lifecycle may remove a verified empty directory.
+     *
+     * The governing type is the desired type for a replacement and `dir` for
+     * a deletion. The caller confirms emptiness separately, so cache omission
+     * does not block exact removal. Descendant exclusions and ownership
+     * intersections still protect the directory namespace.
+     */
+    public function directory_entry_may_change(
+        string $index_path,
+        string $governing_type
+    ): bool {
+        $this->assert_open();
+        self::assert_supported_index_entry_type($governing_type);
+        if ($this->config['index_path_coordinates'] === 'remote_absolute') {
+            return (
+                $this->remote_index_entry_change_decision(
+                    $index_path,
+                    $governing_type
+                ) === 'allow'
+                && $this->remote_subtree_change_decision(
+                    $index_path,
+                    $governing_type,
+                    false
+                ) === 'allow'
+            );
+        }
+
+        $path_mapper = $this->get_local_path_mapper();
+        $change_is_allowed = false;
+        foreach (
+            $this->remote_paths_mapping_to_local_index_path($index_path)
+            as $remote_absolute_path
+        ) {
+            $entry_decision = $this->remote_index_entry_change_decision(
+                $remote_absolute_path,
+                $governing_type
+            );
+            $subtree_decision = $this->remote_subtree_change_decision(
+                $remote_absolute_path,
+                $governing_type,
+                false
+            );
+            if (
+                $entry_decision === 'block'
+                || $subtree_decision === 'block'
+            ) {
+                return false;
+            }
+            if (
+                $entry_decision === 'allow'
+                && $subtree_decision === 'allow'
+            ) {
+                if (
+                    !$path_mapper->remote_path_owns_mapped_local_subtree(
+                        $remote_absolute_path
+                    )
+                ) {
+                    return false;
+                }
+                $change_is_allowed = true;
+            }
+        }
+        return $change_is_allowed;
+    }
+
+    private function subtree_change_is_allowed(
+        string $index_path,
+        ?string $governing_type,
+        bool $requires_cache_visibility
+    ): bool {
         $this->assert_open();
         if ($this->config['index_path_coordinates'] === 'remote_absolute') {
             return $this->remote_subtree_change_decision(
-                $index_path
+                $index_path,
+                $governing_type,
+                $requires_cache_visibility
             ) === 'allow';
         }
 
@@ -214,7 +338,9 @@ final class FileSyncChangeScope
             as $remote_absolute_path
         ) {
             $decision = $this->remote_subtree_change_decision(
-                $remote_absolute_path
+                $remote_absolute_path,
+                $governing_type,
+                $requires_cache_visibility
             );
             if ($decision === 'block') {
                 return false;
@@ -235,7 +361,9 @@ final class FileSyncChangeScope
 
     /** @return 'allow'|'block'|'unowned' */
     private function remote_subtree_change_decision(
-        string $remote_absolute_path
+        string $remote_absolute_path,
+        ?string $governing_type,
+        bool $requires_cache_visibility
     ): string {
         $this->assert_open();
         self::assert_remote_absolute_path($remote_absolute_path);
@@ -244,13 +372,48 @@ final class FileSyncChangeScope
             $remote_absolute_path
         );
         if ($current_relation === 'owns') {
-            return $this->subtree_is_blocked($remote_absolute_path)
+            return $this->subtree_is_blocked(
+                $remote_absolute_path,
+                $requires_cache_visibility
+            )
+                ? 'block'
+                : 'allow';
+        }
+
+        $current_owns_governing_entry = (
+            $governing_type !== null
+            && $this->snapshots_entry_ownership(
+                [$this->config['current_snapshot_id']],
+                $remote_absolute_path,
+                $governing_type
+            ) === 'owned'
+        );
+        if ($current_owns_governing_entry) {
+            // Exact ownership controls this entry, not descendants. It wins
+            // an exact overlap but not a current or protected reservation.
+            if (
+                $this->snapshots_reserve_subtree_namespace(
+                    [$this->config['current_snapshot_id']],
+                    $remote_absolute_path
+                )
+                || $this->snapshots_reserve_subtree_namespace(
+                    $this->config['protected_snapshot_ids'],
+                    $remote_absolute_path
+                )
+            ) {
+                return 'block';
+            }
+            return $this->subtree_is_blocked(
+                $remote_absolute_path,
+                $requires_cache_visibility
+            )
                 ? 'block'
                 : 'allow';
         }
         if ($current_relation === 'intersects') {
             return 'block';
         }
+
         $protected_relation = $this->snapshots_subtree_relation(
             $this->config['protected_snapshot_ids'],
             $remote_absolute_path
@@ -262,20 +425,76 @@ final class FileSyncChangeScope
             $this->config['prior_snapshot_ids'],
             $remote_absolute_path
         );
-        if ($prior_relation !== 'owns') {
+        $prior_owns_governing_entry = (
+            $governing_type !== null
+            && $this->snapshots_entry_ownership(
+                $this->config['prior_snapshot_ids'],
+                $remote_absolute_path,
+                $governing_type
+            ) === 'owned'
+        );
+        if ($prior_relation !== 'owns' && !$prior_owns_governing_entry) {
             return 'unowned';
         }
-        return $this->subtree_is_blocked($remote_absolute_path)
+        return $this->subtree_is_blocked(
+            $remote_absolute_path,
+            $requires_cache_visibility
+        )
             ? 'block'
             : 'allow';
     }
 
-    private function subtree_is_blocked(string $remote_absolute_path): bool
-    {
+    private function subtree_is_blocked(
+        string $remote_absolute_path,
+        bool $requires_cache_visibility
+    ): bool {
         return (
-            !$this->config['include_caches']
+            (
+                $requires_cache_visibility
+                && !$this->config['include_caches']
+            )
             || $this->subtree_intersects_exclusion($remote_absolute_path)
         );
+    }
+
+    private static function assert_supported_index_entry_type(
+        string $type
+    ): void {
+        if (!in_array($type, ['file', 'link', 'dir'], true)) {
+            throw new InvalidArgumentException(
+                "Index entry type must be file, link, or dir; got {$type}."
+            );
+        }
+    }
+
+    /**
+     * Maps one changeable remote entry into this local-relative index.
+     *
+     * The remote entry must itself be allowed, and no remote alias for its
+     * local path may block the change.
+     *
+     * @return string|null Local path relative to the filesystem root, or null.
+     */
+    public function map_changeable_remote_index_entry_to_local_index_path(
+        string $remote_absolute_path,
+        string $type
+    ): ?string {
+        $this->get_local_path_mapper();
+        if (
+            $this->remote_index_entry_change_decision(
+                $remote_absolute_path,
+                $type
+            ) !== 'allow'
+        ) {
+            return null;
+        }
+        $local_index_path = $this->map_remote_absolute_path_to_index_path(
+            $remote_absolute_path
+        );
+        if (!$this->index_entry_may_change($local_index_path, $type)) {
+            return null;
+        }
+        return $local_index_path;
     }
 
     /**
@@ -560,6 +779,33 @@ final class FileSyncChangeScope
             $remote_absolute_path
         );
         return $intersects ? 'intersects' : 'none';
+    }
+
+    /**
+     * Reports a root or ancestor namespace reservation, excluding exact atoms.
+     *
+     * @param list<string> $snapshot_ids
+     */
+    private function snapshots_reserve_subtree_namespace(
+        array $snapshot_ids,
+        string $remote_absolute_path
+    ): bool {
+        return (
+            $this->deepest_owning_root(
+                $snapshot_ids,
+                $remote_absolute_path
+            ) !== null
+            || $this->snapshots_contain_atom(
+                $snapshot_ids,
+                'root',
+                $remote_absolute_path
+            )
+            || $this->snapshots_contain_atom(
+                $snapshot_ids,
+                'ancestor',
+                $remote_absolute_path
+            )
+        );
     }
 
     /** @param list<string> $snapshot_ids */
