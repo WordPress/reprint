@@ -3,7 +3,8 @@
 namespace WordPress\DataLiberation;
 
 use PDO;
-use PDOStatement;
+
+require_once __DIR__ . "/class-database-rows-reader.php";
 
 /**
  * Generates a MySQL dump as a sequence of SQL fragments, one per call to next_sql_fragment().
@@ -53,77 +54,20 @@ class MySQLDumpProducer
     const STATE_EMIT_FOOTER = "emit_footer";
     const STATE_FINISHED = "finished";
 
-    /** @var PDO */
+    /** @var mixed PDO or a PDO-compatible adapter. */
     private $db;
+
+    /** @var DatabaseRowsReader */
+    private $row_reader;
 
     /** @var string|null */
     private $current_sql_fragment = null;
 
-    /** @var array|null */
-    private $current_pk_columns = null;
-
-    /**
-     * Cursor bookmark: the PK values of the last emitted row. The next SELECT
-     * uses a WHERE clause like `(pk1, pk2) > (last1, last2)` to resume without
-     * re-reading earlier rows. Null before the first row of a table.
-     *
-     * @var array|null
-     */
-    private $last_pk_values = null;
-
-    /**
-     * Fallback cursor for tables without a primary key. Unlike PK-based cursors,
-     * OFFSET pagination re-scans earlier rows on every query, so it's slower
-     * and vulnerable to drift if rows are inserted or deleted mid-export.
-     *
-     * @var int
-     */
-    private $current_offset = 0;
-
-    /** @var string|null */
-    private $current_table = null;
-
-    /** @var PDOStatement|null */
-    private $current_result_set = null;
-
-    /**
-     * Distinguishes "query returned zero rows because the table is exhausted"
-     * from "query returned zero rows because we just opened a fresh cursor."
-     * Without this, the producer would stop after every batch_size rows.
-     *
-     * @var int
-     */
-    private $rows_fetched_from_current_query = 0;
-
-    /** @var array */
-    private $tables_to_process;
-
     /** @var string */
     private $state = self::STATE_INIT;
 
-    /**
-     * INFORMATION_SCHEMA column metadata, cached per table to avoid repeated
-     * queries. Keyed by table name, then column name. Each entry contains
-     * 'data_type' (e.g. 'varchar') and 'column_type' (e.g. 'varchar(255)').
-     *
-     * @var array
-     */
-    private $column_type_cache = [];
-
-    /** @var array|null */
-    private $current_row = null;
-
     /** @var int */
     private $rows_in_batch = 0;
-
-    /** @var array|null */
-    private $current_column_types = null;
-
-    /** @var array|null */
-    private $current_column_names = null;
-
-    /** @var int */
-    private $batch_size;
 
     /** @var bool */
     private $emit_create_table;
@@ -137,17 +81,6 @@ class MySQLDumpProducer
      * @var int
      */
     private $max_statement_size;
-
-    /** @var int|null */
-    private $query_time_limit_ms = null;
-
-    /**
-     * Row exclusion rules keyed by table name. Each rule is an array with
-     * 'column' and 'value' keys.
-     *
-     * @var array<string, list<array{column: string, value: string}>>
-     */
-    private $exclude_rows_by_table = [];
 
     /**
      * When a row is too large for a single INSERT, its big columns are split
@@ -178,37 +111,13 @@ class MySQLDumpProducer
     public function __construct($db, $options = [])
     {
         $this->db = $db;
-        $this->tables_to_process = $options["tables_to_process"] ?? null;
-        $this->batch_size = max(1, (int)($options["batch_size"] ?? 250));
+        $this->row_reader = new DatabaseRowsReader($db, $options);
         $this->emit_create_table = (bool)($options["create_table_query"] ?? true);
 
         if (isset($options["max_statement_size"])) {
             $this->max_statement_size = (int)$options["max_statement_size"];
         } else {
             $this->max_statement_size = $this->detect_max_statement_size();
-        }
-
-        if (isset($options["query_time_limit_ms"])) {
-            $limit = (int) $options["query_time_limit_ms"];
-            $this->query_time_limit_ms = $limit > 0 ? $limit : null;
-        }
-
-        if (isset($options["exclude_rows"]) && is_array($options["exclude_rows"])) {
-            foreach ($options["exclude_rows"] as $rule) {
-                if (
-                    !is_array($rule) ||
-                    !isset($rule["table"], $rule["column"], $rule["value"]) ||
-                    !is_string($rule["table"]) ||
-                    !is_string($rule["column"]) ||
-                    !is_string($rule["value"])
-                ) {
-                    continue;
-                }
-                $this->exclude_rows_by_table[$rule["table"]][] = [
-                    "column" => $rule["column"],
-                    "value" => $rule["value"],
-                ];
-            }
         }
 
         if (isset($options["cursor"])) {
@@ -239,8 +148,8 @@ class MySQLDumpProducer
         }
 
         if (self::STATE_INIT === $this->state) {
-            if (null === $this->tables_to_process) {
-                $this->initialize_tables_to_process();
+            if (!$this->row_reader->has_initialized_tables()) {
+                $this->row_reader->initialize_tables_to_process();
             }
             $this->state = self::STATE_EMIT_HEADER;
         }
@@ -300,69 +209,6 @@ class MySQLDumpProducer
 
         return false;
     }
-
-    /**
-     * Fetches the next row from the current result set into $this->current_row.
-     *
-     * When the result set is exhausted, checks whether the table has more rows
-     * by opening a new query from the current cursor position. Returns false
-     * only when a fresh query comes back empty, meaning the table is done.
-     */
-    private function fetch_and_store_row()
-    {
-        if (!$this->current_result_set) {
-            $query = $this->build_select_query();
-            try {
-                $this->current_result_set = $this->db->query($query);
-            } catch (\PDOException $e) {
-                throw new \RuntimeException(
-                    "Database query `{$query}` failed for table " . $this->quote_identifier($this->current_table) . ": " . $e->getMessage()
-                );
-            }
-            $this->rows_fetched_from_current_query = 0;
-        }
-
-        $record = $this->current_result_set->fetch(PDO::FETCH_ASSOC);
-        if (!$record) {
-            $this->current_result_set = null;
-
-            if ($this->rows_fetched_from_current_query === 0) {
-                return false;
-            }
-
-            // This batch is exhausted but returned rows earlier, so the table
-            // may have more. Open a new query starting after the last PK.
-            if ($this->last_pk_values !== null || $this->current_offset > 0) {
-                return $this->fetch_and_store_row();
-            }
-
-            return false;
-        }
-
-        $this->rows_fetched_from_current_query++;
-
-        if ($this->current_column_names === null) {
-            $this->current_column_names = array_keys($record);
-        }
-
-        if ($this->current_pk_columns && count($this->current_pk_columns) > 0) {
-            $this->last_pk_values = [];
-            foreach ($this->current_pk_columns as $col) {
-                if (!array_key_exists($col, $record)) {
-                    throw new \RuntimeException(
-                        "Primary key column '{$col}' missing from SELECT result for table " .
-                        $this->quote_identifier($this->current_table)
-                    );
-                }
-                $this->last_pk_values[$col] = $record[$col];
-            }
-        } else {
-            $this->current_offset++;
-        }
-
-        $this->current_row = $record;
-        return true;
-    }
     /**
      * Emits "INSERT INTO ... VALUES (first_row)" as a single fragment.
      *
@@ -373,8 +219,8 @@ class MySQLDumpProducer
      */
     private function emit_insert_header()
     {
-        if ($this->current_row === null) {
-            if (!$this->fetch_and_store_row()) {
+        if ($this->row_reader->get_current_record() === null) {
+            if (!$this->row_reader->next_record()) {
                 $this->state = self::STATE_NEXT_TABLE;
                 return false;
             }
@@ -383,20 +229,20 @@ class MySQLDumpProducer
         $column_list = implode(
             ",",
             array_map(function ($col) {
-                return $this->quote_identifier($col);
-            }, $this->current_column_names)
+                return $this->row_reader->quote_identifier($col);
+            }, $this->row_reader->get_current_column_names())
         );
 
-        $header = "INSERT INTO " . $this->quote_identifier($this->current_table) . " ({$column_list}) VALUES\n";
+        $header = "INSERT INTO " . $this->row_reader->quote_identifier($this->row_reader->get_current_table()) . " ({$column_list}) VALUES\n";
         $this->current_statement_size = strlen($header);
 
-        $first_row_sql = $this->format_row_for_insert($this->current_row);
+        $first_row_sql = $this->format_row_for_insert($this->row_reader->get_current_record());
         $this->current_statement_size += strlen($first_row_sql) + 1;
 
-        $this->current_row = null;
+        $this->row_reader->clear_current_record();
         $this->rows_in_batch = 1;
 
-        $has_next_row = $this->fetch_and_store_row();
+        $has_next_row = $this->row_reader->next_record();
 
         // Oversized updates require closing this INSERT with a semicolon so the
         // subsequent UPDATE statements are syntactically separate.
@@ -412,7 +258,7 @@ class MySQLDumpProducer
             } else {
                 $this->state = self::STATE_NEXT_TABLE;
             }
-        } elseif ($this->rows_in_batch >= $this->batch_size || $has_oversized) {
+        } elseif ($this->rows_in_batch >= $this->row_reader->get_batch_size() || $has_oversized) {
             $sql = $header . $first_row_sql . ";";
             $this->current_sql_fragment = $sql;
             $this->current_statement_size = 0;
@@ -437,17 +283,17 @@ class MySQLDumpProducer
      */
     private function emit_row()
     {
-        if ($this->current_row === null) {
+        if ($this->row_reader->get_current_record() === null) {
             $this->state = self::STATE_NEXT_TABLE;
             return false;
         }
 
-        $row_sql = $this->format_row_for_insert($this->current_row);
+        $row_sql = $this->format_row_for_insert($this->row_reader->get_current_record());
         $this->current_statement_size += strlen($row_sql) + 2;
-        $this->current_row = null;
+        $this->row_reader->clear_current_record();
         $this->rows_in_batch++;
 
-        $has_next_row = $this->fetch_and_store_row();
+        $has_next_row = $this->row_reader->next_record();
         $has_oversized = $this->has_pending_oversized_updates();
 
         if (!$has_next_row) {
@@ -459,7 +305,7 @@ class MySQLDumpProducer
             } else {
                 $this->state = self::STATE_NEXT_TABLE;
             }
-        } elseif ($this->rows_in_batch >= $this->batch_size || $has_oversized) {
+        } elseif ($this->rows_in_batch >= $this->row_reader->get_batch_size() || $has_oversized) {
             $this->current_sql_fragment = $row_sql . ";";
             $this->current_statement_size = 0;
             if ($has_oversized) {
@@ -481,7 +327,7 @@ class MySQLDumpProducer
      */
     private function emit_create_table_statement()
     {
-        $quoted_table = $this->quote_identifier($this->current_table);
+        $quoted_table = $this->row_reader->quote_identifier($this->row_reader->get_current_table());
         try {
             $query = "SHOW CREATE TABLE {$quoted_table}";
             $result = $this->db->query($query);
@@ -577,311 +423,22 @@ class MySQLDumpProducer
     /** Emits a SQL comment marking the start of data for the current table. */
     private function emit_table_header_comment()
     {
-        $comment = "\n--\n-- Dumping data for table " . str_replace("\n",'\n',$this->quote_identifier($this->current_table)) . "\n--\n";
+        $comment = "\n--\n-- Dumping data for table " . str_replace("\n",'\n',$this->row_reader->quote_identifier($this->row_reader->get_current_table())) . "\n--\n";
         $this->current_sql_fragment = $comment;
-    }
-
-    /**
-     * Builds a SELECT query for the current table's next batch of rows.
-     *
-     * Non-numeric, non-binary columns are wrapped in CAST(... AS BINARY) so
-     * MySQL returns raw bytes rather than re-encoding through the connection
-     * charset. This is critical: without it, a latin1 column read over a utf8mb4
-     * connection would silently transcode the bytes, and our base64 encoding
-     * would capture the transcoded version instead of the original.
-     */
-    private function build_select_query()
-    {
-        $table = $this->current_table;
-        $select = "SELECT";
-
-        if ($this->query_time_limit_ms !== null) {
-            // MySQL optimizer hint — caps this query's wall-clock time so a
-            // single slow table can't consume the entire PHP execution budget.
-            $select .= " /*+ MAX_EXECUTION_TIME(" .
-                $this->query_time_limit_ms .
-                ") */";
-        }
-
-        if ($this->current_column_types) {
-            $select_parts = [];
-            foreach ($this->current_column_types as $col_name => $col_info) {
-                $quoted = $this->quote_identifier($col_name);
-                // Don't cast numeric or already-binary types
-                if (
-                    $this->is_numeric_type($col_info["data_type"]) ||
-                    $this->is_binary_type($col_info["data_type"])
-                ) {
-                    $select_parts[] = $quoted;
-                } else {
-                    $select_parts[] = "CAST({$quoted} AS BINARY) AS {$quoted}";
-                }
-            }
-            $query =
-                $select .
-                " " .
-                implode(", ", $select_parts) .
-                " FROM " . $this->quote_identifier($table);
-        } else {
-            $query = $select . " * FROM " . $this->quote_identifier($table);
-        }
-
-        $where_conditions = $this->build_row_exclusion_where_conditions();
-        if ($this->current_pk_columns && count($this->current_pk_columns) > 0) {
-            if ($this->last_pk_values) {
-                $where_conditions[] = $this->build_pk_where_clause();
-            }
-
-            if ($where_conditions) {
-                $query .= " WHERE " . implode(" AND ", array_map(function ($condition) {
-                    return "({$condition})";
-                }, $where_conditions));
-            }
-
-            $order_cols = array_map(function ($col) {
-                return $this->build_primary_key_column_expression($col) . " ASC";
-            }, $this->current_pk_columns);
-            $query .= " ORDER BY " . implode(", ", $order_cols);
-            $query .= " LIMIT {$this->batch_size}";
-        } else {
-            if ($where_conditions) {
-                $query .= " WHERE " . implode(" AND ", array_map(function ($condition) {
-                    return "({$condition})";
-                }, $where_conditions));
-            }
-
-            // Best effort pagination for tables without a primary key.
-            if ($this->current_offset > 0) {
-                $query .= " LIMIT {$this->batch_size} OFFSET {$this->current_offset}";
-            } else {
-                $query .= " LIMIT {$this->batch_size}";
-            }
-        }
-
-        return $query;
-    }
-
-    /** Builds WHERE fragments for configured row exclusions on the current table. */
-    private function build_row_exclusion_where_conditions(): array
-    {
-        if (!$this->current_table || empty($this->exclude_rows_by_table[$this->current_table])) {
-            return [];
-        }
-
-        $conditions = [];
-        foreach ($this->exclude_rows_by_table[$this->current_table] as $rule) {
-            $column = $rule["column"];
-            if (!isset($this->current_column_types[$column])) {
-                continue;
-            }
-            $quoted_col = $this->quote_identifier($column);
-            $encoded_value = base64_encode($rule["value"]);
-            // Preserve rows with NULL in the filtered column. In SQL, NULL <> value
-            // evaluates to UNKNOWN, so without the explicit IS NULL branch those rows
-            // would be filtered out even though they do not match the excluded value.
-            $conditions[] = "{$quoted_col} IS NULL OR {$quoted_col} <> FROM_BASE64('{$encoded_value}')";
-        }
-        return $conditions;
-    }
-
-    /**
-     * Builds a WHERE clause that selects rows strictly after the last emitted PK.
-     *
-     * For composite primary keys (a, b, c), this produces the lexicographic
-     * "greater than" condition:
-     *
-     *   (a > last_a) OR (a = last_a AND b > last_b) OR (a = last_a AND b = last_b AND c > last_c)
-     *
-     * This is equivalent to `(a, b, c) > (last_a, last_b, last_c)` but written
-     * in expanded form for compatibility with MySQL versions that don't optimize
-     * row-value comparisons well.
-     */
-    private function build_pk_where_clause()
-    {
-        if (!$this->last_pk_values || count($this->current_pk_columns) === 0) {
-            /**
-             * When we haven't seen any PK values yet, or when the table doesn't have a primary key,
-             * we return a dummy condition that will always be true.
-             */
-            return "1=1";
-        }
-
-        $pk_cols = $this->current_pk_columns;
-
-        if (count($pk_cols) === 1) {
-            $col = $pk_cols[0];
-            $value = $this->last_pk_values[$col];
-            return $this->build_comparison($col, $value, ">");
-        }
-        $conditions = [];
-        $prefix_conditions = [];
-
-        foreach ($pk_cols as $col) {
-            $value = $this->last_pk_values[$col];
-
-            $current_condition_parts = $prefix_conditions;
-            $current_condition_parts[] = $this->build_comparison(
-                $col,
-                $value,
-                ">"
-            );
-            $conditions[] =
-                "(" . implode(" AND ", $current_condition_parts) . ")";
-
-            $prefix_conditions[] = $this->build_comparison($col, $value, "=");
-        }
-
-        return "(" . implode(" OR ", $conditions) . ")";
-    }
-
-    /** Builds one primary key comparison without re-encoding database bytes. */
-    private function build_comparison($column, $value, $operator)
-    {
-        $column_expression = $this->build_primary_key_column_expression($column);
-        if ($value === null) {
-            return $operator === "="
-                ? "{$column_expression} IS NULL"
-                : "{$column_expression} IS NOT NULL";
-        }
-
-        if ($this->is_numeric_type($this->get_data_type($column))) {
-            return "{$column_expression} {$operator} {$value}";
-        }
-
-        return "{$column_expression} {$operator} FROM_BASE64('" .
-            base64_encode($value) .
-            "')";
-    }
-
-    /**
-     * Builds the column expression shared by primary key comparison and order.
-     *
-     * CHAR, VARCHAR, and TEXT columns keep their declared comparison semantics.
-     * FROM_BASE64() has a higher coercibility value than the column, so MySQL
-     * applies the column's declared character set and collation without reading
-     * the cursor through the connection character set. Keeping the indexed
-     * column bare also permits a primary-key range scan without a filesort.
-     *
-     * ENUM and SET are excluded because their indexes use numeric positions
-     * while their fetched values are strings.
-     */
-    private function build_primary_key_column_expression($column)
-    {
-        $qualified_column =
-            $this->quote_identifier($this->current_table) .
-            "." .
-            $this->quote_identifier($column);
-        $data_type = strtoupper($this->get_data_type($column));
-
-        if (
-            $this->is_numeric_type($data_type) ||
-            $this->is_binary_type($data_type)
-        ) {
-            return $qualified_column;
-        }
-
-        $index_ordered_types = [
-            "CHAR",
-            "VARCHAR",
-            "TINYTEXT",
-            "TEXT",
-            "MEDIUMTEXT",
-            "LONGTEXT",
-        ];
-
-        if (in_array($data_type, $index_ordered_types, true)) {
-            return $qualified_column;
-        }
-
-        return "CAST({$qualified_column} AS BINARY)";
-    }
-
-    /** Returns primary key column names in ordinal order, or empty array if none. */
-    private function get_primary_key_columns($table)
-    {
-        $pk_columns = [];
-
-        $query = "SELECT COLUMN_NAME
-            FROM information_schema.KEY_COLUMN_USAGE
-            WHERE TABLE_SCHEMA = ?
-            AND TABLE_NAME = ?
-            AND CONSTRAINT_NAME = 'PRIMARY'
-            ORDER BY ORDINAL_POSITION";
-        try {
-            $db_name = $this->db->query("SELECT DATABASE()")->fetchColumn();
-            $stmt = $this->db->prepare($query);
-            $stmt->execute([$db_name, $table]);
-        } catch (\PDOException $e) {
-            throw new \RuntimeException(
-                "Failed to get primary key columns for " . $this->quote_identifier($table) . ": " . $e->getMessage() . " Query: {$query}"
-            );
-        }
-
-        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $pk_columns[] = $row["COLUMN_NAME"];
-        }
-
-        return $pk_columns;
     }
 
     /** Advances to the next table and resets all per-table state. */
     private function move_to_next_table()
     {
-        if ($this->tables_to_process === null) {
-            return false;
-        }
-
-        if (!$this->current_table) {
-            $this->current_table = reset($this->tables_to_process) ?: null;
-        } else {
-            $this->current_table = next($this->tables_to_process) ?: null;
-        }
-
-        if ($this->current_table) {
-            $this->current_pk_columns = $this->get_primary_key_columns(
-                $this->current_table
-            );
-            $this->last_pk_values = null;
-            $this->current_offset = 0;
-            $this->current_column_types = $this->get_column_types(
-                $this->current_table
-            );
-            $this->current_column_names = null;
-            $this->current_row = null;
+        $has_table = $this->row_reader->move_to_next_table();
+        if ($has_table) {
             $this->rows_in_batch = 0;
-
             $this->oversized_queue = [];
             $this->oversized_pk_values = null;
             $this->state_after_oversized = null;
             $this->current_statement_size = 0;
         }
-
-        return (bool) $this->current_table;
-    }
-
-    /**
-     * Discovers all BASE TABLEs in the current database (excludes views).
-     *
-     * @TODO: Use pagination or approach to support large databases with millions of tables.
-     */
-    private function initialize_tables_to_process()
-    {
-        $this->tables_to_process = [];
-
-        $db_name = $this->db->query("SELECT DATABASE()")->fetchColumn();
-
-        $stmt = $this->db->prepare(
-            "SELECT TABLE_NAME
-             FROM INFORMATION_SCHEMA.TABLES
-             WHERE TABLE_SCHEMA = ?
-               AND TABLE_TYPE = 'BASE TABLE'
-             ORDER BY TABLE_NAME"
-        );
-        $stmt->execute([$db_name]);
-
-        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $this->tables_to_process[] = $row["TABLE_NAME"];
-        }
+        return $has_table;
     }
 
     /**
@@ -897,76 +454,27 @@ class MySQLDumpProducer
      */
     public function get_reentrancy_cursor()
     {
-        $encoded_last_pk_values = $this->encode_database_values_for_cursor($this->last_pk_values);
-        $encoded_current_row = $this->encode_database_values_for_cursor($this->current_row);
-        $encoded_oversized_queue = $this->encode_oversized_queue_for_cursor($this->oversized_queue);
-        $encoded_oversized_pk_values = $this->encode_database_values_for_cursor($this->oversized_pk_values);
+        $cursor_data = $this->row_reader->get_cursor_state();
+        $cursor_data["state"] = $this->state;
+        $cursor_data["rows_in_batch"] = $this->rows_in_batch;
+        /**
+         * Tracking for rows that are larger than max_allowed_packet or
+         * max_statement_size.
+         */
+        $cursor_data["oversized_queue"] = $this->encode_oversized_queue_for_cursor($this->oversized_queue);
+        $cursor_data["oversized_pk_values"] = $this->row_reader->encode_database_values_for_cursor(
+            $this->oversized_pk_values
+        );
+        $cursor_data["state_after_oversized"] = $this->state_after_oversized;
+        $cursor_data["current_statement_size"] = $this->current_statement_size;
 
-        $json = json_encode([
-            "current_table" => $this->current_table,
-            "current_pk_columns" => $this->current_pk_columns,
-            "last_pk_values" => $encoded_last_pk_values,
-            "current_offset" => $this->current_offset,
-            "state" => $this->state,
-            "current_row" => $encoded_current_row,
-            "rows_in_batch" => $this->rows_in_batch,
-            "current_column_names" => $this->current_column_names,
-            /**
-             * Tracking for rows that are larger than max_allowed_packet or
-             * max_statement_size.
-             */
-            "oversized_queue" => $encoded_oversized_queue,
-            "oversized_pk_values" => $encoded_oversized_pk_values,
-            "state_after_oversized" => $this->state_after_oversized,
-            "current_statement_size" => $this->current_statement_size,
-        ]);
+        $json = json_encode($cursor_data);
         if ($json === false) {
             throw new \RuntimeException(
                 "Failed to encode reentrancy cursor: " . json_last_error_msg()
             );
         }
         return $json;
-    }
-
-    /**
-     * Wraps every string in a row or primary key checkpoint in
-     * {"__binary__": base64} for JSON safety. JSON is UTF-8-encoded and cannot
-     * express arbitrary database bytes. The "__binary__" marker identifies
-     * strings to decode when restoring the cursor.
-     */
-    private function encode_database_values_for_cursor($values)
-    {
-        if ($values === null) {
-            return null;
-        }
-
-        $encoded = [];
-        foreach ($values as $column_name => $value) {
-            if ($value !== null && is_string($value)) {
-                $encoded[$column_name] = ['__binary__' => base64_encode($value)];
-            } else {
-                $encoded[$column_name] = $value;
-            }
-        }
-        return $encoded;
-    }
-
-    /** Reverses encode_database_values_for_cursor(). */
-    private function decode_database_values_from_cursor($values)
-    {
-        if ($values === null) {
-            return null;
-        }
-
-        $decoded = [];
-        foreach ($values as $column_name => $value) {
-            if (is_array($value) && isset($value['__binary__'])) {
-                $decoded[$column_name] = base64_decode($value['__binary__']);
-            } else {
-                $decoded[$column_name] = $value;
-            }
-        }
-        return $decoded;
     }
 
     /** Base64-encodes all chunk payloads in the oversized queue for JSON safety. */
@@ -1025,27 +533,7 @@ class MySQLDumpProducer
             );
         }
         if (is_array($cursor_data)) {
-            $this->current_table = $cursor_data["current_table"] ?? null;
-            if ($this->current_table !== null && !is_string($this->current_table)) {
-                throw new \InvalidArgumentException(
-                    "Invalid cursor: current_table must be string or null, got " . gettype($this->current_table)
-                );
-            }
-            $this->current_pk_columns =
-                $cursor_data["current_pk_columns"] ?? null;
-            $this->last_pk_values = $this->decode_database_values_from_cursor(
-                $cursor_data["last_pk_values"] ?? null
-            );
-            $this->current_offset = $cursor_data["current_offset"] ?? 0;
-            if (!is_int($this->current_offset) && !is_float($this->current_offset)) {
-                throw new \InvalidArgumentException(
-                    "Invalid cursor: current_offset must be numeric, got " . gettype($this->current_offset)
-                );
-            }
-            $this->current_offset = (int) $this->current_offset;
             $this->state = $cursor_data["state"] ?? self::STATE_INIT;
-            $encoded_row = $cursor_data["current_row"] ?? null;
-            $this->current_row = $this->decode_database_values_from_cursor($encoded_row);
             $this->rows_in_batch = $cursor_data["rows_in_batch"] ?? 0;
             if (!is_int($this->rows_in_batch) && !is_float($this->rows_in_batch)) {
                 throw new \InvalidArgumentException(
@@ -1053,90 +541,19 @@ class MySQLDumpProducer
                 );
             }
             $this->rows_in_batch = (int) $this->rows_in_batch;
-            $this->current_column_names =
-                $cursor_data["current_column_names"] ?? null;
 
             $encoded_queue = $cursor_data["oversized_queue"] ?? [];
             $this->oversized_queue = $this->decode_oversized_queue_from_cursor($encoded_queue);
-            $this->oversized_pk_values = $this->decode_database_values_from_cursor(
+            $this->oversized_pk_values = $this->row_reader->decode_database_values_from_cursor(
                 $cursor_data["oversized_pk_values"] ?? null
             );
             $this->state_after_oversized = $cursor_data["state_after_oversized"] ?? null;
-
             $this->current_statement_size = $cursor_data["current_statement_size"] ?? 0;
 
-            if ($this->tables_to_process === null) {
-                $this->initialize_tables_to_process();
-
-                if ($this->current_table) {
-                    $found = false;
-                    reset($this->tables_to_process);
-                    while (
-                        ($table = current($this->tables_to_process)) !== false
-                    ) {
-                        if ($table === $this->current_table) {
-                            $found = true;
-                            break;
-                        }
-                        next($this->tables_to_process);
-                    }
-                    // Table was dropped between requests — advance to next
-                    if (!$found) {
-                        $this->current_table = null;
-                        $this->state = self::STATE_INIT;
-                    }
-                }
-            }
-
-            if ($this->current_table) {
-                $this->current_column_types = $this->get_column_types(
-                    $this->current_table
-                );
-                if (empty($this->current_column_types)) {
-                    throw new \RuntimeException(
-                        "Table " . $this->quote_identifier($this->current_table) . " was dropped between export requests " .
-                        "(no columns found in INFORMATION_SCHEMA)"
-                    );
-                }
+            if (!$this->row_reader->restore_cursor_state($cursor_data)) {
+                $this->state = self::STATE_INIT;
             }
         }
-    }
-
-    /** Returns cached INFORMATION_SCHEMA column metadata for a table. */
-    private function get_column_types($table_name)
-    {
-        if (isset($this->column_type_cache[$table_name])) {
-            return $this->column_type_cache[$table_name];
-        }
-
-        try {
-            $database_name = $this->db->query("SELECT DATABASE()")->fetchColumn();
-
-            $stmt = $this->db->prepare(
-                'SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE
-                 FROM INFORMATION_SCHEMA.COLUMNS
-                 WHERE TABLE_SCHEMA = ?
-                   AND TABLE_NAME = ?
-                 ORDER BY ORDINAL_POSITION'
-            );
-            $stmt->execute([$database_name, $table_name]);
-        } catch (\PDOException $e) {
-            throw new \RuntimeException(
-                "Failed to get column types for " . $this->quote_identifier($table_name) . ": " . $e->getMessage()
-            );
-        }
-
-        $columns = [];
-        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $columns[$row["COLUMN_NAME"]] = [
-                "data_type" => $row["DATA_TYPE"],
-                "column_type" => $row["COLUMN_TYPE"],
-            ];
-        }
-
-        $this->column_type_cache[$table_name] = $columns;
-
-        return $columns;
     }
 
     /**
@@ -1157,7 +574,7 @@ class MySQLDumpProducer
             return "NULL";
         }
 
-        if ($this->is_numeric_type($data_type)) {
+        if ($this->row_reader->is_numeric_type($data_type)) {
             return (string) $value;
         }
 
@@ -1188,7 +605,7 @@ class MySQLDumpProducer
             return 4; // NULL
         }
 
-        if ($this->is_numeric_type($data_type)) {
+        if ($this->row_reader->is_numeric_type($data_type)) {
             return strlen((string) $value);
         }
 
@@ -1201,79 +618,6 @@ class MySQLDumpProducer
         $estimated_base64_length = 4 * intdiv($len + 2, 3);
         // FROM_BASE64('<data>') => 15 bytes overhead + base64 length
         return 15 + $estimated_base64_length;
-    }
-
-    /** Numeric types are emitted as bare literals (no quoting, no base64). */
-    private function is_numeric_type($data_type)
-    {
-        $data_type = strtoupper($data_type);
-        $numeric_types = [
-            "TINYINT",
-            "SMALLINT",
-            "MEDIUMINT",
-            "INTEGER",
-            "INT",
-            "BIGINT",
-            "DECIMAL",
-            "NUMERIC",
-            "FLOAT",
-            "DOUBLE",
-            "REAL",
-            "BIT",
-            "YEAR",
-        ];
-
-        foreach ($numeric_types as $type) {
-            if (strpos($data_type, $type) === 0) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Binary columns are not CAST to BINARY in the SELECT (they already are),
-     * but they follow the same base64 encoding path as strings.
-     */
-    private function is_binary_type($data_type)
-    {
-        $data_type = strtoupper($data_type);
-        $binary_types = [
-            "BINARY",
-            "VARBINARY",
-            "TINYBLOB",
-            "BLOB",
-            "MEDIUMBLOB",
-            "LONGBLOB",
-        ];
-
-        foreach ($binary_types as $type) {
-            if (strpos($data_type, $type) === 0) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /** Returns the DATA_TYPE string for a column, or throws if unknown. */
-    private function get_data_type(string $col): string
-    {
-        if (!isset($this->current_column_types[$col]["data_type"])) {
-            throw new \RuntimeException(
-                "No column type info for '{$col}' in table " .
-                $this->quote_identifier($this->current_table) .
-                ". This is a bug — INFORMATION_SCHEMA should have returned it."
-            );
-        }
-        return $this->current_column_types[$col]["data_type"];
-    }
-
-    /** Escapes backticks by doubling them: tricky`table → `tricky``table`. */
-    private function quote_identifier($identifier)
-    {
-        return '`' . str_replace('`', '``', $identifier) . '`';
     }
 
     /** Auto-detects max_allowed_packet and uses 80% of it. Falls back to 1MB. */
@@ -1310,10 +654,10 @@ class MySQLDumpProducer
         $estimated_sizes = [];
         $raw_values = [];
 
-        foreach ($this->current_column_names as $col) {
+        foreach ($this->row_reader->get_current_column_names() as $col) {
             $value = $row[$col] ?? null;
             $raw_values[$col] = $value;
-            $data_type = $this->get_data_type($col);
+            $data_type = $this->row_reader->get_data_type($col);
             $estimated_sizes[$col] = $this->estimate_formatted_size($value, $data_type);
         }
 
@@ -1323,8 +667,8 @@ class MySQLDumpProducer
 
         if ($projected_size <= $this->max_statement_size) {
             $formatted_values = [];
-            foreach ($this->current_column_names as $col) {
-                $data_type = $this->get_data_type($col);
+            foreach ($this->row_reader->get_current_column_names() as $col) {
+                $data_type = $this->row_reader->get_data_type($col);
                 $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
             }
             return "(" . implode(",", array_values($formatted_values)) . ")";
@@ -1333,9 +677,9 @@ class MySQLDumpProducer
         // The rest of this method deals with rows that are too large to fit into a single INSERT on
         // the receiving end.
 
-        if (!$this->current_pk_columns || count($this->current_pk_columns) === 0) {
+        if (!$this->row_reader->get_current_primary_key_columns() || count($this->row_reader->get_current_primary_key_columns()) === 0) {
             throw new \RuntimeException(
-                "Row in table " . $this->quote_identifier($this->current_table) .
+                "Row in table " . $this->row_reader->quote_identifier($this->row_reader->get_current_table()) .
                 " exceeds max_statement_size ({$this->max_statement_size} bytes)" .
                 " but the table has no primary key, so the oversized row" .
                 " cannot be split into UPDATE ... CONCAT() chunks."
@@ -1343,11 +687,11 @@ class MySQLDumpProducer
         }
 
         $this->oversized_pk_values = [];
-        foreach ($this->current_pk_columns as $pk_col) {
+        foreach ($this->row_reader->get_current_primary_key_columns() as $pk_col) {
             if (!array_key_exists($pk_col, $row)) {
                 throw new \RuntimeException(
                     "Primary key column '{$pk_col}' missing from row for table " .
-                    $this->quote_identifier($this->current_table)
+                    $this->row_reader->quote_identifier($this->row_reader->get_current_table())
                 );
             }
             $this->oversized_pk_values[$pk_col] = $row[$pk_col];
@@ -1363,7 +707,7 @@ class MySQLDumpProducer
         $excess = $projected_size - $this->max_statement_size;
 
         foreach ($sorted_sizes as $col => $size) {
-            if (in_array($col, $this->current_pk_columns)) {
+            if (in_array($col, $this->row_reader->get_current_primary_key_columns())) {
                 continue;
             }
 
@@ -1380,7 +724,7 @@ class MySQLDumpProducer
                 continue;
             }
 
-            $data_type = $this->get_data_type($col);
+            $data_type = $this->row_reader->get_data_type($col);
             $value_length = strlen($raw_value);
             $chunk_size = $this->compute_chunk_size($col);
 
@@ -1402,12 +746,12 @@ class MySQLDumpProducer
         }
 
         $formatted_values = [];
-        foreach ($this->current_column_names as $col) {
+        foreach ($this->row_reader->get_current_column_names() as $col) {
             if (isset($chunked_columns[$col])) {
                 $formatted_values[$col] = "''";
                 continue;
             }
-            $data_type = $this->get_data_type($col);
+            $data_type = $this->row_reader->get_data_type($col);
             $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
         }
 
@@ -1421,8 +765,8 @@ class MySQLDumpProducer
      */
     private function compute_chunk_size($column)
     {
-        $quoted_table = $this->quote_identifier($this->current_table);
-        $quoted_column = $this->quote_identifier($column);
+        $quoted_table = $this->row_reader->quote_identifier($this->row_reader->get_current_table());
+        $quoted_column = $this->row_reader->quote_identifier($column);
         $update_overhead = strlen("UPDATE {$quoted_table} SET {$quoted_column} = CONCAT({$quoted_column}, ) WHERE ;");
         $where_clause_size = $this->estimate_pk_where_size();
         $total_overhead = $update_overhead + $where_clause_size + 100; // Extra margin
@@ -1447,7 +791,7 @@ class MySQLDumpProducer
 
         $size = 0;
         foreach ($this->oversized_pk_values as $col => $value) {
-            $size += strlen($this->build_comparison($col, $value, "="));
+            $size += strlen($this->row_reader->build_comparison($col, $value, "="));
             $size += 5; // AND
         }
 
@@ -1472,7 +816,7 @@ class MySQLDumpProducer
                 throw new \RuntimeException(
                     "State machine bug: state_after_oversized is null when " .
                     "exiting oversized update loop for table " .
-                    $this->quote_identifier($this->current_table)
+                    $this->row_reader->quote_identifier($this->row_reader->get_current_table())
                 );
             }
             $this->state = $this->state_after_oversized;
@@ -1501,12 +845,12 @@ class MySQLDumpProducer
 
         $where_parts = [];
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
-            $where_parts[] = $this->build_comparison($pk_col, $pk_value, "=");
+            $where_parts[] = $this->row_reader->build_comparison($pk_col, $pk_value, "=");
         }
         $where_clause = implode(" AND ", $where_parts);
 
-        $quoted_table = $this->quote_identifier($this->current_table);
-        $quoted_column = $this->quote_identifier($column);
+        $quoted_table = $this->row_reader->quote_identifier($this->row_reader->get_current_table());
+        $quoted_column = $this->row_reader->quote_identifier($column);
         $sql = "UPDATE {$quoted_table} SET {$quoted_column} = CONCAT({$quoted_column}, {$formatted_chunk}) WHERE {$where_clause};";
 
         $this->current_sql_fragment = $sql;
@@ -1528,12 +872,12 @@ class MySQLDumpProducer
      */
     private function fetch_value_substring_from_the_current_oversized_row(string $column, int $start, int $length): string
     {
-        $quoted_table = $this->quote_identifier($this->current_table);
-        $quoted_column = $this->quote_identifier($column);
+        $quoted_table = $this->row_reader->quote_identifier($this->row_reader->get_current_table());
+        $quoted_column = $this->row_reader->quote_identifier($column);
 
         $where_parts = [];
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
-            $where_parts[] = $this->build_comparison($pk_col, $pk_value, "=");
+            $where_parts[] = $this->row_reader->build_comparison($pk_col, $pk_value, "=");
         }
         $where_clause = implode(" AND ", $where_parts);
 
