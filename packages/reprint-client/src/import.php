@@ -2253,13 +2253,6 @@ class ImportClient
                         "FILE DELETE | {$tables_file} | abort db-pull",
                     );
                 }
-                $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
-                if (file_exists($domains_file)) {
-                    unlink($domains_file);
-                    $this->audit_log(
-                        "FILE DELETE | {$domains_file} | abort db-pull",
-                    );
-                }
                 break;
 
             case "db-index":
@@ -3907,19 +3900,9 @@ class ImportClient
      */
     private function run_db_domains(): void
     {
-        $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
         $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
 
-        if (file_exists($domains_file)) {
-            // Fast path: domains were already discovered during db-pull
-            $domains = json_decode(file_get_contents($domains_file), true);
-            if (!is_array($domains)) {
-                throw new RuntimeException(
-                    "Failed to parse {$domains_file}",
-                );
-            }
-        } elseif (file_exists($sql_file)) {
-            // Scan db.sql for domains using the same pipeline as db-pull
+        if (file_exists($sql_file)) {
             $query_stream = new \WP_MySQL_Naive_Query_Stream();
             $domain_collector = new \DomainCollector();
 
@@ -3952,15 +3935,9 @@ class ImportClient
             }
 
             $domains = $domain_collector->get_domains();
-
-            // Save for future calls
-            file_put_contents(
-                $domains_file,
-                json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-            );
         } else {
             throw new RuntimeException(
-                "No domain data found. Run db-pull first, or place a db.sql file in {$this->state_dir}.",
+                "db.sql not found in {$this->state_dir}. Run db-pull first.",
             );
         }
 
@@ -5663,33 +5640,6 @@ class ImportClient
         if (!empty($options["rewrite_url"])) {
             foreach ($options["rewrite_url"] as [$source_url, $target_url]) {
                 $url_mapping[$source_url] = $target_url;
-            }
-        }
-
-        // Show discovered domains if available
-        $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
-        if (file_exists($domains_file)) {
-            $domains = json_decode(file_get_contents($domains_file), true);
-            if (is_array($domains) && !empty($domains)) {
-                $this->audit_log(
-                    sprintf("DISCOVERED DOMAINS | %s", implode(", ", $domains)),
-                    false,
-                );
-                $this->progress->show_lifecycle_line("Discovered domains in SQL dump:\n");
-                foreach ($domains as $domain) {
-                    $mapped = isset($url_mapping[$domain]) ? " => {$url_mapping[$domain]}" : " (not mapped)";
-                    $this->progress->show_lifecycle_line("  {$domain}{$mapped}\n");
-                }
-                $this->progress->show_lifecycle_line("\n");
-                $domain_map = [];
-                foreach ($domains as $domain) {
-                    $domain_map[$domain] = $url_mapping[$domain] ?? null;
-                }
-                $this->output_progress([
-                    "type" => "domains_discovered",
-                    "domains" => $domain_map,
-                    "message" => "Discovered " . count($domains) . " domain(s) in SQL dump",
-                ], true);
             }
         }
 
@@ -7672,38 +7622,12 @@ class ImportClient
             }
         }
 
-        // Domain discovery and statement counting: scan SQL for URLs during download
+        // Count SQL statements during download for db-apply progress reporting.
         $query_stream = class_exists('WP_MySQL_Naive_Query_Stream')
             ? new \WP_MySQL_Naive_Query_Stream()
             : null;
-        $domain_collector = class_exists('DomainCollector')
-            ? new \DomainCollector()
-            : null;
-        $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
         $sql_stats_file = wp_join_unix_paths($this->pull_state_directory, "sql-stats.json");
         $sql_statements_counted = (int) ($this->get_state()->sql_statements_counted ?? 0);
-
-        // Auto-detect the remote site domain from the export URL so it
-        // always appears in pull/domains.json even if the SQL dump
-        // hasn't been fully scanned yet.
-        if ($domain_collector) {
-            $parsed_url = parse_url($this->remote_reprint_api_url);
-            if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
-                $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
-                if (!empty($parsed_url['port'])) {
-                    $source_origin .= ':' . $parsed_url['port'];
-                }
-                $domain_collector->merge([$source_origin]);
-            }
-        }
-
-        // Load previously discovered domains (from earlier partial downloads)
-        if ($domain_collector && file_exists($domains_file)) {
-            $prev = json_decode(file_get_contents($domains_file), true);
-            if (is_array($prev)) {
-                $domain_collector->merge($prev);
-            }
-        }
 
         // Log current progress at start of request
         $has_cursor = $cursor !== null;
@@ -7738,8 +7662,6 @@ class ImportClient
                     &$sql_bytes_written,
                     $context,
                     $query_stream,
-                    $domain_collector,
-                    $domains_file,
                     &$sql_statements_counted,
                     &$chunks_since_save
                 ) {
@@ -7791,20 +7713,6 @@ class ImportClient
                         $this->get_state()->sql_statements_counted = $sql_statements_counted;
                         $this->save_state();
                         $chunks_since_save = 0;
-
-                        // Also persist discovered domains so they survive crashes.
-                        // On resume, the SQL download picks up from the cursor,
-                        // skipping already-downloaded data — so domains from that
-                        // earlier data would be lost without periodic saves.
-                        if ($domain_collector) {
-                            $domains = $domain_collector->get_domains();
-                            if (!empty($domains)) {
-                                file_put_contents(
-                                    $domains_file,
-                                    json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-                                );
-                            }
-                        }
                     }
 
                     if ($chunk_type === "sql") {
@@ -7858,12 +7766,10 @@ class ImportClient
                                 break;
                         }
 
-                        // Feed data to query stream for domain discovery and statement counting
-                        if ($query_stream && $domain_collector) {
+                        if ($query_stream) {
                             $query_stream->append_sql($data);
-                            $this->drain_query_stream_for_domains(
+                            $this->count_complete_queries(
                                 $query_stream,
-                                $domain_collector,
                                 $sql_statements_counted,
                             );
                         }
@@ -7968,30 +7874,13 @@ class ImportClient
                 $this->save_state();
             }
 
-            // Drain any remaining statements after download completes
-            if ($query_stream && $domain_collector) {
+            // Count any statement completed by the end of the download.
+            if ($query_stream) {
                 $query_stream->mark_input_complete();
-                $this->drain_query_stream_for_domains(
+                $this->count_complete_queries(
                     $query_stream,
-                    $domain_collector,
                     $sql_statements_counted,
                 );
-
-                // Save discovered domains
-                $domains = $domain_collector->get_domains();
-                if (!empty($domains)) {
-                    file_put_contents(
-                        $domains_file,
-                        json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-                    );
-                    $this->audit_log(
-                        sprintf(
-                            "DOMAINS DISCOVERED | %d unique domains saved to pull/domains.json",
-                            count($domains),
-                        ),
-                        false,
-                    );
-                }
 
                 // Save statement count for db-apply progress reporting
                 if ($sql_statements_counted > 0) {
@@ -8056,6 +7945,16 @@ class ImportClient
         }
     }
 
+    /** Count complete SQL queries waiting in the stream. */
+    private function count_complete_queries(
+        \WP_MySQL_Naive_Query_Stream $query_stream,
+        int &$sql_statements_counted
+    ): void {
+        while ($query_stream->next_query()) {
+            $sql_statements_counted++;
+        }
+    }
+
     /** Executes SQL and consumes every result before the next query. */
     private function execute_mysql_queries(\mysqli $connection, string $sql): void
     {
@@ -8088,14 +7987,10 @@ class ImportClient
      */
     private function drain_query_stream_for_domains(
         \WP_MySQL_Naive_Query_Stream $query_stream,
-        \DomainCollector $domain_collector,
-        ?int &$statements_counted = null
+        \DomainCollector $domain_collector
     ) {
         while ($query_stream->next_query()) {
             $query = $query_stream->get_query();
-            if ($statements_counted !== null) {
-                $statements_counted++;
-            }
             // Only scan INSERT statements (they contain data values).
             if (!self::sql_starts_with_token($query, \WP_MySQL_Lexer::INSERT_SYMBOL)) {
                 continue;
@@ -12587,8 +12482,7 @@ if (
             "description" =>
                 "Indexes remote tables, then streams the full SQL dump into\n" .
                 "--state-dir/db.sql (default), to stdout, or directly into a\n" .
-                "MySQL connection. Resumes from the last cursor if interrupted.\n" .
-                "Discovered domains are cached for later use by db-apply.\n",
+                "MySQL connection. Resumes from the last cursor if interrupted.\n",
             "extra" =>
                 "Output modes:\n" .
                 "  file    Write to --state-dir/db.sql (default)\n" .
@@ -12612,9 +12506,7 @@ if (
             "description" =>
                 "Prints domains found in the SQL dump, one per line.\n" .
                 "\n" .
-                "If <remote-state-directory>/pull/domains.json exists (cached by db-pull), it is read\n" .
-                "directly. Otherwise, db.sql is scanned and the result is cached\n" .
-                "for future calls. No network calls.\n" .
+                "Scans db.sql without making network calls.\n" .
                 "\n" .
                 "Example:\n" .
                 "  reprint db-domains https://example.com --state-dir=/path/to/state\n",

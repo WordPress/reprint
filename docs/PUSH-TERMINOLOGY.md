@@ -192,7 +192,6 @@ their parent directories.
         │   ├── remote-index.next.jsonl
         │   ├── fetch-list.jsonl
         │   ├── volatile-files.json
-        │   ├── domains.json
         │   ├── sql-stats.json
         │   └── sql-buffer
         └── push/
@@ -212,7 +211,6 @@ Use these path names:
 | Next remote index file | `$next_remote_index_file` |
 | Fetch list file | `$fetch_list_file` |
 | Volatile files file | `$volatile_files_file` |
-| Domains file | `$domains_file` |
 | SQL statistics file | `$sql_stats_file` |
 | SQL buffer file | `$sql_buffer_file` |
 | Audit log file | `$audit_log_file` |
