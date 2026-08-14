@@ -130,6 +130,117 @@ final class CreateDbConnectionTest extends TestCase {
         );
     }
 
+    public function testRefusedDirectConnectionFallsBackToWordPressDatabaseHandle(): void
+    {
+        if (!extension_loaded('pdo_mysql')) {
+            $this->markTestSkipped('pdo_mysql extension required');
+        }
+
+        $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
+        $export_path = realpath(__DIR__ . '/../packages/reprint-server/src/export.php');
+        $this->assertIsString($autoload_path);
+        $this->assertIsString($export_path);
+        $connection_script = <<<'PHP'
+        class WpdbFallbackTestDouble {
+            public $last_error = '';
+            public $queries = [];
+            public function suppress_errors($suppress = true) {
+            }
+            public function hide_errors() {
+            }
+            public function get_results($query, $output) {
+                $this->queries[] = $query;
+                return [];
+            }
+        }
+        require $argv[1];
+        require $argv[2];
+        $wpdb = new WpdbFallbackTestDouble();
+        $GLOBALS['wpdb'] = $wpdb;
+        $connection = create_db_connection(
+            [
+                'db_engine' => 'mysql',
+                'db_host' => '127.0.0.1:1',
+                'db_name' => 'unused',
+                'db_user' => 'unused',
+                'db_password' => 'unused',
+            ],
+            [PDO::ATTR_TIMEOUT => 1]
+        );
+        fwrite(STDOUT, json_encode([
+            'class' => get_class($connection),
+            'queries' => $wpdb->queries,
+        ]));
+        PHP;
+
+        $result = $this->runPhpProcess([
+            PHP_BINARY,
+            '-r',
+            $connection_script,
+            $autoload_path,
+            $export_path,
+        ]);
+        $this->assertSame(
+            0,
+            $result['status'],
+            $result['stderr'] . $result['stdout']
+        );
+        $this->assertSame(
+            [
+                'class' => 'WpdbDriverPDO',
+                'queries' => ['SET NAMES utf8mb4 COLLATE utf8mb4_bin'],
+            ],
+            json_decode($result['stdout'], true)
+        );
+    }
+
+    public function testRefusedDirectConnectionReportsTheDriverFailureWithoutWordPress(): void
+    {
+        if (!extension_loaded('pdo_mysql')) {
+            $this->markTestSkipped('pdo_mysql extension required');
+        }
+
+        $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
+        $export_path = realpath(__DIR__ . '/../packages/reprint-server/src/export.php');
+        $this->assertIsString($autoload_path);
+        $this->assertIsString($export_path);
+        $connection_script = <<<'PHP'
+        require $argv[1];
+        require $argv[2];
+        try {
+            create_db_connection(
+                [
+                    'db_engine' => 'mysql',
+                    'db_host' => '127.0.0.1:1',
+                    'db_name' => 'unused',
+                    'db_user' => 'unused',
+                    'db_password' => 'unused',
+                ],
+                [PDO::ATTR_TIMEOUT => 1]
+            );
+            fwrite(STDERR, "The connection unexpectedly completed.\n");
+            exit(2);
+        } catch (PDOException $exception) {
+            fwrite(STDOUT, $exception->getMessage());
+        }
+        PHP;
+
+        $result = $this->runPhpProcess([
+            PHP_BINARY,
+            '-r',
+            $connection_script,
+            $autoload_path,
+            $export_path,
+        ]);
+        $this->assertSame(
+            0,
+            $result['status'],
+            $result['stderr'] . $result['stdout']
+        );
+        $this->assertStringContainsString('SQLSTATE', $result['stdout']);
+        $this->assertStringNotContainsString('wpdb', $result['stdout']);
+    }
+
     public function testSqliteDatabaseIntegrationThreeDriverSupportsPreparedQueries(): void
     {
         if (!extension_loaded('pdo_sqlite')) {

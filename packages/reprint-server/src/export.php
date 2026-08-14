@@ -264,15 +264,18 @@ function is_sqlite_site(): bool
 /**
  * Creates a database connection appropriate for the detected backend.
  *
- * For MySQL sites, returns a standard PDO connection.
+ * For MySQL sites, returns a standard PDO connection, falling back to the
+ * wpdb adapter when that connection fails and WordPress is loaded.
  * For SQLite sites, wraps the MySQL-on-SQLite driver which WordPress already
  * loaded in a PDO-compatible adapter. The driver's translator converts every
  * MySQL query to SQLite on the fly, so MySQLDumpProducer sees MySQL-shaped
  * results and produces valid MySQL SQL output.
  *
  * @param array $creds   Credentials from resolve_db_credentials().
- * @param array $options PDO options (only used for MySQL connections).
- * @return PDO A real PDO for MySQL, or a PDO-compatible adapter for SQLite.
+ * @param array $options PDO options. Reach the real PDO connection only; the
+ *                       wpdb adapter has no handle to set them on.
+ * @return PDO A real PDO for MySQL, or a PDO-compatible adapter for SQLite
+ *             and for MySQL hosts reached through wpdb.
  */
 function create_db_connection(array $creds, array $options = [])
 {
@@ -292,12 +295,22 @@ function create_db_connection(array $creds, array $options = [])
         ];
         $merged_options = $options + $default_options;
 
-        $mysql = new PDO(
-            build_pdo_dsn($creds['db_host'], $creds['db_name']),
-            $creds["db_user"],
-            $creds["db_password"],
-            $merged_options
-        );
+        try {
+            $mysql = new PDO(
+                build_pdo_dsn($creds['db_host'], $creds['db_name']),
+                $creds["db_user"],
+                $creds["db_password"],
+                $merged_options
+            );
+        } catch (PDOException $connection_error) {
+            global $wpdb;
+            if (!isset($wpdb) || !is_object($wpdb)) {
+                throw $connection_error;
+            }
+
+            // Fallback to using wpdb if we failed to connect directly to the database.
+            $mysql = create_wpdb_pdo_adapter();
+        }
     }
 
     // SET NAMES normalizes the client, connection, and result charsets plus
