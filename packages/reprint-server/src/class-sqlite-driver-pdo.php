@@ -165,9 +165,9 @@ class SqliteDriverPDOStatement
         $result = $this->driver->query($sql);
         $supply_table_types = false;
         if ($result === false && strcasecmp(trim($sql), 'SHOW FULL TABLES') === 0) {
-            // The version 2 driver supports SHOW TABLES but not SHOW FULL TABLES.
-            // Its SHOW TABLES implementation reads only SQLite tables, not views.
-            $result = $this->driver->query('SHOW TABLES');
+            // The version 2 driver cannot parse SHOW FULL TABLES. Its public
+            // SHOW TABLE STATUS path already removes SQLite system tables.
+            $result = $this->driver->query('SHOW TABLE STATUS');
             $supply_table_types = true;
         }
         if ($result instanceof PDOStatement) {
@@ -184,7 +184,10 @@ class SqliteDriverPDOStatement
                 $this->rows[$i] = (array) $row;
             }
             if ($supply_table_types) {
-                $this->rows[$i]['Table_type'] = 'BASE TABLE';
+                $this->rows[$i] = [
+                    'Name' => $this->rows[$i]['Name'],
+                    'Table_type' => 'BASE TABLE',
+                ];
             }
         }
 
