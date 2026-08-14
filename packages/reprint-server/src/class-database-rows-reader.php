@@ -476,9 +476,10 @@ class DatabaseRowsReader {
     /** Returns primary key column names in ordinal order, or an empty array. */
     private function get_primary_key_columns($table)
     {
+        $primary_key_columns = [];
         $columns_by_position = [];
-        $query = "SHOW INDEX FROM " . $this->quote_identifier($table) .
-            " WHERE Key_name = 'PRIMARY'";
+        $has_usable_positions = true;
+        $query = "SHOW INDEX FROM " . $this->quote_identifier($table);
         try {
             $statement = $this->db->query($query);
         } catch (\PDOException $e) {
@@ -488,8 +489,31 @@ class DatabaseRowsReader {
         }
         $row = $statement->fetch(PDO::FETCH_ASSOC);
         while ($row !== false) {
-            $columns_by_position[$row["Seq_in_index"]] = $row["Column_name"];
+            if (!isset($row["Key_name"]) || strcasecmp($row["Key_name"], "PRIMARY") !== 0) {
+                $row = $statement->fetch(PDO::FETCH_ASSOC);
+                continue;
+            }
+
+            $column = $row["Column_name"];
+            $primary_key_columns[] = $column;
+            $position = $row["Seq_in_index"] ?? null;
+            if (is_string($position) && ctype_digit($position)) {
+                $position = intval($position);
+            }
+            if (
+                !is_int($position) ||
+                $position < 1 ||
+                isset($columns_by_position[$position])
+            ) {
+                $has_usable_positions = false;
+            } else {
+                $columns_by_position[$position] = $column;
+            }
             $row = $statement->fetch(PDO::FETCH_ASSOC);
+        }
+
+        if (!$has_usable_positions) {
+            return $primary_key_columns;
         }
         ksort($columns_by_position, SORT_NUMERIC);
         return array_values($columns_by_position);

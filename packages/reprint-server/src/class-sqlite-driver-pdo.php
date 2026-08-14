@@ -9,10 +9,9 @@
  * driver does not implement so the dump producer can use either supported
  * plugin version without knowing it is talking to SQLite.
  *
- * Every MySQL query goes through the driver's AST-based translator, which
- * converts it to SQLite on the fly. The result is transparent: the dump
- * producer sends MySQL queries, gets rows back, and produces valid MySQL
- * SQL output.
+ * Every MySQL query goes through the active driver's translator, which converts
+ * it to SQLite on the fly. The result is transparent: the dump producer sends
+ * MySQL queries, gets rows back, and produces valid MySQL SQL output.
  */
 
 /**
@@ -164,6 +163,13 @@ class SqliteDriverPDOStatement
         }
 
         $result = $this->driver->query($sql);
+        $supply_table_types = false;
+        if ($result === false && strcasecmp(trim($sql), 'SHOW FULL TABLES') === 0) {
+            // The version 2 driver supports SHOW TABLES but not SHOW FULL TABLES.
+            // Its SHOW TABLES implementation reads only SQLite tables, not views.
+            $result = $this->driver->query('SHOW TABLES');
+            $supply_table_types = true;
+        }
         if ($result instanceof PDOStatement) {
             $this->rows = $result->fetchAll(PDO::FETCH_ASSOC);
         } else {
@@ -176,6 +182,9 @@ class SqliteDriverPDOStatement
         foreach ($this->rows as $i => $row) {
             if (is_object($row)) {
                 $this->rows[$i] = (array) $row;
+            }
+            if ($supply_table_types) {
+                $this->rows[$i]['Table_type'] = 'BASE TABLE';
             }
         }
 
