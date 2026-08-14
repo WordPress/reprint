@@ -200,6 +200,91 @@ class Pull
     }
 
     /**
+     * Refuse to let one command overwrite another command's resume state.
+     *
+     * @param array $options {
+     *     Options which determine the pull pipeline's stage sequence.
+     *
+     *     @type string $target_db          Target database DSN.
+     *     @type string $target_engine      Target database engine.
+     *     @type string $target_sqlite_path Target SQLite path.
+     *     @type string $target_user        Target database user.
+     *     @type string $flatten_to         Flattened document-root path.
+     *     @type string $runtime            Runtime to generate.
+     *     @type string $start_runtime      Runtime to start.
+     * }
+     */
+    public function assert_command_owns_resume_state(string $command, array $options): void
+    {
+        switch ($command) {
+            case 'pull':
+                $stages = $this->stages($options);
+                break;
+            case 'pull-files':
+                $stages = ['preflight', 'files-pull'];
+                break;
+            case 'pull-db':
+                $stages = ['preflight', 'db-pull', 'db-apply'];
+                break;
+            case 'files-pull':
+            case 'files-index':
+                $stages = [$command];
+                break;
+            default:
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI command name, never HTML.
+                throw new InvalidArgumentException("Unknown pull command: {$command}");
+        }
+
+        $state = $this->client->get_state();
+        $pull_pipeline = $state->pull_pipeline->started_by_command;
+        $saved_stage_sequence = $state->pull_pipeline->stage_sequence;
+        $pipeline_final_stage = $saved_stage_sequence[
+            count($saved_stage_sequence) - 1
+        ] ?? null;
+        $pipeline_is_complete =
+            $pipeline_final_stage !== null
+            && $state->pull_pipeline->last_completed_stage === $pipeline_final_stage;
+        $state_command = $state->active_resumable_command->command_name;
+        $state_status = $state->active_resumable_command->completion_state;
+        $pipeline_has_resume_state =
+            $pull_pipeline !== null
+            && !$pipeline_is_complete
+            && (
+                $saved_stage_sequence !== []
+                || $state->pull_pipeline->last_completed_stage !== null
+                || $state_command !== null
+                || $state_status !== null
+            );
+
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI command names are not HTML.
+        if ($pipeline_has_resume_state && $pull_pipeline !== $command) {
+            throw new RuntimeException(
+                "Another command is already in progress: {$pull_pipeline}. " .
+                "Rerun {$pull_pipeline} to resume it. Only use --abort if you want to discard " .
+                "that pipeline's resume state before running {$command}."
+            );
+        }
+
+        if (
+            $state_status !== null
+            && $state_status !== 'complete'
+            && in_array(
+                $state_command,
+                ['files-pull', 'files-index', 'db-pull', 'db-apply'],
+                true
+            )
+            && !in_array($state_command, $stages, true)
+        ) {
+            throw new RuntimeException(
+                "Another command is already in progress: {$state_command}. " .
+                "Rerun {$state_command} to resume it. Only use --abort if you want to discard " .
+                "that command's resume state before running {$command}."
+            );
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+    }
+
+    /**
      * Runs a named pull pipeline from the first unfinished stage.
      *
      * PullState::$pull_pipeline records orchestration progress: which
@@ -235,11 +320,20 @@ class Pull
             $pull_stage !== null &&
             $pipeline_final_stage !== null &&
             $pull_stage === $pipeline_final_stage;
+        $file_selection_checkpoint_saved = false;
 
         if ($completed_pipeline) {
-            $this->prepare_repull($command);
+            $this->prepare_repull(
+                $command,
+                $stages,
+                !empty($options['follow_symlinks']),
+                !empty($options['include_caches']),
+                $options['extra_directory'] ?? null
+            );
+            $file_selection_checkpoint_saved =
+                $command === 'pull' || $command === 'pull-files';
             $completed_stage = null;
-            $pull_pipeline = null;
+            $pull_pipeline = $command;
             $pull_stage = null;
             $state_command = null;
             $state_status = null;
@@ -253,28 +347,7 @@ class Pull
                 $state_status !== null
             );
 
-        if ($pipeline_has_resume_state && $pull_pipeline !== $command) {
-            throw new RuntimeException(
-                "Another command is already in progress: {$pull_pipeline}. " .
-                "Rerun {$pull_pipeline} to resume it. Only use --abort if you want to discard " .
-                "that pipeline's resume state before running {$command}."
-            );
-        }
-
         $has_direct_command_state = !$pipeline_has_resume_state && $state_status !== null;
-        if (
-            $has_direct_command_state &&
-            $state_status !== 'complete' &&
-            in_array($state_command, ['files-pull', 'db-pull', 'db-apply'], true) &&
-            !in_array($state_command, $stages, true)
-        ) {
-            throw new RuntimeException(
-                "Another command is already in progress: {$state_command}. " .
-                "Rerun {$state_command} to resume it. Only use --abort if you want to discard " .
-                "that command's resume state before running {$command}."
-            );
-        }
-
         if ($has_direct_command_state && $state_status === 'complete') {
             // Users can run lower-level commands directly, e.g.
             // `reprint files-pull` or `reprint db-pull`, without going through
@@ -332,6 +405,25 @@ class Pull
                     }
                 }
             }
+        }
+
+        if (
+            !$file_selection_checkpoint_saved
+            && in_array($command, ['pull', 'pull-files'], true)
+        ) {
+            // Save the file-index selection before preflight starts. A process
+            // may stop after that request but before its stage checkpoint.
+            reprint_update_and_save_state_without_signal_interruption(
+                function () use ($command, $options, $stages): void {
+                    $state = $this->client->get_state();
+                    $state->follow_symlinks = !empty($options['follow_symlinks']);
+                    $state->include_caches = !empty($options['include_caches']);
+                    $state->extra_directory = $options['extra_directory'] ?? null;
+                    $state->pull_pipeline->started_by_command = $command;
+                    $state->pull_pipeline->stage_sequence = $stages;
+                },
+                [$this->client, 'save_state']
+            );
         }
 
         $total = count($stages);
@@ -765,8 +857,20 @@ class Pull
      * owned by the high-level command being restarted. Keeping that ownership
      * map here prevents callers from having to know which file/database state
      * belongs to which pipeline.
+     *
+     * @param string      $command         High-level command whose state is reset.
+     * @param string[]    $stage_sequence  Fresh lifecycle stages, or an empty list for abort.
+     * @param bool|null   $follow_symlinks Fresh lifecycle link selection, or null to retain it.
+     * @param bool        $include_caches  Fresh lifecycle cache selection.
+     * @param string|null $extra_directory Fresh lifecycle additional remote directory.
      */
-    private function prepare_repull(string $command): void
+    private function prepare_repull(
+        string $command,
+        array $stage_sequence = [],
+        ?bool $follow_symlinks = null,
+        bool $include_caches = false,
+        ?string $extra_directory = null
+    ): void
     {
         $state_dir = $this->client->state_dir;
         $pull_state_directory = $this->client->pull_state_directory;
@@ -792,36 +896,55 @@ class Pull
             default:
                 throw new InvalidArgumentException("Unknown pull command: {$command}");
         }
-
-
-        $state = $this->client->get_state();
-        $state->pull_pipeline->started_by_command = $command;
-        $state->pull_pipeline->stage_sequence = [];
-        $state->pull_pipeline->last_completed_stage = null;
-        $state->pull_pipeline->has_completed_once = true;
-        $state->active_resumable_command->command_name = null;
-        $state->active_resumable_command->completion_state = null;
-        $state->active_resumable_command->remote_cursor = null;
-        $state->active_resumable_command->current_stage = null;
-        $state->consecutive_interrupted_responses = 0;
-        if ($reset_file_transfer_state) {
-            $state->current_file = null;
-            $state->current_file_bytes = null;
-            $state->diff = new FileDiffProgressState();
-            $state->fetch = new FetchListProgressState();
-            $state->files_pull_summary = new FilesPullSummaryState();
-        }
-        if ($reset_file_selection_state) {
-            $state->index = new RemoteFileIndexCursorState();
-            $state->files_pull_path_selection_fingerprint = null;
-        }
-        if ($reset_db_state) {
-            $state->sql_bytes = null;
-            $state->db_index = new DatabaseTableIndexState();
-            $state->apply = new DatabaseApplyCommandState();
-            $state->sql_output = null;
-        }
-        $this->client->save_state();
+        reprint_update_and_save_state_without_signal_interruption(
+            function () use (
+                $command,
+                $stage_sequence,
+                $follow_symlinks,
+                $include_caches,
+                $extra_directory,
+                $reset_file_transfer_state,
+                $reset_file_selection_state,
+                $reset_db_state
+            ): void {
+                $state = $this->client->get_state();
+                $state->pull_pipeline->started_by_command =
+                    $stage_sequence === [] ? null : $command;
+                $state->pull_pipeline->stage_sequence = $stage_sequence;
+                $state->pull_pipeline->last_completed_stage = null;
+                $state->pull_pipeline->has_completed_once = true;
+                $state->active_resumable_command->command_name = null;
+                $state->active_resumable_command->completion_state = null;
+                $state->active_resumable_command->remote_cursor = null;
+                $state->active_resumable_command->current_stage = null;
+                $state->consecutive_interrupted_responses = 0;
+                if ($command === 'pull' || $command === 'pull-files') {
+                    if ($follow_symlinks !== null) {
+                        $state->follow_symlinks = $follow_symlinks;
+                    }
+                    $state->include_caches = $include_caches;
+                    $state->extra_directory = $extra_directory;
+                }
+                if ($reset_file_transfer_state) {
+                    $state->current_file = null;
+                    $state->current_file_bytes = null;
+                    $state->diff = new FileDiffProgressState();
+                    $state->fetch = new FetchListProgressState();
+                    $state->files_pull_summary = new FilesPullSummaryState();
+                }
+                if ($reset_file_selection_state) {
+                    $state->index = new RemoteFileIndexCursorState();
+                    $state->files_pull_path_selection_fingerprint = null;
+                }
+                if ($reset_db_state) {
+                    $state->sql_bytes = null;
+                    $state->db_index = new DatabaseTableIndexState();
+                    $state->apply = new DatabaseApplyCommandState();
+                    $state->sql_output = null;
+                }
+            },
+            [$this->client, 'save_state']
+        );
 
         $paths = [];
         if ($reset_file_transfer_state) {

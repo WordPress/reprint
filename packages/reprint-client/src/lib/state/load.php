@@ -9,6 +9,7 @@ declare(strict_types=1);
  * on-disk schema.
  */
 
+require_once __DIR__ . '/state-functions.php';
 require_once __DIR__ . '/class-resumable-command-checkpoint-state.php';
 require_once __DIR__ . '/class-database-table-index-state.php';
 require_once __DIR__ . '/class-file-diff-progress-state.php';

@@ -558,6 +558,55 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('files-pull', $state["pull_pipeline"]["last_completed_stage"]);
     }
 
+    public function testPullFilesAbortAllowsANewFileIndexSelection(): void
+    {
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "partial",
+                "current_stage" => "index",
+            ],
+            "pull_pipeline" => [
+                "started_by_command" => "pull-files",
+                "stage_sequence" => ["preflight", "files-pull"],
+                "last_completed_stage" => "preflight",
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            "include_caches" => true,
+            "extra_directory" => "/srv/original-extra",
+        ]);
+
+        $client = $this->makeClient();
+
+        ob_start();
+        $client->run([
+            "command" => "pull-files",
+            "abort" => true,
+        ]);
+        $abortedState = $this->readState();
+        $this->assertNull($abortedState["pull_pipeline"]["started_by_command"]);
+        $this->assertSame([], $abortedState["pull_pipeline"]["stage_sequence"]);
+
+        $client->run([
+            "command" => "pull-files",
+            "include_caches" => false,
+            "extra_directory" => "/srv/new-extra",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertFalse($state["include_caches"]);
+        $this->assertSame(
+            'base64:' . base64_encode('/srv/new-extra'),
+            $state["extra_directory"]
+        );
+        $this->assertSame(
+            ["preflight", "files-pull"],
+            $state["pull_pipeline"]["stage_sequence"]
+        );
+        $this->assertSame(1, $client->files_pull_runs);
+    }
+
     public function testPullAfterFilesPullCompletedBeforePipelineStageWasMarkedDoesNotStealIt(): void
     {
         $this->writeState([

@@ -84,12 +84,23 @@ class OnlyFilesPathPrefixTest extends TestCase
         return $this->client(array('database' => array('wp' => array('paths_urls' => $pathsUrls))));
     }
 
-    private function pathSelectionFingerprint(array $included, array $excluded = array()): string
+    private function pathSelectionFingerprint(
+        array $included,
+        array $excluded = array(),
+        bool $followSymlinks = false,
+        bool $includeCaches = false,
+        ?string $extraDirectory = null
+    ): string
     {
         sort($excluded, SORT_STRING);
         return hash('sha256', json_encode(array(
-            'only_path_prefixes' => $included,
-            'excluded_path_prefixes' => $excluded,
+            'only_path_prefixes_b64' => array_map('base64_encode', $included),
+            'excluded_path_prefixes_b64' => array_map('base64_encode', $excluded),
+            'extra_directory_b64' => $extraDirectory === null
+                ? null
+                : base64_encode($extraDirectory),
+            'follow_symlinks' => $followSymlinks,
+            'include_caches' => $includeCaches,
         ), JSON_UNESCAPED_SLASHES));
     }
 
@@ -129,7 +140,12 @@ class OnlyFilesPathPrefixTest extends TestCase
         );
     }
 
-    private function runFilesPull(array $fileSelectionOptions): void
+    private function runFilesPull(array $fileSelectionOptions): \ImportClient
+    {
+        return $this->runCommand('files-pull', $fileSelectionOptions);
+    }
+
+    private function runCommand(string $command, array $options): \ImportClient
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
         $output = fopen('php://temp', 'w');
@@ -140,12 +156,13 @@ class OnlyFilesPathPrefixTest extends TestCase
 
         try {
             $c->run(array_merge(
-                array('command' => 'files-pull'),
-                $fileSelectionOptions
+                array('command' => $command),
+                $options
             ));
         } finally {
             fclose($output);
         }
+        return $c;
     }
 
     private function readState(): array
@@ -338,6 +355,308 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->assertSame(
             $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
             $state['files_pull_path_selection_fingerprint'] ?? null
+        );
+    }
+
+    public function testRunRestoresIncludeCachesWhileFilesPullIsInProgress(): void
+    {
+        file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
+        $this->writeFilesPullState(array(
+            'include_caches' => true,
+            'files_pull_path_selection_fingerprint' =>
+                $this->pathSelectionFingerprint(array(), array(), false, true),
+        ));
+
+        $this->runFilesPull(array());
+
+        $state = $this->readState();
+        $this->assertTrue($state['include_caches']);
+        $this->assertSame(
+            'complete',
+            $state['active_resumable_command']['completion_state'] ?? null
+        );
+    }
+
+    public function testRunRejectsChangingIncludeCachesWithoutChangingState(): void
+    {
+        file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
+        $this->writeFilesPullState(array(
+            'include_caches' => false,
+            'files_pull_path_selection_fingerprint' =>
+                $this->pathSelectionFingerprint(array()),
+        ));
+
+        try {
+            $this->runFilesPull(array('include_caches' => true));
+            $this->fail('Expected an active files-pull to reject a cache-selection change.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'Cannot change --include-caches while resuming files-pull',
+                $exception->getMessage()
+            );
+        }
+        $this->assertFalse($this->readState()['include_caches']);
+    }
+
+    public function testOmittedIncludeCachesDoesNotReuseCompletedPullValue(): void
+    {
+        $this->writeFilesPullState(array(
+            'active_resumable_command' => array(
+                'completion_state' => 'complete',
+                'current_stage' => null,
+            ),
+            'include_caches' => true,
+        ));
+
+        $client = $this->runFilesPull(array());
+
+        $include_caches = ( new \ReflectionClass( $client ) )
+            ->getProperty('include_caches')
+            ->getValue($client);
+        $this->assertFalse($include_caches);
+        $this->assertTrue($this->readState()['include_caches']);
+    }
+
+    public function testAbortClearsIncludeCachesBeforeTheNextPull(): void
+    {
+        $this->writeFilesPullState(array('include_caches' => true));
+
+        $this->runFilesPull(array('abort' => true));
+
+        $this->assertFalse($this->readState()['include_caches']);
+    }
+
+    public function testRunRestoresByteSafeExtraDirectoryWhileFilesPullIsInProgress(): void
+    {
+        $extraDirectory = "/srv/extra-\x80";
+        file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
+        $this->writeFilesPullState(array(
+            'extra_directory' => $extraDirectory,
+            'files_pull_path_selection_fingerprint' =>
+                $this->pathSelectionFingerprint(
+                    array(),
+                    array(),
+                    false,
+                    false,
+                    $extraDirectory
+                ),
+        ));
+
+        $client = $this->runFilesPull(array());
+
+        $savedState = $this->readState();
+        $this->assertSame(
+            'base64:' . base64_encode($extraDirectory),
+            $savedState['extra_directory']
+        );
+        $this->assertSame(
+            $extraDirectory,
+            ( new \ReflectionClass( $client ) )
+                ->getProperty('extra_directory')
+                ->getValue($client)
+        );
+    }
+
+    public function testRunRejectsChangingExtraDirectoryWithoutChangingState(): void
+    {
+        $extraDirectory = '/srv/original-extra';
+        $this->writeFilesPullState(array(
+            'extra_directory' => $extraDirectory,
+            'files_pull_path_selection_fingerprint' =>
+                $this->pathSelectionFingerprint(
+                    array(),
+                    array(),
+                    false,
+                    false,
+                    $extraDirectory
+                ),
+        ));
+        $stateBefore = file_get_contents($this->pullStateDirectory . '/state.json');
+
+        try {
+            $this->runFilesPull(array('extra_directory' => '/srv/different-extra'));
+            $this->fail('Expected an active files-pull to reject an extra-directory change.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'Cannot change --extra-directory while resuming files-pull',
+                $exception->getMessage()
+            );
+        }
+        $this->assertSame(
+            $stateBefore,
+            file_get_contents($this->pullStateDirectory . '/state.json')
+        );
+    }
+
+    public function testConflictingPipelineCommandLeavesStateBytesUnchanged(): void
+    {
+        $this->writeFilesPullState(array(
+            'pull_pipeline' => array(
+                'started_by_command' => 'pull-files',
+                'stage_sequence' => array('preflight', 'files-pull'),
+                'last_completed_stage' => null,
+                'has_completed_once' => false,
+            ),
+        ));
+        $stateBefore = file_get_contents($this->pullStateDirectory . '/state.json');
+
+        try {
+            $this->runCommand('pull', array(
+                'follow_symlinks' => true,
+                'include_caches' => true,
+                'extra_directory' => '/srv/different-extra',
+                'fs_root_nonempty_behavior' => 'error',
+            ));
+            $this->fail('Expected pull to reject the active pull-files pipeline.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'Another command is already in progress: pull-files',
+                $exception->getMessage()
+            );
+        }
+        $this->assertSame(
+            $stateBefore,
+            file_get_contents($this->pullStateDirectory . '/state.json')
+        );
+    }
+
+    /**
+     * @dataProvider directFileIndexCommandProvider
+     */
+    public function testDirectFileIndexCommandRejectsHighLevelOwnerWithoutChangingState(
+        string $command
+    ): void {
+        $this->writeFilesPullState(array(
+            'pull_pipeline' => array(
+                'started_by_command' => 'pull-files',
+                'stage_sequence' => array('preflight', 'files-pull'),
+                'last_completed_stage' => 'preflight',
+                'has_completed_once' => false,
+            ),
+        ));
+        $stateBefore = file_get_contents($this->pullStateDirectory . '/state.json');
+
+        try {
+            $this->runCommand($command, array(
+                'follow_symlinks' => true,
+                'include_caches' => true,
+                'extra_directory' => '/srv/different-extra',
+            ));
+            $this->fail("Expected {$command} to reject the active pull-files pipeline.");
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'Another command is already in progress: pull-files',
+                $exception->getMessage()
+            );
+        }
+        $this->assertSame(
+            $stateBefore,
+            file_get_contents($this->pullStateDirectory . '/state.json')
+        );
+    }
+
+    /** @return array<string,array{string}> */
+    public static function directFileIndexCommandProvider(): array
+    {
+        return array(
+            'files-pull' => array('files-pull'),
+            'files-index' => array('files-index'),
+        );
+    }
+
+    public function testHighLevelPullRejectsActiveDirectFilesIndexWithoutChangingState(): void
+    {
+        $this->writeFilesPullState(array(
+            'active_resumable_command' => array(
+                'command_name' => 'files-index',
+                'completion_state' => 'in_progress',
+                'current_stage' => 'index',
+                'remote_cursor' => null,
+            ),
+        ));
+        $stateBefore = file_get_contents($this->pullStateDirectory . '/state.json');
+
+        try {
+            $this->runCommand('pull-files', array(
+                'follow_symlinks' => true,
+                'include_caches' => true,
+                'extra_directory' => '/srv/different-extra',
+            ));
+            $this->fail('Expected pull-files to reject the active files-index command.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'Another command is already in progress: files-index',
+                $exception->getMessage()
+            );
+        }
+        $this->assertSame(
+            $stateBefore,
+            file_get_contents($this->pullStateDirectory . '/state.json')
+        );
+    }
+
+    public function testHighLevelOwnerRejectsIncompatibleActiveCommandWithoutChangingState(): void
+    {
+        $this->writeFilesPullState(array(
+            'active_resumable_command' => array(
+                'command_name' => 'files-index',
+                'completion_state' => 'in_progress',
+                'current_stage' => 'index',
+                'remote_cursor' => null,
+            ),
+            'pull_pipeline' => array(
+                'started_by_command' => 'pull-files',
+                'stage_sequence' => array('preflight', 'files-pull'),
+                'last_completed_stage' => 'preflight',
+                'has_completed_once' => false,
+            ),
+        ));
+        $stateBefore = file_get_contents($this->pullStateDirectory . '/state.json');
+
+        try {
+            $this->runCommand('pull-files', array(
+                'follow_symlinks' => true,
+                'include_caches' => true,
+                'extra_directory' => '/srv/different-extra',
+            ));
+            $this->fail('Expected pull-files to reject its incompatible active command.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'Another command is already in progress: files-index',
+                $exception->getMessage()
+            );
+        }
+        $this->assertSame(
+            $stateBefore,
+            file_get_contents($this->pullStateDirectory . '/state.json')
+        );
+    }
+
+    public function testFilesIndexRejectsChangingCacheSelectionWithoutChangingState(): void
+    {
+        $this->writeFilesPullState(array(
+            'active_resumable_command' => array(
+                'command_name' => 'files-index',
+                'completion_state' => 'in_progress',
+                'current_stage' => 'index',
+                'remote_cursor' => null,
+            ),
+            'include_caches' => true,
+        ));
+        $stateBefore = file_get_contents($this->pullStateDirectory . '/state.json');
+
+        try {
+            $this->runCommand('files-index', array('include_caches' => false));
+            $this->fail('Expected files-index to reject a cache-selection change.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'Cannot change --include-caches while resuming files-index',
+                $exception->getMessage()
+            );
+        }
+        $this->assertSame(
+            $stateBefore,
+            file_get_contents($this->pullStateDirectory . '/state.json')
         );
     }
 

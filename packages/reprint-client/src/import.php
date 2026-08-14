@@ -917,25 +917,134 @@ class ImportClient
 
         $this->state = $this->load_state();
 
+        if (
+            ( !$abort && in_array($command, ["pull", "pull-files", "pull-db"], true) )
+            || in_array($command, ["files-pull", "files-index"], true)
+        ) {
+            $this->pull->assert_command_owns_resume_state($command, $options);
+        }
+
         if ($command === "pull-metadata") {
             $this->run_pull_metadata();
             return;
         }
 
-        // Persist follow_symlinks in state so it survives across invocations.
-        // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
-        if (isset($options["follow_symlinks"])) {
-            $this->get_state()->follow_symlinks = $this->follow_symlinks;
-            $this->save_state();
-        } elseif (isset($this->get_state()->follow_symlinks)) {
-            $this->follow_symlinks = $this->get_state()->follow_symlinks;
+        $file_index_lifecycle_command = null;
+        if (in_array($command, ["pull", "pull-files", "files-pull"], true)) {
+            $file_index_lifecycle_command = "files-pull";
+        } elseif ($command === "files-index") {
+            $file_index_lifecycle_command = "files-index";
         }
 
-        if (isset($options["local_followed_symlinks_root"])) {
-            $this->local_followed_symlinks_root = $this->resolve_local_followed_symlinks_root($options["local_followed_symlinks_root"]);
-            $this->follow_symlinks = true;
-            $this->get_state()->follow_symlinks = true;
+        if ($file_index_lifecycle_command !== null) {
+            // Persist the traversal selection across invocations. Explicit
+            // values are validated before the lifecycle checkpoint changes;
+            // omitted values restore an active lifecycle's saved selection.
+            $active_command = $this->get_state()->active_resumable_command;
+            $is_resuming_file_index_lifecycle =
+                $active_command->command_name === $file_index_lifecycle_command
+                && $active_command->completion_state !== null
+                && $active_command->completion_state !== "complete";
+            if (in_array($command, ["pull", "pull-files"], true)) {
+                $pull_pipeline = $this->get_state()->pull_pipeline;
+                $stage_sequence = $pull_pipeline->stage_sequence;
+                $last_stage = $stage_sequence !== []
+                    ? $stage_sequence[count($stage_sequence) - 1]
+                    : null;
+                $pipeline_is_complete =
+                    $last_stage !== null
+                    && $pull_pipeline->last_completed_stage === $last_stage;
+                $is_resuming_file_index_lifecycle =
+                    $is_resuming_file_index_lifecycle
+                    || (
+                        $pull_pipeline->started_by_command === $command
+                        && $stage_sequence !== []
+                        && !$pipeline_is_complete
+                    );
+            }
+
+            if (
+                array_key_exists("extra_directory", $options)
+                && !is_string($this->extra_directory)
+                && $this->extra_directory !== null
+            ) {
+                throw new InvalidArgumentException(
+                    "Invalid --extra-directory value: expected a path string."
+                );
+            }
+
+            $follow_symlinks_was_explicit =
+                array_key_exists("follow_symlinks", $options)
+                || array_key_exists("local_followed_symlinks_root", $options);
+            if (isset($options["local_followed_symlinks_root"])) {
+                $this->local_followed_symlinks_root =
+                    $this->resolve_local_followed_symlinks_root(
+                        $options["local_followed_symlinks_root"]
+                    );
+                $this->follow_symlinks = true;
+            }
+
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option values and command names are not HTML.
+            if (
+                $follow_symlinks_was_explicit
+                && $is_resuming_file_index_lifecycle
+                && !$abort
+                && $this->get_state()->follow_symlinks !== $this->follow_symlinks
+            ) {
+                throw new RuntimeException(
+                    "Cannot change --follow-symlinks while resuming " .
+                        "{$file_index_lifecycle_command}. Use the original setting, " .
+                        "or use --abort to start a new {$file_index_lifecycle_command}."
+                );
+            }
+            if (!$follow_symlinks_was_explicit) {
+                // This setting predates the file-index selection checkpoint and
+                // remains a caller preference between completed lifecycles.
+                $this->follow_symlinks = $this->get_state()->follow_symlinks;
+            }
+
+            if (array_key_exists("include_caches", $options)) {
+                if (
+                    $is_resuming_file_index_lifecycle
+                    && !$abort
+                    && $this->get_state()->include_caches !== $this->include_caches
+                ) {
+                    throw new RuntimeException(
+                        "Cannot change --include-caches while resuming " .
+                            "{$file_index_lifecycle_command}. Use the original setting, " .
+                            "or use --abort to start a new {$file_index_lifecycle_command}."
+                    );
+                }
+            } elseif ($is_resuming_file_index_lifecycle && !$abort) {
+                $this->include_caches = $this->get_state()->include_caches;
+            }
+
+            if (array_key_exists("extra_directory", $options)) {
+                if (
+                    $is_resuming_file_index_lifecycle
+                    && !$abort
+                    && $this->get_state()->extra_directory !== $this->extra_directory
+                ) {
+                    throw new RuntimeException(
+                        "Cannot change --extra-directory while resuming " .
+                            "{$file_index_lifecycle_command}. Use the original directory, " .
+                            "or use --abort to start a new {$file_index_lifecycle_command}."
+                    );
+                }
+            } elseif ($is_resuming_file_index_lifecycle && !$abort) {
+                $this->extra_directory = $this->get_state()->extra_directory;
+            }
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+
+            $options["follow_symlinks"] = $this->follow_symlinks;
+            $options["include_caches"] = $this->include_caches;
+            $options["extra_directory"] = $this->extra_directory;
+        } elseif (isset($options["follow_symlinks"])) {
+            // Persist follow_symlinks in state so it survives across invocations.
+            $this->get_state()->follow_symlinks = $this->follow_symlinks;
             $this->save_state();
+        } else {
+            $this->follow_symlinks = $this->get_state()->follow_symlinks;
         }
 
         // Persist fs_root_nonempty_behavior in state so it survives across invocations.
@@ -2213,15 +2322,22 @@ class ImportClient
                     "RESTART | Clearing files-index state",
                     true,
                 );
-                $this->get_state()->active_resumable_command->command_name = "files-index";
-                $this->get_state()->active_resumable_command->completion_state = null;
-                $this->get_state()->active_resumable_command->current_stage = null;
-                $this->get_state()->index = new RemoteFileIndexCursorState();
+                reprint_update_and_save_state_without_signal_interruption(
+                    function (): void {
+                        $state = $this->get_state();
+                        $state->active_resumable_command->command_name = "files-index";
+                        $state->active_resumable_command->completion_state = null;
+                        $state->active_resumable_command->current_stage = null;
+                        $state->include_caches = false;
+                        $state->extra_directory = null;
+                        $state->index = new RemoteFileIndexCursorState();
+                    },
+                    [$this, 'save_state']
+                );
                 if (file_exists($this->next_remote_index_file)) {
                     @unlink($this->next_remote_index_file);
                     $this->audit_log("FILE DELETE | {$this->next_remote_index_file}");
                 }
-                $this->save_state();
                 break;
 
             case "db-pull":
@@ -2300,6 +2416,8 @@ class ImportClient
             true,
         );
         $this->reset_state();
+        $this->get_state()->include_caches = false;
+        $this->get_state()->extra_directory = null;
 
         if (file_exists($this->next_remote_index_file)) {
             @unlink($this->next_remote_index_file);
@@ -3051,16 +3169,26 @@ class ImportClient
             // The empty WAL blocks files-diff and files-push before the first
             // pull checkpoint can make this lifecycle resumable.
             $this->pull_index_journal->open();
-            $this->get_state()->active_resumable_command->command_name = "files-pull";
-            $this->get_state()->active_resumable_command->completion_state = "in_progress";
-            $this->get_state()->active_resumable_command->current_stage = "index";
-            $this->get_state()->files_pull_path_selection_fingerprint =
+            $path_selection_fingerprint =
                 $this->files_pull_path_selection_fingerprint();
-            $this->get_state()->diff = new FileDiffProgressState();
-            $this->get_state()->index = new RemoteFileIndexCursorState();
-            $this->get_state()->fetch = new FetchListProgressState();
-            $this->get_state()->files_pull_summary = new FilesPullSummaryState();
-            $this->save_state();
+            reprint_update_and_save_state_without_signal_interruption(
+                function () use ($path_selection_fingerprint): void {
+                    $state = $this->get_state();
+                    $state->active_resumable_command->command_name = "files-pull";
+                    $state->active_resumable_command->completion_state = "in_progress";
+                    $state->active_resumable_command->current_stage = "index";
+                    $state->follow_symlinks = $this->follow_symlinks;
+                    $state->include_caches = $this->include_caches;
+                    $state->extra_directory = $this->extra_directory;
+                    $state->files_pull_path_selection_fingerprint =
+                        $path_selection_fingerprint;
+                    $state->diff = new FileDiffProgressState();
+                    $state->index = new RemoteFileIndexCursorState();
+                    $state->fetch = new FetchListProgressState();
+                    $state->files_pull_summary = new FilesPullSummaryState();
+                },
+                [$this, 'save_state']
+            );
 
             if ($is_delta) {
                 $this->files_pulled = 0;
@@ -3273,10 +3401,19 @@ class ImportClient
         }
 
         if ($current_status === null) {
-            $this->get_state()->active_resumable_command->command_name = "files-index";
-            $this->get_state()->active_resumable_command->completion_state = "in_progress";
-            $this->get_state()->active_resumable_command->current_stage = "index";
-            $this->save_state();
+            reprint_update_and_save_state_without_signal_interruption(
+                function (): void {
+                    $state = $this->get_state();
+                    $state->active_resumable_command->command_name = "files-index";
+                    $state->active_resumable_command->completion_state = "in_progress";
+                    $state->active_resumable_command->current_stage = "index";
+                    $state->follow_symlinks = $this->follow_symlinks;
+                    $state->include_caches = $this->include_caches;
+                    $state->extra_directory = $this->extra_directory;
+                    $state->index = new RemoteFileIndexCursorState();
+                },
+                [$this, 'save_state']
+            );
             $this->audit_log("START files-index", true);
             $this->progress->show_lifecycle_line("Starting files-index\n");
             $this->output_progress([
@@ -8591,8 +8728,10 @@ class ImportClient
 
         if ($previous !== $fingerprint) {
             throw new RuntimeException(
-                "Cannot change --include or --exclude while resuming files-pull. " .
-                    "Use the original path selections, or use --abort to start a new files-pull.",
+                "Cannot change --include or --exclude while resuming files-pull; " .
+                    "--extra-directory, --follow-symlinks, and --include-caches " .
+                    "must remain unchanged too. Use the original file-index selection, " .
+                    "or use --abort to start a new files-pull.",
             );
         }
     }
@@ -8613,8 +8752,19 @@ class ImportClient
             "sha256",
             json_encode(
                 [
-                    "only_path_prefixes" => $this->pull_only_files_with_path_prefixes,
-                    "excluded_path_prefixes" => $excluded_path_prefixes,
+                    "only_path_prefixes_b64" => array_map(
+                        "base64_encode",
+                        $this->pull_only_files_with_path_prefixes
+                    ),
+                    "excluded_path_prefixes_b64" => array_map(
+                        "base64_encode",
+                        $excluded_path_prefixes
+                    ),
+                    "extra_directory_b64" => $this->extra_directory === null
+                        ? null
+                        : base64_encode($this->extra_directory),
+                    "follow_symlinks" => $this->follow_symlinks,
+                    "include_caches" => $this->include_caches,
                 ],
                 JSON_UNESCAPED_SLASHES
             ),
@@ -10788,6 +10938,8 @@ class ImportClient
         $this->state->version = $previous_state->version;
         $this->state->webhost = $previous_state->webhost;
         $this->state->follow_symlinks = $previous_state->follow_symlinks;
+        $this->state->include_caches = $previous_state->include_caches;
+        $this->state->extra_directory = $previous_state->extra_directory;
         $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
         $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
         $this->state->resolved_path_mappings_fingerprint = $previous_state->resolved_path_mappings_fingerprint;
@@ -10810,6 +10962,9 @@ class ImportClient
         );
         $state["current_file"] = $this->encode_state_path_value(
             $state["current_file"] ?? null,
+        );
+        $state["extra_directory"] = $this->encode_state_path_value(
+            $state["extra_directory"] ?? null,
         );
         $state["db_index"]["file"] = $this->encode_state_path_value(
             $state["db_index"]["file"] ?? null,
@@ -10839,6 +10994,9 @@ class ImportClient
         );
         $state["current_file"] = $this->decode_state_path_value(
             $state["current_file"] ?? null,
+        );
+        $state["extra_directory"] = $this->decode_state_path_value(
+            $state["extra_directory"] ?? null,
         );
         $state["db_index"]["file"] = $this->decode_state_path_value(
             $state["db_index"]["file"] ?? null,

@@ -49,6 +49,10 @@ class PullState
     /** @var string|null Webhost detected during preflight. */
     public ?string $webhost = null;
     public bool $follow_symlinks = true;
+    /** Whether remote and local file indexes include cache and development paths. */
+    public bool $include_caches = false;
+    /** @var string|null Additional remote directory included in the file index. */
+    public ?string $extra_directory = null;
     /** @var string|null Fingerprint of the local followed symlinks root; guards resume. */
     public ?string $local_followed_symlinks_root_fingerprint = null;
     public string $fs_root_nonempty_behavior = 'error';
@@ -118,6 +122,18 @@ class PullState
         $state->version = $data['version'];
         $state->webhost = $data['webhost'];
         $state->follow_symlinks = $data['follow_symlinks'];
+        if (!is_bool($data['include_caches'])) {
+            throw new UnexpectedValueException(
+                'PullState include_caches must be a boolean.'
+            );
+        }
+        $state->include_caches = $data['include_caches'];
+        if (!is_string($data['extra_directory']) && $data['extra_directory'] !== null) {
+            throw new UnexpectedValueException(
+                'PullState extra_directory must be a string or null.'
+            );
+        }
+        $state->extra_directory = $data['extra_directory'];
         $state->local_followed_symlinks_root_fingerprint = $data['local_followed_symlinks_root_fingerprint'];
         $state->fs_root_nonempty_behavior = $data['fs_root_nonempty_behavior'];
         $state->filter = $data['filter'];
@@ -222,6 +238,8 @@ class PullState
             'version' => $this->version,
             'webhost' => $this->webhost,
             'follow_symlinks' => $this->follow_symlinks,
+            'include_caches' => $this->include_caches,
+            'extra_directory' => $this->extra_directory,
             'local_followed_symlinks_root_fingerprint' => $this->local_followed_symlinks_root_fingerprint,
             'fs_root_nonempty_behavior' => $this->fs_root_nonempty_behavior,
             'filter' => $this->filter,

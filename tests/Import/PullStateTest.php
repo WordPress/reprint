@@ -133,6 +133,30 @@ class PullStateTest extends TestCase
         \PullState::from_array($data);
     }
 
+    public function testStateRejectsNonStringExtraDirectory(): void
+    {
+        $data = ( new \PullState() )->to_array();
+        $data['extra_directory'] = ['not', 'a', 'path'];
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage(
+            'extra_directory must be a string or null'
+        );
+
+        \PullState::from_array($data);
+    }
+
+    public function testStateRejectsNonBooleanIncludeCaches(): void
+    {
+        $data = ( new \PullState() )->to_array();
+        $data['include_caches'] = 1;
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage('include_caches must be a boolean');
+
+        \PullState::from_array($data);
+    }
+
     public function testStateRejectsDiffFieldsFromThePreviousSchema(): void
     {
         $data = (new \PullState())->to_array();

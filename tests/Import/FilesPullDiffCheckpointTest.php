@@ -513,8 +513,11 @@ final class FilesPullDiffCheckpointTest extends TestCase
             'files_pull_path_selection_fingerprint' => hash(
                 'sha256',
                 json_encode([
-                    'only_path_prefixes' => [],
-                    'excluded_path_prefixes' => [],
+                    'only_path_prefixes_b64' => [],
+                    'excluded_path_prefixes_b64' => [],
+                    'extra_directory_b64' => null,
+                    'follow_symlinks' => true,
+                    'include_caches' => false,
                 ], JSON_UNESCAPED_SLASHES)
             ),
         ]);
