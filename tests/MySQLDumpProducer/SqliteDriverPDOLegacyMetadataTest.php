@@ -21,4 +21,32 @@ final class SqliteDriverPDOLegacyMetadataTest extends TestCase {
         );
         $this->assertSame(['SHOW FULL TABLES', 'SHOW TABLE STATUS;'], $driver->queries);
     }
+
+    public function testRetriesQuotedMetadataQueriesForTheLegacyParser(): void
+    {
+        if (!extension_loaded('pdo_sqlite')) {
+            $this->markTestSkipped('pdo_sqlite extension required');
+        }
+
+        $driver = new LegacySqliteMetadataDriver();
+        $adapter = new SqliteDriverPDO($driver, new PDO('sqlite::memory:'));
+
+        $this->assertSame(
+            [['Key_name' => 'PRIMARY', 'Column_name' => 'ID', 'Seq_in_index' => 0]],
+            $adapter->query('SHOW INDEX FROM `wp_posts`')->fetchAll(PDO::FETCH_ASSOC)
+        );
+        $this->assertSame(
+            [['Field' => 'ID', 'Type' => 'INTEGER']],
+            $adapter->query('SHOW FULL COLUMNS FROM `wp_posts`')->fetchAll(PDO::FETCH_ASSOC)
+        );
+        $this->assertSame(
+            [
+                'SHOW INDEX FROM `wp_posts`',
+                'SHOW INDEX FROM wp_posts',
+                'SHOW FULL COLUMNS FROM `wp_posts`',
+                'SHOW FULL COLUMNS FROM wp_posts',
+            ],
+            $driver->queries
+        );
+    }
 }
