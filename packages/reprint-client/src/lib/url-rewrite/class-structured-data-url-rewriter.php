@@ -36,14 +36,8 @@ class StructuredDataUrlRewriter
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
 
-    /**
-     * Exact configured URL spellings used for byte-level replacement in block
-     * markup text tokens. The parsed mapping below serves the structured URL
-     * processors; it cannot preserve the caller's lexical source base.
-     *
-     * @var array<string, string>
-     */
-    private array $url_mapping;
+    /** Prepared URL mapping shared by cautious text processors. */
+    private CautiousURLBaseRewriteMapping $cautious_url_base_rewrite_mapping;
 
     /**
      * Pre-parsed url_mapping: each entry is
@@ -91,7 +85,7 @@ class StructuredDataUrlRewriter
      */
     public function __construct(array $url_mapping)
     {
-        $this->url_mapping = $url_mapping;
+        $this->cautious_url_base_rewrite_mapping = new CautiousURLBaseRewriteMapping($url_mapping);
 
         // Extract unique source domains for the quick-reject check.
         $domains = [];
@@ -444,7 +438,7 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
-                $p = new CautiousTextBlockMarkupUrlProcessor( $content, $base_url, $this->url_mapping );
+                $p = new CautiousTextBlockMarkupUrlProcessor( $content, $base_url, $this->cautious_url_base_rewrite_mapping );
                 while ( $p->next_token() ) {
                     $token_type = $p->get_token_type() ?? '';
                     while ( $p->next_url_in_current_token() ) {
@@ -496,7 +490,7 @@ class StructuredDataUrlRewriter
 
                 $p = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
                     $content,
-                    $this->url_mapping
+                    $this->cautious_url_base_rewrite_mapping
                 );
                 while ( $p->next_url() ) {
                     $p->replace_url_base();

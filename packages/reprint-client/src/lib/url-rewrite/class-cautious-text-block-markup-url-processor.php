@@ -35,18 +35,21 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
  */
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
 class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
-    /** @var array<string, string> */
-    private array $url_mapping;
+    private CautiousURLBaseRewriteMapping $prepared_url_mapping;
 
     /**
-     * @param string                $html            Block markup to process.
-     * @param string|null           $base_url_string Base URL for exact URL parsing.
-     * @param array<string, string> $url_mapping     Source URL base => target URL.
+     * @param string                        $html                 Block markup to process.
+     * @param string|null                   $base_url_string      Base URL for exact URL parsing.
+     * @param CautiousURLBaseRewriteMapping $prepared_url_mapping Prepared URL mapping.
      */
-    public function __construct($html, ?string $base_url_string, array $url_mapping)
+    public function __construct(
+        $html,
+        ?string $base_url_string,
+        CautiousURLBaseRewriteMapping $prepared_url_mapping
+    )
     {
         parent::__construct($html, $base_url_string);
-        $this->url_mapping = $url_mapping;
+        $this->prepared_url_mapping = $prepared_url_mapping;
     }
 
     /**
@@ -90,7 +93,7 @@ class CautiousTextBlockMarkupUrlProcessor extends BlockMarkupUrlProcessor {
         $raw_token = substr($html, $token_span->start, $token_span->length);
         $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
             $raw_token,
-            $this->url_mapping
+            $this->prepared_url_mapping
         );
         while ($processor->next_url()) {
             $processor->replace_url_base();
