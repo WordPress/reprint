@@ -179,6 +179,9 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
 
         const targetConnection = await createMysqlConnection(targetDb);
         try {
+            // A fresh connection rejects ENUM index zero in strict mode. Both
+            // restart cases begin after the dump header, so accepting this value
+            // later proves that db-session-setup.sql restored the dump SQL mode.
             await targetConnection.query(
                 "CREATE TEMPORARY TABLE `session_setup_probe` ("
                 + "`value` ENUM('allowed') NOT NULL) ENGINE=InnoDB"
