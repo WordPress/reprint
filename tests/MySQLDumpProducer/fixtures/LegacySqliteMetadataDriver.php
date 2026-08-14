@@ -16,8 +16,8 @@ final class LegacySqliteMetadataDriver {
             $this->query_results = [];
             return false;
         }
-        if ($query === 'SHOW TABLES') {
-            $this->query_results = [ (object) ['Tables_in_wp_test' => 'wp_posts'] ];
+        if ($query === 'SHOW TABLE STATUS') {
+            $this->query_results = [ (object) ['Name' => 'wp_posts', 'Engine' => 'myisam'] ];
             return true;
         }
         // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
