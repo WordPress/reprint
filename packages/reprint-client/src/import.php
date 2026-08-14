@@ -3456,7 +3456,15 @@ class ImportClient
         // works locally.  The server discovers these (e.g. /srv/wordpress
         // -> /wordpress) and includes them in the next remote index.
         if ($this->follow_symlinks) {
-            $this->recreate_intermediate_symlinks();
+            $file_sync_change_scope =
+                $this->create_files_pull_remote_change_scope();
+            try {
+                $this->recreate_intermediate_symlinks(
+                    $file_sync_change_scope
+                );
+            } finally {
+                $file_sync_change_scope->close();
+            }
         }
         $this->pull_index_journal->apply_pending_records();
 
@@ -3977,7 +3985,9 @@ class ImportClient
      * (e.g. filesystem root/srv/wordpress -> /wordpress) so the directory
      * layout matches the server.
      */
-    private function recreate_intermediate_symlinks(): void
+    private function recreate_intermediate_symlinks(
+        FileSyncChangeScope $file_sync_change_scope
+    ): void
     {
         if (!file_exists($this->next_remote_index_file)) {
             return;
@@ -4026,6 +4036,15 @@ class ImportClient
                 continue;
             }
 
+            if (
+                !$file_sync_change_scope->index_entry_may_change(
+                    $remote_absolute_path,
+                    'link'
+                )
+            ) {
+                continue;
+            }
+
             try {
                 $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
                     $remote_absolute_path
@@ -4035,6 +4054,18 @@ class ImportClient
                     "INTERMEDIATE SYMLINK SKIP: invalid path {$remote_absolute_path}: " . $e->getMessage(),
                     true,
                 );
+                continue;
+            }
+
+            $preserve_local_skip_reason =
+                $this->symlink_preserve_local_skip_reason(
+                    $remote_absolute_path,
+                    $local_absolute_path,
+                    $symlink_target
+                );
+            if ($preserve_local_skip_reason !== null) {
+                $this->audit_log($preserve_local_skip_reason, true);
+                $this->emit_skip_progress($remote_absolute_path);
                 continue;
             }
 
@@ -7602,20 +7633,8 @@ class ImportClient
         }
 
         $file_diff_progress_state = $this->get_state()->diff;
-        $selection_fingerprint =
-            $this->get_state()->files_pull_path_selection_fingerprint;
-        if (!is_string($selection_fingerprint)) {
-            throw new RuntimeException(
-                'Files-pull diff has no path-selection fingerprint.'
-            );
-        }
-        $file_sync_change_scope = $this->get_state()->files_pull_ownership
-            ->create_remote_change_scope(
-                $this->files_pull_ownership_directory,
-                $selection_fingerprint,
-                $this->pull_excluded_files_with_path_prefixes,
-                $this->get_state()->include_caches
-            );
+        $file_sync_change_scope =
+            $this->create_files_pull_remote_change_scope();
         $index_diff = null;
         $fetch_list_file_handle = null;
         try {
@@ -7878,6 +7897,25 @@ class ImportClient
         }
 
         return !$has_path;
+    }
+
+    /** Opens the remote-index change scope for the active files-pull. */
+    private function create_files_pull_remote_change_scope(): FileSyncChangeScope
+    {
+        $selection_fingerprint =
+            $this->get_state()->files_pull_path_selection_fingerprint;
+        if (!is_string($selection_fingerprint)) {
+            throw new RuntimeException(
+                'The active files-pull has no path-selection fingerprint.'
+            );
+        }
+        return $this->get_state()->files_pull_ownership
+            ->create_remote_change_scope(
+                $this->files_pull_ownership_directory,
+                $selection_fingerprint,
+                $this->pull_excluded_files_with_path_prefixes,
+                $this->get_state()->include_caches
+            );
     }
 
     /**
@@ -10206,21 +10244,16 @@ class ImportClient
             $target,
         );
 
-        // In preserve-local mode, if something already exists at the symlink
-        // path, keep it — whether it's a file, directory, or another symlink.
-        // Also skip if any parent component is a symlink — we never create
-        // new content through symlinked directories.
-        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
-                $this->emit_skip_progress($path);
-                return;
-            }
-            if ($this->path_traverses_symlink(dirname($local_absolute_path))) {
-                $this->audit_log("PRESERVE-LOCAL skip symlink (symlink in path): {$path} -> {$target}", true);
-                $this->emit_skip_progress($path);
-                return;
-            }
+        $preserve_local_skip_reason =
+            $this->symlink_preserve_local_skip_reason(
+                $path,
+                $local_absolute_path,
+                $target
+            );
+        if ($preserve_local_skip_reason !== null) {
+            $this->audit_log($preserve_local_skip_reason, true);
+            $this->emit_skip_progress($path);
+            return;
         }
 
         // Validate that the symlink target doesn't escape the filesystem root.
@@ -10330,6 +10363,34 @@ class ImportClient
             "target" => $target_for_local,
             "message" => "Symlink: {$path} -> {$target}",
         ]);
+    }
+
+    /**
+     * Reports why preserve-local keeps a symlink path untouched.
+     *
+     * Existing paths belong to the local installation. A symlinked parent may
+     * lead to shared hosting content, so files-pull must not write through it.
+     */
+    private function symlink_preserve_local_skip_reason(
+        string $remote_absolute_path,
+        string $local_absolute_path,
+        string $symlink_target
+    ): ?string {
+        if ($this->fs_root_nonempty_behavior !== 'preserve-local') {
+            return null;
+        }
+        if (
+            file_exists($local_absolute_path)
+            || is_link($local_absolute_path)
+        ) {
+            return "PRESERVE-LOCAL skip symlink (path exists): "
+                . "{$remote_absolute_path} -> {$symlink_target}";
+        }
+        if ($this->path_traverses_symlink(dirname($local_absolute_path))) {
+            return "PRESERVE-LOCAL skip symlink (symlink in path): "
+                . "{$remote_absolute_path} -> {$symlink_target}";
+        }
+        return null;
     }
 
     /**

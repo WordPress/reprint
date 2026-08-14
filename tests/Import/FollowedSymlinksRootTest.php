@@ -320,8 +320,32 @@ class FollowedSymlinksRootTest extends TestCase
             'intermediate' => true,
         ]);
         file_put_contents($c->pull_state_directory . '/remote-index.next.jsonl', $entry . "\n");
-
-        $rc->getMethod('recreate_intermediate_symlinks')->invoke($c);
+        $snapshotId = \reprint_test_write_ownership_snapshot(
+            $c->pull_state_directory,
+            [[
+                'kind' => 'exact',
+                'path' => '/src/wp-content/data',
+            ]]
+        );
+        $scope = \FileSyncChangeScope::from_config([
+            'index_path_coordinates' => 'remote_absolute',
+            'ownership_directory_b64' => base64_encode(
+                $c->pull_state_directory . '/files-pull-ownership'
+            ),
+            'current_snapshot_id' => $snapshotId,
+            'prior_snapshot_ids' => [],
+            'protected_snapshot_ids' => [],
+            'excluded_remote_absolute_path_roots_b64' => [],
+            'include_caches' => false,
+        ]);
+        try {
+            $rc->getMethod('recreate_intermediate_symlinks')->invoke(
+                $c,
+                $scope
+            );
+        } finally {
+            $scope->close();
+        }
 
         $link = $this->root . '/src/wp-content/data';
         $this->assertTrue(is_link($link), 'intermediate link is created');

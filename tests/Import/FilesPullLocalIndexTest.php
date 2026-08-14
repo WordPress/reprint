@@ -12,8 +12,9 @@ require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 /**
  * The local index used by files-pull, files-push, and files-diff.
  *
- * Files-pull records each non-skipped local path it changes. A later files-diff
- * therefore ignores pulled changes while still reporting unrelated local changes.
+ * Files-pull applies its mutation journal to the local and remote indexes. A
+ * later files-diff ignores journaled pull changes while still reporting local
+ * changes which the active selection did not apply.
  */
 final class FilesPullLocalIndexTest extends TestCase
 {
@@ -165,6 +166,57 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->filesDiffRecords($diff['stdout'])[0][
                 'local_paths_to_push'
             ]
+        );
+    }
+
+    public function testIntermediateLinksHonorOwnershipAndPreserveLocalBeforeJournaling(): void
+    {
+        mkdir($this->localTree . '/local-shared', 0700, true);
+        symlink('local-git', $this->localTree . '/.git');
+        symlink('local-shared', $this->localTree . '/shared');
+        $this->writeRemoteOverrides([
+            'intermediate_links' => [
+                '.git' => 'remote-git',
+                '.svn' => 'remote-svn',
+                'shared/.cache' => 'remote-cache',
+                'node_modules' => 'remote-node-modules',
+            ],
+        ]);
+
+        $pull = $this->runFilesPull([
+            '--exclude=/var/www/html/.git',
+            '--exclude=/var/www/html/.svn',
+            '--on-fs-root-nonempty=preserve-local',
+        ]);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertSame('local-git', readlink($this->localTree . '/.git'));
+        $this->assertFalse(
+            is_link($this->localTree . '/.svn'),
+            'An absent explicitly excluded intermediate link is not created.'
+        );
+        $this->assertFalse(
+            is_link($this->localTree . '/local-shared/.cache'),
+            'An allowed intermediate link below a preserved symlinked parent stays untouched.'
+        );
+        $this->assertTrue(is_link($this->localTree . '/node_modules'));
+        $this->assertSame(
+            'remote-node-modules',
+            readlink($this->localTree . '/node_modules')
+        );
+
+        $remoteIndex = $this->readIndex(
+            $this->pullStateDirectory . '/remote-index.jsonl'
+        );
+        $this->assertArrayNotHasKey('/var/www/html/.git', $remoteIndex);
+        $this->assertArrayNotHasKey('/var/www/html/.svn', $remoteIndex);
+        $this->assertArrayNotHasKey(
+            '/var/www/html/shared/.cache',
+            $remoteIndex
+        );
+        $this->assertArrayHasKey(
+            '/var/www/html/node_modules',
+            $remoteIndex
         );
     }
 
@@ -987,6 +1039,7 @@ $added_files = array_fill_keys(
     array_keys($overrides['added_files'] ?? array()),
     true
 );
+$intermediate_links = $overrides['intermediate_links'] ?? array();
 $remote_index = array();
 foreach ($remote_files as $path => $contents) {
     $remote_index['/var/www/html/' . $path] = array(
@@ -1004,6 +1057,16 @@ foreach ($added_directories as $path => $_) {
         'ctime' => 43,
         'size' => 0,
         'type' => 'dir',
+    );
+}
+foreach ($intermediate_links as $path => $target) {
+    $remote_index['/var/www/html/' . $path] = array(
+        'path' => base64_encode('/var/www/html/' . $path),
+        'ctime' => 43,
+        'size' => strlen($target),
+        'type' => 'link',
+        'target' => base64_encode($target),
+        'intermediate' => true,
     );
 }
 uksort($remote_index, static function (string $left, string $right): int {
@@ -1137,6 +1200,14 @@ if ($endpoint === 'file_index') {
                 'X-Chunk-Type' => 'directory',
                 'X-Directory-Path' => $part['entry']['path'],
                 'X-Directory-Ctime' => $part['entry']['ctime'],
+                'X-Cursor' => $part['cursor'],
+            ));
+        } elseif ($part['entry']['type'] === 'link') {
+            $write_part(array(
+                'X-Chunk-Type' => 'symlink',
+                'X-Symlink-Path' => $part['entry']['path'],
+                'X-Symlink-Target' => $part['entry']['target'],
+                'X-Symlink-Ctime' => $part['entry']['ctime'],
                 'X-Cursor' => $part['cursor'],
             ));
         } else {
