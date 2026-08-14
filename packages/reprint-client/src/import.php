@@ -7723,14 +7723,31 @@ class ImportClient
                                 $sql_bytes_written += strlen($data);
 
                                 if ($query_complete) {
-                                    $table_start_cursor = $sql_action === "replace_table"
-                                        ? $mysql_committed_cursor
-                                        : null;
+                                    $replaces_table = $sql_action === "replace_table";
+                                    $replaced_table = null;
+                                    if ($replaces_table) {
+                                        $encoded_table = $chunk["headers"]["x-table-name-base64"] ?? "";
+                                        $replaced_table = base64_decode($encoded_table, true);
+                                        if ($replaced_table === false || $replaced_table === "") {
+                                            throw new RuntimeException(
+                                                "The source did not identify the table being replaced."
+                                            );
+                                        }
+                                    }
                                     $this->execute_mysql_queries($mysql_conn, $sql_buffer);
+                                    $table_start_cursor =
+                                        $replaces_table &&
+                                        !$this->mysql_table_supports_transactions(
+                                            $mysql_conn,
+                                            $replaced_table,
+                                        )
+                                            ? $mysql_committed_cursor
+                                            : null;
                                     $this->save_mysql_output_cursor(
                                         $mysql_conn,
                                         $cursor,
                                         $table_start_cursor,
+                                        $replaces_table,
                                     );
                                     $mysql_committed_cursor = $cursor;
                                     $sql_buffer = "";
@@ -7925,6 +7942,46 @@ class ImportClient
         }
     }
 
+    /** Returns whether the target table's actual storage engine supports transactions. */
+    private function mysql_table_supports_transactions(
+        \mysqli $connection,
+        string $table_name
+    ): bool {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+        $statement = $connection->prepare(
+            "SELECT `TABLES`.`TABLE_TYPE`, `ENGINES`.`TRANSACTIONS` " .
+            "FROM `INFORMATION_SCHEMA`.`TABLES` AS `TABLES` " .
+            "LEFT JOIN `INFORMATION_SCHEMA`.`ENGINES` AS `ENGINES` " .
+            "ON `ENGINES`.`ENGINE` = `TABLES`.`ENGINE` " .
+            "WHERE `TABLES`.`TABLE_SCHEMA` = DATABASE() " .
+            "AND BINARY `TABLES`.`TABLE_NAME` = BINARY ?"
+        );
+        if (!$statement) {
+            throw new RuntimeException(
+                "MySQL could not prepare the target table engine query: " . $connection->error
+            );
+        }
+        $statement->bind_param("s", $table_name);
+        if (!$statement->execute()) {
+            $error = $statement->error;
+            $statement->close();
+            throw new RuntimeException("MySQL could not read the target table engine: " . $error);
+        }
+        $table_type = null;
+        $transactions = null;
+        $statement->bind_result($table_type, $transactions);
+        $found_table = $statement->fetch() === true;
+        $statement->close();
+        if (!$found_table) {
+            throw new RuntimeException(
+                "MySQL created no target table or view named `{$table_name}`."
+            );
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        // Views have no storage engine and no rows to replay.
+        return $table_type === "VIEW" || $transactions === "YES";
+    }
+
     /** Starts a fresh target import or returns the source cursor saved by MySQL. */
     private function start_or_resume_mysql_output(
         \mysqli $connection,
@@ -8079,7 +8136,8 @@ class ImportClient
     private function save_mysql_output_cursor(
         \mysqli $connection,
         ?string $cursor,
-        ?string $table_start_cursor = null
+        ?string $table_start_cursor = null,
+        bool $replaces_table = false
     ): void
     {
         if ($cursor === null) {
@@ -8092,14 +8150,15 @@ class ImportClient
             "VALUES (1, ?, ?, ?) " .
             "ON DUPLICATE KEY UPDATE `source_hash` = VALUES(`source_hash`), " .
             "`source_cursor` = VALUES(`source_cursor`), " .
-            "`table_start_cursor` = COALESCE(VALUES(`table_start_cursor`), `table_start_cursor`)"
+            "`table_start_cursor` = IF(? = 1, VALUES(`table_start_cursor`), `table_start_cursor`)"
         );
         if (!$statement) {
             throw new RuntimeException("MySQL could not prepare the db-pull position update: " . $connection->error);
         }
 
         $source_hash = hash("sha256", $this->remote_reprint_api_url);
-        $statement->bind_param("sss", $source_hash, $cursor, $table_start_cursor);
+        $replace_table = $replaces_table ? 1 : 0;
+        $statement->bind_param("sssi", $source_hash, $cursor, $table_start_cursor, $replace_table);
         if (!$statement->execute()) {
             $error = $statement->error;
             $statement->close();

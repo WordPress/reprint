@@ -106,6 +106,9 @@ class MySQLDumpProducer
     /** @var string */
     private $current_sql_fragment_type = "sql";
 
+    /** @var string|null */
+    private $current_sql_fragment_table = null;
+
     /**
      * @param PDO $db Database connection — either a real PDO (MySQL) or a
      *        PDO-compatible adapter (SQLite sites). No type hint because the
@@ -139,6 +142,12 @@ class MySQLDumpProducer
         return $this->current_sql_fragment_type;
     }
 
+    /** Returns the table replaced by the current fragment, or null. */
+    public function get_sql_fragment_table(): ?string
+    {
+        return $this->current_sql_fragment_table;
+    }
+
     public function is_finished(): bool
     {
         return self::STATE_FINISHED === $this->state;
@@ -157,6 +166,7 @@ class MySQLDumpProducer
         }
 
         $this->current_sql_fragment_type = "sql";
+        $this->current_sql_fragment_table = null;
 
         if (self::STATE_INIT === $this->state) {
             if (!$this->row_reader->has_initialized_tables()) {
@@ -388,6 +398,7 @@ class MySQLDumpProducer
             $drop = "DROP TABLE IF EXISTS {$quoted_table};\n";
             $this->current_sql_fragment = $header . $drop . $sql . ";";
             $this->current_sql_fragment_type = "replace_table";
+            $this->current_sql_fragment_table = $this->row_reader->get_current_table();
         } else {
             $keys = $row ? implode(", ", array_keys($row)) : "(no row returned)";
             throw new \RuntimeException(

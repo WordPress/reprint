@@ -49,11 +49,13 @@ class BasicDumpTest extends MySQLDumpProducerTestBase
         $producer = $this->createProducer();
         $this->assertTrue($producer->next_sql_fragment());
         $this->assertSame('sql', $producer->get_sql_fragment_type());
+        $this->assertNull($producer->get_sql_fragment_table());
         $this->assertTrue($producer->next_sql_fragment());
 
         $fragment = $producer->get_sql_fragment();
         $this->assertNotNull($fragment);
         $this->assertSame('replace_table', $producer->get_sql_fragment_type());
+        $this->assertSame('replace_me', $producer->get_sql_fragment_table());
         $this->assertStringContainsString('DROP TABLE IF EXISTS `replace_me`;', $fragment);
         $this->assertStringContainsString('CREATE TABLE `replace_me`', $fragment);
         $this->assertLessThan(

@@ -1,7 +1,7 @@
 /**
  * A MySQL target records the source position in the same transaction as each
- * completed INSERT. A replacement process still starts the dump from the
- * beginning until table replacement can make target-side continuation safe.
+ * completed InnoDB INSERT. A replacement process continues after that position
+ * without dropping and rebuilding the table.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -13,7 +13,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir, getDbName,
     createMysqlConnection, fsRootDir,
     writeTestHooks, removeTestHooks,
-    clearHookState,
+    writeHookState, readHookState, clearHookState,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -213,7 +213,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         await connection.end();
     });
 
-    it('records committed rows and safely starts a replacement process over', async () => {
+    it('continues an InnoDB table after its last committed SQL group', async () => {
         const first = spawnDatabasePull();
 
         // Kill only after another MySQL connection can see both the imported
@@ -287,6 +287,18 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         await sleep(100);
         removeTestHooks(site);
 
+        writeHookState(site, { replacementDrops: 0 });
+        writeTestHooks(site, [
+            'function test_hook_before_sql_batch(&$sql, $cursor) {',
+            `    $state_file = '/srv/e2e-sites/.e2e-hook-state-${site}';`,
+            '    $state = json_decode(file_get_contents($state_file), true);',
+            `    if (strpos($sql, 'DROP TABLE IF EXISTS \`${sourceTable}\`') !== false) {`,
+            '        $state[\'replacementDrops\'] = ($state[\'replacementDrops\'] ?? 0) + 1;',
+            '        file_put_contents($state_file, json_encode($state));',
+            '    }',
+            '}',
+        ].join('\n'));
+
         const replacement = runImporter(importUrl(), tempDir, 'db-pull', {
             secret: getSiteSecret(site),
             extraArgs: mysqlArguments(),
@@ -296,6 +308,11 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             replacement.exitCode,
             0,
             `replacement db-pull failed:\n${replacement.stderr}\n${replacement.stdout}`,
+        );
+        assert.equal(
+            readHookState(site)?.replacementDrops,
+            0,
+            'the replacement process dropped an InnoDB table that had a committed source position',
         );
 
         const targetConnection = await createMysqlConnection(targetDb);

@@ -950,7 +950,7 @@ function endpoint_sql_chunk(
     $batches_processed = 0;
     $sql_bytes_processed = 0;
     $aborted = false;
-    /** @var array{sql:string,cursor:string}|null $pending_table_replacement */
+    /** @var array{sql:string,cursor:string,table:string}|null $pending_table_replacement */
     $pending_table_replacement = null;
 
     try {
@@ -959,11 +959,13 @@ function endpoint_sql_chunk(
         ) {
             $sql = [];
             $sql_action = "sql";
+            $sql_table = null;
             $cursor = null;
 
             if ($pending_table_replacement !== null) {
                 $sql[] = $pending_table_replacement["sql"];
                 $cursor = $pending_table_replacement["cursor"];
+                $sql_table = $pending_table_replacement["table"];
                 $sql_action = "replace_table";
                 $pending_table_replacement = null;
             } else {
@@ -972,14 +974,22 @@ function endpoint_sql_chunk(
                     $fragment = (string) $reader->get_sql_fragment();
                     $fragment_cursor = $reader->get_reentrancy_cursor();
                     if ($reader->get_sql_fragment_type() === "replace_table") {
+                        $fragment_table = $reader->get_sql_fragment_table();
+                        if ($fragment_table === null) {
+                            throw new RuntimeException(
+                                "The database dump did not identify the table being replaced."
+                            );
+                        }
                         if ($sql === []) {
                             $sql[] = $fragment;
                             $cursor = $fragment_cursor;
+                            $sql_table = $fragment_table;
                             $sql_action = "replace_table";
                         } else {
                             $pending_table_replacement = [
                                 "sql" => $fragment,
                                 "cursor" => $fragment_cursor,
+                                "table" => $fragment_table,
                             ];
                         }
                         break;
@@ -1021,12 +1031,16 @@ function endpoint_sql_chunk(
                 _e2e_call_hook('test_hook_before_sql_batch', $hook_args);
             }
 
+            $table_header = $sql_table === null
+                ? ""
+                : "X-Table-Name-Base64: " . base64_encode($sql_table) . "\r\n";
             $gz->write(
                 "--{$boundary}\r\n" .
                 "Content-Type: application/sql\r\n" .
                 "Content-Length: " . strlen($sql) . "\r\n" .
                 "X-Chunk-Type: sql\r\n" .
                 "X-SQL-Action: {$sql_action}\r\n" .
+                $table_header .
                 "X-Query-Complete: " . ($query_complete ? "1" : "0") . "\r\n" .
                 "X-Cursor: " . base64_encode($cursor) . "\r\n" .
                 "\r\n"

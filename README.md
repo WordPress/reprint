@@ -375,10 +375,11 @@ SQL group and its source position are committed together. A replacement
 process reads the target position before it asks for more SQL. Incomplete SQL
 stays in memory and is requested again after process death. The source sends
 each `DROP TABLE` + `CREATE TABLE` pair as one replacement action. While a
-table is being filled, the target also keeps the position before that pair.
-After process death, the replacement process rebuilds the unfinished table
-before inserting its rows again. This also works for nontransactional tables
-such as MyISAM.
+nontransactional table is being filled, the target also keeps the position
+before that pair. After process death, the replacement process rebuilds that
+unfinished table before inserting its rows again. Transactional tables such as
+InnoDB continue after their last committed SQL group instead of rebuilding the
+whole table.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
