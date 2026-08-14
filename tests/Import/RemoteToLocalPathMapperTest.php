@@ -80,6 +80,82 @@ final class RemoteToLocalPathMapperTest extends TestCase
         );
     }
 
+    public function testReturnsEveryVerifiedRemoteAliasForOverlappingRemapTargets(): void
+    {
+        $mapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/remote/site', '/remote/shared'],
+            [
+                '/remote/site' => '/local/content',
+                '/remote/site/plugins' => '/local/plugins',
+                '/remote/shared' => '/local/content/shared',
+            ]
+        );
+
+        $this->assertSame(
+            [
+                '/content/shared/file.txt',
+                '/remote/site/shared/file.txt',
+                '/remote/shared/file.txt',
+            ],
+            $mapper->remote_paths_mapping_to('/local/content/shared/file.txt')
+        );
+        $this->assertSame(
+            ['/plugins/hello.php', '/remote/site/plugins/hello.php'],
+            $mapper->remote_paths_mapping_to('/local/plugins/hello.php')
+        );
+        $this->assertSame(
+            ['/content/plugins/hello.php'],
+            $mapper->remote_paths_mapping_to('/local/content/plugins/hello.php')
+        );
+    }
+
+    public function testReturnsIdentityAndFollowedPlacementAliasesOnlyWhenTheyMapForward(): void
+    {
+        $mapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/followed/site'],
+            [],
+            '/local/followed'
+        );
+
+        $this->assertSame(
+            ['/followed/site/file.txt', '/site/file.txt'],
+            $mapper->remote_paths_mapping_to('/local/followed/site/file.txt')
+        );
+        $this->assertSame(
+            ['/mnt/shared/file.txt'],
+            $mapper->remote_paths_mapping_to('/local/followed/mnt/shared/file.txt')
+        );
+    }
+
+    public function testExactPlacementRootsReturnVerifiedRootAliases(): void
+    {
+        $mapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/'],
+            ['/mapped' => '/local']
+        );
+        $this->assertSame(
+            ['/', '/mapped'],
+            $mapper->remote_paths_mapping_to('/local')
+        );
+        $this->assertFalse(
+            $mapper->remote_path_owns_mapped_local_subtree('/')
+        );
+
+        $followedMapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/site'],
+            [],
+            '/local/followed'
+        );
+        $this->assertSame(
+            ['/'],
+            $followedMapper->remote_paths_mapping_to('/local/followed')
+        );
+    }
+
     public function testRemotePathDoesNotOwnLocalSubtreeContainingAnotherRemapTarget(): void
     {
         $mapper = new RemoteToLocalPathMapper(
@@ -112,6 +188,118 @@ final class RemoteToLocalPathMapperTest extends TestCase
         $this->assertTrue($mapper->remote_path_owns_mapped_local_subtree('/b/file.txt'));
     }
 
+    public function testRemotePathsDoNotOwnTheSameMappedLocalRoot(): void
+    {
+        $mapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/a', '/b'],
+            [
+                '/a' => '/local/shared',
+                '/b' => '/local/shared',
+            ]
+        );
+
+        $this->assertFalse($mapper->remote_path_owns_mapped_local_subtree('/a'));
+        $this->assertFalse($mapper->remote_path_owns_mapped_local_subtree('/b'));
+    }
+
+    public function testRemotePathDoesNotOwnSubtreeWithDescendantRemapSourceHole(): void
+    {
+        $mapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/a', '/b'],
+            [
+                '/a' => '/local/shared',
+                '/a/hole' => '/local/elsewhere',
+                '/b' => '/local/shared/hole',
+            ]
+        );
+
+        $this->assertFalse($mapper->remote_path_owns_mapped_local_subtree('/a'));
+        $this->assertFalse($mapper->remote_path_owns_mapped_local_subtree('/b'));
+        $this->assertTrue($mapper->remote_path_owns_mapped_local_subtree('/a/file.txt'));
+    }
+
+    public function testRemotePathOwnsSubtreeAcrossContinuousNestedRemap(): void
+    {
+        $mapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/a'],
+            [
+                '/a' => '/local/shared',
+                '/a/nested' => '/local/shared/nested',
+            ]
+        );
+
+        $this->assertTrue($mapper->remote_path_owns_mapped_local_subtree('/a'));
+    }
+
+    public function testRemotePathDoesNotOwnNestedRemapTargetAliasedByParentPlacement(): void
+    {
+        $mapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/a'],
+            [
+                '/a' => '/local/shared',
+                '/a/nested' => '/local/shared/other',
+            ]
+        );
+        $this->assertFalse(
+            $mapper->remote_path_owns_mapped_local_subtree('/a/nested')
+        );
+    }
+
+    public function testRemotePathDoesNotOwnSubtreeAcrossOriginalFollowedPlacementBoundary(): void
+    {
+        $mapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/srv/site'],
+            [],
+            '/local/followed'
+        );
+
+        $this->assertFalse($mapper->remote_path_owns_mapped_local_subtree('/srv'));
+        $this->assertTrue($mapper->remote_path_owns_mapped_local_subtree('/srv/site'));
+        $this->assertTrue($mapper->remote_path_owns_mapped_local_subtree('/mnt/shared'));
+    }
+
+    public function testRemoteFilesystemRootOwnsOnlyOneContinuousPlacement(): void
+    {
+        $identityMapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/'],
+            [],
+            '/local/followed'
+        );
+        $this->assertTrue(
+            $identityMapper->remote_path_owns_mapped_local_subtree('/')
+        );
+
+        $splitMapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/site'],
+            [],
+            '/local/followed'
+        );
+        $this->assertFalse(
+            $splitMapper->remote_path_owns_mapped_local_subtree('/')
+        );
+    }
+
+    public function testRemotePathDoesNotOwnSubtreeWithForeignPlacementAlias(): void
+    {
+        $mapper = new RemoteToLocalPathMapper(
+            '/local',
+            ['/followed/site'],
+            [],
+            '/local/followed'
+        );
+
+        $this->assertFalse(
+            $mapper->remote_path_owns_mapped_local_subtree('/followed/site')
+        );
+    }
+
     public function testPathBytesDoNotNeedToBeValidUtf8(): void
     {
         $remote_root = "/srv/site-\xff";
@@ -126,6 +314,10 @@ final class RemoteToLocalPathMapperTest extends TestCase
         $this->assertSame(
             $local_content . '/file.txt',
             $mapper->map_path($remote_content . '/file.txt')
+        );
+        $this->assertSame(
+            ["/content-\xfd/file.txt", $remote_content . '/file.txt'],
+            $mapper->remote_paths_mapping_to($local_content . '/file.txt')
         );
     }
 

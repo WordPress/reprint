@@ -1,16 +1,19 @@
 <?php
 declare(strict_types=1);
 
+use function WordPress\Filesystem\wp_join_unix_paths;
+use function WordPress\Reprint\Exporter\assert_valid_relative_path;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Exporter\relative_path_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Errors contain private state paths, never HTML.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
 
 /**
- * Decides which remote-index changes belong to one files-pull selection.
+ * Decides which indexed changes belong to one files-pull selection.
  *
  * The current snapshot describes this run and is authoritative where it owns
  * a path. Earlier snapshots for the same selection cover paths which have
@@ -25,7 +28,10 @@ use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
  * hash-collision candidates one bounded path row at a time. Only one snapshot
  * pair remains open, and snapshot contents are never materialized in memory.
  *
- * @phpstan-type Config array{index_path_coordinates:'remote_absolute',ownership_directory_b64:string,current_snapshot_id:string,prior_snapshot_ids:list<string>,protected_snapshot_ids:list<string>,excluded_remote_absolute_path_roots_b64:list<string>,include_caches:bool}
+ * @phpstan-type MapperConfig array{filesystem_root_b64:string,original_remote_roots_b64:list<string>,resolved_path_mappings:list<array{remote_prefix_b64:string,local_prefix_b64:string}>,local_followed_symlinks_root_b64:string|null}
+ * @phpstan-type RemoteAbsoluteConfig array{index_path_coordinates:'remote_absolute',ownership_directory_b64:string,current_snapshot_id:string,prior_snapshot_ids:list<string>,protected_snapshot_ids:list<string>,excluded_remote_absolute_path_roots_b64:list<string>,include_caches:bool}
+ * @phpstan-type LocalRelativeConfig array{index_path_coordinates:'local_relative',ownership_directory_b64:string,current_snapshot_id:string,prior_snapshot_ids:list<string>,protected_snapshot_ids:list<string>,excluded_remote_absolute_path_roots_b64:list<string>,include_caches:bool,remote_to_local_path_mapper_config:MapperConfig}
+ * @phpstan-type Config RemoteAbsoluteConfig|LocalRelativeConfig
  */
 final class FileSyncChangeScope
 {
@@ -35,6 +41,7 @@ final class FileSyncChangeScope
     /** @phpstan-var Config */
     private array $config;
     private string $ownership_directory;
+    private ?RemoteToLocalPathMapper $remote_to_local_path_mapper = null;
     /** @var list<string> */
     private array $excluded_remote_absolute_path_roots = [];
     private ?string $open_snapshot_id = null;
@@ -86,15 +93,42 @@ final class FileSyncChangeScope
      * Root atoms own strict descendants. Exact atoms own only a link at the
      * same path. Current ownership wins over another selection's protection;
      * earlier ownership does not.
+     * A local-relative entry needs one allowing alias and no blocking alias.
      */
     public function index_entry_may_change(
         string $index_path,
         string $type
     ): bool {
-        return $this->remote_index_entry_change_decision(
-            $index_path,
-            $type
-        ) === 'allow';
+        $this->assert_open();
+        if (!in_array($type, ['file', 'link', 'dir'], true)) {
+            throw new InvalidArgumentException(
+                "Index entry type must be file, link, or dir; got {$type}."
+            );
+        }
+        if ($this->config['index_path_coordinates'] === 'remote_absolute') {
+            return $this->remote_index_entry_change_decision(
+                $index_path,
+                $type
+            ) === 'allow';
+        }
+
+        $change_is_allowed = false;
+        foreach (
+            $this->remote_paths_mapping_to_local_index_path($index_path)
+            as $remote_absolute_path
+        ) {
+            $decision = $this->remote_index_entry_change_decision(
+                $remote_absolute_path,
+                $type
+            );
+            if ($decision === 'block') {
+                return false;
+            }
+            if ($decision === 'allow') {
+                $change_is_allowed = true;
+            }
+        }
+        return $change_is_allowed;
     }
 
     /** @return 'allow'|'block'|'unowned' */
@@ -104,11 +138,6 @@ final class FileSyncChangeScope
     ): string {
         $this->assert_open();
         self::assert_remote_absolute_path($remote_absolute_path);
-        if (!in_array($type, ['file', 'link', 'dir'], true)) {
-            throw new InvalidArgumentException(
-                "Index entry type must be file, link, or dir; got {$type}."
-            );
-        }
         $current_ownership = $this->snapshots_entry_ownership(
             [$this->config['current_snapshot_id']],
             $remote_absolute_path,
@@ -164,13 +193,42 @@ final class FileSyncChangeScope
      * recursive work is never safe. Current whole-subtree ownership wins. Any
      * other current intersection blocks prior authority, as does any protected
      * intersection.
+     * A local-relative subtree also needs continuous remote-to-local mapping.
      */
     public function subtree_may_change(
         string $index_path
     ): bool {
-        return $this->remote_subtree_change_decision(
-            $index_path
-        ) === 'allow';
+        $this->assert_open();
+        if ($this->config['index_path_coordinates'] === 'remote_absolute') {
+            return $this->remote_subtree_change_decision(
+                $index_path
+            ) === 'allow';
+        }
+
+        $path_mapper = $this->get_local_path_mapper();
+        $change_is_allowed = false;
+        foreach (
+            $this->remote_paths_mapping_to_local_index_path($index_path)
+            as $remote_absolute_path
+        ) {
+            $decision = $this->remote_subtree_change_decision(
+                $remote_absolute_path
+            );
+            if ($decision === 'block') {
+                return false;
+            }
+            if ($decision === 'allow') {
+                if (
+                    !$path_mapper->remote_path_owns_mapped_local_subtree(
+                        $remote_absolute_path
+                    )
+                ) {
+                    return false;
+                }
+                $change_is_allowed = true;
+            }
+        }
+        return $change_is_allowed;
     }
 
     /** @return 'allow'|'block'|'unowned' */
@@ -218,6 +276,35 @@ final class FileSyncChangeScope
         );
     }
 
+    /**
+     * Maps one remote absolute path into this local-relative index.
+     *
+     * @return string Local path relative to the filesystem root.
+     */
+    public function map_remote_absolute_path_to_index_path(
+        string $remote_absolute_path
+    ): string {
+        $path_mapper = $this->get_local_path_mapper();
+        self::assert_remote_absolute_path($remote_absolute_path);
+        $local_absolute_path = $path_mapper->map_path($remote_absolute_path);
+        $local_relative_path = relative_path_under(
+            $local_absolute_path,
+            $path_mapper->get_filesystem_root()
+        );
+        if ($local_relative_path === null) {
+            throw new LogicException(
+                'Remote-to-local path mapping escaped the filesystem root.'
+            );
+        }
+        return $local_relative_path;
+    }
+
+    /** Returns the filesystem root of this local-relative index. */
+    public function get_filesystem_root(): string
+    {
+        return $this->get_local_path_mapper()->get_filesystem_root();
+    }
+
     public function includes_caches(): bool
     {
         return $this->config['include_caches'];
@@ -230,6 +317,37 @@ final class FileSyncChangeScope
         }
         $this->closed = true;
         $this->close_open_snapshot();
+    }
+
+    /** @return list<string> */
+    private function remote_paths_mapping_to_local_index_path(
+        string $local_relative_path
+    ): array {
+        $path_mapper = $this->get_local_path_mapper();
+        if ($local_relative_path === '') {
+            $local_absolute_path = $path_mapper->get_filesystem_root();
+        } else {
+            assert_valid_relative_path(
+                $local_relative_path,
+                'file-sync change-scope local relative path'
+            );
+            $local_absolute_path = wp_join_unix_paths(
+                $path_mapper->get_filesystem_root(),
+                $local_relative_path
+            );
+        }
+        return $path_mapper->remote_paths_mapping_to($local_absolute_path);
+    }
+
+    private function get_local_path_mapper(): RemoteToLocalPathMapper
+    {
+        if ($this->remote_to_local_path_mapper === null) {
+            throw new LogicException(
+                'The file-sync change scope uses remote_absolute index paths. '
+                . 'Map it to local_relative before asking for local filesystem coordinates.'
+            );
+        }
+        return $this->remote_to_local_path_mapper;
     }
 
     /**
@@ -619,6 +737,16 @@ final class FileSyncChangeScope
 
     private function set_config(array $config): void
     {
+        $index_path_coordinates = $config['index_path_coordinates'] ?? null;
+        if (
+            $index_path_coordinates !== 'remote_absolute'
+            && $index_path_coordinates !== 'local_relative'
+        ) {
+            throw new InvalidArgumentException(
+                'File-sync change-scope index_path_coordinates must be '
+                . 'remote_absolute or local_relative.'
+            );
+        }
         $expected_keys = [
             'index_path_coordinates',
             'ownership_directory_b64',
@@ -628,6 +756,9 @@ final class FileSyncChangeScope
             'excluded_remote_absolute_path_roots_b64',
             'include_caches',
         ];
+        if ($index_path_coordinates === 'local_relative') {
+            $expected_keys[] = 'remote_to_local_path_mapper_config';
+        }
         $actual_keys = array_keys($config);
         sort($actual_keys, SORT_STRING);
         $sorted_expected_keys = $expected_keys;
@@ -639,11 +770,6 @@ final class FileSyncChangeScope
                 . '; received '
                 . json_encode(array_keys($config), JSON_UNESCAPED_SLASHES)
                 . '.'
-            );
-        }
-        if ($config['index_path_coordinates'] !== 'remote_absolute') {
-            throw new InvalidArgumentException(
-                'File-sync change-scope index_path_coordinates must be remote_absolute.'
             );
         }
         $this->ownership_directory = self::decode_config_path(
@@ -667,6 +793,51 @@ final class FileSyncChangeScope
             throw new InvalidArgumentException(
                 'File-sync change-scope include_caches must be a boolean.'
             );
+        }
+        if ($index_path_coordinates === 'local_relative') {
+            $mapper_config = $config['remote_to_local_path_mapper_config'];
+            $expected_mapper_keys = [
+                'filesystem_root_b64',
+                'original_remote_roots_b64',
+                'resolved_path_mappings',
+                'local_followed_symlinks_root_b64',
+            ];
+            if (!is_array($mapper_config)) {
+                throw new InvalidArgumentException(
+                    'Local-relative file-sync change scope requires a path-mapper config.'
+                );
+            }
+            $actual_mapper_keys = array_keys($mapper_config);
+            sort($actual_mapper_keys, SORT_STRING);
+            $sorted_expected_mapper_keys = $expected_mapper_keys;
+            sort($sorted_expected_mapper_keys, SORT_STRING);
+            if ($actual_mapper_keys !== $sorted_expected_mapper_keys) {
+                throw new InvalidArgumentException(
+                    'Remote-to-local path-mapper config fields must be exactly '
+                    . implode(', ', $expected_mapper_keys)
+                    . '.'
+                );
+            }
+            try {
+                $path_mapper = RemoteToLocalPathMapper::from_config(
+                    $mapper_config
+                );
+            } catch (Throwable $throwable) {
+                throw new InvalidArgumentException(
+                    'Local-relative file-sync change scope has an invalid path-mapper config.',
+                    0,
+                    $throwable
+                );
+            }
+            $canonical_mapper_config = $path_mapper->get_config();
+            foreach ($expected_mapper_keys as $mapper_key) {
+                if ($canonical_mapper_config[$mapper_key] !== $mapper_config[$mapper_key]) {
+                    throw new InvalidArgumentException(
+                        'Remote-to-local path-mapper config paths must use canonical base64.'
+                    );
+                }
+            }
+            $this->remote_to_local_path_mapper = $path_mapper;
         }
         /** @var Config $config */
         $this->config = $config;

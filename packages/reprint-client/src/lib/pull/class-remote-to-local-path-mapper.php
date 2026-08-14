@@ -143,6 +143,23 @@ final class RemoteToLocalPathMapper
         ];
     }
 
+    /**
+     * Re-expresses a remote-absolute change scope in local-index coordinates.
+     */
+    public function map_change_scope_to_local_index(
+        FileSyncChangeScope $remote_change_scope
+    ): FileSyncChangeScope {
+        $config = $remote_change_scope->get_config();
+        if ($config["index_path_coordinates"] !== "remote_absolute") {
+            throw new InvalidArgumentException(
+                "Only a remote_absolute file-sync change scope can be mapped to a local index."
+            );
+        }
+        $config["index_path_coordinates"] = "local_relative";
+        $config["remote_to_local_path_mapper_config"] = $this->get_config();
+        return FileSyncChangeScope::from_config($config);
+    }
+
     /** Returns the local filesystem root used by map_path(). */
     public function get_filesystem_root(): string
     {
@@ -188,6 +205,9 @@ final class RemoteToLocalPathMapper
                 }
             }
             if (!$path_is_within_original_remote_roots) {
+                if ($remote_absolute_path === "/") {
+                    return $this->local_followed_symlinks_root;
+                }
                 return wp_join_unix_paths(
                     $this->local_followed_symlinks_root,
                     $remote_absolute_path
@@ -195,39 +215,163 @@ final class RemoteToLocalPathMapper
             }
         }
 
+        if ($remote_absolute_path === "/") {
+            return $this->filesystem_root;
+        }
         return wp_join_unix_paths($this->filesystem_root, $remote_absolute_path);
+    }
+
+    /**
+     * Returns every remote path which maps to one local absolute path.
+     *
+     * The identity placement, each explicit remap target, and the followed-
+     * symlinks placement may overlap. Candidates are returned only when the
+     * forward mapping confirms the requested local path.
+     *
+     * @param string $local_absolute_path Local absolute path.
+     * @return list<string> Remote absolute paths mapping to the local path.
+     */
+    public function remote_paths_mapping_to(string $local_absolute_path): array
+    {
+        assert_valid_path($local_absolute_path, "local absolute path");
+        $remote_absolute_path_candidates = [];
+
+        $remainder = path_remainder_under(
+            $local_absolute_path,
+            $this->filesystem_root
+        );
+        if ($remainder !== null) {
+            $remote_absolute_path_candidates[] =
+                $remainder === "" ? "/" : $remainder;
+        }
+
+        foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
+            $remainder = path_remainder_under($local_absolute_path, $local_prefix);
+            if ($remainder !== null) {
+                $remote_absolute_path_candidates[] = wp_join_unix_paths(
+                    $remote_prefix,
+                    $remainder
+                );
+            }
+        }
+
+        if ($this->local_followed_symlinks_root !== null) {
+            $remainder = path_remainder_under(
+                $local_absolute_path,
+                $this->local_followed_symlinks_root
+            );
+            if ($remainder !== null) {
+                $remote_absolute_path_candidates[] =
+                    $remainder === "" ? "/" : $remainder;
+            }
+        }
+
+        $remote_absolute_paths = [];
+        foreach ($remote_absolute_path_candidates as $remote_absolute_path) {
+            if (
+                !in_array($remote_absolute_path, $remote_absolute_paths, true)
+                && $this->map_path($remote_absolute_path) === $local_absolute_path
+            ) {
+                $remote_absolute_paths[] = $remote_absolute_path;
+            }
+        }
+        return $remote_absolute_paths;
     }
 
     /**
      * Whether one remote path owns its mapped local subtree.
      *
-     * A recursive local change at this path must not cross a remap used by a
-     * different remote subtree. This covers remap targets both below this path
-     * and above it.
+     * Every remote descendant must retain the same suffix below the mapped
+     * local path. A nested remap or a transition between the original and
+     * followed-symlink placements must not leave a local hole. A separately
+     * selected remote subtree must not map to an intersecting local subtree.
      */
     public function remote_path_owns_mapped_local_subtree(
         string $remote_absolute_path
     ): bool
     {
         $local_absolute_path = $this->map_path($remote_absolute_path);
-        foreach ($this->resolved_path_mappings as $remote_root => $local_root) {
+        foreach (
+            $this->remote_paths_mapping_to($local_absolute_path)
+            as $mapped_remote_path
+        ) {
             if (
-                !path_is_same_as_or_descendant_of(
-                    $remote_absolute_path,
-                    $remote_root
-                )
-                && (
-                    path_is_same_as_or_descendant_of(
-                        $local_absolute_path,
-                        $local_root
-                    )
+                (
+                    $this->local_followed_symlinks_root !== null
                     || path_is_same_as_or_descendant_of(
-                        $local_root,
-                        $local_absolute_path
+                        $mapped_remote_path,
+                        $this->original_remote_roots
                     )
+                )
+                && !path_is_same_as_or_descendant_of(
+                    $mapped_remote_path,
+                    $remote_absolute_path
                 )
             ) {
                 return false;
+            }
+        }
+
+        $remote_mapping_boundaries = array_merge(
+            array_keys($this->resolved_path_mappings),
+            $this->original_remote_roots
+        );
+        foreach ($remote_mapping_boundaries as $remote_mapping_boundary) {
+            if (
+                path_is_same_as_or_descendant_of(
+                    $remote_absolute_path,
+                    $remote_mapping_boundary
+                )
+            ) {
+                continue;
+            }
+
+            $mapped_boundary = $this->map_path($remote_mapping_boundary);
+            $remainder = path_remainder_under(
+                $remote_mapping_boundary,
+                $remote_absolute_path
+            );
+            if ($remainder !== null) {
+                if (
+                    $mapped_boundary
+                    !== wp_join_unix_paths($local_absolute_path, $remainder)
+                ) {
+                    return false;
+                }
+            } elseif (
+                path_is_same_as_or_descendant_of(
+                    $local_absolute_path,
+                    $mapped_boundary
+                )
+                || path_is_same_as_or_descendant_of(
+                    $mapped_boundary,
+                    $local_absolute_path
+                )
+            ) {
+                return false;
+            }
+        }
+
+        if (
+            $this->local_followed_symlinks_root !== null
+            && $this->local_followed_symlinks_root !== $local_absolute_path
+            && path_is_same_as_or_descendant_of(
+                $this->local_followed_symlinks_root,
+                $local_absolute_path
+            )
+        ) {
+            foreach (
+                $this->remote_paths_mapping_to($this->local_followed_symlinks_root)
+                as $mapped_remote_path
+            ) {
+                if (
+                    !path_is_same_as_or_descendant_of(
+                        $mapped_remote_path,
+                        $remote_absolute_path
+                    )
+                ) {
+                    return false;
+                }
             }
         }
 

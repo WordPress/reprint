@@ -7,6 +7,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/pull/class-remote-to-local-path-mapper.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/index/class-file-sync-change-scope.php';
 
 class FileSyncChangeScopeTest extends TestCase {
@@ -338,6 +339,274 @@ class FileSyncChangeScopeTest extends TestCase {
         $scope->index_entry_may_change('/path', 'file');
     }
 
+    public function testLocalEntryAliasesRequireOneAllowAndRejectAnyBlock(): void
+    {
+        $currentSnapshotId = $this->publishSnapshot([
+            ['kind' => 'root', 'path' => '/current'],
+        ]);
+        $protectedSnapshotId = $this->publishSnapshot([
+            ['kind' => 'root', 'path' => '/protected'],
+        ]);
+        $remoteScope = $this->scope(
+            $currentSnapshotId,
+            [],
+            [$protectedSnapshotId]
+        );
+
+        $mapper = new \RemoteToLocalPathMapper(
+            '/local',
+            ['/current', '/protected'],
+            [
+                '/current' => '/local/shared',
+                '/protected' => '/local/shared',
+            ]
+        );
+        $localScope = $mapper->map_change_scope_to_local_index($remoteScope);
+        $this->assertFalse(
+            $localScope->index_entry_may_change('shared/file.php', 'file')
+        );
+        $localScope->close();
+
+        $mapper = new \RemoteToLocalPathMapper(
+            '/local',
+            ['/current'],
+            ['/current' => '/local/shared']
+        );
+        $localScope = $mapper->map_change_scope_to_local_index($remoteScope);
+        $this->assertTrue(
+            $localScope->index_entry_may_change('shared/file.php', 'file')
+        );
+        $this->assertFalse(
+            $localScope->index_entry_may_change('unowned/file.php', 'file')
+        );
+        $localScope->close();
+        $remoteScope->close();
+    }
+
+    public function testLocalSubtreeRequiresContinuousMappingAcrossSourceHoles(): void
+    {
+        $currentSnapshotId = $this->publishSnapshot([
+            ['kind' => 'root', 'path' => '/a'],
+        ]);
+        $remoteScope = $this->scope(
+            $currentSnapshotId,
+            [],
+            [],
+            [],
+            true
+        );
+
+        $continuousMapper = new \RemoteToLocalPathMapper(
+            '/local',
+            ['/a'],
+            ['/a' => '/local/shared']
+        );
+        $localScope = $continuousMapper->map_change_scope_to_local_index(
+            $remoteScope
+        );
+        $this->assertTrue($localScope->subtree_may_change('shared/dir'));
+        $localScope->close();
+
+        $mapperWithFilledHole = new \RemoteToLocalPathMapper(
+            '/local',
+            ['/a', '/b'],
+            [
+                '/a' => '/local/shared',
+                '/a/dir/hole' => '/local/elsewhere',
+                '/b' => '/local/shared/dir/hole',
+            ]
+        );
+        $localScope = $mapperWithFilledHole->map_change_scope_to_local_index(
+            $remoteScope
+        );
+        $this->assertFalse($localScope->subtree_may_change('shared/dir'));
+        $localScope->close();
+        $remoteScope->close();
+    }
+
+    public function testFollowedPlacementAliasProtectionBlocksLocalEntry(): void
+    {
+        $currentSnapshotId = $this->publishSnapshot([
+            ['kind' => 'root', 'path' => '/outside'],
+        ]);
+        $protectedSnapshotId = $this->publishSnapshot([
+            ['kind' => 'root', 'path' => '/followed/outside'],
+        ]);
+        $mapper = new \RemoteToLocalPathMapper(
+            '/local',
+            ['/followed/outside'],
+            [],
+            '/local/followed'
+        );
+
+        $remoteScope = $this->scope(
+            $currentSnapshotId,
+            [],
+            [$protectedSnapshotId]
+        );
+        $localScope = $mapper->map_change_scope_to_local_index($remoteScope);
+        $this->assertFalse(
+            $localScope->index_entry_may_change(
+                'followed/outside/file.php',
+                'file'
+            )
+        );
+        $localScope->close();
+        $remoteScope->close();
+
+        $remoteScope = $this->scope($currentSnapshotId);
+        $localScope = $mapper->map_change_scope_to_local_index($remoteScope);
+        $this->assertTrue(
+            $localScope->index_entry_may_change(
+                'followed/outside/file.php',
+                'file'
+            )
+        );
+        $localScope->close();
+        $remoteScope->close();
+    }
+
+    public function testLocalExactLinkAndArbitraryBytesRoundTrip(): void
+    {
+        $remoteRoot = "/remote-\xFF";
+        $remoteLink = $remoteRoot . "/link-\xFC";
+        $filesystemRoot = "/local-\xFD";
+        $localPrefix = $filesystemRoot . "/mapped-\xFE";
+        $currentSnapshotId = $this->publishSnapshot([
+            ['kind' => 'exact', 'path' => $remoteLink],
+        ]);
+        $remoteScope = $this->scope(
+            $currentSnapshotId,
+            [],
+            [],
+            [],
+            true
+        );
+        $mapper = new \RemoteToLocalPathMapper(
+            $filesystemRoot,
+            [$remoteRoot],
+            [$remoteRoot => $localPrefix]
+        );
+        $localScope = $mapper->map_change_scope_to_local_index($remoteScope);
+        $localRelativeLink = "mapped-\xFE/link-\xFC";
+
+        $this->assertTrue(
+            $localScope->index_entry_may_change($localRelativeLink, 'link')
+        );
+        $this->assertFalse(
+            $localScope->index_entry_may_change($localRelativeLink, 'file')
+        );
+        $this->assertSame(
+            $localRelativeLink,
+            $localScope->map_remote_absolute_path_to_index_path($remoteLink)
+        );
+        $this->assertSame($filesystemRoot, $localScope->get_filesystem_root());
+        $this->assertTrue($localScope->includes_caches());
+
+        $config = $localScope->get_config();
+        $this->assertSame('local_relative', $config['index_path_coordinates']);
+        $this->assertSame(
+            $mapper->get_config(),
+            $config['remote_to_local_path_mapper_config']
+        );
+        $this->assertIsString(json_encode($config, JSON_THROW_ON_ERROR));
+        $resumedScope = \FileSyncChangeScope::from_config($config);
+        $this->assertTrue(
+            $resumedScope->index_entry_may_change($localRelativeLink, 'link')
+        );
+
+        $resumedScope->close();
+        $localScope->close();
+        $remoteScope->close();
+    }
+
+    public function testLocalConfigDiscriminatorAndAccessorsAreStrict(): void
+    {
+        $currentSnapshotId = $this->publishSnapshot([]);
+        $remoteScope = $this->scope($currentSnapshotId);
+        try {
+            $remoteScope->get_filesystem_root();
+            $this->fail('Remote-coordinate scope exposed a local filesystem root.');
+        } catch (\LogicException $exception) {
+            $this->assertStringContainsString(
+                'uses remote_absolute index paths',
+                $exception->getMessage()
+            );
+        }
+        try {
+            $remoteScope->map_remote_absolute_path_to_index_path('/site');
+            $this->fail('Remote-coordinate scope exposed local path mapping.');
+        } catch (\LogicException $exception) {
+            $this->assertStringContainsString(
+                'uses remote_absolute index paths',
+                $exception->getMessage()
+            );
+        }
+
+        $mapper = new \RemoteToLocalPathMapper('/local', ['/site']);
+        $config = $remoteScope->get_config();
+        $config['index_path_coordinates'] = 'local_relative';
+        try {
+            \FileSyncChangeScope::from_config($config);
+            $this->fail('Local-relative config omitted its path mapper.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString(
+                'fields must be exactly',
+                $exception->getMessage()
+            );
+        }
+
+        $localScope = $mapper->map_change_scope_to_local_index($remoteScope);
+        try {
+            $mapper->map_change_scope_to_local_index($localScope);
+            $this->fail('A local-relative scope was mapped a second time.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString(
+                'Only a remote_absolute',
+                $exception->getMessage()
+            );
+        }
+
+        $config = $remoteScope->get_config();
+        $config['remote_to_local_path_mapper_config'] = $mapper->get_config();
+        try {
+            \FileSyncChangeScope::from_config($config);
+            $this->fail('Remote-absolute config accepted a local mapper.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString(
+                'fields must be exactly',
+                $exception->getMessage()
+            );
+        }
+
+        $config = $localScope->get_config();
+        $config['remote_to_local_path_mapper_config']['unexpected'] = true;
+        try {
+            \FileSyncChangeScope::from_config($config);
+            $this->fail('Local-relative config accepted an unknown mapper field.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString(
+                'path-mapper config fields must be exactly',
+                $exception->getMessage()
+            );
+        }
+
+        $config = $localScope->get_config();
+        $config['remote_to_local_path_mapper_config']['filesystem_root_b64'] .= '=';
+        try {
+            \FileSyncChangeScope::from_config($config);
+            $this->fail('Local-relative config accepted noncanonical mapper base64.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString(
+                'invalid path-mapper config',
+                $exception->getMessage()
+            );
+        }
+
+        $localScope->close();
+        $remoteScope->close();
+    }
+
     public function testStrictConfigRejectsUnknownFieldsAndUnsortedRawPaths(): void
     {
         $currentSnapshotId = $this->publishSnapshot([]);
@@ -376,11 +645,11 @@ class FileSyncChangeScopeTest extends TestCase {
     {
         $currentSnapshotId = $this->publishSnapshot([]);
         $config = $this->config($currentSnapshotId);
-        $config['index_path_coordinates'] = 'local_relative';
+        $config['index_path_coordinates'] = 'document_root_relative';
 
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage(
-            'index_path_coordinates must be remote_absolute'
+            'must be remote_absolute or local_relative'
         );
         \FileSyncChangeScope::from_config($config);
     }
