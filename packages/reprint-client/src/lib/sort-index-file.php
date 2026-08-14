@@ -18,13 +18,34 @@ require_once __DIR__ . '/external-merge-sort.php';
  * Paths may be remote absolute paths or local relative paths.
  *
  * Duplicates arise from overlapping symlink targets that index the same
- * files; they are removed during the final write pass.
+ * files. They are removed during the final write pass.
  *
  * @param string $path The JSONL index file to sort in place.
  * @return bool True when the index file was sorted or was empty, false when
  *              the index file does not exist.
  */
 function sort_index_file(string $path): bool
+{
+    return sort_index_file_with_duplicate_policy($path, true);
+}
+
+/**
+ * Sort an index while retaining duplicate paths for collision detection.
+ *
+ * @param string $path The JSONL index file to sort in place.
+ * @return bool True when the index file was sorted or was empty, false when
+ *              the index file does not exist.
+ */
+function sort_index_file_preserving_duplicate_paths(string $path): bool
+{
+    return sort_index_file_with_duplicate_policy($path, false);
+}
+
+/** Sorts an index with the duplicate-path policy selected by its caller. */
+function sort_index_file_with_duplicate_policy(
+    string $path,
+    bool $deduplicate
+): bool
 {
     if (!file_exists($path)) {
         return false;
@@ -66,7 +87,14 @@ function sort_index_file(string $path): bool
     // Fast path: shell out to `sort` for O(n log n) with no memory pressure.
     // If anything goes wrong, fall through to the pure-PHP external merge
     // sort below.
-    if (try_exec_sort_index_file($path, $tmp, $parse_index_path)) {
+    if (
+        try_exec_sort_index_file(
+            $path,
+            $tmp,
+            $parse_index_path,
+            $deduplicate
+        )
+    ) {
         return true;
     }
 
@@ -85,7 +113,7 @@ function sort_index_file(string $path): bool
     $sorter = new \ExternalMergeSort(
         $parse_index_path,
         max(1024, (int) ($available_memory * 0.8)),
-        true,
+        $deduplicate,
         dirname($path),
     );
     $sorter->sort($path);
@@ -98,12 +126,14 @@ function sort_index_file(string $path): bool
  * @param string                   $path             The JSONL index file to sort.
  * @param string                   $temporary_output Path to write before replacing $path.
  * @param callable(string):?string $parse_index_path Returns an index path for a JSONL line.
+ * @param bool                     $deduplicate      Whether to keep only the first entry at each path. Defaults to true.
  * @return bool True when the system command sorted and replaced the file.
  */
 function try_exec_sort_index_file(
     string $path,
     string $temporary_output,
-    callable $parse_index_path
+    callable $parse_index_path,
+    bool $deduplicate = true
 ): bool {
     $exec_is_available = function_exists('exec') && !in_array(
         'exec',
@@ -175,7 +205,10 @@ function try_exec_sort_index_file(
         }
         $key = substr($line, 0, $tab_position);
         $data = substr($line, $tab_position + 1);
-        if ($data === '' || $key === $previous_key) {
+        if (
+            $data === ''
+            || ( $deduplicate && $key === $previous_key )
+        ) {
             continue;
         }
         $previous_key = $key;

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 use function Reprint\Importer\sort_index_file;
+use function Reprint\Importer\sort_index_file_preserving_duplicate_paths;
 use function Reprint\Importer\try_exec_sort_index_file;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/sort-index-file.php';
@@ -108,7 +109,7 @@ final class SortIndexFileTest extends TestCase
         file_put_contents($script, '<?php' . "\n"
             . 'require ' . var_export(dirname(__DIR__, 2) . '/packages/reprint-server/src/utils.php', true) . ';' . "\n"
             . 'require ' . var_export(dirname(__DIR__, 2) . '/packages/reprint-client/src/lib/sort-index-file.php', true) . ';' . "\n"
-            . '\\Reprint\\Importer\\sort_index_file($argv[1]);' . "\n");
+            . '\\Reprint\\Importer\\sort_index_file_preserving_duplicate_paths($argv[1]);' . "\n");
 
         $process = proc_open(
             [PHP_BINARY, '-d', 'disable_functions=exec', $script, $path],
@@ -123,7 +124,25 @@ final class SortIndexFileTest extends TestCase
         fclose($pipes[2]);
 
         $this->assertSame(0, proc_close($process), $stdout . $stderr);
-        $this->assertSame(['/apple', '/banana', '/zebra'], $this->index_paths($path));
+        $this->assertSame(
+            ['/apple', '/banana', '/zebra', '/zebra'],
+            $this->index_paths($path)
+        );
+    }
+
+    public function testSystemSortCanRetainDuplicatePaths(): void
+    {
+        if (!function_exists('exec') || !is_executable('/usr/bin/sort')) {
+            $this->markTestSkipped('The system sort command is unavailable.');
+        }
+        $path = $this->write_unsorted_index();
+
+        $this->assertTrue(sort_index_file_preserving_duplicate_paths($path));
+
+        $this->assertSame(
+            ['/apple', '/banana', '/zebra', '/zebra'],
+            $this->index_paths($path)
+        );
     }
 
     public function testReturnsFalseForAMissingIndexFile(): void
