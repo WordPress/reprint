@@ -16,7 +16,7 @@ final class LegacySqliteMetadataDriver {
             $this->query_results = [];
             return false;
         }
-        if ($query === 'SHOW TABLE STATUS') {
+        if ($query === 'SHOW TABLE STATUS;') {
             $this->query_results = [ (object) ['Name' => 'wp_posts', 'Engine' => 'myisam'] ];
             return true;
         }

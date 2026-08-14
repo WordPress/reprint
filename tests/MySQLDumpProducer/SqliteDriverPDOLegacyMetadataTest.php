@@ -19,6 +19,6 @@ final class SqliteDriverPDOLegacyMetadataTest extends TestCase {
             [['Name' => 'wp_posts', 'Table_type' => 'BASE TABLE']],
             $adapter->query('SHOW FULL TABLES')->fetchAll(PDO::FETCH_ASSOC)
         );
-        $this->assertSame(['SHOW FULL TABLES', 'SHOW TABLE STATUS'], $driver->queries);
+        $this->assertSame(['SHOW FULL TABLES', 'SHOW TABLE STATUS;'], $driver->queries);
     }
 }
