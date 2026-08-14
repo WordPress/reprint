@@ -491,6 +491,10 @@ final class FilesPullDiffCheckpointTest extends TestCase
     private function newClientAtDiffStage(): DiffCheckpointTestClient
     {
         $client = $this->newClient();
+        $ownershipSnapshotId = reprint_test_write_root_ownership_snapshot(
+            $this->pullStateDirectory,
+            ['/']
+        );
         \write_current_pull_state($client, [
             'active_resumable_command' => [
                 'command_name' => 'files-pull',
@@ -521,6 +525,9 @@ final class FilesPullDiffCheckpointTest extends TestCase
                     'include_caches' => false,
                 ], JSON_UNESCAPED_SLASHES)
             ),
+            'files_pull_ownership' => [
+                'active_snapshot_id' => $ownershipSnapshotId,
+            ],
         ]);
         return $client;
     }

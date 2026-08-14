@@ -141,6 +141,20 @@ class OnlyFilesPathPrefixTest extends TestCase
         );
     }
 
+    /** @param list<string> $remoteRoots */
+    private function writeCompletableFilesPullState(
+        array $state,
+        array $remoteRoots
+    ): void {
+        $state['files_pull_ownership'] = array(
+            'active_snapshot_id' => reprint_test_write_root_ownership_snapshot(
+                $this->pullStateDirectory,
+                $remoteRoots
+            ),
+        );
+        $this->writeFilesPullState($state);
+    }
+
     private function runFilesPull(array $fileSelectionOptions): \ImportClient
     {
         return $this->runCommand('files-pull', $fileSelectionOptions);
@@ -345,9 +359,9 @@ class OnlyFilesPathPrefixTest extends TestCase
     public function testRunAllowsSameOnlyPrefixesWhileFilesPullIsInProgress(): void
     {
         file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
-        $this->writeFilesPullState(array(
+        $this->writeCompletableFilesPullState(array(
             'files_pull_path_selection_fingerprint' => $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
-        ));
+        ), array('/var/www/html/wp-content/plugins'));
 
         $this->runFilesPull(array('include' => array(':wp-content:/plugins')));
 
@@ -362,11 +376,11 @@ class OnlyFilesPathPrefixTest extends TestCase
     public function testRunRestoresIncludeCachesWhileFilesPullIsInProgress(): void
     {
         file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
-        $this->writeFilesPullState(array(
+        $this->writeCompletableFilesPullState(array(
             'include_caches' => true,
             'files_pull_path_selection_fingerprint' =>
                 $this->pathSelectionFingerprint(array(), array(), false, true),
-        ));
+        ), array('/var/www/html'));
 
         $this->runFilesPull(array());
 
@@ -431,7 +445,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     {
         $extraDirectory = "/srv/extra-\x80";
         file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
-        $this->writeFilesPullState(array(
+        $this->writeCompletableFilesPullState(array(
             'extra_directory' => $extraDirectory,
             'files_pull_path_selection_fingerprint' =>
                 $this->pathSelectionFingerprint(
@@ -441,7 +455,7 @@ class OnlyFilesPathPrefixTest extends TestCase
                     false,
                     $extraDirectory
                 ),
-        ));
+        ), array('/var/www/html', $extraDirectory));
 
         $client = $this->runFilesPull(array());
 
