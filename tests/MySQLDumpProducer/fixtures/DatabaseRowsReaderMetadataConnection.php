@@ -7,13 +7,22 @@ final class DatabaseRowsReaderMetadataConnection {
     /** @var string[] */
     private $tables;
 
+    /** @var array[] */
+    private $index_rows;
+
     /** @var string[] */
     public $queries = [];
 
-    /** @param string[] $tables */
-    public function __construct(array $tables)
+    /**
+     * @param string[]   $tables     Tables returned by SHOW FULL TABLES.
+     * @param array[]|null $index_rows Rows returned by SHOW INDEX.
+     */
+    public function __construct(array $tables, $index_rows = null)
     {
         $this->tables = $tables;
+        $this->index_rows = $index_rows ?? [
+            ['Key_name' => 'PRIMARY', 'Column_name' => 'id', 'Seq_in_index' => 1],
+        ];
     }
 
     public function query(string $query): DatabaseRowsReaderMetadataStatement
@@ -25,9 +34,7 @@ final class DatabaseRowsReaderMetadataConnection {
             }, $this->tables));
         }
         if (strpos($query, 'SHOW INDEX FROM ') === 0) {
-            return new DatabaseRowsReaderMetadataStatement([
-                ['Column_name' => 'id', 'Seq_in_index' => 1],
-            ]);
+            return new DatabaseRowsReaderMetadataStatement($this->index_rows);
         }
         if (strpos($query, 'SHOW FULL COLUMNS FROM ') === 0) {
             return new DatabaseRowsReaderMetadataStatement([
