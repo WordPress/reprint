@@ -3050,7 +3050,7 @@ class ImportClient
      * - Prior completed files-pull → delta mode (re-index, diff, fetch changes)
      * - In-progress files-pull → resume from saved state
      *
-     * Both modes share the same pipeline: index → diff → fetch.
+     * Both modes share the same pipeline: index → sort → diff → fetch.
      */
     public function run_files_pull(): void
     {
@@ -3250,6 +3250,15 @@ class ImportClient
                     return;
                 }
             }
+            // Sorting replaces the index atomically. Save its phase first so
+            // interruption after the replacement reruns the idempotent sort
+            // instead of requesting the remote index again.
+            $this->get_state()->active_resumable_command->current_stage = "sort";
+            $this->save_state();
+            $stage = "sort";
+        }
+
+        if ($stage === "sort") {
             $this->sort_next_remote_index_file();
             $this->get_state()->active_resumable_command->current_stage = "diff";
             $this->get_state()->diff = new FileDiffProgressState();
@@ -3443,47 +3452,59 @@ class ImportClient
         $this->get_state()->active_resumable_command->command_name = "files-index";
         $this->save_state();
 
-        $attempts = 0;
-        $last_cursor = $this->get_state()->index->cursor ?? null;
-        while (true) {
-            $complete = $this->fetch_next_remote_index();
-            if ($complete) {
-                break;
+        $stage = $this->get_state()->active_resumable_command->current_stage ?? "index";
+        if ($stage === "index") {
+            $attempts = 0;
+            $last_cursor = $this->get_state()->index->cursor ?? null;
+            while (true) {
+                $complete = $this->fetch_next_remote_index();
+                if ($complete) {
+                    break;
+                }
+
+                if ($this->shutdown_requested) {
+                    $this->get_state()->active_resumable_command->completion_state = "partial";
+                    $this->save_state();
+                    return;
+                }
+
+                $current_cursor = $this->get_state()->index->cursor ?? null;
+                if ($current_cursor === $last_cursor) {
+                    throw new RuntimeException(
+                        "files-index made no progress (cursor unchanged)",
+                    );
+                }
+                $last_cursor = $current_cursor;
+
+                $attempts++;
+                if ($attempts > 100000) {
+                    throw new RuntimeException(
+                        "files-index exceeded maximum attempts",
+                    );
+                }
             }
 
-            if ($this->shutdown_requested) {
-                $this->get_state()->active_resumable_command->completion_state = "partial";
-                $this->save_state();
-                return;
+            // Follow symlinks: discover symlink targets outside known roots and
+            // index them as additional directories.  Repeats until no new targets
+            // are found, with cycle detection via realpath.
+            if ($this->follow_symlinks) {
+                $this->discover_symlink_targets();
             }
 
-            $current_cursor = $this->get_state()->index->cursor ?? null;
-            if ($current_cursor === $last_cursor) {
-                throw new RuntimeException(
-                    "files-index made no progress (cursor unchanged)",
-                );
-            }
-            $last_cursor = $current_cursor;
-
-            $attempts++;
-            if ($attempts > 100000) {
-                throw new RuntimeException(
-                    "files-index exceeded maximum attempts",
-                );
-            }
+            // Sorting replaces the index atomically. Save its phase first so
+            // interruption after the replacement reruns the idempotent sort
+            // instead of requesting the remote index again.
+            $this->get_state()->active_resumable_command->current_stage = "sort";
+            $this->save_state();
+            $stage = "sort";
         }
 
-        // Follow symlinks: discover symlink targets outside known roots and
-        // index them as additional directories.  Repeats until no new targets
-        // are found, with cycle detection via realpath.
-        if ($this->follow_symlinks) {
-            $this->discover_symlink_targets();
+        if ($stage === "sort") {
+            $this->sort_next_remote_index_file();
+            $this->get_state()->active_resumable_command->completion_state = "complete";
+            $this->get_state()->active_resumable_command->current_stage = null;
+            $this->save_state();
         }
-
-        $this->sort_next_remote_index_file();
-        $this->get_state()->active_resumable_command->completion_state = "complete";
-        $this->get_state()->active_resumable_command->current_stage = null;
-        $this->save_state();
 
         $next_remote_index_entry_count = 0;
         if (file_exists($this->next_remote_index_file)) {
