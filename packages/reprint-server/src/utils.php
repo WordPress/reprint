@@ -542,6 +542,31 @@ function read_file_index_entry_from_stat(string $path, array $path_stat): array
 }
 
 /**
+ * Reads whether a physical directory has any children.
+ *
+ * @return bool|null True for an empty directory, false for a non-empty
+ *                   directory, or null when the directory cannot be opened.
+ */
+function read_file_index_directory_is_empty(string $path): ?bool
+{
+    $directory_handle = @opendir($path);
+    if ($directory_handle === false) {
+        return null;
+    }
+    while (true) {
+        $directory_entry = readdir($directory_handle);
+        if ($directory_entry === false) {
+            closedir($directory_handle);
+            return true;
+        }
+        if ($directory_entry !== "." && $directory_entry !== "..") {
+            closedir($directory_handle);
+            return false;
+        }
+    }
+}
+
+/**
  * Validates that a path is a non-empty absolute string without NUL bytes
  * or dot-segments (. or ..).
  *

@@ -69,6 +69,17 @@ local relative path to a document-root-relative path.
 - A **file sync patch processor** builds a fresh local index, then runs a file
   sync patch planner in the direction selected by its start method. Its cursor
   owns both phases, so a caller can store it unchanged.
+- A **pull local index processor** (`PullLocalIndexProcessor`) maps the next
+  remote index into local relative paths and merges those paths with the
+  retained local index. It owns the patch-result index or next local index
+  through completion or restart.
+- A **patch-result index** is temporary pre-fetch planning input. Its paths use
+  local coordinates and its selected entries retain remote type, size, ctime,
+  and empty-directory state. Use `$patch_result_index_file`.
+- A **next local index** is the candidate retained local index built after
+  fetch. Its selected entries use metadata from the WAL-applied local index.
+  It replaces the local index only after a final fresh scan finds no selected
+  difference. Use `$next_local_index_file`.
 - The **pull index WAL** records completed pull mutations awaiting application
   to the remote and local indexes.
 - A **pull plan** lists remote absolute paths still scheduled for download or

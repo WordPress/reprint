@@ -356,20 +356,11 @@ final class FileIndexProcessor {
             // exclusions. A cache or Reprint-storage child still makes its
             // parent non-empty; calling that parent empty could turn an
             // intentionally omitted descendant into destructive push work.
-            $directory_handle = @opendir($path);
-            if ($directory_handle !== false) {
-                $item["empty"] = true;
-                while (true) {
-                    $directory_entry = readdir($directory_handle);
-                    if ($directory_entry === false) {
-                        break;
-                    }
-                    if ($directory_entry !== "." && $directory_entry !== "..") {
-                        $item["empty"] = false;
-                        break;
-                    }
-                }
-                closedir($directory_handle);
+            $directory_is_empty = \WordPress\Reprint\Exporter\read_file_index_directory_is_empty(
+                $path
+            );
+            if ($directory_is_empty !== null) {
+                $item["empty"] = $directory_is_empty;
             }
             // When the directory cannot be inspected, leave "empty" absent.
             // Pull reports the later directory-open failure. A push index
