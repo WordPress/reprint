@@ -1,7 +1,6 @@
 <?php
 
 use function Reprint\Importer\append_file_sync_path_stack_entry;
-use function Reprint\Importer\file_sync_index_path_may_change;
 use function Reprint\Importer\read_file_sync_path_stack_entry;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\assert_valid_relative_path;
@@ -11,6 +10,8 @@ use function WordPress\Reprint\Exporter\relative_path_under;
 use function WordPress\Reprint\Exporter\trim_right_slash;
 
 require_once __DIR__ . '/class-file-sync-patch-processor.php';
+require_once __DIR__ . '/../pull/class-remote-to-local-path-mapper.php';
+require_once __DIR__ . '/class-file-sync-change-scope.php';
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Index paths and files are CLI values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Reprint streaming classes use domain names.
@@ -35,11 +36,9 @@ require_once __DIR__ . '/class-file-sync-patch-processor.php';
  *
  *     $cleanup = FileSyncCleanupProcessor::start(
  *         $work_directory,
- *         $filesystem_root,
  *         $patch_result_index,
  *         $storage_path,
- *         ['wp-content'],
- *         ['wp-content/uploads/keep']
+ *         $local_change_scope_config
  *     );
  *     do {
  *         $has_next_step = $cleanup->next_step();
@@ -55,10 +54,10 @@ require_once __DIR__ . '/class-file-sync-patch-processor.php';
  * @phpstan-type PatchCursor array<string,mixed>
  * @phpstan-type PlanningPosition array{phase:'planning',file_sync_patch_processor_cursor:PatchCursor}
  * @phpstan-type ExpectedBase array{type:string,size:int,ctime:int}
- * @phpstan-type RemovingPosition array{phase:'removing',path_b64:string,expected_base:ExpectedBase,file_sync_patch_processor_cursor:PatchCursor}
+ * @phpstan-type RemovingPosition array{phase:'removing',path_b64:string,governing_type:string,expected_base:ExpectedBase,file_sync_patch_processor_cursor:PatchCursor}
  * @phpstan-type PruningPosition array{phase:'pruning'}
  * @phpstan-type Position PlanningPosition|RemovingPosition|PruningPosition|array{phase:'complete'|'restart'}
- * @phpstan-type Cursor array{filesystem_root_b64:string,empty_parent_paths_file_b64:string,empty_parent_paths_file_byte_offset:int,empty_parent_path_stack_top_byte_offset:int|null,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,position:Position}
+ * @phpstan-type Cursor array{file_sync_change_scope_config:array<string,mixed>,empty_parent_paths_file_b64:string,empty_parent_paths_file_byte_offset:int,empty_parent_path_stack_top_byte_offset:int|null,position:Position}
  * @phpstan-type EmptyParentPath array{path:string,previous_byte_offset:int|null,expected_ctime:int|null}
  */
 final class FileSyncCleanupProcessor
@@ -69,11 +68,8 @@ final class FileSyncCleanupProcessor
     /** Canonical filesystem root decoded from the cursor. */
     private string $filesystem_root;
 
-    /** @var list<string> Roots whose descendants may be removed. */
-    private array $included_index_path_roots;
-
-    /** @var list<string> Roots which cleanup must not affect. */
-    private array $excluded_index_path_roots;
+    /** Selection authority in local-relative index coordinates. */
+    private FileSyncChangeScope $change_scope;
 
     /** Patch planning retained while the cursor is planning or removing. */
     private FileSyncPatchProcessor $patch_processor;
@@ -97,22 +93,34 @@ final class FileSyncCleanupProcessor
      * The patch result index describes the local paths which the caller wants
      * to write after cleanup.
      *
-     * @param string       $work_directory             Existing directory for cleanup state.
-     * @param string       $filesystem_root            Filesystem root scanned and changed by cleanup.
-     * @param string       $patch_result_index_file    Index which the later file sync must produce.
-     * @param string       $storage_path               Reprint storage path omitted from the local scan.
-     * @param list<string> $included_index_path_roots  Roots whose descendants cleanup may remove.
-     * @param list<string> $excluded_index_path_roots  Roots which cleanup must not affect.
-     * @param bool         $include_caches             Whether the local scan includes cache directories.
+     * @param string $work_directory          Existing directory for cleanup state.
+     * @param string $patch_result_index_file Index which the later file sync must produce.
+     * @param string $storage_path            Reprint storage path omitted from the local scan.
+     * @param array  $change_scope_config { Local-relative change-scope config.
+     *     @type string       $index_path_coordinates                    Must be `local_relative`.
+     *     @type string       $ownership_directory_b64                   Base64-encoded ownership directory.
+     *     @type string       $current_snapshot_id                       Snapshot which owns paths selected by this pull.
+     *     @type list<string> $prior_snapshot_ids                        Earlier snapshots for this selection.
+     *     @type list<string> $protected_snapshot_ids                    Snapshots owned by other selections.
+     *     @type list<string> $excluded_remote_absolute_path_roots_b64   Base64-encoded excluded remote roots.
+     *     @type bool         $include_caches                            Whether ordinary producer traversal included default-skipped paths.
+     *     @type string       $selected_default_skipped_index_paths_file_b64 Base64-encoded immutable sorted selected-path sidecar.
+     *     @type array        $remote_to_local_path_mapper_config {      Saved remote-to-local placement.
+     *         @type string       $filesystem_root_b64                   Base64-encoded local filesystem root.
+     *         @type list<string> $original_remote_roots_b64             Base64-encoded roots selected before following links.
+     *         @type list<array>  $resolved_path_mappings {              Resolved remote and local prefix pairs.
+     *             @type string $remote_prefix_b64                       Base64-encoded remote prefix.
+     *             @type string $local_prefix_b64                        Base64-encoded local prefix.
+     *         }
+     *         @type string|null  $local_followed_symlinks_root_b64      Base64-encoded placement for followed targets.
+     *     }
+     * }
      */
     public static function start(
         string $work_directory,
-        string $filesystem_root,
         string $patch_result_index_file,
         string $storage_path,
-        array $included_index_path_roots = [""],
-        array $excluded_index_path_roots = [],
-        bool $include_caches = false
+        array $change_scope_config
     ): self {
         if (!is_dir($work_directory)) {
             throw new LogicException(
@@ -121,16 +129,49 @@ final class FileSyncCleanupProcessor
         }
         $work_directory = trim_right_slash($work_directory);
         $processor = new self();
-        $processor->patch_processor =
-            FileSyncPatchProcessor::start_from_fresh_local_tree(
-                $work_directory,
-                $filesystem_root,
-                $patch_result_index_file,
-                $storage_path,
-                $included_index_path_roots,
-                $excluded_index_path_roots,
-                $include_caches
+        if (
+            ( $change_scope_config['index_path_coordinates'] ?? null )
+                !== 'local_relative'
+        ) {
+            throw new InvalidArgumentException(
+                'File sync cleanup requires a local_relative change-scope config.'
             );
+        }
+        $processor->change_scope = FileSyncChangeScope::from_config(
+            $change_scope_config
+        );
+        try {
+            $filesystem_root = $processor->change_scope->get_filesystem_root();
+            if ($processor->change_scope->includes_caches()) {
+                // The selected-path sidecar is empty when ordinary traversal
+                // includes caches, so that traversal must scan them itself.
+                $processor->patch_processor =
+                    FileSyncPatchProcessor::start_from_fresh_local_tree(
+                        $work_directory,
+                        $filesystem_root,
+                        $patch_result_index_file,
+                        $storage_path,
+                        [""],
+                        [],
+                        true
+                    );
+            } else {
+                $processor->patch_processor =
+                    FileSyncPatchProcessor::start_from_fresh_local_tree_with_selected_default_skipped_paths(
+                        $work_directory,
+                        $filesystem_root,
+                        $patch_result_index_file,
+                        $storage_path,
+                        $processor->change_scope
+                            ->get_selected_default_skipped_index_paths_file(),
+                        [""],
+                        []
+                    );
+            }
+        } catch (Throwable $start_failure) {
+            $processor->change_scope->close();
+            throw $start_failure;
+        }
         $patch_cursor = $processor->patch_processor->get_cursor();
         $canonical_filesystem_root = self::decode_cursor_path(
             $patch_cursor["position"]["fresh_local_index_cursor"][
@@ -148,30 +189,20 @@ final class FileSyncCleanupProcessor
         );
         if (!is_resource($processor->empty_parent_paths_handle)) {
             $processor->patch_processor->close();
+            $processor->change_scope->close();
             throw new RuntimeException(
                 "Failed to initialize the empty parent paths file: {$empty_parent_paths_file}"
             );
         }
         $processor->filesystem_root = $canonical_filesystem_root;
-        $processor->included_index_path_roots = $included_index_path_roots;
-        $processor->excluded_index_path_roots = $excluded_index_path_roots;
         $processor->cursor = [
-            "filesystem_root_b64" => base64_encode(
-                $canonical_filesystem_root
-            ),
+            "file_sync_change_scope_config" =>
+                $processor->change_scope->get_config(),
             "empty_parent_paths_file_b64" => base64_encode(
                 $empty_parent_paths_file
             ),
             "empty_parent_paths_file_byte_offset" => 0,
             "empty_parent_path_stack_top_byte_offset" => null,
-            "included_index_path_roots_b64" => array_map(
-                "base64_encode",
-                $included_index_path_roots
-            ),
-            "excluded_index_path_roots_b64" => array_map(
-                "base64_encode",
-                $excluded_index_path_roots
-            ),
             "position" => [
                 "phase" => "planning",
                 "file_sync_patch_processor_cursor" => $patch_cursor,
@@ -190,12 +221,10 @@ final class FileSyncCleanupProcessor
      * @param array $cursor {
      *     Cursor returned by get_cursor().
      *
-     *     @type string       $filesystem_root_b64                         Base64-encoded canonical filesystem root.
+     *     @type array        $file_sync_change_scope_config               Local-relative selection authority.
      *     @type string       $empty_parent_paths_file_b64                 Base64-encoded path to the parent-path stack.
      *     @type int          $empty_parent_paths_file_byte_offset         Confirmed byte offset in the parent-path stack.
      *     @type int|null     $empty_parent_path_stack_top_byte_offset     Byte offset of the current stack entry.
-     *     @type list<string> $included_index_path_roots_b64               Base64-encoded roots whose contents may be removed.
-     *     @type list<string> $excluded_index_path_roots_b64               Base64-encoded roots cleanup must not affect.
      *     @type array        $position                                    Current planning, removing, pruning, complete, or restart phase.
      * }
      * @phpstan-param Cursor $cursor
@@ -204,50 +233,43 @@ final class FileSyncCleanupProcessor
     {
         $processor = new self();
         $processor->cursor = $cursor;
-        $processor->filesystem_root = self::decode_cursor_path(
-            $cursor["filesystem_root_b64"],
-            "filesystem root"
+        $processor->change_scope = FileSyncChangeScope::from_config(
+            $cursor["file_sync_change_scope_config"]
         );
-        $resolved_filesystem_root = realpath($processor->filesystem_root);
-        if (
-            $resolved_filesystem_root === false
-            || $resolved_filesystem_root !== $processor->filesystem_root
-            || !is_dir($processor->filesystem_root)
-            || is_link($processor->filesystem_root)
-        ) {
-            throw new RuntimeException(
-                "The file sync cleanup filesystem root no longer resolves to its saved path."
-            );
-        }
-        $processor->included_index_path_roots = self::decode_path_roots(
-            $cursor["included_index_path_roots_b64"],
-            "included"
-        );
-        $processor->excluded_index_path_roots = self::decode_path_roots(
-            $cursor["excluded_index_path_roots_b64"],
-            "excluded"
-        );
-        $position = $cursor["position"];
-        if (
-            $position["phase"] === "complete"
-            || $position["phase"] === "restart"
-        ) {
-            return $processor;
-        }
-        $empty_parent_paths_file = self::decode_cursor_path(
-            $cursor["empty_parent_paths_file_b64"],
-            "empty parent paths file"
-        );
-        $processor->empty_parent_paths_handle = fopen(
-            $empty_parent_paths_file,
-            "r+b"
-        );
-        if (!is_resource($processor->empty_parent_paths_handle)) {
-            throw new RuntimeException(
-                "Failed to reopen the empty parent paths file: {$empty_parent_paths_file}"
-            );
-        }
         try {
+            $processor->filesystem_root =
+                $processor->change_scope->get_filesystem_root();
+            $resolved_filesystem_root = realpath($processor->filesystem_root);
+            if (
+                $resolved_filesystem_root === false
+                || $resolved_filesystem_root !== $processor->filesystem_root
+                || !is_dir($processor->filesystem_root)
+                || is_link($processor->filesystem_root)
+            ) {
+                throw new RuntimeException(
+                    "The file sync cleanup filesystem root no longer resolves to its saved path."
+                );
+            }
+            $position = $cursor["position"];
+            if (
+                $position["phase"] === "complete"
+                || $position["phase"] === "restart"
+            ) {
+                return $processor;
+            }
+            $empty_parent_paths_file = self::decode_cursor_path(
+                $cursor["empty_parent_paths_file_b64"],
+                "empty parent paths file"
+            );
+            $processor->empty_parent_paths_handle = fopen(
+                $empty_parent_paths_file,
+                "r+b"
+            );
+            if (!is_resource($processor->empty_parent_paths_handle)) {
+                throw new RuntimeException(
+                    "Failed to reopen the empty parent paths file: {$empty_parent_paths_file}"
+                );
+            }
             if (
                 !ftruncate(
                     $processor->empty_parent_paths_handle,
@@ -287,12 +309,18 @@ final class FileSyncCleanupProcessor
                     $position["file_sync_patch_processor_cursor"]
                 );
             }
+            return $processor;
         } catch (Throwable $resume_failure) {
-            fclose($processor->empty_parent_paths_handle);
+            if (isset($processor->patch_processor)) {
+                $processor->patch_processor->close();
+            }
+            if (is_resource($processor->empty_parent_paths_handle)) {
+                fclose($processor->empty_parent_paths_handle);
+            }
             $processor->empty_parent_paths_handle = null;
+            $processor->change_scope->close();
             throw $resume_failure;
         }
-        return $processor;
     }
 
     /**
@@ -322,32 +350,59 @@ final class FileSyncCleanupProcessor
             $has_next_patch_step = $this->patch_processor->next_step();
             $patch_cursor = $this->patch_processor->get_cursor();
             $operation = $this->patch_processor->get_operation();
-            // A selected root marks where traversal begins, not a result
-            // entry. Keep that boundary when its contents are empty.
+            // A root atom marks the traversal boundary but does not own
+            // that entry. Ask the scope with the operation's governing type.
             if (
                 $operation !== null
                 && (
-                    $operation["action"] === "delete"
-                    || $operation["action"] === "replace"
-                )
-                && !in_array(
-                    $operation["path"],
-                    $this->included_index_path_roots,
-                    true
+                    $operation['action'] === 'delete'
+                    || $operation['action'] === 'replace'
                 )
             ) {
-                if (!isset($operation["expected_base"])) {
+                $governing_entry = $operation['action'] === 'delete'
+                    ? ( $operation['expected_base'] ?? null )
+                    : ( $operation['expected_source'] ?? null );
+                if (!is_array($governing_entry)) {
                     throw new LogicException(
-                        "Exact file sync cleanup removal has no patch-base entry."
+                        'File sync cleanup operation has no governing index entry.'
                     );
                 }
-                $this->cursor["position"] = [
-                    "phase" => "removing",
-                    "path_b64" => base64_encode($operation["path"]),
-                    "expected_base" => $operation["expected_base"],
-                    "file_sync_patch_processor_cursor" => $patch_cursor,
-                ];
-                return true;
+                if (!isset($operation['expected_base'])) {
+                    throw new LogicException(
+                        'Exact file sync cleanup removal has no patch-base entry.'
+                    );
+                }
+                // The supplemental local scan labels selected unsupported
+                // paths `other`. A deletion has no owned index-entry type,
+                // while a replacement uses its supported desired type.
+                if (
+                    !(
+                        $operation['action'] === 'delete'
+                        && $governing_entry['type'] === 'other'
+                    )
+                ) {
+                    $removal_is_allowed =
+                        $operation['expected_base']['type'] === 'dir'
+                            ? $this->change_scope
+                                ->directory_entry_may_change(
+                                    $operation['path'],
+                                    $governing_entry['type']
+                                )
+                            : $this->change_scope->index_entry_may_change(
+                                $operation['path'],
+                                $governing_entry['type']
+                            );
+                    if ($removal_is_allowed) {
+                        $this->cursor['position'] = [
+                            'phase' => 'removing',
+                            'path_b64' => base64_encode($operation['path']),
+                            'governing_type' => $governing_entry['type'],
+                            'expected_base' => $operation['expected_base'],
+                            'file_sync_patch_processor_cursor' => $patch_cursor,
+                        ];
+                        return true;
+                    }
+                }
             }
             if (!$has_next_patch_step) {
                 $this->patch_processor->close();
@@ -370,6 +425,19 @@ final class FileSyncCleanupProcessor
                 $position["path_b64"],
                 "pending cleanup path"
             );
+            $removal_is_allowed =
+                $position['expected_base']['type'] === 'dir'
+                    ? $this->change_scope->directory_entry_may_change(
+                        $index_path,
+                        $position['governing_type']
+                    )
+                    : $this->change_scope->index_entry_may_change(
+                        $index_path,
+                        $position['governing_type']
+                    );
+            if (!$removal_is_allowed) {
+                return $this->finish_removal_step($position);
+            }
             $absolute_path = $this->absolute_selected_path($index_path);
             $path_stat = @lstat($absolute_path);
             $path_removed = !is_array($path_stat);
@@ -390,6 +458,8 @@ final class FileSyncCleanupProcessor
                     $this->cursor["position"] = ["phase" => "restart"];
                     return false;
                 }
+            }
+            if (is_array($path_stat)) {
                 if ($path_type === "dir") {
                     $path_removed = @rmdir($absolute_path);
                     if (!$path_removed) {
@@ -438,23 +508,7 @@ final class FileSyncCleanupProcessor
             if ($path_removed) {
                 $this->schedule_parent_path($index_path);
             }
-            $patch_cursor = $position[
-                "file_sync_patch_processor_cursor"
-            ];
-            if ($patch_cursor["position"]["phase"] === "complete") {
-                $this->patch_processor->close();
-                if ($this->empty_parent_path === null) {
-                    $this->cursor["position"] = ["phase" => "complete"];
-                    return false;
-                }
-                $this->cursor["position"] = ["phase" => "pruning"];
-                return true;
-            }
-            $this->cursor["position"] = [
-                "phase" => "planning",
-                "file_sync_patch_processor_cursor" => $patch_cursor,
-            ];
-            return true;
+            return $this->finish_removal_step($position);
         }
 
         if ($this->empty_parent_path === null) {
@@ -474,7 +528,10 @@ final class FileSyncCleanupProcessor
             && $this->empty_parent_path["expected_ctime"] !== null
             && (int) $path_stat["ctime"]
                 === $this->empty_parent_path["expected_ctime"];
-        if ($parent_is_unchanged_directory) {
+        if (
+            $parent_is_unchanged_directory
+            && $this->change_scope->subtree_may_change($index_path)
+        ) {
             $removed = @rmdir($absolute_path);
             if (!$removed) {
                 clearstatcache(true, $absolute_path);
@@ -522,15 +579,39 @@ final class FileSyncCleanupProcessor
     }
 
     /**
+     * Continues after a planned removal was applied or became unauthorized.
+     *
+     * @phpstan-param RemovingPosition $position
+     */
+    private function finish_removal_step(array $position): bool
+    {
+        $patch_cursor = $position[
+            'file_sync_patch_processor_cursor'
+        ];
+        if ($patch_cursor['position']['phase'] === 'complete') {
+            $this->patch_processor->close();
+            if ($this->empty_parent_path === null) {
+                $this->cursor['position'] = ['phase' => 'complete'];
+                return false;
+            }
+            $this->cursor['position'] = ['phase' => 'pruning'];
+            return true;
+        }
+        $this->cursor['position'] = [
+            'phase' => 'planning',
+            'file_sync_patch_processor_cursor' => $patch_cursor,
+        ];
+        return true;
+    }
+
+    /**
      * Returns everything needed to resume after the latest completed step.
      *
      * @return array {
-     *     @type string       $filesystem_root_b64                         Base64-encoded canonical filesystem root.
+     *     @type array        $file_sync_change_scope_config               Local-relative selection authority.
      *     @type string       $empty_parent_paths_file_b64                 Base64-encoded path to the parent-path stack.
      *     @type int          $empty_parent_paths_file_byte_offset         Confirmed byte offset in the parent-path stack.
      *     @type int|null     $empty_parent_path_stack_top_byte_offset     Byte offset of the current stack entry.
-     *     @type list<string> $included_index_path_roots_b64               Base64-encoded roots whose contents may be removed.
-     *     @type list<string> $excluded_index_path_roots_b64               Base64-encoded roots cleanup must not affect.
      *     @type array        $position                                    Current planning, removing, pruning, complete, or restart phase.
      * }
      * @phpstan-return Cursor
@@ -588,6 +669,7 @@ final class FileSyncCleanupProcessor
         if (isset($this->patch_processor)) {
             $this->patch_processor->close();
         }
+        $this->change_scope->close();
         if (is_resource($this->empty_parent_paths_handle)) {
             fclose($this->empty_parent_paths_handle);
         }
@@ -599,18 +681,6 @@ final class FileSyncCleanupProcessor
     private function absolute_selected_path(string $index_path): string
     {
         assert_valid_relative_path($index_path, "File sync cleanup path");
-        if (
-            !file_sync_index_path_may_change(
-                $index_path,
-                $this->included_index_path_roots,
-                $this->excluded_index_path_roots
-            )
-        ) {
-            throw new RuntimeException(
-                "File sync cleanup cursor selected a path outside its allowed roots: "
-                . base64_encode($index_path)
-            );
-        }
         $absolute_path = wp_join_unix_paths(
             $this->filesystem_root,
             $index_path
@@ -641,14 +711,7 @@ final class FileSyncCleanupProcessor
             return;
         }
         $parent_path = substr($index_path, 0, $separator);
-        if (
-            in_array($parent_path, $this->included_index_path_roots, true)
-            || !file_sync_index_path_may_change(
-                $parent_path,
-                $this->included_index_path_roots,
-                $this->excluded_index_path_roots
-            )
-        ) {
+        if (!$this->change_scope->subtree_may_change($parent_path)) {
             return;
         }
         $parent_absolute_path = $this->absolute_selected_path($parent_path);
@@ -711,21 +774,6 @@ final class FileSyncCleanupProcessor
         } finally {
             closedir($directory_handle);
         }
-    }
-
-    /** Decodes arbitrary-byte path roots stored in the JSON cursor. */
-    private static function decode_path_roots(
-        array $path_roots_b64,
-        string $field_name
-    ): array {
-        $path_roots = [];
-        foreach ($path_roots_b64 as $path_root_b64) {
-            $path_roots[] = self::decode_cursor_path(
-                $path_root_b64,
-                $field_name . " path root"
-            );
-        }
-        return $path_roots;
     }
 
     /** Decodes one arbitrary-byte path stored in the JSON cursor. */
