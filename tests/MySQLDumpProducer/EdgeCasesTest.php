@@ -136,6 +136,22 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
         $this->assertDatabasesEqual($this->pdo, $importPdo, ['t']);
     }
 
+    public function testBatchBoundaryCursorDoesNotPrefetchTheNextRow(): void
+    {
+        $this->pdo->exec("CREATE TABLE t (id INT PRIMARY KEY, v INT)");
+        $this->pdo->exec("INSERT INTO t VALUES (1, 10), (2, 20)");
+        $producer = $this->createProducer(['batch_size' => 1]);
+
+        do {
+            $producer->next_sql_fragment();
+            $sql = (string) $producer->get_sql_fragment();
+        } while (strpos($sql, 'INSERT INTO') !== 0);
+
+        $cursor = json_decode($producer->get_reentrancy_cursor(), true);
+        $this->assertNull($cursor['current_row']);
+        $this->assertSame(['id' => 1], $cursor['last_pk_values']);
+    }
+
     // ──────────────────────────────────────────────────
     // tables_to_process filtering
     // ──────────────────────────────────────────────────
