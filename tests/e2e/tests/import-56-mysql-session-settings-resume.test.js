@@ -49,6 +49,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             '--sql-fragments-start=1',
             '--sql-fragments-min=1',
             '--sql-fragments-max=1',
+            '--max-exec=1',
             '--progress=jsonl',
         ];
     }
@@ -107,13 +108,13 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
 
         tempDir = createTempDir('e2e-mysql-session-settings-resume');
         clearHookState(site);
-        writeHookState(site, { batches: 0, release: false });
+        writeHookState(site, { requests: 0, batches: 0, release: false });
         writeTestHooks(site, [
-            'function test_hook_before_sql_batch(&$sql, $cursor) {',
+            'function test_hook_after_gzip_init($gz, $boundary) {',
             `    $state_file = '/srv/e2e-sites/.e2e-hook-state-${site}';`,
             '    $state = json_decode(file_get_contents($state_file), true);',
-            '    $state[\'batches\'] = ($state[\'batches\'] ?? 0) + 1;',
-            '    if ($state[\'batches\'] === 60) {',
+            '    $state[\'requests\'] = ($state[\'requests\'] ?? 0) + 1;',
+            '    if ($state[\'requests\'] === 2) {',
             '        $state[\'paused\'] = true;',
             '        file_put_contents($state_file, json_encode($state));',
             '        do {',
@@ -122,6 +123,15 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             '        } while (empty($state[\'release\']));',
             '    } else {',
             '        file_put_contents($state_file, json_encode($state));',
+            '    }',
+            '}',
+            'function test_hook_before_sql_batch(&$sql, $cursor) {',
+            `    $state_file = '/srv/e2e-sites/.e2e-hook-state-${site}';`,
+            '    $state = json_decode(file_get_contents($state_file), true);',
+            '    $state[\'batches\'] = ($state[\'batches\'] ?? 0) + 1;',
+            '    file_put_contents($state_file, json_encode($state));',
+            '    if ($state[\'requests\'] === 1 && $state[\'batches\'] === 60) {',
+            '        usleep(1500000);',
             '    }',
             '}',
         ].join('\n'));
