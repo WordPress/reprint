@@ -15,6 +15,7 @@ class CautiousURLBaseRewriteMapping {
      *     source_authority: string,
      *     source_ascii_host: string,
      *     source_host_uses_idn: bool,
+     *     unicode_source_path_segments_in_nfd: array<int, string>,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -68,6 +69,7 @@ class CautiousURLBaseRewriteMapping {
      *     source_authority: string,
      *     source_ascii_host: string,
      *     source_host_uses_idn: bool,
+     *     unicode_source_path_segments_in_nfd: array<int, string>,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -87,6 +89,7 @@ class CautiousURLBaseRewriteMapping {
      *     source_authority: string,
      *     source_ascii_host: string,
      *     source_host_uses_idn: bool,
+     *     unicode_source_path_segments_in_nfd: array<int, string>,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -107,6 +110,26 @@ class CautiousURLBaseRewriteMapping {
         // A source URL ending at its authority uses / as the URL separator,
         // not as an initial path to remove. Leave its original spelling alone.
         $source_path = $source['path'] === '/' ? '' : $source['path'];
+        $unicode_source_path_segments_in_nfd = [];
+        foreach (explode('/', substr($source_path, 1)) as $source_path_segment) {
+            if (preg_match('/[\x80-\xFF]/', $source_path_segment) !== 1) {
+                continue;
+            }
+
+            // NFD writes é as e followed by a combining accent. Store every
+            // configured Unicode segment in NFD. The scanner converts each
+            // captured candidate segment to NFD before comparing the two.
+            $source_path_segment_in_nfd = Normalizer::normalize(
+                $source_path_segment,
+                Normalizer::FORM_D
+            );
+            if (!is_string($source_path_segment_in_nfd)) {
+                return null;
+            }
+            $unicode_source_path_segments_in_nfd[] =
+                $source_path_segment_in_nfd;
+        }
+
         $source_authority_pattern = '(?i:' . preg_quote($source['authority'], '~') . ')';
         if ($source['host_uses_idn']) {
             // This branch locates Unicode authority candidates. IDNA below
@@ -124,7 +147,9 @@ class CautiousURLBaseRewriteMapping {
             'source_authority'     => $source['authority'],
             'source_ascii_host'    => $source['ascii_host'],
             'source_host_uses_idn' => $source['host_uses_idn'],
-            'source_path'          => $source_path,
+            'unicode_source_path_segments_in_nfd' =>
+                $unicode_source_path_segments_in_nfd,
+            'source_path' => $source_path,
             'source_base'          => $source['authority'] . $source_path,
             'target_domain'        => $target['host'],
             'target_scheme'        => $target['scheme'],
@@ -157,36 +182,37 @@ class CautiousURLBaseRewriteMapping {
         $separator_escape = '\\\\{0,8}';
         $source_path_pattern = '';
         if ($source_path !== '') {
-            $source_path_spellings = [$source_path];
-            // NFC writes characters such as é as one code point. NFD writes
-            // the same character as e followed by a combining accent. Build
-            // both spellings because the mapping and input may use different
-            // forms for the same path.
-            foreach ([Normalizer::FORM_C, Normalizer::FORM_D] as $normalization_form) {
-                $normalized_source_path = Normalizer::normalize(
-                    $source_path,
-                    $normalization_form
-                );
-                if (
-                    is_string($normalized_source_path)
-                    && !in_array($normalized_source_path, $source_path_spellings, true)
-                ) {
-                    $source_path_spellings[] = $normalized_source_path;
+            $source_path_suffix_pattern = '';
+            $unicode_path_segment_index = 0;
+            foreach (
+                explode('/', substr($source_path, 1))
+                as $source_path_segment_index => $source_path_segment
+            ) {
+                if ($source_path_segment_index > 0) {
+                    $source_path_suffix_pattern .= $separator_escape . '/';
                 }
-            }
+                // Capture Unicode segments and compare them in NFD after
+                // matching. One regexp then handles any mixture of composed
+                // and decomposed characters without listing every combination.
+                if (preg_match('/[\x80-\xFF]/', $source_path_segment) !== 1) {
+                    $source_path_suffix_pattern .= preg_quote(
+                        $source_path_segment,
+                        '~'
+                    );
+                    continue;
+                }
 
-            $source_path_suffix_patterns = [];
-            foreach ($source_path_spellings as $source_path_spelling) {
-                $source_path_suffix_patterns[] = str_replace(
-                    '/',
-                    $separator_escape . '/',
-                    preg_quote(substr($source_path_spelling, 1), '~')
-                );
+                $source_path_suffix_pattern .=
+                    '(?<unicode_path_segment_' . $unicode_path_segment_index . '>'
+                    . '(?=[^/?#\x00-\x20\x7F]*[\x80-\xFF])'
+                    . '[^/?#\x00-\x20\x7F]+?'
+                    . ')';
+                ++$unicode_path_segment_index;
             }
 
             $source_path_pattern =
                 '(?<path_slash>' . $separator_escape . '/)'
-                . '(?:' . implode('|', $source_path_suffix_patterns) . ')';
+                . $source_path_suffix_pattern;
         }
         $candidate_boundary_pattern = '(?=
             $

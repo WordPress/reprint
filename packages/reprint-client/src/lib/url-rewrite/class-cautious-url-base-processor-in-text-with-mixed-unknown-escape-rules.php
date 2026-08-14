@@ -33,16 +33,18 @@
  * Instead, the processor performs one narrow operation: find the configured
  * source base as bytes and replace that entire slice with a target domain and
  * optional path. It replaces the literal protocol separately when the mapping
- * changes it. It does not decode, normalize, or re-encode the input.
+ * changes it. Candidate Unicode path segments are normalized only for the
+ * comparison. The bytes outside the replaced slice remain unchanged.
  *
  * Supported sources:
  *
  * - ASCII or Unicode IDN source domains and IPv4 or IPv6 addresses, with
  *   an optional port. Unicode and Punycode spellings of the same IDN match.
  * - An optional initial path containing valid UTF-8 without whitespace or
- *   control characters. NFC and NFD spellings of the configured path match
- *   the same source base. That path is part of the source base and is removed
- *   with it. A root slash is the URL separator rather than a removable path,
+ *   control characters. Composed and decomposed characters may be mixed in
+ *   one path and still match the same source base. That path is part of the
+ *   source base and is removed with it. A root slash is the URL separator
+ *   rather than a removable path,
  *   so it remains after replacement. Mapping
  *   https://source.example/media to
  *   https://destination.example changes
@@ -115,6 +117,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_authority: string,
      *     source_ascii_host: string,
      *     source_host_uses_idn: bool,
+     *     unicode_source_path_segments_in_nfd: array<int, string>,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -135,6 +138,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_authority: string,
      *     source_ascii_host: string,
      *     source_host_uses_idn: bool,
+     *     unicode_source_path_segments_in_nfd: array<int, string>,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -256,6 +260,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_authority: string,
      *     source_ascii_host: string,
      *     source_host_uses_idn: bool,
+     *     unicode_source_path_segments_in_nfd: array<int, string>,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -275,7 +280,10 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     {
         $next_match = null;
         foreach ($this->url_mappings as $mapping) {
-            if (!$mapping['source_host_uses_idn']) {
+            if (
+                !$mapping['source_host_uses_idn']
+                && $mapping['unicode_source_path_segments_in_nfd'] === []
+            ) {
                 $found = preg_match(
                     $mapping['pattern'],
                     $this->text,
@@ -293,19 +301,38 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                         PREG_OFFSET_CAPTURE,
                         $search_from
                     );
-                    if (
-                        $found !== 1
-                        || !isset($matches['unicode_host'])
-                        || $matches['unicode_host'][1] === -1
-                    ) {
+                    if ($found !== 1) {
                         break;
                     }
 
-                    $candidate_ascii_host =
-                        CautiousURLBaseRewriteMapping::to_ascii_idn_hostname(
-                            $matches['unicode_host'][0]
+                    $candidate_matches_mapping = true;
+                    if (
+                        isset($matches['unicode_host'])
+                        && $matches['unicode_host'][1] !== -1
+                    ) {
+                        $candidate_matches_mapping =
+                            CautiousURLBaseRewriteMapping::to_ascii_idn_hostname(
+                                $matches['unicode_host'][0]
+                            ) === $mapping['source_ascii_host'];
+                    }
+
+                    foreach (
+                        $mapping['unicode_source_path_segments_in_nfd']
+                        as $unicode_path_segment_index => $source_path_segment_in_nfd
+                    ) {
+                        $candidate_path_segment_in_nfd = Normalizer::normalize(
+                            $matches[
+                                'unicode_path_segment_' . $unicode_path_segment_index
+                            ][0],
+                            Normalizer::FORM_D
                         );
-                    if ($candidate_ascii_host === $mapping['source_ascii_host']) {
+                        if ($candidate_path_segment_in_nfd !== $source_path_segment_in_nfd) {
+                            $candidate_matches_mapping = false;
+                            break;
+                        }
+                    }
+
+                    if ($candidate_matches_mapping) {
                         break;
                     }
 

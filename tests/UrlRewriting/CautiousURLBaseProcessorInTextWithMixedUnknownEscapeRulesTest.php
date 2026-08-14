@@ -329,6 +329,14 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                     'https://destination.example/assets',
                 ],
             ],
+            'mixed canonical forms within one source path segment' => [
+                'https:\\/\\/source.example\\/cafe' . "\u{0301}" . 'naïve\\/logo.png',
+                'https:\\/\\/destination.example\\/assets\\/logo.png',
+                [
+                    'https://source.example/cafénaïve' =>
+                    'https://destination.example/assets',
+                ],
+            ],
             'other Unicode source path matches its exact spelling' => [
                 'https://source.example/🚤/logo.png',
                 'https://destination.example/logo.png',
@@ -439,6 +447,14 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://source.example/' . "\u{FB01}" . '/logo.png',
                 'https://source.example/' . "\u{FB01}" . '/logo.png',
                 ['https://source.example/fi' => 'https://destination.example'],
+            ],
+            'canonically different Unicode source path stays distinct' => [
+                'https://source.example/cafe' . "\u{0301}" . 'naive/logo.png',
+                'https://source.example/cafe' . "\u{0301}" . 'naive/logo.png',
+                [
+                    'https://source.example/cafénaïve' =>
+                    'https://destination.example/assets',
+                ],
             ],
             'target path has a dot segment' => [
                 'https://source.example/media/logo.png',
