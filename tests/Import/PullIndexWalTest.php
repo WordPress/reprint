@@ -73,6 +73,70 @@ final class PullIndexWalTest extends TestCase
         $this->assertFileDoesNotExist($pullIndexWalPath);
     }
 
+    public function testAppliedBatchRetainsDefaultSkippedLocalUpsert(): void
+    {
+        $localRelativePath = 'wp-content/cache/pulled.txt';
+        $this->assertTrue(
+            \FileIndexProcessor::path_is_default_skipped($localRelativePath)
+        );
+        $filesystemRoot = realpath($this->fileRoot);
+        $this->assertIsString($filesystemRoot);
+        $localAbsolutePath = $filesystemRoot . '/' . $localRelativePath;
+        mkdir(dirname($localAbsolutePath), 0700, true);
+        file_put_contents($localAbsolutePath, 'changed cache');
+        $localPathStat = lstat($localAbsolutePath);
+        $this->assertIsArray($localPathStat);
+
+        $journal = $this->journal($this->client());
+        $journal->record_remote_upsert(
+            '/site/wp-content/cache/pulled.txt',
+            42,
+            13,
+            'file',
+            $localAbsolutePath
+        );
+        $journal->apply_pending_records();
+
+        $localIndexEntries = $this->readLocalIndex();
+        $this->assertArrayHasKey($localRelativePath, $localIndexEntries);
+        $this->assertSame(
+            (int) $localPathStat['ctime'],
+            $localIndexEntries[$localRelativePath]['ctime']
+        );
+        $this->assertSame(13, $localIndexEntries[$localRelativePath]['size']);
+        $this->assertSame('file', $localIndexEntries[$localRelativePath]['type']);
+    }
+
+    public function testAppliedBatchAppliesDefaultSkippedLocalDeletionWithArbitraryPathBytes(): void
+    {
+        $arbitraryByte = chr(255);
+        $localRelativePath = 'site/node_modules/generated-' . $arbitraryByte . '.js';
+        $this->assertTrue(
+            \FileIndexProcessor::path_is_default_skipped($localRelativePath)
+        );
+        $filesystemRoot = realpath($this->fileRoot);
+        $this->assertIsString($filesystemRoot);
+        $localAbsolutePath = $filesystemRoot . '/' . $localRelativePath;
+        file_put_contents(
+            dirname($this->pullStateDirectory) . '/local_index.jsonl',
+            json_encode([
+                'path' => base64_encode($localRelativePath),
+                'ctime' => 10,
+                'size' => 7,
+                'type' => 'file',
+            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
+        );
+
+        $journal = $this->journal($this->client());
+        $journal->record_successful_deletion(
+            '/site/node_modules/generated-' . $arbitraryByte . '.js',
+            $localAbsolutePath
+        );
+        $journal->apply_pending_records();
+
+        $this->assertSame([], $this->readLocalIndex());
+    }
+
     public function testRecordedMutationsUsePlusAndMinusOperations(): void
     {
         $journal = $this->journal($this->client());

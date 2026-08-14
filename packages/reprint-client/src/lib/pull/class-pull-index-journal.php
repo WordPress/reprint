@@ -59,8 +59,8 @@ use function WordPress\Reprint\Exporter\relative_path_under;
  *     }
  *
  * No local type, size, or ctime is needed because the local path is already
- * gone. A skipped path or a path outside the filesystem root also has no local
- * fields.
+ * gone. A path outside the filesystem root, or the root itself, also has no
+ * local fields.
  *
  * Applying the `+` record above writes these index entries:
  *
@@ -271,7 +271,7 @@ class PullIndexJournal
      * files-diff and PushPlan compare the path with the old local index and
      * treat the pulled path as a new local change.
      *
-     * A null local path, a path outside the filesystem root, or a skipped path
+     * A null local path, a path outside the filesystem root, or the root itself
      * updates only the remote index.
      *
      * @param string      $remote_absolute_path Source absolute path.
@@ -336,8 +336,7 @@ class PullIndexJournal
      * Adds a `-` record after files-pull removes a local path.
      *
      * The record always removes the remote index entry. If the local path is
-     * under the filesystem root and is not skipped, it removes the local index
-     * entry too.
+     * below the filesystem root, it removes the local index entry too.
      *
      * @param string $remote_absolute_path Deleted source absolute path.
      * @param string $local_absolute_path  Local path already removed.
@@ -711,7 +710,7 @@ class PullIndexJournal
      * Returns the path used by the local index.
      *
      * The path is relative to the filesystem root. This method returns null
-     * for the root itself, a path outside it, or a skipped path.
+     * for the root itself or a path outside it.
      *
      * @param string $local_absolute_path Absolute local path.
      * @return string|null Relative path, or null when the local index must not
@@ -730,11 +729,7 @@ class PullIndexJournal
         ) {
             return null;
         }
-        return FileIndexProcessor::path_is_default_skipped(
-            $local_relative_path
-        )
-            ? null
-            : $local_relative_path;
+        return $local_relative_path;
     }
 
     /**
