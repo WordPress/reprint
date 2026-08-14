@@ -367,12 +367,13 @@ The three modes:
 | `stdout` | Streams SQL to stdout, progress/status goes to stderr | none |
 | `mysql` | Connects via `mysqli::multi_query()` and executes statements as they arrive | none |
 
-All three modes recover from server crashes mid-stream (PHP fatal errors,
-OOM kills, `max_execution_time` expiry). When the server dies before sending
-a completion chunk, the importer detects the transport failure, saves its
-cursor, and exits with code 2 for automatic retry. Accumulated SQL is
-persisted in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/sql-buffer`
-so the next run reloads it and continues.
+When a source response stops mid-stream, the same importer asks for the
+remaining SQL and keeps an unfinished statement in memory. Direct MySQL
+output stores the last committed source position in the target table
+`__reprint_db_pull_progress`. For transactional target tables, each completed
+SQL group and its source position are committed together. If the importer
+process stops, the next `db-pull` starts the dump from the beginning rather
+than relying on unfinished SQL from the dead process.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
@@ -670,9 +671,9 @@ are absent while the plan is still being built.
 #### `<remote-state-directory>/pull/state.json` — the pull state store
 
 This is the pull state store. Pull commands read it on startup and write it
-back periodically and on shutdown. It stores everything needed to resume after
-a crash or interruption: the current command, cursor position, AIMD tuning
-state, and per-phase bookmarks.
+back periodically and on shutdown. It stores the current command, cursor
+position, AIMD tuning state, and per-phase bookmarks. Direct MySQL output also
+records each committed source position in the target database.
 
 Written atomically (temp file + rename) so a crash mid-write never corrupts it.
 If the JSON is invalid on load, the importer renames it to

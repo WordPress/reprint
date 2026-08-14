@@ -145,6 +145,9 @@
     },
     "sqlite-legacy": {
       "port": 8127
+    },
+    "mysql-target-cursor-resume": {
+      "port": 8128
     }
   }
 }

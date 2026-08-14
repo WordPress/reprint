@@ -172,6 +172,7 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
+    private const MYSQL_DB_PULL_PROGRESS_TABLE = "__reprint_db_pull_progress";
 
     /**
      * Maximum number of consecutive interrupted responses with no cursor
@@ -7455,13 +7456,13 @@ class ImportClient
 
         $sql_handle = null;
         $mysql_conn = null;
-        $sql_buffer_handle = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
         $session_setup_file = wp_join_unix_paths(
             $this->state_dir,
             "db-session-setup.sql",
         );
+        $mysql_committed_cursor = null;
 
         if ($mode === "file") {
             $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
@@ -7527,44 +7528,30 @@ class ImportClient
             }
             $mysql_conn->set_charset("utf8mb4");
 
-            if ($cursor !== null) {
-                $session_setup_sql = @file_get_contents($session_setup_file);
-                if ($session_setup_sql === false || trim($session_setup_sql) === "") {
-                    throw new RuntimeException(
-                        "Cannot resume db-pull because db-session-setup.sql is missing or empty. " .
-                        "Run db-pull --abort and start again.",
-                    );
-                }
-                $this->execute_mysql_queries($mysql_conn, $session_setup_sql);
-                $this->audit_log(
-                    "SQL OUTPUT mysql | ran saved session setup after reconnect",
-                    true,
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+            $table = self::MYSQL_DB_PULL_PROGRESS_TABLE;
+            $create_table_sql = "CREATE TABLE IF NOT EXISTS `{$table}` (" .
+                "`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY," .
+                "`source_hash` CHAR(64) CHARACTER SET ascii NOT NULL," .
+                "`source_cursor` MEDIUMTEXT NOT NULL" .
+                ") ENGINE=InnoDB";
+            if (!$mysql_conn->query($create_table_sql)) {
+                throw new RuntimeException(
+                    "MySQL could not create the db-pull progress table: " . $mysql_conn->error
                 );
             }
+            if (!$mysql_conn->query("DELETE FROM `{$table}` WHERE `id` = 1")) {
+                throw new RuntimeException(
+                    "MySQL could not reset the previous db-pull position: " . $mysql_conn->error
+                );
+            }
+            $cursor = null;
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
             $this->audit_log(
                 "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
                 true,
             );
-
-            // Open a persistent buffer file so partial queries survive crashes.
-            // Each SQL chunk is appended to this file as it arrives; when the
-            // query completes and executes, the file is truncated. If the process
-            // dies at any point, the next run reloads whatever was accumulated.
-            $sql_buffer_file = wp_join_unix_paths($this->pull_state_directory, "sql-buffer");
-            if (file_exists($sql_buffer_file)) {
-                $sql_buffer = file_get_contents($sql_buffer_file);
-                $this->audit_log(
-                    sprintf("CRASH RECOVERY | Restored %d bytes from pull/sql-buffer", strlen($sql_buffer)),
-                    true,
-                );
-            }
-            // Open in write mode (truncate) if we loaded nothing, append if we
-            // have a partial query to continue accumulating into.
-            $sql_buffer_handle = fopen($sql_buffer_file, $sql_buffer !== "" ? "a" : "w");
-            if (!$sql_buffer_handle) {
-                throw new RuntimeException("Cannot open SQL buffer file: {$sql_buffer_file}");
-            }
         }
 
         // Count SQL statements during download for db-apply progress reporting.
@@ -7601,9 +7588,9 @@ class ImportClient
                     &$complete,
                     &$sql_handle,
                     $mysql_conn,
-                    &$sql_buffer_handle,
                     &$sql_buffer,
                     $session_setup_file,
+                    &$mysql_committed_cursor,
                     &$sql_bytes_written,
                     $context,
                     $query_stream,
@@ -7653,7 +7640,8 @@ class ImportClient
                         if ($sql_handle) {
                             fflush($sql_handle);
                         }
-                        $this->get_state()->active_resumable_command->remote_cursor = $cursor;
+                        $this->get_state()->active_resumable_command->remote_cursor =
+                            $mode === "mysql" ? $mysql_committed_cursor : $cursor;
                         $this->get_state()->sql_bytes = $sql_bytes_written;
                         $this->get_state()->sql_statements_counted = $sql_statements_counted;
                         $this->save_state();
@@ -7688,24 +7676,13 @@ class ImportClient
                                 break;
 
                             case "mysql":
-                                // Append to disk immediately so the buffer survives
-                                // even if the process is killed mid-chunk.
-                                if ($sql_buffer_handle) {
-                                    fwrite($sql_buffer_handle, $data);
-                                    fflush($sql_buffer_handle);
-                                }
-
                                 $sql_buffer .= $data;
                                 $sql_bytes_written += strlen($data);
 
                                 if ($query_complete) {
                                     $this->execute_mysql_queries($mysql_conn, $sql_buffer);
-
-                                    // Query executed — truncate the buffer file and reset.
-                                    if ($sql_buffer_handle) {
-                                        ftruncate($sql_buffer_handle, 0);
-                                        rewind($sql_buffer_handle);
-                                    }
+                                    $this->save_mysql_output_cursor($mysql_conn, $cursor);
+                                    $mysql_committed_cursor = $cursor;
                                     $sql_buffer = "";
                                 }
                                 break;
@@ -7813,7 +7790,8 @@ class ImportClient
                     fflush($sql_handle);
                 }
 
-                $this->get_state()->active_resumable_command->remote_cursor = $cursor;
+                $this->get_state()->active_resumable_command->remote_cursor =
+                    $mode === "mysql" ? $mysql_committed_cursor : $cursor;
                 // Clear sql_bytes when complete, otherwise save current position
                 $this->get_state()->sql_bytes = $complete ? null : $sql_bytes_written;
                 $this->save_state();
@@ -7849,30 +7827,15 @@ class ImportClient
             if ($sql_handle) {
                 fclose($sql_handle);
             }
-            if ($sql_buffer_handle) {
-                fclose($sql_buffer_handle);
-                $sql_buffer_handle = null;
-            }
             if ($mysql_conn) {
                 $pending = $sql_buffer;
                 $mysql_conn->close();
                 $mysql_conn = null;
-                // Clean up buffer file — if we got here with an empty buffer,
-                // all queries were executed successfully.
-                $sql_buffer_file = wp_join_unix_paths($this->pull_state_directory, "sql-buffer");
-                if ($pending === "" && file_exists($sql_buffer_file)) {
-                    unlink($sql_buffer_file);
-                }
                 if ($pending !== "") {
                     if ($caught_exception !== null) {
-                        // An exception is already in flight (e.g. curl error,
-                        // MySQL error). Don't mask it by throwing about the
-                        // buffer — the buffer data is safely persisted in
-                        // pull/sql-buffer and will be recovered on the next run.
                         $this->audit_log(
-                            "BUFFER NOT FLUSHED | " . strlen($pending) .
-                            " bytes in SQL buffer during exception unwind" .
-                            " (original error: " . $caught_exception->getMessage() . ")",
+                            "DISCARDED INCOMPLETE SQL | " . strlen($pending) .
+                            " bytes | a new process will request the dump from the beginning",
                             true,
                         );
                     } else {
@@ -7888,6 +7851,39 @@ class ImportClient
                 " bytes) — incomplete export?"
             );
         }
+    }
+
+    /** Saves the source cursor and commits the current target transaction. */
+    private function save_mysql_output_cursor(\mysqli $connection, ?string $cursor): void
+    {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+        if ($cursor === null) {
+            throw new RuntimeException("The source returned SQL without a position to save.");
+        }
+
+        $table = self::MYSQL_DB_PULL_PROGRESS_TABLE;
+        $statement = $connection->prepare(
+            "INSERT INTO `{$table}` (`id`, `source_hash`, `source_cursor`) VALUES (1, ?, ?) " .
+            "ON DUPLICATE KEY UPDATE `source_hash` = VALUES(`source_hash`), " .
+            "`source_cursor` = VALUES(`source_cursor`)"
+        );
+        if (!$statement) {
+            throw new RuntimeException("MySQL could not prepare the db-pull position update: " . $connection->error);
+        }
+
+        $source_hash = hash("sha256", $this->remote_reprint_api_url);
+        $statement->bind_param("ss", $source_hash, $cursor);
+        if (!$statement->execute()) {
+            $error = $statement->error;
+            $statement->close();
+            throw new RuntimeException("MySQL could not save the db-pull position: " . $error);
+        }
+        $statement->close();
+
+        if (!$connection->commit()) {
+            throw new RuntimeException("MySQL could not commit the imported SQL and its source position: " . $connection->error);
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
     }
 
     /** Count complete SQL queries waiting in the stream. */

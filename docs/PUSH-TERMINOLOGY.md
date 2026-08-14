@@ -192,8 +192,7 @@ their parent directories.
         │   ├── remote-index.next.jsonl
         │   ├── fetch-list.jsonl
         │   ├── volatile-files.json
-        │   ├── sql-stats.json
-        │   └── sql-buffer
+        │   └── sql-stats.json
         └── push/
 ```
 
