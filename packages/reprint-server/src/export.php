@@ -313,9 +313,10 @@ function create_db_connection(array $creds, array $options = [])
 /**
  * Wraps the SQLite plugin's already-loaded driver in a PDO-compatible adapter.
  *
- * Version 3 exposes WP_MySQL_On_SQLite through $wpdb->get_driver(). Version 2
- * stores WP_SQLite_Driver in $wpdb->dbh. Both drivers translate MySQL queries,
- * but neither provides every PDO operation used by MySQLDumpProducer.
+ * Version 3 exposes its active translator through $wpdb->get_driver(). Version
+ * 2 exposes its active translator through wpdb's backward-compatible dbh
+ * property. Both translate MySQL queries, but neither provides every PDO
+ * operation used by MySQLDumpProducer.
  *
  * @return object PDO-compatible adapter (SqliteDriverPDO).
  * @throws RuntimeException If the driver is not available or unsupported.
@@ -325,8 +326,7 @@ function create_sqlite_pdo_adapter()
     global $wpdb;
 
     /**
-     * Minimum sqlite-database-integration version that exposes the legacy
-     * WP_SQLite_Driver API used below.
+     * Minimum supported sqlite-database-integration version.
      */
     $min_version = '2.1.0';
 
@@ -335,21 +335,40 @@ function create_sqlite_pdo_adapter()
     $driver = null;
     $raw_pdo = null;
 
-    if (isset($wpdb) && method_exists($wpdb, 'get_driver')) {
+    if (isset($wpdb) && is_object($wpdb) && method_exists($wpdb, 'get_driver')) {
         $candidate = $wpdb->get_driver();
-        if (is_a($candidate, 'WP_MySQL_On_SQLite')) {
+        if (
+            is_object($candidate) &&
+            method_exists($candidate, 'query') &&
+            method_exists($candidate, 'get_sqlite_pdo')
+        ) {
+            $candidate_pdo = call_user_func([$candidate, 'get_sqlite_pdo']);
+        } else {
+            $candidate_pdo = null;
+        }
+        if ($candidate_pdo instanceof PDO) {
             $driver = $candidate;
-            $raw_pdo = call_user_func([$driver, 'get_sqlite_pdo']);
+            $raw_pdo = $candidate_pdo;
         }
     }
 
-    if (
-        $driver === null &&
-        isset($wpdb) &&
-        $wpdb->dbh instanceof WP_SQLite_Driver
-    ) {
-        $driver = $wpdb->dbh;
-        $raw_pdo = $driver->get_connection()->get_pdo();
+    if ($driver === null && isset($wpdb) && is_object($wpdb)) {
+        $candidate = $wpdb->dbh;
+        $candidate_pdo = null;
+        if (is_object($candidate) && method_exists($candidate, 'query')) {
+            if (method_exists($candidate, 'get_pdo')) {
+                $candidate_pdo = call_user_func([$candidate, 'get_pdo']);
+            } elseif (method_exists($candidate, 'get_connection')) {
+                $connection = call_user_func([$candidate, 'get_connection']);
+                if (is_object($connection) && method_exists($connection, 'get_pdo')) {
+                    $candidate_pdo = call_user_func([$connection, 'get_pdo']);
+                }
+            }
+        }
+        if ($candidate_pdo instanceof PDO) {
+            $driver = $candidate;
+            $raw_pdo = $candidate_pdo;
+        }
     }
 
     if ($driver === null) {
