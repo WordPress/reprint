@@ -211,7 +211,6 @@ Use these path names:
 | Fetch list file | `$fetch_list_file` |
 | Volatile files file | `$volatile_files_file` |
 | SQL statistics file | `$sql_stats_file` |
-| SQL buffer file | `$sql_buffer_file` |
 | Audit log file | `$audit_log_file` |
 | Progress file | `$progress_file` |
 | Reprint process lock path | `$process_lock_path` |
