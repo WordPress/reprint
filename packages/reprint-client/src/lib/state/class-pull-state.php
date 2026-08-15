@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 use Reprint\Importer\State\AdaptiveTuningState;
 use Reprint\Importer\State\DatabaseApplyCommandState;
+use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
 use Reprint\Importer\State\DatabaseTableIndexState;
 use Reprint\Importer\State\FetchListProgressState;
 use Reprint\Importer\State\FileDiffProgressState;
@@ -74,6 +75,8 @@ class PullState
     /** @var int SQL statements counted while streaming db.sql. */
     public int $sql_statements_counted = 0;
     public DatabaseApplyCommandState $apply;
+    /** Live database URL rewrite cursor and counters. */
+    public DatabaseUrlRewriteCommandState $database_url_rewrite;
     /** @var string|null SQL output mode persisted for resume: file, stdout, or mysql. */
     public ?string $sql_output = null;
     /**
@@ -104,6 +107,7 @@ class PullState
         $this->fetch = new FetchListProgressState();
         $this->files_pull_summary = new FilesPullSummaryState();
         $this->apply = new DatabaseApplyCommandState();
+        $this->database_url_rewrite = new DatabaseUrlRewriteCommandState();
         $this->tuning = new AdaptiveTuningState();
         $this->pull_pipeline = new PullPipelineCheckpointState();
     }
@@ -135,6 +139,7 @@ class PullState
         $state->sql_bytes = $data['sql_bytes'];
         $state->sql_statements_counted = $data['sql_statements_counted'];
         $state->apply = DatabaseApplyCommandState::from_array($data['apply']);
+        $state->database_url_rewrite = DatabaseUrlRewriteCommandState::from_array($data['database_url_rewrite']);
         $state->sql_output = $data['sql_output'];
         $state->mysql_host = $data['mysql_host'];
         $state->mysql_port = $data['mysql_port'];
@@ -239,6 +244,7 @@ class PullState
             'sql_bytes' => $this->sql_bytes,
             'sql_statements_counted' => $this->sql_statements_counted,
             'apply' => $this->apply->to_array(),
+            'database_url_rewrite' => $this->database_url_rewrite->to_array(),
             'sql_output' => $this->sql_output,
             'mysql_host' => $this->mysql_host,
             'mysql_port' => $this->mysql_port,

@@ -26,3 +26,4 @@ require_once __DIR__ . '/class-structured-data-url-rewriter.php';
 
 // Depends on StructuredDataUrlRewriter + Base64ValueScanner
 require_once __DIR__ . '/class-sql-statement-rewriter.php';
+require_once __DIR__ . '/class-database-url-rewrite-processor.php';

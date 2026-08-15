@@ -178,12 +178,13 @@ class SqlStatementRewriter
         return SQLitePreparedInsertBuilder::build(
             $sql,
             function (string $value, string $table, ?string $column): string {
-                return $this->rewrite_value_for_column($value, $table, $column);
+                return $this->rewrite_value($value, $table, $column);
             }
         );
     }
 
-    private function rewrite_value_for_column(string $value, string $table, ?string $column): string
+    /** Rewrite one decoded database value with the same column rules as rewrite(). */
+    public function rewrite_value(string $value, string $table, ?string $column): string
     {
         if (strpos($value, 'http') === false) {
             return $value;
@@ -245,7 +246,7 @@ class SqlStatementRewriter
                 );
             }
 
-            $rewritten = $this->rewrite_value_for_column(
+            $rewritten = $this->rewrite_value(
                 $value,
                 $value_to_column_map['table'] ?? '',
                 $column_name

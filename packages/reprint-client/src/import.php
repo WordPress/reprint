@@ -11,9 +11,11 @@
  */
 
 use Reprint\Importer\CurlTimeoutException;
+use Reprint\Importer\DatabaseUrlRewriteProcessor;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\Pull\PullFailureReportedException;
 use Reprint\Importer\State\DatabaseApplyCommandState;
+use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
 use Reprint\Importer\State\DatabaseTableIndexState;
 use Reprint\Importer\State\FetchListProgressState;
 use Reprint\Importer\State\FileDiffProgressState;
@@ -158,6 +160,7 @@ class ImportClient
         "db-pull",
         "db-index",
         "db-apply",
+        "db-rewrite-urls",
         "pull-metadata",
         "preflight",
         "preflight-assert",
@@ -452,7 +455,8 @@ class ImportClient
         string $remote_reprint_api_url,
         string $state_dir,
         string $filesystem_root,
-        ?string $signal_handling_command = null
+        ?string $signal_handling_command = null,
+        ?string $selected_remote_state_directory = null
     )
     {
         // Register the command's signal behavior before constructor work can
@@ -464,6 +468,9 @@ class ImportClient
             }
             if ($signal_handling_command === 'files-push') {
                 $this->enable_files_push_signal_handling();
+            } elseif ($signal_handling_command === 'db-rewrite-urls') {
+                pcntl_signal(SIGINT, [$this, 'handle_database_url_rewrite_shutdown']);
+                pcntl_signal(SIGTERM, [$this, 'handle_database_url_rewrite_shutdown']);
             } elseif ($signal_handling_command !== 'files-diff') {
                 // files-diff must not save the pull command's state from a
                 // shutdown handler; default signal behavior ends the report.
@@ -475,10 +482,12 @@ class ImportClient
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
         $this->state_dir = trim_right_slash($state_dir);
         $this->filesystem_root = trim_right_slash($filesystem_root);
-        $remote_state_directory = self::remote_state_directory_path(
-            $this->remote_reprint_api_url,
-            $this->state_dir
-        );
+        $remote_state_directory = $selected_remote_state_directory === null
+            ? self::remote_state_directory_path(
+                $this->remote_reprint_api_url,
+                $this->state_dir
+            )
+            : trim_right_slash($selected_remote_state_directory);
         $this->pull_state_directory = wp_join_unix_paths($remote_state_directory, "pull");
         $this->local_index_file = wp_join_unix_paths($remote_state_directory, "local_index.jsonl");
         $this->pull_state_file = wp_join_unix_paths($this->pull_state_directory, "state.json");
@@ -643,9 +652,9 @@ class ImportClient
      */
     public function audit_log_argv(string $command, array $argv): void
     {
-        // Mask the remote URL (argv[2]) to avoid logging secrets embedded in query strings.
+        // Mask the positional remote URL to avoid logging secrets embedded in query strings.
         $masked = $argv;
-        if (isset($masked[2])) {
+        if (isset($masked[2]) && strpos($masked[2], '-') !== 0) {
             $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
             if ($command === 'files-push') {
                 $masked[2] = self::mask_url_credentials($masked[2]);
@@ -1165,6 +1174,32 @@ class ImportClient
                     "status" => "error",
                     "error" => $e->getMessage(),
                     "error_code" => $this->last_error_code,
+                    "message" => "Error: " . $e->getMessage(),
+                ]);
+                $this->write_progress_file($e->getMessage());
+                throw $e;
+            }
+            return;
+        }
+        if ($command === "db-rewrite-urls") {
+            if ($abort) {
+                $this->handle_abort($command);
+                return;
+            }
+            try {
+                $this->run_db_rewrite_urls($options);
+                $final_status = $this->get_state()->active_resumable_command->completion_state ?? "complete";
+                $this->output_progress([
+                    "status" => $final_status,
+                    "message" => "db-rewrite-urls {$final_status}",
+                ]);
+                if ($final_status === "partial") {
+                    $this->exit_code = 2;
+                }
+            } catch (Exception $e) {
+                $this->output_progress([
+                    "status" => "error",
+                    "error" => $e->getMessage(),
                     "message" => "Error: " . $e->getMessage(),
                 ]);
                 $this->write_progress_file($e->getMessage());
@@ -2163,6 +2198,20 @@ class ImportClient
         die("\nForced exit.\n");
     }
 
+    /** Stops after the active database record step reaches its durable cursor. */
+    // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- PHP passes the signal number to handlers.
+    public function handle_database_url_rewrite_shutdown(int $signal): void
+    {
+        if (!$this->shutdown_requested) {
+            $this->shutdown_requested = true;
+            return;
+        }
+        if (function_exists('posix_kill') && function_exists('posix_getpid')) {
+            posix_kill(posix_getpid(), SIGKILL);
+        }
+        die("\nForced exit.\n");
+    }
+
     /** Installs the files-push first-signal stop behavior when PCNTL exists. */
     public function enable_files_push_signal_handling(): void
     {
@@ -2272,6 +2321,28 @@ class ImportClient
                     true,
                 );
                 $this->reset_state();
+                $this->save_state();
+                break;
+
+            case "db-rewrite-urls":
+                $active_command = $this->get_state()->active_resumable_command;
+                if (
+                    $active_command->command_name !== null
+                    && $active_command->command_name !== 'db-rewrite-urls'
+                    && $active_command->completion_state !== 'complete'
+                ) {
+                    throw new RuntimeException(
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error, never HTML.
+                        "Cannot abort db-rewrite-urls while {$active_command->command_name} is incomplete."
+                    );
+                }
+                $this->audit_log(
+                    "RESTART | Clearing db-rewrite-urls state",
+                    true,
+                );
+                $this->get_state()->active_resumable_command =
+                    new \Reprint\Importer\State\ResumableCommandCheckpointState();
+                $this->get_state()->database_url_rewrite = new DatabaseUrlRewriteCommandState();
                 $this->save_state();
                 break;
         }
@@ -4135,7 +4206,62 @@ class ImportClient
         // checks, so a bad --target-* value fails before the output directory
         // is created. The target is either stated on the command line or read
         // from what db-apply connected to.
-        $target = $this->resolve_apply_runtime_database_target($options);
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.
+        $stated_engine = $options["target_engine"] ?? null;
+        if ($stated_engine === null || $stated_engine === "") {
+            $target_flags = [
+                "target_db" => "--target-db",
+                "target_sqlite_path" => "--target-sqlite-path",
+                "target_host" => "--target-host",
+                "target_port" => "--target-port",
+                "target_user" => "--target-user",
+                "target_pass" => "--target-pass",
+            ];
+            foreach ($target_flags as $option_key => $flag) {
+                $value = $options[$option_key] ?? null;
+                if ($value === null || $value === "") {
+                    continue;
+                }
+                throw new InvalidArgumentException(
+                    "apply-runtime received {$flag} without --target-engine. " .
+                    "Add --target-engine=mysql or --target-engine=sqlite to state the database target.",
+                );
+            }
+        }
+
+        $target = $this->resolve_database_target(
+            $options,
+            $this->get_local_site_database_target(),
+            null,
+            "apply-runtime",
+        );
+
+        // DB_DIR reaches runtime.php verbatim, so absolutize a stated path
+        // here; a relative one would resolve against the server's working
+        // directory. A recorded path is used as-is — flat-docroot may have
+        // moved the tree since db-apply saved it, and apply-runtime without a
+        // new path accepts that.
+        $stated_sqlite_path = $options["target_sqlite_path"] ?? null;
+        if (
+            $target["engine"] === "sqlite"
+            && $stated_sqlite_path !== null
+            && $stated_sqlite_path !== ""
+        ) {
+            $stated_sqlite_path = (string) $stated_sqlite_path;
+            $directory = dirname($stated_sqlite_path);
+            $absolute_directory = is_dir($directory) ? realpath($directory) : false;
+            if ($absolute_directory === false) {
+                throw new InvalidArgumentException(
+                    "The directory for --target-sqlite-path={$stated_sqlite_path} does not exist: {$directory}. " .
+                    "Create it first; the database file itself is created on the first request.",
+                );
+            }
+            $target["sqlite_path"] = wp_join_unix_paths(
+                $absolute_directory,
+                basename($stated_sqlite_path),
+            );
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
         // Resolve the local document root from either --flat-document-root
         // (used as-is) or --fs-root (prefixed with the remote document_root).
@@ -4371,19 +4497,33 @@ class ImportClient
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.
     /**
-     * Resolve the database target the generated runtime should point at.
+     * Resolve command options and recorded state into one database target.
      *
-     * Without an explicit engine, apply-runtime uses the database target
-     * db-apply recorded. An explicit engine lets a caller name a database it
-     * keeps outside Reprint's db-apply stage. Options fill missing values from
-     * matching recorded state; a different engine ignores it entirely.
+     * Options fill missing values from matching recorded state. A different
+     * explicitly stated engine ignores the recorded target entirely.
      *
-     * @param array<string,mixed> $options
-     * @return array<string,mixed>
+     * @param array<string,mixed> $options Command options.
+     * @param array $recorded_target {
+     *     Previously recorded database target.
+     *
+     *     @type string|null $engine      mysql, sqlite, or null.
+     *     @type string      $db          MySQL database or SQLite logical database name.
+     *     @type string|null $sqlite_path SQLite database path.
+     *     @type string      $host        MySQL host.
+     *     @type int         $port        MySQL port.
+     *     @type string      $user        MySQL user.
+     *     @type string      $pass        MySQL password.
+     * }
+     * @param string|null $default_engine Engine used when neither options nor state specify one.
+     * @param string      $command        Command name used in errors.
+     * @return array<string,mixed> Canonical database target.
      */
-    private function resolve_apply_runtime_database_target(array $options): array
-    {
-        $recorded_target = $this->get_state()->apply;
+    private function resolve_database_target(
+        array $options,
+        array $recorded_target,
+        ?string $default_engine,
+        string $command
+    ): array {
         $stated_engine = $options["target_engine"] ?? null;
         $engine_was_stated = $stated_engine !== null && $stated_engine !== "";
 
@@ -4394,29 +4534,11 @@ class ImportClient
                     "Invalid --target-engine value: {$stated_engine}. Valid engines: mysql, sqlite.",
                 );
             }
-            if ($recorded_target->target_engine !== $engine) {
-                $recorded_target = null;
+            if (($recorded_target["engine"] ?? null) !== $engine) {
+                $recorded_target = [];
             }
         } else {
-            $target_flags = [
-                "target_db" => "--target-db",
-                "target_sqlite_path" => "--target-sqlite-path",
-                "target_host" => "--target-host",
-                "target_port" => "--target-port",
-                "target_user" => "--target-user",
-                "target_pass" => "--target-pass",
-            ];
-            foreach ($target_flags as $option_key => $flag) {
-                $value = $options[$option_key] ?? null;
-                if ($value === null || $value === "") {
-                    continue;
-                }
-                throw new InvalidArgumentException(
-                    "apply-runtime received {$flag} without --target-engine. " .
-                    "Add --target-engine=mysql or --target-engine=sqlite to state the database target.",
-                );
-            }
-            $engine = $recorded_target->target_engine;
+            $engine = $recorded_target["engine"] ?? $default_engine;
         }
 
         if ($engine === null) {
@@ -4433,40 +4555,20 @@ class ImportClient
         };
 
         if ($engine === "sqlite") {
-            // DB_DIR reaches runtime.php verbatim, so absolutize a stated path
-            // here; a relative one would resolve against the server's working
-            // directory. A recorded path is used as db-apply wrote it —
-            // flat-docroot may have moved the tree since, and apply-runtime
-            // without options accepts that.
-            $stated_sqlite_path = $options["target_sqlite_path"] ?? null;
-            if ($stated_sqlite_path !== null && $stated_sqlite_path !== "") {
-                $stated_sqlite_path = (string) $stated_sqlite_path;
-                $directory = dirname($stated_sqlite_path);
-                $absolute_directory = is_dir($directory) ? realpath($directory) : false;
-                if ($absolute_directory === false) {
-                    throw new InvalidArgumentException(
-                        "The directory for --target-sqlite-path={$stated_sqlite_path} does not exist: {$directory}. " .
-                        "Create it first; the database file itself is created on the first request.",
-                    );
-                }
-                $sqlite_path = wp_join_unix_paths(
-                    $absolute_directory,
-                    basename($stated_sqlite_path),
-                );
-            } else {
-                $sqlite_path = $recorded_target === null
-                    ? null
-                    : $recorded_target->target_sqlite_path;
-                if ($sqlite_path === "") {
-                    $sqlite_path = null;
-                }
+            $sqlite_path = $option_then_recorded(
+                $options["target_sqlite_path"] ?? null,
+                $recorded_target["sqlite_path"] ?? null,
+                null,
+            );
+            if ($sqlite_path === "") {
+                $sqlite_path = null;
             }
 
             return [
                 "engine" => "sqlite",
                 "db" => (string) $option_then_recorded(
                     $options["target_db"] ?? null,
-                    $recorded_target === null ? null : $recorded_target->target_db,
+                    $recorded_target["db"] ?? null,
                     "sqlite_database",
                 ),
                 "sqlite_path" => $sqlite_path === null ? null : (string) $sqlite_path,
@@ -4477,43 +4579,83 @@ class ImportClient
             "engine" => "mysql",
             "db" => (string) $option_then_recorded(
                 $options["target_db"] ?? null,
-                $recorded_target === null ? null : $recorded_target->target_db,
+                $recorded_target["db"] ?? null,
                 "",
             ),
             "host" => (string) $option_then_recorded(
                 $options["target_host"] ?? null,
-                $recorded_target === null ? null : $recorded_target->target_host,
+                $recorded_target["host"] ?? null,
                 "127.0.0.1",
             ),
             "port" => (int) $option_then_recorded(
                 $options["target_port"] ?? null,
-                $recorded_target === null ? null : $recorded_target->target_port,
+                $recorded_target["port"] ?? null,
                 3306,
             ),
             "user" => (string) $option_then_recorded(
                 $options["target_user"] ?? null,
-                $recorded_target === null ? null : $recorded_target->target_user,
+                $recorded_target["user"] ?? null,
                 "",
             ),
             "pass" => (string) $option_then_recorded(
                 $options["target_pass"] ?? null,
-                $recorded_target === null ? null : $recorded_target->target_pass,
+                $recorded_target["pass"] ?? null,
                 "",
             ),
         ];
 
-        if ($engine_was_stated) {
+        if ($default_engine !== null || $engine_was_stated) {
             foreach (["user" => "--target-user", "db" => "--target-db"] as $field => $flag) {
                 if ($target[$field] === "") {
                     throw new InvalidArgumentException(
-                        "apply-runtime with --target-engine=mysql requires {$flag}: " .
-                        "neither the command line nor the recorded db-apply target supplied one.",
+                        "{$command} with --target-engine=mysql requires {$flag}: " .
+                        "neither the command line nor the recorded database target supplied one.",
                     );
                 }
             }
         }
 
         return $target;
+    }
+
+    /**
+     * Return the local site database target recorded by db-apply.
+     *
+     * @return array {
+     *     Recorded database target.
+     *
+     *     @type string|null $engine      mysql, sqlite, or null.
+     *     @type string      $db          MySQL database or SQLite logical database name.
+     *     @type string|null $sqlite_path SQLite database path.
+     *     @type string      $host        MySQL host.
+     *     @type int         $port        MySQL port.
+     *     @type string      $user        MySQL user.
+     *     @type string      $pass        MySQL password.
+     * }
+     */
+    private function get_local_site_database_target(): array
+    {
+        $apply_state = $this->get_state()->apply;
+        if ($apply_state->target_engine === null) {
+            return ["engine" => null];
+        }
+
+        if ($apply_state->target_engine === "sqlite") {
+            return [
+                "engine" => "sqlite",
+                "db" => $apply_state->target_db,
+                "sqlite_path" => $apply_state->target_sqlite_path,
+            ];
+        }
+
+        return [
+            "engine" => "mysql",
+            "db" => $apply_state->target_db,
+            "host" => $apply_state->target_host,
+            "port" => $apply_state->target_port,
+            "user" => $apply_state->target_user,
+            "pass" => $apply_state->target_pass,
+        ];
     }
 
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
@@ -5341,10 +5483,227 @@ class ImportClient
         rmdir($dir);
     }
 
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI errors are never HTML.
+    /** Rewrite URL-bearing values in an existing database one record at a time. */
+    public function run_db_rewrite_urls(array $options): void
+    {
+        $this->resolve_new_site_url_option($options);
+        $url_mapping = [];
+        if (!empty($options['rewrite_url'])) {
+            foreach ($options['rewrite_url'] as [$source_url, $target_url]) {
+                $url_mapping[$source_url] = $target_url;
+            }
+        }
+
+        $active_command = $this->get_state()->active_resumable_command;
+        if (
+            $active_command->command_name !== null
+            && $active_command->command_name !== 'db-rewrite-urls'
+            && $active_command->completion_state !== 'complete'
+        ) {
+            throw new RuntimeException(
+                "Finish or abort the incomplete {$active_command->command_name} command "
+                . 'before running db-rewrite-urls.'
+            );
+        }
+        $current_status = $active_command->command_name === 'db-rewrite-urls'
+            ? $active_command->completion_state
+            : null;
+        if ($current_status === 'complete') {
+            throw new RuntimeException(
+                'db-rewrite-urls already completed. Use --abort to start another lifecycle.'
+            );
+        }
+
+        $rewrite_state = $this->get_state()->database_url_rewrite;
+        $is_resume = in_array($current_status, ['in_progress', 'partial'], true);
+
+        $local_site_database_target = $this->get_local_site_database_target();
+        $recorded_target = $is_resume ? ( $rewrite_state->target ?? [] ) : $local_site_database_target;
+        if ($is_resume && ($recorded_target['engine'] ?? null) === 'mysql') {
+            $local_site_database_identity = $local_site_database_target;
+            unset($local_site_database_identity['pass']);
+            if ($local_site_database_identity === $recorded_target) {
+                $recorded_target['pass'] = $local_site_database_target['pass'];
+            }
+        }
+
+        if ($is_resume) {
+            if ($url_mapping === []) {
+                $url_mapping = $rewrite_state->rewrite_url ?? [];
+            } elseif ($url_mapping !== $rewrite_state->rewrite_url) {
+                throw new RuntimeException(
+                    'Cannot change --rewrite-url while db-rewrite-urls is incomplete. '
+                    . 'Finish it or use --abort.'
+                );
+            }
+        } elseif ($url_mapping === []) {
+            throw new InvalidArgumentException(
+                'db-rewrite-urls requires --rewrite-url FROM TO or --new-site-url=URL.'
+            );
+        }
+        if ($url_mapping === []) {
+            throw new RuntimeException(
+                'The saved db-rewrite-urls lifecycle has no URL mapping. Use --abort.'
+            );
+        }
+
+        $target = $this->resolve_database_target(
+            $options,
+            $recorded_target,
+            'mysql',
+            'db-rewrite-urls'
+        );
+        if ($target['engine'] === 'sqlite') {
+            $target_path = $target['sqlite_path'];
+            $resolved_target_path = is_string($target_path) ? realpath($target_path) : false;
+            if ($resolved_target_path === false || !is_file($resolved_target_path)) {
+                throw new InvalidArgumentException(
+                    'db-rewrite-urls requires an existing live SQLite database: '
+                    . (string) $target_path
+                );
+            }
+            $target['sqlite_path'] = $resolved_target_path;
+        }
+
+        $target_identity = $target;
+        unset($target_identity['pass']);
+
+        if ($is_resume) {
+            if ($target_identity !== $rewrite_state->target) {
+                throw new RuntimeException(
+                    'Cannot change the target database while db-rewrite-urls is incomplete. '
+                    . 'Reconnect to the original database or use --abort.'
+                );
+            }
+        }
+
+        [$database, $connection_label] = $this->create_target_database_connection($target, false);
+
+        if (!$is_resume) {
+            $rewrite_state = new DatabaseUrlRewriteCommandState();
+            $rewrite_state->rewrite_url = $url_mapping;
+            $rewrite_state->target = $target_identity;
+            $this->get_state()->database_url_rewrite = $rewrite_state;
+            $active_command->command_name = 'db-rewrite-urls';
+            $active_command->completion_state = 'in_progress';
+            $active_command->current_stage = 'database-records';
+            $this->save_state();
+        }
+
+        $statement_rewriter = new SqlStatementRewriter(
+            new StructuredDataUrlRewriter($url_mapping),
+            $this->get_state()->get('preflight.database.wp.table_prefix'),
+        );
+
+        $cursor = null;
+        if ($rewrite_state->cursor !== null) {
+            $cursor = json_decode($rewrite_state->cursor, true);
+            if (!is_array($cursor)) {
+                throw new RuntimeException(
+                    'The saved db-rewrite-urls record cursor is invalid. Use --abort.'
+                );
+            }
+        }
+        $processor = new DatabaseUrlRewriteProcessor(
+            $database,
+            $statement_rewriter,
+            $cursor
+        );
+
+        $lifecycle_event = $is_resume ? 'resuming' : 'starting';
+        $this->audit_log(
+            strtoupper($lifecycle_event) . " db-rewrite-urls | {$connection_label}",
+            true
+        );
+        $this->output_progress([
+            'type' => 'lifecycle',
+            'event' => $lifecycle_event,
+            'command' => 'db-rewrite-urls',
+            'records_processed' => $rewrite_state->records_processed,
+            'records_changed' => $rewrite_state->records_changed,
+            'message' => ucfirst($lifecycle_event) . ' db-rewrite-urls',
+        ], true);
+
+        while (true) {
+            if (function_exists('pcntl_signal_dispatch')) {
+                pcntl_signal_dispatch();
+            }
+            if ($this->shutdown_requested) {
+                break;
+            }
+
+            $has_more_steps = $processor->next_step();
+            $progress = $processor->get_progress();
+            $encoded_cursor = json_encode($processor->get_cursor());
+            if ($encoded_cursor === false) {
+                throw new RuntimeException(
+                    'Failed to encode the db-rewrite-urls record cursor: '
+                    . json_last_error_msg()
+                );
+            }
+
+            $rewrite_state->cursor = $encoded_cursor;
+            $rewrite_state->records_processed = $progress['records_processed'];
+            $rewrite_state->records_changed = $progress['records_changed'];
+            $rewrite_state->tables_started = $progress['tables_started'];
+            $rewrite_state->current_table = $progress['current_table'];
+            $this->save_state();
+
+            $message = sprintf(
+                '%s records checked, %s changed',
+                number_format($rewrite_state->records_processed),
+                number_format($rewrite_state->records_changed)
+            );
+            $this->output_progress([
+                'phase' => 'database-records',
+                'records_processed' => $rewrite_state->records_processed,
+                'records_changed' => $rewrite_state->records_changed,
+                'tables_started' => $rewrite_state->tables_started,
+                'current_table' => $rewrite_state->current_table,
+                'message' => $message,
+            ]);
+            $this->progress->show_progress_line($message);
+
+            if (!$has_more_steps) {
+                break;
+            }
+        }
+
+        if ($this->shutdown_requested) {
+            $active_command->completion_state = 'partial';
+            $status = 'partial';
+        } else {
+            $active_command->completion_state = 'complete';
+            $status = 'complete';
+        }
+        $this->save_state();
+
+        $message = sprintf(
+            'db-rewrite-urls %s (%d records checked, %d changed)',
+            $status,
+            $rewrite_state->records_processed,
+            $rewrite_state->records_changed
+        );
+        $this->audit_log($message, true);
+        $this->output_progress([
+            'status' => $status,
+            'phase' => 'database-records',
+            'records_processed' => $rewrite_state->records_processed,
+            'records_changed' => $rewrite_state->records_changed,
+            'tables_started' => $rewrite_state->tables_started,
+            'current_table' => $rewrite_state->current_table,
+            'message' => $message,
+        ], true);
+        $this->progress->clear_progress_line();
+        $this->progress->show_lifecycle_line($message . "\n");
+    }
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+
     /**
      * If --new-site-url is set, derive the source origin from the export URL
      * and append implicit --rewrite-url mappings for both HTTP and HTTPS
-     * variants of the old URL to $options. The new URL is used verbatim.
+     * variants. The new URL is used verbatim.
      */
     private function resolve_new_site_url_option(array &$options): void
     {
@@ -5354,6 +5713,12 @@ class ImportClient
 
         $parsed_url = parse_url($this->remote_reprint_api_url);
         if (!$parsed_url || !isset($parsed_url['scheme'], $parsed_url['host'])) {
+            if ($this->remote_reprint_api_url === '') {
+                throw new InvalidArgumentException(
+                    '--new-site-url requires a positional remote Reprint API URL. '
+                    . 'Use --rewrite-url FROM TO when no remote URL is available.'
+                );
+            }
             throw new InvalidArgumentException(
                 "--new-site-url requires a valid export URL to derive the remote site origin.",
             );
@@ -5456,18 +5821,36 @@ class ImportClient
         return $pdo;
     }
 
-    private function create_target_db_apply_connection(array $options): array
+    /**
+     * @param array $target {
+     *     Resolved database target.
+     *
+     *     @type string      $engine      mysql or sqlite.
+     *     @type string      $db          MySQL database or SQLite logical database name.
+     *     @type string|null $sqlite_path SQLite database path.
+     *     @type string      $host        MySQL host.
+     *     @type int         $port        MySQL port.
+     *     @type string      $user        MySQL user.
+     *     @type string      $pass        MySQL password.
+     * }
+     * @param bool $save_runtime_target Whether to save the target for apply-runtime.
+     * @return array {
+     *     Target database connection details.
+     *
+     *     @type mixed  $0 PDO or a PDO-compatible adapter.
+     *     @type string $1 Human-readable connection label.
+     * }
+     */
+    private function create_target_database_connection(
+        array $target,
+        bool $save_runtime_target = true
+    ): array
     {
-        $target_engine = strtolower((string) ($options["target_engine"] ?? "mysql"));
-        if (!in_array($target_engine, ["mysql", "sqlite"], true)) {
-            throw new InvalidArgumentException(
-                "Invalid --target-engine value: {$target_engine}. Valid engines: mysql, sqlite.",
-            );
-        }
+        $target_engine = $target["engine"];
 
         if ($target_engine === "sqlite") {
-            $target_path = $options["target_sqlite_path"] ?? null;
-            $target_db = $options["target_db"] ?? "sqlite_database";
+            $target_path = $target["sqlite_path"];
+            $target_db = $target["db"];
 
             if (!$target_path) {
                 $content_dir = $this->clean_preflight_path(
@@ -5486,14 +5869,18 @@ class ImportClient
                     'database',
                     '.ht.sqlite'
                 );
-                $this->audit_log("DB-APPLY | defaulting SQLite path to: {$target_path}");
+                $this->audit_log(
+                    "DB-APPLY | defaulting SQLite path to: {$target_path}"
+                );
                 $this->progress->show_lifecycle_line("SQLite path: {$target_path}\n");
             }
 
-            // Persist target database configuration for apply-runtime.
-            $this->get_state()->apply->target_engine = "sqlite";
-            $this->get_state()->apply->target_db = $target_db;
-            $this->get_state()->apply->target_sqlite_path = $target_path;
+            if ($save_runtime_target) {
+                // Persist target database configuration for apply-runtime.
+                $this->get_state()->apply->target_engine = "sqlite";
+                $this->get_state()->apply->target_db = $target_db;
+                $this->get_state()->apply->target_sqlite_path = $target_path;
+            }
 
             return [
                 $this->create_sqlite_target_pdo($target_path, $target_db),
@@ -5505,25 +5892,21 @@ class ImportClient
             ];
         }
 
-        $target_host = $options["target_host"] ?? "127.0.0.1";
-        $target_port = (int) ($options["target_port"] ?? 3306);
-        $target_user = $options["target_user"] ?? null;
-        $target_pass = $options["target_pass"] ?? "";
-        $target_db = $options["target_db"] ?? null;
+        $target_host = $target["host"];
+        $target_port = $target["port"];
+        $target_user = $target["user"];
+        $target_pass = $target["pass"];
+        $target_db = $target["db"];
 
-        if (!$target_user || !$target_db) {
-            throw new InvalidArgumentException(
-                "db-apply with --target-engine=mysql requires --target-user and --target-db.",
-            );
+        if ($save_runtime_target) {
+            // Persist target database configuration for apply-runtime.
+            $this->get_state()->apply->target_engine = "mysql";
+            $this->get_state()->apply->target_db = $target_db;
+            $this->get_state()->apply->target_host = $target_host;
+            $this->get_state()->apply->target_port = $target_port;
+            $this->get_state()->apply->target_user = $target_user;
+            $this->get_state()->apply->target_pass = $target_pass;
         }
-
-        // Persist target database configuration for apply-runtime.
-        $this->get_state()->apply->target_engine = "mysql";
-        $this->get_state()->apply->target_db = $target_db;
-        $this->get_state()->apply->target_host = $target_host;
-        $this->get_state()->apply->target_port = $target_port;
-        $this->get_state()->apply->target_user = $target_user;
-        $this->get_state()->apply->target_pass = $target_pass;
 
         $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
         try {
@@ -5598,6 +5981,13 @@ class ImportClient
             );
         }
 
+        $target = $this->resolve_database_target(
+            $options,
+            $this->get_local_site_database_target(),
+            'mysql',
+            'db-apply'
+        );
+
         $apply_state = $this->get_state()->apply;
         $statements_executed = $apply_state->statements_executed;
         $bytes_read = $apply_state->bytes_read;
@@ -5669,12 +6059,12 @@ class ImportClient
             );
         }
 
-        [$pdo, $connection_label] = $this->create_target_db_apply_connection($options);
+        [$pdo, $connection_label] = $this->create_target_database_connection($target);
         $sqlite_prepared_pdo = null;
         $sqlite_prepared_statement_cache = [];
         $sqlite_prepared_statement_cache_order = [];
         if (
-            strtolower((string) ($options["target_engine"] ?? "mysql")) === "sqlite"
+            $target["engine"] === "sqlite"
             && method_exists($pdo, 'get_connection')
         ) {
             $sqlite_prepared_pdo = $pdo->get_connection()->get_pdo();
@@ -11190,7 +11580,7 @@ if (
             'target' => 'abort',
             'help' => 'Abort current sync and exit (preserves downloaded files)',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls'],
         ],
         [
             'name' => 'verbose',
@@ -11199,7 +11589,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -11370,7 +11760,7 @@ if (
             'target' => 'target_engine',
             'placeholder' => 'ENGINE',
             'help' => 'Target database engine: mysql or sqlite',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'target-host',
@@ -11378,7 +11768,7 @@ if (
             'target' => 'target_host',
             'placeholder' => 'HOST',
             'help' => 'Target MySQL host (default: 127.0.0.1)',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'target-port',
@@ -11387,7 +11777,7 @@ if (
             'placeholder' => 'PORT',
             'cast' => 'int',
             'help' => 'Target MySQL port (default: 3306)',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'target-user',
@@ -11395,7 +11785,7 @@ if (
             'target' => 'target_user',
             'placeholder' => 'USER',
             'help' => 'Target MySQL user (required for mysql)',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'target-pass',
@@ -11403,7 +11793,7 @@ if (
             'target' => 'target_pass',
             'placeholder' => 'PASS',
             'help' => 'Target MySQL password',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'target-db',
@@ -11411,7 +11801,7 @@ if (
             'target' => 'target_db',
             'placeholder' => 'NAME',
             'help' => 'Target DB name (required for mysql, optional for sqlite)',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'target-sqlite-path',
@@ -11419,7 +11809,7 @@ if (
             'target' => 'target_sqlite_path',
             'placeholder' => 'PATH',
             'help' => 'Target SQLite database file (default: <wp-content>/database/.ht.sqlite)',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'rewrite-url',
@@ -11427,7 +11817,7 @@ if (
             'target' => 'rewrite_url',
             'argument_labels' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
-            'commands' => ['pull', 'pull-db', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
         ],
         [
             'name' => 'new-site-url',
@@ -11435,7 +11825,7 @@ if (
             'target' => 'new_site_url',
             'placeholder' => 'URL',
             'help' => 'New site URL (auto-creates --rewrite-url from export URL origin)',
-            'commands' => ['pull', 'pull-db', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
         ],
         [
             'name' => 'remap',
@@ -12257,6 +12647,31 @@ if (
                 "    --target-engine=sqlite --target-sqlite-path=/path/to/db.sqlite \\\n" .
                 "    --rewrite-url https://old.com https://new.com\n",
         ],
+        "db-rewrite-urls" => [
+            "level" => "low",
+            "short" => "Rewrite URLs in an existing live database",
+            "usage" =>
+                "reprint db-rewrite-urls [<remote-reprint-api-url>] " .
+                "--state-dir=DIR [options]",
+            "description" =>
+                "Rewrites URL-bearing values in a live MySQL or SQLite database,\n" .
+                "one primary-keyed record at a time. Each bounded step reads one\n" .
+                "record and updates only columns whose rewritten value changed.\n" .
+                "\n" .
+                "Resumes from the last saved record cursor and reports records\n" .
+                "checked, records changed, tables started, and the current table.\n" .
+                "Tables containing records must have a primary key. --fs-root is\n" .
+                "not used.\n",
+            "extra" =>
+                "The positional URL selects prior state when --state-dir contains\n" .
+                "more than one remote. With one remote it is optional; with none,\n" .
+                "the command creates its own state. Target options default to the\n" .
+                "database recorded by db-apply.\n" .
+                "\n" .
+                "Example:\n" .
+                "  reprint db-rewrite-urls --state-dir=./state \\\n" .
+                "    --rewrite-url https://old.com https://new.com\n",
+        ],
         "flat-docroot" => [
             "level" => "low",
             "short" => "Reassemble pulled files into a standard WordPress layout",
@@ -12422,19 +12837,22 @@ if (
         exit(0);
     }
 
-    // Every command which reads or writes state names the remote Reprint API
-    // URL whose remote state directory it uses. Local commands use the URL to
-    // select state without making a network request.
-    $remote_reprint_api_url = $argv[2] ?? null;
-    if (
-        !$remote_reprint_api_url
-        || strpos($remote_reprint_api_url, '-') === 0
-    ) {
+    // Most commands name the remote Reprint API URL whose state they use.
+    // db-rewrite-urls can select the only saved remote or use command-local state.
+    $reprint_remote_reprint_api_url_argument = $argv[2] ?? null;
+    $reprint_has_remote_reprint_api_url =
+        is_string($reprint_remote_reprint_api_url_argument)
+        && $reprint_remote_reprint_api_url_argument !== ''
+        && strpos($reprint_remote_reprint_api_url_argument, '-') !== 0;
+    if (!$reprint_has_remote_reprint_api_url && $command !== 'db-rewrite-urls') {
         fwrite(STDERR, "Error: <remote-reprint-api-url> is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
-    $option_start_index = 3;
+    $remote_reprint_api_url = $reprint_has_remote_reprint_api_url
+        ? $reprint_remote_reprint_api_url_argument
+        : '';
+    $option_start_index = $reprint_has_remote_reprint_api_url ? 3 : 2;
 
     [$state_dir, $filesystem_root, $options] = _cli_parse_options(
         $argv, $argc, $option_start_index, $option_defs
@@ -12478,12 +12896,59 @@ if (
 
     if (!$state_dir) {
         fwrite(STDERR, "Error: --state-dir=DIR is required\n");
-        fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        if ($command === 'db-rewrite-urls') {
+            fwrite(STDERR, "Usage: reprint db-rewrite-urls [<remote-reprint-api-url>] --state-dir=DIR [options]\n");
+        } else {
+            fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        }
         exit(1);
     }
 
     // apply-runtime accepts --flat-document-root as an alternative to --fs-root.
     $flat_document_root = $options["flat_document_root"] ?? null;
+    $reprint_selected_remote_state_directory = null;
+    if ($command === 'db-rewrite-urls') {
+        if ($filesystem_root || $flat_document_root) {
+            fwrite(STDERR, "Error: db-rewrite-urls does not accept --fs-root or --flat-document-root.\n");
+            exit(1);
+        }
+        $filesystem_root = $state_dir; // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound
+        if (!$reprint_has_remote_reprint_api_url) {
+            $reprint_command_local_state_directory =
+                wp_join_unix_paths($state_dir, 'db-rewrite-urls');
+            if (
+                is_file(
+                    wp_join_unix_paths(
+                        $reprint_command_local_state_directory,
+                        'pull',
+                        'state.json'
+                    )
+                )
+            ) {
+                $reprint_selected_remote_state_directory =
+                    $reprint_command_local_state_directory;
+            } else {
+                $reprint_saved_remote_state_files = glob(
+                    wp_join_unix_paths($state_dir, 'remotes', '*', 'pull', 'state.json')
+                );
+                $reprint_saved_remote_state_files = $reprint_saved_remote_state_files === false
+                    ? []
+                    : array_values(array_filter($reprint_saved_remote_state_files, 'is_file'));
+                if (count($reprint_saved_remote_state_files) > 1) {
+                    fwrite(
+                        STDERR,
+                        "Error: --state-dir contains more than one saved remote. "
+                        . "Provide <remote-reprint-api-url> to select one.\n"
+                    );
+                    exit(1);
+                }
+                $reprint_selected_remote_state_directory =
+                    count($reprint_saved_remote_state_files) === 1
+                        ? dirname(dirname($reprint_saved_remote_state_files[0]))
+                        : $reprint_command_local_state_directory;
+            }
+        }
+    }
     if ($filesystem_root && $flat_document_root) {
         fwrite(STDERR, "Error: --fs-root and --flat-document-root are mutually exclusive.\n");
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
@@ -12524,7 +12989,13 @@ if (
                 'files-diff'
             );
         }
-        $client = new ImportClient($remote_reprint_api_url, $state_dir, $filesystem_root, $command);
+        $client = new ImportClient(
+            $remote_reprint_api_url,
+            $state_dir,
+            $filesystem_root,
+            $command,
+            $reprint_selected_remote_state_directory
+        );
         $client->audit_log_argv($command, $argv);
         $client->run(
             $options
