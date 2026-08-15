@@ -308,6 +308,17 @@ class PushPlan
     }
 
     /**
+     * Returns the plan-owned deletion-root work file for later patch planning.
+     *
+     * The path remains available after a completed plan is closed, so another
+     * planner can reuse the existing work file instead of creating one.
+     */
+    public function get_active_deletion_roots_path(): string
+    {
+        return $this->active_deletion_roots_file;
+    }
+
+    /**
      * Flushes plan files before the owner persists the current cursor.
      *
      * A later process truncates bytes beyond that cursor before appending.

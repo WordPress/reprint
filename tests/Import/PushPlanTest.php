@@ -68,6 +68,17 @@ final class PushPlanTest extends TestCase
         $this->assertPathCounts(0, 0);
     }
 
+    public function testExposesTheActiveDeletionRootsWorkFile(): void
+    {
+        $plan = $this->startPlan();
+        $this->planToCompletion($plan);
+
+        $this->assertSame(
+            $this->planDirectory() . '/deleted_directories_stack.jsonl',
+            $plan->get_active_deletion_roots_path()
+        );
+    }
+
     public function testStartRequiresTheCallerToCreateThePlanDirectory(): void
     {
         $this->expectException(LogicException::class);
