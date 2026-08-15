@@ -3,14 +3,14 @@
  *
  * Tests the full round-trip:
  * 1. Create site with known content containing source URLs in various formats
- * 2. Run db-pull → verify pull/domains.json contains the source domain
+ * 2. Run db-pull
  * 3. Run db-apply with --rewrite-url to apply SQL to target database
  * 4. Verify URLs are rewritten in all value types, including serialized PHP
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -251,19 +251,9 @@ register_block_type('reprint/e2e-shortcode', [
 
         const sqlFile = join(tempDir, 'db.sql');
         assert.ok(existsSync(sqlFile), 'Expected db.sql to exist');
-    });
 
-    it('domain discovery produces pull/domains.json', () => {
         const domainsFile = join(pullStateDirectory(tempDir, importUrl()), 'domains.json');
-        assert.ok(existsSync(domainsFile), 'Expected pull/domains.json to exist');
-
-        const domains = JSON.parse(readFileSync(domainsFile, 'utf-8'));
-        assert.ok(Array.isArray(domains), 'Expected domains to be an array');
-        assert.ok(domains.length > 0, 'Expected at least one domain');
-        assert.ok(
-            domains.some(d => d.includes(SOURCE_DOMAIN)),
-            `Expected to find ${SOURCE_DOMAIN} in domains, got: ${JSON.stringify(domains)}`
-        );
+        assert.ok(!existsSync(domainsFile), 'Expected db-pull not to create pull/domains.json');
     });
 
     it('db-apply with URL mapping rewrites URLs in target database', async () => {

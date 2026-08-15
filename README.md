@@ -649,7 +649,7 @@ command state. Explicit `tty` and `jsonl` modes cannot be combined with
 
 The selector governs progress, lifecycle, and status output. It does not
 reformat a command's data result, such as preflight or pull-metadata JSON,
-files-stats JSON, db-domains lines, or SQL written with `--sql-output=stdout`.
+files-stats JSON, or SQL written with `--sql-output=stdout`.
 
 The files-push terminal presentation uses one stage-weighted progress bar. The
 percentage comes first, followed by a major stage such as `Indexing`, `Pushing`,
@@ -805,7 +805,6 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
-* `db-domains` — Lists domains discovered in the SQL dump. Reads `<remote-state-directory>/pull/domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 * `pull-metadata` — Prints pull lifecycle and source-site metadata as JSON. The remote Reprint API URL selects the pull state; no network calls are made.
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).

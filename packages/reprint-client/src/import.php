@@ -157,7 +157,6 @@ class ImportClient
         "files-stats",
         "db-pull",
         "db-index",
-        "db-domains",
         "db-apply",
         "pull-metadata",
         "preflight",
@@ -1133,11 +1132,6 @@ class ImportClient
             return;
         }
 
-        // db-domains and db-apply are local-only commands that don't need a remote server.
-        if ($command === "db-domains") {
-            $this->run_db_domains();
-            return;
-        }
         if ($command === "files-stats") {
             $this->run_files_stats();
             return;
@@ -2251,13 +2245,6 @@ class ImportClient
                     unlink($tables_file);
                     $this->audit_log(
                         "FILE DELETE | {$tables_file} | abort db-pull",
-                    );
-                }
-                $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
-                if (file_exists($domains_file)) {
-                    unlink($domains_file);
-                    $this->audit_log(
-                        "FILE DELETE | {$domains_file} | abort db-pull",
                     );
                 }
                 break;
@@ -3892,82 +3879,6 @@ class ImportClient
             $db_sync_complete["sql_file"] = $sql_file;
         }
         $this->output_progress($db_sync_complete, true);
-    }
-
-    // =========================================================================
-    // db-apply: Apply SQL dump to a target MySQL database with URL rewriting
-    // =========================================================================
-
-    /**
-     * Command: db-apply
-     *
-     * Reads db.sql, optionally rewrites URLs, and executes statements against
-     * a target MySQL database. Supports resumption via statement count tracking.
-     *
-     */
-    private function run_db_domains(): void
-    {
-        $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
-        $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
-
-        if (file_exists($domains_file)) {
-            // Fast path: domains were already discovered during db-pull
-            $domains = json_decode(file_get_contents($domains_file), true);
-            if (!is_array($domains)) {
-                throw new RuntimeException(
-                    "Failed to parse {$domains_file}",
-                );
-            }
-        } elseif (file_exists($sql_file)) {
-            // Scan db.sql for domains using the same pipeline as db-pull
-            $query_stream = new \WP_MySQL_Naive_Query_Stream();
-            $domain_collector = new \DomainCollector();
-
-            $sql_handle = fopen($sql_file, "r");
-            if (!$sql_handle) {
-                throw new RuntimeException("Cannot open SQL file: {$sql_file}");
-            }
-
-            try {
-                $chunk_size = 64 * 1024;
-                while (!feof($sql_handle)) {
-                    $data = fread($sql_handle, $chunk_size);
-                    if ($data === false || $data === '') {
-                        break;
-                    }
-                    $query_stream->append_sql($data);
-                    $this->drain_query_stream_for_domains(
-                        $query_stream,
-                        $domain_collector,
-                    );
-                }
-
-                $query_stream->mark_input_complete();
-                $this->drain_query_stream_for_domains(
-                    $query_stream,
-                    $domain_collector,
-                );
-            } finally {
-                fclose($sql_handle);
-            }
-
-            $domains = $domain_collector->get_domains();
-
-            // Save for future calls
-            file_put_contents(
-                $domains_file,
-                json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-            );
-        } else {
-            throw new RuntimeException(
-                "No domain data found. Run db-pull first, or place a db.sql file in {$this->state_dir}.",
-            );
-        }
-
-        // Print one domain per line to stdout
-        foreach ($domains as $domain) {
-            echo $domain . "\n";
-        }
     }
 
     /**
@@ -5641,6 +5552,17 @@ class ImportClient
         ];
     }
 
+    // =========================================================================
+    // db-apply: Apply SQL dump to a target MySQL database with URL rewriting
+    // =========================================================================
+
+    /**
+     * Command: db-apply
+     *
+     * Reads db.sql, optionally rewrites URLs, and executes statements against
+     * a target MySQL database. Supports resumption via statement count tracking.
+     *
+     */
     public function run_db_apply(array $options): void
     {
         $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
@@ -5663,33 +5585,6 @@ class ImportClient
         if (!empty($options["rewrite_url"])) {
             foreach ($options["rewrite_url"] as [$source_url, $target_url]) {
                 $url_mapping[$source_url] = $target_url;
-            }
-        }
-
-        // Show discovered domains if available
-        $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
-        if (file_exists($domains_file)) {
-            $domains = json_decode(file_get_contents($domains_file), true);
-            if (is_array($domains) && !empty($domains)) {
-                $this->audit_log(
-                    sprintf("DISCOVERED DOMAINS | %s", implode(", ", $domains)),
-                    false,
-                );
-                $this->progress->show_lifecycle_line("Discovered domains in SQL dump:\n");
-                foreach ($domains as $domain) {
-                    $mapped = isset($url_mapping[$domain]) ? " => {$url_mapping[$domain]}" : " (not mapped)";
-                    $this->progress->show_lifecycle_line("  {$domain}{$mapped}\n");
-                }
-                $this->progress->show_lifecycle_line("\n");
-                $domain_map = [];
-                foreach ($domains as $domain) {
-                    $domain_map[$domain] = $url_mapping[$domain] ?? null;
-                }
-                $this->output_progress([
-                    "type" => "domains_discovered",
-                    "domains" => $domain_map,
-                    "message" => "Discovered " . count($domains) . " domain(s) in SQL dump",
-                ], true);
             }
         }
 
@@ -7672,38 +7567,12 @@ class ImportClient
             }
         }
 
-        // Domain discovery and statement counting: scan SQL for URLs during download
+        // Count SQL statements during download for db-apply progress reporting.
         $query_stream = class_exists('WP_MySQL_Naive_Query_Stream')
             ? new \WP_MySQL_Naive_Query_Stream()
             : null;
-        $domain_collector = class_exists('DomainCollector')
-            ? new \DomainCollector()
-            : null;
-        $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
         $sql_stats_file = wp_join_unix_paths($this->pull_state_directory, "sql-stats.json");
         $sql_statements_counted = (int) ($this->get_state()->sql_statements_counted ?? 0);
-
-        // Auto-detect the remote site domain from the export URL so it
-        // always appears in pull/domains.json even if the SQL dump
-        // hasn't been fully scanned yet.
-        if ($domain_collector) {
-            $parsed_url = parse_url($this->remote_reprint_api_url);
-            if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
-                $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
-                if (!empty($parsed_url['port'])) {
-                    $source_origin .= ':' . $parsed_url['port'];
-                }
-                $domain_collector->merge([$source_origin]);
-            }
-        }
-
-        // Load previously discovered domains (from earlier partial downloads)
-        if ($domain_collector && file_exists($domains_file)) {
-            $prev = json_decode(file_get_contents($domains_file), true);
-            if (is_array($prev)) {
-                $domain_collector->merge($prev);
-            }
-        }
 
         // Log current progress at start of request
         $has_cursor = $cursor !== null;
@@ -7738,8 +7607,6 @@ class ImportClient
                     &$sql_bytes_written,
                     $context,
                     $query_stream,
-                    $domain_collector,
-                    $domains_file,
                     &$sql_statements_counted,
                     &$chunks_since_save
                 ) {
@@ -7791,20 +7658,6 @@ class ImportClient
                         $this->get_state()->sql_statements_counted = $sql_statements_counted;
                         $this->save_state();
                         $chunks_since_save = 0;
-
-                        // Also persist discovered domains so they survive crashes.
-                        // On resume, the SQL download picks up from the cursor,
-                        // skipping already-downloaded data — so domains from that
-                        // earlier data would be lost without periodic saves.
-                        if ($domain_collector) {
-                            $domains = $domain_collector->get_domains();
-                            if (!empty($domains)) {
-                                file_put_contents(
-                                    $domains_file,
-                                    json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-                                );
-                            }
-                        }
                     }
 
                     if ($chunk_type === "sql") {
@@ -7858,12 +7711,10 @@ class ImportClient
                                 break;
                         }
 
-                        // Feed data to query stream for domain discovery and statement counting
-                        if ($query_stream && $domain_collector) {
+                        if ($query_stream) {
                             $query_stream->append_sql($data);
-                            $this->drain_query_stream_for_domains(
+                            $this->count_complete_queries(
                                 $query_stream,
-                                $domain_collector,
                                 $sql_statements_counted,
                             );
                         }
@@ -7968,30 +7819,13 @@ class ImportClient
                 $this->save_state();
             }
 
-            // Drain any remaining statements after download completes
-            if ($query_stream && $domain_collector) {
+            // Count any statement completed by the end of the download.
+            if ($query_stream) {
                 $query_stream->mark_input_complete();
-                $this->drain_query_stream_for_domains(
+                $this->count_complete_queries(
                     $query_stream,
-                    $domain_collector,
                     $sql_statements_counted,
                 );
-
-                // Save discovered domains
-                $domains = $domain_collector->get_domains();
-                if (!empty($domains)) {
-                    file_put_contents(
-                        $domains_file,
-                        json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-                    );
-                    $this->audit_log(
-                        sprintf(
-                            "DOMAINS DISCOVERED | %d unique domains saved to pull/domains.json",
-                            count($domains),
-                        ),
-                        false,
-                    );
-                }
 
                 // Save statement count for db-apply progress reporting
                 if ($sql_statements_counted > 0) {
@@ -8056,6 +7890,16 @@ class ImportClient
         }
     }
 
+    /** Count complete SQL queries waiting in the stream. */
+    private function count_complete_queries(
+        \WP_MySQL_Naive_Query_Stream $query_stream,
+        int &$sql_statements_counted
+    ): void {
+        while ($query_stream->next_query()) {
+            $sql_statements_counted++;
+        }
+    }
+
     /** Executes SQL and consumes every result before the next query. */
     private function execute_mysql_queries(\mysqli $connection, string $sql): void
     {
@@ -8080,228 +7924,6 @@ class ImportClient
             }
         }
         // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-    }
-
-    /**
-     * Drain complete SQL statements from a query stream and scan their
-     * base64-decoded values for URL domains.
-     */
-    private function drain_query_stream_for_domains(
-        \WP_MySQL_Naive_Query_Stream $query_stream,
-        \DomainCollector $domain_collector,
-        ?int &$statements_counted = null
-    ) {
-        while ($query_stream->next_query()) {
-            $query = $query_stream->get_query();
-            if ($statements_counted !== null) {
-                $statements_counted++;
-            }
-            // Only scan INSERT statements (they contain data values).
-            if (!self::sql_starts_with_token($query, \WP_MySQL_Lexer::INSERT_SYMBOL)) {
-                continue;
-            }
-            // Only scan statements with base64 values
-            if (strpos($query, "FROM_BASE64(") === false) {
-                continue;
-            }
-
-            $table = self::extract_insert_table($query);
-            $is_options_table = substr($table, -8) === '_options';
-
-            $scanner = new \Base64ValueScanner($query);
-            while ($scanner->next_value()) {
-                // For _options tables, extract the option_name (second column)
-                // and skip transients — they contain ephemeral cached data
-                // that would pollute the domain list.
-                $option_name = null;
-                $match_offset = $scanner->get_match_offset();
-                if ($is_options_table) {
-                    $option_name = self::extract_option_name($query, $match_offset);
-                    if ($option_name !== null && (
-                        strpos($option_name, '_transient') === 0 ||
-                        strpos($option_name, '_site_transient') === 0
-                    )) {
-                        continue;
-                    }
-                }
-
-                $new_domains = $domain_collector->scan($scanner->get_value());
-                if (!empty($new_domains)) {
-                    $row_id = self::extract_row_identifier($query, $match_offset);
-
-                    $option_ctx = '';
-                    if ($option_name !== null) {
-                        $option_ctx = ' option=' . $option_name;
-                    }
-
-                    foreach ($new_domains as $domain) {
-                        $this->audit_log(
-                            sprintf(
-                                "NEW DOMAIN | %s | table=%s %s%s",
-                                $domain,
-                                $table,
-                                $row_id,
-                                $option_ctx,
-                            ),
-                            false,
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * Extract the table name from an INSERT INTO statement.
-     */
-    private static function extract_insert_table(string $query): string
-    {
-        if (preg_match('/INSERT\s+INTO\s+`([^`]+)`/i', $query, $m)) {
-            return $m[1];
-        }
-        return '?';
-    }
-
-    /**
-     * Extract a row identifier (PK value or offset) from the INSERT row
-     * containing the base64 expression at $offset.
-     *
-     * Scans backwards from $offset to find the row-opening parenthesis,
-     * then reads the first column value — typically the primary key.
-     */
-    private static function extract_row_identifier(string $query, int $offset): string
-    {
-        // Walk backwards from the match to find the row-opening '('.
-        // Track parenthesis depth so we skip inner '(' from FROM_BASE64()
-        // and CONVERT() wrappers.
-        $depth = 0;
-        $row_start = -1;
-        for ($i = $offset - 1; $i >= 0; $i--) {
-            $ch = $query[$i];
-            if ($ch === ')') {
-                $depth++;
-            } elseif ($ch === '(') {
-                if ($depth === 0) {
-                    $row_start = $i + 1;
-                    break;
-                }
-                $depth--;
-            }
-        }
-
-        if ($row_start < 0) {
-            return 'offset=?';
-        }
-
-        // Read the first value after the row-opening '('.
-        // Numeric PKs: (123, ...  or (-5, ...
-        $after = substr($query, $row_start, 40);
-        if (preg_match('/^(-?\d+)/', $after, $m)) {
-            return 'pk=' . $m[1];
-        }
-        // String PKs: ('some-uuid', ...
-        if (preg_match("/^'([^']{0,30})'/", $after, $m)) {
-            return "pk=" . $m[1];
-        }
-        if (preg_match('/^NULL/i', $after)) {
-            return 'pk=NULL';
-        }
-
-        return 'offset=?';
-    }
-
-    /**
-     * Extract the option_name (second column) from a wp_options INSERT row.
-     *
-     * WordPress options tables have columns: option_id, option_name, option_value, autoload.
-     * Given an offset inside the row, this finds the row-opening '(' and reads
-     * past the first column (option_id) to extract the second column (option_name).
-     */
-    private static function extract_option_name(string $query, int $offset): ?string
-    {
-        // Find the row-opening '(' by walking backwards, same as extract_row_identifier.
-        $depth = 0;
-        $row_start = -1;
-        for ($i = $offset - 1; $i >= 0; $i--) {
-            $ch = $query[$i];
-            if ($ch === ')') {
-                $depth++;
-            } elseif ($ch === '(') {
-                if ($depth === 0) {
-                    $row_start = $i + 1;
-                    break;
-                }
-                $depth--;
-            }
-        }
-
-        if ($row_start < 0) {
-            return null;
-        }
-
-        // Skip the first column value (option_id) and the comma separator,
-        // then read the second column value (option_name) which is a quoted string.
-        $after = substr($query, $row_start, 200);
-        // First column is typically a number: "123," or could be FROM_BASE64(...)
-        // Skip to the first comma that's outside parentheses.
-        $len = strlen($after);
-        $d = 0;
-        $comma_pos = -1;
-        for ($j = 0; $j < $len; $j++) {
-            $c = $after[$j];
-            if ($c === '(') { $d++; }
-            elseif ($c === ')') { $d--; }
-            elseif ($c === ',' && $d === 0) {
-                $comma_pos = $j;
-                break;
-            }
-        }
-
-        if ($comma_pos < 0) {
-            return null;
-        }
-
-        // After the comma, skip whitespace and read a quoted string or FROM_BASE64(...)
-        $rest = ltrim(substr($after, $comma_pos + 1));
-        // Simple quoted string: 'option_name'
-        if (isset($rest[0]) && $rest[0] === "'") {
-            if (preg_match("/^'([^']{0,80})'/", $rest, $m)) {
-                return $m[1];
-            }
-        }
-        // FROM_BASE64('...') wrapped value — decode it
-        if (strpos($rest, 'FROM_BASE64(') === 0) {
-            if (preg_match("/^FROM_BASE64\\('([A-Za-z0-9+\\/=]+)'\\)/", $rest, $m)) {
-                $decoded = base64_decode($m[1], true);
-                if ($decoded !== false) {
-                    return substr($decoded, 0, 80);
-                }
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Check whether a SQL statement's first keyword token matches a given token ID.
-     * Skips leading whitespace and comments, so "/* ... *​/ INSERT INTO ..." is handled.
-     */
-    private static function sql_starts_with_token(string $sql, int $expected_token_id): bool
-    {
-        $lexer = new \WP_MySQL_Lexer($sql);
-        while ($lexer->next_token()) {
-            $token = $lexer->get_token();
-            if (
-                $token->id === \WP_MySQL_Lexer::WHITESPACE
-                || $token->id === \WP_MySQL_Lexer::COMMENT
-                || $token->id === \WP_MySQL_Lexer::MYSQL_COMMENT_START
-                || $token->id === \WP_MySQL_Lexer::MYSQL_COMMENT_END
-            ) {
-                continue;
-            }
-            return $token->id === $expected_token_id;
-        }
-        return false;
     }
 
     /**
@@ -12587,8 +12209,7 @@ if (
             "description" =>
                 "Indexes remote tables, then streams the full SQL dump into\n" .
                 "--state-dir/db.sql (default), to stdout, or directly into a\n" .
-                "MySQL connection. Resumes from the last cursor if interrupted.\n" .
-                "Discovered domains are cached for later use by db-apply.\n",
+                "MySQL connection. Resumes from the last cursor if interrupted.\n",
             "extra" =>
                 "Output modes:\n" .
                 "  file    Write to --state-dir/db.sql (default)\n" .
@@ -12605,20 +12226,6 @@ if (
             "extra" =>
                 "Output files:\n" .
                 "  db-tables.jsonl  One JSON object per table\n",
-        ],
-        "db-domains" => [
-            "level" => "low",
-            "short" => "Extract domains from the pulled SQL dump",
-            "description" =>
-                "Prints domains found in the SQL dump, one per line.\n" .
-                "\n" .
-                "If <remote-state-directory>/pull/domains.json exists (cached by db-pull), it is read\n" .
-                "directly. Otherwise, db.sql is scanned and the result is cached\n" .
-                "for future calls. No network calls.\n" .
-                "\n" .
-                "Example:\n" .
-                "  reprint db-domains https://example.com --state-dir=/path/to/state\n",
-            "extra" => null,
         ],
         "pull-metadata" => [
             "level" => "low",

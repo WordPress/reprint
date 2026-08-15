@@ -23,7 +23,6 @@ require_once __DIR__ . '/class-structured-block-markup-url-processor.php';
 
 // Depend on the iterators above
 require_once __DIR__ . '/class-structured-data-url-rewriter.php';
-require_once __DIR__ . '/class-domain-collector.php';
 
 // Depends on StructuredDataUrlRewriter + Base64ValueScanner
 require_once __DIR__ . '/class-sql-statement-rewriter.php';
