@@ -486,7 +486,7 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
 
         $sqlite = new \PDO('sqlite:' . $this->database_path);
         $sqlite->exec(
-            "UPDATE wp_posts SET post_content = 'https://concurrent.example' WHERE ID = 1"
+            "UPDATE wp_posts SET post_content = 'https://concurrent.example https://old.example' WHERE ID = 1"
         );
 
         $resumed_processor = new \Reprint\Importer\DatabaseUrlRewriteProcessor(
@@ -500,7 +500,7 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
 
         $this->assertSame(2, $resumed_processor->get_progress()['records_processed']);
         $this->assertSame(
-            'https://concurrent.example',
+            'https://concurrent.example https://old.example',
             $sqlite->query('SELECT post_content FROM wp_posts WHERE ID = 1')->fetchColumn()
         );
         $this->assertSame(
