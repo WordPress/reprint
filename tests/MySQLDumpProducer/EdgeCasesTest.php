@@ -634,7 +634,7 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
         // Should NOT use UPDATE+CONCAT
-        $this->assertStringNotContainsString('UPDATE', $sql);
+        $this->assertStringNotContainsString('UPDATE `t` SET', $sql);
 
         $importPdo = $this->executeDumpInNewDatabase($sql);
         $imported = $importPdo->query("SELECT v FROM t WHERE id = 1")->fetchColumn();

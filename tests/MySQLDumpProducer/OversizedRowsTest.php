@@ -30,8 +30,8 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         // Use a large max_statement_size so nothing gets split
         $sql = $this->getDumpSQL(['max_statement_size' => 1024 * 1024]);
 
-        // Should not contain UPDATE statements
-        $this->assertStringNotContainsString('UPDATE', $sql);
+        // Should not contain an oversized-value UPDATE statement.
+        $this->assertStringNotContainsString('UPDATE `small_data` SET', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -59,7 +59,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $sql = $this->getDumpSQL(['max_statement_size' => 10 * 1024]);
 
         // Should contain UPDATE statements with CONCAT
-        $this->assertStringContainsString('UPDATE', $sql);
+        $this->assertStringContainsString('UPDATE `large_data` SET', $sql);
         $this->assertStringContainsString('CONCAT', $sql);
 
         // Round-trip test
@@ -91,7 +91,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $sql = $this->getDumpSQL(['max_statement_size' => 10 * 1024]);
 
         // Should contain UPDATE statements
-        $this->assertStringContainsString('UPDATE', $sql);
+        $this->assertStringContainsString('UPDATE `large_text` SET', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -123,7 +123,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $sql = $this->getDumpSQL(['max_statement_size' => 20 * 1024]);
 
         // Both large columns should trigger updates
-        $updateCount = substr_count($sql, 'UPDATE');
+        $updateCount = substr_count($sql, 'UPDATE `multi_large` SET');
         $this->assertGreaterThan(1, $updateCount, 'Should have multiple UPDATE statements');
 
         // Round-trip test
@@ -252,7 +252,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $sql = $this->getDumpSQL(['max_statement_size' => 10 * 1024]);
 
         // UPDATE statements should use composite WHERE clause
-        $this->assertStringContainsString('UPDATE', $sql);
+        $this->assertStringContainsString('UPDATE `composite_pk` SET', $sql);
         $this->assertStringContainsString('tenant_id', $sql);
         $this->assertStringContainsString('item_id', $sql);
 
@@ -641,7 +641,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
 
         // The PK value should appear in UPDATE WHERE clauses
         // It should NOT be split
-        $this->assertStringContainsString('UPDATE', $sql);
+        $this->assertStringContainsString('UPDATE `varchar_pk` SET', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);

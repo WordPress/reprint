@@ -234,7 +234,7 @@ class MySQLDumpProducer
         );
 
         $header = "INSERT INTO " . $this->row_reader->quote_identifier($this->row_reader->get_current_table()) . " ({$column_list}) VALUES\n";
-        $this->current_statement_size = strlen($header);
+        $this->current_statement_size = strlen($header) + strlen($this->get_insert_replay_clause()) + 1;
 
         $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
         $first_row_sql = $this->format_row_for_insert($this->row_reader->get_current_record());
@@ -258,7 +258,7 @@ class MySQLDumpProducer
         $has_next_row = $this->row_reader->next_record();
 
         if (!$has_next_row) {
-            $sql = $header . $first_row_sql . ";";
+            $sql = $this->finish_insert_statement($header . $first_row_sql);
             $this->current_sql_fragment = $sql;
             $this->current_statement_size = 0;
             if ($has_oversized) {
@@ -268,7 +268,7 @@ class MySQLDumpProducer
                 $this->state = self::STATE_NEXT_TABLE;
             }
         } elseif ($has_oversized) {
-            $sql = $header . $first_row_sql . ";";
+            $sql = $this->finish_insert_statement($header . $first_row_sql);
             $this->current_sql_fragment = $sql;
             $this->current_statement_size = 0;
             $this->state_after_oversized = self::STATE_START_INSERT;
@@ -312,7 +312,7 @@ class MySQLDumpProducer
         $has_next_row = $this->row_reader->next_record();
 
         if (!$has_next_row) {
-            $this->current_sql_fragment = $row_sql . ";";
+            $this->current_sql_fragment = $this->finish_insert_statement($row_sql);
             $this->current_statement_size = 0;
             if ($has_oversized) {
                 $this->state_after_oversized = self::STATE_NEXT_TABLE;
@@ -321,7 +321,7 @@ class MySQLDumpProducer
                 $this->state = self::STATE_NEXT_TABLE;
             }
         } elseif ($has_oversized) {
-            $this->current_sql_fragment = $row_sql . ";";
+            $this->current_sql_fragment = $this->finish_insert_statement($row_sql);
             $this->current_statement_size = 0;
             $this->state_after_oversized = self::STATE_START_INSERT;
             $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
@@ -335,7 +335,7 @@ class MySQLDumpProducer
     /** Finishes an INSERT batch at its bounded row limit. */
     private function finish_insert_batch($sql, $has_oversized)
     {
-        $this->current_sql_fragment = $sql . ";";
+        $this->current_sql_fragment = $this->finish_insert_statement($sql);
         $this->current_statement_size = 0;
         if ($has_oversized) {
             $this->state_after_oversized = self::STATE_START_INSERT;
@@ -343,6 +343,27 @@ class MySQLDumpProducer
         } else {
             $this->state = self::STATE_START_INSERT;
         }
+    }
+
+    /** Adds the duplicate-row behavior and terminates an INSERT statement. */
+    private function finish_insert_statement($sql)
+    {
+        return $sql . $this->get_insert_replay_clause() . ";";
+    }
+
+    /**
+     * Returns a no-op update for rows already written by a stopped INSERT.
+     *
+     * MyISAM can keep a complete prefix of a multi-row INSERT when the query
+     * stops. Repeating that INSERT should skip the existing rows and write the
+     * missing rows. Assigning any inserted column to itself handles a simple
+     * or composite key without hiding invalid values behind INSERT IGNORE.
+     */
+    private function get_insert_replay_clause()
+    {
+        $first_column = $this->row_reader->get_current_column_names()[0];
+        $quoted_column = $this->row_reader->quote_identifier($first_column);
+        return "\nON DUPLICATE KEY UPDATE {$quoted_column} = {$quoted_column}";
     }
 
     /**

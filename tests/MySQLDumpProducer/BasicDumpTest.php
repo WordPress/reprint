@@ -67,6 +67,66 @@ class BasicDumpTest extends MySQLDumpProducerTestBase
         $this->assertSQLContains('19.99', $sql);
     }
 
+    public function testMyIsamInsertFillsRowsMissingAfterAStoppedQuery(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE replay_rows (
+                site_id INT NOT NULL,
+                row_id INT NOT NULL,
+                value VARCHAR(100) NOT NULL,
+                PRIMARY KEY (site_id, row_id)
+            ) ENGINE=MyISAM
+        ");
+        $this->pdo->exec("
+            INSERT INTO replay_rows VALUES
+            (1, 1, 'first'),
+            (1, 2, 'second'),
+            (1, 3, 'third')
+        ");
+
+        $sql = $this->getDumpSQL(['batch_size' => 3]);
+        $this->assertSame(
+            1,
+            preg_match('/INSERT INTO `replay_rows`.*?;/s', $sql, $matches)
+        );
+        $this->assertStringContainsString(
+            'ON DUPLICATE KEY UPDATE `site_id` = `site_id`;',
+            $matches[0]
+        );
+
+        $this->pdo->exec('TRUNCATE TABLE replay_rows');
+        // MyISAM keeps the first two rows when the third row stops this statement.
+        try {
+            $this->pdo->exec("
+                INSERT INTO replay_rows VALUES
+                (1, 1, 'first'),
+                (1, 2, 'second'),
+                (1, 1, 'duplicate'),
+                (1, 3, 'third')
+            ");
+            $this->fail('The setup query should stop at its duplicate composite key.');
+        } catch (PDOException $error) {
+            $this->assertSame('23000', $error->getCode());
+        }
+
+        $this->assertSame(
+            ['1:1', '1:2'],
+            $this->pdo->query(
+                "SELECT CONCAT(site_id, ':', row_id) FROM replay_rows ORDER BY site_id, row_id"
+            )->fetchAll(PDO::FETCH_COLUMN)
+        );
+
+        $this->pdo->exec($matches[0]);
+
+        $this->assertSame(
+            ['1:1:first', '1:2:second', '1:3:third'],
+            $this->pdo->query(
+                "SELECT CONCAT(site_id, ':', row_id, ':', value) " .
+                'FROM replay_rows ORDER BY site_id, row_id'
+            )->fetchAll(PDO::FETCH_COLUMN)
+        );
+    }
+
     public function testMultipleTables(): void
     {
         // Create multiple tables
@@ -207,9 +267,7 @@ class BasicDumpTest extends MySQLDumpProducerTestBase
         // Export with batch size of 100
         $sql = $this->getDumpSQL(['batch_size' => 100]);
 
-        // Count semicolons in INSERT statements (one per batch)
-        // Each batch ends with ); so we should have 5 batches
-        $batchCount = substr_count($sql, ');');
+        $batchCount = $this->countInsertStatements($sql);
         $this->assertEquals(5, $batchCount, 'Should have 5 batches (500 rows / 100 per batch)');
 
         // Verify round-trip - all 500 rows should be imported
