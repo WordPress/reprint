@@ -66,3 +66,17 @@ https://example.com -> https://example.com/new
 The tradeoff is that a value written at the same time may still contain the old
 URL. If you need to catch every value, prevent the site from writing to the
 database while this command runs.
+
+## Rows to verify
+
+Every run creates a `db-rewrite-urls-<job-id>.jsonl` report in the same
+directory as its saved progress. The first line records the URL replacements
+and database used by the job.
+
+When the command cannot tell whether it updated a row before an interruption or
+another connection changed that row, it adds the table, primary key, and column
+hashes to the report. It does not copy the full database value into the file.
+
+The final command output tells you how many rows need verification and where to
+find the report. A reported row may already contain the intended result. Check
+it before applying another replacement.

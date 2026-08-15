@@ -12,6 +12,7 @@
 
 use Reprint\Importer\CurlTimeoutException;
 use Reprint\Importer\DatabaseUrlRewriteProcessor;
+use Reprint\Importer\DatabaseUrlRewriteReviewLog;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\Pull\PullFailureReportedException;
 use Reprint\Importer\State\DatabaseApplyCommandState;
@@ -5584,12 +5585,30 @@ class ImportClient
             $rewrite_state = new DatabaseUrlRewriteCommandState();
             $rewrite_state->rewrite_url = $url_mapping;
             $rewrite_state->target = $target_identity;
+            $rewrite_state->review_job_id = bin2hex(random_bytes(16));
             $this->get_state()->database_url_rewrite = $rewrite_state;
             $active_command->command_name = 'db-rewrite-urls';
             $active_command->completion_state = 'in_progress';
             $active_command->current_stage = 'database-records';
             $this->save_state();
         }
+
+        if ($rewrite_state->review_job_id === null) {
+            // An incomplete job saved before review reports were introduced
+            // receives its report ID on the first resume with this version.
+            $rewrite_state->review_job_id = bin2hex(random_bytes(16));
+            $this->save_state();
+        }
+        $review_file = wp_join_unix_paths(
+            $this->pull_state_directory,
+            "db-rewrite-urls-{$rewrite_state->review_job_id}.jsonl"
+        );
+        $review_log = new DatabaseUrlRewriteReviewLog(
+            $review_file,
+            $rewrite_state->review_job_id,
+            $url_mapping,
+            $target_identity
+        );
 
         $statement_rewriter = new SqlStatementRewriter(
             new StructuredDataUrlRewriter($url_mapping),
@@ -5643,9 +5662,17 @@ class ImportClient
                 );
             }
 
+            // The review entry must reach disk before the cursor advances.
+            // A crash between these writes replays the same pending row; the
+            // log compares its stable ID with the final complete JSONL line.
+            if (is_array($progress['row_to_verify'])) {
+                $review_log->append_row_to_verify($progress['row_to_verify']);
+            }
+
             $rewrite_state->cursor = $encoded_cursor;
             $rewrite_state->records_processed = $progress['records_processed'];
             $rewrite_state->records_changed = $progress['records_changed'];
+            $rewrite_state->records_to_verify = $progress['records_to_verify'];
             $rewrite_state->tables_started = $progress['tables_started'];
             $rewrite_state->current_table = $progress['current_table'];
             $this->save_state();
@@ -5676,8 +5703,10 @@ class ImportClient
                 'phase' => 'database-records',
                 'records_processed' => $rewrite_state->records_processed,
                 'records_changed' => $rewrite_state->records_changed,
+                'records_to_verify' => $rewrite_state->records_to_verify,
                 'tables_started' => $rewrite_state->tables_started,
                 'current_table' => $rewrite_state->current_table,
+                'review_file' => $review_file,
                 'message' => $message,
             ]);
             $this->progress->show_progress_line($message);
@@ -5697,10 +5726,13 @@ class ImportClient
         $this->save_state();
 
         $message = sprintf(
-            'db-rewrite-urls %s (%d records checked, %d changed)',
+            'db-rewrite-urls %s (%d records checked, %d changed, %d %s to verify: %s)',
             $status,
             $rewrite_state->records_processed,
-            $rewrite_state->records_changed
+            $rewrite_state->records_changed,
+            $rewrite_state->records_to_verify,
+            $rewrite_state->records_to_verify === 1 ? 'row' : 'rows',
+            $review_file
         );
         $this->audit_log($message, true);
         $this->output_progress([
@@ -5708,12 +5740,15 @@ class ImportClient
             'phase' => 'database-records',
             'records_processed' => $rewrite_state->records_processed,
             'records_changed' => $rewrite_state->records_changed,
+            'records_to_verify' => $rewrite_state->records_to_verify,
             'tables_started' => $rewrite_state->tables_started,
             'current_table' => $rewrite_state->current_table,
+            'review_file' => $review_file,
             'message' => $message,
         ], true);
         $this->progress->clear_progress_line();
         $this->progress->show_lifecycle_line($message . "\n");
+        $review_log->close();
     }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
@@ -12677,6 +12712,8 @@ if (
                 "\n" .
                 "Resumes from the last saved record cursor and reports records\n" .
                 "checked, records changed, tables started, and the current table.\n" .
+                "Each job also writes a JSONL report listing rows whose update\n" .
+                "result must be verified after an interruption or concurrent change.\n" .
                 "Tables containing records must have a primary key. --fs-root is\n" .
                 "not used.\n",
             "extra" =>

@@ -79,7 +79,18 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
         $this->assertSame('complete', $state['active_resumable_command']['completion_state']);
         $this->assertSame(6, $state['database_url_rewrite']['records_processed']);
         $this->assertSame(2, $state['database_url_rewrite']['records_changed']);
+        $this->assertSame(0, $state['database_url_rewrite']['records_to_verify']);
         $this->assertNotEmpty($state['database_url_rewrite']['cursor']);
+        $this->assertMatchesRegularExpression(
+            '/^[a-f0-9]{32}$/',
+            $state['database_url_rewrite']['review_job_id']
+        );
+        $report_file = $client->pull_state_directory . '/db-rewrite-urls-'
+            . $state['database_url_rewrite']['review_job_id'] . '.jsonl';
+        $this->assertFileExists($report_file);
+        $report_lines = file($report_file, FILE_IGNORE_NEW_LINES);
+        $this->assertCount(1, $report_lines);
+        $this->assertSame('job', json_decode($report_lines[0], true)['type']);
     }
 
     public function testInterruptedCommandResumesWithoutUpdatingARecordTwice(): void
@@ -497,6 +508,16 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
         );
         $resumed_processor->next_step();
 
+        $row_to_verify = $resumed_processor->get_progress()['row_to_verify'];
+        $this->assertSame('wp_posts', $row_to_verify['table']);
+        $this->assertSame(['ID' => 1], $row_to_verify['primary_key']);
+        $this->assertSame([
+            'post_content' => [
+                'original_sha256' => hash('sha256', 'https://old.example/one'),
+                'intended_sha256' => hash('sha256', 'https://new.example/one'),
+            ],
+        ], $row_to_verify['columns']);
+
         $sqlite = new \PDO('sqlite:' . $this->database_path);
         $this->assertSame(
             'https://new.example/one',
@@ -508,6 +529,7 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
         );
         $this->assertSame(1, $resumed_processor->get_progress()['records_processed']);
         $this->assertSame(1, $resumed_processor->get_progress()['records_changed']);
+        $this->assertSame(1, $resumed_processor->get_progress()['records_to_verify']);
     }
 
     public function testProcessorAdvancesPastADeletedPendingRecord(): void
@@ -592,6 +614,7 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
         $state->cursor = '{"state":"emit_row"}';
         $state->records_processed = 12;
         $state->records_changed = 4;
+        $state->records_to_verify = 2;
         $state->tables_started = 3;
         $state->current_table = 'wp_posts';
         $state->rewrite_url = ['https://old.example' => 'https://new.example'];
@@ -600,11 +623,23 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
             'db' => 'wp_test',
             'sqlite_path' => '/tmp/wordpress.sqlite',
         ];
+        $state->review_job_id = '0123456789abcdef0123456789abcdef';
 
         $this->assertSame(
             $state->to_array(),
             DatabaseUrlRewriteCommandState::from_array($state->to_array())->to_array()
         );
+    }
+
+    public function testStateLoadsAJobSavedBeforeReviewReportsWereAdded(): void
+    {
+        $legacy_state = ( new DatabaseUrlRewriteCommandState() )->to_array();
+        unset($legacy_state['records_to_verify'], $legacy_state['review_job_id']);
+
+        $state = DatabaseUrlRewriteCommandState::from_array($legacy_state);
+
+        $this->assertSame(0, $state->records_to_verify);
+        $this->assertNull($state->review_job_id);
     }
 
     private function create_database(): void

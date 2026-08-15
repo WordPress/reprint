@@ -30,9 +30,12 @@ class DatabaseUrlRewriteProcessor {
     private string $reader_phase = self::READER_PHASE_NEXT_TABLE;
     private int $records_processed;
     private int $records_changed;
+    private int $records_to_verify;
     private int $tables_started;
     private ?string $current_table;
     private ?string $skipped_table = null;
+    /** @var array<string,mixed>|null */
+    private ?array $row_to_verify = null;
     private bool $complete = false;
 
     /**
@@ -82,6 +85,7 @@ class DatabaseUrlRewriteProcessor {
         }
         $this->records_processed = (int) ( $cursor['records_processed'] ?? 0 );
         $this->records_changed = (int) ( $cursor['records_changed'] ?? 0 );
+        $this->records_to_verify = (int) ( $cursor['records_to_verify'] ?? 0 );
         $this->tables_started = (int) ( $cursor['tables_started'] ?? 0 );
         $this->current_table = isset($cursor['current_table'])
             ? (string) $cursor['current_table']
@@ -97,6 +101,7 @@ class DatabaseUrlRewriteProcessor {
     public function next_step(): bool
     {
         $this->skipped_table = null;
+        $this->row_to_verify = null;
         if ($this->complete) {
             return false;
         }
@@ -163,6 +168,7 @@ class DatabaseUrlRewriteProcessor {
      *     @type string      $reader_phase    Next reader action.
      *     @type int         $records_processed Records whose rewrite decision is complete.
      *     @type int         $records_changed  Records changed by this lifecycle.
+     *     @type int         $records_to_verify Records whose update result could not be confirmed.
      *     @type int         $tables_started   Tables in which a record was processed.
      *     @type string|null $current_table    Table containing the last processed record.
      *     @type bool        $complete         Whether the processor is terminal.
@@ -175,6 +181,7 @@ class DatabaseUrlRewriteProcessor {
             'reader_phase' => $this->reader_phase,
             'records_processed' => $this->records_processed,
             'records_changed' => $this->records_changed,
+            'records_to_verify' => $this->records_to_verify,
             'tables_started' => $this->tables_started,
             'current_table' => $this->current_table,
             'complete' => $this->complete,
@@ -187,9 +194,11 @@ class DatabaseUrlRewriteProcessor {
      *
      *     @type int         $records_processed Records whose rewrite decision is complete.
      *     @type int         $records_changed  Records changed by this lifecycle.
+     *     @type int         $records_to_verify Records whose update result could not be confirmed.
      *     @type int         $tables_started   Tables in which a record was processed.
      *     @type string|null $current_table    Table containing the last processed record.
      *     @type string|null $skipped_table    Table skipped by the latest step for lacking a primary key.
+     *     @type array|null  $row_to_verify    Selected row whose conditional update changed no rows.
      * }
      */
     public function get_progress(): array
@@ -197,9 +206,11 @@ class DatabaseUrlRewriteProcessor {
         return [
             'records_processed' => $this->records_processed,
             'records_changed' => $this->records_changed,
+            'records_to_verify' => $this->records_to_verify,
             'tables_started' => $this->tables_started,
             'current_table' => $this->current_table,
             'skipped_table' => $this->skipped_table,
+            'row_to_verify' => $this->row_to_verify,
         ];
     }
 
@@ -231,7 +242,25 @@ class DatabaseUrlRewriteProcessor {
         }
 
         if ($changes !== []) {
-            $this->update_record($table, $record, $primary_key_columns, $changes);
+            if (!$this->update_record($table, $record, $primary_key_columns, $changes)) {
+                $primary_key = [];
+                foreach ($primary_key_columns as $column) {
+                    $primary_key[$column] = $record[$column];
+                }
+                $columns = [];
+                foreach ($changes as $column => $rewritten_value) {
+                    $columns[$column] = [
+                        'original_sha256' => hash('sha256', (string) $record[$column]),
+                        'intended_sha256' => hash('sha256', $rewritten_value),
+                    ];
+                }
+                $this->row_to_verify = [
+                    'table' => $table,
+                    'primary_key' => $primary_key,
+                    'columns' => $columns,
+                ];
+                ++$this->records_to_verify;
+            }
             ++$this->records_changed;
         }
         ++$this->records_processed;
@@ -251,7 +280,7 @@ class DatabaseUrlRewriteProcessor {
         array $record,
         array $primary_key_columns,
         array $changes
-    ): void {
+    ): bool {
         $set_parts = [];
         $where_parts = [];
         $params = [];
@@ -290,6 +319,13 @@ class DatabaseUrlRewriteProcessor {
         // cursor was saved, or that the selected values changed or disappeared.
         // These cases cannot be distinguished for overlapping URL mappings.
         // Complete the pending decision without rewriting the current bytes.
+        $rows_changed = $statement->rowCount();
+        if ($rows_changed > 1) {
+            throw new RuntimeException(
+                "The primary-key update for {$table} changed {$rows_changed} records instead of at most one."
+            );
+        }
+        return $rows_changed === 1;
     }
 
     /**

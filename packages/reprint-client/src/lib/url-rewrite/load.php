@@ -17,6 +17,7 @@ require_once __DIR__ . '/class-fast-insert-scanner.php';
 require_once __DIR__ . '/class-sqlite-prepared-insert-builder.php';
 require_once __DIR__ . '/class-cautious-url-base-rewrite-mapping.php';
 require_once __DIR__ . '/class-cautious-url-base-processor-in-text-with-mixed-unknown-escape-rules.php';
+require_once __DIR__ . '/class-database-url-rewrite-review-log.php';
 
 // Scans structured block markup and uses the cautious processor for opaque tokens.
 require_once __DIR__ . '/class-structured-block-markup-url-processor.php';
