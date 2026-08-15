@@ -175,6 +175,7 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
+    // Change this UUID whenever the progress-table schema changes.
     private const MYSQL_DB_PULL_PROGRESS_TABLE = "__reprint_db_pull_progress_728f9e0b-42f7-4d85-a7f3-8f53e90a6f4c";
 
     /**
@@ -7936,9 +7937,17 @@ class ImportClient
             }
             $mysql_conn->set_charset("utf8mb4");
 
-            $this->ensure_progress_table($mysql_conn);
-
             // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+            $create_table_sql = "CREATE TABLE IF NOT EXISTS `{$table}` (" .
+                "`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY," .
+                "`source_hash` CHAR(64) CHARACTER SET ascii NOT NULL," .
+                "`source_cursor` MEDIUMTEXT NOT NULL" .
+                ") ENGINE=InnoDB";
+            if (!$mysql_conn->query($create_table_sql)) {
+                throw new RuntimeException(
+                    "MySQL could not create the db-pull progress table: " . $mysql_conn->error
+                );
+            }
             if (!$mysql_conn->query("DELETE FROM `{$table}` WHERE `id` = 1")) {
                 throw new RuntimeException(
                     "MySQL could not reset the previous db-pull position: " . $mysql_conn->error
@@ -8259,64 +8268,6 @@ class ImportClient
                 " bytes) — incomplete export?"
             );
         }
-    }
-
-    /** Creates the db-pull progress table, replacing it when its schema is wrong. */
-    private function ensure_progress_table(\mysqli $connection): void
-    {
-        $table = self::MYSQL_DB_PULL_PROGRESS_TABLE;
-        $expected_table = "__reprint_expected_db_pull_progress";
-        $columns = "(" .
-            "`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY," .
-            "`source_hash` CHAR(64) CHARACTER SET ascii NOT NULL," .
-            "`source_cursor` MEDIUMTEXT NOT NULL" .
-            ") ENGINE=InnoDB";
-
-        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
-        if (!$connection->query("CREATE TABLE IF NOT EXISTS `{$table}` {$columns}")) {
-            throw new RuntimeException(
-                "MySQL could not create the db-pull progress table: " . $connection->error
-            );
-        }
-        if (!$connection->query("CREATE TEMPORARY TABLE `{$expected_table}` {$columns}")) {
-            throw new RuntimeException(
-                "MySQL could not prepare the expected db-pull progress schema: " . $connection->error
-            );
-        }
-
-        try {
-            $schemas = [];
-            foreach ([$table, $expected_table] as $schema_table) {
-                $result = $connection->query("SHOW CREATE TABLE `{$schema_table}`");
-                $row = $result ? $result->fetch_row() : null;
-                if (!$row || !isset($row[1])) {
-                    throw new RuntimeException(
-                        "MySQL could not inspect the db-pull progress table: " . $connection->error
-                    );
-                }
-                $result->free();
-                $schemas[] = preg_replace(
-                    '/^CREATE (?:TEMPORARY )?TABLE `[^`]+`/',
-                    'CREATE TABLE',
-                    $row[1]
-                );
-            }
-        } finally {
-            $connection->query("DROP TEMPORARY TABLE `{$expected_table}`");
-        }
-
-        if ($schemas[0] !== $schemas[1]) {
-            if (
-                !$connection->query("DROP TABLE `{$table}`")
-                || !$connection->query("CREATE TABLE `{$table}` {$columns}")
-            ) {
-                throw new RuntimeException(
-                    "MySQL could not recreate the db-pull progress table: " . $connection->error
-                );
-            }
-            $this->audit_log("RECREATED DB-PULL PROGRESS TABLE | its schema did not match", true);
-        }
-        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
     }
 
     /** Saves the source cursor and commits the current target transaction. */

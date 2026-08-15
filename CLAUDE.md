@@ -168,7 +168,7 @@ Entries in `paths_to_remove` under `wp-content/plugins/` also trigger automatic 
 
 ### SQL Streaming Crash Recovery
 
-Direct MySQL output keeps incomplete SQL only in memory while one importer process requests more source responses. After each complete SQL group, it updates `__reprint_db_pull_progress_<uuid>` and commits the current target transaction. The UUID makes an accidental table-name clash unlikely. Reprint logs and excludes that internal name from the source dump. For transactional target tables, the imported rows and source position commit together. If the importer process stops, the next `db-pull` starts the dump from the beginning rather than using incomplete SQL from the dead process.
+Direct MySQL output keeps incomplete SQL only in memory while one importer process requests more source responses. After each complete SQL group, it updates `__reprint_db_pull_progress_<uuid>` and commits the current target transaction. The UUID makes an accidental table-name clash unlikely and changes whenever the table schema changes. Reprint logs and excludes that internal name from the source dump. For transactional target tables, the imported rows and source position commit together. If the importer process stops, the next `db-pull` starts the dump from the beginning rather than using incomplete SQL from the dead process.
 
 ### Progress Tracking
 

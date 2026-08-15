@@ -372,11 +372,11 @@ When a source response stops mid-stream, the same importer asks for the
 remaining SQL and keeps an unfinished statement in memory. Direct MySQL
 output stores the last committed source position in the target table
 `__reprint_db_pull_progress_<uuid>`. The UUID makes an accidental name clash
-unlikely. Reprint logs and excludes that internal name from the source dump.
-For transactional target tables, each completed SQL group and its source position
-are committed together. If the importer process stops, the next `db-pull` starts
-the dump from the beginning rather than relying on unfinished SQL from the dead
-process.
+unlikely and changes whenever the table schema changes. Reprint logs and excludes
+that internal name from the source dump. For transactional target tables, each
+completed SQL group and its source position are committed together. If the
+importer process stops, the next `db-pull` starts the dump from the beginning
+rather than relying on unfinished SQL from the dead process.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`

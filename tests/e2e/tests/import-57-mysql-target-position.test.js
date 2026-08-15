@@ -176,47 +176,6 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         }
     });
 
-    it('recreates a progress table whose schema does not match', async () => {
-        const collisionDir = createTempDir('e2e-mysql-target-cursor-collision');
-        const targetConnection = await createMysqlConnection(targetDb);
-        try {
-            await targetConnection.query(`DROP TABLE IF EXISTS \`${progressTable}\``);
-            await targetConnection.query(
-                `CREATE TABLE \`${progressTable}\` (`
-                + '`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY, '
-                + '`note` VARCHAR(64) NOT NULL) ENGINE=InnoDB'
-            );
-            await targetConnection.query(
-                `INSERT INTO \`${progressTable}\` (id, note) VALUES (1, 'old row')`
-            );
-
-            const preflight = runImporter(importUrl(), collisionDir, 'preflight', {
-                secret: getSiteSecret(site),
-            });
-            assert.equal(preflight.exitCode, 0, preflight.stderr + preflight.stdout);
-
-            const result = runImporter(importUrl(), collisionDir, 'db-pull', {
-                secret: getSiteSecret(site),
-                extraArgs: mysqlArguments(),
-            });
-            assert.equal(result.exitCode, 0, result.stderr + result.stdout);
-
-            const [targetColumns] = await targetConnection.query(
-                'SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS '
-                + 'WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION',
-                [targetDb, progressTable],
-            );
-            assert.deepEqual(
-                targetColumns.map(column => column.COLUMN_NAME),
-                ['id', 'source_hash', 'source_cursor'],
-            );
-        } finally {
-            await targetConnection.query(`DROP TABLE IF EXISTS \`${progressTable}\``);
-            await targetConnection.end();
-            cleanupTempDir(collisionDir);
-        }
-    });
-
     afterAll(async () => {
         removeTestHooks(site);
         clearHookState(site);
