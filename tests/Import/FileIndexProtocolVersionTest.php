@@ -70,6 +70,7 @@ final class FileIndexProtocolVersionTest extends TestCase
     {
         $result = $this->runCli([
             'pull-files',
+            '--mode=catch-up',
             '--on-fs-root-nonempty=preserve-local',
         ]);
 
@@ -93,6 +94,7 @@ final class FileIndexProtocolVersionTest extends TestCase
         file_put_contents($this->protocolVersionFile, '2');
         $result = $this->runCli([
             'pull-files',
+            '--mode=catch-up',
             '--on-fs-root-nonempty=preserve-local',
         ]);
 

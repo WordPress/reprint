@@ -218,27 +218,48 @@ class FollowedSymlinksRootTest extends TestCase
         );
     }
 
-    // ── Local followed symlinks root fingerprint guard ──
+    // ── Followed path mapping fingerprint guard ──
+
+    private function mappingFingerprint(
+        \ImportClient $client,
+        ?string $localFollowedSymlinksRoot
+    ): string {
+        $reflection = new \ReflectionClass($client);
+        $reflection->getProperty('local_followed_symlinks_root')->setValue(
+            $client,
+            $localFollowedSymlinksRoot
+        );
+        return $reflection->getMethod('followed_path_mapping_fingerprint')
+            ->invoke($client);
+    }
 
     private function assertGuard(\ImportClient $c, ?string $localFollowedSymlinksRoot, ?string $persistedFingerprint): void
     {
         $rc = new \ReflectionClass($c);
         $rc->getProperty('local_followed_symlinks_root')->setValue($c, $localFollowedSymlinksRoot);
-        $rc->getProperty('state')->getValue($c)->local_followed_symlinks_root_fingerprint = $persistedFingerprint;
-        $rc->getMethod('assert_local_followed_symlinks_root_unchanged')->invoke($c);
+        $rc->getProperty('state')->getValue($c)->followed_path_mapping_fingerprint = $persistedFingerprint;
+        $rc->getMethod('assert_followed_path_mapping_unchanged')->invoke($c);
     }
 
     public function testGuardRejectsChangedLocalFollowedSymlinksRoot(): void
     {
         $c = $this->newClient();
         $this->expectException(\RuntimeException::class);
-        $this->assertGuard($c, $this->root . '/.bundle-a', hash('sha256', $this->root . '/.bundle-b'));
+        $this->assertGuard(
+            $c,
+            $this->root . '/.bundle-a',
+            $this->mappingFingerprint($c, $this->root . '/.bundle-b')
+        );
     }
 
     public function testGuardAllowsUnchangedLocalFollowedSymlinksRoot(): void
     {
         $c = $this->newClient();
-        $this->assertGuard($c, $this->root . '/.bundle-a', hash('sha256', $this->root . '/.bundle-a'));
+        $this->assertGuard(
+            $c,
+            $this->root . '/.bundle-a',
+            $this->mappingFingerprint($c, $this->root . '/.bundle-a')
+        );
         $this->addToAssertionCount(1); // no exception == pass
     }
 
@@ -248,7 +269,11 @@ class FollowedSymlinksRootTest extends TestCase
         // to default placement.
         $c = $this->newClient();
         $this->expectException(\RuntimeException::class);
-        $this->assertGuard($c, null, hash('sha256', $this->root . '/.bundle-a'));
+        $this->assertGuard(
+            $c,
+            null,
+            $this->mappingFingerprint($c, $this->root . '/.bundle-a')
+        );
     }
 
     public function testGuardTreatsBareFollowAndFsRootAsEquivalent(): void
@@ -256,19 +281,57 @@ class FollowedSymlinksRootTest extends TestCase
         // Bare --follow-symlinks (no explicit root) and --follow-symlinks=:fs-root:
         // fingerprint identically — both place at fs-root.
         $c = $this->newClient();
-        $this->assertGuard($c, null, hash('sha256', $this->root));
-        $this->assertGuard($c, $this->root, hash('sha256', $this->root));
+        $fingerprint = $this->mappingFingerprint($c, $this->root);
+        $this->assertGuard($c, null, $fingerprint);
+        $this->assertGuard($c, $this->root, $fingerprint);
         $this->addToAssertionCount(1); // no exception == pass
+    }
+
+    public function testGuardRejectsChangedRemoteRootsWithACustomFollowedRoot(): void
+    {
+        $client = $this->placeClient('/.bundle', ['/remote/first']);
+        $fingerprint = $this->mappingFingerprint(
+            $client,
+            $this->root . '/.bundle'
+        );
+        $reflection = new \ReflectionClass($client);
+        $reflection->getProperty('pull_only_files_with_path_prefixes')
+            ->setValue($client, ['/remote/second']);
+        $reflection->getProperty('export_directories_cache')
+            ->setValue($client, null);
+
+        $this->expectException(\RuntimeException::class);
+        $this->assertGuard($client, $this->root . '/.bundle', $fingerprint);
+    }
+
+    public function testGuardAllowsChangedRemoteRootsAtTheFilesystemRoot(): void
+    {
+        $client = $this->placeClient($this->root, ['/remote/first']);
+        $fingerprint = $this->mappingFingerprint($client, $this->root);
+        $reflection = new \ReflectionClass($client);
+        $reflection->getProperty('pull_only_files_with_path_prefixes')
+            ->setValue($client, ['/remote/second']);
+        $reflection->getProperty('export_directories_cache')
+            ->setValue($client, null);
+
+        $this->assertGuard($client, $this->root, $fingerprint);
+        $this->addToAssertionCount(1);
     }
 
     public function testDefaultFollowedSymlinksRootFingerprintKeepsFilesystemRoot(): void
     {
         $client = $this->newRootClient();
         $fingerprint = (new \ReflectionClass($client))
-            ->getMethod('local_followed_symlinks_root_fingerprint')
+            ->getMethod('followed_path_mapping_fingerprint')
             ->invoke($client);
 
-        $this->assertSame(hash('sha256', '/'), $fingerprint);
+        $this->assertSame(
+            hash('sha256', json_encode([
+                'effective_root_b64' => base64_encode('/'),
+                'remote_roots_b64' => [],
+            ], JSON_UNESCAPED_SLASHES)),
+            $fingerprint
+        );
     }
 
     // ── Repoint routes via remap even when the target is spelled within fs-root ──

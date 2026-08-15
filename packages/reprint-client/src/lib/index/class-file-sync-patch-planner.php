@@ -98,7 +98,7 @@ require_once __DIR__ . '/file-sync-path-functions.php';
  * @phpstan-type ActiveDeletionRoot array{path:string,previous_byte_offset:int|null}
  * @phpstan-type ExpectedSource array{type:string,size:int,ctime:int}
  * @phpstan-type DeleteOperation array{action:'delete',path:string,expected_base?:ExpectedSource}
- * @phpstan-type CopyOperation array{action:'copy'|'replace',path:string,expected_source:ExpectedSource,expected_base?:ExpectedSource}
+ * @phpstan-type CopyOperation array{action:'copy'|'replace',path:string,expected_source:ExpectedSource,expected_base?:ExpectedSource,remote_absolute_path?:string}
  * @phpstan-type SyncOperation DeleteOperation|CopyOperation
  */
 final class FileSyncPatchPlanner
@@ -492,7 +492,11 @@ final class FileSyncPatchPlanner
                 || $patch_base_entry_shape === "symlink";
             $empty_directory_needs_copy =
                 $patch_result_entry_shape === "empty_directory"
-                && $patch_base_entry_shape !== "empty_directory";
+                && (
+                    $patch_base_entry_shape !== "empty_directory"
+                    || ( $path_transition === "modified"
+                        && $this->index_diff->get_remote_absolute_path_in_new_index() !== null )
+                );
             $changed_file_or_symlink_needs_copy =
                 $patch_result_entry_is_file_or_symlink
                 && $path_transition === "modified";
@@ -537,6 +541,12 @@ final class FileSyncPatchPlanner
                     "ctime" => $this->index_diff->get_ctime_in_new_index(),
                 ],
             ];
+            $remote_absolute_path =
+                $this->index_diff->get_remote_absolute_path_in_new_index();
+            if ($remote_absolute_path !== null) {
+                $this->operation["remote_absolute_path"] =
+                    $remote_absolute_path;
+            }
         } elseif ($path_to_delete !== null) {
             $this->operation = [
                 "action" => "delete",
@@ -586,6 +596,7 @@ final class FileSyncPatchPlanner
      *
      *     @type string $action          `copy`, `delete`, or `replace`.
      *     @type string $path            Path on which to operate.
+     *     @type string $remote_absolute_path Original remote path when the result index records one.
      *     @type array  $expected_source {
      *         Source state required by `copy` and `replace`. Absent for `delete`.
      *

@@ -155,6 +155,36 @@ final class FileSyncCleanupProcessorTest extends TestCase {
         );
     }
 
+    public function testQueuesARemoteEmptyDirectoryMissingFromTheRetainedIndex(): void
+    {
+        mkdir($this->filesystem_root . '/selected/empty', 0755, true);
+        $work_directory = $this->work_directory('copy-empty-directory');
+        $processor = FileSyncCleanupProcessor::start(
+            $work_directory,
+            $this->filesystem_root,
+            $this->write_index('copy-empty-directory-result.jsonl', [
+                $this->entry(
+                    'selected/empty',
+                    'dir',
+                    '/remote/empty'
+                ),
+            ]),
+            $work_directory,
+            ['selected']
+        );
+
+        $operations = $this->run_to_completion_collecting_operations(
+            $processor
+        );
+
+        $this->assertDirectoryExists($this->filesystem_root . '/selected/empty');
+        $this->assertSame([[
+            'action' => 'copy',
+            'path' => 'selected/empty',
+            'remote_absolute_path' => '/remote/empty',
+        ]], $operations);
+    }
+
     /** @dataProvider exactPathTypes */
     public function testRemovesAnExactPathBeforeItsTypeChanges(
         string $local_type,
@@ -176,17 +206,28 @@ final class FileSyncCleanupProcessorTest extends TestCase {
             $work_directory,
             $this->filesystem_root,
             $this->write_index('replace-result.jsonl', [
-                $this->entry('selected/entry', $result_type),
+                $this->entry(
+                    'selected/entry',
+                    $result_type,
+                    '/remote/entry'
+                ),
             ]),
             $work_directory,
             ['selected']
         );
 
-        $this->run_to_completion($processor);
+        $operations = $this->run_to_completion_collecting_operations(
+            $processor
+        );
 
         $this->assertFalse(file_exists($path));
         $this->assertFalse(is_link($path));
         $this->assertDirectoryExists($this->filesystem_root . '/selected');
+        $this->assertSame([[
+            'action' => 'replace',
+            'path' => 'selected/entry',
+            'remote_absolute_path' => '/remote/entry',
+        ]], $operations);
     }
 
     /** @return list<array{string,string}> */
@@ -282,17 +323,26 @@ final class FileSyncCleanupProcessorTest extends TestCase {
             $work_directory,
             $this->filesystem_root,
             $this->write_index('copy-restart-result.jsonl', [
-                $this->entry('remote.txt', 'file'),
+                $this->entry(
+                    'remote.txt',
+                    'file',
+                    '/remote/source.txt'
+                ),
             ]),
             $work_directory
         );
 
-        $this->run_to_completion($processor);
+        $operations = $this->run_to_completion_collecting_operations(
+            $processor
+        );
 
         $this->assertSame('complete', $processor->get_status());
         $this->assertFileDoesNotExist(
             $this->filesystem_root . '/remote.txt'
         );
+        $this->assertSame('/remote/source.txt', $operations[0][
+            'remote_absolute_path'
+        ]);
     }
 
     public function testChangedPendingRemovalRestartsWithoutDeletingTheNewPath(): void
@@ -714,6 +764,25 @@ final class FileSyncCleanupProcessorTest extends TestCase {
         $this->fail('File sync cleanup did not complete in 300 steps.');
     }
 
+    /** @return list<array<string,mixed>> */
+    private function run_to_completion_collecting_operations(
+        FileSyncCleanupProcessor $processor
+    ): array {
+        $operations = [];
+        for ($step = 0; $step < 300; ++$step) {
+            $has_next_step = $processor->next_step();
+            $operation = $processor->get_operation();
+            if ($operation !== null) {
+                $operations[] = $operation;
+            }
+            $processor->flush_pending_output();
+            if (!$has_next_step) {
+                return $operations;
+            }
+        }
+        $this->fail('File sync cleanup did not complete in 300 steps.');
+    }
+
     /** @return array<string,mixed> */
     private function stored_cursor(array $cursor): array
     {
@@ -740,6 +809,11 @@ final class FileSyncCleanupProcessorTest extends TestCase {
         $lines = [];
         foreach ($entries as $entry) {
             $entry['path'] = base64_encode($entry['path']);
+            if (isset($entry['remote_absolute_path'])) {
+                $entry['remote_absolute_path'] = base64_encode(
+                    $entry['remote_absolute_path']
+                );
+            }
             $lines[] = json_encode(
                 $entry,
                 JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
@@ -754,7 +828,11 @@ final class FileSyncCleanupProcessorTest extends TestCase {
     }
 
     /** @return array{path:string,ctime:int,size:int,type:string,empty?:bool} */
-    private function entry(string $path, string $type): array
+    private function entry(
+        string $path,
+        string $type,
+        ?string $remote_absolute_path = null
+    ): array
     {
         $entry = [
             'path' => $path,
@@ -764,6 +842,9 @@ final class FileSyncCleanupProcessorTest extends TestCase {
         ];
         if ($type === 'dir') {
             $entry['empty'] = true;
+        }
+        if ($remote_absolute_path !== null) {
+            $entry['remote_absolute_path'] = $remote_absolute_path;
         }
         return $entry;
     }

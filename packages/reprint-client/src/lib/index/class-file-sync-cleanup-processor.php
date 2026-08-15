@@ -28,6 +28,8 @@ require_once __DIR__ . '/class-file-sync-patch-processor.php';
  * never by walking their children. An excluded, skipped, or newly created
  * child therefore keeps its directory in place. Empty parents are pruned in
  * separate steps after patch planning ends.
+ * get_operation() reports a remote-backed copy or replacement when it is
+ * ready to fetch. Store that fetch-list write with the returned cursor.
  *
  * A planned removal is stored in the cursor before it is applied. If a process
  * stops after removing the path but before storing the next cursor, resume()
@@ -55,11 +57,12 @@ require_once __DIR__ . '/class-file-sync-patch-processor.php';
  * @phpstan-type PatchCursor array<string,mixed>
  * @phpstan-type PlanningPosition array{phase:'planning',file_sync_patch_processor_cursor:PatchCursor}
  * @phpstan-type ExpectedBase array{type:string,size:int,ctime:int}
- * @phpstan-type RemovingPosition array{phase:'removing',path_b64:string,expected_base:ExpectedBase,file_sync_patch_processor_cursor:PatchCursor}
+ * @phpstan-type RemovingPosition array{phase:'removing',path_b64:string,remote_absolute_path_b64:string|null,expected_base:ExpectedBase,file_sync_patch_processor_cursor:PatchCursor}
  * @phpstan-type PruningPosition array{phase:'pruning'}
  * @phpstan-type Position PlanningPosition|RemovingPosition|PruningPosition|array{phase:'complete'|'restart'}
  * @phpstan-type Cursor array{filesystem_root_b64:string,empty_parent_paths_file_b64:string,empty_parent_paths_file_byte_offset:int,empty_parent_path_stack_top_byte_offset:int|null,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,position:Position}
  * @phpstan-type EmptyParentPath array{path:string,previous_byte_offset:int|null,expected_ctime:int|null}
+ * @phpstan-type CleanupOperation array{action:'copy'|'replace',path:string,remote_absolute_path:string}
  */
 final class FileSyncCleanupProcessor
 {
@@ -89,6 +92,9 @@ final class FileSyncCleanupProcessor
 
     /** Whether close() released the retained handles. */
     private bool $closed = false;
+
+    /** @var CleanupOperation|null Operation completed by the latest step. */
+    private ?array $operation = null;
 
     /**
      * Starts cleanup before the first local-index step.
@@ -305,6 +311,7 @@ final class FileSyncCleanupProcessor
      */
     public function next_step(): bool
     {
+        $this->operation = null;
         $position = $this->cursor["position"];
         if (
             $position["phase"] === "complete"
@@ -322,6 +329,17 @@ final class FileSyncCleanupProcessor
             $has_next_patch_step = $this->patch_processor->next_step();
             $patch_cursor = $this->patch_processor->get_cursor();
             $operation = $this->patch_processor->get_operation();
+            if (
+                $operation !== null
+                && $operation["action"] === "copy"
+                && isset($operation["remote_absolute_path"])
+            ) {
+                $this->operation = [
+                    "action" => "copy",
+                    "path" => $operation["path"],
+                    "remote_absolute_path" => $operation["remote_absolute_path"],
+                ];
+            }
             // A selected root marks where traversal begins, not a result
             // entry. Keep that boundary when its contents are empty.
             if (
@@ -344,6 +362,10 @@ final class FileSyncCleanupProcessor
                 $this->cursor["position"] = [
                     "phase" => "removing",
                     "path_b64" => base64_encode($operation["path"]),
+                    "remote_absolute_path_b64" =>
+                        isset($operation["remote_absolute_path"])
+                            ? base64_encode($operation["remote_absolute_path"])
+                            : null,
                     "expected_base" => $operation["expected_base"],
                     "file_sync_patch_processor_cursor" => $patch_cursor,
                 ];
@@ -437,6 +459,16 @@ final class FileSyncCleanupProcessor
             }
             if ($path_removed) {
                 $this->schedule_parent_path($index_path);
+            }
+            if ($position["remote_absolute_path_b64"] !== null) {
+                $this->operation = [
+                    "action" => "replace",
+                    "path" => $index_path,
+                    "remote_absolute_path" => self::decode_cursor_path(
+                        $position["remote_absolute_path_b64"],
+                        "pending replacement remote path"
+                    ),
+                ];
             }
             $patch_cursor = $position[
                 "file_sync_patch_processor_cursor"
@@ -556,6 +588,12 @@ final class FileSyncCleanupProcessor
         return $phase === "complete" || $phase === "restart"
             ? $phase
             : null;
+    }
+
+    /** Returns the operation completed by the latest step. */
+    public function get_operation(): ?array
+    {
+        return $this->operation;
     }
 
     /** Flushes processor work files before the caller stores get_cursor(). */

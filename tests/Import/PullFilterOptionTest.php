@@ -450,6 +450,7 @@ class PullFilterOptionTest extends TestCase
         $client->run([
             "command" => "pull-files",
             "progress" => "tty",
+            "files_pull_mode" => "catch-up",
             "only" => ["/var/www/html/wp-content/uploads/reprint-demo"],
         ]);
 
@@ -467,6 +468,7 @@ class PullFilterOptionTest extends TestCase
         $client->run([
             "command" => "pull-files",
             "filter" => "essential-files",
+            "files_pull_mode" => "catch-up",
         ]);
         ob_end_clean();
 
@@ -824,6 +826,7 @@ class PullFilterOptionTest extends TestCase
         $client->run([
             "command" => "pull",
             "filter" => "essential-files",
+            "files_pull_mode" => "catch-up",
             "runtime" => "none",
         ]);
         ob_end_clean();
@@ -863,11 +866,13 @@ class PullFilterOptionTest extends TestCase
         $client->run([
             "command" => "pull",
             "filter" => "essential-files",
+            "files_pull_mode" => "catch-up",
             "runtime" => "none",
         ]);
         $client->run([
             "command" => "pull",
             "filter" => "none",
+            "files_pull_mode" => "catch-up",
             "runtime" => "none",
         ]);
         ob_end_clean();
@@ -888,6 +893,7 @@ class PullFilterOptionTest extends TestCase
         $client->run([
             "command" => "pull",
             "filter" => "essential-files",
+            "files_pull_mode" => "catch-up",
             "flatten_to" => $flatten_to,
             "runtime" => "playground-cli",
             "start_runtime" => "none",

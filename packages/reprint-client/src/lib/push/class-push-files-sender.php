@@ -1,5 +1,6 @@
 <?php
 
+use function Reprint\Importer\copy_index_through_swap_file;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\relative_path_under;
 use function WordPress\Reprint\Exporter\trim_right_slash;
@@ -1391,7 +1392,7 @@ final class PushFilesSender
     {
         $fresh_local_index_file = $this->plan->get_fresh_local_index_path();
         try {
-            $this->copy_through_swap_file(
+            copy_index_through_swap_file(
                 $fresh_local_index_file,
                 $this->local_index_file
             );
@@ -1402,27 +1403,6 @@ final class PushFilesSender
         $this->state['push_plan_cursor'] = null;
         $this->state['phase'] = 'completing';
         $this->store_state($this->state);
-    }
-
-    /**
-     * Copies one complete index through a swap file and moves it into place.
-     *
-     * copy() streams without holding the complete index in memory. Only the
-     * final rename is atomic: interruption during copy leaves the existing
-     * index untouched and a later call overwrites the partial swap file.
-     *
-     * @param string $source_path Complete index to copy.
-     * @param string $target_path Final path for the copied index.
-     */
-    private function copy_through_swap_file(string $source_path, string $target_path): void
-    {
-        $swap_index = $target_path . '.swap';
-        if (!@copy($source_path, $swap_index)) {
-            throw new RuntimeException('Failed to copy the index to its swap file: ' . $swap_index);
-        }
-        if (!@rename($swap_index, $target_path)) {
-            throw new RuntimeException('Failed to move the copied index into place: ' . $target_path);
-        }
     }
 
     /**

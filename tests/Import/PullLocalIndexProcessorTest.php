@@ -86,20 +86,28 @@ final class PullLocalIndexProcessorTest extends TestCase {
         $this->assertSame( (int) $a_stat['size'], $entries[0]['size']);
         $this->assertSame( (int) $z_stat['ctime'], $entries[1]['ctime']);
         $this->assertSame( (int) $z_stat['size'], $entries[1]['size']);
+        $this->assertArrayNotHasKey('remote_absolute_path', $entries[0]);
+        $this->assertArrayNotHasKey('remote_absolute_path', $entries[1]);
     }
 
-    public function testPatchResultKeepsRemoteMetadataAndEmptyDirectory(): void
+    public function testPatchResultKeepsRetainedMetadataAndRemotePaths(): void
     {
+        mkdir($this->filesystem_root . '/empty', 0700, true);
+        $this->write_file('file.txt', 'local file');
         $this->write_remote_index([
             $this->remote_entry('/remote/empty', 'dir', 0, 456, true),
             $this->remote_entry('/remote/file.txt', 'file', 123, 789),
         ]);
-        $this->write_local_index([]);
+        $empty_entry = $this->local_entry_from_path('empty');
+        $empty_entry['empty'] = true;
+        $file_entry = $this->local_entry_from_path('file.txt');
+        $this->write_local_index([$empty_entry, $file_entry]);
 
         $entries = $this->run_to_completion(
             PullLocalIndexProcessor::start_patch_result(
                 $this->work_directory,
                 $this->next_remote_index_file,
+                $this->remote_index_file,
                 $this->retained_local_index_file,
                 new RemoteToLocalPathMapper(
                     $this->filesystem_root,
@@ -111,21 +119,50 @@ final class PullLocalIndexProcessorTest extends TestCase {
 
         $this->assertSame(
             [
-                [
-                    'path' => 'empty',
-                    'ctime' => 456,
-                    'size' => 0,
-                    'type' => 'dir',
-                    'empty' => true,
+                $empty_entry + [
+                    'remote_absolute_path' => '/remote/empty',
                 ],
-                [
-                    'path' => 'file.txt',
-                    'ctime' => 789,
-                    'size' => 123,
-                    'type' => 'file',
+                $file_entry + [
+                    'remote_absolute_path' => '/remote/file.txt',
                 ],
             ],
             $entries
+        );
+    }
+
+    public function testPatchResultKeepsAMissingRemoteEmptyDirectory(): void
+    {
+        $this->write_remote_index([
+            $this->remote_entry('/remote/empty', 'dir', 0, 456, true),
+        ]);
+        $retained_entry = [
+            'path' => 'empty',
+            'ctime' => 123,
+            'size' => 0,
+            'type' => 'dir',
+            'empty' => true,
+        ];
+        $this->write_local_index([$retained_entry]);
+
+        $entries = $this->run_to_completion(
+            PullLocalIndexProcessor::start_patch_result(
+                $this->work_directory,
+                $this->next_remote_index_file,
+                $this->remote_index_file,
+                $this->retained_local_index_file,
+                new RemoteToLocalPathMapper(
+                    $this->filesystem_root,
+                    ['/remote'],
+                    ['/remote' => $this->filesystem_root]
+                )
+            )
+        );
+
+        $this->assertSame(
+            $retained_entry + [
+                'remote_absolute_path' => '/remote/empty',
+            ],
+            $entries[0]
         );
     }
 
@@ -140,6 +177,7 @@ final class PullLocalIndexProcessorTest extends TestCase {
             PullLocalIndexProcessor::start_patch_result(
                 $this->work_directory,
                 $this->next_remote_index_file,
+                $this->remote_index_file,
                 $this->retained_local_index_file,
                 new RemoteToLocalPathMapper(
                     $this->filesystem_root,
@@ -161,6 +199,7 @@ final class PullLocalIndexProcessorTest extends TestCase {
         $processor = PullLocalIndexProcessor::start_patch_result(
             $this->work_directory,
             $this->next_remote_index_file,
+            $this->remote_index_file,
             $this->retained_local_index_file,
             new RemoteToLocalPathMapper(
                 $this->filesystem_root,
@@ -292,15 +331,21 @@ final class PullLocalIndexProcessorTest extends TestCase {
 
     public function testDropsMappedEmptyDirectoryImpliedByOverlappingRemapDescendant(): void
     {
+        $this->write_file('parent-name.txt', 'parent name');
+        $this->write_file('parent/child.txt', 'child');
         $this->write_remote_index([
             $this->remote_entry('/remote/empty', 'dir', 0, 10, true),
             $this->remote_entry('/remote/interleaving.txt', 'file', 11, 11),
             $this->remote_entry('/remote/leaf.txt', 'file', 12, 12),
         ]);
-        $this->write_local_index([]);
+        $this->write_local_index([
+            $this->local_entry_from_path('parent-name.txt'),
+            $this->local_entry_from_path('parent/child.txt'),
+        ]);
         $processor = PullLocalIndexProcessor::start_patch_result(
             $this->work_directory,
             $this->next_remote_index_file,
+            $this->remote_index_file,
             $this->retained_local_index_file,
             new RemoteToLocalPathMapper(
                 $this->filesystem_root,
@@ -335,6 +380,7 @@ final class PullLocalIndexProcessorTest extends TestCase {
         $processor = PullLocalIndexProcessor::start_patch_result(
             $this->work_directory,
             $this->next_remote_index_file,
+            $this->remote_index_file,
             $this->retained_local_index_file,
             new RemoteToLocalPathMapper(
                 $this->filesystem_root,
@@ -379,6 +425,7 @@ final class PullLocalIndexProcessorTest extends TestCase {
         $processor = PullLocalIndexProcessor::start_patch_result(
             $this->work_directory,
             $this->next_remote_index_file,
+            $this->remote_index_file,
             $this->retained_local_index_file,
             new RemoteToLocalPathMapper(
                 $this->filesystem_root,
@@ -1012,6 +1059,45 @@ final class PullLocalIndexProcessorTest extends TestCase {
         $resumed = PullLocalIndexProcessor::resume($complete_cursor);
         $this->assertFalse($resumed->next_step());
         $this->assertSame('complete', $resumed->get_phase());
+        $resumed->close();
+    }
+
+    public function testTerminalStepKeepsTheLastResumableCursorForSignalSave(): void
+    {
+        $this->write_file('file.txt', 'contents');
+        $this->write_remote_index([
+            $this->remote_entry('/remote/file.txt', 'file'),
+        ]);
+        $this->write_local_index([
+            $this->local_entry_from_path('file.txt'),
+        ]);
+
+        $client = new ImportClient(
+            'http://fake.url',
+            $this->temporary_directory . '/state',
+            $this->filesystem_root
+        );
+        $take_steps = ( new ReflectionClass($client) )
+            ->getMethod('take_files_pull_local_index_steps');
+        $processor = $this->start_processor();
+        for ($batch = 0; $batch < 20; ++$batch) {
+            $has_next_step = $take_steps->invoke($client, $processor);
+            if (!$has_next_step) {
+                break;
+            }
+            $processor = PullLocalIndexProcessor::resume(
+                $client->get_state()->diff->processor_cursor
+            );
+        }
+
+        $this->assertFalse($has_next_step);
+        $saved_cursor = $client->get_state()->diff->processor_cursor;
+        $this->assertIsArray($saved_cursor);
+        $this->assertNotSame('complete', $saved_cursor['position']['phase']);
+
+        $resumed = PullLocalIndexProcessor::resume($saved_cursor);
+        $this->run_to_completion_without_closing($resumed);
+        $this->assertSame('complete', $resumed->get_status());
         $resumed->close();
     }
 

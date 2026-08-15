@@ -459,6 +459,32 @@ final class FilesPullDiffCheckpointTest extends TestCase
         $this->assertSame(['/added.txt'], $actualFetchPaths);
     }
 
+    public function testMirrorInvalidatesAnOldRemoteRowOutsideCurrentRoots(): void
+    {
+        file_put_contents(
+            $this->pullStateDirectory . '/remote-index.jsonl',
+            '{"path":"L29sZC1yb290L3N0YWxlLnR4dA==","ctime":1,"size":1,"type":"file"}' . "\n"
+        );
+        file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
+
+        $client = $this->newClientAtDiffStage();
+        $client->get_state()->set_preflight_record([
+            'data' => ['ok' => true, 'wp_detect' => ['roots' => [['path' => '/current-root']]]],
+            'http_code' => 200,
+        ]);
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection->getProperty('files_pull_mode')->setValue($client, 'mirror');
+        $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')
+            ->invoke($client);
+        $reflection->getProperty('pull_index_journal')->getValue($client)
+            ->apply_pending_records();
+
+        $this->assertSame([], $this->readBase64Paths(
+            $this->pullStateDirectory . '/remote-index.jsonl',
+            'path'
+        ));
+    }
+
     public function testDiffRejectsBlankRemoteIndexRecords(): void
     {
         file_put_contents($this->pullStateDirectory . '/remote-index.jsonl', '');
@@ -510,6 +536,7 @@ final class FilesPullDiffCheckpointTest extends TestCase
             ],
             'remote_protocol_version' => PULL_PROTOCOL_VERSION,
             'follow_symlinks' => false,
+            'files_pull_mode' => 'catch-up',
             'fs_root_nonempty_behavior' => 'preserve-local',
             'files_pull_path_selection_fingerprint' => hash(
                 'sha256',
@@ -522,6 +549,9 @@ final class FilesPullDiffCheckpointTest extends TestCase
                 ], JSON_UNESCAPED_SLASHES)
             ),
         ]);
+        ( new \ReflectionClass(\ImportClient::class) )
+            ->getProperty('files_pull_mode')
+            ->setValue($client, 'catch-up');
         return $client;
     }
 
@@ -530,9 +560,11 @@ final class FilesPullDiffCheckpointTest extends TestCase
         DiffCheckpointTestClient $client
     ): DiffCheckpointTestClient {
         $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getProperty('state')->setValue(
+        $state = $reflection->getMethod('load_state')->invoke($client);
+        $reflection->getProperty('state')->setValue($client, $state);
+        $reflection->getProperty('files_pull_mode')->setValue(
             $client,
-            $reflection->getMethod('load_state')->invoke($client)
+            $state->files_pull_mode
         );
         return $client;
     }

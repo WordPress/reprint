@@ -141,7 +141,7 @@ final class FilesPullLocalIndexTest extends TestCase
             ],
         ]);
 
-        $this->completeFilesPull();
+        $this->completeFilesPull(['--mode=catch-up']);
 
         $this->assertSame(
             'pulled dependency',
@@ -208,38 +208,83 @@ final class FilesPullLocalIndexTest extends TestCase
         );
     }
 
-    public function testDeltaPullUpdatesOnlyThePathsItChanges(): void
+    /** @dataProvider localDriftPullModeProvider */
+    public function testPullModeResolvesRemoteAndLocalChanges(string $mode): void
     {
-        $this->completeFilesPull();
-        file_put_contents($this->localTree . '/edited.txt', 'longer local edit');
+        $arguments = ["--mode={$mode}"];
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+
+        $localEditedContents = 'longer local edit';
+        $localOnlyContents = 'local-only contents';
+        $remoteBothChangedContents = 'remote change delivered by the second pull';
+        file_put_contents($this->localTree . '/edited.txt', $localEditedContents);
         unlink($this->localTree . '/deleted.txt');
-        $pulledContents = 'remote change delivered by the second pull';
+        file_put_contents($this->localTree . '/local-only.txt', $localOnlyContents);
+        file_put_contents(
+            $this->localTree . '/' . self::PULLED_PATH,
+            'local edit before the remote also changes'
+        );
         $this->writeRemoteOverrides([
             'pulled_ctime' => self::REMOTE_CTIME + 1,
-            'pulled_contents_b64' => base64_encode($pulledContents),
+            'pulled_contents_b64' => base64_encode($remoteBothChangedContents),
             'removed_paths' => ['unchanged.txt'],
         ]);
 
-        $this->abortFilesPull();
-        $delta = $this->runFilesPull();
+        $abort = $this->runFilesPull(array_merge(['--abort'], $arguments));
+        $this->assertSame(0, $abort['exit'], $abort['output']);
+        $delta = $this->runFilesPull($arguments);
 
         $this->assertSame(0, $delta['exit'], $delta['output']);
-        $this->assertSame('longer local edit', file_get_contents($this->localTree . '/edited.txt'));
-        $this->assertSame($pulledContents, file_get_contents($this->localTree . '/' . self::PULLED_PATH));
+        $this->assertSame(
+            $remoteBothChangedContents,
+            file_get_contents($this->localTree . '/' . self::PULLED_PATH)
+        );
         $this->assertFileDoesNotExist($this->localTree . '/unchanged.txt');
 
         $diff = $this->runFilesDiff();
         $this->assertSame(0, $diff['exit'], $diff['output']);
         $records = $this->filesDiffRecords($diff['stdout']);
         $complete = array_pop($records);
+
+        if ($mode === 'mirror') {
+            $this->assertSame(
+                $this->remoteFiles['edited.txt'],
+                file_get_contents($this->localTree . '/edited.txt')
+            );
+            $this->assertSame(
+                $this->remoteFiles['deleted.txt'],
+                file_get_contents($this->localTree . '/deleted.txt')
+            );
+            $this->assertFileDoesNotExist($this->localTree . '/local-only.txt');
+            $this->assertSame([
+                'command' => 'files-diff',
+                'status' => 'complete',
+                'local_paths_to_push' => 0,
+                'local_paths_to_delete' => 0,
+            ], $complete);
+            $this->assertSame([], $records);
+            return;
+        }
+
+        $this->assertSame(
+            $localEditedContents,
+            file_get_contents($this->localTree . '/edited.txt')
+        );
+        $this->assertFileDoesNotExist($this->localTree . '/deleted.txt');
+        $this->assertSame(
+            $localOnlyContents,
+            file_get_contents($this->localTree . '/local-only.txt')
+        );
         $this->assertSame([
             'command' => 'files-diff',
             'status' => 'complete',
-            'local_paths_to_push' => 1,
+            'local_paths_to_push' => 2,
             'local_paths_to_delete' => 1,
         ], $complete);
         $this->assertSame([
             $this->expectedPushRecord('edited.txt'),
+            $this->expectedPushRecord('local-only.txt'),
             [
                 'command' => 'files-diff',
                 'action' => 'delete',
@@ -248,6 +293,13 @@ final class FilesPullLocalIndexTest extends TestCase
                 ),
             ],
         ], $records);
+    }
+
+    /** @return iterable<string,array{string}> */
+    public static function localDriftPullModeProvider(): iterable
+    {
+        yield 'catch-up keeps changes the remote did not make' => ['catch-up'];
+        yield 'mirror restores the current remote tree' => ['mirror'];
     }
 
     public function testResumeReplaysTheWALIntoTheLocalIndex(): void
@@ -347,19 +399,23 @@ final class FilesPullLocalIndexTest extends TestCase
     public static function partialPullProvider(): iterable
     {
         yield 'selected directory' => [[
+            '--mode=catch-up',
             '--include=/var/www/html/selected',
         ]];
         yield 'filtered files' => [[
+            '--mode=catch-up',
             '--filter=essential-files',
         ]];
         yield 'preserve local files' => [[
+            '--mode=catch-up',
             '--on-fs-root-nonempty=preserve-local',
         ]];
     }
 
-    public function testRemappedPullKeepsUnrelatedLocalIndexEntries(): void
+    public function testMirrorRefetchesLocallyEditedRemappedPathFromItsRemoteSource(): void
     {
         $arguments = [
+            '--mode=mirror',
             '--remap',
             '/var/www/html',
             ':fs-root:/var/www/html/remapped',
@@ -369,29 +425,31 @@ final class FilesPullLocalIndexTest extends TestCase
         $remappedUnchangedPath = $this->localIndexEntryPath(
             'remapped/unchanged.txt'
         );
-        $before = $this->readIndex(
-            $this->localIndexPath()
-        )[$remappedUnchangedPath];
-        $pulledContents = 'remapped pull change';
-        $this->writeRemoteOverrides([
-            'pulled_ctime' => self::REMOTE_CTIME + 1,
-            'pulled_contents_b64' => base64_encode($pulledContents),
-        ]);
+        $remappedUnchangedFile = $this->localTree . '/remapped/unchanged.txt';
+        $this->assertSame(
+            $this->remoteFiles['unchanged.txt'],
+            file_get_contents($remappedUnchangedFile)
+        );
+        file_put_contents(
+            $remappedUnchangedFile,
+            'local edit at the remapped destination'
+        );
 
-        $this->abortFilesPull();
+        $abort = $this->runFilesPull(array_merge(['--abort'], $arguments));
+        $this->assertSame(0, $abort['exit'], $abort['output']);
         $pull = $this->runFilesPull($arguments);
 
         $this->assertSame(0, $pull['exit'], $pull['output']);
         $this->assertSame(
-            $pulledContents,
-            file_get_contents($this->localTree . '/remapped/' . self::PULLED_PATH)
+            $this->remoteFiles['unchanged.txt'],
+            file_get_contents($remappedUnchangedFile)
         );
         $index = $this->readIndex($this->localIndexPath());
-        $this->assertSame($before, $index[$remappedUnchangedPath]);
         $this->assertArrayHasKey(
-            $this->localIndexEntryPath('remapped/' . self::PULLED_PATH),
+            $remappedUnchangedPath,
             $index
         );
+        $this->assertLocalIndexMatches('remapped/unchanged.txt');
     }
 
     public function testPulledDeletionStopsAtNestedIncludedRoot(): void
@@ -404,6 +462,7 @@ final class FilesPullLocalIndexTest extends TestCase
 
         $this->abortFilesPull();
         $pull = $this->runFilesPull([
+            '--mode=catch-up',
             '--include=/var/www/html/folder',
         ]);
 
@@ -456,6 +515,7 @@ final class FilesPullLocalIndexTest extends TestCase
             'removed_paths' => ['folder/remote-deleted.txt'],
         ]);
         $pull = $this->runFilesPull([
+            '--mode=catch-up',
             '--include=/var/www/html/folder',
             '--exclude=/var/www/html/folder/keep',
         ]);
@@ -482,6 +542,7 @@ final class FilesPullLocalIndexTest extends TestCase
     public function testPulledDeletionRemovesAnEntireRemappedSelection(): void
     {
         $arguments = [
+            '--mode=catch-up',
             '--include=/var/www/html',
             '--remap',
             '/var/www/html',
@@ -513,6 +574,7 @@ final class FilesPullLocalIndexTest extends TestCase
     public function testPulledDeletionKeepsAnotherRemapTargetBelowIt(): void
     {
         $arguments = [
+            '--mode=catch-up',
             '--remap',
             '/var/www/html/folder',
             ':fs-root:/shared',
@@ -546,6 +608,7 @@ final class FilesPullLocalIndexTest extends TestCase
     public function testPulledDeletionKeepsAnotherRemapTargetAboveIt(): void
     {
         $arguments = [
+            '--mode=catch-up',
             '--remap',
             '/var/www/html/folder',
             ':fs-root:/shared/inner',
@@ -586,7 +649,7 @@ final class FilesPullLocalIndexTest extends TestCase
         $this->writeRemoteOverrides([
             'added_directories' => ['folder/was-empty'],
         ]);
-        $this->completeFilesPull();
+        $this->completeFilesPull(['--mode=catch-up']);
         file_put_contents(
             $this->localTree . '/folder/was-empty/local.txt',
             'local child'
@@ -599,6 +662,7 @@ final class FilesPullLocalIndexTest extends TestCase
             ],
         ]);
         $pull = $this->runFilesPull([
+            '--mode=catch-up',
             '--include=/var/www/html/folder/was-empty',
         ]);
 
@@ -636,12 +700,12 @@ final class FilesPullLocalIndexTest extends TestCase
                 'removed-tree/child.txt' => 'remote child',
             ],
         ]);
-        $this->completeFilesPull();
+        $this->completeFilesPull(['--mode=catch-up']);
         $this->assertFileExists($this->localTree . '/removed-tree/child.txt');
 
         $this->abortFilesPull();
         $this->writeRemoteOverrides([]);
-        $pull = $this->runFilesPull();
+        $pull = $this->runFilesPull(['--mode=catch-up']);
 
         $this->assertSame(0, $pull['exit'], $pull['output']);
         $this->assertDirectoryDoesNotExist($this->localTree . '/removed-tree');
@@ -659,9 +723,10 @@ final class FilesPullLocalIndexTest extends TestCase
         $this->assertSame(0, $this->filesDiffRecords($diff['stdout'])[0]['local_paths_to_push']);
     }
 
-    private function completeFilesPull(): void
+    /** @param list<string> $arguments */
+    private function completeFilesPull(array $arguments = []): void
     {
-        $result = $this->runFilesPull();
+        $result = $this->runFilesPull($arguments);
         $this->assertSame(0, $result['exit'], $result['output']);
     }
 
@@ -752,12 +817,18 @@ final class FilesPullLocalIndexTest extends TestCase
      */
     private function runFilesPull(array $extraArguments = []): array
     {
-        return $this->runCli(array_merge([
-            'files-pull',
-            $this->targetUrl,
-            '--state-dir=' . $this->stateDirectory,
-            '--fs-root=' . $this->rawFileRoot,
-        ], $extraArguments));
+        for ($attempt = 0; $attempt < 100; ++$attempt) {
+            $result = $this->runCli(array_merge([
+                'files-pull',
+                $this->targetUrl,
+                '--state-dir=' . $this->stateDirectory,
+                '--fs-root=' . $this->rawFileRoot,
+            ], $extraArguments));
+            if ($result['exit'] !== 2) {
+                return $result;
+            }
+        }
+        $this->fail('files-pull did not complete after 100 bounded runs.');
     }
 
     /**

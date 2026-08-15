@@ -88,6 +88,8 @@ require_once __DIR__ . '/lib/merge/load.php';
 require_once __DIR__ . '/lib/sort-index-file.php';
 require_once __DIR__ . '/lib/local-index-update-functions.php';
 require_once __DIR__ . '/lib/index/class-file-index-diff-processor.php';
+require_once __DIR__ . '/lib/index/class-file-sync-cleanup-processor.php';
+require_once __DIR__ . '/lib/index/class-pull-local-index-processor.php';
 require_once __DIR__ . '/lib/index/file-sync-path-functions.php';
 require_once __DIR__ . '/lib/class-reprint-process-lock.php';
 
@@ -326,6 +328,9 @@ class ImportClient
      * with no source).
      */
     private $include_caches = false;
+
+    /** @var string Files-pull behavior: mirror or catch-up. */
+    private $files_pull_mode = 'mirror';
 
     /**
      * @var string Controls behavior when the filesystem root is non-empty at pull start.
@@ -829,6 +834,10 @@ class ImportClient
         $this->progress->set_verbose_mode($this->verbose_mode);
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
         $this->include_caches = $options["include_caches"] ?? false;
+        $this->files_pull_mode = $options["files_pull_mode"] ?? 'mirror';
+        if (!in_array($this->files_pull_mode, ['mirror', 'catch-up'], true)) {
+            throw new InvalidArgumentException("Invalid --mode value. Valid values: mirror, catch-up");
+        }
         $this->extra_directory = $options["extra_directory"] ?? null;
         if (isset($options["fs_root_nonempty_behavior"])) {
             $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
@@ -868,7 +877,6 @@ class ImportClient
                 "Invalid command: {$command}. Valid commands: " . implode(", ", self::COMMANDS),
             );
         }
-
         $progress_output_mode = $options['progress'] ?? 'auto';
         if (
             !is_string($progress_output_mode)
@@ -1029,6 +1037,24 @@ class ImportClient
                 $this->include_caches = $this->get_state()->include_caches;
             }
 
+            if ($file_index_lifecycle_command === "files-pull") {
+                if (
+                    $is_resuming_file_index_lifecycle
+                    && !$abort
+                    && array_key_exists("files_pull_mode", $options)
+                    && $this->get_state()->files_pull_mode !== $this->files_pull_mode
+                ) {
+                    throw new RuntimeException(
+                        "Cannot change --mode while resuming files-pull. " .
+                            "Use --abort to start a new files-pull."
+                    );
+                }
+                if ($is_resuming_file_index_lifecycle && !$abort) {
+                    $this->files_pull_mode = $this->get_state()->files_pull_mode;
+                }
+                $options["files_pull_mode"] = $this->files_pull_mode;
+            }
+
             if (array_key_exists("extra_directory", $options)) {
                 if (
                     $is_resuming_file_index_lifecycle
@@ -1049,6 +1075,35 @@ class ImportClient
             $options["follow_symlinks"] = $this->follow_symlinks;
             $options["include_caches"] = $this->include_caches;
             $options["extra_directory"] = $this->extra_directory;
+
+            if (
+                $file_index_lifecycle_command === "files-pull"
+                && !$abort
+                && $this->files_pull_mode === "mirror"
+            ) {
+                if ($this->include_caches) {
+                    throw new InvalidArgumentException(
+                        "--mode=mirror does not yet accept --include-caches. " .
+                            "Use --mode=catch-up when caches are included."
+                    );
+                }
+                if (
+                    in_array(
+                        $options["filter"] ?? $this->get_state()->filter ?? "none",
+                        $command === "files-pull"
+                            ? ["essential-files", "skipped-earlier"]
+                            : ["essential-files"],
+                        true
+                    )
+                    || !empty($options["include"] ?? $options["only"] ?? [])
+                    || !empty($options["exclude"] ?? [])
+                ) {
+                    throw new InvalidArgumentException(
+                        "--mode=mirror does not accept --include, --exclude, or a partial --filter. " .
+                            "Use --mode=catch-up for a partial pull."
+                    );
+                }
+            }
         } elseif (isset($options["follow_symlinks"])) {
             // Persist follow_symlinks in state so it survives across invocations.
             $this->get_state()->follow_symlinks = $this->follow_symlinks;
@@ -1060,11 +1115,22 @@ class ImportClient
         // Persist fs_root_nonempty_behavior in state so it survives across invocations.
         // 'preserve-local' preserves existing local files instead of overwriting
         // them, and gracefully skips non-writable directories.
+        if (!isset($options["fs_root_nonempty_behavior"])) {
+            $this->fs_root_nonempty_behavior = $this->get_state()->fs_root_nonempty_behavior ?? 'error';
+        }
+        if (
+            $file_index_lifecycle_command === "files-pull"
+            && !$abort
+            && $this->files_pull_mode === "mirror"
+            && $this->fs_root_nonempty_behavior === "preserve-local"
+        ) {
+            throw new InvalidArgumentException(
+                "--mode=mirror cannot preserve local files. Use --mode=catch-up instead."
+            );
+        }
         if (isset($options["fs_root_nonempty_behavior"])) {
             $this->get_state()->fs_root_nonempty_behavior = $this->fs_root_nonempty_behavior;
             $this->save_state();
-        } else {
-            $this->fs_root_nonempty_behavior = $this->get_state()->fs_root_nonempty_behavior ?? 'error';
         }
 
         // Persist the path-filter preset in state so it survives across resume cycles.
@@ -3101,7 +3167,7 @@ class ImportClient
             $this->pull_index_journal->apply_pending_records();
         }
         $this->assert_files_pull_path_selection_unchanged_while_resuming($has_progress);
-        $this->assert_local_followed_symlinks_root_unchanged();
+        $this->assert_followed_path_mapping_unchanged();
 
         // Already completed.
         if ($current_status === "complete") {
@@ -3175,7 +3241,12 @@ class ImportClient
             // Starting fresh — validate that the filesystem root is empty.
             // A delta sync ($is_delta) naturally has a non-empty filesystem root
             // because we put those files there during the initial sync.
-            if (!$is_empty && !$is_delta && $this->fs_root_nonempty_behavior === 'error') {
+            if (
+                !$is_empty
+                && !$is_delta
+                && $this->fs_root_nonempty_behavior === 'error'
+                && $this->files_pull_mode === 'catch-up'
+            ) {
                 throw new RuntimeException(
                     "Filesystem root is not empty and no cursor found. " .
                         "Either clear the filesystem root, use --abort flag, or use --on-fs-root-nonempty=preserve-local to sync while preserving the existing content.",
@@ -3195,6 +3266,7 @@ class ImportClient
                     $state->active_resumable_command->current_stage = "index";
                     $state->follow_symlinks = $this->follow_symlinks;
                     $state->include_caches = $this->include_caches;
+                    $state->files_pull_mode = $this->files_pull_mode;
                     $state->extra_directory = $this->extra_directory;
                     $state->files_pull_path_selection_fingerprint =
                         $path_selection_fingerprint;
@@ -3247,6 +3319,14 @@ class ImportClient
         $this->save_state();
 
         $stage = $this->get_state()->active_resumable_command->current_stage ?? "index";
+        $mirror_work_directory = wp_join_unix_paths($this->pull_state_directory, "mirror");
+        if (
+            $this->files_pull_mode === "mirror"
+            && !is_dir($mirror_work_directory)
+            && !mkdir($mirror_work_directory, 0755)
+        ) {
+            throw new RuntimeException("Failed to create the mirror work directory.");
+        }
         if ($stage !== "diff") {
             $this->pull_index_journal->open();
         }
@@ -3365,23 +3445,97 @@ class ImportClient
                 return;
             }
             $this->get_state()->fetch = new FetchListProgressState();
-
+            if ($this->files_pull_mode === "mirror") {
+                $this->pull_index_journal->apply_pending_records();
+                $stage = "mirror-index";
+                $this->save_files_pull_stage($stage);
+            }
             if (file_exists($this->fetch_list_file)) {
                 @unlink($this->fetch_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->fetch_list_file} | fetch complete",
+            }
+        }
+
+        if ($stage === "mirror-index" || $stage === "mirror-verify") {
+            $processor_cursor = $this->get_state()->diff->processor_cursor;
+            $path_mapper = new RemoteToLocalPathMapper(
+                $this->filesystem_root, $this->get_export_directories(),
+                $this->resolved_path_mappings, $this->local_followed_symlinks_root
+            );
+            $processor = $processor_cursor !== null
+                ? PullLocalIndexProcessor::resume($processor_cursor)
+                : ( $stage === "mirror-index"
+                    ? PullLocalIndexProcessor::start_patch_result(
+                        $mirror_work_directory, $this->next_remote_index_file,
+                        $this->remote_index_file, $this->local_index_file, $path_mapper,
+                        [""], [], $this->include_caches
+                    )
+                    : PullLocalIndexProcessor::start_next_local_index(
+                        $mirror_work_directory, $this->next_remote_index_file,
+                        $this->remote_index_file, $this->local_index_file, $path_mapper,
+                        // Mirror checks every local path against today's remote index.
+                        $this->state_dir, true
+                    ) );
+            $has_next_step = $this->take_files_pull_local_index_steps($processor);
+            if ($processor->get_status() === "restart") {
+                $stage = "index";
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_files_pull_stage($stage);
+                return;
+            } elseif (!$has_next_step && $stage === "mirror-index") {
+                $stage = "mirror-cleanup";
+                $this->save_files_pull_stage($stage);
+            } elseif (!$has_next_step) {
+                Reprint\Importer\copy_index_through_swap_file(
+                    wp_join_unix_paths($mirror_work_directory, "next_local_index.jsonl"),
+                    $this->local_index_file
                 );
             }
-
+            if ($has_next_step) {
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
+                return;
+            }
         }
 
-        // Recreate intermediate path symlinks so the full symlink chain
-        // works locally.  The server discovers these (e.g. /srv/wordpress
-        // -> /wordpress) and includes them in the next remote index.
-        if ($this->follow_symlinks) {
-            $this->recreate_intermediate_symlinks();
+        if ($stage === "mirror-cleanup") {
+            $complete = $this->plan_files_pull_mirror_changes($mirror_work_directory);
+            if (!$complete) {
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
+                return;
+            }
+            $stage = "mirror-fetch";
+            $this->save_files_pull_stage($stage);
         }
-        $this->pull_index_journal->apply_pending_records();
+
+        if ($stage === "mirror-fetch") {
+            if (!$this->fetch_files_from_list($this->fetch_list_file)) {
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
+                return;
+            }
+            if ($this->follow_symlinks) {
+                $this->recreate_intermediate_symlinks();
+            }
+            $stage = "mirror-verify";
+            $this->get_state()->active_resumable_command->completion_state = "partial";
+            $this->save_files_pull_stage($stage);
+            $this->pull_index_journal->apply_pending_records();
+            if (file_exists($this->fetch_list_file)) {
+                @unlink($this->fetch_list_file);
+            }
+            return;
+        }
+
+        if ($this->files_pull_mode === "catch-up") {
+            // Recreate intermediate path symlinks so the full symlink chain
+            // works locally. The server discovers these (e.g. /srv/wordpress
+            // -> /wordpress) and includes them in the next remote index.
+            if ($this->follow_symlinks) {
+                $this->recreate_intermediate_symlinks();
+            }
+            $this->pull_index_journal->apply_pending_records();
+        }
 
         $this->ensure_local_index_exists();
         $this->get_state()->active_resumable_command->completion_state = "complete";
@@ -3411,6 +3565,108 @@ class ImportClient
         ], true);
 
         $this->report_volatile_files();
+    }
+
+    /** Takes a bounded batch without crossing an unsaved processor phase. */
+    private function take_files_pull_local_index_steps(PullLocalIndexProcessor $processor): bool {
+        $phase = $processor->get_checkpoint_phase();
+        for ($steps = 0; $steps < 200; ++$steps) {
+            $has_next_step = $processor->next_step();
+            $processor->flush_pending_output();
+            if ($has_next_step) {
+                $this->get_state()->diff->processor_cursor = $processor->get_cursor();
+            }
+            if (!$has_next_step || $processor->get_checkpoint_phase() !== $phase) {
+                break;
+            }
+        }
+        $processor->close();
+        return $has_next_step;
+    }
+
+    /** Plans one bounded mirror-cleanup batch and records its completed work. */
+    private function plan_files_pull_mirror_changes(string $work_directory): bool {
+        $progress = $this->get_state()->diff;
+        $fetch_list_handle = null;
+        $processor = null;
+        try {
+            $fetch_list_handle = fopen($this->fetch_list_file, "c+b");
+            $fetch_list_stat = is_resource($fetch_list_handle)
+                ? fstat($fetch_list_handle)
+                : false;
+            if (
+                !is_resource($fetch_list_handle)
+                || $progress->fetch_list_byte_offset < 0
+                || $fetch_list_stat === false
+                || $progress->fetch_list_byte_offset > $fetch_list_stat["size"]
+                || !ftruncate($fetch_list_handle, $progress->fetch_list_byte_offset)
+                || fseek($fetch_list_handle, $progress->fetch_list_byte_offset) !== 0
+            ) {
+                throw new RuntimeException("Failed to resume the mirror fetch list.");
+            }
+            $processor = $progress->processor_cursor === null
+                ? FileSyncCleanupProcessor::start(
+                    $work_directory, $this->filesystem_root,
+                    wp_join_unix_paths($work_directory, "pull_patch_result_index.jsonl"),
+                    // Mirror removes local paths omitted by the remote scan.
+                    $this->state_dir, [""], [], true
+                )
+                : FileSyncCleanupProcessor::resume($progress->processor_cursor);
+            $phase = $processor->get_phase();
+            for ($steps = 0; $steps < 200; ++$steps) {
+                $has_next_step = $processor->next_step();
+                $operation = $processor->get_operation();
+                if ($operation !== null && isset($operation["remote_absolute_path"])) {
+                    $this->append_to_fetch_list($operation["remote_absolute_path"], $fetch_list_handle);
+                }
+                $processor->flush_pending_output();
+                if (!fflush($fetch_list_handle)) {
+                    throw new RuntimeException("Failed to flush the mirror fetch list.");
+                }
+                $fetch_list_byte_offset = ftell($fetch_list_handle);
+                if (!is_int($fetch_list_byte_offset)) {
+                    throw new RuntimeException(
+                        "Failed to read the mirror fetch-list byte offset."
+                    );
+                }
+                $next_progress = new FileDiffProgressState();
+                $next_progress->processor_cursor = $processor->get_cursor();
+                $next_progress->fetch_list_byte_offset = $fetch_list_byte_offset;
+                $this->get_state()->diff = $next_progress;
+                if (!$has_next_step || $processor->get_phase() !== $phase) {
+                    break;
+                }
+            }
+        } finally {
+            if ($processor !== null) {
+                $processor->close();
+            }
+            if (is_resource($fetch_list_handle)) {
+                fclose($fetch_list_handle);
+            }
+        }
+        if ($processor->get_status() === "restart") {
+            $this->get_state()->diff = new FileDiffProgressState();
+            return false;
+        }
+        return !$has_next_step;
+    }
+
+    /** Stores one coherent mirror-stage checkpoint before its first step. */
+    private function save_files_pull_stage(string $stage): void
+    {
+        reprint_update_and_save_state_without_signal_interruption(
+            function () use ($stage): void {
+                $state = $this->get_state();
+                $state->active_resumable_command->current_stage = $stage;
+                $state->diff = new FileDiffProgressState();
+                $state->fetch = new FetchListProgressState();
+                if ($stage === "index") {
+                    $state->index = new RemoteFileIndexState();
+                }
+            },
+            [$this, "save_state"]
+        );
     }
 
     /** Creates an empty local index when files-pull recorded no local paths. */
@@ -7504,12 +7760,18 @@ class ImportClient
         }
 
         $file_diff_progress_state = $this->get_state()->diff;
-        $index_diff = FileIndexDiffProcessor::resume(
-            $this->remote_index_file,
-            $this->next_remote_index_file,
-            $file_diff_progress_state->index_diff_cursor,
-            [RemoteIndexReader::class, "decode_index_line"]
-        );
+        $index_diff = $file_diff_progress_state->processor_cursor === null
+            ? FileIndexDiffProcessor::create(
+                $this->remote_index_file,
+                $this->next_remote_index_file,
+                [RemoteIndexReader::class, "decode_index_line"]
+            )
+            : FileIndexDiffProcessor::resume(
+                $this->remote_index_file,
+                $this->next_remote_index_file,
+                $file_diff_progress_state->processor_cursor,
+                [RemoteIndexReader::class, "decode_index_line"]
+            );
         $remote_to_local_path_mapper = new RemoteToLocalPathMapper(
             $this->filesystem_root,
             $this->get_export_directories(),
@@ -7575,9 +7837,13 @@ class ImportClient
                                 $index_diff->get_preceding_path_in_new_index(),
                                 $index_diff->get_following_path_in_new_index()
                             );
-                        // The remote index is a union across files-pull path
-                        // selections. Keep paths outside this run's selection.
-                        if (
+                        // Catch-up keeps the remote-index union outside this
+                        // run's selection. Mirror follows only today's index.
+                        if ($this->files_pull_mode === "mirror") {
+                            $this->pull_index_journal->record_remote_invalidation(
+                                $remote_absolute_path
+                            );
+                        } elseif (
                             $this->is_selected_for_pulling(
                                 $remote_absolute_path,
                                 false
@@ -7722,7 +7988,7 @@ class ImportClient
                 // saved checkpoint in one assignment. An async signal can save
                 // either complete checkpoint.
                 $next_file_diff_progress_state = new FileDiffProgressState();
-                $next_file_diff_progress_state->index_diff_cursor =
+                $next_file_diff_progress_state->processor_cursor =
                     $index_diff->get_cursor();
                 $next_file_diff_progress_state->fetch_list_byte_offset =
                     $fetch_list_byte_offset;
@@ -9230,38 +9496,40 @@ class ImportClient
     }
 
     /**
-     * Refuse to run files-pull after the local followed symlinks root changed.
-     * Placement of followed content is bound to it, so changing it
-     * mid-state would split content across two layouts. Recorded on the first
-     * run, compared on every run after; --abort resets it.
+     * Refuses to reuse indexes after followed-path placement changes.
+     * Paths outside the original remote roots use the followed-symlinks root,
+     * so changing either input can move an unchanged remote path locally.
      */
-    private function assert_local_followed_symlinks_root_unchanged(): void
+    private function assert_followed_path_mapping_unchanged(): void
     {
-        $fingerprint = $this->local_followed_symlinks_root_fingerprint();
-        $previous = $this->get_state()->local_followed_symlinks_root_fingerprint ?? null;
+        $fingerprint = $this->followed_path_mapping_fingerprint();
+        $previous = $this->get_state()->followed_path_mapping_fingerprint ?? null;
 
         if ($previous !== null && $previous !== $fingerprint) {
             throw new RuntimeException(
-                "Cannot change the local followed symlinks root for an existing files-pull. " .
-                    "Use the original value, or use --abort to start a new files-pull.",
+                "Remote roots or the local followed-symlinks root changed path placement. " .
+                    "Use the original settings, or use a new --state-dir.",
             );
         }
 
         if ($previous === null) {
-            $this->get_state()->local_followed_symlinks_root_fingerprint = $fingerprint;
+            $this->get_state()->followed_path_mapping_fingerprint = $fingerprint;
             $this->save_state();
         }
     }
 
-    /**
-     * Fingerprint of the effective local followed symlinks root. No explicit root
-     * (and bare --follow-symlinks) fingerprints as filesystem root, which is the
-     * equivalent placement — so switching between those spellings is allowed.
-     */
-    private function local_followed_symlinks_root_fingerprint(): string
+    /** Fingerprints roots which can change followed-path placement. */
+    private function followed_path_mapping_fingerprint(): string
     {
         $effective = $this->local_followed_symlinks_root ?? $this->filesystem_root;
-        return hash("sha256", $effective);
+        $remote_roots = $effective === $this->filesystem_root
+            ? []
+            : $this->get_export_directories();
+        sort($remote_roots, SORT_STRING);
+        return hash("sha256", json_encode([
+            "effective_root_b64" => base64_encode($effective),
+            "remote_roots_b64" => array_map("base64_encode", $remote_roots),
+        ], JSON_UNESCAPED_SLASHES));
     }
 
     /**
@@ -11416,7 +11684,10 @@ class ImportClient
         $this->state->webhost = $previous_state->webhost;
         $this->state->follow_symlinks = $previous_state->follow_symlinks;
         $this->state->include_caches = $previous_state->include_caches;
+        $this->state->files_pull_mode = $previous_state->files_pull_mode;
         $this->state->extra_directory = $previous_state->extra_directory;
+        $this->state->followed_path_mapping_fingerprint =
+            $previous_state->followed_path_mapping_fingerprint;
         $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
         $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
         $this->state->resolved_path_mappings_fingerprint = $previous_state->resolved_path_mappings_fingerprint;
@@ -12150,6 +12421,15 @@ if (
         ],
 
         // ── files-pull options ───────────────────────────────────
+        [
+            'name' => 'mode',
+            'type' => 'value',
+            'target' => 'files_pull_mode',
+            'placeholder' => 'MODE',
+            'valid_values' => ['mirror', 'catch-up'],
+            'help' => 'Mirror the remote tree or only catch up remote changes (default: mirror)',
+            'commands' => ['pull', 'pull-files', 'files-pull'],
+        ],
         [
             'name' => 'filter',
             'type' => 'value',

@@ -120,6 +120,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             ],
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "follow_symlinks" => false,
+            "files_pull_mode" => "catch-up",
             "fs_root_nonempty_behavior" => "preserve-local",
         ];
         \write_current_pull_state(
@@ -132,6 +133,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $r->getProperty('state')->setValue($client, $r->getMethod('load_state')->invoke($client));
         $r->getProperty('is_tty')->setValue($client, false);
         $r->getProperty('fs_root_nonempty_behavior')->setValue($client, 'preserve-local');
+        $r->getProperty('files_pull_mode')->setValue($client, 'catch-up');
         $r->getProperty('pull_only_files_with_path_prefixes')->setValue($client, $pull_only_files_with_path_prefixes);
         $r->getProperty('pull_excluded_files_with_path_prefixes')->setValue($client, $pull_excluded_files_with_path_prefixes);
         return [$client, $r];

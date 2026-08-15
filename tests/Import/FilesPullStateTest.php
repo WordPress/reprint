@@ -75,6 +75,7 @@ class FilesPullStateTest extends TestCase
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "remote_protocol_version" => PULL_PROTOCOL_VERSION,
             "follow_symlinks" => false,
+            "files_pull_mode" => "catch-up",
             "fs_root_nonempty_behavior" => "preserve-local",
         ], $state));
     }
@@ -137,6 +138,8 @@ class FilesPullStateTest extends TestCase
 
         $behaviorProp = $reflection->getProperty('fs_root_nonempty_behavior');
         $behaviorProp->setValue($client, 'preserve-local');
+        $modeProp = $reflection->getProperty('files_pull_mode');
+        $modeProp->setValue($client, 'catch-up');
 
         return [$client, $reflection];
     }
@@ -144,6 +147,32 @@ class FilesPullStateTest extends TestCase
     // ---------------------------------------------------------------
     // State transition tests
     // ---------------------------------------------------------------
+
+    public function testHighLevelPullDoesNotCountDurableMirrorStepsAsRetries(): void
+    {
+        $client = $this->makeClient();
+        $pull = ( new \ReflectionClass($client) )
+            ->getProperty('pull')
+            ->getValue($client);
+        $runs = 0;
+        $handler = function () use ($client, &$runs): void {
+            ++$runs;
+            $state = $client->get_state();
+            if ($runs > 1000) {
+                $state->active_resumable_command->completion_state = 'complete';
+                return;
+            }
+            $state->active_resumable_command->completion_state = 'partial';
+            $state->active_resumable_command->current_stage = 'mirror-index';
+            $state->diff->processor_cursor = ['step' => $runs];
+        };
+
+        ( new \ReflectionClass($pull) )
+            ->getMethod('run_until_complete')
+            ->invoke($pull, 'files-pull', $handler);
+
+        $this->assertSame(1001, $runs);
+    }
 
     /**
      * A completed files-pull should refuse to re-run.

@@ -131,6 +131,7 @@ class OnlyFilesPathPrefixTest extends TestCase
             ),
             'remote_protocol_version' => PULL_PROTOCOL_VERSION,
             'follow_symlinks' => false,
+            'files_pull_mode' => 'catch-up',
             'fs_root_nonempty_behavior' => 'preserve-local',
             'filter' => 'none',
         );
@@ -378,6 +379,80 @@ class OnlyFilesPathPrefixTest extends TestCase
         );
     }
 
+    public function testRunRestoresFilesPullModeWhileFilesPullIsInProgress(): void
+    {
+        file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
+        $this->writeFilesPullState(array(
+            'files_pull_mode' => 'catch-up',
+            'files_pull_path_selection_fingerprint' =>
+                $this->pathSelectionFingerprint(array()),
+        ));
+
+        $client = $this->runFilesPull(array());
+
+        $files_pull_mode = ( new \ReflectionClass( $client ) )
+            ->getProperty('files_pull_mode')
+            ->getValue($client);
+        $this->assertSame('catch-up', $files_pull_mode);
+        $this->assertSame('catch-up', $this->readState()['files_pull_mode']);
+    }
+
+    public function testRunRejectsChangingFilesPullModeWithoutChangingState(): void
+    {
+        $this->writeFilesPullState(array('files_pull_mode' => 'catch-up'));
+        $stateBefore = file_get_contents($this->pullStateDirectory . '/state.json');
+
+        try {
+            $this->runFilesPull(array('files_pull_mode' => 'mirror'));
+            $this->fail('Expected an active files-pull to reject a mode change.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'Cannot change --mode while resuming files-pull',
+                $exception->getMessage()
+            );
+        }
+        $this->assertSame(
+            $stateBefore,
+            file_get_contents($this->pullStateDirectory . '/state.json')
+        );
+    }
+
+    /** @dataProvider unsupportedMirrorOptionProvider */
+    public function testMirrorRejectsUnsupportedOptionsBeforeWritingState(
+        array $options,
+        string $message
+    ): void {
+        $stateFile = $this->pullStateDirectory . '/state.json';
+
+        try {
+            $this->runFilesPull($options);
+            $this->fail('Expected mirror to reject the unsupported option.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString($message, $exception->getMessage());
+        }
+        $this->assertFileDoesNotExist($stateFile);
+    }
+
+    /** @return iterable<string,array{array<string,mixed>,string}> */
+    public static function unsupportedMirrorOptionProvider(): iterable
+    {
+        yield 'include' => [[
+            'include' => ['/var/www/html/selected'],
+        ], 'does not accept --include'];
+        yield 'exclude' => [[
+            'exclude' => ['/var/www/html/excluded'],
+        ], 'does not accept --include, --exclude'];
+        yield 'filter' => [[
+            'filter' => 'essential-files',
+        ], 'partial --filter'];
+        yield 'caches' => [[
+            'include_caches' => true,
+        ], 'does not yet accept --include-caches'];
+        yield 'preserve local' => [[
+            'fs_root_nonempty_behavior' => 'preserve-local',
+        ], 'cannot preserve local files'];
+    }
+
     public function testRunRejectsChangingIncludeCachesWithoutChangingState(): void
     {
         file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
@@ -409,7 +484,9 @@ class OnlyFilesPathPrefixTest extends TestCase
             'include_caches' => true,
         ));
 
-        $client = $this->runFilesPull(array());
+        $client = $this->runFilesPull(array(
+            'files_pull_mode' => 'catch-up',
+        ));
 
         $include_caches = ( new \ReflectionClass( $client ) )
             ->getProperty('include_caches')
@@ -422,7 +499,10 @@ class OnlyFilesPathPrefixTest extends TestCase
     {
         $this->writeFilesPullState(array('include_caches' => true));
 
-        $this->runFilesPull(array('abort' => true));
+        $this->runFilesPull(array(
+            'abort' => true,
+            'files_pull_mode' => 'catch-up',
+        ));
 
         $this->assertFalse($this->readState()['include_caches']);
     }
@@ -671,7 +751,10 @@ class OnlyFilesPathPrefixTest extends TestCase
             'files_pull_path_selection_fingerprint' => $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
 
-        $this->runFilesPull(array('include' => array(':wp-uploads:')));
+        $this->runFilesPull(array(
+            'include' => array(':wp-uploads:'),
+            'files_pull_mode' => 'catch-up',
+        ));
 
         $state = $this->readState();
         $this->assertSame('complete', $state['active_resumable_command']['completion_state'] ?? null);

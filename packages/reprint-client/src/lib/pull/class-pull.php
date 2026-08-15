@@ -328,7 +328,8 @@ class Pull
                 $stages,
                 !empty($options['follow_symlinks']),
                 !empty($options['include_caches']),
-                $options['extra_directory'] ?? null
+                $options['extra_directory'] ?? null,
+                $options['files_pull_mode'] ?? 'mirror'
             );
             $file_selection_checkpoint_saved =
                 $command === 'pull' || $command === 'pull-files';
@@ -418,6 +419,7 @@ class Pull
                     $state = $this->client->get_state();
                     $state->follow_symlinks = !empty($options['follow_symlinks']);
                     $state->include_caches = !empty($options['include_caches']);
+                    $state->files_pull_mode = $options['files_pull_mode'] ?? 'mirror';
                     $state->extra_directory = $options['extra_directory'] ?? null;
                     $state->pull_pipeline->started_by_command = $command;
                     $state->pull_pipeline->stage_sequence = $stages;
@@ -869,13 +871,15 @@ class Pull
      * @param bool|null   $follow_symlinks Fresh lifecycle link selection, or null to retain it.
      * @param bool        $include_caches  Fresh lifecycle cache selection.
      * @param string|null $extra_directory Fresh lifecycle additional remote directory.
+     * @param string      $files_pull_mode Fresh lifecycle files-pull mode.
      */
     private function prepare_repull(
         string $command,
         array $stage_sequence = [],
         ?bool $follow_symlinks = null,
         bool $include_caches = false,
-        ?string $extra_directory = null
+        ?string $extra_directory = null,
+        string $files_pull_mode = 'mirror'
     ): void
     {
         $state_dir = $this->client->state_dir;
@@ -909,6 +913,7 @@ class Pull
                 $follow_symlinks,
                 $include_caches,
                 $extra_directory,
+                $files_pull_mode,
                 $reset_file_transfer_state,
                 $reset_file_selection_state,
                 $reset_db_state
@@ -929,6 +934,7 @@ class Pull
                         $state->follow_symlinks = $follow_symlinks;
                     }
                     $state->include_caches = $include_caches;
+                    $state->files_pull_mode = $files_pull_mode;
                     $state->extra_directory = $extra_directory;
                 }
                 if ($reset_file_transfer_state) {
@@ -976,11 +982,17 @@ class Pull
      * Lower-level commands return with completion_state="partial" when a
      * server timeout drops the connection. This loop retries automatically,
      * resetting the completion state to "in_progress" so the handler enters
-     * its resume path on the next call.
+     * its resume path on the next call. Durable files-pull cursor movement
+     * resets the retry ceiling because that partial made forward progress.
      */
     private function run_until_complete(string $stage, callable $handler): void
     {
-        for ($attempt = 0; $attempt < 1000; $attempt++) {
+        $transient_retry_attempts = 0;
+        while (true) {
+            $state = $this->client->get_state();
+            $previous_files_pull_stage =
+                $state->active_resumable_command->current_stage;
+            $previous_processor_cursor = $state->diff->processor_cursor;
             $handler();
             $state = $this->client->get_state();
             if ($state->active_resumable_command->completion_state === 'complete') {
@@ -989,13 +1001,26 @@ class Pull
             if ($state->active_resumable_command->completion_state !== 'partial') {
                 throw new RuntimeException("Stage {$stage} stopped before completing.");
             }
+            $processor_made_durable_progress =
+                $stage === 'files-pull'
+                && (
+                    $state->active_resumable_command->current_stage
+                        !== $previous_files_pull_stage
+                    || $state->diff->processor_cursor
+                        !== $previous_processor_cursor
+                );
+            if ($processor_made_durable_progress) {
+                $transient_retry_attempts = 0;
+            } elseif (++$transient_retry_attempts >= 1000) {
+                throw new RuntimeException(
+                    "Stage {$stage} kept reporting partial progress after 1000 retry attempts; aborting."
+                );
+            }
             $state->active_resumable_command->completion_state = 'in_progress';
             $this->client->save_state();
             $this->client->exit_code = 0;
             $this->progress->tick_spinner();
         }
-
-        throw new RuntimeException("Stage {$stage} kept reporting partial progress after 1000 retry attempts; aborting.");
     }
 
     /**

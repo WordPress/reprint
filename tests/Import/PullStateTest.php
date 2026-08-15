@@ -41,29 +41,39 @@ class PullStateTest extends TestCase
         $state->active_resumable_command->command_name = 'db-pull';
         $state->active_resumable_command->completion_state = 'complete';
         $state->pull_pipeline->started_by_command = 'pull';
-        $state->diff->index_diff_cursor = [
-            'old_index_byte_offset' => 123,
-            'new_index_byte_offset' => 456,
-            'preceding_new_index_entry_path_b64' => base64_encode(
-                '/wp-content/index.php'
-            ),
+        $state->files_pull_mode = 'catch-up';
+        $state->diff->processor_cursor = [
+            'phase' => 'planning',
+            'byte_offset' => 123,
         ];
         $state->diff->fetch_list_byte_offset = 789;
         $state->diff->pull_index_wal_byte_offset = 321;
         $state->sql_statements_counted = 99;
 
         $array = $state->to_array();
+        $restored = \PullState::from_array($array);
 
         $this->assertSame('db-pull', $array['active_resumable_command']['command_name']);
         $this->assertSame('complete', $array['active_resumable_command']['completion_state']);
         $this->assertSame('pull', $array['pull_pipeline']['started_by_command']);
+        $this->assertSame('catch-up', $array['files_pull_mode']);
+        $this->assertSame('catch-up', $restored->files_pull_mode);
         $this->assertSame(
-            $state->diff->index_diff_cursor,
-            $array['diff']['index_diff_cursor']
+            $state->diff->processor_cursor,
+            $array['diff']['processor_cursor']
         );
+        $this->assertSame($state->diff->processor_cursor, $restored->diff->processor_cursor);
         $this->assertSame(789, $array['diff']['fetch_list_byte_offset']);
         $this->assertSame(321, $array['diff']['pull_index_wal_byte_offset']);
         $this->assertSame(99, $array['sql_statements_counted']);
+    }
+
+    public function testFilesPullModeDefaultsToMirror(): void
+    {
+        $state = new \PullState();
+
+        $this->assertSame('mirror', $state->files_pull_mode);
+        $this->assertSame('mirror', $state->to_array()['files_pull_mode']);
     }
 
     public function testGetAppliesDefaultsOverVerbatimPreflight(): void
@@ -157,14 +167,32 @@ class PullStateTest extends TestCase
         \PullState::from_array($data);
     }
 
+    public function testStateRejectsInvalidFilesPullMode(): void
+    {
+        $data = ( new \PullState() )->to_array();
+        $data['files_pull_mode'] = 'combine';
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage(
+            'files_pull_mode must be mirror or catch-up'
+        );
+
+        \PullState::from_array($data);
+    }
+
     public function testStateRejectsDiffFieldsFromThePreviousSchema(): void
     {
         $data = (new \PullState())->to_array();
         unset(
-            $data['diff']['index_diff_cursor'],
+            $data['diff']['processor_cursor'],
             $data['diff']['fetch_list_byte_offset'],
             $data['diff']['pull_index_wal_byte_offset']
         );
+        $data['diff']['index_diff_cursor'] = [
+            'old_index_byte_offset' => 0,
+            'new_index_byte_offset' => 0,
+            'preceding_new_index_entry_path_b64' => null,
+        ];
         $data['diff']['next_remote_index_byte_offset'] = 123;
         $data['diff']['last_consumed_remote_index_entry_path'] =
             '/wp-content/index.php';
@@ -173,8 +201,8 @@ class PullStateTest extends TestCase
 
         $this->expectException(\UnexpectedValueException::class);
         $this->expectExceptionMessage(
-            'missing fetch_list_byte_offset, index_diff_cursor, pull_index_wal_byte_offset; ' .
-            'unexpected last_consumed_remote_index_entry_path, ' .
+            'missing fetch_list_byte_offset, processor_cursor, pull_index_wal_byte_offset; ' .
+            'unexpected index_diff_cursor, last_consumed_remote_index_entry_path, ' .
             'last_processed_next_remote_index_entry_path, next_remote_index_byte_offset'
         );
 

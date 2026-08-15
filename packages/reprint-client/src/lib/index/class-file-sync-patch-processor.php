@@ -53,7 +53,7 @@ require_once __DIR__ . '/class-fresh-local-index-processor.php';
  * @phpstan-type FreshTreePosition array{phase:'indexing'|'sorting'|'starting_patch',patch_base_index_file_b64:string,patch_result_index_file_b64:string,included_index_path_roots_b64:list<string>,excluded_index_path_roots_b64:list<string>,deletion_policy:'collapsed'|'exact',fresh_local_index_cursor:FreshIndexCursor}
  * @phpstan-type Position FreshTreePosition|array{phase:'planning',file_sync_patch_planner_cursor:PlannerCursor}|array{phase:'complete'}
  * @phpstan-type Cursor array{fresh_local_index_file_b64:string,position:Position}
- * @phpstan-type SyncOperation array{action:'copy'|'delete'|'replace',path:string,expected_source?:array{type:string,size:int,ctime:int},expected_base?:array{type:string,size:int,ctime:int}}
+ * @phpstan-type SyncOperation array{action:'copy'|'delete'|'replace',path:string,expected_source?:array{type:string,size:int,ctime:int},expected_base?:array{type:string,size:int,ctime:int},remote_absolute_path?:string}
  */
 final class FileSyncPatchProcessor {
     /** @var Cursor */
@@ -316,6 +316,7 @@ final class FileSyncPatchProcessor {
      * @return array|null {
      *     @type string $action          `copy`, `delete`, or `replace`.
      *     @type string $path            Local relative path selected by the patch.
+     *     @type string $remote_absolute_path Original remote path when the result index records one.
      *     @type array  $expected_source {
      *         Result index entry required by `copy` and `replace`.
      *

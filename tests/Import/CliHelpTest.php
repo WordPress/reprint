@@ -26,6 +26,10 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--include=SOURCE', $output);
         $this->assertStringNotContainsString('--only', $output);
         $this->assertStringContainsString('--exclude=SOURCE', $output);
+        $this->assertMatchesRegularExpression(
+            '/--mode=MODE.*mirror.*catch up.*default: mirror/i',
+            $output
+        );
     }
 
     public function testFilesIndexHelpNamesTheNextRemoteIndexFile(): void

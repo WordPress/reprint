@@ -29,10 +29,10 @@ require_once __DIR__ . '/file-sync-path-functions.php';
  * them with the retained local index. It replaces retained entries inside the
  * selected roots and keeps entries outside them or across an excluded root.
  *
- * start_patch_result() copies remote type, size, ctime, and directory emptiness
- * into local coordinates. FileSyncPatchProcessor can use that index to plan
- * pre-fetch cleanup. The patch-result file is temporary planning input. Its
- * mapped entries' ctime values belong to the remote machine.
+ * start_patch_result() checks the WAL-applied remote index against the next
+ * remote index, then copies retained local metadata into local coordinates.
+ * FileSyncPatchProcessor can use that temporary index to plan cleanup after
+ * remote catch-up without comparing ctime values from different machines.
  *
  * start_next_local_index() requires the selected paths in the remote index and
  * next remote index to match in presence, type, size, and ctime. Candidate
@@ -74,7 +74,7 @@ require_once __DIR__ . '/file-sync-path-functions.php';
  * @phpstan-type MapperConfig array{filesystem_root_b64:string,original_remote_roots_b64:list<string>,resolved_path_mappings:list<array{remote_prefix_b64:string,local_prefix_b64:string}>,local_followed_symlinks_root_b64:string|null}
  * @phpstan-type IndexDiffCursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
  * @phpstan-type Position array{phase:'mapping',remote_index_byte_offset?:int,remote_index_diff_cursor?:IndexDiffCursor,mapped_index_byte_offset:int,mapped_index_parents_byte_offset:int}|array{phase:'sorting'|'sorting_parents'|'starting_merge'}|array{phase:'merging',index_diff_cursor:IndexDiffCursor,mapped_index_parent_cursor:IndexDiffCursor,index_byte_offset:int}|array{phase:'verifying',file_sync_patch_processor_cursor:array}|array{phase:'complete'|'restart'}
- * @phpstan-type Cursor array{metadata_source:'remote_recorded'|'locally_observed',next_remote_index_file_b64:string,remote_index_file_b64:string|null,remote_index_exists:bool,retained_local_index_file_b64:string,retained_local_index_exists:bool,mapped_index_file_b64:string,mapped_index_parents_file_b64:string,index_file_b64:string,path_mapper_config:MapperConfig,included_local_index_path_roots_b64:list<string>,excluded_local_index_path_roots_b64:list<string>,verification_storage_path_b64:string,verification_include_caches:bool,position:Position}
+ * @phpstan-type Cursor array{metadata_source:'remote_recorded'|'retained_local'|'locally_observed',next_remote_index_file_b64:string,remote_index_file_b64:string|null,remote_index_exists:bool,retained_local_index_file_b64:string,retained_local_index_exists:bool,mapped_index_file_b64:string,mapped_index_parents_file_b64:string,index_file_b64:string,path_mapper_config:MapperConfig,included_local_index_path_roots_b64:list<string>,excluded_local_index_path_roots_b64:list<string>,verification_storage_path_b64:string,verification_include_caches:bool,position:Position}
  */
 final class PullLocalIndexProcessor
 {
@@ -117,33 +117,37 @@ final class PullLocalIndexProcessor
     private bool $closed = false;
 
     /**
-     * Starts a local-coordinate patch-result index using remote metadata.
+     * Starts a local-coordinate patch-result index after remote catch-up.
      *
      * @param string                  $work_directory            Existing directory for processor work files.
      * @param string                  $next_remote_index_file Immutable next remote index.
+     * @param string                  $remote_index_file WAL-applied remote index after catch-up.
      * @param string                  $retained_local_index_file Retained local index, or a missing path on the first pull.
      * @param RemoteToLocalPathMapper $path_mapper               Path mapping used by this pull.
      * @param list<string> $included_local_index_path_roots Local roots which the pull may change.
      * @param list<string> $excluded_local_index_path_roots Local roots which the pull must not affect.
+     * @param bool         $include_caches                  Whether the local scan includes default-skipped paths.
      */
     public static function start_patch_result(
         string $work_directory,
         string $next_remote_index_file,
+        string $remote_index_file,
         string $retained_local_index_file,
         RemoteToLocalPathMapper $path_mapper,
         array $included_local_index_path_roots = [""],
-        array $excluded_local_index_path_roots = []
+        array $excluded_local_index_path_roots = [],
+        bool $include_caches = false
     ): self {
         return self::start(
-            "remote_recorded", $work_directory,
+            "retained_local", $work_directory,
             $next_remote_index_file,
-            null,
+            $remote_index_file,
             $retained_local_index_file,
             $path_mapper,
             $included_local_index_path_roots,
             $excluded_local_index_path_roots,
             "",
-            false
+            $include_caches
         );
     }
 
@@ -201,6 +205,7 @@ final class PullLocalIndexProcessor
         $processor->cursor = $cursor;
         if (
             $cursor["metadata_source"] !== "remote_recorded"
+            && $cursor["metadata_source"] !== "retained_local"
             && $cursor["metadata_source"] !== "locally_observed"
         ) {
             throw new InvalidArgumentException("Pull local index cursor contains an invalid metadata source.");
@@ -244,7 +249,7 @@ final class PullLocalIndexProcessor
         if ($position["phase"] === "mapping") {
             self::require_file($processor->next_remote_index_file, "next remote index");
             try {
-                if ($cursor["metadata_source"] === "locally_observed") {
+                if ($cursor["metadata_source"] !== "remote_recorded") {
                     if ($cursor["remote_index_file_b64"] === null) {
                         throw new InvalidArgumentException(
                             "Pull local index cursor is missing its remote index."
@@ -365,7 +370,7 @@ final class PullLocalIndexProcessor
             $local_absolute_path = null;
             $local_relative_path = null;
             $path_may_change = null;
-            if ($this->cursor["metadata_source"] === "locally_observed") {
+            if ($this->cursor["metadata_source"] !== "remote_recorded") {
                 if (
                     !$this->remote_index_path_selected
                     && !$this->remote_index_diff->next_path()
@@ -405,6 +410,21 @@ final class PullLocalIndexProcessor
                     $next_remote_path_type =
                         $this->remote_index_diff
                             ->get_path_type_in_new_index();
+                    if (
+                        $path_may_change
+                        && $next_remote_path_type !== null
+                        && !$this->cursor["verification_include_caches"]
+                        && FileIndexProcessor::path_is_default_skipped(
+                            $local_relative_path
+                        )
+                    ) {
+                        throw new RuntimeException(
+                            "Cannot mirror mapped path "
+                            . base64_encode($local_relative_path)
+                            . " because the local scan omits it by default. "
+                            . "Use --include-caches or --mode=catch-up."
+                        );
+                    }
                     if ($next_remote_path_type !== null) {
                         $remote_index_entry = [
                             "path" => $remote_absolute_path,
@@ -496,6 +516,10 @@ final class PullLocalIndexProcessor
                     "size" => $remote_index_entry["size"],
                     "type" => $remote_index_entry["type"],
                 ];
+                if ($this->cursor["metadata_source"] === "retained_local") {
+                    $mapped_index_entry["remote_absolute_path"] =
+                        $remote_index_entry["path"];
+                }
                 if (array_key_exists("empty", $remote_index_entry)) {
                     $mapped_index_entry["empty"] = $remote_index_entry["empty"];
                 }
@@ -582,7 +606,7 @@ final class PullLocalIndexProcessor
                 "mapped_index_parents_byte_offset" =>
                     $mapped_index_parents_byte_offset,
             ];
-            if ($this->cursor["metadata_source"] === "locally_observed") {
+            if ($this->cursor["metadata_source"] !== "remote_recorded") {
                 $this->remote_index_path_selected =
                     $this->remote_index_diff->next_path();
                 $mapping_position[
@@ -737,12 +761,14 @@ final class PullLocalIndexProcessor
                 );
             }
         }
-        $write_retained_local_metadata =
-            $this->cursor["metadata_source"] === "locally_observed"
-            && $write_new_entry;
+        $use_retained_local_metadata =
+            $this->cursor["metadata_source"] !== "remote_recorded"
+            && $write_new_entry
+            && $old_path_type === $new_path_type;
         if (
-            $write_retained_local_metadata
-            && $old_path_type !== $new_path_type
+            $this->cursor["metadata_source"] === "locally_observed"
+            && $write_new_entry
+            && !$use_retained_local_metadata
         ) {
             return $this->restart();
         }
@@ -750,12 +776,14 @@ final class PullLocalIndexProcessor
             $index_entry = [
                 "path" => $this->index_diff->get_path(),
                 "ctime" => $write_new_entry
-                    ? ( $write_retained_local_metadata
+                    ? ( $use_retained_local_metadata
                         ? $this->index_diff->get_ctime_in_old_index()
-                        : $this->index_diff->get_ctime_in_new_index() )
+                        : ( $this->cursor["metadata_source"] === "retained_local"
+                            ? -1
+                            : $this->index_diff->get_ctime_in_new_index() ) )
                     : $this->index_diff->get_ctime_in_old_index(),
                 "size" => $write_new_entry
-                    ? ( $write_retained_local_metadata
+                    ? ( $use_retained_local_metadata
                         ? $this->index_diff->get_size_in_old_index()
                         : $this->index_diff->get_size_in_new_index() )
                     : $this->index_diff->get_size_in_old_index(),
@@ -766,6 +794,14 @@ final class PullLocalIndexProcessor
                 : $this->index_diff->get_directory_is_empty_in_old_index();
             if ($directory_is_empty !== null) {
                 $index_entry["empty"] = $directory_is_empty;
+            }
+            $remote_absolute_path =
+                $this->index_diff->get_remote_absolute_path_in_new_index();
+            if (
+                $this->cursor["metadata_source"] === "retained_local"
+                && $write_new_entry && $remote_absolute_path !== null
+            ) {
+                $index_entry["remote_absolute_path"] = $remote_absolute_path;
             }
             write_local_index_entry($this->index_handle, $index_entry);
         }
@@ -798,6 +834,15 @@ final class PullLocalIndexProcessor
     public function get_phase(): string
     {
         return $this->cursor["position"]["phase"];
+    }
+
+    /** Returns the phase whose transition requires a caller checkpoint. */
+    public function get_checkpoint_phase(): string
+    {
+        if ($this->get_phase() !== "verifying") {
+            return $this->get_phase();
+        }
+        return "verifying:" . $this->verification_processor->get_phase();
     }
 
     /** Returns `complete` or `restart` after next_step() returns false. */
@@ -895,7 +940,7 @@ final class PullLocalIndexProcessor
         }
         self::require_file($next_remote_index_file, "next remote index");
         $remote_index_exists = false;
-        if ($metadata_source === "locally_observed") {
+        if ($metadata_source !== "remote_recorded") {
             if ($remote_index_file === null) {
                 throw new LogicException(
                     "Cannot build the next local index without its remote index."
@@ -919,7 +964,7 @@ final class PullLocalIndexProcessor
         );
         $index_file = wp_join_unix_paths(
             $work_directory,
-            $metadata_source === "remote_recorded"
+            $metadata_source !== "locally_observed"
                 ? "pull_patch_result_index.jsonl"
                 : "next_local_index.jsonl"
         );
@@ -934,7 +979,7 @@ final class PullLocalIndexProcessor
         if (file_put_contents($index_file, "") !== 0) {
             throw new RuntimeException("Failed to initialize the pull local index.");
         }
-        if ($metadata_source === "locally_observed") {
+        if ($metadata_source !== "remote_recorded") {
             $position = [
                 "phase" => "mapping",
                 "remote_index_diff_cursor" => [
@@ -987,7 +1032,7 @@ final class PullLocalIndexProcessor
         $this->mapped_index_parent_reader = null;
         fclose($this->index_handle);
         $this->index_handle = null;
-        if ($this->cursor["metadata_source"] === "remote_recorded") {
+        if ($this->cursor["metadata_source"] !== "locally_observed") {
             $this->cursor["position"] = ["phase" => "complete"];
             $this->close();
             return false;

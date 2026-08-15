@@ -111,6 +111,7 @@ final class FileIndexSelectionLifecycleTest extends TestCase
                     'current_stage' => 'index',
                     'remote_cursor' => null,
                 ],
+                'files_pull_mode' => 'catch-up',
                 'include_caches' => true,
                 'extra_directory' => $this->extraDirectory,
             ]
@@ -144,6 +145,7 @@ final class FileIndexSelectionLifecycleTest extends TestCase
         $this->assertIsString($importer);
         $options = [
             'command' => 'pull-files',
+            'files_pull_mode' => 'catch-up',
             'fs_root_nonempty_behavior' => 'preserve-local',
             'progress' => 'jsonl',
         ];

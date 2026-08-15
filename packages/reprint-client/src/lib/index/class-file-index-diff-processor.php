@@ -115,7 +115,7 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * while the processor retains unread entries. The cursor still names only
  * consumed entries and can always be passed to `resume()`.
  *
- * @phpstan-type IndexEntry array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool}
+ * @phpstan-type IndexEntry array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool,remote_absolute_path?:string}
  * @phpstan-type Cursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
  */
 final class FileIndexDiffProcessor
@@ -487,6 +487,13 @@ final class FileIndexDiffProcessor
     {
         $entry = $this->get_new_index_entry_for_current_path();
         return $entry["empty"] ?? null;
+    }
+
+    /** Returns the current result entry's original remote path, when recorded. */
+    public function get_remote_absolute_path_in_new_index(): ?string
+    {
+        $entry = $this->get_new_index_entry_for_current_path();
+        return $entry["remote_absolute_path"] ?? null;
     }
 
     /**

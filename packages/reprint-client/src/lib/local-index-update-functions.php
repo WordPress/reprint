@@ -7,6 +7,23 @@ use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exceptions contain CLI filesystem paths, never HTML output.
 
 /**
+ * Copies one complete index through a swap file and moves it into place.
+ *
+ * copy() streams without holding the complete index in memory. Only the
+ * final rename is atomic: interruption during copy leaves the existing
+ * index untouched and a later call overwrites the partial swap file.
+ */
+function copy_index_through_swap_file(string $source_path, string $target_path): void {
+	$swap_index = $target_path . '.swap';
+	if ( ! @copy( $source_path, $swap_index ) ) {
+		throw new \RuntimeException( 'Failed to copy the index to its swap file: ' . $swap_index );
+	}
+	if ( ! @rename( $swap_index, $target_path ) ) {
+		throw new \RuntimeException( 'Failed to move the copied index into place: ' . $target_path );
+	}
+}
+
+/**
  * Merges path mutations into the local index file:
  *
  *     current index ----\
@@ -217,11 +234,12 @@ function merge_local_index_mutations(
  * @type string $type `file`, `link`, or `dir`.
  * @type bool $empty Whether a directory has no descendant entries in
  *                         this index.
+ * @type string $remote_absolute_path Original remote path for temporary pull planning entries.
  * }
- * @phpstan-return array{path:string,ctime:int,size:int,type:'file'|'link'|'dir',empty?:bool}
+ * @phpstan-return array{path:string,ctime:int,size:int,type:'file'|'link'|'dir',empty?:bool,remote_absolute_path?:string}
  */
 function decode_local_index_entry( string $local_index_json_line ): array {
-	/** @var array{path:string,ctime:int,size:int,type:'file'|'link'|'dir',empty?:bool} $encoded_local_index_entry */
+	/** @var array{path:string,ctime:int,size:int,type:'file'|'link'|'dir',empty?:bool,remote_absolute_path?:string} $encoded_local_index_entry */
 	$encoded_local_index_entry = json_decode(
 		$local_index_json_line,
 		true,
@@ -241,6 +259,16 @@ function decode_local_index_entry( string $local_index_json_line ): array {
 	if ( array_key_exists( 'empty', $encoded_local_index_entry ) ) {
 		$local_index_entry['empty'] =
 			$encoded_local_index_entry['empty'];
+	}
+	if ( array_key_exists( 'remote_absolute_path', $encoded_local_index_entry ) ) {
+		$remote_absolute_path = base64_decode(
+			$encoded_local_index_entry['remote_absolute_path'],
+			true
+		);
+		if ( $remote_absolute_path === false ) {
+			throw new \RuntimeException( 'Invalid remote path in a local index entry.' );
+		}
+		$local_index_entry['remote_absolute_path'] = $remote_absolute_path;
 	}
 
 	return $local_index_entry;
@@ -336,6 +364,7 @@ function read_local_index_updates( $sorted_local_index_updates_handle ): \Genera
  * @type string $type `file`, `link`, or `dir`.
  * @type bool $empty Whether a directory has no descendant entries in
  *                         this index.
+ * @type string $remote_absolute_path Original remote path for temporary pull planning entries.
  * }
  */
 function write_local_index_entry(
@@ -353,6 +382,10 @@ function write_local_index_entry(
 		&& array_key_exists( 'empty', $local_index_entry )
 	) {
 		$encoded_local_index_entry['empty'] = $local_index_entry['empty'];
+	}
+	if ( array_key_exists( 'remote_absolute_path', $local_index_entry ) ) {
+		$encoded_local_index_entry['remote_absolute_path'] =
+			base64_encode( $local_index_entry['remote_absolute_path'] );
 	}
 	$local_index_json_line = json_encode(
 		                         $encoded_local_index_entry,

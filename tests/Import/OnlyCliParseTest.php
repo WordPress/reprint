@@ -350,6 +350,7 @@ PHP, var_export($requestsLog, true)));
         $output = $this->runCli(array(
             'files-pull',
             $remoteReprintApiUrl,
+            '--mode=catch-up',
             '--include',
             ':wp-content:/plugins',
             '--include',
@@ -387,6 +388,7 @@ PHP, var_export($requestsLog, true)));
         $output = $this->runCli(array(
             'files-pull',
             $remoteUrl,
+            '--mode=catch-up',
             '--exclude',
             ':wp-content:/cache',
             '--exclude',
