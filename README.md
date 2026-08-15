@@ -108,7 +108,8 @@ Both packages depend on [`wp-php-toolkit/data-liberation`](https://packagist.org
 - `packages/reprint-client` — Source for the `wp-php-toolkit/reprint-client` Composer package (the CLI). `packages/reprint-client/bin/reprint-client` is the entry point for repo checkouts; Composer installs it as `vendor/bin/reprint-client`.
 - `reprint-server-wp` — WordPress plugin distribution that bundles `reprint-server`. The release ZIP keeps the legacy `reprint-exporter-wp.zip` name so upgrades land in the existing installed plugin directory.
 - `tests` — PHPUnit suite (`tests/`), Docker-based e2e scenarios (`tests/e2e/`), and PHPStan support files (`tests/phpstan/`).
-- `docs` — architecture documentation and project logos.
+- `docs` — [design choices](docs/DESIGN.md), focused design documents, and
+  project logos.
 - `bin` — build tooling (PHAR build, plugin version stamping).
 - `lib` — the `sqlite-database-integration` git submodule used by the MySQL query parser.
 
