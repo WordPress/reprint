@@ -387,6 +387,32 @@ PHP;
         $this->assertDatabasesEqual($this->pdo, $importPdo, ['items']);
     }
 
+    public function testTableReplacementIsMarkedForItsOwnMultipartPart(): void
+    {
+        $this->pdo->exec("CREATE TABLE aa_rows (id INT PRIMARY KEY)");
+        $this->pdo->exec("INSERT INTO aa_rows VALUES (1), (2)");
+        $this->pdo->exec("CREATE TABLE bb_rows (id INT PRIMARY KEY)");
+        $this->pdo->exec("INSERT INTO bb_rows VALUES (1)");
+
+        $producer = $this->createProducer(['batch_size' => 1]);
+        $aa_insert_count = 0;
+        $saw_bb_replacement = false;
+        while ($producer->next_sql_fragment()) {
+            $fragment = $producer->get_sql_fragment();
+            if (strpos($fragment, 'INSERT INTO `aa_rows`') !== false) {
+                ++$aa_insert_count;
+                $this->assertFalse($producer->current_fragment_must_be_its_own_part());
+            }
+            if (strpos($fragment, 'DROP TABLE IF EXISTS `bb_rows`') !== false) {
+                $saw_bb_replacement = true;
+                $this->assertTrue($producer->current_fragment_must_be_its_own_part());
+            }
+        }
+
+        $this->assertSame(2, $aa_insert_count);
+        $this->assertTrue($saw_bb_replacement);
+    }
+
     public function testVariousDataTypes(): void
     {
         $this->pdo->exec("

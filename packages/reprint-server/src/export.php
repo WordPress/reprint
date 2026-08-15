@@ -964,38 +964,76 @@ function endpoint_sql_chunk(
     $batches_processed = 0;
     $sql_bytes_processed = 0;
     $aborted = false;
+    /** @var string|null $deferred_fragment */
+    $deferred_fragment = null;
+    /** @var string|null $deferred_fragment_cursor */
+    $deferred_fragment_cursor = null;
 
     try {
         while (
             $budget->has_remaining()
         ) {
-            $sql = [];
+            $sql_fragments = [];
+            $cursor = null;
+            $sql_ends_with_complete_statement = false;
 
             $i = 0;
-            while ($reader->next_sql_fragment()) {
-                $fragment = (string) $reader->get_sql_fragment();
-                $sql[] = $fragment;
-                $i++;
+            if ($deferred_fragment !== null) {
+                $sql_fragments[] = $deferred_fragment;
+                $cursor = $deferred_fragment_cursor;
+                $sql_ends_with_complete_statement = true;
+                $deferred_fragment = null;
+                $deferred_fragment_cursor = null;
+            } else {
+                while ($reader->next_sql_fragment()) {
+                    $fragment = (string) $reader->get_sql_fragment();
 
-                // Direct MySQL output saves its source position after this
-                // part. Stop at the end of a statement so a following DROP or
-                // CREATE cannot commit imported rows before that position is saved.
-                $trimmed_fragment = rtrim($fragment);
-                if ($trimmed_fragment !== "" && $trimmed_fragment[-1] === ";") {
-                    break;
-                }
+                    // The importer stores a cursor only after executing a complete part.
+                    // Keep the SET header alone before row data. Do not put DROP/CREATE
+                    // or the footer after INSERTs: their implicit or explicit COMMIT
+                    // could make those rows permanent before the INSERT cursor is stored.
+                    // Keep each CONCAT UPDATE alone so its cursor is stored immediately;
+                    // if MyISAM stops first, the importer refuses to repeat the append.
+                    if (
+                        $reader->current_fragment_must_be_its_own_part() &&
+                        !empty($sql_fragments) &&
+                        $sql_ends_with_complete_statement
+                    ) {
+                        $deferred_fragment = $fragment;
+                        $deferred_fragment_cursor = $reader->get_reentrancy_cursor();
+                        break;
+                    }
 
-                if ($i >= $fragments_per_batch) {
-                    break;
-                }
+                    $sql_fragments[] = $fragment;
+                    $i++;
 
-                if (
-                    !$budget->has_remaining()
-                ) {
-                    break;
+                    $trimmed_fragment = rtrim($fragment);
+                    $sql_ends_with_complete_statement =
+                        $trimmed_fragment !== '' && $trimmed_fragment[-1] === ';';
+                    if ($sql_ends_with_complete_statement) {
+                        $cursor = $reader->get_reentrancy_cursor();
+                    }
+
+                    if ($reader->current_fragment_must_be_its_own_part()) {
+                        break;
+                    }
+
+                    if ($i >= $fragments_per_batch) {
+                        break;
+                    }
+
+                    if (
+                        !$budget->has_remaining()
+                    ) {
+                        break;
+                    }
                 }
             }
-            $sql = implode("", $sql);
+
+            $sql = implode("", $sql_fragments);
+            if ($sql === '') {
+                break;
+            }
             $sql_bytes_processed += strlen($sql);
 
             // Does this chunk end on a complete statement boundary?
@@ -1004,15 +1042,16 @@ function endpoint_sql_chunk(
             // character is sufficient.
             $trimmed = rtrim($sql);
             $query_complete = $trimmed !== "" && $trimmed[-1] === ";";
+            if (!$query_complete || $cursor === null) {
+                $cursor = $reader->get_reentrancy_cursor();
+            }
 
             // E2E test hook: before SQL batch is emitted
             if (getenv('SITE_EXPORT_TEST_MODE')) {
-                $cursor_for_hook = $reader->get_reentrancy_cursor();
-                $hook_args = [&$sql, $cursor_for_hook];
+                $hook_args = [&$sql, $cursor];
                 _e2e_call_hook('test_hook_before_sql_batch', $hook_args);
             }
 
-            $cursor = $reader->get_reentrancy_cursor();
             $gz->write(
                 "--{$boundary}\r\n" .
                 "Content-Type: application/sql\r\n" .
@@ -1028,7 +1067,7 @@ function endpoint_sql_chunk(
 
             $batches_processed++;
 
-            if ($reader->is_finished()) {
+            if ($reader->is_finished() && $deferred_fragment === null) {
                 break;
             }
         }
@@ -1039,7 +1078,9 @@ function endpoint_sql_chunk(
     }
 
     // Best-effort completion chunk — the client already has the data chunks.
-    $status = $aborted ? "partial" : ($reader->is_finished() ? "complete" : "partial");
+    $status = $aborted
+        ? "partial"
+        : ($reader->is_finished() && $deferred_fragment === null ? "complete" : "partial");
 
     // E2E test hook: before completion chunk
     if (getenv('SITE_EXPORT_TEST_MODE')) {

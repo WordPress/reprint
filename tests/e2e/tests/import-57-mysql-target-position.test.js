@@ -39,15 +39,17 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
     }
 
     function mysqlArguments() {
+        // One table comment plus one 250-row INSERT completes the first part.
+        // The hook pauses the following part while those 250 rows are committed.
         return [
             '--sql-output=mysql',
             '--mysql-host=127.0.0.1',
             '--mysql-user=e2e_admin',
             '--mysql-password=e2e_password',
             `--mysql-database=${targetDb}`,
-            '--sql-fragments-start=5000',
-            '--sql-fragments-min=5000',
-            '--sql-fragments-max=5000',
+            '--sql-fragments-start=251',
+            '--sql-fragments-min=251',
+            '--sql-fragments-max=251',
             '--progress=jsonl',
         ];
     }
@@ -115,6 +117,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         writeHookState(site, {
             pauseTable: sourceTable,
             pauseNextBatch: false,
+            stopAfterBatch: false,
             paused: false,
             countDrops: false,
             drops: {},
@@ -130,9 +133,15 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             '            }',
             '        }',
             '    }',
+            '    if (!empty($state[\'stopAfterBatch\'])) {',
+            '        // Keep the request open while the importer saves the preceding part.',
+            '        usleep(10000000);',
+            '        exit;',
+            '    }',
             '    if (!empty($state[\'pauseNextBatch\'])) {',
             '        $state[\'pauseNextBatch\'] = false;',
             '        $state[\'paused\'] = true;',
+            '        $state[\'stopAfterBatch\'] = true;',
             '        file_put_contents($state_file, json_encode($state));',
             '        usleep(10000000);',
             '        return;',
@@ -167,6 +176,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             ...readHookState(site),
             pauseTable: null,
             pauseNextBatch: false,
+            stopAfterBatch: false,
             paused: false,
         });
         const collisionDir = createTempDir('e2e-mysql-source-cursor-collision');
@@ -233,6 +243,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         writeHookState(site, {
             pauseTable: sourceTable,
             pauseNextBatch: false,
+            stopAfterBatch: false,
             paused: false,
             countDrops: false,
             drops: {},
@@ -314,6 +325,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             ...hookState,
             pauseTable: myisamSourceTable,
             pauseNextBatch: false,
+            stopAfterBatch: false,
             paused: false,
             countDrops: true,
             drops: {},
@@ -322,7 +334,8 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         const lockName = 'reprint-db-pull-'
             + createHash('sha256').update(targetDb).digest('hex').slice(0, 40);
         const heldLock = await createMysqlConnection(targetDb);
-        const [[lockResult]] = await heldLock.query('SELECT GET_LOCK(?, 0) AS acquired', [lockName]);
+        // MySQL may need a moment to notice that SIGKILL closed the old target connection.
+        const [[lockResult]] = await heldLock.query('SELECT GET_LOCK(?, 10) AS acquired', [lockName]);
         assert.equal(Number(lockResult.acquired), 1);
 
         const second = spawnDatabasePull();
@@ -371,6 +384,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             ...finalHookState,
             pauseTable: null,
             pauseNextBatch: false,
+            stopAfterBatch: false,
             paused: false,
             drops: {
                 ...finalHookState.drops,
