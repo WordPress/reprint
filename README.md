@@ -375,8 +375,13 @@ output stores the last committed source position in the target table
 unlikely and changes whenever the table schema changes. Reprint logs and excludes
 that internal name from the source dump. For transactional target tables, each
 completed SQL group and its source position are committed together. If the
-importer process stops, the next `db-pull` starts the dump from the beginning
-rather than relying on unfinished SQL from the dead process.
+importer process stops, the next `db-pull` waits for the old target connection
+to finish, reapplies the saved MySQL session setup, and continues from the
+position stored in the target database. A repeated INSERT skips rows already
+identified by a non-null unique key, so this also works for keyed MyISAM tables.
+Reprint cannot continue a nontransactional table without such a key, or while
+an oversized value is being appended in separate UPDATE statements; those
+cases require `db-pull --abort` and a fresh import.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`

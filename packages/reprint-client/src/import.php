@@ -3813,7 +3813,11 @@ class ImportClient
 
         $has_progress =
             $state_command === "db-pull" &&
-            ($this->get_state()->active_resumable_command->completion_state ?? null) === "in_progress";
+            in_array(
+                $this->get_state()->active_resumable_command->completion_state ?? null,
+                ["in_progress", "partial"],
+                true,
+            );
         $current_status =
             $state_command === "db-pull"
                 ? $this->get_state()->active_resumable_command->completion_state ?? null
@@ -3841,6 +3845,7 @@ class ImportClient
 
         if ($has_progress) {
             $stage = $this->get_state()->active_resumable_command->current_stage ?? "db-index";
+            $this->get_state()->active_resumable_command->completion_state = "in_progress";
             $this->audit_log(
                 sprintf(
                     "RESUME db-pull | stage=%s | cursor=%s",
@@ -3906,7 +3911,8 @@ class ImportClient
             );
 
             // Transition to sql stage
-            $this->get_state()->active_resumable_command->current_stage = "sql";
+            $stage = $this->sql_output_mode === "mysql" ? "mysql-start" : "sql";
+            $this->get_state()->active_resumable_command->current_stage = $stage;
             $this->get_state()->active_resumable_command->remote_cursor = null;
             $this->save_state();
         }
@@ -3918,7 +3924,7 @@ class ImportClient
             "message" => "Downloading SQL dump",
         ]);
 
-        $this->fetch_sql();
+        $this->fetch_sql($stage === "mysql-start");
 
         // Interrupted response during SQL download — state already saved, exit partial.
         if (($this->get_state()->active_resumable_command->completion_state ?? null) === "partial") {
@@ -7853,8 +7859,10 @@ class ImportClient
 
     /**
      * Download SQL from remote.
+     *
+     * @param bool $starts_mysql_output Whether to clear an older target position before reading SQL.
      */
-    private function fetch_sql(): void
+    private function fetch_sql(bool $starts_mysql_output = false): void
     {
         $cursor = $this->get_state()->active_resumable_command->remote_cursor ?? null;
         $complete = false;
@@ -7937,6 +7945,28 @@ class ImportClient
             }
             $mysql_conn->set_charset("utf8mb4");
 
+            $lock_name = "reprint-db-pull-" . substr(
+                hash("sha256", (string) $this->mysql_database),
+                0,
+                40,
+            );
+            $lock_result = $mysql_conn->query(
+                "SELECT GET_LOCK('{$lock_name}', 60) AS `lock_acquired`"
+            );
+            if (!$lock_result) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+                throw new RuntimeException(
+                    "MySQL could not lock the target database for db-pull: " . $mysql_conn->error
+                );
+            }
+            $lock_row = $lock_result->fetch_assoc();
+            $lock_result->free();
+            if ( (int) ( $lock_row["lock_acquired"] ?? 0 ) !== 1) {
+                throw new RuntimeException(
+                    "Another db-pull is still writing to the target database. Try again after it stops."
+                );
+            }
+
             // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
             $create_table_sql = "CREATE TABLE IF NOT EXISTS `{$table}` (" .
                 "`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY," .
@@ -7948,13 +7978,42 @@ class ImportClient
                     "MySQL could not create the db-pull progress table: " . $mysql_conn->error
                 );
             }
-            if (!$mysql_conn->query("DELETE FROM `{$table}` WHERE `id` = 1")) {
-                throw new RuntimeException(
-                    "MySQL could not reset the previous db-pull position: " . $mysql_conn->error
+            if ($starts_mysql_output) {
+                // Keep the mysql-start stage until the old target position is gone.
+                // If this process stops before save_state(), the next process
+                // deletes that position again instead of treating it as current.
+                if (!$mysql_conn->query("DELETE FROM `{$table}` WHERE `id` = 1")) {
+                    throw new RuntimeException(
+                        "MySQL could not reset the previous db-pull position: " . $mysql_conn->error
+                    );
+                }
+                $cursor = null;
+                $this->get_state()->active_resumable_command->current_stage = "sql";
+                $this->get_state()->active_resumable_command->remote_cursor = null;
+                $this->save_state();
+            } else {
+                $cursor = $this->read_mysql_output_cursor($mysql_conn);
+            }
+            $mysql_committed_cursor = $cursor;
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+
+            if ($cursor !== null) {
+                $session_setup_sql = @file_get_contents($session_setup_file);
+                if ($session_setup_sql === false || trim($session_setup_sql) === "") {
+                    throw new RuntimeException(
+                        "Cannot continue db-pull because db-session-setup.sql is missing or empty. " .
+                        "Run db-pull --abort and start again.",
+                    );
+                }
+                $this->execute_mysql_queries($mysql_conn, $session_setup_sql);
+                $this->audit_log(
+                    "SQL OUTPUT mysql | ran saved session setup after reconnect",
+                    true,
                 );
             }
-            $cursor = null;
-            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+
+            $this->get_state()->active_resumable_command->remote_cursor = $cursor;
+            $this->save_state();
 
             $this->audit_log(
                 "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
@@ -8252,7 +8311,7 @@ class ImportClient
                     if ($caught_exception !== null) {
                         $this->audit_log(
                             "DISCARDED INCOMPLETE SQL | " . strlen($pending) .
-                            " bytes | a new process will request the dump from the beginning",
+                            " bytes | the next process will request them again from the saved target position",
                             true,
                         );
                     } else {
@@ -8301,6 +8360,139 @@ class ImportClient
             throw new RuntimeException("MySQL could not commit the imported SQL and its source position: " . $connection->error);
         }
         // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+    }
+
+    /** Returns the source position committed by MySQL, if one exists. */
+    private function read_mysql_output_cursor(\mysqli $connection): ?string
+    {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors and table names are CLI text, not HTML.
+        $table = self::MYSQL_DB_PULL_PROGRESS_TABLE;
+        $result = $connection->query(
+            "SELECT `source_hash`, `source_cursor` FROM `{$table}` WHERE `id` = 1"
+        );
+        if (!$result) {
+            throw new RuntimeException(
+                "MySQL could not read the saved db-pull position: " . $connection->error
+            );
+        }
+        $row = $result->fetch_assoc();
+        $result->free();
+        if (!$row) {
+            return null;
+        }
+
+        $source_hash = hash("sha256", $this->remote_reprint_api_url);
+        if (!hash_equals($source_hash, $row["source_hash"])) {
+            throw new RuntimeException(
+                "The target database contains an unfinished db-pull from a different source. " .
+                "Finish that pull or run db-pull --abort before starting this one."
+            );
+        }
+
+        $cursor = $row["source_cursor"];
+        $cursor_json = base64_decode($cursor, true);
+        $cursor_data = $cursor_json === false ? null : json_decode($cursor_json, true);
+        if (!is_array($cursor_data)) {
+            throw new RuntimeException(
+                "MySQL contains a db-pull position that Reprint cannot read. " .
+                "Run db-pull --abort to start again."
+            );
+        }
+
+        $current_table = $cursor_data["current_table"] ?? null;
+        if ($current_table === null) {
+            return $cursor;
+        }
+        if (!is_string($current_table) || $current_table === "") {
+            throw new RuntimeException(
+                "MySQL contains a db-pull position with an invalid table name. " .
+                "Run db-pull --abort to start again."
+            );
+        }
+
+        $table_statement = $connection->prepare(
+            "SELECT `TABLES`.`TABLE_TYPE`, `TABLES`.`ENGINE`, `ENGINES`.`TRANSACTIONS` " .
+            "FROM `INFORMATION_SCHEMA`.`TABLES` AS `TABLES` " .
+            "LEFT JOIN `INFORMATION_SCHEMA`.`ENGINES` AS `ENGINES` " .
+            "ON `ENGINES`.`ENGINE` = `TABLES`.`ENGINE` " .
+            "WHERE `TABLES`.`TABLE_SCHEMA` = DATABASE() " .
+            "AND BINARY `TABLES`.`TABLE_NAME` = BINARY ?"
+        );
+        if (!$table_statement) {
+            throw new RuntimeException(
+                "MySQL could not check the saved db-pull table: " . $connection->error
+            );
+        }
+        $table_statement->bind_param("s", $current_table);
+        if (!$table_statement->execute()) {
+            $error = $table_statement->error;
+            $table_statement->close();
+            throw new RuntimeException("MySQL could not check the saved db-pull table: " . $error);
+        }
+        $table_type = null;
+        $engine = null;
+        $supports_transactions = null;
+        $table_statement->bind_result($table_type, $engine, $supports_transactions);
+        $found_table = $table_statement->fetch() === true;
+        $table_statement->close();
+        if (!$found_table) {
+            throw new RuntimeException(
+                "Cannot continue db-pull because target table `{$current_table}` is missing. " .
+                "Run db-pull --abort to rebuild the target."
+            );
+        }
+        if ($table_type === "VIEW" || $supports_transactions === "YES") {
+            return $cursor;
+        }
+
+        if (!empty($cursor_data["oversized_queue"])) {
+            throw new RuntimeException(
+                "Cannot continue db-pull in target table `{$current_table}` because {$engine} may have " .
+                "already appended part of a large value. Run db-pull --abort to rebuild the target."
+            );
+        }
+
+        $key_statement = $connection->prepare(
+            "SELECT `STATISTICS`.`INDEX_NAME` " .
+            "FROM `INFORMATION_SCHEMA`.`STATISTICS` AS `STATISTICS` " .
+            "INNER JOIN `INFORMATION_SCHEMA`.`COLUMNS` AS `COLUMNS` " .
+            "ON `COLUMNS`.`TABLE_SCHEMA` = `STATISTICS`.`TABLE_SCHEMA` " .
+            "AND `COLUMNS`.`TABLE_NAME` = `STATISTICS`.`TABLE_NAME` " .
+            "AND `COLUMNS`.`COLUMN_NAME` = `STATISTICS`.`COLUMN_NAME` " .
+            "WHERE `STATISTICS`.`TABLE_SCHEMA` = DATABASE() " .
+            "AND BINARY `STATISTICS`.`TABLE_NAME` = BINARY ? " .
+            "AND `STATISTICS`.`NON_UNIQUE` = 0 " .
+            "GROUP BY `STATISTICS`.`INDEX_NAME` " .
+            "HAVING SUM(`COLUMNS`.`IS_NULLABLE` = 'YES') = 0 LIMIT 1"
+        );
+        if (!$key_statement) {
+            throw new RuntimeException(
+                "MySQL could not check the keys for target table `{$current_table}`: " .
+                $connection->error
+            );
+        }
+        $key_statement->bind_param("s", $current_table);
+        if (!$key_statement->execute()) {
+            $error = $key_statement->error;
+            $key_statement->close();
+            throw new RuntimeException(
+                "MySQL could not check the keys for target table `{$current_table}`: " . $error
+            );
+        }
+        $index_name = null;
+        $key_statement->bind_result($index_name);
+        $has_replay_key = $key_statement->fetch() === true;
+        $key_statement->close();
+        if (!$has_replay_key) {
+            throw new RuntimeException(
+                "Cannot continue db-pull in target table `{$current_table}` because {$engine} may have " .
+                "kept some rows from an interrupted INSERT, and the table has no non-null unique key " .
+                "that can identify them. Run db-pull --abort to rebuild the target."
+            );
+        }
+
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        return $cursor;
     }
 
     /** Count complete SQL queries waiting in the stream. */
