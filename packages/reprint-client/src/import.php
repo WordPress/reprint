@@ -7527,7 +7527,10 @@ class ImportClient
                     $source_table_name = is_array($source_table)
                         ? $source_table["name"] ?? null
                         : null;
-                    if ($source_table_name === $table) {
+                    if (
+                        is_string($source_table_name)
+                        && strcasecmp($source_table_name, $table) === 0
+                    ) {
                         throw new RuntimeException(
                             "The source database has a table named {$table}, which Reprint needs " .
                             "to save db-pull progress. Rename that source table before using " .
