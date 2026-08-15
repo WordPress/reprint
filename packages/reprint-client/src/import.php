@@ -7916,38 +7916,6 @@ class ImportClient
             $name = $this->mysql_database;
             $table = self::MYSQL_DB_PULL_PROGRESS_TABLE;
 
-            $tables_file = wp_join_unix_paths($this->state_dir, "db-tables.jsonl");
-            $tables_handle = @fopen($tables_file, "r");
-            if (!$tables_handle) {
-                throw new RuntimeException(
-                    "Cannot check the source table names because db-tables.jsonl cannot be read."
-                );
-            }
-            try {
-                while (true) {
-                    $table_line = fgets($tables_handle);
-                    if ($table_line === false) {
-                        break;
-                    }
-                    $source_table = json_decode($table_line, true);
-                    $source_table_name = is_array($source_table)
-                        ? $source_table["name"] ?? null
-                        : null;
-                    if (
-                        is_string($source_table_name)
-                        && strcasecmp($source_table_name, $table) === 0
-                    ) {
-                        $this->audit_log(
-                            "SKIPPED SOURCE TABLE | {$source_table_name} matches Reprint's " .
-                            "db-pull progress table {$table}",
-                            true,
-                        );
-                    }
-                }
-            } finally {
-                fclose($tables_handle);
-            }
-
             // Parse host for port/socket (same format as WordPress DB_HOST).
             // An explicit --mysql-port takes precedence over a port embedded
             // in the host string.
@@ -8008,6 +7976,12 @@ class ImportClient
         $buffer_not_flushed = "";
         $chunks_since_save = 0;
         try {
+            if ($mode === "mysql") {
+                $this->audit_log(
+                    "SKIPPING SOURCE TABLE IF PRESENT | " . self::MYSQL_DB_PULL_PROGRESS_TABLE,
+                    true,
+                );
+            }
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
                 if ($mode === "mysql") {

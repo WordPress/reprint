@@ -156,7 +156,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             assert.equal(result.exitCode, 0, result.stderr + result.stdout);
             assert.match(
                 readAuditLog(collisionDir),
-                new RegExp(`SKIPPED SOURCE TABLE .*${progressTable}`),
+                new RegExp(`SKIPPING SOURCE TABLE IF PRESENT .*${progressTable}`),
             );
 
             const [targetColumns] = await targetConnection.query(
