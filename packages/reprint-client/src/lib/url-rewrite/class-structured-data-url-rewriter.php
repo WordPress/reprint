@@ -17,7 +17,7 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
  * 3. Base64 → decode, recurse on decoded content, re-encode if changed
- * 4. Leaf text → CautiousTextBlockMarkupUrlProcessor (block_markup hint)
+ * 4. Leaf text → StructuredBlockMarkupUrlProcessor (block_markup hint)
  *    or CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules (default)
  *
  * HTML is never auto-detected — the caller must explicitly pass
@@ -120,7 +120,7 @@ class StructuredDataUrlRewriter
      *
      * @param string      $value        The decoded database value.
      * @param string|null $content_type Content type hint: null (auto-detect, plain text default),
-     *                                  'block_markup' (use BlockMarkupUrlProcessor), or 'skip' (no-op).
+     *                                  'block_markup' (use StructuredBlockMarkupUrlProcessor), or 'skip' (no-op).
      * @return string The rewritten value, or the original if no changes were made.
      */
     public function rewrite(string $value, ?string $content_type = null): string
@@ -438,7 +438,7 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
-                $p = new CautiousTextBlockMarkupUrlProcessor( $content, $base_url, $this->cautious_url_base_rewrite_mapping );
+                $p = new StructuredBlockMarkupUrlProcessor( $content, $base_url );
                 while ( $p->next_token() ) {
                     $token_type = $p->get_token_type() ?? '';
                     while ( $p->next_url_in_current_token() ) {
@@ -479,6 +479,7 @@ class StructuredDataUrlRewriter
                         }
                         $this->set_cached_rewrite_result($cache_key, $cache_value);
                     }
+                    $p->replace_url_bases_in_current_token( $this->cautious_url_base_rewrite_mapping );
                 }
 
                 return $p->get_updated_html();

@@ -1,6 +1,5 @@
 <?php
 
-use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 
 /**
@@ -15,7 +14,7 @@ use WordPress\DataLiberation\URL\WPURL;
  *   values and recurse
  * - JSON objects/arrays: construct JsonStringIterator, iterate string
  *   values and recurse
- * - Leaf values: scan as HTML (BlockMarkupUrlProcessor finds URLs in
+ * - Leaf values: scan as HTML (StructuredBlockMarkupUrlProcessor finds URLs in
  *   media tags/blocks) AND collect as plain URL (if the entire string
  *   is a URL). These two don't overlap — the HTML scanner only finds
  *   URLs inside tag attributes and block comments, while collectIfUrl
@@ -131,7 +130,7 @@ class DomainCollector
      */
     private function scanHtml(string $value): void
     {
-        $p = new BlockMarkupUrlProcessor($value);
+        $p = new StructuredBlockMarkupUrlProcessor($value);
         while ($p->next_url()) {
             $token_type = $p->get_token_type();
 
@@ -147,14 +146,6 @@ class DomainCollector
                 if (!isset(self::MEDIA_BLOCKS[$p->get_block_name()])) {
                     continue;
                 }
-            }
-
-            // Text nodes within HTML: only collect if the URL is
-            // the entire text content (a bare URL pasted into content).
-            // This avoids collecting domains from prose like "visit
-            // twitter.com for more info".
-            if ($token_type === '#text') {
-                continue;
             }
 
             $this->collectParsedUrl($p->get_parsed_url());

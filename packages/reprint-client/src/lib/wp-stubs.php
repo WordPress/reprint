@@ -3,7 +3,7 @@
  * Minimal WordPress function stubs for wp-php-toolkit/data-liberation
  * to work outside of a WordPress environment.
  *
- * These stubs provide just enough compatibility for BlockMarkupUrlProcessor
+ * These stubs provide just enough compatibility for StructuredBlockMarkupUrlProcessor
  * and wp_rewrite_urls() to function correctly.
  */
 
