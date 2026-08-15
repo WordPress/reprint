@@ -541,7 +541,7 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
         while ($producer->next_sql_fragment()) {
             $frag = $producer->get_sql_fragment();
             $fragments[] = $frag;
-            if (strpos($frag, ');') !== false) {
+            if (strpos($frag, 'INSERT INTO `t`') === 0) {
                 break;
             }
         }
@@ -634,7 +634,7 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
         // Should NOT use UPDATE+CONCAT
-        $this->assertStringNotContainsString('UPDATE', $sql);
+        $this->assertStringNotContainsString('UPDATE `t` SET', $sql);
 
         $importPdo = $this->executeDumpInNewDatabase($sql);
         $imported = $importPdo->query("SELECT v FROM t WHERE id = 1")->fetchColumn();
@@ -938,7 +938,7 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
         while ($producer->next_sql_fragment()) {
             $frag = $producer->get_sql_fragment();
             $fragments[] = $frag;
-            if (strpos($frag, ');') !== false) {
+            if (strpos($frag, 'INSERT INTO `t`') === 0) {
                 break;
             }
         }

@@ -67,6 +67,174 @@ class BasicDumpTest extends MySQLDumpProducerTestBase
         $this->assertSQLContains('19.99', $sql);
     }
 
+    public function testMyIsamInsertFillsRowsMissingAfterAStoppedQuery(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE replay_rows (
+                site_id INT NOT NULL,
+                row_id INT NOT NULL,
+                value VARCHAR(100) NOT NULL,
+                PRIMARY KEY (site_id, row_id)
+            ) ENGINE=MyISAM
+        ");
+        $this->pdo->exec("
+            INSERT INTO replay_rows VALUES
+            (1, 1, 'first'),
+            (1, 2, 'second'),
+            (1, 3, 'third'),
+            (1, 4, 'fourth')
+        ");
+
+        $sql = $this->getDumpSQL(['batch_size' => 4]);
+        $this->assertSame(
+            1,
+            preg_match('/INSERT INTO `replay_rows`.*?;/s', $sql, $matches)
+        );
+        $this->assertStringContainsString(
+            'ON DUPLICATE KEY UPDATE `site_id` = `site_id`;',
+            $matches[0]
+        );
+
+        $this->pdo->exec('TRUNCATE TABLE replay_rows');
+
+        $host = getenv('DB_HOST') ?: 'localhost';
+        $user = getenv('DB_USER') ?: 'root';
+        $pass = getenv('DB_PASS') ?: '';
+        $dsn = "mysql:host={$host};charset=utf8mb4";
+        $query = "
+            INSERT INTO replay_rows VALUES
+            (1, 1, 'first'),
+            (1, 2, 'second'),
+            (1, IF(SLEEP(30) = 0, 3, 1), 'third'),
+            (1, 4, 'fourth')
+        ";
+        $child_code = <<<'PHP'
+$pdo = new PDO(
+    $argv[1],
+    $argv[2],
+    $argv[3],
+    [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
+);
+$pdo->exec('USE `' . str_replace('`', '``', $argv[4]) . '`');
+echo $pdo->query('SELECT CONNECTION_ID()')->fetchColumn(), "\n";
+flush();
+try {
+    $pdo->exec(base64_decode($argv[5]));
+    exit(2);
+} catch (PDOException $error) {
+    fwrite(STDERR, $error->getMessage());
+    exit(0);
+}
+PHP;
+        $pipes = [];
+        $command = [
+            PHP_BINARY,
+            '-r',
+            $child_code,
+            $dsn,
+            $user,
+            $pass,
+            $this->dbName,
+            base64_encode($query),
+        ];
+        $process = proc_open(
+            $command,
+            [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+            $pipes
+        );
+        $this->assertIsResource($process);
+        fclose($pipes[0]);
+
+        $connection_id_line = fgets($pipes[1]);
+        $this->assertNotFalse($connection_id_line);
+        $connection_id = (int) trim($connection_id_line);
+        $deadline = microtime(true) + 10;
+        $state = null;
+        do {
+            $state = $this->pdo->query(
+                "SELECT STATE FROM information_schema.PROCESSLIST WHERE ID = {$connection_id}"
+            )->fetchColumn();
+            if ('User sleep' === $state) {
+                break;
+            }
+            usleep(10000);
+        } while (microtime(true) < $deadline);
+
+        if ('User sleep' !== $state) {
+            $this->pdo->exec("KILL CONNECTION {$connection_id}");
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            proc_close($process);
+            $this->fail('The MyISAM INSERT did not reach its interruption point.');
+        }
+
+        // KILL QUERY makes SLEEP() return 1. That repeats row 1's key, so
+        // MyISAM stops after the first two rows instead of finishing the batch.
+        $this->pdo->exec("KILL QUERY {$connection_id}");
+        $child_error = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $this->assertSame(0, proc_close($process), $child_error);
+        $this->assertStringContainsString('1062', $child_error);
+
+        $this->assertSame(
+            ['1:1', '1:2'],
+            $this->pdo->query(
+                "SELECT CONCAT(site_id, ':', row_id) FROM replay_rows ORDER BY site_id, row_id"
+            )->fetchAll(PDO::FETCH_COLUMN)
+        );
+
+        $this->pdo->exec($matches[0]);
+
+        $this->assertSame(
+            ['1:1:first', '1:2:second', '1:3:third', '1:4:fourth'],
+            $this->pdo->query(
+                "SELECT CONCAT(site_id, ':', row_id, ':', value) " .
+                'FROM replay_rows ORDER BY site_id, row_id'
+            )->fetchAll(PDO::FETCH_COLUMN)
+        );
+    }
+
+    public function testUniqueKeyChecksStayEnabledForReplay(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE unique_replay_rows (
+                site_id INT NOT NULL,
+                row_id INT NOT NULL,
+                value VARCHAR(100) NOT NULL,
+                UNIQUE KEY replay_row (site_id, row_id)
+            ) ENGINE=InnoDB
+        ");
+        $this->pdo->exec("
+            INSERT INTO unique_replay_rows VALUES
+            (1, 1, 'first'),
+            (1, 2, 'second'),
+            (1, 3, 'third')
+        ");
+
+        $sql = $this->getDumpSQL(['batch_size' => 3]);
+        $this->assertStringContainsString('UNIQUE_CHECKS=1', $sql);
+        $this->assertSame(
+            1,
+            preg_match('/INSERT INTO `unique_replay_rows`.*?;/s', $sql, $matches)
+        );
+
+        $this->pdo->exec('TRUNCATE TABLE unique_replay_rows');
+        $this->pdo->exec("INSERT INTO unique_replay_rows VALUES (1, 1, 'first')");
+        $this->pdo->exec('SET UNIQUE_CHECKS=0');
+        $this->pdo->exec(\WordPress\DataLiberation\MySQLDumpProducer::get_session_setup_sql());
+        $this->assertSame(1, (int) $this->pdo->query('SELECT @@UNIQUE_CHECKS')->fetchColumn());
+        $this->pdo->exec($matches[0]);
+
+        $this->assertSame(
+            ['1:1:first', '1:2:second', '1:3:third'],
+            $this->pdo->query(
+                "SELECT CONCAT(site_id, ':', row_id, ':', value) " .
+                'FROM unique_replay_rows ORDER BY site_id, row_id'
+            )->fetchAll(PDO::FETCH_COLUMN)
+        );
+    }
+
     public function testMultipleTables(): void
     {
         // Create multiple tables
@@ -207,9 +375,7 @@ class BasicDumpTest extends MySQLDumpProducerTestBase
         // Export with batch size of 100
         $sql = $this->getDumpSQL(['batch_size' => 100]);
 
-        // Count semicolons in INSERT statements (one per batch)
-        // Each batch ends with ); so we should have 5 batches
-        $batchCount = substr_count($sql, ');');
+        $batchCount = $this->countInsertStatements($sql);
         $this->assertEquals(5, $batchCount, 'Should have 5 batches (500 rows / 100 per batch)');
 
         // Verify round-trip - all 500 rows should be imported

@@ -500,7 +500,7 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             $fragments[] = $sql;
 
             // Stop after first INSERT batch (5 rows)
-            if (strpos($sql, ");") !== false) {
+            if (strpos($sql, 'INSERT INTO `resume_test`') === 0) {
                 break;
             }
         }
@@ -699,8 +699,8 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             $sql = $producer->get_sql_fragment();
             $fragments[] = $sql;
 
-            // Stop right after finishing table_a (when we see semicolon for last INSERT)
-            if (strpos($sql, ");") !== false && strpos($sql, "a_10") !== false) {
+            // Stop right after finishing table_a's only INSERT batch.
+            if (strpos($sql, 'INSERT INTO `table_a`') === 0) {
                 break;
             }
         }

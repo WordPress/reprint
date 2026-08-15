@@ -234,7 +234,7 @@ class MySQLDumpProducer
         );
 
         $header = "INSERT INTO " . $this->row_reader->quote_identifier($this->row_reader->get_current_table()) . " ({$column_list}) VALUES\n";
-        $this->current_statement_size = strlen($header);
+        $this->current_statement_size = strlen($header) + strlen($this->on_duplicate_key()) + 1;
 
         $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
         $first_row_sql = $this->format_row_for_insert($this->row_reader->get_current_record());
@@ -258,7 +258,7 @@ class MySQLDumpProducer
         $has_next_row = $this->row_reader->next_record();
 
         if (!$has_next_row) {
-            $sql = $header . $first_row_sql . ";";
+            $sql = $header . $first_row_sql . $this->on_duplicate_key() . ';';
             $this->current_sql_fragment = $sql;
             $this->current_statement_size = 0;
             if ($has_oversized) {
@@ -268,7 +268,7 @@ class MySQLDumpProducer
                 $this->state = self::STATE_NEXT_TABLE;
             }
         } elseif ($has_oversized) {
-            $sql = $header . $first_row_sql . ";";
+            $sql = $header . $first_row_sql . $this->on_duplicate_key() . ';';
             $this->current_sql_fragment = $sql;
             $this->current_statement_size = 0;
             $this->state_after_oversized = self::STATE_START_INSERT;
@@ -312,7 +312,7 @@ class MySQLDumpProducer
         $has_next_row = $this->row_reader->next_record();
 
         if (!$has_next_row) {
-            $this->current_sql_fragment = $row_sql . ";";
+            $this->current_sql_fragment = $row_sql . $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
             if ($has_oversized) {
                 $this->state_after_oversized = self::STATE_NEXT_TABLE;
@@ -321,7 +321,7 @@ class MySQLDumpProducer
                 $this->state = self::STATE_NEXT_TABLE;
             }
         } elseif ($has_oversized) {
-            $this->current_sql_fragment = $row_sql . ";";
+            $this->current_sql_fragment = $row_sql . $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
             $this->state_after_oversized = self::STATE_START_INSERT;
             $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
@@ -335,7 +335,7 @@ class MySQLDumpProducer
     /** Finishes an INSERT batch at its bounded row limit. */
     private function finish_insert_batch($sql, $has_oversized)
     {
-        $this->current_sql_fragment = $sql . ";";
+        $this->current_sql_fragment = $sql . $this->on_duplicate_key() . ';';
         $this->current_statement_size = 0;
         if ($has_oversized) {
             $this->state_after_oversized = self::STATE_START_INSERT;
@@ -343,6 +343,24 @@ class MySQLDumpProducer
         } else {
             $this->state = self::STATE_START_INSERT;
         }
+    }
+
+    /**
+     * Returns a no-op update for rows already written by a stopped INSERT.
+     *
+     * MyISAM can keep a complete prefix of a multi-row INSERT when the query
+     * stops. Repeating that INSERT should skip the existing rows and write the
+     * missing rows. Assigning any inserted column to itself handles a simple
+     * or composite key without hiding invalid values behind INSERT IGNORE.
+     * MySQL can also detect an enforced UNIQUE key whose columns are NOT NULL.
+     * A nullable UNIQUE key cannot identify an existing row because MySQL
+     * permits more than one row whose unique-key value contains NULL.
+     */
+    private function on_duplicate_key()
+    {
+        $first_column = $this->row_reader->get_current_column_names()[0];
+        $quoted_column = $this->row_reader->quote_identifier($first_column);
+        return "\nON DUPLICATE KEY UPDATE {$quoted_column} = {$quoted_column}";
     }
 
     /**
@@ -386,9 +404,11 @@ class MySQLDumpProducer
     }
 
     /**
-     * Emits SET statements that disable constraint checks and set a strict SQL mode.
+     * Emits SET statements that configure constraint checks and set a strict SQL mode.
      * These are restored in emit_sql_footer(). Without disabling FK checks, tables
      * that reference each other would need to be imported in dependency order.
+     * Unique checks stay enabled because replayed INSERT statements use unique
+     * keys to recognize rows which are already present.
      *
      * The SQL_MODE explicitly omits NO_ZERO_DATE, NO_ZERO_IN_DATE, and NO_ENGINE_SUBSTITUTION.
      *
@@ -430,7 +450,7 @@ class MySQLDumpProducer
     /** Returns the connection settings required before executing dump SQL. */
     public static function get_session_setup_sql()
     {
-        return "SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0;\n" .
+        return "SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=1;\n" .
             "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;\n" .
             // @TODO: Restore STRICT_TRANS_TABLES
             "SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='ONLY_FULL_GROUP_BY,ERROR_FOR_DIVISION_BY_ZERO';\n" .
