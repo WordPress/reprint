@@ -175,8 +175,7 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
-    private const MYSQL_DB_PULL_PROGRESS_TABLE = "__reprint_db_pull_progress";
-    private const MYSQL_DB_PULL_PROGRESS_TABLE_COMMENT = "Reprint db-pull progress v1";
+    private const MYSQL_DB_PULL_PROGRESS_TABLE = "__reprint_db_pull_progress_728f9e0b-42f7-4d85-a7f3-8f53e90a6f4c";
 
     /**
      * Maximum number of consecutive interrupted responses with no cursor
@@ -7938,10 +7937,10 @@ class ImportClient
                         is_string($source_table_name)
                         && strcasecmp($source_table_name, $table) === 0
                     ) {
-                        throw new RuntimeException(
-                            "The source database has a table named {$table}, which Reprint needs " .
-                            "to save db-pull progress. Rename that source table before using " .
-                            "--sql-output=mysql."
+                        $this->audit_log(
+                            "SKIPPED SOURCE TABLE | {$source_table_name} matches Reprint's " .
+                            "db-pull progress table {$table}",
+                            true,
                         );
                     }
                 }
@@ -7969,92 +7968,9 @@ class ImportClient
             }
             $mysql_conn->set_charset("utf8mb4");
 
+            $this->ensure_progress_table($mysql_conn);
+
             // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
-            $create_table_sql = "CREATE TABLE IF NOT EXISTS `{$table}` (" .
-                "`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY," .
-                "`source_hash` CHAR(64) CHARACTER SET ascii NOT NULL," .
-                "`source_cursor` MEDIUMTEXT NOT NULL" .
-                ") ENGINE=InnoDB COMMENT='" . self::MYSQL_DB_PULL_PROGRESS_TABLE_COMMENT . "'";
-            if (!$mysql_conn->query($create_table_sql)) {
-                throw new RuntimeException(
-                    "MySQL could not create the db-pull progress table: " . $mysql_conn->error
-                );
-            }
-
-            $table_result = $mysql_conn->query(
-                "SELECT `ENGINE`, `TABLE_COMMENT` FROM `INFORMATION_SCHEMA`.`TABLES` " .
-                "WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = '{$table}'"
-            );
-            if (!$table_result) {
-                throw new RuntimeException(
-                    "MySQL could not inspect the db-pull progress table: " . $mysql_conn->error
-                );
-            }
-            $table_info = $table_result->fetch_assoc();
-            $table_result->free();
-            $table_engine = strtoupper($table_info["ENGINE"] ?? "");
-            $table_comment = $table_info["TABLE_COMMENT"] ?? "";
-            if (
-                !$table_info ||
-                $table_engine !== "INNODB" ||
-                $table_comment !== self::MYSQL_DB_PULL_PROGRESS_TABLE_COMMENT
-            ) {
-                throw new RuntimeException(
-                    "The target database already has a table named {$table}, and Reprint did not create it. " .
-                    "Rename or remove that table before using --sql-output=mysql."
-                );
-            }
-
-            $columns_result = $mysql_conn->query(
-                "SELECT `COLUMN_NAME`, `DATA_TYPE`, `COLUMN_TYPE`, `CHARACTER_MAXIMUM_LENGTH`, " .
-                "`IS_NULLABLE`, `COLUMN_KEY` FROM `INFORMATION_SCHEMA`.`COLUMNS` " .
-                "WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = '{$table}' " .
-                "ORDER BY `ORDINAL_POSITION`"
-            );
-            if (!$columns_result) {
-                throw new RuntimeException(
-                    "MySQL could not inspect the db-pull progress columns: " . $mysql_conn->error
-                );
-            }
-            $columns = [];
-            while (true) {
-                $column = $columns_result->fetch_assoc();
-                if (!$column) {
-                    break;
-                }
-                $columns[$column["COLUMN_NAME"]] = $column;
-            }
-            $columns_result->free();
-            $id_column = $columns["id"] ?? [];
-            $source_hash_column = $columns["source_hash"] ?? [];
-            $source_cursor_column = $columns["source_cursor"] ?? [];
-            $id_data_type = $id_column["DATA_TYPE"] ?? null;
-            $id_column_type = $id_column["COLUMN_TYPE"] ?? "";
-            $id_is_nullable = $id_column["IS_NULLABLE"] ?? null;
-            $id_key = $id_column["COLUMN_KEY"] ?? null;
-            $source_hash_data_type = $source_hash_column["DATA_TYPE"] ?? null;
-            $source_hash_length = $source_hash_column["CHARACTER_MAXIMUM_LENGTH"] ?? 0;
-            $source_hash_is_nullable = $source_hash_column["IS_NULLABLE"] ?? null;
-            $source_cursor_data_type = $source_cursor_column["DATA_TYPE"] ?? null;
-            $source_cursor_is_nullable = $source_cursor_column["IS_NULLABLE"] ?? null;
-            $has_expected_columns =
-                array_keys($columns) === ["id", "source_hash", "source_cursor"] &&
-                $id_data_type === "tinyint" &&
-                strpos($id_column_type, "unsigned") !== false &&
-                $id_is_nullable === "NO" &&
-                $id_key === "PRI" &&
-                $source_hash_data_type === "char" &&
-                (int) $source_hash_length === 64 &&
-                $source_hash_is_nullable === "NO" &&
-                $source_cursor_data_type === "mediumtext" &&
-                $source_cursor_is_nullable === "NO";
-            if (!$has_expected_columns) {
-                throw new RuntimeException(
-                    "The target table {$table} does not have the columns Reprint expects. " .
-                    "Remove it before using --sql-output=mysql."
-                );
-            }
-
             if (!$mysql_conn->query("DELETE FROM `{$table}` WHERE `id` = 1")) {
                 throw new RuntimeException(
                     "MySQL could not reset the previous db-pull position: " . $mysql_conn->error
@@ -8094,6 +8010,9 @@ class ImportClient
         try {
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
+                if ($mode === "mysql") {
+                    $params["skip_tables"] = [self::MYSQL_DB_PULL_PROGRESS_TABLE];
+                }
                 $url = $this->build_url("sql_chunk", $cursor, $params);
 
                 $context = new StreamingContext();
@@ -8366,6 +8285,64 @@ class ImportClient
                 " bytes) — incomplete export?"
             );
         }
+    }
+
+    /** Creates the db-pull progress table, replacing it when its schema is wrong. */
+    private function ensure_progress_table(\mysqli $connection): void
+    {
+        $table = self::MYSQL_DB_PULL_PROGRESS_TABLE;
+        $expected_table = "__reprint_expected_db_pull_progress";
+        $columns = "(" .
+            "`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY," .
+            "`source_hash` CHAR(64) CHARACTER SET ascii NOT NULL," .
+            "`source_cursor` MEDIUMTEXT NOT NULL" .
+            ") ENGINE=InnoDB";
+
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+        if (!$connection->query("CREATE TABLE IF NOT EXISTS `{$table}` {$columns}")) {
+            throw new RuntimeException(
+                "MySQL could not create the db-pull progress table: " . $connection->error
+            );
+        }
+        if (!$connection->query("CREATE TEMPORARY TABLE `{$expected_table}` {$columns}")) {
+            throw new RuntimeException(
+                "MySQL could not prepare the expected db-pull progress schema: " . $connection->error
+            );
+        }
+
+        try {
+            $schemas = [];
+            foreach ([$table, $expected_table] as $schema_table) {
+                $result = $connection->query("SHOW CREATE TABLE `{$schema_table}`");
+                $row = $result ? $result->fetch_row() : null;
+                if (!$row || !isset($row[1])) {
+                    throw new RuntimeException(
+                        "MySQL could not inspect the db-pull progress table: " . $connection->error
+                    );
+                }
+                $result->free();
+                $schemas[] = preg_replace(
+                    '/^CREATE (?:TEMPORARY )?TABLE `[^`]+`/',
+                    'CREATE TABLE',
+                    $row[1]
+                );
+            }
+        } finally {
+            $connection->query("DROP TEMPORARY TABLE `{$expected_table}`");
+        }
+
+        if ($schemas[0] !== $schemas[1]) {
+            if (
+                !$connection->query("DROP TABLE `{$table}`")
+                || !$connection->query("CREATE TABLE `{$table}` {$columns}")
+            ) {
+                throw new RuntimeException(
+                    "MySQL could not recreate the db-pull progress table: " . $connection->error
+                );
+            }
+            $this->audit_log("RECREATED DB-PULL PROGRESS TABLE | its schema did not match", true);
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
     }
 
     /** Saves the source cursor and commits the current target transaction. */

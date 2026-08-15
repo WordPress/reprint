@@ -13,7 +13,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir, getDbName,
     createMysqlConnection, fsRootDir,
     writeTestHooks, removeTestHooks,
-    clearHookState,
+    clearHookState, readAuditLog,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -24,6 +24,7 @@ const describeWithHostPhpProcess = process.env.PHP_BINARY?.endsWith('/playground
 describeWithHostPhpProcess('Import: source position saved in MySQL target', { timeout: 300000 }, () => {
     const site = 'mysql-target-cursor-resume';
     const sourceTable = 'aa_target_cursor_rows';
+    const progressTable = '__reprint_db_pull_progress_728f9e0b-42f7-4d85-a7f3-8f53e90a6f4c';
     const targetDb = `${getDbName(site)}_import`;
     const projectRoot = join(import.meta.dirname, '..', '..', '..');
     const importerPath = process.env.IMPORTER_PATH
@@ -128,18 +129,19 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         );
     });
 
-    it('refuses any capitalization of the progress-table name in the source', async () => {
+    it('logs and skips the progress table when the source is also a Reprint target', async () => {
         const collisionDir = createTempDir('e2e-mysql-source-cursor-collision');
         const sourceConnection = await createMysqlConnection(getDbName(site));
         const targetConnection = await createMysqlConnection(targetDb);
+        const sourceProgressTable = progressTable.toUpperCase();
         try {
             await sourceConnection.query(
-                'CREATE TABLE `__REPRINT_DB_PULL_PROGRESS` ('
+                `CREATE TABLE \`${sourceProgressTable}\` (`
                 + '`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY, '
                 + '`note` VARCHAR(64) NOT NULL) ENGINE=InnoDB'
             );
             await sourceConnection.query(
-                "INSERT INTO `__REPRINT_DB_PULL_PROGRESS` (id, note) VALUES (1, 'source row')"
+                `INSERT INTO \`${sourceProgressTable}\` (id, note) VALUES (1, 'source row')`
             );
 
             const preflight = runImporter(importUrl(), collisionDir, 'preflight', {
@@ -151,33 +153,41 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
                 secret: getSiteSecret(site),
                 extraArgs: mysqlArguments(),
             });
-            assert.notEqual(result.exitCode, 0, 'db-pull should reject the reserved source table');
-
-            const [[targetTable]] = await targetConnection.query(
-                'SELECT COUNT(*) AS tableCount FROM INFORMATION_SCHEMA.TABLES '
-                + 'WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
-                [targetDb, '__reprint_db_pull_progress'],
+            assert.equal(result.exitCode, 0, result.stderr + result.stdout);
+            assert.match(
+                readAuditLog(collisionDir),
+                new RegExp(`SKIPPED SOURCE TABLE .*${progressTable}`),
             );
-            assert.equal(Number(targetTable.tableCount), 0);
+
+            const [targetColumns] = await targetConnection.query(
+                'SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS '
+                + 'WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION',
+                [targetDb, progressTable],
+            );
+            assert.deepEqual(
+                targetColumns.map(column => column.COLUMN_NAME),
+                ['id', 'source_hash', 'source_cursor'],
+            );
         } finally {
-            await sourceConnection.query('DROP TABLE IF EXISTS `__REPRINT_DB_PULL_PROGRESS`');
+            await sourceConnection.query(`DROP TABLE IF EXISTS \`${sourceProgressTable}\``);
             await sourceConnection.end();
             await targetConnection.end();
             cleanupTempDir(collisionDir);
         }
     });
 
-    it('does not alter an unrelated target table with the progress-table name', async () => {
+    it('recreates a progress table whose schema does not match', async () => {
         const collisionDir = createTempDir('e2e-mysql-target-cursor-collision');
         const targetConnection = await createMysqlConnection(targetDb);
         try {
+            await targetConnection.query(`DROP TABLE IF EXISTS \`${progressTable}\``);
             await targetConnection.query(
-                'CREATE TABLE `__reprint_db_pull_progress` ('
+                `CREATE TABLE \`${progressTable}\` (`
                 + '`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY, '
                 + '`note` VARCHAR(64) NOT NULL) ENGINE=InnoDB'
             );
             await targetConnection.query(
-                "INSERT INTO `__reprint_db_pull_progress` (id, note) VALUES (1, 'keep this row')"
+                `INSERT INTO \`${progressTable}\` (id, note) VALUES (1, 'old row')`
             );
 
             const preflight = runImporter(importUrl(), collisionDir, 'preflight', {
@@ -189,14 +199,19 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
                 secret: getSiteSecret(site),
                 extraArgs: mysqlArguments(),
             });
-            assert.notEqual(result.exitCode, 0, 'db-pull should reject the table-name collision');
+            assert.equal(result.exitCode, 0, result.stderr + result.stdout);
 
-            const [[row]] = await targetConnection.query(
-                'SELECT note FROM `__reprint_db_pull_progress` WHERE id = 1'
+            const [targetColumns] = await targetConnection.query(
+                'SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS '
+                + 'WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION',
+                [targetDb, progressTable],
             );
-            assert.equal(row.note, 'keep this row');
+            assert.deepEqual(
+                targetColumns.map(column => column.COLUMN_NAME),
+                ['id', 'source_hash', 'source_cursor'],
+            );
         } finally {
-            await targetConnection.query('DROP TABLE IF EXISTS `__reprint_db_pull_progress`');
+            await targetConnection.query(`DROP TABLE IF EXISTS \`${progressTable}\``);
             await targetConnection.end();
             cleanupTempDir(collisionDir);
         }
@@ -229,7 +244,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
                         `SELECT COUNT(*) AS rowCount FROM \`${sourceTable}\``
                     );
                     const [[savedPosition]] = await interruptedTarget.query(
-                        'SELECT source_cursor FROM `__reprint_db_pull_progress` WHERE id = 1'
+                        `SELECT source_cursor FROM \`${progressTable}\` WHERE id = 1`
                     );
                     importedRowCount = Number(importedRows.rowCount);
                     savedSourceCursor = savedPosition?.source_cursor ?? null;

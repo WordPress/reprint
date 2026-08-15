@@ -904,6 +904,20 @@ function endpoint_sql_chunk(
         $producer_options["exclude_rows"] = $exclude_rows;
     }
 
+    if (isset($config["skip_tables"])) {
+        if (!is_array($config["skip_tables"])) {
+            throw new InvalidArgumentException("skip_tables must be an array");
+        }
+        foreach ($config["skip_tables"] as $skipped_table) {
+            if (!is_string($skipped_table) || $skipped_table === "") {
+                throw new InvalidArgumentException(
+                    "Every skip_tables entry must be a non-empty string"
+                );
+            }
+        }
+        $producer_options["exclude_tables"] = array_values($config["skip_tables"]);
+    }
+
     if (isset($config["cursor"])) {
         $producer_options["cursor"] = $config["cursor"];
     }

@@ -84,6 +84,9 @@ class DatabaseRowsReader {
     /** @var array<string,list<array{column:string,value:string}>> Row exclusions keyed by table. */
     private $exclude_rows_by_table = [];
 
+    /** @var string[] Table names omitted from automatic discovery. */
+    private $exclude_tables = [];
+
 
     /**
      * Initializes the bounded database row reader.
@@ -96,6 +99,7 @@ class DatabaseRowsReader {
      *     @type int        $batch_size          Maximum records per query.
      *     @type int|null   $query_time_limit_ms Maximum query duration in milliseconds.
      *     @type array      $exclude_rows        Table, column, and value exclusion rules.
+     *     @type string[]   $exclude_tables      Table names to omit from automatic discovery.
      * }
      */
     public function __construct($db, $options = [])
@@ -103,6 +107,10 @@ class DatabaseRowsReader {
         $this->db = $db;
         $this->tables_to_process = $options["tables_to_process"] ?? null;
         $this->batch_size = max(1, (int) ( $options["batch_size"] ?? 250 ));
+        $this->exclude_tables = array_values(array_filter(
+            $options["exclude_tables"] ?? [],
+            "is_string"
+        ));
 
         if (isset($options["query_time_limit_ms"])) {
             $limit = (int) $options["query_time_limit_ms"];
@@ -574,7 +582,18 @@ class DatabaseRowsReader {
         $row = $statement->fetch(PDO::FETCH_ASSOC);
         while ($row !== false) {
             $values = array_values($row);
-            if (isset($values[0], $values[1]) && strcasecmp($values[1], "BASE TABLE") === 0) {
+            $excluded = false;
+            foreach ($this->exclude_tables as $excluded_table) {
+                if (isset($values[0]) && strcasecmp($values[0], $excluded_table) === 0) {
+                    $excluded = true;
+                    break;
+                }
+            }
+            if (
+                isset($values[0], $values[1])
+                && strcasecmp($values[1], "BASE TABLE") === 0
+                && !$excluded
+            ) {
                 $this->tables_to_process[] = $values[0];
             }
             $row = $statement->fetch(PDO::FETCH_ASSOC);
