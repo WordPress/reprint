@@ -32,6 +32,7 @@ class DatabaseUrlRewriteProcessor {
     private int $records_changed;
     private int $tables_started;
     private ?string $current_table;
+    private ?string $skipped_table = null;
     private bool $complete = false;
 
     /**
@@ -95,6 +96,7 @@ class DatabaseUrlRewriteProcessor {
      */
     public function next_step(): bool
     {
+        $this->skipped_table = null;
         if ($this->complete) {
             return false;
         }
@@ -107,6 +109,10 @@ class DatabaseUrlRewriteProcessor {
                 $this->complete = true;
                 return false;
             }
+            if ($this->row_reader->get_current_primary_key_columns() === []) {
+                $this->skip_current_table();
+                return true;
+            }
             $this->reader_phase = self::READER_PHASE_NEXT_RECORD;
             return true;
         }
@@ -118,10 +124,15 @@ class DatabaseUrlRewriteProcessor {
                     'The saved db-rewrite-urls record is missing. Use --abort.'
                 );
             }
+            $primary_key_columns = $this->row_reader->get_current_primary_key_columns();
+            if ($primary_key_columns === []) {
+                $this->skip_current_table();
+                return true;
+            }
             $this->rewrite_record(
                 $this->row_reader->get_current_table(),
                 $record,
-                $this->row_reader->get_current_primary_key_columns()
+                $primary_key_columns
             );
             $this->row_reader->clear_current_record();
             $this->reader_phase = self::READER_PHASE_NEXT_RECORD;
@@ -135,6 +146,13 @@ class DatabaseUrlRewriteProcessor {
 
         $this->reader_phase = self::READER_PHASE_NEXT_TABLE;
         return true;
+    }
+
+    private function skip_current_table(): void
+    {
+        $this->skipped_table = $this->row_reader->get_current_table();
+        $this->row_reader->clear_current_record();
+        $this->reader_phase = self::READER_PHASE_NEXT_TABLE;
     }
 
     /**
@@ -171,6 +189,7 @@ class DatabaseUrlRewriteProcessor {
      *     @type int         $records_changed  Records changed by this lifecycle.
      *     @type int         $tables_started   Tables in which a record was processed.
      *     @type string|null $current_table    Table containing the last processed record.
+     *     @type string|null $skipped_table    Table skipped by the latest step for lacking a primary key.
      * }
      */
     public function get_progress(): array
@@ -180,6 +199,7 @@ class DatabaseUrlRewriteProcessor {
             'records_changed' => $this->records_changed,
             'tables_started' => $this->tables_started,
             'current_table' => $this->current_table,
+            'skipped_table' => $this->skipped_table,
         ];
     }
 
@@ -193,12 +213,6 @@ class DatabaseUrlRewriteProcessor {
         array $primary_key_columns
     ): void
     {
-        if ($primary_key_columns === []) {
-            throw new RuntimeException(
-                "Cannot rewrite URLs in {$table} because it has records but no primary key."
-            );
-        }
-
         $changes = [];
         foreach ($record as $column => $value) {
             if (!is_string($value)) {

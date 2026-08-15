@@ -5650,6 +5650,23 @@ class ImportClient
             $rewrite_state->current_table = $progress['current_table'];
             $this->save_state();
 
+            if ($progress['skipped_table'] !== null) {
+                $skip_message = sprintf(
+                    'Skipping %s because it has no primary key.',
+                    $progress['skipped_table']
+                );
+                $this->audit_log($skip_message, false);
+                $this->output_progress([
+                    'type' => 'warning',
+                    'phase' => 'database-records',
+                    'reason' => 'missing_primary_key',
+                    'table' => $progress['skipped_table'],
+                    'message' => $skip_message,
+                ], true);
+                $this->progress->clear_progress_line();
+                $this->progress->show_lifecycle_line($skip_message . "\n");
+            }
+
             $message = sprintf(
                 '%s records checked, %s changed',
                 number_format($rewrite_state->records_processed),

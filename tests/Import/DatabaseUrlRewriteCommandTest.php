@@ -285,18 +285,95 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
         $this->assertSame(6, $complete_state['database_url_rewrite']['records_processed']);
     }
 
-    public function testRejectsLiveTableRowsWithoutAPrimaryKey(): void
+    public function testSkipsTablesWithoutAPrimaryKeyAndContinues(): void
     {
         $database = new \PDO('sqlite:' . $this->database_path);
         $database->exec('CREATE TABLE wp_unkeyed (content TEXT NOT NULL)');
         $database->exec("INSERT INTO wp_unkeyed VALUES ('https://old.example/unkeyed')");
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage(
-            'Cannot rewrite URLs in wp_unkeyed because it has records but no primary key.'
+        $database->exec(
+            'CREATE TABLE zz_after_unkeyed (id INTEGER PRIMARY KEY, content TEXT NOT NULL)'
+        );
+        $database->exec(
+            "INSERT INTO zz_after_unkeyed VALUES (1, 'https://old.example/after-unkeyed')"
         );
 
-        $this->new_client()->run($this->command_options());
+        $client = $this->new_client();
+        $client->run($this->command_options());
+
+        $this->assertSame(
+            'https://old.example/unkeyed',
+            $database->query('SELECT content FROM wp_unkeyed')->fetchColumn()
+        );
+        $this->assertSame(
+            'https://new.example/after-unkeyed',
+            $database->query('SELECT content FROM zz_after_unkeyed')->fetchColumn()
+        );
+        $this->assertSame(
+            'complete',
+            $this->read_state($client)['active_resumable_command']['completion_state']
+        );
+        $this->assertStringContainsString(
+            'Skipping wp_unkeyed because it has no primary key.',
+            (string) file_get_contents($this->temp_dir . '/audit.log')
+        );
+    }
+
+    public function testResumesPastAPendingRecordFromAnUnkeyedTable(): void
+    {
+        $sqlite = new \PDO('sqlite:' . $this->database_path);
+        $sqlite->exec('CREATE TABLE wp_unkeyed (content TEXT NOT NULL)');
+        $sqlite->exec("INSERT INTO wp_unkeyed VALUES ('https://old.example/unkeyed')");
+        $sqlite->exec(
+            'CREATE TABLE zz_after_unkeyed (id INTEGER PRIMARY KEY, content TEXT NOT NULL)'
+        );
+        $sqlite->exec(
+            "INSERT INTO zz_after_unkeyed VALUES (1, 'https://old.example/after-unkeyed')"
+        );
+
+        $database = $this->open_mysql_on_sqlite_database();
+        $reader = new \WordPress\DataLiberation\DatabaseRowsReader(
+            $database,
+            ['batch_size' => 1]
+        );
+        $reader->initialize_tables_to_process();
+        do {
+            $this->assertTrue($reader->move_to_next_table());
+        } while ($reader->get_current_table() !== 'wp_unkeyed');
+        $this->assertTrue($reader->next_record());
+
+        $processor = new \Reprint\Importer\DatabaseUrlRewriteProcessor(
+            $database,
+            new \SqlStatementRewriter(
+                new \StructuredDataUrlRewriter([
+                    'https://old.example' => 'https://new.example',
+                ]),
+                'wp_'
+            ),
+            [
+                'reader_cursor' => $reader->get_cursor_state(),
+                'reader_phase' => 'process_record',
+                'records_processed' => 3,
+                'records_changed' => 2,
+                'tables_started' => 1,
+                'current_table' => 'wp_posts',
+                'complete' => false,
+            ]
+        );
+
+        $this->assertTrue($processor->next_step());
+        $this->assertSame('wp_unkeyed', $processor->get_progress()['skipped_table']);
+        do {
+            $has_more_steps = $processor->next_step();
+        } while ($has_more_steps);
+
+        $this->assertSame(
+            'https://old.example/unkeyed',
+            $sqlite->query('SELECT content FROM wp_unkeyed')->fetchColumn()
+        );
+        $this->assertSame(
+            'https://new.example/after-unkeyed',
+            $sqlite->query('SELECT content FROM zz_after_unkeyed')->fetchColumn()
+        );
     }
 
     public function testSqliteMetadataQuotesATableNameContainingSqlPunctuation(): void
