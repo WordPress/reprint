@@ -805,7 +805,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
-* `db-rewrite-urls` — Rewrites URLs in an existing MySQL or SQLite database one primary-keyed record at a time. It saves a record cursor after each bounded step and resumes without scanning completed records again.
+* `db-rewrite-urls` — Rewrites URLs directly in an existing MySQL or SQLite database. You can stop it and continue later. See [Rewrite URLs in a live database](docs/DB-REWRITE-URLS.md).
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 * `pull-metadata` — Prints pull lifecycle and source-site metadata as JSON. The remote Reprint API URL selects the pull state; no network calls are made.
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
