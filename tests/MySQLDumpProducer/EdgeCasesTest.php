@@ -541,7 +541,7 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
         while ($producer->next_sql_fragment()) {
             $frag = $producer->get_sql_fragment();
             $fragments[] = $frag;
-            if (strpos($frag, ');') !== false) {
+            if (strpos($frag, 'INSERT INTO `t`') === 0) {
                 break;
             }
         }
@@ -938,7 +938,7 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
         while ($producer->next_sql_fragment()) {
             $frag = $producer->get_sql_fragment();
             $fragments[] = $frag;
-            if (strpos($frag, ');') !== false) {
+            if (strpos($frag, 'INSERT INTO `t`') === 0) {
                 break;
             }
         }

@@ -358,6 +358,9 @@ class MySQLDumpProducer
      * stops. Repeating that INSERT should skip the existing rows and write the
      * missing rows. Assigning any inserted column to itself handles a simple
      * or composite key without hiding invalid values behind INSERT IGNORE.
+     * MySQL can also detect an enforced UNIQUE key whose columns are NOT NULL.
+     * A nullable UNIQUE key cannot identify an existing row because MySQL
+     * permits more than one row whose unique-key value contains NULL.
      */
     private function get_insert_replay_clause()
     {
@@ -407,9 +410,11 @@ class MySQLDumpProducer
     }
 
     /**
-     * Emits SET statements that disable constraint checks and set a strict SQL mode.
+     * Emits SET statements that configure constraint checks and set a strict SQL mode.
      * These are restored in emit_sql_footer(). Without disabling FK checks, tables
      * that reference each other would need to be imported in dependency order.
+     * Unique checks stay enabled because replayed INSERT statements use unique
+     * keys to recognize rows which are already present.
      *
      * The SQL_MODE explicitly omits NO_ZERO_DATE, NO_ZERO_IN_DATE, and NO_ENGINE_SUBSTITUTION.
      *
@@ -451,7 +456,7 @@ class MySQLDumpProducer
     /** Returns the connection settings required before executing dump SQL. */
     public static function get_session_setup_sql()
     {
-        return "SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0;\n" .
+        return "SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=1;\n" .
             "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;\n" .
             // @TODO: Restore STRICT_TRANS_TABLES
             "SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='ONLY_FULL_GROUP_BY,ERROR_FOR_DIVISION_BY_ZERO';\n" .
