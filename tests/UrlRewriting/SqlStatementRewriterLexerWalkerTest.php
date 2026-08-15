@@ -399,8 +399,8 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
         // sits in, so block_markup-aware rewriting is impossible. Plain
         // text rewriting still happens — that's the conservative outcome
         // and the URL must come out updated. The block-markup HTML
-        // structure is preserved verbatim by URLInTextProcessor (it only
-        // rewrites the URL text, not the surrounding HTML).
+        // structure is preserved verbatim by cautious byte replacement,
+        // which does not re-encode the surrounding HTML.
         $html = '<a href="' . self::FROM . '/page">link</a>';
         $sql = sprintf(
             "INSERT INTO `wp_posts` VALUES (1, 1, NOW(), NOW(), FROM_BASE64('%s'), 'title', 'excerpt', 'publish');",
