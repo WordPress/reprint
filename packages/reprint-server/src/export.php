@@ -959,8 +959,17 @@ function endpoint_sql_chunk(
 
             $i = 0;
             while ($reader->next_sql_fragment()) {
-                $sql[] = $reader->get_sql_fragment();
+                $fragment = (string) $reader->get_sql_fragment();
+                $sql[] = $fragment;
                 $i++;
+
+                // Direct MySQL output saves its source position after this
+                // part. Stop at the end of a statement so a following DROP or
+                // CREATE cannot commit imported rows before that position is saved.
+                $trimmed_fragment = rtrim($fragment);
+                if ($trimmed_fragment !== "" && $trimmed_fragment[-1] === ";") {
+                    break;
+                }
 
                 if ($i >= $fragments_per_batch) {
                     break;
