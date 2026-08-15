@@ -99,7 +99,17 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         clearHookState(site);
         writeTestHooks(site, [
             'function test_hook_before_sql_batch(&$sql, $cursor) {',
-            '    usleep(100000);',
+            '    static $sent_complete_target_insert = false;',
+            '    static $paused_after_target_insert = false;',
+            '    if ($sent_complete_target_insert && !$paused_after_target_insert) {',
+            '        $paused_after_target_insert = true;',
+            '        usleep(10000000);',
+            '        return;',
+            '    }',
+            `    if (strpos($sql, 'INSERT INTO \`${sourceTable}\`') !== false`,
+            `        && substr(rtrim($sql), -1) === ';') {`,
+            '        $sent_complete_target_insert = true;',
+            '    }',
             '}',
         ].join('\n'));
 
