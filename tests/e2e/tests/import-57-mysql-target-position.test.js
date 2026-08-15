@@ -269,7 +269,15 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         );
         assert.equal(decodedSourceCursor.current_table, sourceTable);
         assert.deepEqual(decodedSourceCursor.current_pk_columns, ['id']);
-        assert.equal(Number(decodedSourceCursor.last_pk_values.id), importedRowCount);
+        const savedPrimaryKey = decodedSourceCursor.last_pk_values.id;
+        const savedPrimaryKeyValue = (
+            typeof savedPrimaryKey === 'object'
+            && savedPrimaryKey !== null
+            && typeof savedPrimaryKey.__binary__ === 'string'
+        )
+            ? Buffer.from(savedPrimaryKey.__binary__, 'base64').toString('utf8')
+            : savedPrimaryKey;
+        assert.equal(Number(savedPrimaryKeyValue), importedRowCount);
 
         assert.equal(first.childProcess.kill('SIGKILL'), true);
         const killed = await first.exit;
