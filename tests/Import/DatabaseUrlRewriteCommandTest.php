@@ -433,6 +433,82 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
         $this->assertSame(1, $resumed_processor->get_progress()['records_changed']);
     }
 
+    public function testProcessorAdvancesPastADeletedPendingRecord(): void
+    {
+        $statement_rewriter = new \SqlStatementRewriter(
+            new \StructuredDataUrlRewriter([
+                'https://old.example' => 'https://new.example',
+            ]),
+            'wp_'
+        );
+        $processor = new \Reprint\Importer\DatabaseUrlRewriteProcessor(
+            $this->open_mysql_on_sqlite_database(),
+            $statement_rewriter
+        );
+        $processor->next_step();
+        $processor->next_step();
+        $cursor_before_update = $processor->get_cursor();
+
+        $sqlite = new \PDO('sqlite:' . $this->database_path);
+        $sqlite->exec('DELETE FROM wp_posts WHERE ID = 1');
+
+        $resumed_processor = new \Reprint\Importer\DatabaseUrlRewriteProcessor(
+            $this->open_mysql_on_sqlite_database(),
+            $statement_rewriter,
+            $cursor_before_update
+        );
+        $resumed_processor->next_step();
+        $resumed_processor->next_step();
+        $resumed_processor->next_step();
+
+        $this->assertSame(2, $resumed_processor->get_progress()['records_processed']);
+        $this->assertSame(
+            'a:1:{s:3:"url";s:31:"https://new.example/serialized";}',
+            $sqlite->query('SELECT post_content FROM wp_posts WHERE ID = 2')->fetchColumn()
+        );
+    }
+
+    public function testProcessorAdvancesPastAChangedPendingRecord(): void
+    {
+        $statement_rewriter = new \SqlStatementRewriter(
+            new \StructuredDataUrlRewriter([
+                'https://old.example' => 'https://new.example',
+            ]),
+            'wp_'
+        );
+        $processor = new \Reprint\Importer\DatabaseUrlRewriteProcessor(
+            $this->open_mysql_on_sqlite_database(),
+            $statement_rewriter
+        );
+        $processor->next_step();
+        $processor->next_step();
+        $cursor_before_update = $processor->get_cursor();
+
+        $sqlite = new \PDO('sqlite:' . $this->database_path);
+        $sqlite->exec(
+            "UPDATE wp_posts SET post_content = 'https://concurrent.example' WHERE ID = 1"
+        );
+
+        $resumed_processor = new \Reprint\Importer\DatabaseUrlRewriteProcessor(
+            $this->open_mysql_on_sqlite_database(),
+            $statement_rewriter,
+            $cursor_before_update
+        );
+        $resumed_processor->next_step();
+        $resumed_processor->next_step();
+        $resumed_processor->next_step();
+
+        $this->assertSame(2, $resumed_processor->get_progress()['records_processed']);
+        $this->assertSame(
+            'https://concurrent.example',
+            $sqlite->query('SELECT post_content FROM wp_posts WHERE ID = 1')->fetchColumn()
+        );
+        $this->assertSame(
+            'a:1:{s:3:"url";s:31:"https://new.example/serialized";}',
+            $sqlite->query('SELECT post_content FROM wp_posts WHERE ID = 2')->fetchColumn()
+        );
+    }
+
     public function testStateRoundTripsTheLiveRewriteCursorAndCounters(): void
     {
         $state = new DatabaseUrlRewriteCommandState();
