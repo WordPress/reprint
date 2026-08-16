@@ -14,8 +14,8 @@ use function WordPress\Reprint\Exporter\trim_right_slash;
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
- * --remap: the single write seam (map_remote_absolute_path_to_local_absolute_path)
- * routes remote absolute paths to local absolute paths and leaves the rest nested.
+ * RemoteToLocalPathMapper routes remote absolute paths to local absolute paths
+ * and leaves unmatched paths nested beneath the filesystem root.
  */
 class RemapSeamTest extends TestCase
 {
@@ -66,21 +66,19 @@ class RemapSeamTest extends TestCase
         (new \ReflectionClass($c))->getProperty($p)->setValue($c, $v);
     }
 
-    private function clientWithRules(array $rules): \ImportClient
+    private function mapperWithRules(array $rules): \RemoteToLocalPathMapper
     {
-        $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
-        $this->set($c, 'resolved_path_mappings', $rules);
-        return $c;
+        return new \RemoteToLocalPathMapper($this->root, [], $rules);
     }
 
     public function testRemoteAbsolutePathMapsToLocalAbsolutePath(): void
     {
-        $c = $this->clientWithRules(array(
+        $mapper = $this->mapperWithRules(array(
             '/var/www/html/wp-content' => $this->root . '/wp-content',
         ));
-        $local_absolute_path = $this->call($c, 'map_remote_absolute_path_to_local_absolute_path', array(
-            '/var/www/html/wp-content/plugins/woo/woo.php',
-        ));
+        $local_absolute_path = $mapper->remote_path_to_local_path(
+            '/var/www/html/wp-content/plugins/woo/woo.php'
+        );
         $this->assertSame($this->root . '/wp-content/plugins/woo/woo.php', $local_absolute_path);
     }
 
@@ -89,13 +87,13 @@ class RemapSeamTest extends TestCase
         // Two nested remote prefixes; the deeper (more specific) one has the
         // shorter local prefix. It must still win — specificity is ranked by
         // remote-prefix length, not local-prefix length.
-        $c = $this->clientWithRules(array(
+        $mapper = $this->mapperWithRules(array(
             '/srv/wp-content' => $this->root . '/archive-of-everything',
             '/srv/wp-content/plugins' => $this->root . '/p',
         ));
-        $local_absolute_path = $this->call($c, 'map_remote_absolute_path_to_local_absolute_path', array(
-            '/srv/wp-content/plugins/woo/woo.php',
-        ));
+        $local_absolute_path = $mapper->remote_path_to_local_path(
+            '/srv/wp-content/plugins/woo/woo.php'
+        );
         $this->assertSame($this->root . '/p/woo/woo.php', $local_absolute_path);
     }
 
@@ -103,33 +101,47 @@ class RemapSeamTest extends TestCase
     {
         // A local absolute prefix that is the filesystem root: files land directly at the root,
         // no double slash.
-        $c = $this->clientWithRules(array(
+        $mapper = $this->mapperWithRules(array(
             '/var/www/html/wp-content' => $this->root,
         ));
-        $local_absolute_path = $this->call($c, 'map_remote_absolute_path_to_local_absolute_path', array(
-            '/var/www/html/wp-content/plugins/woo/woo.php',
-        ));
+        $local_absolute_path = $mapper->remote_path_to_local_path(
+            '/var/www/html/wp-content/plugins/woo/woo.php'
+        );
         $this->assertSame($this->root . '/plugins/woo/woo.php', $local_absolute_path);
     }
 
     public function testOutOfScopePathFallsBackToNestedIdentity(): void
     {
-        $c = $this->clientWithRules(array(
+        $mapper = $this->mapperWithRules(array(
             '/var/www/html/wp-content' => $this->root . '/wp-content',
         ));
-        $local_absolute_path = $this->call($c, 'map_remote_absolute_path_to_local_absolute_path', array(
-            '/var/www/html/wp-admin/index.php',
-        ));
+        $local_absolute_path = $mapper->remote_path_to_local_path(
+            '/var/www/html/wp-admin/index.php'
+        );
         $this->assertSame($this->root . '/var/www/html/wp-admin/index.php', $local_absolute_path);
     }
 
     public function testNoRulesIsLegacyMapping(): void
     {
-        $c = $this->clientWithRules(array());
-        $local_absolute_path = $this->call($c, 'map_remote_absolute_path_to_local_absolute_path', array(
-            '/var/www/html/wp-content/x.txt',
-        ));
+        $mapper = $this->mapperWithRules(array());
+        $local_absolute_path = $mapper->remote_path_to_local_path(
+            '/var/www/html/wp-content/x.txt'
+        );
         $this->assertSame($this->root . '/var/www/html/wp-content/x.txt', $local_absolute_path);
+    }
+
+    public function testMappingPreservesArbitraryPathBytes(): void
+    {
+        $remote_prefix = "/var/www/html/content-\xff";
+        $local_prefix = $this->root . "/content-\xfe";
+        $mapper = $this->mapperWithRules(array(
+            $remote_prefix => $local_prefix,
+        ));
+
+        $this->assertSame(
+            $local_prefix . "/file-\xfd.txt",
+            $mapper->remote_path_to_local_path($remote_prefix . "/file-\xfd.txt")
+        );
     }
 
     /**
@@ -339,7 +351,11 @@ class RemapSeamTest extends TestCase
 
     public function testNextRemoteIndexMatchesFilesystemRootAndPathBoundaries(): void
     {
-        $client = $this->clientWithRules(array());
+        $client = new \ImportClient(
+            'https://src.example/export.php',
+            $this->stateDir,
+            $this->fsRoot
+        );
         $next_remote_index_file = $this->tempDir . '/remote-index.next.jsonl';
         file_put_contents(
             $next_remote_index_file,
