@@ -6,6 +6,7 @@ import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
@@ -14,6 +15,7 @@ import {
     createMysqlConnection, fsRootDir,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState, readAuditLog,
+    pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -25,7 +27,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
     const site = 'mysql-target-cursor-resume';
     const sourceTable = 'aa_target_cursor_rows';
     const myisamSourceTable = 'ab_target_cursor_myisam_rows';
-    const progressTable = '__reprint_db_pull_progress_728f9e0b-42f7-4d85-a7f3-8f53e90a6f4c';
+    const progressTable = '__reprint_db_pull_progress_49acb118-a97a-45c7-814d-8e670db7f6b4';
     const targetDb = `${getDbName(site)}_import`;
     const projectRoot = join(import.meta.dirname, '..', '..', '..');
     const importerPath = process.env.IMPORTER_PATH
@@ -215,7 +217,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             );
             assert.deepEqual(
                 targetColumns.map(column => column.COLUMN_NAME),
-                ['id', 'source_hash', 'source_cursor'],
+                ['id', 'source_hash', 'source_cursor', 'file_byte_offset'],
             );
         } finally {
             await sourceConnection.query(`DROP TABLE IF EXISTS \`${sourceProgressTable}\``);
@@ -262,10 +264,13 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
                             `SELECT COUNT(*) AS rowCount FROM \`${table}\``
                         );
                         const [[savedPosition]] = await interruptedTarget.query(
-                            `SELECT source_cursor FROM \`${progressTable}\` WHERE id = 1`
+                            `SELECT source_cursor, file_byte_offset FROM \`${progressTable}\` WHERE id = 1`
                         );
                         importedRowCount = Number(importedRows.rowCount);
                         savedSourceCursor = savedPosition?.source_cursor ?? null;
+                        if (savedPosition) {
+                            assert.equal(savedPosition.file_byte_offset, null);
+                        }
                         if (
                             importedRowCount > 0
                             && importedRowCount < 600
@@ -304,6 +309,15 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         }
 
         const firstPosition = await waitForSavedTablePosition(sourceTable, first);
+        const localState = JSON.parse(readFileSync(
+            join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+            'utf8',
+        ));
+        assert.equal(
+            localState.active_resumable_command.remote_cursor,
+            null,
+            'direct MySQL output copied the target cursor into local state',
+        );
         assert.deepEqual(firstPosition.decoded.current_pk_columns, ['id']);
         const savedPrimaryKey = firstPosition.decoded.last_pk_values.id;
         const savedPrimaryKeyValue = (
