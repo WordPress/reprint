@@ -27,6 +27,8 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
     const site = 'mysql-target-cursor-resume';
     const sourceTable = 'aa_target_cursor_rows';
     const myisamSourceTable = 'ab_target_cursor_myisam_rows';
+    const unkeyedMyisamSourceTable = 'ac_target_cursor_unkeyed_myisam_rows';
+    const afterUnkeyedSourceTable = 'ad_after_unkeyed_myisam_rows';
     const progressTable = '__reprint_db_pull_progress_49acb118-a97a-45c7-814d-8e670db7f6b4';
     const targetDb = `${getDbName(site)}_import`;
     const projectRoot = join(import.meta.dirname, '..', '..', '..');
@@ -88,19 +90,18 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         await ensureSite(site, {
             files: 'none',
             customDb: async (_dbName, connection) => {
-                for (const [table, engine] of [
-                    [sourceTable, 'InnoDB'],
-                    [myisamSourceTable, 'MyISAM'],
+                for (const [table, engine, key, rowCount] of [
+                    [sourceTable, 'InnoDB', 'PRIMARY KEY (`id`)', 600],
+                    [myisamSourceTable, 'MyISAM', 'UNIQUE KEY `replay_key` (`id`, `value`)', 600],
+                    [unkeyedMyisamSourceTable, 'MyISAM', '', 100],
+                    [afterUnkeyedSourceTable, 'InnoDB', 'PRIMARY KEY (`id`)', 1],
                 ]) {
-                    const key = engine === 'MyISAM'
-                        ? 'UNIQUE KEY `replay_key` (`id`, `value`)'
-                        : 'PRIMARY KEY (`id`)';
                     await connection.query(
                         `CREATE TABLE \`${table}\` (`
                         + '`id` INT NOT NULL, `value` VARCHAR(64) NOT NULL, '
-                        + `${key}) ENGINE=${engine}`
+                        + `${key || 'KEY `row_order` (`id`)'}) ENGINE=${engine}`
                     );
-                    const rows = Array.from({ length: 600 }, (_, index) => [
+                    const rows = Array.from({ length: rowCount }, (_, index) => [
                         index + 1,
                         `${table}-row-${index + 1}`,
                     ]);
@@ -129,7 +130,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             `    $state_file = '/srv/e2e-sites/.e2e-hook-state-${site}';`,
             '    $state = json_decode(file_get_contents($state_file), true);',
             '    if (!empty($state[\'countDrops\'])) {',
-            `        foreach (['${sourceTable}', '${myisamSourceTable}'] as $table) {`,
+            `        foreach (['${sourceTable}', '${myisamSourceTable}', '${unkeyedMyisamSourceTable}', '${afterUnkeyedSourceTable}'] as $table) {`,
             '            if (strpos($sql, "DROP TABLE IF EXISTS `{$table}`") !== false) {',
             '                $state[\'drops\'][$table] = ($state[\'drops\'][$table] ?? 0) + 1;',
             '            }',
@@ -241,7 +242,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         await connection.end();
     });
 
-    it('continues InnoDB and keyed MyISAM tables from the position saved by MySQL', async () => {
+    it('continues after a finished unkeyed MyISAM table', async () => {
         writeHookState(site, {
             pauseTable: sourceTable,
             pauseNextBatch: false,
@@ -252,7 +253,12 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         });
         const first = spawnDatabasePull();
 
-        async function waitForSavedTablePosition(table, databasePull) {
+        async function waitForSavedTablePosition(
+            table,
+            databasePull,
+            completedRowCount = null,
+            requirePausedSource = true,
+        ) {
             const interruptedTarget = await createMysqlConnection(targetDb);
             let importedRowCount = 0;
             let savedSourceCursor = null;
@@ -271,12 +277,14 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
                         if (savedPosition) {
                             assert.equal(savedPosition.file_byte_offset, null);
                         }
+                        const expectedRowsArePresent = completedRowCount === null
+                            ? importedRowCount > 0 && importedRowCount < 600
+                            : importedRowCount === completedRowCount;
                         if (
-                            importedRowCount > 0
-                            && importedRowCount < 600
+                            expectedRowsArePresent
                             && typeof savedSourceCursor === 'string'
                             && savedSourceCursor.length > 0
-                            && readHookState(site)?.paused === true
+                            && (!requirePausedSource || readHookState(site)?.paused === true)
                         ) {
                             const decoded = JSON.parse(
                                 Buffer.from(savedSourceCursor, 'base64').toString('utf8')
@@ -393,6 +401,46 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         assert.equal(secondKilled.code, null);
         assert.equal(secondKilled.signal, 'SIGKILL');
 
+        // The source request can outlive the killed importer. Its hook sleeps
+        // twice for 10 seconds before exiting, so let it finish before the
+        // replacement process starts using the same hook state.
+        await sleep(21000);
+
+        const secondHookState = readHookState(site);
+        writeHookState(site, {
+            ...secondHookState,
+            pauseTable: null,
+            pauseNextBatch: false,
+            stopAfterBatch: false,
+            paused: false,
+        });
+
+        const blockedFollowingTable = await createMysqlConnection(targetDb);
+        await blockedFollowingTable.query(
+            `CREATE TABLE IF NOT EXISTS \`${afterUnkeyedSourceTable}\` (`
+            + '`id` INT NOT NULL PRIMARY KEY, `value` VARCHAR(64) NOT NULL) ENGINE=InnoDB'
+        );
+        // Hold the following DROP so the finished MyISAM cursor remains observable.
+        await blockedFollowingTable.query(`LOCK TABLES \`${afterUnkeyedSourceTable}\` READ`);
+        const third = spawnDatabasePull();
+        try {
+            const completedUnkeyedPosition = await waitForSavedTablePosition(
+                unkeyedMyisamSourceTable,
+                third,
+                100,
+                false,
+            );
+            assert.equal(completedUnkeyedPosition.decoded.state, 'next_table');
+
+            assert.equal(third.childProcess.kill('SIGKILL'), true);
+            const thirdKilled = await third.exit;
+            assert.equal(thirdKilled.code, null);
+            assert.equal(thirdKilled.signal, 'SIGKILL');
+        } finally {
+            await blockedFollowingTable.query('UNLOCK TABLES');
+            await blockedFollowingTable.end();
+        }
+
         const finalHookState = readHookState(site);
         writeHookState(site, {
             ...finalHookState,
@@ -402,7 +450,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             paused: false,
             drops: {
                 ...finalHookState.drops,
-                [myisamSourceTable]: 0,
+                [unkeyedMyisamSourceTable]: 0,
             },
         });
 
@@ -417,14 +465,19 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             `replacement db-pull failed:\n${replacement.stderr}\n${replacement.stdout}`,
         );
         assert.equal(
-            readHookState(site)?.drops?.[myisamSourceTable] ?? 0,
+            readHookState(site)?.drops?.[unkeyedMyisamSourceTable] ?? 0,
             0,
-            'replacement db-pull restarted the completed part of the MyISAM table',
+            'replacement db-pull restarted the finished unkeyed MyISAM table',
         );
 
         const targetConnection = await createMysqlConnection(targetDb);
         try {
-            for (const table of [sourceTable, myisamSourceTable]) {
+            for (const [table, expectedRowCount] of [
+                [sourceTable, 600],
+                [myisamSourceTable, 600],
+                [unkeyedMyisamSourceTable, 100],
+                [afterUnkeyedSourceTable, 1],
+            ]) {
                 const [summary] = await targetConnection.query(
                     `SELECT COUNT(*) AS rowCount, MIN(id) AS firstId, MAX(id) AS lastId `
                     + `FROM \`${table}\``
@@ -435,7 +488,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
                         firstId: Number(summary[0].firstId),
                         lastId: Number(summary[0].lastId),
                     },
-                    { rowCount: 600, firstId: 1, lastId: 600 },
+                    { rowCount: expectedRowCount, firstId: 1, lastId: expectedRowCount },
                 );
             }
         } finally {
