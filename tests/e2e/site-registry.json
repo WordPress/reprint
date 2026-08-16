@@ -148,6 +148,9 @@
     },
     "mysql-target-cursor-resume": {
       "port": 8128
+    },
+    "budgeted-mysql-sql-groups": {
+      "port": 8129
     }
   }
 }

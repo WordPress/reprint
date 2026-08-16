@@ -378,6 +378,13 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
                 );
             }
 
+            if (strpos($producer->get_sql_fragment(), 'UPDATE `reentrant_large_binary_key`') !== false) {
+                $this->assertTrue(
+                    $producer->current_fragment_must_be_its_own_part(),
+                    'Each oversized-value update must be sent in its own multipart part.'
+                );
+            }
+
             if (!$producer->is_finished()) {
                 $options["cursor"] = $cursor;
                 $producer = $this->createProducer($options);

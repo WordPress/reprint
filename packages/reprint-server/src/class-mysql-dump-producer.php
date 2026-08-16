@@ -63,6 +63,9 @@ class MySQLDumpProducer
     /** @var string|null */
     private $current_sql_fragment = null;
 
+    /** @var bool */
+    private $current_fragment_must_be_its_own_part = false;
+
     /** @var string */
     private $state = self::STATE_INIT;
 
@@ -135,6 +138,12 @@ class MySQLDumpProducer
         return self::STATE_FINISHED === $this->state;
     }
 
+    /** Returns whether this fragment must be sent in its own multipart part. */
+    public function current_fragment_must_be_its_own_part(): bool
+    {
+        return $this->current_fragment_must_be_its_own_part;
+    }
+
     /**
      * Advances the state machine and populates the next SQL fragment.
      *
@@ -146,6 +155,8 @@ class MySQLDumpProducer
         if ($this->is_finished()) {
             return false;
         }
+
+        $this->current_fragment_must_be_its_own_part = false;
 
         if (self::STATE_INIT === $this->state) {
             if (!$this->row_reader->has_initialized_tables()) {
@@ -159,6 +170,7 @@ class MySQLDumpProducer
                 case self::STATE_EMIT_HEADER:
                     $this->emit_sql_header();
                     $this->state = self::STATE_NEXT_TABLE;
+                    $this->current_fragment_must_be_its_own_part = true;
                     return true;
 
                 case self::STATE_NEXT_TABLE:
@@ -174,11 +186,13 @@ class MySQLDumpProducer
                 case self::STATE_EMIT_FOOTER:
                     $this->emit_sql_footer();
                     $this->state = self::STATE_FINISHED;
+                    $this->current_fragment_must_be_its_own_part = true;
                     return true;
 
                 case self::STATE_CREATE_TABLE:
                     $this->emit_create_table_statement();
                     $this->state = self::STATE_TABLE_HEADER;
+                    $this->current_fragment_must_be_its_own_part = true;
                     return true;
 
                 case self::STATE_TABLE_HEADER:
@@ -198,6 +212,7 @@ class MySQLDumpProducer
 
                 case self::STATE_EMIT_OVERSIZED_UPDATE:
                     if ($this->emit_oversized_update()) {
+                        $this->current_fragment_must_be_its_own_part = true;
                         return true;
                     }
                     break;

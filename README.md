@@ -370,14 +370,19 @@ The three modes:
 
 When a source response stops mid-stream, the same importer asks for the
 remaining SQL and keeps an unfinished statement in memory. Direct MySQL
-output stores the last committed source position in the target table
+output stores the last committed cursor in the target table
 `__reprint_db_pull_progress_<uuid>`. The UUID makes an accidental name clash
 unlikely and changes whenever the table schema changes. Reprint logs and excludes
-that internal name from the source dump. For transactional target tables, each
-completed SQL group and its source position are committed together. If the
-importer process stops, the next `db-pull` waits for the old target connection
-to finish, reapplies the saved MySQL session setup, and continues from the
-position stored in the target database. A repeated INSERT skips rows already
+that internal name from the source dump. Existing SQL statement-size, fragment,
+time, and memory budgets may split SQL across multipart parts or place several
+regular INSERT statements in one part. When a part completes the buffered SQL
+statement, the importer runs everything collected since the previous commit.
+For transactional target tables, those rows and that part's cursor are committed
+together. Table replacement and oversized-value updates remain separate so they
+cannot commit earlier rows before their cursor is saved. If the importer process
+stops, the next `db-pull` waits for the old target connection to finish, reapplies
+the saved MySQL session setup, and continues from the cursor stored in the target
+database. A repeated INSERT skips rows already
 identified by a non-null unique key, so this also works for keyed MyISAM tables.
 Reprint cannot continue a nontransactional table without such a key, or while
 an oversized value is being appended in separate UPDATE statements; those
@@ -681,7 +686,7 @@ are absent while the plan is still being built.
 This is the pull state store. Pull commands read it on startup and write it
 back periodically and on shutdown. It stores the current command, cursor
 position, AIMD tuning state, and per-phase bookmarks. Direct MySQL output also
-records each committed source position in the target database.
+records each committed cursor in the target database.
 
 Written atomically (temp file + rename) so a crash mid-write never corrupts it.
 If the JSON is invalid on load, the importer renames it to
