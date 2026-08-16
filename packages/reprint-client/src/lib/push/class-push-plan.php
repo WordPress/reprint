@@ -5,7 +5,7 @@ use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\relative_path_under;
 use function WordPress\Reprint\Exporter\trim_right_slash;
 
-require_once __DIR__ . '/../index/class-file-sync-patch-planner.php';
+require_once __DIR__ . '/../index/class-file-sync-plan-runner.php';
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
 
@@ -19,9 +19,9 @@ require_once __DIR__ . '/../index/class-file-sync-patch-planner.php';
  *
  * PushFilesSender or the files-diff command owns the caller-visible lifecycle,
  * lock, top-level phase, result, and terminal behavior. PushPlan owns
- * FileIndexProcessor, FileSyncPatchPlanner, the fresh local index, the
- * meaning of its cursor, and the two completed path lists. A caller which
- * resumes across processes stores the cursor returned by get_cursor().
+ * FileIndexProcessor, FileSyncPlanRunner, the fresh local index, the meaning
+ * of its cursor, and the two completed path lists. A caller which resumes
+ * across processes stores the cursor returned by get_cursor().
  *
  * ## Durable boundary
  *
@@ -56,18 +56,18 @@ require_once __DIR__ . '/../index/class-file-sync-patch-planner.php';
  * bytes beyond saved offsets, so an interrupted step cannot leave duplicate
  * durable entries.
  *
- * FileSyncPatchPlanner retains the next entry from each index and writes the
+ * FileSyncPlanRunner retains FileSyncPatchPlanner, both plan outputs, and the
  * active directory-deletion roots needed to suppress redundant descendant
- * deletions. PushPlan stores its cursor without unpacking it. Neither class
- * loads an index, path list, or the active deletion roots file in full.
+ * deletions. PushPlan stores the runner cursor unchanged while diffing.
+ * Neither class loads an index, path list, or the active deletion roots file
+ * in full.
  *
+ * @phpstan-import-type Cursor from FileSyncPlanRunner as FileSyncPlanRunnerCursor
  * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
  * @phpstan-type IndexingCursor array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}
  * @phpstan-type StartingDiffCursor array{phase:'starting_diff'}
- * @phpstan-type FileSyncPlannerIndexDiffCursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
- * @phpstan-type FileSyncPlannerCursor array{patch_base_index_file:string,patch_result_index_file:string,active_deletion_roots_file:string,included_index_path_roots:list<string>,excluded_index_path_roots:list<string>,index_diff_cursor:FileSyncPlannerIndexDiffCursor,active_deletion_root_byte_offset:int|null}
- * @phpstan-type IndexDiffCursor array{phase:'diffing',file_sync_planner_cursor:FileSyncPlannerCursor,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int|null,local_file_bytes_to_push:int|null}
- * @phpstan-type CompleteCursor array{phase:'complete',local_paths_to_push_count:int|null,local_file_bytes_to_push:int|null}
+ * @phpstan-type IndexDiffCursor array{phase:'diffing',file_sync_plan_runner_cursor:FileSyncPlanRunnerCursor}
+ * @phpstan-type CompleteCursor array{phase:'complete',local_paths_to_push_count:int,local_file_bytes_to_push:int}
  * @phpstan-type PushPlanPosition IndexingCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
  * @phpstan-type PushPlanCursor array{plan_directory:string,filesystem_root:string,local_index_file:string,document_root_local_relative_path:string,position:PushPlanPosition}
  */
@@ -112,15 +112,11 @@ class PushPlan
     /** @var FileIndexProcessor Fresh local index traversal retained during indexing. */
     private FileIndexProcessor $file_index_processor;
 
-    /** File-sync patch planner retained during the diff phase. */
-    private FileSyncPatchPlanner $patch_planner;
+    /** File-sync plan runner retained during the diff phase. */
+    private FileSyncPlanRunner $file_sync_plan_runner;
 
     /** @var resource|null Open fresh local index retained during indexing. */
     private $fresh_local_index_handle = null;
-    /** @var resource|null */
-    private $local_paths_to_push_handle = null;
-    /** @var resource|null */
-    private $local_paths_to_delete_handle = null;
     /** @var int|null Combined size of the two retained indexes during the index diff. */
     private ?int $index_bytes_total = null;
 
@@ -195,24 +191,6 @@ class PushPlan
             // Older cursors had no document-root mapping and used local relative paths unchanged.
             $cursor["document_root_local_relative_path"] = "";
         }
-        $position = $cursor["position"];
-        if (
-            ($position["phase"] === "diffing" || $position["phase"] === "complete")
-            && !array_key_exists("local_paths_to_push_count", $position)
-        ) {
-            // Keep the plan single-pass when an older cursor has no path count.
-            $position["local_paths_to_push_count"] = null;
-            $cursor["position"] = $position;
-        }
-        if (
-            ( $position["phase"] === "diffing" || $position["phase"] === "complete" )
-            && !array_key_exists("local_file_bytes_to_push", $position)
-        ) {
-            // Keep the plan single-pass when an older cursor has no file byte total.
-            $position["local_file_bytes_to_push"] = null;
-            $cursor["position"] = $position;
-        }
-
         $plan = new self(
             $cursor["plan_directory"],
             $cursor["filesystem_root"],
@@ -227,14 +205,8 @@ class PushPlan
         if ($position["phase"] === "indexing") {
             $plan->open_fresh_local_index_for_continuation();
         } elseif ($position["phase"] === "diffing") {
-            $plan->open_plan_output_files(
-                $position["byte_offset_in_local_paths_to_push"],
-                $position["byte_offset_in_local_paths_to_delete"]
-            );
-            $file_sync_planner_cursor =
-                $position["file_sync_planner_cursor"];
-            $plan->patch_planner = FileSyncPatchPlanner::resume(
-                $file_sync_planner_cursor
+            $plan->file_sync_plan_runner = FileSyncPlanRunner::resume(
+                $position["file_sync_plan_runner_cursor"]
             );
             $plan->set_index_bytes_total();
         }
@@ -282,10 +254,8 @@ class PushPlan
             return $progress;
         }
 
-        $index_diff_cursor =
-            $position["file_sync_planner_cursor"]["index_diff_cursor"];
-        $index_bytes_done = $index_diff_cursor["new_index_byte_offset"]
-            + $index_diff_cursor["old_index_byte_offset"];
+        $index_bytes_done =
+            $this->file_sync_plan_runner->get_index_bytes_done();
         $progress["index_bytes_done"] = min($index_bytes_done, $this->index_bytes_total);
         $progress["index_bytes_total"] = $this->index_bytes_total;
         return $progress;
@@ -320,14 +290,8 @@ class PushPlan
         ) {
             throw new RuntimeException("Failed to flush the fresh local index.");
         }
-        if (
-            ( is_resource($this->local_paths_to_push_handle) && !fflush($this->local_paths_to_push_handle) )
-            || ( is_resource($this->local_paths_to_delete_handle) && !fflush($this->local_paths_to_delete_handle) )
-        ) {
-            throw new RuntimeException("Failed to flush a push-plan output.");
-        }
-        if (isset($this->patch_planner)) {
-            $this->patch_planner->flush_pending_outputs();
+        if (isset($this->file_sync_plan_runner)) {
+            $this->file_sync_plan_runner->flush_pending_outputs();
         }
     }
 
@@ -495,40 +459,24 @@ class PushPlan
                 "Failed to sort the fresh local index: {$this->fresh_local_index_file}"
             );
         }
-        $this->open_plan_output_files(0, 0);
-        $this->patch_planner = FileSyncPatchPlanner::create(
+        $patch_planner = FileSyncPatchPlanner::create(
             $this->local_index_file,
             $this->fresh_local_index_file,
             $this->active_deletion_roots_file,
             [$this->document_root_local_relative_path],
             $this->get_excluded_index_path_roots()
         );
-        $this->cursor["position"] = [
-            "phase" => "diffing",
-            "file_sync_planner_cursor" => $this->patch_planner->get_cursor(),
-            "byte_offset_in_local_paths_to_push" => 0,
-            "byte_offset_in_local_paths_to_delete" => 0,
-            "local_paths_to_push_count" => 0,
-            "local_file_bytes_to_push" => 0,
-        ];
+        $this->file_sync_plan_runner = FileSyncPlanRunner::start(
+            $patch_planner,
+            [
+                "paths_to_copy_file" => $this->local_paths_to_push,
+                "paths_to_delete_file" => $this->local_paths_to_delete,
+                "deletion_path_prefix" =>
+                    $this->document_root_local_relative_path,
+            ]
+        );
+        $this->store_file_sync_plan_runner_position();
         $this->set_index_bytes_total();
-    }
-
-    /** Opens both patch-plan outputs at their durable byte offsets. */
-    private function open_plan_output_files(
-        int $byte_offset_in_local_paths_to_push,
-        int $byte_offset_in_local_paths_to_delete
-    ): void {
-        $this->local_paths_to_push_handle =
-            $this->open_push_plan_output_file_at_byte_offset(
-                $this->local_paths_to_push,
-                $byte_offset_in_local_paths_to_push
-            );
-        $this->local_paths_to_delete_handle =
-            $this->open_push_plan_output_file_at_byte_offset(
-                $this->local_paths_to_delete,
-                $byte_offset_in_local_paths_to_delete
-            );
     }
 
     /** Returns target exclusions in local-index coordinates. */
@@ -624,75 +572,31 @@ class PushPlan
      */
     private function next_index_diff_step(): bool
     {
-        /** @var IndexDiffCursor $cursor */
-        $cursor = $this->cursor["position"];
-        $local_paths_to_push_count = $cursor["local_paths_to_push_count"];
-        $local_file_bytes_to_push = $cursor["local_file_bytes_to_push"];
+        $another_step_may_be_performed =
+            $this->file_sync_plan_runner->next_step();
+        $this->store_file_sync_plan_runner_position();
+        return $another_step_may_be_performed;
+    }
 
-        if (!$this->patch_planner->next_path()) {
-            if (
-                !fflush($this->local_paths_to_push_handle)
-                || !fflush($this->local_paths_to_delete_handle)
-            ) {
-                throw new RuntimeException("Failed to flush a push-plan output.");
-            }
-            $this->patch_planner->flush_pending_outputs();
+    /** Stores the runner cursor or the completed push-plan totals. */
+    private function store_file_sync_plan_runner_position(): void
+    {
+        if ($this->file_sync_plan_runner->is_complete()) {
             $this->cursor["position"] = [
                 "phase" => "complete",
-                "local_paths_to_push_count" => $local_paths_to_push_count,
-                "local_file_bytes_to_push" => $local_file_bytes_to_push,
+                "local_paths_to_push_count" =>
+                    $this->file_sync_plan_runner->get_paths_to_copy_count(),
+                "local_file_bytes_to_push" =>
+                    $this->file_sync_plan_runner->get_file_bytes_to_copy(),
             ];
-            return false;
+            return;
         }
 
-        $operation = $this->patch_planner->get_operation();
-        if ($operation !== null) {
-            if ($operation["action"] !== "copy") {
-                $this->append_local_path_to_delete($operation["path"]);
-            }
-            if ($operation["action"] !== "delete") {
-                $this->append_local_path_to_push($operation);
-                if ($local_paths_to_push_count !== null) {
-                    ++$local_paths_to_push_count;
-                }
-                if (
-                    $local_file_bytes_to_push !== null
-                    && $operation["expected_source"]["type"] === "file"
-                ) {
-                    $local_file_bytes_to_push +=
-                        $operation["expected_source"]["size"];
-                }
-            }
-        }
-
-        $complete = $this->patch_planner->is_complete();
-        if ($complete) {
-            if (
-                !fflush($this->local_paths_to_push_handle)
-                || !fflush($this->local_paths_to_delete_handle)
-            ) {
-                throw new RuntimeException("Failed to flush a push-plan output.");
-            }
-            $this->patch_planner->flush_pending_outputs();
-        }
-        $this->cursor["position"] = $complete
-            ? [
-                "phase" => "complete",
-                "local_paths_to_push_count" => $local_paths_to_push_count,
-                "local_file_bytes_to_push" => $local_file_bytes_to_push,
-            ]
-            : [
-                "phase" => "diffing",
-                "file_sync_planner_cursor" =>
-                    $this->patch_planner->get_cursor(),
-                "byte_offset_in_local_paths_to_push" =>
-                    ftell($this->local_paths_to_push_handle),
-                "byte_offset_in_local_paths_to_delete" =>
-                    ftell($this->local_paths_to_delete_handle),
-                "local_paths_to_push_count" => $local_paths_to_push_count,
-                "local_file_bytes_to_push" => $local_file_bytes_to_push,
-            ];
-        return !$complete;
+        $this->cursor["position"] = [
+            "phase" => "diffing",
+            "file_sync_plan_runner_cursor" =>
+                $this->file_sync_plan_runner->get_cursor(),
+        ];
     }
 
     /**
@@ -704,21 +608,16 @@ class PushPlan
      */
     public function close(): void
     {
+        if ($this->closed) {
+            return;
+        }
         if (isset($this->file_index_processor)) {
             $this->file_index_processor->close();
         }
-        if (isset($this->patch_planner)) {
-            $this->patch_planner->close();
+        if (isset($this->file_sync_plan_runner)) {
+            $this->file_sync_plan_runner->close();
         }
         $this->close_fresh_local_index_handle();
-        if (is_resource($this->local_paths_to_push_handle)) {
-            fclose($this->local_paths_to_push_handle);
-        }
-        if (is_resource($this->local_paths_to_delete_handle)) {
-            fclose($this->local_paths_to_delete_handle);
-        }
-        $this->local_paths_to_push_handle = null;
-        $this->local_paths_to_delete_handle = null;
         $this->closed = true;
     }
 
@@ -731,102 +630,6 @@ class PushPlan
             fclose($this->fresh_local_index_handle);
         }
         $this->fresh_local_index_handle = null;
-    }
-
-    /**
-     * Opens one output at its durable cursor offset and discards later bytes.
-     *
-     * Plan output is flushed before its cursor is stored, so a valid cursor
-     * cannot exceed the output length. A process may stop after writing output
-     * but before storing its next cursor. Truncating to the saved offset
-     * removes only that uncommitted tail before the plan continues.
-     *
-     * @param string $push_plan_output_file Path to the push-plan output file.
-     * @param int    $byte_offset           Durable byte offset at which writing resumes.
-     * @return resource Writable output handle positioned at the durable offset.
-     */
-    private function open_push_plan_output_file_at_byte_offset(
-        string $push_plan_output_file,
-        int $byte_offset
-    )
-    {
-        $push_plan_output_file_handle = fopen($push_plan_output_file, "c+b");
-        if (!$push_plan_output_file_handle) {
-            throw new RuntimeException("Failed to open push plan output for writing: {$push_plan_output_file}");
-        }
-        if (
-            !ftruncate($push_plan_output_file_handle, $byte_offset)
-            || fseek($push_plan_output_file_handle, $byte_offset) !== 0
-        ) {
-            fclose($push_plan_output_file_handle);
-            throw new RuntimeException(
-                "Failed to truncate and seek push plan output "
-                . "{$push_plan_output_file} to byte {$byte_offset}."
-            );
-        }
-        return $push_plan_output_file_handle;
-    }
-
-    /**
-     * Appends one copy or replace operation to the JSONL push list.
-     *
-     * Base64 keeps arbitrary filesystem path bytes representable in JSON.
-     *
-     * @param array $operation {
-     *     Copy or replace operation selected by FileSyncPatchPlanner.
-     *
-     *     @type string $action          `copy` or `replace`.
-     *     @type string $path            Local relative path selected for push.
-     *     @type array  $expected_source {
-     *         Source state required when the path is pushed.
-     *
-     *         @type string $type  Expected `file`, `link`, or `dir` type.
-     *         @type int    $size  Expected size.
-     *         @type int    $ctime Expected inode change time.
-     *     }
-     * }
-     * @phpstan-param array{action:'copy'|'replace',path:string,expected_source:array{type:string,size:int,ctime:int}} $operation
-     */
-    private function append_local_path_to_push(array $operation): void {
-        $local_path_to_push_json_line = json_encode(
-            [
-                "path" => base64_encode($operation["path"]),
-                "type" => $operation["expected_source"]["type"] === "link"
-                    ? "symlink"
-                    : ( $operation["expected_source"]["type"] === "dir"
-                        ? "directory"
-                        : "file" ),
-                "size" => $operation["expected_source"]["size"],
-                "ctime" => $operation["expected_source"]["ctime"],
-            ],
-            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-        ) . "\n";
-        if (
-            fwrite($this->local_paths_to_push_handle, $local_path_to_push_json_line)
-            !== strlen($local_path_to_push_json_line)
-        ) {
-            throw new RuntimeException("Short write on local push path list {$this->local_paths_to_push}, is the disk full?");
-        }
-    }
-
-    /**
-     * Appends one path to the NUL-delimited list of local paths to delete.
-     *
-     * @param string $path Raw filesystem path selected for deletion.
-     */
-    private function append_local_path_to_delete(string $path): void
-    {
-        $document_root_relative_path = relative_path_under(
-            $path,
-            $this->document_root_local_relative_path
-        );
-        if ($document_root_relative_path === null) {
-            return;
-        }
-        $document_root_relative_path_with_nul = $document_root_relative_path . "\0";
-        if (fwrite($this->local_paths_to_delete_handle, $document_root_relative_path_with_nul) !== strlen($document_root_relative_path_with_nul)) {
-            throw new RuntimeException("Short write on local paths to delete {$this->local_paths_to_delete}, is the disk full?");
-        }
     }
 
     /**

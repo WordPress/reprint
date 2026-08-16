@@ -60,12 +60,13 @@ local relative path to a document-root-relative path.
   planning a push. Use `$fresh_local_index_file`.
 - An **index entry** records one path, type, size, and ctime. Use
   `$index_entry`.
-- A **file sync patch planner** compares a patch base index with a patch result
-  index and selects `copy`, `delete`, or `replace` operations. To make two
-  trees identical, the destination is the patch base and the source is the
-  patch result. To copy only source changes, the source snapshots from the
-  last sync and now are the patch base and result. The planner owns the index
-  diff and the active deletion roots file.
+- A **file sync patch planner** compares a patch base index with a patch head
+  index and selects `copy`, `delete`, or `replace` operations. The base is the
+  left side of the comparison. The head is the right side. To make two trees
+  identical, the destination is the patch base and the source is the patch
+  head. To copy only source changes, the source snapshots from the last sync
+  and now are the patch base and head. The planner owns the index diff and the
+  active deletion roots file.
 - The **pull index WAL** records completed pull mutations awaiting application
   to the remote and local indexes.
 - A **pull plan** lists remote absolute paths still scheduled for download or
@@ -527,7 +528,7 @@ Use these names verbatim inside `PushPlan`:
 | Fresh local index byte offset | `$fresh_local_index_byte_offset` |
 | Open fresh local index | `$fresh_local_index_handle` |
 | Combined index bytes | `$index_bytes_total` |
-| File-sync planner cursor | `file_sync_planner_cursor`, `$file_sync_planner_cursor` |
+| File-sync plan runner cursor | `file_sync_plan_runner_cursor`, `$file_sync_plan_runner_cursor` |
 | Plan progress | `get_progress()` |
 | Start index diff | `start_index_diff()` |
 | Seek an index file | `seek_index_file_to_byte_offset()`, `$index_file_handle` |

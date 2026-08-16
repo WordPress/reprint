@@ -47,7 +47,7 @@ final class FileSyncPatchPlannerTest extends TestCase
             'e-modified.txt' => $this->entry('e-modified.txt', 1),
             'f-unchanged.txt' => $this->entry('f-unchanged.txt'),
         ]);
-        $patch_result_index = $this->write_index('result.jsonl', [
+        $patch_head_index = $this->write_index('head.jsonl', [
             'a-added.txt' => $this->entry('a-added.txt', 2, 3),
             'c-empty-to-file' => $this->entry('c-empty-to-file', 2, 4),
             'd-file-to-empty' => $this->entry('d-file-to-empty', 2, 0, 'dir'),
@@ -56,7 +56,7 @@ final class FileSyncPatchPlannerTest extends TestCase
         ]);
         $planner = FileSyncPatchPlanner::create(
             $patch_base_index,
-            $patch_result_index,
+            $patch_head_index,
             $this->active_deletion_roots_file()
         );
 
@@ -76,19 +76,109 @@ final class FileSyncPatchPlannerTest extends TestCase
         $planner->close();
     }
 
-    public function testReplacesASubtreeWithOnePatchResultPath(): void
+    public function testIndependentDecodersExposeWholeEntriesBeforeAndAfterResume(): void
+    {
+        $patch_base_index = $this->write_index('base.jsonl', [
+            'a.txt' => $this->entry('a.txt', 1),
+            'c.txt' => $this->entry('c.txt', 3, 3),
+        ]);
+        $patch_head_index = $this->write_index('head.jsonl', [
+            'b.txt' => $this->entry('b.txt', 2, 2),
+            'c.txt' => $this->entry('c.txt', 3, 3),
+        ]);
+        $decode_patch_base_index_line = static function (string $line): array {
+            $entry = \Reprint\Importer\decode_local_index_entry($line);
+            $entry['base_marker'] = 'base:' . $entry['path'];
+            return $entry;
+        };
+        $decode_patch_head_index_line = static function (string $line): array {
+            $entry = \Reprint\Importer\decode_local_index_entry($line);
+            $entry['source_path'] = '/remote/' . $entry['path'];
+            return $entry;
+        };
+
+        $planner = FileSyncPatchPlanner::create(
+            $patch_base_index,
+            $patch_head_index,
+            $this->active_deletion_roots_file(),
+            [''],
+            [],
+            $decode_patch_base_index_line,
+            $decode_patch_head_index_line
+        );
+        $this->assertTrue($planner->next_path());
+        $this->assertSame(
+            [
+                'path' => 'a.txt',
+                'ctime' => 1,
+                'size' => 1,
+                'type' => 'file',
+                'base_marker' => 'base:a.txt',
+            ],
+            $planner->get_entry_in_patch_base_index()
+        );
+        $this->assertNull($planner->get_entry_in_patch_head_index());
+        $planner->flush_pending_outputs();
+        $cursor = $planner->get_cursor();
+        $planner->close();
+
+        $planner = FileSyncPatchPlanner::resume(
+            $cursor,
+            $decode_patch_base_index_line,
+            $decode_patch_head_index_line
+        );
+        $this->assertTrue($planner->next_path());
+        $this->assertNull($planner->get_entry_in_patch_base_index());
+        $this->assertSame(
+            [
+                'path' => 'b.txt',
+                'ctime' => 2,
+                'size' => 2,
+                'type' => 'file',
+                'source_path' => '/remote/b.txt',
+            ],
+            $planner->get_entry_in_patch_head_index()
+        );
+
+        $this->assertTrue($planner->next_path());
+        $this->assertSame(
+            [
+                'path' => 'c.txt',
+                'ctime' => 3,
+                'size' => 3,
+                'type' => 'file',
+                'base_marker' => 'base:c.txt',
+            ],
+            $planner->get_entry_in_patch_base_index()
+        );
+        $this->assertSame(
+            [
+                'path' => 'c.txt',
+                'ctime' => 3,
+                'size' => 3,
+                'type' => 'file',
+                'source_path' => '/remote/c.txt',
+            ],
+            $planner->get_entry_in_patch_head_index()
+        );
+        $this->assertNull($planner->get_operation());
+        $this->assertTrue($planner->is_complete());
+        $planner->close();
+    }
+
+    public function testReplacesASubtreeWithOnePatchHeadPath(): void
     {
         $patch_base_index = $this->write_index('base.jsonl', [
             'tree/child.txt' => $this->entry('tree/child.txt'),
         ]);
-        $patch_result_index = $this->write_index('result.jsonl', [
+        $patch_head_index = $this->write_index('head.jsonl', [
             'tree' => $this->entry('tree', 2),
             // `-` sorts before `/`, so this sibling appears before tree/child.
             'tree-other.txt' => $this->entry('tree-other.txt', 2),
         ]);
         $planner = FileSyncPatchPlanner::create(
             $patch_base_index,
-            $patch_result_index,
+            $patch_head_index,
             $this->active_deletion_roots_file()
         );
 
@@ -110,12 +200,12 @@ final class FileSyncPatchPlannerTest extends TestCase
             'gone/nested/leaf.txt' => $this->entry('gone/nested/leaf.txt'),
             'stays.txt' => $this->entry('stays.txt'),
         ]);
-        $patch_result_index = $this->write_index('result.jsonl', [
+        $patch_head_index = $this->write_index('head.jsonl', [
             'stays.txt' => $this->entry('stays.txt'),
         ]);
         $planner = FileSyncPatchPlanner::create(
             $patch_base_index,
-            $patch_result_index,
+            $patch_head_index,
             $this->active_deletion_roots_file()
         );
 
@@ -136,7 +226,7 @@ final class FileSyncPatchPlannerTest extends TestCase
             'outside/deleted.txt' => $this->entry('outside/deleted.txt'),
             'selected/delete.txt' => $this->entry('selected/delete.txt'),
         ]);
-        $patch_result_index = $this->write_index('result.jsonl', [
+        $patch_head_index = $this->write_index('head.jsonl', [
             'outside/added.txt' => $this->entry('outside/added.txt', 2),
             'selected/excluded/added.txt' =>
                 $this->entry('selected/excluded/added.txt', 2),
@@ -145,7 +235,7 @@ final class FileSyncPatchPlannerTest extends TestCase
         ]);
         $planner = FileSyncPatchPlanner::create(
             $patch_base_index,
-            $patch_result_index,
+            $patch_head_index,
             $this->active_deletion_roots_file(),
             ['selected'],
             ['selected/excluded']
@@ -170,13 +260,13 @@ final class FileSyncPatchPlannerTest extends TestCase
         $patch_base_index = $this->write_index('base.jsonl', [
             'a/child.txt' => $this->entry('a/child.txt'),
         ]);
-        $patch_result_index = $this->write_index('result.jsonl', [
+        $patch_head_index = $this->write_index('head.jsonl', [
             'a' => $this->entry('a', 2),
             'a-other.txt' => $this->entry('a-other.txt', 2),
         ]);
         $planner = FileSyncPatchPlanner::create(
             $patch_base_index,
-            $patch_result_index,
+            $patch_head_index,
             $this->active_deletion_roots_file()
         );
 
