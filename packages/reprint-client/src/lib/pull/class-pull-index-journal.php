@@ -362,6 +362,26 @@ class PullIndexJournal
     }
 
     /**
+     * Adds a `-` record after mirror removes a local-only path.
+     *
+     * @param string $local_absolute_path Local path already removed.
+     * @throws RuntimeException When the record cannot be appended.
+     */
+    public function record_local_deletion(string $local_absolute_path): void
+    {
+        $local_relative_path = $this->local_relative_path_from_local_absolute_path(
+            $local_absolute_path
+        );
+        if ($local_relative_path === null) {
+            return;
+        }
+        $this->write_record([
+            "op" => "-",
+            "local_relative_path_b64" => base64_encode($local_relative_path),
+        ]);
+    }
+
+    /**
      * Adds a `-` record which changes only the remote index.
      *
      * The record has no `local_relative_path_b64`, so the local index does not
@@ -775,6 +795,19 @@ class PullIndexJournal
                 throw new RuntimeException("Invalid pull index WAL line format.");
             }
             $pull_index_wal_operation = $pull_index_wal_record["op"] ?? null;
+            if (
+                $pull_index_wal_operation === "-"
+                && !array_key_exists(
+                    "remote_absolute_path_b64",
+                    $pull_index_wal_record
+                )
+                && array_key_exists(
+                    "local_relative_path_b64",
+                    $pull_index_wal_record
+                )
+            ) {
+                continue;
+            }
             $remote_absolute_path_base64 =
                 $pull_index_wal_record["remote_absolute_path_b64"] ?? null;
             if (
