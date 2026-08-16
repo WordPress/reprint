@@ -474,7 +474,7 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertSame(strtoupper(bin2hex($bytes)), $rows[0]['hex_value']);
     }
 
-    public function testSqlitePragmasDoNotChangeProgressCounters(): void
+    public function testSqliteApplyDoesNotStoreTargetProgressInStateJson(): void
     {
         $remoteReprintApiUrl = 'https://old-site.example.com/?reprint-api';
         $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
@@ -526,7 +526,7 @@ class NewSiteUrlSqliteTest extends TestCase
             true
         );
         $this->assertSame('complete', $state['active_resumable_command']['completion_state']);
-        $this->assertSame(3, $state['apply']['statements_executed']);
-        $this->assertSame(0, $state['apply']['bytes_read']);
+        $this->assertArrayNotHasKey('statements_executed', $state['apply']);
+        $this->assertArrayNotHasKey('bytes_read', $state['apply']);
     }
 }

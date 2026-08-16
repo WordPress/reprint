@@ -490,8 +490,7 @@ class Pull
                         $this->client->run_db_apply($options);
                     });
                 }
-                $stmts = $state->apply->statements_executed;
-                $this->print_done($stage, $stmts > 0 ? number_format($stmts) . " statements" : null);
+                $this->print_done($stage);
                 break;
 
             case 'flat-docroot':

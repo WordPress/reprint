@@ -187,7 +187,7 @@ class ImportClient
     private const DATABASE_IMPORT_POSITION_TABLE_PREFIX = "__reprint_db_pull_progress_";
     // Change this UUID whenever the progress-table schema changes.
     private const DATABASE_IMPORT_POSITION_TABLE =
-        self::DATABASE_IMPORT_POSITION_TABLE_PREFIX . "49acb118-a97a-45c7-814d-8e670db7f6b4";
+        self::DATABASE_IMPORT_POSITION_TABLE_PREFIX . "725a0014-81eb-4827-acfb-5edb1b4f24d9";
     private const SQL_GROUP_MARKER = "-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 ";
 
     /**
@@ -6645,11 +6645,32 @@ class ImportClient
         $byte_offset = 0;
         $statements_executed = 0;
         try {
+            $target_position = $is_resume
+                ? $this->read_database_import_position(
+                    $connection,
+                    $source_hash,
+                    "db-apply",
+                )
+                : null;
+            if ($target_position !== null) {
+                $statements_executed = $target_position["statements_executed"];
+                if ($statements_executed === null) {
+                    throw new RuntimeException(
+                        "The target database has no statement count for this db-apply. " .
+                        "Run db-apply --abort to start again.",
+                    );
+                }
+            }
+
             if (
                 $is_resume
                 && $this->get_state()->active_resumable_command->current_stage === "database-cleanup"
             ) {
-                $this->finish_database_dump_file_apply($connection, $options);
+                $this->finish_database_dump_file_apply(
+                    $connection,
+                    $options,
+                    $target_position === null ? null : $statements_executed,
+                );
                 return;
             }
 
@@ -6660,14 +6681,8 @@ class ImportClient
                 $this->get_state()->active_resumable_command->current_stage = "sql";
                 $this->get_state()->active_resumable_command->remote_cursor = null;
             } else {
-                $target_position = $this->read_database_import_position(
-                    $connection,
-                    $source_hash,
-                    "db-apply",
-                );
                 if ($target_position !== null) {
                     $byte_offset = $target_position["file_byte_offset"];
-                    $statements_executed = $this->get_state()->apply->statements_executed;
                     if ($byte_offset === null) {
                         throw new RuntimeException(
                             "The target database has no db.sql byte offset for this db-apply. " .
@@ -6690,7 +6705,6 @@ class ImportClient
                 }
             }
 
-            $this->get_state()->apply->statements_executed = $statements_executed;
             $this->save_state();
 
             if ($byte_offset > 0 && $target_engine === 'mysql') {
@@ -6743,16 +6757,13 @@ class ImportClient
                     $source_hash,
                     $group["exporter_cursor"],
                     $group["byte_offset"],
+                    $statements_executed,
                     $target_engine,
                     $stmt_rewriter,
                 );
 
                 $statements_executed += $group_statement_count;
                 $byte_offset = $group["byte_offset"];
-                // The target already contains the cursor and db.sql byte offset.
-                // The local statement count is only progress information.
-                $this->get_state()->apply->statements_executed = $statements_executed;
-                $this->save_state();
 
                 $apply_fraction = $sql_file_size > 0
                     ? $byte_offset / $sql_file_size
@@ -6789,7 +6800,11 @@ class ImportClient
             // interrupted, the next process repeats cleanup instead of SQL.
             $this->get_state()->active_resumable_command->current_stage = "database-cleanup";
             $this->save_state();
-            $this->finish_database_dump_file_apply($connection, $options);
+            $this->finish_database_dump_file_apply(
+                $connection,
+                $options,
+                $statements_executed,
+            );
         } finally {
             fclose($sql_handle);
             if ($connection->inTransaction()) {
@@ -6802,12 +6817,14 @@ class ImportClient
     /**
      * Finishes idempotent target cleanup after every SQL group is committed.
      *
-     * @param DatabaseConnection $connection Open target connection.
-     * @param array $options Command options used by plugin cleanup.
+     * @param DatabaseConnection $connection          Open target connection.
+     * @param array              $options             Command options used by plugin cleanup.
+     * @param int|null           $statements_executed Exact count, or null when cleanup resumed after its target row was removed.
      */
     private function finish_database_dump_file_apply(
         DatabaseConnection $connection,
-        array $options
+        array $options,
+        ?int $statements_executed
     ): void {
         // The host analyzer declares paths_to_remove; any entry under
         // wp-content/plugins/ means that plugin will be deleted from disk
@@ -6833,26 +6850,26 @@ class ImportClient
 
         $this->remove_database_import_position_table($connection);
 
-        $statements_executed = $this->get_state()->apply->statements_executed;
         $this->get_state()->active_resumable_command->completion_state = "complete";
         $this->save_state();
-        $this->audit_log(
-            "db-apply complete | {$statements_executed} statements executed",
-            true,
-        );
-        $this->output_progress([
+        $completion_message = $statements_executed === null
+            ? "db-apply complete"
+            : "db-apply complete ({$statements_executed} statements executed)";
+        $this->audit_log($completion_message, true);
+        $completion_progress = [
             "status" => "complete",
             "phase" => "db-apply",
-            "statements_executed" => $statements_executed,
-            "message" => "db-apply complete ({$statements_executed} statements executed)",
-        ]);
+            "message" => $completion_message,
+        ];
+        if ($statements_executed !== null) {
+            $completion_progress["statements_executed"] = $statements_executed;
+        }
+        $this->output_progress($completion_progress);
         if (!$this->progress->is_mode("pipeline")) {
             // Clear the progress line before printing the final message.
             $this->progress->clear_progress_line();
         }
-        $this->progress->show_lifecycle_line(
-            "db-apply complete ({$statements_executed} statements executed)\n",
-        );
+        $this->progress->show_lifecycle_line($completion_message . "\n");
     }
 
     /**
@@ -6898,6 +6915,7 @@ class ImportClient
         string $source_hash,
         string $next_cursor,
         ?int $next_file_byte_offset,
+        ?int $statements_executed_before_group,
         string $target_engine,
         ?SqlStatementRewriter $stmt_rewriter = null
     ): int {
@@ -6912,6 +6930,9 @@ class ImportClient
                 $source_hash,
                 $next_cursor,
                 $next_file_byte_offset,
+                $statements_executed_before_group === null
+                    ? null
+                    : $statements_executed_before_group + $statement_count,
             );
             $connection->commit();
             return $statement_count;
@@ -6961,6 +6982,9 @@ class ImportClient
                 $source_hash,
                 $next_cursor,
                 $next_file_byte_offset,
+                $statements_executed_before_group === null
+                    ? null
+                    : $statements_executed_before_group + $statement_count,
             );
             $connection->commit();
             return $statement_count;
@@ -8710,6 +8734,7 @@ class ImportClient
                                         hash("sha256", $this->remote_reprint_api_url),
                                         $cursor,
                                         null,
+                                        null,
                                         'mysql',
                                     );
                                     $sql_buffer = "";
@@ -8938,7 +8963,8 @@ class ImportClient
             "`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY," .
             "`source_hash` CHAR(64) CHARACTER SET ascii NOT NULL," .
             "`source_cursor` MEDIUMTEXT NOT NULL," .
-            "`file_byte_offset` BIGINT UNSIGNED NULL" .
+            "`file_byte_offset` BIGINT UNSIGNED NULL," .
+            "`statements_executed` BIGINT UNSIGNED NULL" .
             ") ENGINE=InnoDB";
         $database->exec($create_table_sql);
     }
@@ -8963,8 +8989,9 @@ class ImportClient
      * @return array|null {
      *     The saved position, or null before the first committed group.
      *
-     *     @type string   $source_cursor    Exporter cursor after the group.
-     *     @type int|null $file_byte_offset First db.sql byte after the group marker.
+     *     @type string   $source_cursor       Exporter cursor after the group.
+     *     @type int|null $file_byte_offset    First db.sql byte after the group marker.
+     *     @type int|null $statements_executed Number of db.sql statements committed so far.
      * }
      */
     private function read_database_import_position(
@@ -8975,7 +9002,7 @@ class ImportClient
         $table = self::DATABASE_IMPORT_POSITION_TABLE;
         // No row means this target has not committed an SQL group for the
         // current import yet, so its reader starts from the beginning.
-        $query = "SELECT `source_hash`, `source_cursor`, `file_byte_offset` " .
+        $query = "SELECT `source_hash`, `source_cursor`, `file_byte_offset`, `statements_executed` " .
             "FROM `{$table}` WHERE `id` = 1";
         $result = $database->query($query);
         $row = $result->fetch(PDO::FETCH_ASSOC);
@@ -9002,9 +9029,23 @@ class ImportClient
                 );
             }
         }
+
+        $statements_executed = null;
+        if ($row["statements_executed"] !== null) {
+            $statements_executed = filter_var($row["statements_executed"], FILTER_VALIDATE_INT);
+            if ($statements_executed === false || $statements_executed < 0) {
+                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Command is a validated CLI command name.
+                throw new RuntimeException(
+                    "The target database contains an invalid statement count for {$command}. " .
+                    "Run {$command} --abort to start again.",
+                );
+                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+            }
+        }
         return [
             "source_cursor" => $row["source_cursor"],
             "file_byte_offset" => $file_byte_offset,
+            "statements_executed" => $statements_executed,
         ];
     }
 
@@ -9017,13 +9058,15 @@ class ImportClient
         DatabaseConnection $database,
         string $source_hash,
         string $next_cursor,
-        ?int $next_file_byte_offset
+        ?int $next_file_byte_offset,
+        ?int $next_statements_executed
     ): void {
         $table = self::DATABASE_IMPORT_POSITION_TABLE;
         $database->execute(
             "REPLACE INTO `{$table}` " .
-            "(`id`, `source_hash`, `source_cursor`, `file_byte_offset`) VALUES (1, ?, ?, ?)",
-            [$source_hash, $next_cursor, $next_file_byte_offset],
+            "(`id`, `source_hash`, `source_cursor`, `file_byte_offset`, `statements_executed`) " .
+            "VALUES (1, ?, ?, ?, ?)",
+            [$source_hash, $next_cursor, $next_file_byte_offset, $next_statements_executed],
         );
     }
 

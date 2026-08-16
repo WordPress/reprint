@@ -29,7 +29,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
     const myisamSourceTable = 'ab_target_cursor_myisam_rows';
     const unkeyedMyisamSourceTable = 'ac_target_cursor_unkeyed_myisam_rows';
     const afterUnkeyedSourceTable = 'ad_after_unkeyed_myisam_rows';
-    const progressTable = '__reprint_db_pull_progress_49acb118-a97a-45c7-814d-8e670db7f6b4';
+    const progressTable = '__reprint_db_pull_progress_725a0014-81eb-4827-acfb-5edb1b4f24d9';
     const previousProgressTable = '__reprint_db_pull_progress_11111111-2222-4333-8444-555555555555';
     const targetDb = `${getDbName(site)}_import`;
     const projectRoot = join(import.meta.dirname, '..', '..', '..');
@@ -222,7 +222,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             );
             assert.deepEqual(
                 targetColumns.map(column => column.COLUMN_NAME),
-                ['id', 'source_hash', 'source_cursor', 'file_byte_offset'],
+                ['id', 'source_hash', 'source_cursor', 'file_byte_offset', 'statements_executed'],
             );
             const [[previousTable]] = await targetConnection.query(
                 'SELECT COUNT(*) AS tableCount FROM INFORMATION_SCHEMA.TABLES '
@@ -282,12 +282,14 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
                             `SELECT COUNT(*) AS rowCount FROM \`${table}\``
                         );
                         const [[savedPosition]] = await interruptedTarget.query(
-                            `SELECT source_cursor, file_byte_offset FROM \`${progressTable}\` WHERE id = 1`
+                            'SELECT source_cursor, file_byte_offset, statements_executed '
+                            + `FROM \`${progressTable}\` WHERE id = 1`
                         );
                         importedRowCount = Number(importedRows.rowCount);
                         savedSourceCursor = savedPosition?.source_cursor ?? null;
                         if (savedPosition) {
                             assert.equal(savedPosition.file_byte_offset, null);
+                            assert.equal(savedPosition.statements_executed, null);
                         }
                         const expectedRowsArePresent = completedRowCount === null
                             ? importedRowCount > 0 && importedRowCount < 600

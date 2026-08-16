@@ -132,7 +132,6 @@ class PullFilterFakeClient extends \ImportClient
         $state->active_resumable_command->command_name = "db-apply";
         $state->active_resumable_command->completion_state = "complete";
         $state->active_resumable_command->current_stage = null;
-        $state->apply->statements_executed = 42;
         $this->save_state();
     }
 }
@@ -687,7 +686,8 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('pull-db', $state["pull_pipeline"]["started_by_command"]);
         $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
         $this->assertSame('db-apply', $state["active_resumable_command"]["command_name"]);
-        $this->assertSame(42, $state["apply"]["statements_executed"]);
+        $this->assertArrayNotHasKey("statements_executed", $state["apply"]);
+        $this->assertArrayNotHasKey("bytes_read", $state["apply"]);
     }
 
     public function testPullDbRejectsConflictingInProgressPullFiles(): void

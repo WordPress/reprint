@@ -86,43 +86,24 @@ class SqliteSqlGroupImporterTest extends TestCase
             ],
         ]);
 
-        $sqlitePath = $this->sqlitePath;
         $firstApply = new class(
             $this->remoteUrl,
             $this->tempDir,
-            $this->tempDir . '/fs-root',
-            $sqlitePath
+            $this->tempDir . '/fs-root'
         ) extends \ImportClient {
-            private string $sqlitePath;
             private bool $stopped = false;
 
-            public function __construct(
-                string $remoteUrl,
-                string $stateDirectory,
-                string $filesystemRoot,
-                string $sqlitePath
-            ) {
-                parent::__construct($remoteUrl, $stateDirectory, $filesystemRoot);
-                $this->sqlitePath = $sqlitePath;
-            }
-
-            public function save_state(): void
+            public function output_progress(array $data, bool $force = false): void
             {
-                if (!$this->stopped && file_exists($this->sqlitePath)) {
-                    $database = new \PDO('sqlite:' . $this->sqlitePath);
-                    $statement = $database->query(
-                        'SELECT "attempts", "finished" FROM "import_probe" WHERE "id" = 1'
-                    );
-                    $row = $statement->fetch(\PDO::FETCH_ASSOC);
-                    $statement->closeCursor();
-                    unset($statement, $database);
-                    if ( (int) $row['attempts'] === 100 && (int) $row['finished'] === 0 ) {
-                        $this->stopped = true;
-                        throw new \RuntimeException('Stop after the first committed SQL group.');
-                    }
+                parent::output_progress($data, $force);
+                if (
+                    !$this->stopped
+                    && ( $data['phase'] ?? null ) === 'db-apply'
+                    && ( $data['statements_executed'] ?? null ) === 100
+                ) {
+                    $this->stopped = true;
+                    throw new \RuntimeException('Stop after the first committed SQL group.');
                 }
-
-                parent::save_state();
             }
         };
         $pullStateDirectory = $firstApply->pull_state_directory;
@@ -145,18 +126,20 @@ class SqliteSqlGroupImporterTest extends TestCase
         );
         $sqlite = new \PDO('sqlite:' . $this->sqlitePath);
         $position = $sqlite->query(
-            "SELECT `source_cursor`, `file_byte_offset` " .
-            "FROM `__reprint_db_pull_progress_49acb118-a97a-45c7-814d-8e670db7f6b4`"
+            "SELECT `source_cursor`, `file_byte_offset`, `statements_executed` " .
+            "FROM `__reprint_db_pull_progress_725a0014-81eb-4827-acfb-5edb1b4f24d9`"
         )->fetch(\PDO::FETCH_ASSOC);
         $this->assertIsArray($position);
         $this->assertGreaterThan(0, (int) $position['file_byte_offset']);
+        $this->assertSame(100, (int) $position['statements_executed']);
         unset($sqlite);
 
         $localState = json_decode(
             file_get_contents($pullStateDirectory . '/state.json'),
             true
         );
-        $this->assertSame(0, $localState['apply']['bytes_read']);
+        $this->assertArrayNotHasKey('bytes_read', $localState['apply']);
+        $this->assertArrayNotHasKey('statements_executed', $localState['apply']);
         $this->assertNull($localState['active_resumable_command']['remote_cursor']);
 
         $this->runApply(new \ImportClient(
@@ -169,12 +152,97 @@ class SqliteSqlGroupImporterTest extends TestCase
             ['attempts' => 100, 'finished' => 1],
             $this->readProbe()
         );
+        $completedState = json_decode(
+            file_get_contents($pullStateDirectory . '/state.json'),
+            true
+        );
+        $this->assertArrayNotHasKey('bytes_read', $completedState['apply']);
+        $this->assertArrayNotHasKey('statements_executed', $completedState['apply']);
         $sqlite = new \PDO('sqlite:' . $this->sqlitePath);
         $positionTables = $sqlite->query(
             "SELECT COUNT(*) FROM sqlite_master " .
             "WHERE type = 'table' AND name LIKE '__reprint_db_pull_progress_%'"
         )->fetchColumn();
         $this->assertSame(0, (int) $positionTables);
+    }
+
+    public function testFinishesCleanupAfterTheTargetPositionWasRemoved(): void
+    {
+        $this->writeGroups([
+            [
+                'sql' => "UPDATE `import_probe` SET `attempts` = `attempts` + 1 WHERE `id` = 1;\n",
+                'cursor' => ['current_table' => 'import_probe'],
+            ],
+        ]);
+
+        $firstApply = new class(
+            $this->remoteUrl,
+            $this->tempDir,
+            $this->tempDir . '/fs-root'
+        ) extends \ImportClient {
+            private bool $stopped = false;
+
+            public function save_state(): void
+            {
+                $command = $this->get_state()->active_resumable_command;
+                if (
+                    !$this->stopped
+                    && $command->current_stage === 'database-cleanup'
+                    && $command->completion_state === 'complete'
+                ) {
+                    $this->stopped = true;
+                    throw new \RuntimeException(
+                        'Stop after removing the target position and before saving completion.'
+                    );
+                }
+
+                parent::save_state();
+            }
+        };
+        $pullStateDirectory = $firstApply->pull_state_directory;
+
+        try {
+            $this->runApply($firstApply);
+            $this->fail('The first db-apply should stop during final cleanup.');
+        } catch (\RuntimeException $error) {
+            $this->assertSame(
+                'Stop after removing the target position and before saving completion.',
+                $error->getMessage()
+            );
+        }
+        unset($firstApply, $error);
+        gc_collect_cycles();
+
+        $sqlite = new \PDO('sqlite:' . $this->sqlitePath);
+        $positionTables = $sqlite->query(
+            "SELECT COUNT(*) FROM sqlite_master " .
+            "WHERE type = 'table' AND name LIKE '__reprint_db_pull_progress_%'"
+        )->fetchColumn();
+        $this->assertSame(0, (int) $positionTables);
+        unset($sqlite);
+
+        $stoppedState = json_decode(
+            file_get_contents($pullStateDirectory . '/state.json'),
+            true
+        );
+        $this->assertSame('in_progress', $stoppedState['active_resumable_command']['completion_state']);
+        $this->assertSame('database-cleanup', $stoppedState['active_resumable_command']['current_stage']);
+        $this->assertArrayNotHasKey('bytes_read', $stoppedState['apply']);
+        $this->assertArrayNotHasKey('statements_executed', $stoppedState['apply']);
+        $this->assertSame(1, $this->readProbe()['attempts']);
+
+        $this->runApply(new \ImportClient(
+            $this->remoteUrl,
+            $this->tempDir,
+            $this->tempDir . '/fs-root'
+        ));
+
+        $completedState = json_decode(
+            file_get_contents($pullStateDirectory . '/state.json'),
+            true
+        );
+        $this->assertSame('complete', $completedState['active_resumable_command']['completion_state']);
+        $this->assertSame(1, $this->readProbe()['attempts']);
     }
 
     public function testRefusesATamperedUnfinishedStageBeforeExecutingSql(): void

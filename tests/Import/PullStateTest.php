@@ -23,8 +23,6 @@ class PullStateTest extends TestCase
             'last_completed_stage' => 'preflight',
             'has_completed_once' => false,
         ];
-        $data['apply']['statements_executed'] = 12;
-        $data['apply']['bytes_read'] = 34;
         $data['apply']['target_engine'] = 'sqlite';
         $state = \PullState::from_array($data);
 
@@ -32,7 +30,8 @@ class PullStateTest extends TestCase
         $this->assertSame('partial', $state->active_resumable_command->completion_state);
         $this->assertSame('preflight', $state->pull_pipeline->last_completed_stage);
         $this->assertSame(['preflight', 'files-pull'], $state->pull_pipeline->stage_sequence);
-        $this->assertSame(12, $state->apply->statements_executed);
+        $this->assertArrayNotHasKey('statements_executed', $state->apply->to_array());
+        $this->assertArrayNotHasKey('bytes_read', $state->apply->to_array());
     }
 
     public function testStateRoundTripsToPersistedArraySchema(): void
