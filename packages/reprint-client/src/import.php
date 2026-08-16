@@ -7992,7 +7992,7 @@ class ImportClient
                 $this->get_state()->active_resumable_command->remote_cursor = null;
                 $this->save_state();
             } else {
-                $cursor = $this->read_mysql_output_cursor($mysql_conn);
+                $cursor = $this->read_and_validate_mysql_resume_cursor($mysql_conn);
             }
             $mysql_committed_cursor = $cursor;
             // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
@@ -8362,11 +8362,14 @@ class ImportClient
         // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
     }
 
-    /** Returns the source position committed by MySQL, if one exists. */
-    private function read_mysql_output_cursor(\mysqli $connection): ?string
+    /** Reads MySQL's saved cursor and checks that its next SQL can be repeated safely. */
+    private function read_and_validate_mysql_resume_cursor(\mysqli $connection): ?string
     {
         // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors and table names are CLI text, not HTML.
         $table = self::MYSQL_DB_PULL_PROGRESS_TABLE;
+
+        // The target stores one cursor after each complete SQL group. No row
+        // means this is a new pull.
         $result = $connection->query(
             "SELECT `source_hash`, `source_cursor` FROM `{$table}` WHERE `id` = 1"
         );
@@ -8381,6 +8384,8 @@ class ImportClient
             return null;
         }
 
+        // A cursor from another source describes a different SQL stream. It
+        // cannot tell this source where to continue.
         $source_hash = hash("sha256", $this->remote_reprint_api_url);
         if (!hash_equals($source_hash, $row["source_hash"])) {
             throw new RuntimeException(
@@ -8389,6 +8394,8 @@ class ImportClient
             );
         }
 
+        // The cursor is base64-encoded JSON produced by the exporter. We need
+        // its current table to decide whether an interrupted query can be run again.
         $cursor = $row["source_cursor"];
         $cursor_json = base64_decode($cursor, true);
         $cursor_data = $cursor_json === false ? null : json_decode($cursor_json, true);
@@ -8401,6 +8408,8 @@ class ImportClient
 
         $current_table = $cursor_data["current_table"] ?? null;
         if ($current_table === null) {
+            // This cursor sits outside a table's row stream, so there cannot be
+            // a partly applied INSERT for a table to inspect.
             return $cursor;
         }
         if (!is_string($current_table) || $current_table === "") {
@@ -8410,6 +8419,8 @@ class ImportClient
             );
         }
 
+        // The saved cursor comes before any SQL that was still running when
+        // the process stopped. Check the target table before repeating that SQL.
         $table_statement = $connection->prepare(
             "SELECT `TABLES`.`TABLE_TYPE`, `TABLES`.`ENGINE`, `ENGINES`.`TRANSACTIONS` " .
             "FROM `INFORMATION_SCHEMA`.`TABLES` AS `TABLES` " .
@@ -8442,9 +8453,15 @@ class ImportClient
             );
         }
         if ($table_type === "VIEW" || $supports_transactions === "YES") {
+            // InnoDB rolls back an interrupted statement, so repeating it
+            // starts from the same rows that existed at the saved cursor. Views
+            // do not need the non-transactional table key check below.
             return $cursor;
         }
 
+        // Large values are written by UPDATE statements which append pieces.
+        // A non-transactional table may keep one piece, so repeating the UPDATE
+        // could append those bytes twice.
         if (!empty($cursor_data["oversized_queue"])) {
             throw new RuntimeException(
                 "Cannot continue db-pull in target table `{$current_table}` because {$engine} may have " .
@@ -8452,6 +8469,9 @@ class ImportClient
             );
         }
 
+        // MyISAM may keep the first rows from an interrupted INSERT. The dump's
+        // ON DUPLICATE KEY no-op makes repeating those rows safe only when a
+        // non-null unique key can identify them.
         $key_statement = $connection->prepare(
             "SELECT `STATISTICS`.`INDEX_NAME` " .
             "FROM `INFORMATION_SCHEMA`.`STATISTICS` AS `STATISTICS` " .
