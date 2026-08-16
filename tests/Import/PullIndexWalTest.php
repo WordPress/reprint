@@ -117,6 +117,34 @@ final class PullIndexWalTest extends TestCase
         $journal->remove_empty_wal();
     }
 
+    public function testLocalOnlyDeletionChangesOnlyTheLocalIndex(): void
+    {
+        mkdir($this->fileRoot . '/site');
+        $localAbsolutePath = $this->fileRoot . '/site/local-only.txt';
+        file_put_contents($localAbsolutePath, 'hello');
+        $localAbsolutePath = realpath($localAbsolutePath);
+        $this->assertIsString($localAbsolutePath);
+        $journal = $this->journal($this->client());
+        $journal->record_remote_upsert(
+            '/site/local-only.txt',
+            42,
+            5,
+            'file',
+            $localAbsolutePath
+        );
+        $journal->apply_pending_records();
+
+        unlink($localAbsolutePath);
+        $journal->record_local_deletion($localAbsolutePath);
+        $journal->apply_pending_records();
+
+        $this->assertSame(
+            ['/site/local-only.txt'],
+            $this->remoteIndexEntryPaths()
+        );
+        $this->assertSame([], $this->readLocalIndex());
+    }
+
     public function testUpsertingFileDoesNotCreateParentDirectoryEntries(): void
     {
         $journal = $this->journal($this->client());
