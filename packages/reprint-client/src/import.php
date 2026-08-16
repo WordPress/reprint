@@ -8932,6 +8932,12 @@ class ImportClient
             );
         }
 
+        if (($cursor_data["state"] ?? null) === "next_table") {
+            // The previous table is finished. The next group replaces the next
+            // table, so it cannot repeat an INSERT in the previous MyISAM table.
+            return;
+        }
+
         $current_table = $cursor_data["current_table"] ?? null;
         if ($current_table === null) {
             // This cursor sits outside a table's row stream, so there cannot be
