@@ -315,4 +315,27 @@ class PullSymlinkTest extends TestCase
         $this->assertTrue(is_link($filePath), 'File should be replaced with symlink');
         $this->assertEquals('target', readlink($filePath));
     }
+
+    public function testRemoteDeletionRemovesAParentSymlinkWithoutFollowingIt(): void
+    {
+        $outsideDirectory = $this->tempDir . '/outside';
+        mkdir($outsideDirectory);
+        file_put_contents($outsideDirectory . '/file.txt', 'outside');
+        $localSymlink = $this->tempDir . '/fs-root/link';
+        symlink($outsideDirectory, $localSymlink);
+        $client = new \ImportClient(
+            'http://fake.url',
+            $this->tempDir,
+            $this->tempDir . '/fs-root'
+        );
+
+        $removedPath = ( new \ReflectionMethod(
+            \ImportClient::class,
+            'remove_remote_path_locally'
+        ) )->invoke($client, '/link/file.txt');
+
+        $this->assertSame(realpath(dirname($localSymlink)) . '/link', $removedPath);
+        $this->assertFalse(is_link($localSymlink));
+        $this->assertFileExists($outsideDirectory . '/file.txt');
+    }
 }

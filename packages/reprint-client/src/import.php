@@ -8088,11 +8088,32 @@ class ImportClient
     }
 
     /**
-     * Removes a remote deletion root from the mapped local filesystem.
+     * Removes a local path without traversing a symlink component.
      *
-     * @return string|null The mapped local absolute path when it is absent
-     *                     after this call, or null when it could not be removed.
+     * @return array{path:string,outcome:'absent'|'removed'|'symlink'}|null
      */
+    private function remove_local_path_without_traversing_symlinks(
+        string $local_absolute_path
+    ): ?array {
+        $removed_symlink_path = $this->remove_first_symlink_component(
+            $local_absolute_path
+        );
+        if ($removed_symlink_path !== null) {
+            return ["path" => $removed_symlink_path, "outcome" => "symlink"];
+        }
+        if (!file_exists($local_absolute_path) && !is_link($local_absolute_path)) {
+            return ["path" => $local_absolute_path, "outcome" => "absent"];
+        }
+        if (
+            $this->remove_local_absolute_path_without_following_symlinks(
+                $local_absolute_path
+            )
+        ) {
+            return ["path" => $local_absolute_path, "outcome" => "removed"];
+        }
+        return null;
+    }
+
     private function remove_remote_path_locally(
         string $remote_deletion_root
     ): ?string {
@@ -8110,17 +8131,17 @@ class ImportClient
             );
             return null;
         }
-        if (!file_exists($local_absolute_path) && !is_link($local_absolute_path)) {
-            return $local_absolute_path;
+        $removal = $this->remove_local_path_without_traversing_symlinks(
+            $local_absolute_path
+        );
+        if ($removal === null) {
+            $this->audit_log("Failed to delete: {$remote_deletion_root}", true);
+            return null;
         }
-
-        if ($this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)) {
+        if ($removal["outcome"] === "removed") {
             $this->audit_log("Deleted: {$remote_deletion_root}", false);
-            return $local_absolute_path;
         }
-
-        $this->audit_log("Failed to delete: {$remote_deletion_root}", true);
-        return null;
+        return $removal["path"];
     }
 
     /**
@@ -8242,6 +8263,44 @@ class ImportClient
         }
 
         return true === @unlink($local_absolute_path);
+    }
+
+    /** Removes the first symlink component without traversing its target. */
+    private function remove_first_symlink_component(
+        string $local_absolute_path
+    ): ?string {
+        $local_relative_path = relative_path_under(
+            $local_absolute_path,
+            $this->filesystem_root
+        );
+        if ($local_relative_path === null) {
+            throw new RuntimeException(
+                "Cannot inspect a local path outside the filesystem root."
+            );
+        }
+        if ($local_relative_path === "") {
+            return null;
+        }
+
+        $local_component_path = $this->filesystem_root;
+        foreach (explode("/", $local_relative_path) as $path_component) {
+            $local_component_path = wp_join_unix_paths(
+                $local_component_path,
+                $path_component
+            );
+            if (is_link($local_component_path)) {
+                if (!@unlink($local_component_path)) {
+                    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem path, never HTML output.
+                    throw new RuntimeException(
+                        "Failed to remove a local symlink component: "
+                        . $local_component_path
+                    );
+                    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+                }
+                return $local_component_path;
+            }
+        }
+        return null;
     }
 
     /**
