@@ -176,8 +176,10 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
+    private const MYSQL_IMPORT_PROGRESS_TABLE_PREFIX = "__reprint_db_pull_progress_";
     // Change this UUID whenever the progress-table schema changes.
-    private const MYSQL_IMPORT_PROGRESS_TABLE = "__reprint_db_pull_progress_49acb118-a97a-45c7-814d-8e670db7f6b4";
+    private const MYSQL_IMPORT_PROGRESS_TABLE =
+        self::MYSQL_IMPORT_PROGRESS_TABLE_PREFIX . "49acb118-a97a-45c7-814d-8e670db7f6b4";
     private const MYSQL_SQL_GROUP_MARKER = "-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 ";
 
     /**
@@ -8389,7 +8391,7 @@ class ImportClient
         try {
             if ($mode === "mysql") {
                 $this->audit_log(
-                    "SKIPPING SOURCE TABLE IF PRESENT | " . self::MYSQL_IMPORT_PROGRESS_TABLE,
+                    "SKIPPING SOURCE TABLES IF PRESENT | " . self::MYSQL_IMPORT_PROGRESS_TABLE_PREFIX . "*",
                     true,
                 );
             }

@@ -7,10 +7,13 @@ use WordPress\DataLiberation\DatabaseRowsReader;
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
 class DatabaseRowsReaderTest extends MySQLDumpProducerTestBase {
 
-    public function testExcludesRequestedTablesWhenDiscoveringSourceTables(): void
+    public function testExcludesRequestedAndReprintProgressTablesWhenDiscoveringSourceTables(): void
     {
         $this->pdo->exec('CREATE TABLE included_table (id INT PRIMARY KEY)');
         $this->pdo->exec('CREATE TABLE skipped_table (id INT PRIMARY KEY)');
+        $this->pdo->exec(
+            'CREATE TABLE `__reprint_db_pull_progress_another_schema` (id INT PRIMARY KEY)'
+        );
 
         $reader = new DatabaseRowsReader(
             $this->pdo,
@@ -25,6 +28,7 @@ class DatabaseRowsReaderTest extends MySQLDumpProducerTestBase {
 
         $this->assertContains('included_table', $tables);
         $this->assertNotContains('skipped_table', $tables);
+        $this->assertNotContains('__reprint_db_pull_progress_another_schema', $tables);
     }
 
     public function testReturnsStructuredRecordsWithoutFormattingSql(): void
