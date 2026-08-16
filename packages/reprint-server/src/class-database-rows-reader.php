@@ -12,6 +12,9 @@ use PDO;
  */
 class DatabaseRowsReader {
 
+    /** Prefix shared by every schema version of Reprint's internal MySQL progress table. */
+    private const MYSQL_IMPORT_PROGRESS_TABLE_PREFIX = "__reprint_db_pull_progress_";
+
 
     /** @var mixed PDO or a PDO-compatible adapter. */
     private $db;
@@ -571,7 +574,7 @@ class DatabaseRowsReader {
     }
 
     /**
-     * Discovers BASE TABLEs and excludes views.
+     * Discovers BASE TABLEs and excludes views and Reprint progress tables.
      *
      * @TODO: Paginate databases with millions of tables.
      */
@@ -582,7 +585,10 @@ class DatabaseRowsReader {
         $row = $statement->fetch(PDO::FETCH_ASSOC);
         while ($row !== false) {
             $values = array_values($row);
-            $excluded = false;
+            $excluded = isset($values[0]) && stripos(
+                $values[0],
+                self::MYSQL_IMPORT_PROGRESS_TABLE_PREFIX
+            ) === 0;
             foreach ($this->exclude_tables as $excluded_table) {
                 if (isset($values[0]) && strcasecmp($values[0], $excluded_table) === 0) {
                     $excluded = true;
