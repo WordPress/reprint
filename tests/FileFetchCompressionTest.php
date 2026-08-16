@@ -35,6 +35,33 @@ final class FileFetchCompressionTest extends TestCase
         $this->assertStringContainsString('pretend-jpeg-bytes', $stdout);
     }
 
+    public function testFileFetchRejectsRawJsonPaths(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-server/src/export.php';
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $listPath = $this->tempDir . '/file-list.json';
+        file_put_contents(
+            $listPath,
+            json_encode([$siteDir . '/file.txt'], JSON_THROW_ON_ERROR)
+        );
+        $budget = new ResourceBudget(
+            microtime(true),
+            10,
+            128 * 1024 * 1024,
+            0.9
+        );
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'file_list entry 0 must contain a nonempty base64 path'
+        );
+        endpoint_file_fetch([
+            'directory' => $siteDir,
+            'file_list_path' => $listPath,
+        ], $budget);
+    }
+
     public function testFileFetchUsesGzipForTextOnlyPaths(): void
     {
         $siteDir = $this->tempDir . '/site';
@@ -340,7 +367,16 @@ final class FileFetchCompressionTest extends TestCase
     private function runFileFetch(string $siteDir, array $paths): string
     {
         $listPath = $this->tempDir . '/file-list.json';
-        file_put_contents($listPath, json_encode($paths, JSON_THROW_ON_ERROR));
+        $encodedPaths = array_map(
+            static function (string $path): array {
+                return ['path' => base64_encode($path)];
+            },
+            $paths
+        );
+        file_put_contents(
+            $listPath,
+            json_encode($encodedPaths, JSON_THROW_ON_ERROR)
+        );
 
         $configPath = $this->tempDir . '/config.json';
         file_put_contents($configPath, json_encode([

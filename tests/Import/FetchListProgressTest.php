@@ -313,6 +313,58 @@ class FetchListProgressTest extends TestCase
         $this->assertSame(10, $batch['entries']);
         $this->assertSame(0, $batch['offset']);
         $this->assertGreaterThan(0, $batch['next_offset']);
+        $this->assertSame(
+            array_map(
+                static function (int $index): array {
+                    return [
+                        'path' => base64_encode("/file-{$index}.txt"),
+                    ];
+                },
+                range(0, 9)
+            ),
+            json_decode(
+                file_get_contents($batch['file']),
+                true,
+                512,
+                JSON_THROW_ON_ERROR
+            )
+        );
+
+        if (file_exists($batch['file'])) {
+            @unlink($batch['file']);
+        }
+    }
+
+    public function testPrepareFetchBatchPreservesArbitraryPathBytes()
+    {
+        $listFile = $this->pullStateDirectory . '/fetch-list.jsonl';
+        $encodedPath = base64_encode("/binary-\xff.txt");
+        file_put_contents(
+            $listFile,
+            json_encode(["path" => $encodedPath], JSON_THROW_ON_ERROR) . "\n"
+        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "fetch",
+            ],
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        $batch = $reflection->getMethod('prepare_fetch_batch')
+            ->invoke($client, $listFile, 0);
+
+        $this->assertNotNull($batch);
+        $this->assertSame(
+            [["path" => $encodedPath]],
+            json_decode(
+                file_get_contents($batch['file']),
+                true,
+                512,
+                JSON_THROW_ON_ERROR
+            )
+        );
 
         if (file_exists($batch['file'])) {
             @unlink($batch['file']);

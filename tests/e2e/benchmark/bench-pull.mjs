@@ -394,7 +394,9 @@ async function ensureFileBenchSite() {
 }
 
 async function runFileFetchScenario({ stage, site, filePath, params = {}, details = {} }) {
-    const fileListJson = JSON.stringify([filePath]);
+    const fileListJson = JSON.stringify([{
+        path: Buffer.from(filePath).toString('base64'),
+    }]);
     const formData = new FormData();
     formData.append(
         'file_list',
