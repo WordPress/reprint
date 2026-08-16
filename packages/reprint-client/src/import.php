@@ -6035,6 +6035,12 @@ class ImportClient
                     : $statements_executed > 0
             );
 
+        // A resumed apply keeps its URL replacements when the CLI omits them.
+        // A fresh apply must not inherit replacements from an older lifecycle.
+        if ($is_resume && empty($url_mapping) && !empty($apply_state->rewrite_url)) {
+            $url_mapping = $apply_state->rewrite_url;
+        }
+
         if ($is_resume) {
             $resume_message = $uses_mysql_import
                 ? "Resuming db-apply from the position saved in MySQL"
@@ -6089,11 +6095,6 @@ class ImportClient
                 "command" => "db-apply",
                 "message" => "Starting db-apply",
             ], true);
-        }
-
-        // On resume, use the persisted URL mapping if none provided on CLI
-        if (empty($url_mapping) && !empty($apply_state->rewrite_url)) {
-            $url_mapping = $apply_state->rewrite_url;
         }
 
         // Set up SQL statement rewriter if we have URL mappings
