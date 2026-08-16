@@ -373,20 +373,26 @@ remaining SQL and keeps an unfinished statement in memory. Direct MySQL
 output stores the last committed cursor in the target table
 `__reprint_db_pull_progress_<uuid>`. The UUID makes an accidental name clash
 unlikely and changes whenever the table schema changes. Reprint logs and excludes
-that internal name from the source dump. Existing SQL statement-size, fragment,
-time, and memory budgets may split SQL across multipart parts or place several
-regular INSERT statements in one part. When a part completes the buffered SQL
-statement, the importer runs everything collected since the previous commit.
-For transactional target tables, those rows and that part's cursor are committed
-together. Table replacement and oversized-value updates remain separate so they
-cannot commit earlier rows before their cursor is saved. If the importer process
-stops, the next `db-pull` waits for the old target connection to finish, reapplies
-the saved MySQL session setup, and continues from the cursor stored in the target
-database. A repeated INSERT skips rows already
-identified by a non-null unique key, so this also works for keyed MyISAM tables.
-Reprint cannot continue a nontransactional table without such a key, or while
-an oversized value is being appended in separate UPDATE statements; those
-cases require `db-pull --abort` and a fresh import.
+that internal name from the source dump.
+
+File output keeps the same SQL groups by adding a harmless comment after each
+complete group. The comment records the exporter cursor. `db-apply` reads one
+group at a time and sends it through the same MySQL importer as direct output.
+The target stores the exporter cursor in both flows. For `db-apply`, the same
+target row also stores the matching `db.sql` byte offset. A replacement process
+reads that row and seeks directly to the next group.
+
+Existing SQL statement-size, fragment, time, and memory budgets still decide
+how much SQL belongs to a group. For transactional target tables, the group and
+its next cursor are committed together. Table replacement and oversized-value
+updates remain separate groups. If a process stops, its replacement waits for
+the old target connection, reruns `db-session-setup.sql`, and continues from the
+cursor stored in MySQL. A repeated INSERT skips rows identified by a non-null
+unique key, so this also works for keyed MyISAM tables. Reprint cannot continue
+a nontransactional table without such a key, or while an oversized value is
+being appended in separate UPDATE statements; those cases require aborting and
+starting the database import again. After `db-apply` finishes, it removes its
+internal cursor table from the imported database.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
@@ -818,7 +824,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
-* `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
+* `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. MySQL continues from the file group named by its target cursor. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
 * `db-rewrite-urls` — Rewrites URLs directly in an existing MySQL or SQLite database. You can stop it and continue later. See [Rewrite URLs in a live database](docs/DB-REWRITE-URLS.md).
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 * `pull-metadata` — Prints pull lifecycle and source-site metadata as JSON. The remote Reprint API URL selects the pull state; no network calls are made.

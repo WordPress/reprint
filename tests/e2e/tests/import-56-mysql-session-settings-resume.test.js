@@ -1,6 +1,6 @@
 /**
- * A new MySQL process resumes after the dump header, but still needs the
- * header's connection settings before it executes later table data.
+ * A new MySQL process continues from the position saved in its target. It
+ * reruns the dump's connection settings before it executes later table data.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -27,7 +27,9 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
         { length: 32 },
         (_, index) => `aa_session_setup_${String(index + 1).padStart(2, '0')}`,
     );
+    const applyCursorTable = 'zy_db_apply_cursor_rows';
     const sqlModeTable = 'zz_session_setup_sql_mode';
+    const progressTable = '__reprint_db_pull_progress_49acb118-a97a-45c7-814d-8e670db7f6b4';
     const targetDb = `${getDbName(site)}_import`;
     const projectRoot = join(import.meta.dirname, '..', '..', '..');
     const importerPath = process.env.IMPORTER_PATH
@@ -131,6 +133,15 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
                 }
 
                 await connection.query(
+                    `CREATE TABLE \`${applyCursorTable}\` (`
+                    + '`id` INT NOT NULL, `value` VARCHAR(64) NOT NULL, '
+                    + 'PRIMARY KEY (`id`)) ENGINE=InnoDB'
+                );
+                await connection.query(
+                    `INSERT INTO \`${applyCursorTable}\` (id, value) VALUES (1, 'apply-row-1')`
+                );
+
+                await connection.query(
                     `CREATE TABLE \`${sqlModeTable}\` (`
                     + "`id` INT NOT NULL, `value` ENUM('allowed') NOT NULL, "
                     + 'PRIMARY KEY (`id`)) ENGINE=InnoDB'
@@ -223,28 +234,41 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
 
     it('runs the dump connection settings before resumed SQL', async () => {
         const first = spawnDatabasePull();
-        const statePath = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
         const deadline = Date.now() + 60000;
         let savedCursor = null;
+        const targetMonitor = await createMysqlConnection(targetDb);
 
-        while (Date.now() < deadline) {
-            if (first.childProcess.exitCode !== null || first.childProcess.signalCode !== null) {
-                const result = await first.exit;
-                assert.fail(
-                    `db-pull exited before the source paused (${result.code}/${result.signal}):\n`
-                    + first.output.stderr + first.output.stdout,
-                );
-            }
+        try {
+            while (Date.now() < deadline) {
+                if (first.childProcess.exitCode !== null || first.childProcess.signalCode !== null) {
+                    const result = await first.exit;
+                    assert.fail(
+                        `db-pull exited before the source paused (${result.code}/${result.signal}):\n`
+                        + first.output.stderr + first.output.stdout,
+                    );
+                }
 
-            const hookState = readHookState(site);
-            if (existsSync(statePath)) {
-                const state = JSON.parse(readFileSync(statePath, 'utf8'));
-                savedCursor = state.active_resumable_command?.remote_cursor || null;
+                const hookState = readHookState(site);
+                try {
+                    const [[savedPosition]] = await targetMonitor.query(
+                        'SELECT source_cursor, file_byte_offset FROM `' + progressTable + '` WHERE id = 1'
+                    );
+                    savedCursor = savedPosition?.source_cursor ?? null;
+                    if (savedPosition) {
+                        assert.equal(savedPosition.file_byte_offset, null);
+                    }
+                } catch (error) {
+                    if (error?.code !== 'ER_NO_SUCH_TABLE') {
+                        throw error;
+                    }
+                }
+                if (hookState?.paused && savedCursor) {
+                    break;
+                }
+                await sleep(25);
             }
-            if (hookState?.paused && savedCursor) {
-                break;
-            }
-            await sleep(25);
+        } finally {
+            await targetMonitor.end();
         }
 
         assert.ok(savedCursor, 'db-pull did not save a source position before the pause');
@@ -282,10 +306,15 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
         }
     });
 
-    it('runs locally saved dump settings before resumed db-apply SQL', async () => {
+    it("continues db.sql from MySQL's saved position with the saved session settings", async () => {
         fileTempDir = createTempDir('e2e-mysql-file-session-settings-resume');
         writeTestHooks(site, [
             'function test_hook_before_sql_batch(&$sql, $cursor) {',
+            `    if (strpos($sql, 'INSERT INTO \`${applyCursorTable}\`') !== false) {`,
+            '        for ($id = 2; $id <= 301; $id++) {',
+            `            $sql .= "\\nINSERT INTO \`${applyCursorTable}\` (\`id\`, \`value\`) VALUES (" . $id . ", FROM_BASE64('" . base64_encode("apply-row-" . $id) . "')) ON DUPLICATE KEY UPDATE \`id\` = \`id\`;\\nDO SLEEP(0.02) /* reprint_db_apply_cursor_rows */;\\n";`,
+            '        }',
+            '    }',
             "    if (substr(rtrim($sql), -1) === ';') {",
             "        $sql .= \"\\nDO SLEEP(0.03);\\n\";",
             '    }',
@@ -322,6 +351,11 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             true,
             'db-pull did not save the MySQL session setup beside db.sql',
         );
+        const sqlContents = readFileSync(join(fileTempDir, 'db.sql'), 'utf8');
+        const sqlGroupMarkers = [...sqlContents.matchAll(
+            /-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 ([A-Za-z0-9+/=]+)/g,
+        )];
+        assert.ok(sqlGroupMarkers.length > 0, 'db.sql did not keep the exporter SQL group boundaries');
 
         const connection = await createMysqlConnection();
         await connection.query(`DROP DATABASE IF EXISTS \`${targetDb}\``);
@@ -329,29 +363,65 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
         await connection.end();
 
         const first = spawnDatabaseApply(fileTempDir);
-        const statePath = join(pullStateDirectory(fileTempDir, importUrl()), 'state.json');
         const deadline = Date.now() + 60000;
-        let statementsExecuted = 0;
+        let pausedInsideUncommittedRows = false;
+        let rowsVisibleBeforeKill = null;
+        let cursorSavedBeforeKill = null;
+        let fileByteOffsetSavedBeforeKill = null;
+        const targetMonitor = await createMysqlConnection(targetDb);
 
-        while (Date.now() < deadline) {
-            if (first.childProcess.exitCode !== null || first.childProcess.signalCode !== null) {
-                const result = await first.exit;
-                assert.fail(
-                    `db-apply exited before its first saved position (${result.code}/${result.signal}):\n`
-                    + first.output.stderr + first.output.stdout,
+        try {
+            while (Date.now() < deadline) {
+                if (first.childProcess.exitCode !== null || first.childProcess.signalCode !== null) {
+                    const result = await first.exit;
+                    assert.fail(
+                        `db-apply exited before its first saved position (${result.code}/${result.signal}):\n`
+                        + first.output.stderr + first.output.stdout,
+                    );
+                }
+                const [[running]] = await targetMonitor.query(
+                    'SELECT COUNT(*) AS queryCount FROM INFORMATION_SCHEMA.PROCESSLIST '
+                    + "WHERE INFO LIKE '%reprint_db_apply_cursor_rows%' AND ID <> CONNECTION_ID()"
                 );
+                if (Number(running.queryCount) > 0) {
+                    const [[savedPosition]] = await targetMonitor.query(
+                        'SELECT COUNT(*) AS positionCount FROM `' + progressTable + '` WHERE id = 1'
+                    );
+                    if (Number(savedPosition.positionCount) === 1) {
+                        const [[savedCursor]] = await targetMonitor.query(
+                            'SELECT source_cursor, file_byte_offset FROM `' + progressTable + '` WHERE id = 1'
+                        );
+                        cursorSavedBeforeKill = savedCursor.source_cursor;
+                        fileByteOffsetSavedBeforeKill = Number(savedCursor.file_byte_offset);
+                        const [[visibleRows]] = await targetMonitor.query(
+                            `SELECT COUNT(*) AS rowCount FROM \`${applyCursorTable}\``
+                        );
+                        rowsVisibleBeforeKill = Number(visibleRows.rowCount);
+                        pausedInsideUncommittedRows = true;
+                        break;
+                    }
+                }
+                await sleep(5);
             }
-            if (existsSync(statePath)) {
-                const state = JSON.parse(readFileSync(statePath, 'utf8'));
-                statementsExecuted = Number(state.apply?.statements_executed || 0);
-            }
-            if (statementsExecuted >= 100) {
-                break;
-            }
-            await sleep(10);
+        } finally {
+            await targetMonitor.end();
         }
 
-        assert.ok(statementsExecuted >= 100, 'db-apply did not save a position');
+        assert.equal(pausedInsideUncommittedRows, true, 'db-apply did not reach the pause inside the final InnoDB table');
+        const savedMarker = sqlGroupMarkers.find((marker) => marker[1] === cursorSavedBeforeKill);
+        assert.ok(savedMarker, 'MySQL did not save an exporter cursor from db.sql before the process stopped');
+        const expectedFileByteOffset = Buffer.byteLength(
+            sqlContents.slice(0, savedMarker.index + savedMarker[0].length) + '\n',
+        );
+        assert.equal(
+            fileByteOffsetSavedBeforeKill,
+            expectedFileByteOffset,
+            'MySQL did not save the byte immediately after the matching db.sql marker',
+        );
+        assert.ok(
+            rowsVisibleBeforeKill < 301,
+            `db-apply finished the final InnoDB table before it could be stopped (${rowsVisibleBeforeKill} rows)`,
+        );
         assert.equal(first.childProcess.kill('SIGKILL'), true);
         const killed = await first.exit;
         assert.equal(killed.code, null);
@@ -371,6 +441,30 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
 
         const targetConnection = await createMysqlConnection(targetDb);
         try {
+            const [[applyCursorRows]] = await targetConnection.query(
+                `SELECT COUNT(*) AS rowCount FROM \`${applyCursorTable}\``
+            );
+            assert.equal(
+                Number(applyCursorRows.rowCount),
+                301,
+                'db-apply skipped InnoDB rows which MySQL rolled back with the stopped connection',
+            );
+
+            const completedState = JSON.parse(readFileSync(
+                join(pullStateDirectory(fileTempDir, importUrl()), 'state.json'),
+                'utf8',
+            ));
+            assert.equal(completedState.apply.bytes_read, 0, 'db-apply copied the MySQL byte offset into local state');
+            assert.ok(completedState.apply.statements_executed > 0, 'db-apply did not save the statement count');
+            assert.equal(completedState.active_resumable_command.remote_cursor, null);
+
+            const [[remainingProgressTable]] = await targetConnection.query(
+                'SELECT COUNT(*) AS tableCount FROM INFORMATION_SCHEMA.TABLES '
+                + 'WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
+                [targetDb, progressTable],
+            );
+            assert.equal(Number(remainingProgressTable.tableCount), 0, 'db-apply left its cursor table behind');
+
             const [rows] = await targetConnection.query(
                 `SELECT value, value + 0 AS enumIndex FROM \`${sqlModeTable}\``
             );
