@@ -1,6 +1,7 @@
 <?php
 
 use function Reprint\Importer\sort_index_file;
+use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\relative_path_under;
 use function WordPress\Reprint\Exporter\trim_right_slash;
@@ -422,7 +423,11 @@ class PushPlan
         switch ($this->file_index_processor->get_step_status()) {
             case FileIndexProcessor::STATUS_INDEXED:
                 foreach ($this->file_index_processor->get_index_entries() as $file_index_processor_entry) {
-                    $this->append_fresh_local_index_entry($file_index_processor_entry);
+                    write_file_index_processor_entry_to_local_index(
+                        $this->fresh_local_index_handle,
+                        $file_index_processor_entry,
+                        $this->filesystem_root
+                    );
                 }
                 break;
 
@@ -505,60 +510,6 @@ class PushPlan
         if (is_int($fresh_local_index_bytes) && is_int($local_index_bytes)) {
             $this->index_bytes_total = $fresh_local_index_bytes
                 + $local_index_bytes;
-        }
-    }
-
-    /**
-     * Appends one FileIndexProcessor entry in the JSONL format consumed by the
-     * index diff.
-     *
-     * @param array<string,mixed> $file_index_processor_entry Filesystem path details from FileIndexProcessor.
-     */
-    private function append_fresh_local_index_entry(array $file_index_processor_entry): void
-    {
-        if ($file_index_processor_entry["type"] === "other") {
-            throw new RuntimeException(
-                "Cannot push the unsupported local path: "
-                . base64_encode($file_index_processor_entry["path"])
-                . "."
-            );
-        }
-        if (
-            $file_index_processor_entry["type"] === "dir"
-            && !array_key_exists("empty", $file_index_processor_entry)
-        ) {
-            throw new RuntimeException(
-                "Could not inspect the local directory: "
-                . base64_encode($file_index_processor_entry["path"])
-                . "."
-            );
-        }
-
-        $local_relative_path = relative_path_under(
-            $file_index_processor_entry["path"],
-            $this->filesystem_root
-        );
-        if ($local_relative_path === null) {
-            throw new LogicException("File index path is outside the filesystem root.");
-        }
-        $fresh_local_index_entry = [
-            "path" => base64_encode($local_relative_path),
-            "ctime" => $file_index_processor_entry["ctime"],
-            "size" => $file_index_processor_entry["size"],
-            "type" => $file_index_processor_entry["type"],
-        ];
-        if ($file_index_processor_entry["type"] === "dir") {
-            $fresh_local_index_entry["empty"] = $file_index_processor_entry["empty"];
-        }
-        $fresh_local_index_json_line = json_encode(
-            $fresh_local_index_entry,
-            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-        ) . "\n";
-        if (
-            fwrite($this->fresh_local_index_handle, $fresh_local_index_json_line)
-            !== strlen($fresh_local_index_json_line)
-        ) {
-            throw new RuntimeException("Failed to write a fresh local index entry.");
         }
     }
 

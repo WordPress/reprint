@@ -3,6 +3,7 @@
 namespace Reprint\Importer;
 
 use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Exporter\relative_path_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exceptions contain CLI filesystem paths, never HTML output.
 
@@ -321,6 +322,60 @@ function read_local_index_updates( $sorted_local_index_updates_handle ): \Genera
 	if ( ! feof( $sorted_local_index_updates_handle ) ) {
 		throw new \RuntimeException( 'Failed to read an index-update entry.' );
 	}
+}
+
+/**
+ * Converts and writes one absolute-path FileIndexProcessor entry.
+ *
+ * @param resource $local_index_output_handle Open local index output.
+ * @param array    $file_index_processor_entry {
+ *     Indexed filesystem entry.
+ *
+ *     @type string $path  Local absolute path.
+ *     @type int    $ctime Indexed change timestamp.
+ *     @type int    $size  Indexed size.
+ *     @type string $type  file, link, dir, or other.
+ *     @type bool   $empty Whether a directory has no indexed descendants.
+ * }
+ * @param string $filesystem_root Local filesystem root.
+ */
+function write_file_index_processor_entry_to_local_index(
+	$local_index_output_handle,
+	array $file_index_processor_entry,
+	string $filesystem_root
+): void {
+	if (
+		$file_index_processor_entry['type'] === 'other'
+		|| (
+			$file_index_processor_entry['type'] === 'dir'
+			&& ! array_key_exists( 'empty', $file_index_processor_entry )
+		)
+	) {
+		throw new \RuntimeException(
+			'Could not index the local path: '
+			. base64_encode( $file_index_processor_entry['path'] )
+			. '.'
+		);
+	}
+	$local_relative_path = relative_path_under(
+		$file_index_processor_entry['path'],
+		$filesystem_root
+	);
+	if ( $local_relative_path === null ) {
+		throw new \LogicException(
+			'File index path is outside the filesystem root.'
+		);
+	}
+	$local_index_entry = [
+		'path'  => $local_relative_path,
+		'ctime' => $file_index_processor_entry['ctime'],
+		'size'  => $file_index_processor_entry['size'],
+		'type'  => $file_index_processor_entry['type'],
+	];
+	if ( $file_index_processor_entry['type'] === 'dir' ) {
+		$local_index_entry['empty'] = $file_index_processor_entry['empty'];
+	}
+	write_local_index_entry( $local_index_output_handle, $local_index_entry );
 }
 
 /**
