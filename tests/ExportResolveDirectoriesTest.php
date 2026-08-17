@@ -38,25 +38,27 @@ final class ExportResolveDirectoriesTest extends TestCase {
         $this->assertSame([realpath($this->tempDir . '/site')], $resolved);
     }
 
-    public function testFileEntryIsAccepted(): void
+    public function testDirectoryResolverRejectsAFileEntry(): void
     {
-        $resolved = resolve_directories([
-            'directory' => [$this->tempDir . '/site/wp-config.php'],
-        ]);
-        $this->assertSame(
-            [realpath($this->tempDir . '/site') . '/wp-config.php'],
-            $resolved
-        );
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('not an accessible directory');
+
+        resolve_directories(['directory' => [$this->tempDir . '/site/wp-config.php']]);
     }
 
-    public function testFileSymlinkEntryKeepsItsOwnPath(): void
+    public function testFileIndexResolverKeepsRequestedAndResolvedCoordinates(): void
     {
-        $resolved = resolve_directories([
+        $roots = resolve_file_index_roots([
             'directory' => [$this->tempDir . '/site/config-link.php'],
+            'follow_symlinks' => true,
         ]);
         $this->assertSame(
-            [realpath($this->tempDir . '/site') . '/config-link.php'],
-            $resolved
+            [[
+                'requested_path' => $this->tempDir . '/site/config-link.php',
+                'resolved_path' => realpath($this->tempDir . '/site/wp-config.php'),
+                'type' => 'symlink',
+            ]],
+            $roots
         );
     }
 
