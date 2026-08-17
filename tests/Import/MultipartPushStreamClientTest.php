@@ -32,7 +32,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         ]);
 
         $this->assertFalse($client->has_sent_parts());
-        $this->assertTrue($client->start_upload_request(str_repeat('a', 32)));
+        $this->assertTrue($client->start_upload_request(str_repeat('a', 32), 1));
         $this->assertFalse($client->has_sent_parts());
         $connection = stream_socket_accept($listener, 3);
         $this->assertNotFalse($connection);
@@ -164,7 +164,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'response_timeout' => 2,
         ]);
         foreach (['first.bin', 'second.bin'] as $request_number => $path) {
-            $this->assertTrue($client->start_upload_request(str_repeat( (string) ( $request_number + 4 ), 32)));
+            $this->assertTrue($client->start_upload_request(str_repeat( (string) ( $request_number + 4 ), 32), 1));
             $this->assertTrue($client->send_part([
                 'type' => 'file',
                 'path' => $path,
@@ -198,7 +198,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'connect_timeout' => 2,
         ]);
         $this->assertSame(7, $client->next_file_body_bytes('bounded.bin', 100, 0));
-        $this->assertTrue($client->start_upload_request(str_repeat('b', 32)));
+        $this->assertTrue($client->start_upload_request(str_repeat('b', 32), 1));
         $connection = stream_socket_accept($listener, 3);
         $this->assertNotFalse($connection);
         $this->read_available($connection);
@@ -229,7 +229,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'chunk_bytes' => 1024,
             'connect_timeout' => 2,
         ]);
-        $this->assertTrue($client->start_upload_request(str_repeat('d', 32)));
+        $this->assertTrue($client->start_upload_request(str_repeat('d', 32), 1));
         $connection = stream_socket_accept($listener, 3);
         $this->assertNotFalse($connection);
         $this->read_available($connection);
@@ -278,7 +278,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'response_timeout' => 2,
         ]);
 
-        $this->assertTrue($client->start_upload_request(str_repeat('c', 32)));
+        $this->assertTrue($client->start_upload_request(str_repeat('c', 32), 1));
         $connection = stream_socket_accept($listener, 3);
         $this->assertNotFalse($connection);
         $this->read_available($connection);
@@ -327,7 +327,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'response_timeout' => 2,
         ]);
         $before = $client->get_request_sizer_state();
-        $this->assertTrue($client->start_upload_request(str_repeat('7', 32)));
+        $this->assertTrue($client->start_upload_request(str_repeat('7', 32), 1));
         $connection = stream_socket_accept($listener, 3);
         $this->assertNotFalse($connection);
         $response = (string) json_encode(['status' => 'accepted', 'accepted' => []]);
@@ -361,7 +361,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'response_timeout' => 2,
         ]);
 
-        $this->assertTrue($client->start_upload_request(str_repeat('4', 32)));
+        $this->assertTrue($client->start_upload_request(str_repeat('4', 32), 1));
         $connection = stream_socket_accept($listener, 3);
         $this->assertNotFalse($connection);
         $this->read_available($connection);
@@ -406,7 +406,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'response_timeout' => 2,
         ]);
 
-        $this->assertTrue($client->start_upload_request(str_repeat('e', 32)));
+        $this->assertTrue($client->start_upload_request(str_repeat('e', 32), 1));
         $connection = stream_socket_accept($listener, 3);
         $this->assertNotFalse($connection);
         $this->read_available($connection);
@@ -548,7 +548,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'stall_timeout' => 2,
             'response_timeout' => 2,
         ]);
-        $this->assertTrue($client->start_upload_request(str_repeat('6', 32)));
+        $this->assertTrue($client->start_upload_request(str_repeat('6', 32), 1));
         $this->assertTrue($client->send_part([
             'type' => 'file',
             'path' => 'oversized-response.bin',
@@ -674,7 +674,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'response_timeout' => 2,
         ]);
 
-        $this->assertTrue($client->start_upload_request(str_repeat('f', 32)));
+        $this->assertTrue($client->start_upload_request(str_repeat('f', 32), 1));
         $connection = stream_socket_accept($listener, 3);
         $this->assertNotFalse($connection);
         $started = microtime(true);
@@ -716,7 +716,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'response_timeout' => 1,
         ]);
 
-        $this->assertTrue($client->start_upload_request(str_repeat('1', 32)));
+        $this->assertTrue($client->start_upload_request(str_repeat('1', 32), 1));
         $connection = stream_socket_accept($listener, 3);
         $this->assertNotFalse($connection);
         $this->assertTrue($client->send_part([
@@ -798,7 +798,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'stall_timeout' => 2,
             'response_timeout' => 1,
         ]);
-        $this->assertTrue($client->start_upload_request(str_repeat('3', 32)));
+        $this->assertTrue($client->start_upload_request(str_repeat('3', 32), 1));
         $this->assertTrue($client->send_part([
             'type' => 'file',
             'path' => 'slow-response.bin',
@@ -881,7 +881,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'response_timeout' => 5,
         ]);
         $started = microtime(true);
-        $this->assertTrue($client->start_upload_request(str_repeat('2', 32)));
+        $this->assertTrue($client->start_upload_request(str_repeat('2', 32), 1));
         $sent = $client->send_part([
             'type' => 'file',
             'path' => 'slow-progress.bin',

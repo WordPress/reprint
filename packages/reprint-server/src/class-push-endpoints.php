@@ -10,6 +10,10 @@ use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 
+if (!class_exists('Site_Export_Push_Coordinator', false)) {
+    require_once __DIR__ . '/class-push-coordinator.php';
+}
+
 /**
  * Exposes push-session operations through the exporter HTTP dispatcher.
  *
@@ -48,6 +52,9 @@ final class Site_Export_Push_Endpoints {
 
     /** @var int|null */
     private $post_max_bytes;
+
+    /** @var Site_Export_Push_Coordinator */
+    private $coordinator;
 
     /**
      * Stores the server-supplied push directories, path policy, and limits.
@@ -142,6 +149,7 @@ final class Site_Export_Push_Endpoints {
             $this->post_max_bytes = $parsed_post_max_bytes > 0 ? $parsed_post_max_bytes : null;
         }
 
+        $this->coordinator = new Site_Export_Push_Coordinator($reprint_directory, $docroot, $excluded_paths);
         $this->reprint_directory = $reprint_directory;
         $this->docroot = $docroot;
         $this->excluded_paths = $excluded_paths;
@@ -154,6 +162,16 @@ final class Site_Export_Push_Endpoints {
             }
             $this->commit_start_denial_detail = $options['commit_start_denial_detail'];
         }
+    }
+
+    /**
+     * Holds the shared document-root gate for one file response.
+     *
+     * @param callable $callback Receives the current document-root generation.
+     * @return mixed Callback return value.
+     */
+    public function with_file_read(callable $callback) {
+        return $this->coordinator->with_file_read($callback);
     }
 
     /**
@@ -186,15 +204,28 @@ final class Site_Export_Push_Endpoints {
         try {
             $this->assert_request_method('POST');
             $push_session_id = $this->read_push_session_id($config);
-            Site_Export_Push_Session::create(
-                $this->reprint_directory,
-                $this->docroot,
-                $this->excluded_paths,
-                $push_session_id
+            $owner = $this->coordinator->claim_owner(
+                $push_session_id,
+                $this->read_force_takeover($config),
+                $this->read_optional_push_session_id($config, 'blocking_push_session_id'),
+                $this->read_optional_ownership_epoch($config, 'blocking_ownership_epoch')
             );
+            try {
+                Site_Export_Push_Session::create(
+                    $this->reprint_directory,
+                    $this->docroot,
+                    $this->excluded_paths,
+                    $push_session_id
+                );
+            } catch (Throwable $exception) {
+                $this->coordinator->abandon_creation($push_session_id, $owner['ownership_epoch']);
+                throw $exception;
+            }
             $this->respond(200, [
                 'status' => 'created',
                 'push_session_id' => $push_session_id,
+                'ownership_epoch' => $owner['ownership_epoch'],
+                'document_root_generation' => $owner['document_root_generation'],
                 'max_part_bytes' => $this->maximum_part_bytes,
                 'post_max_bytes' => $this->post_max_bytes,
                 'excluded_paths_b64' => array_map('base64_encode', $this->excluded_paths),
@@ -261,42 +292,47 @@ final class Site_Export_Push_Endpoints {
                     'Could not open the multipart upload request body.'
                 );
             }
-            $push_session = Site_Export_Push_Session::open(
-                $this->reprint_directory,
-                $this->docroot,
-                $push_session_id,
-                $this->excluded_paths
-            );
-            $push_session->accept_upload(
-                $input,
-                new Site_Export_Multipart_Processor($boundary),
-                $this->maximum_part_bytes,
-                $this->post_max_bytes ?? PHP_INT_MAX
-            );
-            $upload_open = true;
-            $changes_accepted = 0;
-            $last_change = null;
-            while ($push_session->next_change()) {
-                ++$changes_accepted;
-                $current_change = $push_session->get_current_change();
-                if ($current_change === null) {
-                    throw new LogicException('An accepted multipart part did not set its receiver-confirmed change.');
+            $ownership_epoch = $this->read_ownership_epoch($config);
+            $this->coordinator->with_owner_request($push_session_id, $ownership_epoch, function () use ($input, $boundary, $push_session_id, &$push_session, &$upload_open, &$changes_accepted, &$last_change, $ownership_epoch): void {
+                $this->coordinator->mark_receiving_work($push_session_id, $ownership_epoch);
+                $push_session = Site_Export_Push_Session::open(
+                    $this->reprint_directory,
+                    $this->docroot,
+                    $push_session_id,
+                    $this->excluded_paths
+                );
+                $push_session->accept_upload(
+                    $input,
+                    new Site_Export_Multipart_Processor($boundary),
+                    $this->maximum_part_bytes,
+                    $this->post_max_bytes ?? PHP_INT_MAX
+                );
+                $upload_open = true;
+                $changes_accepted = 0;
+                $last_change = null;
+                while ($push_session->next_change()) {
+                    ++$changes_accepted;
+                    $current_change = $push_session->get_current_change();
+                    if ($current_change === null) {
+                        throw new LogicException('An accepted multipart part did not set its receiver-confirmed change.');
+                    }
+                    $last_change = [];
+                    if (array_key_exists('path_b64', $current_change)) {
+                        $last_change['path_b64'] = $current_change['path_b64'];
+                    }
+                    $last_change['state'] = $current_change['state'];
+                    $last_change['type'] = $current_change['type'];
+                    $last_change['accepted_bytes'] = $current_change['accepted_bytes'];
                 }
-                $last_change = [];
-                if (array_key_exists('path_b64', $current_change)) {
-                    $last_change['path_b64'] = $current_change['path_b64'];
-                }
-                $last_change['state'] = $current_change['state'];
-                $last_change['type'] = $current_change['type'];
-                $last_change['accepted_bytes'] = $current_change['accepted_bytes'];
-            }
-            $push_session->finish_upload();
-            $upload_open = false;
+                $push_session->finish_upload();
+                $upload_open = false;
+            });
             fclose($input);
             $input = null;
             $this->respond(200, [
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
+                'ownership_epoch' => $ownership_epoch,
                 'changes_accepted' => $changes_accepted,
                 'last_change' => $last_change,
             ]);
@@ -353,13 +389,16 @@ final class Site_Export_Push_Endpoints {
                     throw new InvalidArgumentException('path_b64 must be valid base64 text.');
                 }
             }
-            $push_session = Site_Export_Push_Session::open(
-                $this->reprint_directory,
-                $this->docroot,
-                $push_session_id,
-                $this->excluded_paths
-            );
-            $push_status = $push_session->get_status($path);
+            $ownership_epoch = $this->read_ownership_epoch($config);
+            $push_status = $this->coordinator->with_owner_request($push_session_id, $ownership_epoch, function () use ($push_session_id, $path): array {
+                $push_session = Site_Export_Push_Session::open(
+                    $this->reprint_directory,
+                    $this->docroot,
+                    $push_session_id,
+                    $this->excluded_paths
+                );
+                return $push_session->get_status($path);
+            });
             $path_status = null;
             if ($push_status['path'] !== null) {
                 $path_status = [
@@ -374,6 +413,8 @@ final class Site_Export_Push_Endpoints {
             $this->respond(200, [
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
+                'ownership_epoch' => $ownership_epoch,
+                'document_root_generation' => $this->coordinator->get_document_root_generation(),
                 'phase' => $push_status['phase'],
                 'work_deletes_bytes' => $push_status['work_deletes_bytes'],
                 'work_deletes_complete' => $push_status['work_deletes_complete'],
@@ -406,19 +447,38 @@ final class Site_Export_Push_Endpoints {
         try {
             $this->assert_request_method('POST');
             $push_session_id = $this->read_push_session_id($config);
-            $push_session = Site_Export_Push_Session::open(
-                $this->reprint_directory,
-                $this->docroot,
-                $push_session_id,
-                $this->excluded_paths
-            );
-            $commit = $push_session->commit(
-                $this->maximum_commit_entries,
-                $this->commit_start_denial_detail
-            );
+            $ownership_epoch = $this->read_ownership_epoch($config);
+            if ($this->commit_start_denial_detail !== null) {
+                // Preserve the authorization contract for a first denied commit:
+                // a missing private session is reported as push_disabled, not as
+                // a coordination failure before the session can be identified.
+                $denied_push_session = Site_Export_Push_Session::open(
+                    $this->reprint_directory,
+                    $this->docroot,
+                    $push_session_id,
+                    $this->excluded_paths
+                );
+                $denied_push_session->get_status();
+            }
+            $commit = $this->coordinator->with_owner_request($push_session_id, $ownership_epoch, function () use ($push_session_id, $ownership_epoch): array {
+                return $this->coordinator->with_commit($push_session_id, $ownership_epoch, function () use ($push_session_id): array {
+                    $push_session = Site_Export_Push_Session::open(
+                        $this->reprint_directory,
+                        $this->docroot,
+                        $push_session_id,
+                        $this->excluded_paths
+                    );
+                    return $push_session->commit(
+                        $this->maximum_commit_entries,
+                        $this->commit_start_denial_detail
+                    );
+                });
+            });
             $this->respond(200, [
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
+                'ownership_epoch' => $ownership_epoch,
+                'document_root_generation' => $this->coordinator->get_document_root_generation(),
                 'phase' => $commit['phase'],
                 'send_next_request' => $commit['send_next_request'],
                 'entries_processed' => $commit['entries_processed'],
@@ -460,15 +520,26 @@ final class Site_Export_Push_Endpoints {
         try {
             $this->assert_request_method('POST');
             $push_session_id = $this->read_push_session_id($config);
-            $remove_complete = Site_Export_Push_Session::remove(
-                $this->reprint_directory,
-                $this->docroot,
-                $push_session_id,
-                $this->excluded_paths
-            );
+            $ownership_epoch = $this->read_ownership_epoch($config);
+            if ($this->coordinator->is_terminal_owner($push_session_id, $ownership_epoch)) {
+                $remove_complete = true;
+            } else {
+                $remove_complete = $this->coordinator->with_owner_request($push_session_id, $ownership_epoch, function () use ($push_session_id): bool {
+                    return Site_Export_Push_Session::remove(
+                        $this->reprint_directory,
+                        $this->docroot,
+                        $push_session_id,
+                        $this->excluded_paths
+                    );
+                });
+            }
+            if ($remove_complete) {
+                $this->coordinator->complete_removal($push_session_id, $ownership_epoch);
+            }
             $this->respond(200, [
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
+                'ownership_epoch' => $ownership_epoch,
                 'removed' => $remove_complete,
             ]);
         } catch (Throwable $exception) {
@@ -490,6 +561,69 @@ final class Site_Export_Push_Endpoints {
                 'Push endpoint requires ' . $expected_method . '; observed ' . ( $observed_method === '' ? 'no request method' : $observed_method ) . '.'
             );
         }
+    }
+
+    /**
+     * Reads the identity which fences every owner request.
+     *
+     * @param array<string,mixed> $config Request parameters.
+     */
+    private function read_ownership_epoch(array $config): int {
+        $ownership_epoch = $config['ownership_epoch'] ?? null;
+        if (!is_int($ownership_epoch) && ! ( is_string($ownership_epoch) && ctype_digit($ownership_epoch) )) {
+            throw new InvalidArgumentException('ownership_epoch must be a positive integer.');
+        }
+        $ownership_epoch = (int) $ownership_epoch;
+        if ($ownership_epoch <= 0) {
+            throw new InvalidArgumentException('ownership_epoch must be a positive integer.');
+        }
+        return $ownership_epoch;
+    }
+
+    /**
+     * @param array<string,mixed> $config Request parameters.
+     */
+    private function read_optional_ownership_epoch(array $config, string $name): ?int {
+        if (!array_key_exists($name, $config)) {
+            return null;
+        }
+        if (!is_int($config[$name]) && ! ( is_string($config[$name]) && ctype_digit($config[$name]) )) {
+            throw new InvalidArgumentException($name . ' must be a positive integer.');
+        }
+        $ownership_epoch = (int) $config[$name];
+        if ($ownership_epoch <= 0) {
+            throw new InvalidArgumentException($name . ' must be a positive integer.');
+        }
+        return $ownership_epoch;
+    }
+
+    /**
+     * @param array<string,mixed> $config Request parameters.
+     */
+    private function read_optional_push_session_id(array $config, string $name): ?string {
+        if (!array_key_exists($name, $config)) {
+            return null;
+        }
+        if (!is_string($config[$name])) {
+            throw new InvalidArgumentException($name . ' must be a string.');
+        }
+        return $config[$name];
+    }
+
+    /**
+     * @param array<string,mixed> $config Request parameters.
+     */
+    private function read_force_takeover(array $config): bool {
+        if (!array_key_exists('force_takeover', $config)) {
+            return false;
+        }
+        if ($config['force_takeover'] === true || $config['force_takeover'] === '1') {
+            return true;
+        }
+        if ($config['force_takeover'] === false || $config['force_takeover'] === '0') {
+            return false;
+        }
+        throw new InvalidArgumentException('force_takeover must be boolean.');
     }
 
     /**
@@ -551,10 +685,13 @@ final class Site_Export_Push_Endpoints {
                 'reason' => $reason,
                 'detail' => $exception->getMessage(),
             ];
-            if ($reason === Site_Export_Push_Session::ERROR_COMMIT_REQUIRED) {
+            if ($reason === Site_Export_Push_Session::ERROR_COMMIT_REQUIRED || $reason === Site_Export_Push_Session::ERROR_SYNC_LOCKED) {
                 $context = $exception->get_context();
                 if (is_string($context['blocking_push_session_id'] ?? null)) {
                     $response['blocking_push_session_id'] = $context['blocking_push_session_id'];
+                }
+                if (is_int($context['blocking_ownership_epoch'] ?? null)) {
+                    $response['blocking_ownership_epoch'] = $context['blocking_ownership_epoch'];
                 }
             }
             if ($reason === Site_Export_Push_Session::ERROR_REQUEST_TOO_LARGE) {

@@ -30,6 +30,7 @@
             "src/class-multipart-processor.php",
             "src/class-push-configuration-exception.php",
             "src/class-push-exception.php",
+            "src/class-push-coordinator.php",
             "src/class-push-endpoints.php",
             "src/class-push-session.php",
             "src/class-sqlite-driver-pdo.php",

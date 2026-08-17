@@ -67,6 +67,9 @@ final class Site_Export_Push_Session {
     public const ERROR_SAME_DEVICE = 'same_device';
     public const ERROR_REQUEST_TOO_LARGE = 'request_too_large';
     public const ERROR_PUSH_DISABLED = 'push_disabled';
+    public const ERROR_SYNC_LOCKED = 'sync_locked';
+    public const ERROR_SYNC_OVERTAKEN = 'sync_overtaken';
+    public const ERROR_PUSH_CONFIGURATION_CHANGED = 'push_configuration_changed';
 
     private const MAX_PATH_BYTES = 4096;
     private const MAX_METADATA_BYTES = 1048576;

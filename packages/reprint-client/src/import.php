@@ -1629,6 +1629,7 @@ class ImportClient
      *
      *     @type string $secret             HMAC shared secret.
      *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
+     *     @type bool   $force_takeover     Whether the operator may take over the target's reported push owner.
      *     @type string $progress           Progress output mode: auto, tty, or jsonl.
      *     @type array  $files_push_context Optional context already validated by the CLI entry point.
      * }
@@ -1678,6 +1679,7 @@ class ImportClient
             'remote_reprint_api_url' => $context['remote_reprint_api_url'],
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
             'allow_http' => $options['force_http'] ?? false,
+            'force_takeover' => $options['force_takeover'] ?? false,
             'chunk_bytes' => $chunk_bytes,
         ];
 
@@ -2100,6 +2102,7 @@ class ImportClient
      *
      *     @type string $secret     HMAC shared secret.
      *     @type bool   $force_http Whether the operator allowed a plain-HTTP target.
+     *     @type bool   $force_takeover Whether the operator may take over the target's reported push owner.
      * }
      * @phpstan-param array<string,mixed> $options
      * @return array {
@@ -12379,6 +12382,13 @@ if (
             'commands' => ['files-push'],
         ],
         [
+            'name' => 'force-takeover',
+            'type' => 'flag',
+            'target' => 'force_takeover',
+            'help' => 'Take over the target push owner after it is identified; the displaced sender stops at its next request',
+            'commands' => ['files-push'],
+        ],
+        [
             'name' => 'progress',
             'type' => 'value',
             'target' => 'progress',
@@ -13363,7 +13373,7 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--progress=MODE] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--force-takeover] [--progress=MODE] [--verbose]",
             "description" =>
                 "Sends the remote document root's local tree beneath --fs-root.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
@@ -13689,7 +13699,7 @@ if (
         foreach ($reprint_files_command_arguments as $reprint_files_push_command_argument) {
             $reprint_files_push_option_allowed = in_array(
                 $reprint_files_push_command_argument,
-                ['--force-http', '--verbose', '-v'],
+                ['--force-http', '--force-takeover', '--verbose', '-v'],
                 true
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
