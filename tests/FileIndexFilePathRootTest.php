@@ -68,4 +68,21 @@ final class FileIndexFilePathRootTest extends TestCase
         $this->assertContains($site . '/theme', $paths);
         $this->assertContains($target . '/style.css', $paths);
     }
+
+    public function testEndpointCopiesASelectedDirectorySymlinkWithoutFollowingItsTarget(): void
+    {
+        $site = $this->tempDir . '/site';
+        $shared = $this->tempDir . '/shared';
+        mkdir($site, 0755, true);
+        mkdir($shared . '/theme', 0755, true);
+        file_put_contents($shared . '/theme/style.css', 'body{}');
+        $site = (string) realpath($site);
+        $shared = (string) realpath($shared);
+        $link = $site . '/theme';
+        symlink($shared . '/theme', $link);
+
+        $paths = $this->runFileIndex([$link], $link, false);
+
+        $this->assertSame([$link], $paths);
+    }
 }

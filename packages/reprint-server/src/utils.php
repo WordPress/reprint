@@ -35,7 +35,6 @@ namespace WordPress\Reprint\Exporter {
 
 use InvalidArgumentException;
 use RuntimeException;
-use function WordPress\Filesystem\wp_join_unix_paths;
 
 // Composer's "files" autoload includes this file once per registered
 // path. In a monorepo where the same package is mirrored into vendor/

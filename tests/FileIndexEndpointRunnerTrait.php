@@ -11,7 +11,11 @@ trait FileIndexEndpointRunnerTrait
      * @param string[] $directories
      * @return string[]
      */
-    protected function runFileIndex(array $directories, string $listDir): array
+    protected function runFileIndex(
+        array $directories,
+        string $listDir,
+        bool $followSymlinks = true
+    ): array
     {
         $configPath = $this->tempDir . '/config.json';
         file_put_contents(
@@ -19,7 +23,7 @@ trait FileIndexEndpointRunnerTrait
             json_encode([
                 'directory' => $directories,
                 'list_dir' => $listDir,
-                'follow_symlinks' => true,
+                'follow_symlinks' => $followSymlinks,
                 'batch_size' => 1000,
             ], JSON_THROW_ON_ERROR),
         );
