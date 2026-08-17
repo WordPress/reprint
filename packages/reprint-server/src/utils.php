@@ -397,7 +397,10 @@ function path_is_same_as_or_descendant_of($path, $ancestor): bool
 /**
  * Canonicalizes one configured root path.
  *
- * A non-directory keeps its final component, so a named symlink stays itself.
+ * A regular file or file symlink keeps its final component after its parent is
+ * canonicalized. For example, `/srv/site/config-link.php` remains
+ * `config-link.php` rather than becoming its target. Directory symlinks are
+ * directories to PHP and resolve to their physical directory.
  *
  * @param string $path Root path as configured.
  * @return string|null Canonical root path, or null when it does not exist.

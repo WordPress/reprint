@@ -64,8 +64,8 @@ final class FileIndexProcessor {
     /** @var array[] Intermediate symlinks emitted before a new traversal begins. */
     private $initial_index_entries;
 
-    /** @var string[] Requested paths still to inspect, one per step, before traversal. */
-    private $pending_path_roots = [];
+    /** @var string[] Requested named roots still to index, one per step. */
+    private $pending_named_roots = [];
 
     /** @var string[]|null Sorted names in the current directory. */
     private $current_directory_names = null;
@@ -152,7 +152,8 @@ final class FileIndexProcessor {
         });
         $ordered_roots = array_merge($ordered_roots, $extra_roots);
 
-        // A root that is not a directory is one named path; nothing to walk.
+        // `--only` may select wp-config.php or a symlink. Index one named root
+        // per step, then continue with directory walking.
         $directory_roots = [];
         $path_roots = [];
         foreach ($ordered_roots as $root) {
@@ -273,7 +274,7 @@ final class FileIndexProcessor {
         }
 
         // Absent from cursors written before this field existed.
-        $pending_path_roots = [];
+        $pending_named_roots = [];
         $encoded_path_roots = isset($cursor["paths"]) ? $cursor["paths"] : [];
         if (!is_array($encoded_path_roots)) {
             throw new InvalidArgumentException("Index cursor paths must be an array");
@@ -286,7 +287,7 @@ final class FileIndexProcessor {
             if ($path_root === false || $path_root === "") {
                 throw new InvalidArgumentException("Index cursor path entry has invalid encoding");
             }
-            $pending_path_roots[] = $path_root;
+            $pending_named_roots[] = $path_root;
         }
 
         // During continuation, the active directory is the best description
@@ -305,7 +306,7 @@ final class FileIndexProcessor {
             $directory_stack,
             $index_directory,
             [],
-            $pending_path_roots
+            $pending_named_roots
         );
     }
 
@@ -337,9 +338,10 @@ final class FileIndexProcessor {
             return true;
         }
 
-        // One per step, before traversal, so each step stays bounded.
-        if (!empty($this->pending_path_roots)) {
-            $this->index_next_path_root();
+        // Index one selected named root before walking directories. This keeps
+        // each step bounded and makes its cursor boundary unambiguous.
+        if (!empty($this->pending_named_roots)) {
+            $this->index_next_named_root();
             return true;
         }
 
@@ -477,7 +479,7 @@ final class FileIndexProcessor {
             ];
         }
         $encoded_path_roots = [];
-        foreach ($this->pending_path_roots as $path_root) {
+        foreach ($this->pending_named_roots as $path_root) {
             $encoded_path_roots[] = base64_encode($path_root);
         }
         return ["stack" => $encoded_stack, "paths" => $encoded_path_roots];
@@ -594,7 +596,7 @@ final class FileIndexProcessor {
      * @param array[]  $directory_stack      Active directory stack.
      * @param string   $index_directory      Directory reported by the endpoint.
      * @param array[]  $initial_index_entries Intermediate symlinks emitted before traversal.
-     * @param string[] $pending_path_roots   Named paths still to inspect, one per step.
+     * @param string[] $pending_named_roots  Requested named roots still to index, one per step.
      */
     private function __construct(
         array $roots,
@@ -605,7 +607,7 @@ final class FileIndexProcessor {
         array $directory_stack,
         string $index_directory,
         array $initial_index_entries,
-        array $pending_path_roots = []
+        array $pending_named_roots = []
     ) {
         $this->roots = $roots;
         $this->directories = $directories;
@@ -615,7 +617,7 @@ final class FileIndexProcessor {
         $this->directory_stack = $directory_stack;
         $this->index_directory = $index_directory;
         $this->initial_index_entries = $initial_index_entries;
-        $this->pending_path_roots = $pending_path_roots;
+        $this->pending_named_roots = $pending_named_roots;
     }
 
     /**
@@ -769,12 +771,12 @@ final class FileIndexProcessor {
     }
 
     /**
-     * Inspects one named path, applying the omissions traversal applies.
+     * Indexes one requested named root using traversal's exclusions.
      */
-    private function index_next_path_root(): void
+    private function index_next_named_root(): void
     {
         // Settle the cursor first so a skipped or vanished path is not retried.
-        $requested_path = array_shift($this->pending_path_roots);
+        $requested_path = array_shift($this->pending_named_roots);
         $root = $this->find_root($requested_path);
         if ($root === null) {
             throw new InvalidArgumentException("Index cursor names a root absent from this request: {$requested_path}");
@@ -808,7 +810,8 @@ final class FileIndexProcessor {
 
         $entries = [];
         if ($this->follow_symlinks) {
-            // dirname() so a symlinked file is not repeated as an intermediate entry.
+            // Record links in the requested parent path. The inspected root may
+            // add links from its own symlink target, so keep both entry sets.
             $entries = self::find_parent_symlinks(dirname($path_root));
         }
         $inspected_path = self::index_entries_for_path($path_root, $stat, $this->follow_symlinks);
@@ -873,7 +876,7 @@ final class FileIndexProcessor {
                 $candidate["requested_path"] !== $root["requested_path"]
                 &&
                 $candidate["resolved_path"] === $root["resolved_path"]
-                && !in_array($candidate["requested_path"], $this->pending_path_roots, true)
+                && !in_array($candidate["requested_path"], $this->pending_named_roots, true)
             ) {
                 return true;
             }
@@ -994,7 +997,8 @@ final class FileIndexProcessor {
             $item["target"] = $link_target;
         }
         if ($type === "dir") {
-            // Physical emptiness, not post-exclusion: else push deletes the parent.
+            // This is physical emptiness, not a directory whose children are
+            // merely excluded from synchronization.
             $directory_handle = @opendir($path);
             if ($directory_handle !== false) {
                 $item["empty"] = true;
@@ -1010,12 +1014,16 @@ final class FileIndexProcessor {
                 }
                 closedir($directory_handle);
             }
-            // An absent "empty" means unknown, so push must not infer deletions.
+            // If opendir() fails, leave "empty" absent. Pull reports the
+            // directory error and push does not plan deletions from it.
         }
 
-        // One step: the cursor cannot stop between a link and its intermediates.
+        // Intermediate links and the inspected path share one step because a
+        // cursor cannot stop between them without losing one of the entries.
         $entries = $intermediate_symlinks;
-        // A descendant implies its ancestors, so only empty directories need a row.
+        // Descendants imply non-empty parents: /a/file already implies /a.
+        // Emit a directory only when it is empty or uninspectable, when no
+        // descendant can establish that it exists.
         if (
             $type !== "dir"
             || !isset($item["empty"])
