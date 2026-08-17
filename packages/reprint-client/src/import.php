@@ -261,8 +261,8 @@ class ImportClient
     /** @var string Path to pull/fetch-list.jsonl — files to download, computed by comparing the next remote index with the remote index. */
     private $fetch_list_file;
 
-    /** @var string Unpublished mirror replacement for the fetch list. */
-    private $next_fetch_list_file;
+    /** @var string Path to the replacement fetch list built during mirror planning. */
+    private $fetch_list_replacement_file;
 
     /** @var string Path to audit.log — append-only log of every operation for debugging. */
     private $audit_log_file;
@@ -521,8 +521,8 @@ class ImportClient
             wp_join_unix_paths($this->pull_state_directory, "remote-index.local-map.jsonl");
         $this->fetch_list_file =
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl");
-        $this->next_fetch_list_file =
-            wp_join_unix_paths($this->pull_state_directory, "fetch-list.next.jsonl");
+        $this->fetch_list_replacement_file =
+            wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl.new");
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
         $this->volatile_files_file = wp_join_unix_paths($this->pull_state_directory, "volatile-files.json");
         $this->progress_file = wp_join_unix_paths($this->state_dir, "progress.json");
@@ -2464,7 +2464,7 @@ class ImportClient
             $this->audit_log("FILE DELETE | {$this->next_remote_index_file}");
         }
         foreach (
-            [$this->mapped_remote_index_file, $this->next_fetch_list_file]
+            [$this->mapped_remote_index_file, $this->fetch_list_replacement_file]
             as $mirror_work_file
         ) {
             if (file_exists($mirror_work_file)) {
@@ -3561,16 +3561,19 @@ class ImportClient
             "changed-local-paths.jsonl"
         );
         if (file_exists($this->fetch_list_file)) {
-            if (!copy($this->fetch_list_file, $this->next_fetch_list_file)) {
+            if (!copy($this->fetch_list_file, $this->fetch_list_replacement_file)) {
                 throw new RuntimeException("Failed to copy the remote-diff fetch list.");
             }
-        } elseif (file_put_contents($this->next_fetch_list_file, "") !== 0) {
-            throw new RuntimeException("Failed to create the mirror fetch list.");
+        } elseif (file_put_contents($this->fetch_list_replacement_file, "") !== 0) {
+            throw new RuntimeException("Failed to create the replacement fetch list.");
         }
 
-        $next_fetch_list_handle = fopen($this->next_fetch_list_file, "ab");
-        if (!is_resource($next_fetch_list_handle)) {
-            throw new RuntimeException("Failed to open the mirror fetch list.");
+        $fetch_list_replacement_file_handle = fopen(
+            $this->fetch_list_replacement_file,
+            "ab"
+        );
+        if (!is_resource($fetch_list_replacement_file_handle)) {
+            throw new RuntimeException("Failed to open the replacement fetch list.");
         }
         $decode_mapped_entry = static function (string $line): array {
             return MappedRemoteIndexBuilder::decode_index_line($line);
@@ -3592,7 +3595,7 @@ class ImportClient
                     /** @var array{copy_source_path:string} $remote_entry */
                     $this->append_to_fetch_list(
                         $remote_entry["copy_source_path"],
-                        $next_fetch_list_handle
+                        $fetch_list_replacement_file_handle
                     );
                     continue;
                 }
@@ -3620,19 +3623,19 @@ class ImportClient
                     $local_parent_path = dirname($local_parent_path);
                 }
             }
-            if (!fflush($next_fetch_list_handle)) {
-                throw new RuntimeException("Failed to flush the mirror fetch list.");
+            if (!fflush($fetch_list_replacement_file_handle)) {
+                throw new RuntimeException("Failed to flush the replacement fetch list.");
             }
         } finally {
             $changed_path_diff->close();
-            fclose($next_fetch_list_handle);
+            fclose($fetch_list_replacement_file_handle);
         }
 
-        if (!sort_index_file($this->next_fetch_list_file)) {
-            throw new RuntimeException("Failed to sort the mirror fetch list.");
+        if (!sort_index_file($this->fetch_list_replacement_file)) {
+            throw new RuntimeException("Failed to sort the replacement fetch list.");
         }
-        if (!rename($this->next_fetch_list_file, $this->fetch_list_file)) {
-            throw new RuntimeException("Failed to publish the mirror fetch list.");
+        if (!rename($this->fetch_list_replacement_file, $this->fetch_list_file)) {
+            throw new RuntimeException("Failed to replace the fetch list.");
         }
     }
 
