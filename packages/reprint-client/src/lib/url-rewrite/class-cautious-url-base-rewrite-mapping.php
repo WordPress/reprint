@@ -13,6 +13,9 @@ class CautiousURLBaseRewriteMapping {
     /**
      * @var array<int, array{
      *     source_authority: string,
+     *     source_ascii_host: string,
+     *     source_host_uses_idn: bool,
+     *     unicode_source_path_segments_in_nfd: array<int, string>,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -26,6 +29,16 @@ class CautiousURLBaseRewriteMapping {
 
     /**
      * Prepares source URL base => target URL pairs.
+     *
+     * A source may include an initial valid UTF-8 path without whitespace or
+     * control characters. A target must be an HTTP(S) URL with a supported
+     * domain, optional port, and optional restricted path:
+     *
+     * ```
+     * [
+     *     'https://source.example/media' => 'https://destination.example/assets',
+     * ]
+     * ```
      *
      * Invalid pairs are skipped as a whole. They cannot produce a partial
      * domain replacement.
@@ -54,6 +67,9 @@ class CautiousURLBaseRewriteMapping {
      *
      * @return array<int, array{
      *     source_authority: string,
+     *     source_ascii_host: string,
+     *     source_host_uses_idn: bool,
+     *     unicode_source_path_segments_in_nfd: array<int, string>,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -71,6 +87,9 @@ class CautiousURLBaseRewriteMapping {
     /**
      * @return array{
      *     source_authority: string,
+     *     source_ascii_host: string,
+     *     source_host_uses_idn: bool,
+     *     unicode_source_path_segments_in_nfd: array<int, string>,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -91,18 +110,54 @@ class CautiousURLBaseRewriteMapping {
         // A source URL ending at its authority uses / as the URL separator,
         // not as an initial path to remove. Leave its original spelling alone.
         $source_path = $source['path'] === '/' ? '' : $source['path'];
+        $unicode_source_path_segments_in_nfd = [];
+        foreach (explode('/', substr($source_path, 1)) as $source_path_segment) {
+            if (preg_match('/[\x80-\xFF]/', $source_path_segment) !== 1) {
+                continue;
+            }
+
+            // NFD writes é as e followed by a combining accent. Store every
+            // configured Unicode segment in NFD. The scanner converts each
+            // captured candidate segment to NFD before comparing the two.
+            $source_path_segment_in_nfd = Normalizer::normalize(
+                $source_path_segment,
+                Normalizer::FORM_D
+            );
+            if (!is_string($source_path_segment_in_nfd)) {
+                return null;
+            }
+            $unicode_source_path_segments_in_nfd[] =
+                $source_path_segment_in_nfd;
+        }
+
+        $source_authority_pattern = '(?i:' . preg_quote($source['authority'], '~') . ')';
+        if ($source['host_uses_idn']) {
+            // This branch locates Unicode authority candidates. IDNA below
+            // decides whether each candidate names the configured host.
+            $unicode_host_character = "[^\\s<>@/\\\\:?#,!;()\\[\\]{}>\"']";
+            $source_authority_pattern =
+                '(?:' . $source_authority_pattern
+                . '|(?<unicode_host>(?=' . $unicode_host_character . '*[\\x80-\\xFF])'
+                . $unicode_host_character . '+)'
+                . ( $source['port'] === null ? '' : ':' . $source['port'] )
+                . ')';
+        }
 
         return [
-            'source_authority' => $source['authority'],
-            'source_path'      => $source_path,
-            'source_base'      => $source['authority'] . $source_path,
-            'target_domain'    => $target['host'],
-            'target_scheme'    => $target['scheme'],
-            'target_path'      => $target['path'],
-            'target_port'      => $target['port'],
-            'pattern'          => $this->create_url_candidate_pattern(
+            'source_authority'     => $source['authority'],
+            'source_ascii_host'    => $source['ascii_host'],
+            'source_host_uses_idn' => $source['host_uses_idn'],
+            'unicode_source_path_segments_in_nfd' =>
+                $unicode_source_path_segments_in_nfd,
+            'source_path' => $source_path,
+            'source_base'          => $source['authority'] . $source_path,
+            'target_domain'        => $target['host'],
+            'target_scheme'        => $target['scheme'],
+            'target_path'          => $target['path'],
+            'target_port'          => $target['port'],
+            'pattern'              => $this->create_url_candidate_pattern(
                 $source['scheme'],
-                $source['authority'],
+                $source_authority_pattern,
                 $source_path,
                 $target['path'] !== ''
             ),
@@ -119,7 +174,7 @@ class CautiousURLBaseRewriteMapping {
      */
     private function create_url_candidate_pattern(
         string $source_scheme,
-        string $source_authority,
+        string $source_authority_pattern,
         string $source_path,
         bool $requires_path_slash
     ): string
@@ -127,13 +182,37 @@ class CautiousURLBaseRewriteMapping {
         $separator_escape = '\\\\{0,8}';
         $source_path_pattern = '';
         if ($source_path !== '') {
+            $source_path_suffix_pattern = '';
+            $unicode_path_segment_index = 0;
+            foreach (
+                explode('/', substr($source_path, 1))
+                as $source_path_segment_index => $source_path_segment
+            ) {
+                if ($source_path_segment_index > 0) {
+                    $source_path_suffix_pattern .= $separator_escape . '/';
+                }
+                // Capture Unicode segments and compare them in NFD after
+                // matching. One regexp then handles any mixture of composed
+                // and decomposed characters without listing every combination.
+                if (preg_match('/[\x80-\xFF]/', $source_path_segment) !== 1) {
+                    $source_path_suffix_pattern .= preg_quote(
+                        $source_path_segment,
+                        '~'
+                    );
+                    continue;
+                }
+
+                $source_path_suffix_pattern .=
+                    '(?<unicode_path_segment_' . $unicode_path_segment_index . '>'
+                    . '(?=[^/?#\x00-\x20\x7F]*[\x80-\xFF])'
+                    . '[^/?#\x00-\x20\x7F]+?'
+                    . ')';
+                ++$unicode_path_segment_index;
+            }
+
             $source_path_pattern =
                 '(?<path_slash>' . $separator_escape . '/)'
-                . str_replace(
-                    '/',
-                    $separator_escape . '/',
-                    preg_quote(substr($source_path, 1), '~')
-                );
+                . $source_path_suffix_pattern;
         }
         $candidate_boundary_pattern = '(?=
             $
@@ -162,7 +241,7 @@ class CautiousURLBaseRewriteMapping {
                 (?:[^\s<>@/\\\\]+@)?
             )?
             (?<base>
-                (?<authority>(?i:' . preg_quote($source_authority, '~') . '))
+                (?<authority>' . $source_authority_pattern . ')
                 ' . $source_path_pattern . '
             )
             ' . $candidate_boundary_pattern . '
@@ -170,7 +249,15 @@ class CautiousURLBaseRewriteMapping {
     }
 
     /**
-     * @return array{scheme: string, host: string, authority: string, path: string, port: int|null}|null
+     * @return array{
+     *     scheme: string,
+     *     host: string,
+     *     ascii_host: string,
+     *     host_uses_idn: bool,
+     *     authority: string,
+     *     path: string,
+     *     port: int|null
+     * }|null
      */
     private function get_supported_url_parts(string $url, bool $is_source_url): ?array
     {
@@ -188,24 +275,119 @@ class CautiousURLBaseRewriteMapping {
         $scheme = strtolower( (string) $parts['scheme'] );
         $host = (string) $parts['host'];
         $path = isset($parts['path']) ? (string) $parts['path'] : '';
+        if ($is_source_url) {
+            // parse_url() replaces control-valued bytes with underscores.
+            // Some UTF-8 continuation bytes fall in that range. Read the
+            // source authority and path from the configured URL after
+            // parse_url() has checked its structure.
+            $authority_separator_at = strpos($url, '://');
+            if ($authority_separator_at === false) {
+                return null;
+            }
+            $authority_starts_at = $authority_separator_at + 3;
+            $path_starts_at = strpos($url, '/', $authority_starts_at);
+            $source_authority = $path_starts_at === false
+                ? substr($url, $authority_starts_at)
+                : substr(
+                    $url,
+                    $authority_starts_at,
+                    $path_starts_at - $authority_starts_at
+                );
+            if (isset($parts['port'])) {
+                $port_suffix = ':' . $parts['port'];
+                if (substr($source_authority, -strlen($port_suffix)) !== $port_suffix) {
+                    return null;
+                }
+                $host = substr($source_authority, 0, -strlen($port_suffix));
+            } else {
+                $host = $source_authority;
+            }
+            $path = $path_starts_at === false ? '' : substr($url, $path_starts_at);
+        }
+
+        $host_is_ascii_domain = $this->is_alphanumeric_dot_hyphen_domain_name($host);
+        $host_is_ip_address =
+            $is_source_url
+            && !$host_is_ascii_domain
+            && $this->is_ip_address($host);
+        $host_contains_punycode_label =
+            $host_is_ascii_domain
+            && stripos('.' . $host, '.xn--') !== false;
+        $host_uses_idn =
+            $is_source_url
+            && (
+                $host_contains_punycode_label
+                || ( !$host_is_ascii_domain && !$host_is_ip_address )
+            );
+        $ascii_host = $host;
+        if ($host_uses_idn) {
+            if (
+                !$host_is_ascii_domain
+                && preg_match('/^[\p{L}\p{M}\p{N}.-]+$/u', $host) !== 1
+            ) {
+                return null;
+            }
+            $ascii_host = self::to_ascii_idn_hostname($host);
+            if ($ascii_host === null) {
+                return null;
+            }
+        }
+
         $has_unsupported_target_path =
             !$is_source_url
             && $path !== ''
             && preg_match('#^/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$#', $path) !== 1;
+        $path_is_supported = $is_source_url
+            ? preg_match('/^[^\p{Z}\p{C}]*$/u', $path) === 1
+            : $this->contains_only_exclamation_mark_through_tilde_bytes($path);
+        $host_is_supported =
+            $host_is_ascii_domain
+            || $host_is_ip_address
+            || (
+                $host_uses_idn
+                && $this->is_alphanumeric_dot_hyphen_domain_name($ascii_host)
+            );
         if (( $scheme !== 'http' && $scheme !== 'https' )
             || ( !$is_source_url && $has_unsupported_target_path )
-            || !( $this->is_alphanumeric_dot_hyphen_domain_name($host) || ( $is_source_url && $this->is_ip_address($host) ) )
-            || !$this->contains_only_exclamation_mark_through_tilde_bytes($path)) {
+            || !$host_is_supported
+            || !$path_is_supported) {
             return null;
         }
 
         return [
-            'scheme'    => $scheme,
-            'host'      => $host,
-            'authority' => $host . ( isset( $parts['port'] ) ? ':' . $parts['port'] : '' ),
-            'path'      => $path,
-            'port'      => isset($parts['port']) ? (int) $parts['port'] : null,
+            'scheme'        => $scheme,
+            'host'          => $host,
+            'ascii_host'    => $ascii_host,
+            'host_uses_idn' => $host_uses_idn,
+            'authority'     => $ascii_host . ( isset( $parts['port'] ) ? ':' . $parts['port'] : '' ),
+            'path'          => $path,
+            'port'          => isset($parts['port']) ? (int) $parts['port'] : null,
         ];
+    }
+
+    /**
+     * Converts a Unicode or Punycode hostname to its lowercase ASCII form.
+     *
+     * Returns null when IDNA rejects the hostname.
+     */
+    public static function to_ascii_idn_hostname(string $hostname): ?string
+    {
+        $idn_info = [];
+        $ascii_hostname = idn_to_ascii(
+            $hostname,
+            IDNA_NONTRANSITIONAL_TO_ASCII | IDNA_USE_STD3_RULES,
+            INTL_IDNA_VARIANT_UTS46,
+            $idn_info
+        );
+        if (
+            !is_string($ascii_hostname)
+            || $ascii_hostname === ''
+            || ( $idn_info['errors'] ?? 0 ) !== 0
+        ) {
+            return null;
+        }
+
+        return strtolower($ascii_hostname);
     }
 
     private function is_ip_address(string $host): bool

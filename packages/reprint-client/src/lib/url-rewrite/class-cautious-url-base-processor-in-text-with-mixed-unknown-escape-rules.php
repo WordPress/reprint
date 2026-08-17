@@ -33,15 +33,19 @@
  * Instead, the processor performs one narrow operation: find the configured
  * source base as bytes and replace that entire slice with a target domain and
  * optional path. It replaces the literal protocol separately when the mapping
- * changes it. It does not decode, normalize, or re-encode the input.
+ * changes it. Candidate Unicode path segments are normalized only for the
+ * comparison. The bytes outside the replaced slice remain unchanged.
  *
  * Supported sources:
  *
- * - ASCII domains and IPv4 or IPv6 addresses, with an optional port.
- * - An optional initial path containing only bytes from `!` (0x21) through
- *   `~` (0x7E). Spaces and multibyte characters are rejected. That path is
- *   part of the source base and is removed with it. A root slash is the URL
- *   separator rather than a removable path, so it remains after replacement. Mapping
+ * - ASCII or Unicode IDN source domains and IPv4 or IPv6 addresses, with
+ *   an optional port. Unicode and Punycode spellings of the same IDN match.
+ * - An optional initial path containing valid UTF-8 without whitespace or
+ *   control characters. Composed and decomposed characters may be mixed in
+ *   one path and still match the same source base. That path is part of the
+ *   source base and is removed with it. A root slash is the URL separator
+ *   rather than a removable path,
+ *   so it remains after replacement. Mapping
  *   https://source.example/media to
  *   https://destination.example changes
  *   https://source.example/media/logo.png to
@@ -69,18 +73,21 @@
  *   of the surrounding text.
  * - Target user information, queries, fragments, IPv4/IPv6 addresses, and
  *   Unicode domains are not supported. Punycode domains are supported.
- * - Unicode source domains and paths are not supported.
  *
  * CSS hexadecimal escapes such as https\3a \2f \2f ... and percent-encoded
  * separators are not recognized. They need a parser for the enclosing format.
  * Complete PHP serializations, JSON documents, and block markup must likewise
  * be parsed first; pass only the resulting text leaves to this processor.
  *
- * The HTTP(S) scheme and authority are matched case-insensitively. A configured
- * source path remains byte-for-byte and case-sensitive because URL paths may
- * name different resources when their case differs. A scheme may begin at the
- * start of the value or after a byte other than an ASCII letter, plus sign, or
- * hyphen. Scheme-less authorities use a stricter boundary so the scanner does
+ * Ordinary ASCII authorities use a literal pattern and never run IDNA. A
+ * mapping with a Unicode or `xn--` source hostname also checks literal Unicode
+ * candidates through IDNA. The HTTP(S) scheme and authority are matched
+ * case-insensitively. A configured
+ * source path remains case-sensitive because URL paths may name different
+ * resources when their case differs. Canonically equivalent composed and
+ * decomposed Unicode spellings match. A scheme may begin at the start of the
+ * value or after a byte other than an ASCII letter, plus sign, or hyphen.
+ * Scheme-less authorities use a stricter boundary so the scanner does
  * not mistake part of another URL or identifier for a match. A dot or colon
  * immediately after the configured base is rejected: it may continue the host
  * name or introduce a port which the mapping did not include.
@@ -108,6 +115,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * @var array<int, array{
      *     source_authority: string,
+     *     source_ascii_host: string,
+     *     source_host_uses_idn: bool,
+     *     unicode_source_path_segments_in_nfd: array<int, string>,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -126,6 +136,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * @var array{
      *     source_authority: string,
+     *     source_ascii_host: string,
+     *     source_host_uses_idn: bool,
+     *     unicode_source_path_segments_in_nfd: array<int, string>,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -245,6 +258,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * @return array{
      *     source_authority: string,
+     *     source_ascii_host: string,
+     *     source_host_uses_idn: bool,
+     *     unicode_source_path_segments_in_nfd: array<int, string>,
      *     source_path: string,
      *     source_base: string,
      *     target_domain: string,
@@ -264,13 +280,67 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     {
         $next_match = null;
         foreach ($this->url_mappings as $mapping) {
-            $found = preg_match(
-                $mapping['pattern'],
-                $this->text,
-                $matches,
-                PREG_OFFSET_CAPTURE,
-                $this->bytes_already_scanned
-            );
+            if (
+                !$mapping['source_host_uses_idn']
+                && $mapping['unicode_source_path_segments_in_nfd'] === []
+            ) {
+                $found = preg_match(
+                    $mapping['pattern'],
+                    $this->text,
+                    $matches,
+                    PREG_OFFSET_CAPTURE,
+                    $this->bytes_already_scanned
+                );
+            } else {
+                $search_from = $this->bytes_already_scanned;
+                while (true) {
+                    $found = preg_match(
+                        $mapping['pattern'],
+                        $this->text,
+                        $matches,
+                        PREG_OFFSET_CAPTURE,
+                        $search_from
+                    );
+                    if ($found !== 1) {
+                        break;
+                    }
+
+                    $candidate_matches_mapping = true;
+                    if (
+                        isset($matches['unicode_host'])
+                        && $matches['unicode_host'][1] !== -1
+                    ) {
+                        $candidate_matches_mapping =
+                            CautiousURLBaseRewriteMapping::to_ascii_idn_hostname(
+                                $matches['unicode_host'][0]
+                            ) === $mapping['source_ascii_host'];
+                    }
+
+                    foreach (
+                        $mapping['unicode_source_path_segments_in_nfd']
+                        as $unicode_path_segment_index => $source_path_segment_in_nfd
+                    ) {
+                        $candidate_path_segment_in_nfd = Normalizer::normalize(
+                            $matches[
+                                'unicode_path_segment_' . $unicode_path_segment_index
+                            ][0],
+                            Normalizer::FORM_D
+                        );
+                        if ($candidate_path_segment_in_nfd !== $source_path_segment_in_nfd) {
+                            $candidate_matches_mapping = false;
+                            break;
+                        }
+                    }
+
+                    if ($candidate_matches_mapping) {
+                        break;
+                    }
+
+                    $search_from =
+                        $matches['authority'][1]
+                        + strlen($matches['authority'][0]);
+                }
+            }
             if ($found !== 1) {
                 continue;
             }
