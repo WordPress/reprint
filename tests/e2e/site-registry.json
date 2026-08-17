@@ -151,6 +151,9 @@
     },
     "budgeted-mysql-sql-groups": {
       "port": 8129
+    },
+    "files-pull-mirror": {
+      "port": 8130
     }
   }
 }
