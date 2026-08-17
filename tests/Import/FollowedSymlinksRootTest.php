@@ -99,10 +99,14 @@ class FollowedSymlinksRootTest extends TestCase
 
     private function inScope(array $onlyPrefixes, string $path): bool
     {
-        $c = $this->newClient();
-        $rc = new \ReflectionClass($c);
-        $rc->getProperty('pull_only_files_with_path_prefixes')->setValue($c, $onlyPrefixes);
-        return $rc->getMethod('path_is_within_original_export_scope')->invoke($c, $path);
+        $mapper = new \RemoteToLocalPathMapper(
+            $this->root,
+            $onlyPrefixes,
+            [],
+            $this->root . '/followed'
+        );
+
+        return $mapper->remote_path_to_local_path($path) === $this->root . $path;
     }
 
     public function testTargetUnderScopeIsInScope(): void
@@ -122,67 +126,57 @@ class FollowedSymlinksRootTest extends TestCase
      * @param array<int,string> $scopePrefixes Original export scope (--include prefixes).
      * @param array<string,string> $remapRules source => absolute target.
      */
-    private function placeClient(?string $followedSymlinksRootSub, array $scopePrefixes, array $remapRules = []): \ImportClient
+    private function placeMapper(?string $followedSymlinksRootSub, array $scopePrefixes, array $remapRules = []): \RemoteToLocalPathMapper
     {
-        $c = $this->newClient();
-        $rc = new \ReflectionClass($c);
-        $rc->getProperty('local_followed_symlinks_root')->setValue($c, $followedSymlinksRootSub === null ? null : $this->root . $followedSymlinksRootSub);
-        $rc->getProperty('pull_only_files_with_path_prefixes')->setValue($c, $scopePrefixes);
-        $rc->getProperty('resolved_path_mappings')->setValue($c, $remapRules);
-        return $c;
-    }
-
-    private function place(\ImportClient $c, string $path): string
-    {
-        return (new \ReflectionClass($c))->getMethod('map_remote_absolute_path_to_local_absolute_path')->invoke($c, $path);
+        return new \RemoteToLocalPathMapper(
+            $this->root,
+            $scopePrefixes,
+            $remapRules,
+            $followedSymlinksRootSub === null
+                ? null
+                : $this->root . $followedSymlinksRootSub
+        );
     }
 
     public function testEscapingTargetRoutesIntoLocalFollowedSymlinksRoot(): void
     {
-        $c = $this->placeClient('/.followed-symlinks-root', ['/var/www/html']);
+        $mapper = $this->placeMapper('/.followed-symlinks-root', ['/var/www/html']);
         $this->assertSame(
             $this->root . '/.followed-symlinks-root/tmp/shared/foo/style.css',
-            $this->place($c, '/tmp/shared/foo/style.css')
+            $mapper->remote_path_to_local_path('/tmp/shared/foo/style.css')
         );
     }
 
     public function testInScopePathDoesNotUseLocalFollowedSymlinksRoot(): void
     {
-        $c = $this->placeClient('/.followed-symlinks-root', ['/var/www/html']);
+        $mapper = $this->placeMapper('/.followed-symlinks-root', ['/var/www/html']);
         $this->assertSame(
             $this->root . '/var/www/html/index.php',
-            $this->place($c, '/var/www/html/index.php')
+            $mapper->remote_path_to_local_path('/var/www/html/index.php')
         );
     }
 
     public function testDefaultPlacementWhenNoLocalFollowedSymlinksRoot(): void
     {
-        $c = $this->placeClient(null, []);
+        $mapper = $this->placeMapper(null, []);
         $this->assertSame(
             $this->root . '/tmp/shared/foo/style.css',
-            $this->place($c, '/tmp/shared/foo/style.css')
+            $mapper->remote_path_to_local_path('/tmp/shared/foo/style.css')
         );
     }
 
     public function testFilesystemRootPlacementKeepsOneLeadingSlash(): void
     {
-        $client = $this->newRootClient();
-        $reflection = new \ReflectionClass($client);
-        $reflection->getProperty('pull_only_files_with_path_prefixes')->setValue($client, []);
-
+        $mapper = new \RemoteToLocalPathMapper('/', []);
         $this->assertSame(
             '/tmp/shared/foo/style.css',
-            $this->place($client, '/tmp/shared/foo/style.css')
+            $mapper->remote_path_to_local_path('/tmp/shared/foo/style.css')
         );
 
-        $reflection->getProperty('local_followed_symlinks_root')->setValue($client, '/');
-        $reflection->getProperty('pull_only_files_with_path_prefixes')->setValue(
-            $client,
-            ['/var/www/html']
-        );
+        $mapper = new \RemoteToLocalPathMapper('/', ['/var/www/html'], [], '/');
         $this->assertSame(
             '/tmp/shared/foo/style.css',
-            $this->place($client, '/tmp/shared/foo/style.css')
+            $mapper->remote_path_to_local_path('/tmp/shared/foo/style.css')
         );
     }
 
@@ -190,15 +184,15 @@ class FollowedSymlinksRootTest extends TestCase
     // (/shared/wp-content) must not move the in-scope subtree.
     public function testAncestorEscapingRootLeavesInScopeContentInPlace(): void
     {
-        $c = $this->placeClient('/.followed-symlinks-root', ['/shared/wp-content']);
+        $mapper = $this->placeMapper('/.followed-symlinks-root', ['/shared/wp-content']);
         $this->assertSame(
             $this->root . '/shared/wp-content/plugins/foo.php',
-            $this->place($c, '/shared/wp-content/plugins/foo.php'),
+            $mapper->remote_path_to_local_path('/shared/wp-content/plugins/foo.php'),
             'in-scope content must not use the local followed symlinks root'
         );
         $this->assertSame(
             $this->root . '/.followed-symlinks-root/shared/other/bar.php',
-            $this->place($c, '/shared/other/bar.php'),
+            $mapper->remote_path_to_local_path('/shared/other/bar.php'),
             'genuinely escaping content uses the local followed symlinks root'
         );
     }
@@ -207,10 +201,10 @@ class FollowedSymlinksRootTest extends TestCase
     // and the symlink repoint (which share this seam) agree — no dangling link.
     public function testRemapWinsOverBundle(): void
     {
-        $c = $this->placeClient('/.followed-symlinks-root', ['/var/www/html'], ['/escaped' => $this->root . '/x']);
+        $mapper = $this->placeMapper('/.followed-symlinks-root', ['/var/www/html'], ['/escaped' => $this->root . '/x']);
         $this->assertSame(
             $this->root . '/x/foo',
-            $this->place($c, '/escaped/foo'),
+            $mapper->remote_path_to_local_path('/escaped/foo'),
             'remap target wins; the path does not use the local followed symlinks root'
         );
     }

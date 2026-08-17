@@ -14,9 +14,14 @@ require_once __DIR__ . '/../local-index-update-functions.php';
  * ## What the indexes represent
  *
  * A filesystem index is a path-sorted list describing a filesystem tree at one
- * point in time. Each index entry records one local relative path, whether that
- * path is a file, link, or directory, its size, its inode change time (ctime),
- * and, for some directories, whether it was empty.
+ * point in time. Each index entry records one path, whether that path is a file,
+ * link, or directory, its size, its inode change time (ctime), and, for some
+ * directories, whether it was empty. Both indexes must use the same path
+ * coordinate system; paths may be local relative paths or remote absolute paths.
+ * Each physical line must decode to one entry. The two indexes may use separate
+ * decoders, and decoder-specific fields remain available through
+ * `get_entry_in_old_index()` and `get_entry_in_new_index()`. A decoder cannot
+ * filter lines; blank or invalid records must throw.
  *
  * This processor opens two such lists:
  *
@@ -123,6 +128,12 @@ final class FileIndexDiffProcessor
     /** @var resource|null Stream containing the ending tree. */
     private $new_index_handle = null;
 
+    /** @var callable(string):IndexEntry Decodes one old-index JSONL line. */
+    private $decode_old_index_line;
+
+    /** @var callable(string):IndexEntry Decodes one new-index JSONL line. */
+    private $decode_new_index_line;
+
     /** @var IndexEntry|null Unconsumed old entry, which may be current or following. */
     private ?array $old_index_entry = null;
 
@@ -157,12 +168,20 @@ final class FileIndexDiffProcessor
      * equivalent to an empty tree. The new file describes the ending tree and
      * must be readable. Both files remain open until `close()`.
      *
-     * @param string $old_index_file Old index, or a missing path for an empty index.
-     * @param string $new_index_file New index.
+     * @param string        $old_index_file       Old index, or a missing path for an empty index.
+     * @param string        $new_index_file       New index.
+     * @param callable|null $decode_index_line    Old-index decoder, or null for the local decoder.
+     * @param callable|null $decode_new_index_line New-index decoder, or null to reuse the old-index decoder.
+     * @phpstan-param (callable(string):IndexEntry)|null $decode_index_line
+     * @phpstan-param (callable(string):IndexEntry)|null $decode_new_index_line
      * @return self Open processor positioned before either index's first path.
      */
-    public static function create(string $old_index_file, string $new_index_file): self
-    {
+    public static function create(
+        string $old_index_file,
+        string $new_index_file,
+        ?callable $decode_index_line = null,
+        ?callable $decode_new_index_line = null
+    ): self {
         return self::resume(
             $old_index_file,
             $new_index_file,
@@ -170,7 +189,9 @@ final class FileIndexDiffProcessor
                 "old_index_byte_offset" => 0,
                 "new_index_byte_offset" => 0,
                 "preceding_new_index_entry_path_b64" => null,
-            ]
+            ],
+            $decode_index_line,
+            $decode_new_index_line
         );
     }
 
@@ -185,6 +206,8 @@ final class FileIndexDiffProcessor
      * The caller must provide the same immutable index contents used to produce
      * the cursor. This method restores positions; it does not fingerprint the
      * files or check that they still describe the same snapshots.
+     * The cursor does not store the line decoders, so the caller must pass the
+     * same decoders again when resuming.
      *
      * @param string $old_index_file Old index, or a missing path for an empty index.
      * @param string $new_index_file New index.
@@ -196,15 +219,27 @@ final class FileIndexDiffProcessor
      *     @type string|null $preceding_new_index_entry_path_b64 New-index path before the next position.
      * }
      * @phpstan-param Cursor $cursor
+     * @param callable|null $decode_index_line    Old-index decoder, or null for the local decoder.
+     * @param callable|null $decode_new_index_line New-index decoder, or null to reuse the old-index decoder.
+     * @phpstan-param (callable(string):IndexEntry)|null $decode_index_line
+     * @phpstan-param (callable(string):IndexEntry)|null $decode_new_index_line
      * @return self Open processor restored at the supplied continuation boundary.
      */
     public static function resume(
         string $old_index_file,
         string $new_index_file,
-        array $cursor
+        array $cursor,
+        ?callable $decode_index_line = null,
+        ?callable $decode_new_index_line = null
     ): self {
         $processor = new self();
         $processor->cursor = $cursor;
+        $processor->decode_old_index_line = $decode_index_line
+            ?? static function (string $line): array {
+                return decode_local_index_entry($line);
+            };
+        $processor->decode_new_index_line = $decode_new_index_line
+            ?? $processor->decode_old_index_line;
         if (is_file($old_index_file)) {
             $processor->old_index_handle = @fopen($old_index_file, "rb");
             if (!is_resource($processor->old_index_handle)) {
@@ -279,13 +314,15 @@ final class FileIndexDiffProcessor
         }
         if (!$this->old_index_entry_loaded) {
             $this->old_index_entry = $this->read_next_index_entry(
-                $this->old_index_handle
+                $this->old_index_handle,
+                $this->decode_old_index_line
             );
             $this->old_index_entry_loaded = true;
         }
         if (!$this->new_index_entry_loaded) {
             $this->new_index_entry = $this->read_next_index_entry(
-                $this->new_index_handle
+                $this->new_index_handle,
+                $this->decode_new_index_line
             );
             $this->new_index_entry_loaded = true;
         }
@@ -325,7 +362,7 @@ final class FileIndexDiffProcessor
     }
 
     /**
-     * Returns the local relative path selected by next_path().
+     * Returns the path selected by next_path().
      *
      * This method does not read either index. The returned path remains current
      * until the next call to `next_path()`.
@@ -381,7 +418,7 @@ final class FileIndexDiffProcessor
      */
     public function get_path_type_in_old_index(): ?string
     {
-        $entry = $this->get_old_index_entry_for_current_path();
+        $entry = $this->get_entry_in_old_index();
         return $entry["type"] ?? null;
     }
 
@@ -394,7 +431,7 @@ final class FileIndexDiffProcessor
      */
     public function get_path_type_in_new_index(): ?string
     {
-        $entry = $this->get_new_index_entry_for_current_path();
+        $entry = $this->get_entry_in_new_index();
         return $entry["type"] ?? null;
     }
 
@@ -451,7 +488,7 @@ final class FileIndexDiffProcessor
      */
     public function get_directory_is_empty_in_old_index(): ?bool
     {
-        $entry = $this->get_old_index_entry_for_current_path();
+        $entry = $this->get_entry_in_old_index();
         return $entry["empty"] ?? null;
     }
 
@@ -464,7 +501,7 @@ final class FileIndexDiffProcessor
      */
     public function get_directory_is_empty_in_new_index(): ?bool
     {
-        $entry = $this->get_new_index_entry_for_current_path();
+        $entry = $this->get_entry_in_new_index();
         return $entry["empty"] ?? null;
     }
 
@@ -585,11 +622,22 @@ final class FileIndexDiffProcessor
      *
      * The retained old entry may instead be the path following a current path
      * found only in the new index. In that case this method returns null rather
-     * than exposing the unrelated retained entry.
+     * than exposing the unrelated retained entry. Any additional fields from
+     * the old-index decoder remain in the returned entry.
+     *
+     * @return array|null {
+     *     Complete decoded old-index entry for the current path, or null.
+     *
+     *     @type string $path  Decoded path bytes.
+     *     @type string $type  `file`, `link`, or `dir`.
+     *     @type int    $size  Recorded size.
+     *     @type int    $ctime Recorded inode change time.
+     *     @type bool   $empty Optional empty-directory marker.
+     * }
      *
      * @phpstan-return IndexEntry|null
      */
-    private function get_old_index_entry_for_current_path(): ?array
+    public function get_entry_in_old_index(): ?array
     {
         $this->assert_current_path();
         return $this->current_path_found_in === "new"
@@ -602,11 +650,22 @@ final class FileIndexDiffProcessor
      *
      * The retained new entry may instead be the path following a current path
      * found only in the old index. In that case this method returns null rather
-     * than exposing the unrelated retained entry.
+     * than exposing the unrelated retained entry. Any additional fields from
+     * the new-index decoder remain in the returned entry.
+     *
+     * @return array|null {
+     *     Complete decoded new-index entry for the current path, or null.
+     *
+     *     @type string $path  Decoded path bytes.
+     *     @type string $type  `file`, `link`, or `dir`.
+     *     @type int    $size  Recorded size.
+     *     @type int    $ctime Recorded inode change time.
+     *     @type bool   $empty Optional empty-directory marker.
+     * }
      *
      * @phpstan-return IndexEntry|null
      */
-    private function get_new_index_entry_for_current_path(): ?array
+    public function get_entry_in_new_index(): ?array
     {
         $this->assert_current_path();
         return $this->current_path_found_in === "old"
@@ -621,7 +680,7 @@ final class FileIndexDiffProcessor
      */
     private function get_required_old_index_entry(): array
     {
-        $entry = $this->get_old_index_entry_for_current_path();
+        $entry = $this->get_entry_in_old_index();
         if ($entry === null) {
             throw new LogicException("The current path has no old-index entry.");
         }
@@ -635,7 +694,7 @@ final class FileIndexDiffProcessor
      */
     private function get_required_new_index_entry(): array
     {
-        $entry = $this->get_new_index_entry_for_current_path();
+        $entry = $this->get_entry_in_new_index();
         if ($entry === null) {
             throw new LogicException("The current path has no new-index entry.");
         }
@@ -648,10 +707,15 @@ final class FileIndexDiffProcessor
      * The file handle advances when a line is read, but the public cursor does
      * does not advance until `next_path()` moves past the current path.
      *
-     * @param resource|null $index_handle Open index or null for an empty index.
+     * @param resource|null $index_handle      Open index or null for an empty index.
+     * @param callable      $decode_index_line Decoder for this index.
+     * @phpstan-param callable(string):IndexEntry $decode_index_line
      * @phpstan-return IndexEntry|null
      */
-    private function read_next_index_entry($index_handle): ?array
+    private function read_next_index_entry(
+        $index_handle,
+        callable $decode_index_line
+    ): ?array
     {
         if (!is_resource($index_handle)) {
             return null;
@@ -663,6 +727,13 @@ final class FileIndexDiffProcessor
             }
             return null;
         }
-        return decode_local_index_entry($line);
+        $index_entry = $decode_index_line($line);
+        if (!is_array($index_entry)) {
+            throw new UnexpectedValueException(
+                "The file-index decoder returned " . gettype($index_entry)
+                . "; expected one index entry for each line."
+            );
+        }
+        return $index_entry;
     }
 }

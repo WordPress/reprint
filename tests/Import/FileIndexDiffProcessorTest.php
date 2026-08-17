@@ -305,6 +305,155 @@ final class FileIndexDiffProcessorTest extends TestCase
         $processor->close();
     }
 
+    public function testIndependentDecodersExposeCompleteCurrentEntries(): void
+    {
+        $old_index_file = $this->write_index('old.jsonl', [
+            $this->entry('b-old-only.txt', 10),
+            $this->entry('c-shared.txt', 20),
+        ]);
+        $new_index_file = $this->write_index('new.jsonl', [
+            $this->entry('a-new-only.txt', 30),
+            $this->entry('c-shared.txt', 40),
+        ]);
+        $old_decoder = static function (string $line): array {
+            $entry = Reprint\Importer\decode_local_index_entry($line);
+            $entry['decoded_from'] = 'old';
+            return $entry;
+        };
+        $new_decoder = static function (string $line): array {
+            $entry = Reprint\Importer\decode_local_index_entry($line);
+            $entry['decoded_from'] = 'new';
+            return $entry;
+        };
+        $processor = FileIndexDiffProcessor::create(
+            $old_index_file,
+            $new_index_file,
+            $old_decoder,
+            $new_decoder
+        );
+
+        $this->assertTrue($processor->next_path());
+        $this->assertSame('a-new-only.txt', $processor->get_path());
+        $this->assertNull($processor->get_entry_in_old_index());
+        $this->assertSame(
+            [
+                'path' => 'a-new-only.txt',
+                'ctime' => 30,
+                'size' => 1,
+                'type' => 'file',
+                'decoded_from' => 'new',
+            ],
+            $processor->get_entry_in_new_index()
+        );
+
+        $this->assertTrue($processor->next_path());
+        $this->assertSame('b-old-only.txt', $processor->get_path());
+        $this->assertSame(
+            [
+                'path' => 'b-old-only.txt',
+                'ctime' => 10,
+                'size' => 1,
+                'type' => 'file',
+                'decoded_from' => 'old',
+            ],
+            $processor->get_entry_in_old_index()
+        );
+        $this->assertNull($processor->get_entry_in_new_index());
+
+        $this->assertTrue($processor->next_path());
+        $this->assertSame('c-shared.txt', $processor->get_path());
+        $this->assertSame(
+            'old',
+            $processor->get_entry_in_old_index()['decoded_from'] ?? null
+        );
+        $this->assertSame(
+            'new',
+            $processor->get_entry_in_new_index()['decoded_from'] ?? null
+        );
+        $processor->close();
+    }
+
+    public function testOneDecoderStillDecodesBothIndexes(): void
+    {
+        $old_index_file = $this->write_index('old.jsonl', [
+            $this->entry('shared.txt', 10),
+        ]);
+        $new_index_file = $this->write_index('new.jsonl', [
+            $this->entry('shared.txt', 20),
+        ]);
+        $decoder = static function (string $line): array {
+            $entry = Reprint\Importer\decode_local_index_entry($line);
+            $entry['decoder'] = 'shared';
+            return $entry;
+        };
+        $processor = FileIndexDiffProcessor::create(
+            $old_index_file,
+            $new_index_file,
+            $decoder
+        );
+
+        $this->assertTrue($processor->next_path());
+        $this->assertSame(
+            'shared',
+            $processor->get_entry_in_old_index()['decoder'] ?? null
+        );
+        $this->assertSame(
+            'shared',
+            $processor->get_entry_in_new_index()['decoder'] ?? null
+        );
+        $processor->close();
+    }
+
+    public function testNewDecoderOverridesTheDefaultDecoderAcrossResume(): void
+    {
+        $old_index_file = $this->write_index('old.jsonl', [
+            $this->entry('a-old-only.txt'),
+            $this->entry('c-shared.txt'),
+        ]);
+        $new_index_file = $this->write_index('new.jsonl', [
+            $this->entry('b-new-only.txt'),
+            $this->entry('c-shared.txt'),
+        ]);
+        $new_decoder = static function (string $line): array {
+            $entry = Reprint\Importer\decode_local_index_entry($line);
+            $entry['decoded_from'] = 'new';
+            return $entry;
+        };
+        $processor = FileIndexDiffProcessor::create(
+            $old_index_file,
+            $new_index_file,
+            null,
+            $new_decoder
+        );
+        $this->assertTrue($processor->next_path());
+        $this->assertTrue($processor->next_path());
+        $cursor = $processor->get_cursor();
+        $processor->close();
+
+        $resumed_processor = FileIndexDiffProcessor::resume(
+            $old_index_file,
+            $new_index_file,
+            $cursor,
+            null,
+            $new_decoder
+        );
+        $this->assertTrue($resumed_processor->next_path());
+        $this->assertSame('b-new-only.txt', $resumed_processor->get_path());
+        $this->assertNull($resumed_processor->get_entry_in_old_index());
+        $this->assertSame(
+            'new',
+            $resumed_processor->get_entry_in_new_index()['decoded_from'] ?? null
+        );
+        $this->assertTrue($resumed_processor->next_path());
+        $this->assertSame('c-shared.txt', $resumed_processor->get_path());
+        $old_entry = $resumed_processor->get_entry_in_old_index();
+        $new_entry = $resumed_processor->get_entry_in_new_index();
+        $this->assertIsArray($old_entry);
+        $this->assertArrayNotHasKey('decoded_from', $old_entry);
+        $this->assertSame('new', $new_entry['decoded_from'] ?? null);
+        $resumed_processor->close();
+    }
+
     public function testMissingNewIndexIsRejected(): void
     {
         $old_index_file = $this->write_index('old.jsonl', []);
@@ -325,6 +474,31 @@ final class FileIndexDiffProcessorTest extends TestCase
         $this->assertFalse($processor->next_path());
         $this->assertFalse($processor->next_path());
         $processor->close();
+    }
+
+    public function testDecoderMustReturnAnEntryForEveryLine(): void
+    {
+        $old_index_file = $this->write_index('old.jsonl', []);
+        $new_index_file = $this->write_index('new.jsonl', [
+            $this->entry('new.txt'),
+        ]);
+        $processor = FileIndexDiffProcessor::create(
+            $old_index_file,
+            $new_index_file,
+            static function (string $line) {
+                return null;
+            }
+        );
+
+        $this->expectException(UnexpectedValueException::class);
+        $this->expectExceptionMessage(
+            'returned NULL; expected one index entry for each line'
+        );
+        try {
+            $processor->next_path();
+        } finally {
+            $processor->close();
+        }
     }
 
     public function testCloseIsIdempotentAndMakesTheProcessorTerminal(): void

@@ -10,10 +10,10 @@
  * Column-aware: for each FROM_BASE64() match, determines which column it belongs
  * to and passes the appropriate content type hint to StructuredDataUrlRewriter.
  * WordPress core columns known to contain block markup (post_content, comment_content,
- * etc.) get the 'block_markup' hint so BlockMarkupUrlProcessor handles HTML
+ * etc.) get the 'block_markup' hint so StructuredBlockMarkupUrlProcessor handles HTML
  * attributes, block comment JSON, and CSS url(). All other columns default to
- * auto-detect with URLInTextProcessor for leaf text, which is simpler and more
- * predictable for columns that contain serialized PHP, JSON, or plain strings.
+ * cautious leaf-text scanning, which is simpler and more predictable for
+ * columns that contain serialized PHP, JSON, or plain strings.
  *
  * Column resolution walks the lexer output directly. Both INSERT and UPDATE
  * statements emitted by MySQLDumpProducer follow a constrained set of shapes
@@ -31,7 +31,7 @@ class SqlStatementRewriter
 
     /**
      * WordPress core columns that contain block markup and benefit from
-     * BlockMarkupUrlProcessor over plain-text URL scanning. Keyed by table suffix
+     * StructuredBlockMarkupUrlProcessor over plain-text URL scanning. Keyed by table suffix
      * (without prefix) — the constructor prepends the actual table_prefix to
      * build full table names for exact matching.
      *
@@ -178,12 +178,13 @@ class SqlStatementRewriter
         return SQLitePreparedInsertBuilder::build(
             $sql,
             function (string $value, string $table, ?string $column): string {
-                return $this->rewrite_value_for_column($value, $table, $column);
+                return $this->rewrite_value($value, $table, $column);
             }
         );
     }
 
-    private function rewrite_value_for_column(string $value, string $table, ?string $column): string
+    /** Rewrite one decoded database value with the same column rules as rewrite(). */
+    public function rewrite_value(string $value, string $table, ?string $column): string
     {
         if (strpos($value, 'http') === false) {
             return $value;
@@ -245,7 +246,7 @@ class SqlStatementRewriter
                 );
             }
 
-            $rewritten = $this->rewrite_value_for_column(
+            $rewritten = $this->rewrite_value(
                 $value,
                 $value_to_column_map['table'] ?? '',
                 $column_name

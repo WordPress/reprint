@@ -199,6 +199,81 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertSame('My Test Blog', $blogname[0]['option_value']);
     }
 
+    /** A new db-apply does not inherit URL replacements from an older apply. */
+    public function testFreshApplyDoesNotReuseAnOlderUrlMapping(): void
+    {
+        $sourceUrl = 'https://old-site.example.com';
+        $firstTargetUrl = 'https://first-target.example.com';
+        $exportUrl = 'https://old-site.example.com/?reprint-api';
+        $firstSqlitePath = $this->tempDir . '/database/first.sqlite';
+        $secondSqlitePath = $this->tempDir . '/database/second.sqlite';
+
+        file_put_contents($this->tempDir . '/db.sql', $this->buildSqlDump($sourceUrl));
+        $this->writeState($exportUrl);
+
+        $firstApply = new \ImportClient(
+            $exportUrl,
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+        $firstApply->run([
+            'command' => 'db-apply',
+            'abort' => false,
+            'verbose' => false,
+            'secret' => null,
+            'tuning_config' => [],
+            'target_engine' => 'sqlite',
+            'target_sqlite_path' => $firstSqlitePath,
+            'target_db' => 'wp_first',
+            'new_site_url' => $firstTargetUrl,
+        ]);
+
+        // This public command replaces the active command while retaining the
+        // completed db-apply configuration used by apply-runtime.
+        $rewrite = new \ImportClient(
+            $exportUrl,
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+        $rewrite->run([
+            'command' => 'db-rewrite-urls',
+            'abort' => false,
+            'verbose' => false,
+            'secret' => null,
+            'tuning_config' => [],
+            'target_engine' => 'sqlite',
+            'target_sqlite_path' => $firstSqlitePath,
+            'target_db' => 'wp_first',
+            'rewrite_url' => [
+                ['https://unused.example.com', 'https://also-unused.example.com'],
+            ],
+        ]);
+
+        file_put_contents($this->tempDir . '/db.sql', $this->buildSqlDump($sourceUrl));
+        $secondApply = new \ImportClient(
+            $exportUrl,
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+        $secondApply->run([
+            'command' => 'db-apply',
+            'abort' => false,
+            'verbose' => false,
+            'secret' => null,
+            'tuning_config' => [],
+            'target_engine' => 'sqlite',
+            'target_sqlite_path' => $secondSqlitePath,
+            'target_db' => 'wp_second',
+        ]);
+
+        $rows = $this->querySqlite(
+            $secondSqlitePath,
+            "SELECT option_value FROM wp_options WHERE option_name = 'siteurl'",
+            'wp_second',
+        );
+        $this->assertSame($sourceUrl, $rows[0]['option_value']);
+    }
+
     /**
      * --new-site-url with an HTTP source also rewrites HTTPS variants.
      */

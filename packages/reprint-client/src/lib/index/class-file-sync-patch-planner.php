@@ -14,10 +14,10 @@ require_once __DIR__ . '/class-file-index-diff-processor.php';
 /**
  * Plans a file-sync patch from two indexed file trees.
  *
- * The patch base index describes the state before the patch. The patch result
- * index describes the state after it. Both indexes use the same path
- * coordinates and are sorted by decoded path bytes. The caller chooses these
- * indexes based on the sync intent:
+ * The patch base and patch head indexes are the left and right sides of the
+ * comparison. Both indexes use the same path coordinates and are sorted by
+ * decoded path bytes. The caller chooses these indexes based on the sync
+ * intent:
  *
  * - To make two file trees identical, compare the current destination index
  *   with the current source index.
@@ -30,9 +30,9 @@ require_once __DIR__ . '/class-file-index-diff-processor.php';
  * FileIndexDiffProcessor aligns their entries and labels each path. This
  * planner turns those labels into one operation for the current path:
  *
- * - `copy` copies the patch-result entry.
+ * - `copy` copies the patch-head entry.
  * - `delete` deletes a path from the patch base.
- * - `replace` deletes a path, then copies the patch-result entry there.
+ * - `replace` deletes a path, then copies the patch-head entry there.
  *
  * One path may need both actions. Replacing a directory tree with a file, for
  * example, deletes the tree and copies the file. The planner combines
@@ -44,7 +44,7 @@ require_once __DIR__ . '/class-file-index-diff-processor.php';
  *
  * Non-empty directories have no index entry. Their descendants imply that the
  * directory exists. The planner uses the paths preceding and following the
- * current position to decide whether a missing directory still has a result
+ * current position to decide whether a missing directory still has a head
  * descendant. When a whole directory disappeared, it emits the highest
  * missing directory instead of deleting every indexed descendant.
  *
@@ -68,7 +68,7 @@ require_once __DIR__ . '/class-file-index-diff-processor.php';
  *
  *     $planner = FileSyncPatchPlanner::create(
  *         $patch_base_index_file,
- *         $patch_result_index_file,
+ *         $patch_head_index_file,
  *         $active_deletion_roots_file
  *     );
  *     while ($planner->next_path()) {
@@ -80,14 +80,16 @@ require_once __DIR__ . '/class-file-index-diff-processor.php';
  *     }
  *     $planner->close();
  *
- * The cursor contains everything resume() needs: both index paths, the active
- * deletion roots file, path selection, and the current byte offsets. The
- * active deletion roots file may contain bytes beyond the cursor after an
+ * The cursor contains both index paths, the active deletion roots file, path
+ * selection, and the current byte offsets. It does not contain index line
+ * decoders; pass the same decoders to resume() that were passed to create().
+ * The active deletion roots file may contain bytes beyond the cursor after an
  * interruption. resume() ignores those bytes.
  *
  * @phpstan-type IndexDiffCursor array{old_index_byte_offset:int,new_index_byte_offset:int,preceding_new_index_entry_path_b64:string|null}
- * @phpstan-type Cursor array{patch_base_index_file:string,patch_result_index_file:string,active_deletion_roots_file:string,included_index_path_roots:list<string>,excluded_index_path_roots:list<string>,index_diff_cursor:IndexDiffCursor,active_deletion_root_byte_offset:int|null}
+ * @phpstan-type Cursor array{patch_base_index_file:string,patch_head_index_file:string,active_deletion_roots_file:string,included_index_path_roots:list<string>,excluded_index_path_roots:list<string>,index_diff_cursor:IndexDiffCursor,active_deletion_root_byte_offset:int|null}
  * @phpstan-type ActiveDeletionRoot array{path:string,previous_byte_offset:int|null}
+ * @phpstan-type IndexEntry array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool,copy_source_path?:string}
  * @phpstan-type ExpectedSource array{type:string,size:int,ctime:int}
  * @phpstan-type DeleteOperation array{action:'delete',path:string}
  * @phpstan-type CopyOperation array{action:'copy'|'replace',path:string,expected_source:ExpectedSource}
@@ -95,7 +97,7 @@ require_once __DIR__ . '/class-file-index-diff-processor.php';
  */
 final class FileSyncPatchPlanner
 {
-    /** Sorted comparison of the patch base and result indexes. */
+    /** Sorted comparison of the patch base and head indexes. */
     private FileIndexDiffProcessor $index_diff;
 
     /** @var resource Open append-only file of active deletion roots. */
@@ -116,8 +118,17 @@ final class FileSyncPatchPlanner
     /** Whether the diff processor has already selected the next path. */
     private bool $index_diff_path_selected = false;
 
+    /** Whether next_path() was attempted on this open planner. */
+    private bool $next_path_was_called = false;
+
     /** @var SyncOperation|null Operation selected for the current path. */
     private ?array $operation = null;
+
+    /** @var IndexEntry|null Complete patch-base entry for the current path. */
+    private ?array $patch_base_index_entry = null;
+
+    /** @var IndexEntry|null Complete patch-head entry for the current path. */
+    private ?array $patch_head_index_entry = null;
 
     /** Whether both indexes reached EOF. */
     private bool $complete = false;
@@ -131,19 +142,25 @@ final class FileSyncPatchPlanner
      * The active deletion roots file is replaced with an empty file. Use
      * resume() to continue from a cursor returned by get_cursor().
      *
-     * @param string       $patch_base_index_file          Tree state before the patch, or a missing path for an empty tree.
-     * @param string       $patch_result_index_file        Tree state described by the patch.
-     * @param string       $active_deletion_roots_file     State for directory deletions which cover paths not processed yet.
-     * @param list<string> $included_index_path_roots      Roots within which changes may be planned.
-     * @param list<string> $excluded_index_path_roots      Roots which changes must not affect.
+     * @param string        $patch_base_index_file         Left index in the patch comparison, or a missing path for an empty tree.
+     * @param string        $patch_head_index_file         Right index in the patch comparison.
+     * @param string        $active_deletion_roots_file    State for directory deletions which cover paths not processed yet.
+     * @param list<string>  $included_index_path_roots     Roots within which changes may be planned.
+     * @param list<string>  $excluded_index_path_roots     Roots which changes must not affect.
+     * @param callable|null $decode_patch_base_index_line  Patch-base index decoder, or null for the local decoder.
+     * @param callable|null $decode_patch_head_index_line  Patch-head index decoder, or null to reuse the base decoder.
+     * @phpstan-param (callable(string):IndexEntry)|null $decode_patch_base_index_line
+     * @phpstan-param (callable(string):IndexEntry)|null $decode_patch_head_index_line
      * @return self Open planner positioned before the first path.
      */
     public static function create(
         string $patch_base_index_file,
-        string $patch_result_index_file,
+        string $patch_head_index_file,
         string $active_deletion_roots_file,
         array $included_index_path_roots = [""],
-        array $excluded_index_path_roots = []
+        array $excluded_index_path_roots = [],
+        ?callable $decode_patch_base_index_line = null,
+        ?callable $decode_patch_head_index_line = null
     ): self {
         if (file_put_contents($active_deletion_roots_file, "") !== 0) {
             throw new RuntimeException(
@@ -153,7 +170,7 @@ final class FileSyncPatchPlanner
         return self::resume(
             [
                 "patch_base_index_file" => $patch_base_index_file,
-                "patch_result_index_file" => $patch_result_index_file,
+                "patch_head_index_file" => $patch_head_index_file,
                 "active_deletion_roots_file" => $active_deletion_roots_file,
                 "included_index_path_roots" => $included_index_path_roots,
                 "excluded_index_path_roots" => $excluded_index_path_roots,
@@ -163,7 +180,9 @@ final class FileSyncPatchPlanner
                     "preceding_new_index_entry_path_b64" => null,
                 ],
                 "active_deletion_root_byte_offset" => null,
-            ]
+            ],
+            $decode_patch_base_index_line,
+            $decode_patch_head_index_line
         );
     }
 
@@ -176,19 +195,26 @@ final class FileSyncPatchPlanner
      * @param array $cursor {
      *     Cursor returned by get_cursor().
      *
-     *     @type string       $patch_base_index_file                    Tree state before the patch.
-     *     @type string       $patch_result_index_file                  Tree state described by the patch.
+     *     @type string       $patch_base_index_file                    Left index in the patch comparison.
+     *     @type string       $patch_head_index_file                    Right index in the patch comparison.
      *     @type string       $active_deletion_roots_file               State for active directory deletions.
      *     @type list<string> $included_index_path_roots                Roots within which changes may be planned.
      *     @type list<string> $excluded_index_path_roots                Roots which changes must not affect.
      *     @type array        $index_diff_cursor                        File-index diff cursor.
-     *     @type int|null     $active_deletion_root_byte_offset    Active deletion-root offset.
+     *     @type int|null     $active_deletion_root_byte_offset         Active deletion-root offset.
      * }
      * @phpstan-param Cursor $cursor
+     * @param callable|null $decode_patch_base_index_line  Patch-base index decoder, or null for the local decoder.
+     * @param callable|null $decode_patch_head_index_line  Patch-head index decoder, or null to reuse the base decoder.
+     * @phpstan-param (callable(string):IndexEntry)|null $decode_patch_base_index_line
+     * @phpstan-param (callable(string):IndexEntry)|null $decode_patch_head_index_line
      * @return self Open planner restored at the supplied cursor.
      */
-    public static function resume(array $cursor): self
-    {
+    public static function resume(
+        array $cursor,
+        ?callable $decode_patch_base_index_line = null,
+        ?callable $decode_patch_head_index_line = null
+    ): self {
         $planner = new self();
         $planner->cursor = $cursor;
         $planner->included_index_path_roots =
@@ -197,8 +223,10 @@ final class FileSyncPatchPlanner
             $cursor["excluded_index_path_roots"];
         $planner->index_diff = FileIndexDiffProcessor::resume(
             $cursor["patch_base_index_file"],
-            $cursor["patch_result_index_file"],
-            $cursor["index_diff_cursor"]
+            $cursor["patch_head_index_file"],
+            $cursor["index_diff_cursor"],
+            $decode_patch_base_index_line,
+            $decode_patch_head_index_line
         );
         $planner->active_deletion_roots_handle = fopen(
             $cursor["active_deletion_roots_file"],
@@ -219,7 +247,7 @@ final class FileSyncPatchPlanner
     }
 
     /**
-     * Processes the next path found in the patch base or result index.
+     * Processes the next path found in the patch base or head index.
      *
      * True means the getters describe one processed path. False means there
      * was no path left to process. A true result may also make is_complete()
@@ -228,7 +256,10 @@ final class FileSyncPatchPlanner
     public function next_path(): bool
     {
         $this->assert_open();
+        $this->next_path_was_called = true;
         $this->operation = null;
+        $this->patch_base_index_entry = null;
+        $this->patch_head_index_entry = null;
         if ($this->complete) {
             return false;
         }
@@ -240,14 +271,20 @@ final class FileSyncPatchPlanner
             return false;
         }
         $this->index_diff_path_selected = true;
+        // The nested diff advances to its next lookahead before this method
+        // returns, so retain the complete entries for the processed path now.
+        $this->patch_base_index_entry =
+            $this->index_diff->get_entry_in_old_index();
+        $this->patch_head_index_entry =
+            $this->index_diff->get_entry_in_new_index();
 
         $index_path = $this->index_diff->get_path();
         $patch_base_path_type = $this->index_diff->get_path_type_in_old_index();
-        $patch_result_path_type = $this->index_diff->get_path_type_in_new_index();
+        $patch_head_path_type = $this->index_diff->get_path_type_in_new_index();
         $path_transition = $this->index_diff->get_path_transition();
-        $patch_result_entry_shape = $patch_result_path_type === null
+        $patch_head_entry_shape = $patch_head_path_type === null
             ? null
-            : $this->index_entry_shape($patch_result_path_type);
+            : $this->index_entry_shape($patch_head_path_type);
         $patch_base_entry_shape = $patch_base_path_type === null
             ? null
             : $this->index_entry_shape($patch_base_path_type);
@@ -283,14 +320,14 @@ final class FileSyncPatchPlanner
         if ($path_transition === "added") {
             // A NUL byte cannot occur in an index path. Use it when there is
             // no following patch-base path so the descendant test cannot match.
-            $patch_result_entry_replaces_patch_base_subtree =
+            $patch_head_entry_replaces_patch_base_subtree =
                 path_is_same_as_or_descendant_of(
                     $this->index_diff->get_following_path_in_old_index()
                         ?? "\0",
                     $index_path
                 );
             if (
-                $patch_result_entry_replaces_patch_base_subtree
+                $patch_head_entry_replaces_patch_base_subtree
                 && $this->path_may_change($index_path)
                 && !$this->active_deletion_root_covers_path($index_path)
             ) {
@@ -305,16 +342,16 @@ final class FileSyncPatchPlanner
                 $path_to_copy = $index_path;
             }
         } elseif ($path_transition === "deleted") {
-            $patch_base_empty_directory_is_implied_by_patch_result_descendant =
+            $patch_base_empty_directory_is_implied_by_patch_head_descendant =
                 $patch_base_entry_shape === "empty_directory"
-                && $this->patch_result_index_contains_path_or_descendant(
+                && $this->patch_head_index_contains_path_or_descendant(
                     $index_path,
                     $this->index_diff->get_preceding_path_in_new_index(),
                     $this->index_diff->get_following_path_in_new_index()
                 );
 
-            // Find the highest patch-base directory without a patch-result
-            // entry below it. Only the adjacent result entries can neighbor
+            // Find the highest patch-base directory without a patch-head
+            // entry below it. Only the adjacent head entries can neighbor
             // each parent in byte order, so no index rescan is needed.
             $candidate_path_to_delete = $index_path;
             $index_path_components = wp_unix_path_segments($index_path);
@@ -330,7 +367,7 @@ final class FileSyncPatchPlanner
                     ...$candidate_path_components
                 );
                 if (
-                    !$this->patch_result_index_contains_path_or_descendant(
+                    !$this->patch_head_index_contains_path_or_descendant(
                         $candidate_path,
                         $this->index_diff->get_preceding_path_in_new_index(),
                         $this->index_diff->get_following_path_in_new_index()
@@ -341,7 +378,7 @@ final class FileSyncPatchPlanner
                 }
             }
             if (
-                !$patch_base_empty_directory_is_implied_by_patch_result_descendant
+                !$patch_base_empty_directory_is_implied_by_patch_head_descendant
                 && $this->path_may_change($candidate_path_to_delete)
                 && !$this->active_deletion_root_covers_path($index_path)
             ) {
@@ -355,22 +392,22 @@ final class FileSyncPatchPlanner
                 }
             }
         } else {
-            $patch_result_entry_is_file_or_symlink =
-                $patch_result_entry_shape === "file"
-                || $patch_result_entry_shape === "symlink";
+            $patch_head_entry_is_file_or_symlink =
+                $patch_head_entry_shape === "file"
+                || $patch_head_entry_shape === "symlink";
             $patch_base_entry_is_file_or_symlink =
                 $patch_base_entry_shape === "file"
                 || $patch_base_entry_shape === "symlink";
             $empty_directory_needs_copy =
-                $patch_result_entry_shape === "empty_directory"
+                $patch_head_entry_shape === "empty_directory"
                 && $patch_base_entry_shape !== "empty_directory";
             $changed_file_or_symlink_needs_copy =
-                $patch_result_entry_is_file_or_symlink
+                $patch_head_entry_is_file_or_symlink
                 && $path_transition === "modified";
             // The diff defines modification by type, size, and ctime. Only a
-            // modified file or symlink needs its result value copied.
+            // modified file or symlink needs its patch-head value copied.
             $needs_delete =
-                $patch_result_entry_is_file_or_symlink
+                $patch_head_entry_is_file_or_symlink
                 !== $patch_base_entry_is_file_or_symlink;
             $path_may_change = $this->path_may_change($index_path);
 
@@ -395,7 +432,7 @@ final class FileSyncPatchPlanner
                 "action" => $path_to_delete === null ? "copy" : "replace",
                 "path" => $path_to_copy,
                 "expected_source" => [
-                    "type" => $patch_result_path_type,
+                    "type" => $patch_head_path_type,
                     "size" => $this->index_diff->get_size_in_new_index(),
                     "ctime" => $this->index_diff->get_ctime_in_new_index(),
                 ],
@@ -419,6 +456,25 @@ final class FileSyncPatchPlanner
         return true;
     }
 
+    /**
+     * Returns whether this planner is still at its initial position.
+     *
+     * A fresh planner is open, has not attempted a path, both index byte
+     * offsets are zero, and no active deletion root is retained.
+     */
+    public function is_positioned_before_first_path(): bool
+    {
+        if ($this->closed || $this->next_path_was_called) {
+            return false;
+        }
+
+        $index_diff_cursor = $this->cursor["index_diff_cursor"];
+        return $index_diff_cursor["old_index_byte_offset"] === 0
+            && $index_diff_cursor["new_index_byte_offset"] === 0
+            && $index_diff_cursor["preceding_new_index_entry_path_b64"] === null
+            && $this->cursor["active_deletion_root_byte_offset"] === null;
+    }
+
     /** Returns whether the last processed path exhausted both indexes. */
     public function is_complete(): bool
     {
@@ -431,7 +487,7 @@ final class FileSyncPatchPlanner
      * Null means the current path needs no operation. A `delete` operation has
      * only an action and path. A `copy` or `replace` operation also records the
      * source state expected when the operation is performed. `replace` means
-     * delete the path before copying the patch-result entry there.
+     * delete the path before copying the patch-head entry there.
      *
      * @return array|null {
      *     Current sync operation, or null.
@@ -455,18 +511,80 @@ final class FileSyncPatchPlanner
     }
 
     /**
+     * Returns the current path's complete decoded patch-base entry.
+     *
+     * Null means the current path is absent from the patch base. Fields added
+     * by the patch-base decoder remain in the returned entry.
+     *
+     * @return array|null {
+     *     Complete decoded patch-base entry for the current path, or null.
+     *
+     *     @type string $path  Decoded path bytes.
+     *     @type string $type  `file`, `link`, or `dir`.
+     *     @type int    $size  Recorded size.
+     *     @type int    $ctime Recorded inode change time.
+     *     @type bool   $empty            Optional empty-directory marker.
+     *     @type string $copy_source_path Optional source path retained from a custom decoder.
+     * }
+     * @phpstan-return IndexEntry|null
+     */
+    public function get_entry_in_patch_base_index(): ?array
+    {
+        $this->assert_open();
+        return $this->patch_base_index_entry;
+    }
+
+    /**
+     * Returns the current path's complete decoded patch-head entry.
+     *
+     * Null means the current path is absent from the patch head. Fields added
+     * by the patch-head decoder remain in the returned entry.
+     *
+     * @return array|null {
+     *     Complete decoded patch-head entry for the current path, or null.
+     *
+     *     @type string $path  Decoded path bytes.
+     *     @type string $type  `file`, `link`, or `dir`.
+     *     @type int    $size  Recorded size.
+     *     @type int    $ctime Recorded inode change time.
+     *     @type bool   $empty            Optional empty-directory marker.
+     *     @type string $copy_source_path Optional source path retained from a custom decoder.
+     * }
+     * @phpstan-return IndexEntry|null
+     */
+    public function get_entry_in_patch_head_index(): ?array
+    {
+        $this->assert_open();
+        return $this->patch_head_index_entry;
+    }
+
+    /** Returns whether the current path is inside the configured change roots. */
+    public function current_path_may_change(): bool
+    {
+        $this->assert_open();
+        $current_entry = $this->patch_head_index_entry
+            ?? $this->patch_base_index_entry;
+        if ($current_entry === null) {
+            throw new LogicException(
+                "The file sync patch planner has no current path."
+            );
+        }
+        return $this->path_may_change($current_entry["path"]);
+    }
+
+    /**
      * Returns everything needed to resume after the current path.
      *
      * @return array {
      *     Cursor for resume().
      *
-     *     @type string       $patch_base_index_file                    Tree state before the patch.
-     *     @type string       $patch_result_index_file                  Tree state described by the patch.
+     *     @type string       $patch_base_index_file                    Left index in the patch comparison.
+     *     @type string       $patch_head_index_file                    Right index in the patch comparison.
      *     @type string       $active_deletion_roots_file               State for active directory deletions.
      *     @type list<string> $included_index_path_roots                Roots within which changes may be planned.
      *     @type list<string> $excluded_index_path_roots                Roots which changes must not affect.
      *     @type array        $index_diff_cursor                        File-index diff cursor.
-     *     @type int|null     $active_deletion_root_byte_offset    Active deletion-root offset.
+     *     @type int|null     $active_deletion_root_byte_offset         Active deletion-root offset.
      * }
      * @phpstan-return Cursor
      */
@@ -498,23 +616,23 @@ final class FileSyncPatchPlanner
         $this->closed = true;
     }
 
-    /** Checks adjacent patch-result entries for a path or its descendant. */
-    private function patch_result_index_contains_path_or_descendant(
+    /** Checks adjacent patch-head entries for a path or its descendant. */
+    private function patch_head_index_contains_path_or_descendant(
         string $index_path,
-        ?string $preceding_patch_result_index_path,
-        ?string $following_patch_result_index_path
+        ?string $preceding_patch_head_index_path,
+        ?string $following_patch_head_index_path
     ): bool {
         // NUL cannot occur in an index path and cannot match either test.
-        $preceding_patch_result_index_path =
-            $preceding_patch_result_index_path ?? "\0";
-        $following_patch_result_index_path =
-            $following_patch_result_index_path ?? "\0";
+        $preceding_patch_head_index_path =
+            $preceding_patch_head_index_path ?? "\0";
+        $following_patch_head_index_path =
+            $following_patch_head_index_path ?? "\0";
 
         return path_is_same_as_or_descendant_of(
-            $preceding_patch_result_index_path,
+            $preceding_patch_head_index_path,
             $index_path
         ) || path_is_same_as_or_descendant_of(
-            $following_patch_result_index_path,
+            $following_patch_head_index_path,
             $index_path
         );
     }

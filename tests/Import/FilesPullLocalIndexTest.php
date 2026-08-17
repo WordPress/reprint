@@ -2,12 +2,37 @@
 
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedNamespaceFound -- Existing importer test namespace.
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Match the existing importer test class style.
+// phpcs:disable Generic.Files.OneObjectStructurePerFile.MultipleFound -- Test-only client and interruption exception live with their test.
 
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+
+/** Stops after the replacement fetch list moves into place but before its stage is saved. */
+final class SimulatedStopBeforeMirrorFetchStageSave extends \RuntimeException
+{
+}
+
+/** Stops files-pull at the fetch-list replacement boundary selected by the test. */
+final class MirrorFetchReplacementTestClient extends \ImportClient
+{
+    public bool $throw_before_fetch_stage_save = false;
+
+    public function save_state(): void
+    {
+        if (
+            $this->throw_before_fetch_stage_save
+            && $this->get_state()->active_resumable_command->current_stage
+                === 'fetch'
+        ) {
+            $this->throw_before_fetch_stage_save = false;
+            throw new SimulatedStopBeforeMirrorFetchStageSave();
+        }
+        parent::save_state();
+    }
+}
 
 /**
  * The local index used by files-pull, files-push, and files-diff.
@@ -248,6 +273,445 @@ final class FilesPullLocalIndexTest extends TestCase
                 ),
             ],
         ], $records);
+    }
+
+    public function testMirrorRestoresLocalChangesAndRemovesLocalOnlyPaths(): void
+    {
+        $initial = $this->runFilesPull(['--mode=mirror']);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+
+        $samePath = $this->localTree . '/unchanged.txt';
+        $sameCtime = filectime($samePath);
+        $this->assertIsInt($sameCtime);
+        while (time() <= $sameCtime) {
+            usleep(20000);
+        }
+        file_put_contents($samePath, 'edit');
+        $this->assertSame(4, filesize($samePath));
+
+        $localTypeChange = $this->localTree . '/edited.txt';
+        unlink($localTypeChange);
+        mkdir($localTypeChange);
+        file_put_contents($localTypeChange . '/local-child.txt', 'local');
+
+        unlink($this->localTree . '/deleted.txt');
+        $localOnlyRoot = $this->localTree . '/local-only';
+        mkdir($localOnlyRoot . '/nested', 0700, true);
+        file_put_contents($localOnlyRoot . '/nested/file.txt', 'local');
+        $localOnlySibling = $this->localTree . '/folder/local-only.txt';
+        file_put_contents($localOnlySibling, 'local sibling');
+
+        $pulledContents = 'remote change delivered by mirror';
+        file_put_contents(
+            $this->localTree . '/' . self::PULLED_PATH,
+            'local change to the same remote-changed path'
+        );
+        $this->writeRemoteOverrides([
+            'pulled_ctime' => self::REMOTE_CTIME + 1,
+            'pulled_contents_b64' => base64_encode($pulledContents),
+        ]);
+
+        $this->abortFilesPull();
+        $mirror = $this->runFilesPull(['--mode=mirror']);
+
+        $this->assertSame(0, $mirror['exit'], $mirror['output']);
+        $this->assertSame('same', file_get_contents($samePath));
+        $this->assertFileExists($localTypeChange);
+        $this->assertFalse(is_dir($localTypeChange));
+        $this->assertSame(
+            $this->remoteFiles['edited.txt'],
+            file_get_contents($localTypeChange)
+        );
+        $this->assertSame(
+            $this->remoteFiles['deleted.txt'],
+            file_get_contents($this->localTree . '/deleted.txt')
+        );
+        $this->assertSame(
+            $pulledContents,
+            file_get_contents($this->localTree . '/' . self::PULLED_PATH)
+        );
+        $this->assertDirectoryDoesNotExist($localOnlyRoot);
+        $this->assertFileDoesNotExist($localOnlySibling);
+        $this->assertSame(
+            $this->remoteFiles['folder/remote-deleted.txt'],
+            file_get_contents(
+                $this->localTree . '/folder/remote-deleted.txt'
+            )
+        );
+
+        $diff = $this->runFilesDiff();
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $this->assertSame([[
+            'command' => 'files-diff',
+            'status' => 'complete',
+            'local_paths_to_push' => 0,
+            'local_paths_to_delete' => 0,
+        ]], $this->filesDiffRecords($diff['stdout']));
+    }
+
+    public function testInitialMirrorConvergesANonemptyLocalTree(): void
+    {
+        mkdir($this->localTree . '/local-only', 0700, true);
+        file_put_contents(
+            $this->localTree . '/local-only/file.txt',
+            'local only'
+        );
+        file_put_contents($this->localTree . '/unchanged.txt', 'local');
+
+        $mirror = $this->runFilesPull(['--mode=mirror']);
+
+        $this->assertSame(0, $mirror['exit'], $mirror['output']);
+        $this->assertDirectoryDoesNotExist($this->localTree . '/local-only');
+        $this->assertSame(
+            $this->remoteFiles['unchanged.txt'],
+            file_get_contents($this->localTree . '/unchanged.txt')
+        );
+        $this->assertSame(
+            $this->remoteFiles['edited.txt'],
+            file_get_contents($this->localTree . '/edited.txt')
+        );
+        $diff = $this->runFilesDiff();
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $this->assertSame([[
+            'command' => 'files-diff',
+            'status' => 'complete',
+            'local_paths_to_push' => 0,
+            'local_paths_to_delete' => 0,
+        ]], $this->filesDiffRecords($diff['stdout']));
+    }
+
+    public function testMirrorWithAnEmptyRemoteIndexRemovesTheLocalTree(): void
+    {
+        $initial = $this->runFilesPull(['--mode=mirror']);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        file_put_contents($this->localTree . '/local-only.txt', 'local');
+        $this->writeRemoteOverrides([
+            'removed_paths' => array_merge(
+                array_keys($this->remoteFiles),
+                [self::PULLED_PATH]
+            ),
+        ]);
+
+        $this->abortFilesPull();
+        $mirror = $this->runFilesPull(['--mode=mirror']);
+
+        $this->assertSame(0, $mirror['exit'], $mirror['output']);
+        $this->assertDirectoryDoesNotExist($this->localTree);
+        $this->assertSame([], $this->readIndex($this->localIndexPath()));
+    }
+
+    /**
+     * @dataProvider mirrorIncompatibleOptionProvider
+     * @param list<string> $arguments
+     */
+    public function testMirrorRejectsPartialPathSelectionBeforeStarting(
+        array $arguments
+    ): void
+    {
+        $mirror = $this->runFilesPull(
+            array_merge(['--mode=mirror'], $arguments)
+        );
+
+        $this->assertSame(1, $mirror['exit'], $mirror['output']);
+        $this->assertStringContainsString(
+            '--mode=mirror requires a full pull',
+            $mirror['output']
+        );
+        $savedState = json_decode(
+            file_get_contents($this->pullStateDirectory . '/state.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertSame('catch-up', $savedState['files_pull_mode']);
+        $this->assertNull(
+            $savedState['active_resumable_command']['command_name']
+        );
+    }
+
+    /** @return iterable<string,array{list<string>}> */
+    public static function mirrorIncompatibleOptionProvider(): iterable
+    {
+        yield 'included path' => [[
+            '--include=/var/www/html/selected',
+        ]];
+        yield 'excluded path' => [[
+            '--exclude=/var/www/html/ignored',
+        ]];
+        yield 'default skipped paths' => [[
+            '--include-caches',
+        ]];
+        yield 'partial filter' => [[
+            '--filter=essential-files',
+        ]];
+        yield 'preserved local paths' => [[
+            '--on-fs-root-nonempty=preserve-local',
+        ]];
+    }
+
+    public function testMirrorRejectsAStateDirectoryInsideTheFilesystemRoot(): void
+    {
+        $mirror = $this->runCli([
+            'files-pull',
+            $this->targetUrl,
+            '--state-dir=' . $this->rawFileRoot . '/state-inside',
+            '--fs-root=' . $this->rawFileRoot,
+            '--mode=mirror',
+        ]);
+
+        $this->assertSame(1, $mirror['exit'], $mirror['output']);
+        $this->assertStringContainsString(
+            '--mode=mirror requires --state-dir to be outside --fs-root.',
+            $mirror['output']
+        );
+    }
+
+    public function testMirrorUsesRemotePathsAfterLocalRemapping(): void
+    {
+        $arguments = [
+            '--mode=mirror',
+            '--remap',
+            '/var/www/html',
+            ':fs-root:/var/www/html/remapped',
+        ];
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+
+        $remappedRoot = $this->localTree . '/remapped';
+        file_put_contents($remappedRoot . '/unchanged.txt', 'local edit');
+        unlink($remappedRoot . '/deleted.txt');
+        mkdir($remappedRoot . '/local-only', 0700, true);
+        file_put_contents(
+            $remappedRoot . '/local-only/file.txt',
+            'local only'
+        );
+
+        $this->abortFilesPull();
+        $mirror = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $mirror['exit'], $mirror['output']);
+        $this->assertSame(
+            $this->remoteFiles['unchanged.txt'],
+            file_get_contents($remappedRoot . '/unchanged.txt')
+        );
+        $this->assertSame(
+            $this->remoteFiles['deleted.txt'],
+            file_get_contents($remappedRoot . '/deleted.txt')
+        );
+        $this->assertDirectoryDoesNotExist($remappedRoot . '/local-only');
+
+        $diff = $this->runFilesDiff();
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $this->assertSame(0, $this->filesDiffRecords($diff['stdout'])[0][
+            'local_paths_to_push'
+        ]);
+        $this->assertSame(0, $this->filesDiffRecords($diff['stdout'])[0][
+            'local_paths_to_delete'
+        ]);
+    }
+
+    public function testMirrorRestartsAnInterruptedLocalIndexStage(): void
+    {
+        $initial = $this->runFilesPull(['--mode=mirror']);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $this->abortFilesPull();
+
+        $localOnlyRoot = $this->localTree . '/many-local-only-files';
+        $this->createManyLocalOnlyFiles($localOnlyRoot);
+
+        [$process, $pipes] = $this->startCliProcess([
+            'files-pull',
+            $this->targetUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->rawFileRoot,
+            '--mode=mirror',
+        ]);
+        $freshLocalIndex = $this->pullStateDirectory
+            . '/mirror-plan/fresh-local-index.jsonl';
+        $deadline = microtime(true) + 10;
+        $savedStage = null;
+        while (microtime(true) < $deadline) {
+            clearstatcache(true, $freshLocalIndex);
+            $savedState = json_decode(
+                (string) file_get_contents(
+                    $this->pullStateDirectory . '/state.json'
+                ),
+                true
+            );
+            $savedStage = is_array($savedState)
+                ? $savedState['active_resumable_command']['current_stage'] ?? null
+                : null;
+            if (
+                $savedStage === 'local-index'
+                && is_file($freshLocalIndex)
+                && filesize($freshLocalIndex) > 0
+            ) {
+                break;
+            }
+            usleep(1000);
+        }
+        proc_terminate($process, 9);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        proc_close($process);
+        $this->assertSame('local-index', $savedStage);
+        $this->assertFileExists($freshLocalIndex);
+        $this->assertGreaterThan(0, filesize($freshLocalIndex));
+
+        $modeChange = $this->runFilesPull(['--mode=catch-up']);
+        $this->assertSame(1, $modeChange['exit'], $modeChange['output']);
+        $this->assertStringContainsString(
+            'Cannot change --mode after files-pull starts.',
+            $modeChange['output']
+        );
+
+        $resumed = $this->runFilesPull(['--mode=mirror']);
+
+        $this->assertSame(0, $resumed['exit'], $resumed['output']);
+        $this->assertDirectoryDoesNotExist($localOnlyRoot);
+        $this->assertSame(
+            'complete',
+            json_decode(
+                file_get_contents($this->pullStateDirectory . '/state.json'),
+                true,
+                512,
+                JSON_THROW_ON_ERROR
+            )['active_resumable_command']['completion_state']
+        );
+    }
+
+    public function testMirrorRestartsAfterAnInterruptedLocalDeletionPass(): void
+    {
+        $initial = $this->runFilesPull(['--mode=mirror']);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $this->abortFilesPull();
+
+        $localOnlyRoot = $this->localTree . '/many-local-only-files';
+        $this->createManyLocalOnlyFiles($localOnlyRoot);
+
+        [$process, $pipes] = $this->startCliProcess([
+            'files-pull',
+            $this->targetUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->rawFileRoot,
+            '--mode=mirror',
+        ]);
+        $walPath = $this->pullStateDirectory . '/index.wal';
+        $deadline = microtime(true) + 10;
+        $savedStage = null;
+        while (microtime(true) < $deadline) {
+            clearstatcache(true, $walPath);
+            $savedState = json_decode(
+                (string) file_get_contents(
+                    $this->pullStateDirectory . '/state.json'
+                ),
+                true
+            );
+            $savedStage = is_array($savedState)
+                ? $savedState['active_resumable_command']['current_stage'] ?? null
+                : null;
+            if (
+                $savedStage === 'mirror'
+                && is_file($walPath)
+                && filesize($walPath) > 0
+            ) {
+                break;
+            }
+            usleep(1000);
+        }
+        proc_terminate($process, 9);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        proc_close($process);
+        $this->assertSame('mirror', $savedStage);
+        $this->assertFileExists($walPath);
+        $this->assertGreaterThan(0, filesize($walPath));
+
+        $resumed = $this->runFilesPull(['--mode=mirror']);
+
+        $this->assertSame(0, $resumed['exit'], $resumed['output']);
+        $this->assertDirectoryDoesNotExist($localOnlyRoot);
+        $diff = $this->runFilesDiff();
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $this->assertSame([[
+            'command' => 'files-diff',
+            'status' => 'complete',
+            'local_paths_to_push' => 0,
+            'local_paths_to_delete' => 0,
+        ]], $this->filesDiffRecords($diff['stdout']));
+    }
+
+    public function testMirrorResumesAfterReplacingTheFetchListBeforeSavingItsStage(): void
+    {
+        $initial = $this->runFilesPull(['--mode=mirror']);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $this->abortFilesPull();
+
+        file_put_contents($this->localTree . '/unchanged.txt', 'local edit');
+        mkdir($this->localTree . '/local-only');
+        file_put_contents(
+            $this->localTree . '/local-only/file.txt',
+            'local only'
+        );
+
+        $client = new MirrorFetchReplacementTestClient(
+            $this->targetUrl,
+            $this->stateDirectory,
+            $this->rawFileRoot,
+            'files-pull'
+        );
+        $client->throw_before_fetch_stage_save = true;
+        $processLock = new \ReprintProcessLock($this->stateDirectory);
+        ob_start();
+        try {
+            $client->run([
+                'command' => 'files-pull',
+                'files_pull_mode' => 'mirror',
+            ], $processLock);
+            $this->fail(
+                'Expected files-pull to stop before saving the fetch stage.'
+            );
+        } catch (SimulatedStopBeforeMirrorFetchStageSave $error) {
+            $this->assertSame(
+                'mirror',
+                json_decode(
+                    file_get_contents(
+                        $this->pullStateDirectory . '/state.json'
+                    ),
+                    true,
+                    512,
+                    JSON_THROW_ON_ERROR
+                )['active_resumable_command']['current_stage']
+            );
+        } finally {
+            $processLock->close();
+            ob_end_clean();
+        }
+
+        $this->assertFileExists(
+            $this->pullStateDirectory . '/fetch-list.jsonl'
+        );
+        $this->assertFileDoesNotExist(
+            $this->pullStateDirectory . '/fetch-list.jsonl.new'
+        );
+
+        $resumed = $this->runFilesPull(['--mode=mirror']);
+
+        $this->assertSame(0, $resumed['exit'], $resumed['output']);
+        $this->assertSame(
+            $this->remoteFiles['unchanged.txt'],
+            file_get_contents($this->localTree . '/unchanged.txt')
+        );
+        $this->assertDirectoryDoesNotExist($this->localTree . '/local-only');
+        $this->assertSame(
+            'complete',
+            json_decode(
+                file_get_contents($this->pullStateDirectory . '/state.json'),
+                true,
+                512,
+                JSON_THROW_ON_ERROR
+            )['active_resumable_command']['completion_state']
+        );
     }
 
     public function testResumeReplaysTheWALIntoTheLocalIndex(): void
@@ -515,6 +979,22 @@ final class FilesPullLocalIndexTest extends TestCase
         ]);
     }
 
+    private function createManyLocalOnlyFiles(string $directory): void
+    {
+        mkdir($directory, 0700, true);
+        for ($index = 0; $index < 5000; ++$index) {
+            file_put_contents(
+                $directory . '/' . str_pad(
+                    (string) $index,
+                    5,
+                    '0',
+                    STR_PAD_LEFT
+                ),
+                'local'
+            );
+        }
+    }
+
     private function assertLocalIndexMatches(string $path): void
     {
         $stat = lstat($this->localTree . '/' . $path);
@@ -741,12 +1221,12 @@ foreach (($overrides['removed_paths'] ?? array()) as $removed_path) {
 foreach (($overrides['added_files'] ?? array()) as $path => $contents) {
     $remote_files[$path] = $contents;
 }
-$added_directories = array_fill_keys(
-    $overrides['added_directories'] ?? array(),
-    true
-);
 $added_files = array_fill_keys(
     array_keys($overrides['added_files'] ?? array()),
+    true
+);
+$added_directories = array_fill_keys(
+    $overrides['added_directories'] ?? array(),
     true
 );
 $remote_index = array();

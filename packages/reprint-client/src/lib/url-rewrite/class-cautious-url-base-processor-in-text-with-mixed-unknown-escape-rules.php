@@ -31,9 +31,9 @@
  * of those formats and could corrupt the value.
  *
  * Instead, the processor performs one narrow operation: find the configured
- * source base as bytes and replace that entire slice with a target domain. It
- * replaces the literal protocol separately when the mapping changes it. It does
- * not decode, normalize, or re-encode the input.
+ * source base as bytes and replace that entire slice with a target domain and
+ * optional path. It replaces the literal protocol separately when the mapping
+ * changes it. It does not decode, normalize, or re-encode the input.
  *
  * Supported sources:
  *
@@ -46,9 +46,9 @@
  *   https://destination.example changes
  *   https://source.example/media/logo.png to
  *   https://destination.example/logo.png.
- * - Literal, scheme-less, and slash-escaped URL spellings. The recognized
- *   HTTP(S) separators may have one or three preceding backslashes, including
- *   https:\/\/, https\:\/\/, and https:\\\/\\\/.
+ * - Literal, protocol-relative, scheme-less, and slash-escaped URL spellings.
+ *   A separator may have up to eight preceding backslashes. The two slashes
+ *   before an authority must use the same spelling.
  * - Other parts of the URL may surround the configured base. For example,
  *   https://user:password@source.example/logo.png?download=1#preview becomes
  *   https://user:password@destination.example/logo.png?download=1#preview.
@@ -58,10 +58,17 @@
  * Unsupported mappings are discarded as a whole. There is no partial
  * replacement:
  *
- * - A target path is not supported. Writing it would require choosing whether
- *   each slash should be /, \/, or something else.
- * - Target ports, user information, queries, fragments, IPv4/IPv6 addresses,
- *   and Unicode domains are not supported. Punycode domains are supported.
+ * - A target path may contain non-empty slash-separated components composed
+ *   only of ASCII letters, digits, hyphens, and underscores. Each slash copies
+ *   the first available spelling from the URL prefix, configured source path,
+ *   or following candidate path. A scheme-less authority with no slash stays
+ *   unchanged when the target has a path.
+ * - A target port copies the colon spelling after the matched scheme. A
+ *   protocol-relative or scheme-less candidate has no scheme colon to copy, so
+ *   its target port uses a literal `:`. This may not match the escaping rules
+ *   of the surrounding text.
+ * - Target user information, queries, fragments, IPv4/IPv6 addresses, and
+ *   Unicode domains are not supported. Punycode domains are supported.
  * - Unicode source domains and paths are not supported.
  *
  * CSS hexadecimal escapes such as https\3a \2f \2f ... and percent-encoded
@@ -81,11 +88,12 @@
  * Example usage:
  *
  * ```php
+ * $mapping = new CautiousURLBaseRewriteMapping([
+ *     'https://source.example' => 'https://destination.example',
+ * ]);
  * $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
  *     '[vc_video link="https:\\/\\/source.example\\/media\\/video.mp4"]',
- *     [
- *         'https://source.example' => 'https://destination.example',
- *     ]
+ *     $mapping
  * );
  *
  * while ($processor->next_url()) {
@@ -104,6 +112,8 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_base: string,
      *     target_domain: string,
      *     target_scheme: string,
+     *     target_path: string,
+     *     target_port: int|null,
      *     pattern: string
      * }>
      */
@@ -120,9 +130,12 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_base: string,
      *     target_domain: string,
      *     target_scheme: string,
+     *     target_path: string,
+     *     target_port: int|null,
      *     pattern: string,
      *     start: int,
      *     base_length: int,
+     *     replacement: string,
      *     scheme_start: int|null,
      *     scheme_length: int,
      *     candidate_scheme: string
@@ -136,38 +149,15 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * Creates a processor for one opaque text value.
      *
-     * A source may include an initial path containing only bytes from `!`
-     * (0x21) through `~` (0x7E). A target must be an HTTP(S) URL with a
-     * supported domain and no path or other URL components:
-     *
-     * ```
-     * [
-     *     'https://source.example/media' => 'https://destination.example',
-     * ]
-     * ```
-     *
-     * Invalid mappings are skipped as a whole. They cannot produce a partial
-     * domain replacement.
-     *
-     * @param array<string, string> $url_mapping Source URL base => target URL.
+     * @param CautiousURLBaseRewriteMapping $url_mapping Prepared URL mapping.
      */
-    public function __construct(string $text, array $url_mapping)
+    public function __construct(
+        string $text,
+        CautiousURLBaseRewriteMapping $url_mapping
+    )
     {
         $this->text = $text;
-
-        foreach ($url_mapping as $source_url => $target_url) {
-            $mapping = $this->create_url_mapping($source_url, $target_url);
-            if ($mapping !== null) {
-                $this->url_mappings[] = $mapping;
-            }
-        }
-
-        usort(
-            $this->url_mappings,
-            static function (array $first, array $second): int {
-                return strlen($second['source_base']) <=> strlen($first['source_base']);
-            }
-        );
+        $this->url_mappings = $url_mapping->get_entries();
     }
 
     /**
@@ -191,11 +181,11 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     /**
      * Queues replacement of the complete current source base.
      *
-     * Mapping source.example/media to destination.example changes
+     * Mapping source.example/media to destination.example/assets changes
      * https://source.example/media/logo.png to
-     * https://destination.example/logo.png. The logo.png suffix is outside the
-     * matched base and remains unchanged. A configured protocol change replaces
-     * only the literal scheme, preserving the separator's existing escaping.
+     * https://destination.example/assets/logo.png. The original /logo.png
+     * suffix is outside the matched base and remains unchanged. A configured
+     * protocol change replaces only the literal scheme.
      */
     public function replace_url_base(): bool
     {
@@ -206,7 +196,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         $this->lexical_updates[$this->matched_url['start']] = [
             'start'       => $this->matched_url['start'],
             'length'      => $this->matched_url['base_length'],
-            'replacement' => $this->matched_url['target_domain'],
+            'replacement' => $this->matched_url['replacement'],
         ];
 
         if (
@@ -259,9 +249,12 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      *     source_base: string,
      *     target_domain: string,
      *     target_scheme: string,
+     *     target_path: string,
+     *     target_port: int|null,
      *     pattern: string,
      *     start: int,
      *     base_length: int,
+     *     replacement: string,
      *     scheme_start: int|null,
      *     scheme_length: int,
      *     candidate_scheme: string
@@ -287,11 +280,33 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                 continue;
             }
 
+            $target_path_slash = '';
+            if ($mapping['target_path'] !== '') {
+                $target_path_slash = $matches['url_slash'][1] === -1
+                    ? $matches['path_slash'][0]
+                    : $matches['url_slash'][0];
+            }
+            $target_port = '';
+            if ($mapping['target_port'] !== null) {
+                // No escaped colon is available here. Use an unescaped colon.
+                // This risks breaking an unknown format, but ':' is not a
+                // common string terminator in popular formats.
+                $target_port_colon = $matches['scheme_colon'][1] === -1
+                    ? ':'
+                    : $matches['scheme_colon'][0];
+                $target_port = $target_port_colon . $mapping['target_port'];
+            }
+
             $next_match = array_merge(
                 $mapping,
                 [
                     'start'         => $authority_start,
                     'base_length'   => strlen($matches['base'][0]),
+                    'replacement'   => $mapping['target_domain'] . $target_port . str_replace(
+                        '/',
+                        $target_path_slash,
+                        $mapping['target_path']
+                    ),
                     'scheme_start'  => $matches['scheme'][1] === -1
                         ? null
                         : $matches['scheme'][1],
@@ -302,133 +317,5 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
         }
 
         return $next_match;
-    }
-
-    /**
-     * Build a candidate pattern adapted from URLInTextProcessor's URL finder.
-     *
-     * The pattern recognizes only this mapping's scheme, authority, and initial
-     * path. Capturing those slices, rather than a complete parsed URL, lets
-     * callers replace the scheme and authority without rendering separators or
-     * surrounding syntax.
-     */
-    private function create_url_candidate_pattern(
-        string $source_scheme,
-        string $source_authority,
-        string $source_path
-    ): string
-    {
-        $escaped_separator = '(?:\\\\{1}|\\\\{3})?';
-        $source_path_pattern = str_replace(
-            '/',
-            $escaped_separator . '/',
-            preg_quote($source_path, '~')
-        );
-
-        return '~
-            (?<![A-Za-z0-9._%+\\/@-])
-            (?:
-                (?<scheme>(?i:' . preg_quote($source_scheme, '~') . '))
-                ' . $escaped_separator . ':
-                ' . $escaped_separator . '/
-                ' . $escaped_separator . '/
-                (?:[^\s<>@/\\\\]+@)?
-            )?
-            (?<base>
-                (?<authority>(?i:' . preg_quote($source_authority, '~') . '))
-                ' . $source_path_pattern . '
-            )
-            (?=
-                $
-                | ' . $escaped_separator . '/
-                | [/?# \t\r\n,!;)\]}>"\']
-            )
-        ~x';
-    }
-
-    /**
-     * @return array{
-     *     source_authority: string,
-     *     source_path: string,
-     *     source_base: string,
-     *     target_domain: string,
-     *     target_scheme: string,
-     *     pattern: string
-     * }|null
-     */
-    private function create_url_mapping(string $source_url, string $target_url): ?array
-    {
-        $source = $this->get_supported_url_parts($source_url, true);
-        $target = $this->get_supported_url_parts($target_url, false);
-        if ($source === null || $target === null) {
-            return null;
-        }
-
-        // A source URL ending at its authority uses / as the URL separator,
-        // not as an initial path to remove. Leave its original spelling alone.
-        $source_path = $source['path'] === '/' ? '' : $source['path'];
-
-        return [
-            'source_authority' => $source['authority'],
-            'source_path'      => $source_path,
-            'source_base'      => $source['authority'] . $source_path,
-            'target_domain'    => $target['host'],
-            'target_scheme'    => $target['scheme'],
-            'pattern'          => $this->create_url_candidate_pattern(
-                $source['scheme'],
-                $source['authority'],
-                $source_path
-            ),
-        ];
-    }
-
-    /**
-     * @return array{scheme: string, host: string, authority: string, path: string}|null
-     */
-    private function get_supported_url_parts(string $url, bool $is_source_url): ?array
-    {
-        $parts = parse_url($url);
-        if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])) {
-            return null;
-        }
-
-        foreach (['user', 'pass', 'query', 'fragment'] as $unsupported_part) {
-            if (array_key_exists($unsupported_part, $parts)) {
-                return null;
-            }
-        }
-
-        $scheme = strtolower( (string) $parts['scheme'] );
-        $host = (string) $parts['host'];
-        $path = isset($parts['path']) ? (string) $parts['path'] : '';
-        if (( $scheme !== 'http' && $scheme !== 'https' )
-            || ( !$is_source_url && ( array_key_exists('port', $parts) || $path !== '' ) )
-            || !( $this->is_alphanumeric_dot_hyphen_domain_name($host) || ( $is_source_url && $this->is_ip_address($host) ) )
-            || !$this->contains_only_exclamation_mark_through_tilde_bytes($path)) {
-            return null;
-        }
-
-        return [
-            'scheme'    => $scheme,
-            'host'      => $host,
-            'authority' => $host . ( isset( $parts['port'] ) ? ':' . $parts['port'] : '' ),
-            'path'      => $path,
-        ];
-    }
-
-    private function is_ip_address(string $host): bool
-    {
-        return filter_var(trim($host, '[]'), FILTER_VALIDATE_IP) !== false;
-    }
-
-    private function is_alphanumeric_dot_hyphen_domain_name(string $domain): bool
-    {
-        return filter_var($domain, FILTER_VALIDATE_IP) === false
-            && preg_match('/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/', $domain) === 1;
-    }
-
-    private function contains_only_exclamation_mark_through_tilde_bytes(string $path): bool
-    {
-        return $path === '' || preg_match('/^[\x21-\x7E]+$/', $path) === 1;
     }
 }

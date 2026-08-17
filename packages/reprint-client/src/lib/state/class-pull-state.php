@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 use Reprint\Importer\State\AdaptiveTuningState;
 use Reprint\Importer\State\DatabaseApplyCommandState;
+use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
 use Reprint\Importer\State\DatabaseTableIndexState;
 use Reprint\Importer\State\FetchListProgressState;
 use Reprint\Importer\State\FileDiffProgressState;
@@ -49,6 +50,8 @@ class PullState
     /** @var string|null Webhost detected during preflight. */
     public ?string $webhost = null;
     public bool $follow_symlinks = true;
+    /** The selected files-pull mode. */
+    public string $files_pull_mode = 'catch-up';
     /** @var string|null Fingerprint of the local followed symlinks root; guards resume. */
     public ?string $local_followed_symlinks_root_fingerprint = null;
     public string $fs_root_nonempty_behavior = 'error';
@@ -74,6 +77,8 @@ class PullState
     /** @var int SQL statements counted while streaming db.sql. */
     public int $sql_statements_counted = 0;
     public DatabaseApplyCommandState $apply;
+    /** Live database URL rewrite cursor and counters. */
+    public DatabaseUrlRewriteCommandState $database_url_rewrite;
     /** @var string|null SQL output mode persisted for resume: file, stdout, or mysql. */
     public ?string $sql_output = null;
     /**
@@ -104,6 +109,7 @@ class PullState
         $this->fetch = new FetchListProgressState();
         $this->files_pull_summary = new FilesPullSummaryState();
         $this->apply = new DatabaseApplyCommandState();
+        $this->database_url_rewrite = new DatabaseUrlRewriteCommandState();
         $this->tuning = new AdaptiveTuningState();
         $this->pull_pipeline = new PullPipelineCheckpointState();
     }
@@ -111,6 +117,7 @@ class PullState
     public static function from_array(array $data): self
     {
         $state = new self();
+        $data += ['files_pull_mode' => 'catch-up'];
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
         $state->preflight = $data['preflight'];
@@ -118,6 +125,12 @@ class PullState
         $state->version = $data['version'];
         $state->webhost = $data['webhost'];
         $state->follow_symlinks = $data['follow_symlinks'];
+        if (!in_array($data['files_pull_mode'], ['mirror', 'catch-up'], true)) {
+            throw new UnexpectedValueException(
+                'PullState files_pull_mode must be mirror or catch-up.'
+            );
+        }
+        $state->files_pull_mode = $data['files_pull_mode'];
         $state->local_followed_symlinks_root_fingerprint = $data['local_followed_symlinks_root_fingerprint'];
         $state->fs_root_nonempty_behavior = $data['fs_root_nonempty_behavior'];
         $state->filter = $data['filter'];
@@ -135,6 +148,7 @@ class PullState
         $state->sql_bytes = $data['sql_bytes'];
         $state->sql_statements_counted = $data['sql_statements_counted'];
         $state->apply = DatabaseApplyCommandState::from_array($data['apply']);
+        $state->database_url_rewrite = DatabaseUrlRewriteCommandState::from_array($data['database_url_rewrite']);
         $state->sql_output = $data['sql_output'];
         $state->mysql_host = $data['mysql_host'];
         $state->mysql_port = $data['mysql_port'];
@@ -222,6 +236,7 @@ class PullState
             'version' => $this->version,
             'webhost' => $this->webhost,
             'follow_symlinks' => $this->follow_symlinks,
+            'files_pull_mode' => $this->files_pull_mode,
             'local_followed_symlinks_root_fingerprint' => $this->local_followed_symlinks_root_fingerprint,
             'fs_root_nonempty_behavior' => $this->fs_root_nonempty_behavior,
             'filter' => $this->filter,
@@ -239,6 +254,7 @@ class PullState
             'sql_bytes' => $this->sql_bytes,
             'sql_statements_counted' => $this->sql_statements_counted,
             'apply' => $this->apply->to_array(),
+            'database_url_rewrite' => $this->database_url_rewrite->to_array(),
             'sql_output' => $this->sql_output,
             'mysql_host' => $this->mysql_host,
             'mysql_port' => $this->mysql_port,

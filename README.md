@@ -108,7 +108,8 @@ Both packages depend on [`wp-php-toolkit/data-liberation`](https://packagist.org
 - `packages/reprint-client` — Source for the `wp-php-toolkit/reprint-client` Composer package (the CLI). `packages/reprint-client/bin/reprint-client` is the entry point for repo checkouts; Composer installs it as `vendor/bin/reprint-client`.
 - `reprint-server-wp` — WordPress plugin distribution that bundles `reprint-server`. The release ZIP keeps the legacy `reprint-exporter-wp.zip` name so upgrades land in the existing installed plugin directory.
 - `tests` — PHPUnit suite (`tests/`), Docker-based e2e scenarios (`tests/e2e/`), and PHPStan support files (`tests/phpstan/`).
-- `docs` — architecture documentation and project logos.
+- `docs` — [design choices](docs/DESIGN.md), focused design documents, and
+  project logos.
 - `bin` — build tooling (PHAR build, plugin version stamping).
 - `lib` — the `sqlite-database-integration` git submodule used by the MySQL query parser.
 
@@ -367,12 +368,31 @@ The three modes:
 | `stdout` | Streams SQL to stdout, progress/status goes to stderr | none |
 | `mysql` | Connects via `mysqli::multi_query()` and executes statements as they arrive | none |
 
-All three modes recover from server crashes mid-stream (PHP fatal errors,
-OOM kills, `max_execution_time` expiry). When the server dies before sending
-a completion chunk, the importer detects the transport failure, saves its
-cursor, and exits with code 2 for automatic retry. Accumulated SQL is
-persisted in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/sql-buffer`
-so the next run reloads it and continues.
+When a source response stops mid-stream, the same importer asks for the
+remaining SQL and keeps an unfinished statement in memory. Direct MySQL
+output stores the last committed cursor in the target table
+`__reprint_db_pull_progress_<uuid>`. The UUID makes an accidental name clash
+unlikely and changes whenever the table schema changes. Reprint logs and excludes
+that internal name from the source dump.
+
+File output keeps the same SQL groups by adding a harmless comment after each
+complete group. The comment records the exporter cursor. `db-apply` reads one
+group at a time and sends it through the same MySQL importer as direct output.
+The target stores the exporter cursor in both flows. For `db-apply`, the same
+target row also stores the matching `db.sql` byte offset. A replacement process
+reads that row and seeks directly to the next group.
+
+Existing SQL statement-size, fragment, time, and memory budgets still decide
+how much SQL belongs to a group. For transactional target tables, the group and
+its next cursor are committed together. Table replacement and oversized-value
+updates remain separate groups. If a process stops, its replacement waits for
+the old target connection, reruns `db-session-setup.sql`, and continues from the
+cursor stored in MySQL. A repeated INSERT skips rows identified by a non-null
+unique key, so this also works for keyed MyISAM tables. Reprint cannot continue
+a nontransactional table without such a key, or while an oversized value is
+being appended in separate UPDATE statements; those cases require aborting and
+starting the database import again. After `db-apply` finishes, it removes its
+internal cursor table from the imported database.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
@@ -649,7 +669,7 @@ command state. Explicit `tty` and `jsonl` modes cannot be combined with
 
 The selector governs progress, lifecycle, and status output. It does not
 reformat a command's data result, such as preflight or pull-metadata JSON,
-files-stats JSON, db-domains lines, or SQL written with `--sql-output=stdout`.
+files-stats JSON, or SQL written with `--sql-output=stdout`.
 
 The files-push terminal presentation uses one stage-weighted progress bar. The
 percentage comes first, followed by a major stage such as `Indexing`, `Pushing`,
@@ -670,9 +690,9 @@ are absent while the plan is still being built.
 #### `<remote-state-directory>/pull/state.json` — the pull state store
 
 This is the pull state store. Pull commands read it on startup and write it
-back periodically and on shutdown. It stores everything needed to resume after
-a crash or interruption: the current command, cursor position, AIMD tuning
-state, and per-phase bookmarks.
+back periodically and on shutdown. It stores the current command, cursor
+position, AIMD tuning state, and per-phase bookmarks. Direct MySQL output also
+records each committed cursor in the target database.
 
 Written atomically (temp file + rename) so a crash mid-write never corrupts it.
 If the JSON is invalid on load, the importer renames it to
@@ -699,10 +719,14 @@ fresh.
     "updated_at": "2025-01-15T10:30:00Z"
   },
   "diff": {
-    // Byte offset into the next remote index.
-    "next_remote_index_byte_offset": 1024,
-    // Last remote index entry path consumed before that byte offset.
-    "last_consumed_remote_index_entry_path": "base64..."
+    "index_diff_cursor": {
+      "old_index_byte_offset": 512,
+      "new_index_byte_offset": 1024,
+      "preceding_new_index_entry_path_b64": "base64..."
+    },
+    // Output bytes covered by the index-diff cursor.
+    "fetch_list_byte_offset": 256,
+    "pull_index_wal_byte_offset": 128
   },
   "index": {
     "cursor": "..."               // file_index cursor
@@ -800,8 +824,8 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
-* `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
-* `db-domains` — Lists domains discovered in the SQL dump. Reads `<remote-state-directory>/pull/domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
+* `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. MySQL continues from the file group named by its target cursor. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
+* `db-rewrite-urls` — Rewrites URLs directly in an existing MySQL or SQLite database. You can stop it and continue later. See [Rewrite URLs in a live database](docs/DB-REWRITE-URLS.md).
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 * `pull-metadata` — Prints pull lifecycle and source-site metadata as JSON. The remote Reprint API URL selects the pull state; no network calls are made.
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).

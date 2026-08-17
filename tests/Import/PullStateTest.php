@@ -41,23 +41,55 @@ class PullStateTest extends TestCase
         $state->active_resumable_command->command_name = 'db-pull';
         $state->active_resumable_command->completion_state = 'complete';
         $state->pull_pipeline->started_by_command = 'pull';
-        $state->diff->next_remote_index_byte_offset = 123;
-        $state->diff->last_consumed_remote_index_entry_path = '/wp-content/index.php';
-        $state->diff->last_processed_next_remote_index_entry_path = '/wp-content/themes/twentytwenty/style.css';
+        $state->diff->index_diff_cursor = [
+            'old_index_byte_offset' => 123,
+            'new_index_byte_offset' => 456,
+            'preceding_new_index_entry_path_b64' => base64_encode(
+                '/wp-content/index.php'
+            ),
+        ];
+        $state->diff->fetch_list_byte_offset = 789;
+        $state->diff->pull_index_wal_byte_offset = 321;
         $state->sql_statements_counted = 99;
+        $state->files_pull_mode = 'mirror';
 
         $array = $state->to_array();
 
         $this->assertSame('db-pull', $array['active_resumable_command']['command_name']);
         $this->assertSame('complete', $array['active_resumable_command']['completion_state']);
         $this->assertSame('pull', $array['pull_pipeline']['started_by_command']);
-        $this->assertSame(123, $array['diff']['next_remote_index_byte_offset']);
-        $this->assertSame('/wp-content/index.php', $array['diff']['last_consumed_remote_index_entry_path']);
         $this->assertSame(
-            '/wp-content/themes/twentytwenty/style.css',
-            $array['diff']['last_processed_next_remote_index_entry_path']
+            $state->diff->index_diff_cursor,
+            $array['diff']['index_diff_cursor']
         );
+        $this->assertSame(789, $array['diff']['fetch_list_byte_offset']);
+        $this->assertSame(321, $array['diff']['pull_index_wal_byte_offset']);
         $this->assertSame(99, $array['sql_statements_counted']);
+        $this->assertSame('mirror', $array['files_pull_mode']);
+        $this->assertSame('mirror', \PullState::from_array($array)->files_pull_mode);
+    }
+
+    public function testStateDefaultsAnOlderMissingFilesPullModeToCatchUp(): void
+    {
+        $array = ( new \PullState() )->to_array();
+        unset($array['files_pull_mode']);
+
+        $this->assertSame(
+            'catch-up',
+            \PullState::from_array($array)->files_pull_mode
+        );
+    }
+
+    public function testStateRejectsAnUnknownFilesPullMode(): void
+    {
+        $array = ( new \PullState() )->to_array();
+        $array['files_pull_mode'] = 'partial';
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage(
+            'PullState files_pull_mode must be mirror or catch-up.'
+        );
+        \PullState::from_array($array);
     }
 
     public function testGetAppliesDefaultsOverVerbatimPreflight(): void
@@ -130,13 +162,22 @@ class PullStateTest extends TestCase
     public function testStateRejectsDiffFieldsFromThePreviousSchema(): void
     {
         $data = (new \PullState())->to_array();
-        unset($data['diff']['last_consumed_remote_index_entry_path']);
-        $data['diff']['last_consumed_local_index_entry_path'] =
+        unset(
+            $data['diff']['index_diff_cursor'],
+            $data['diff']['fetch_list_byte_offset'],
+            $data['diff']['pull_index_wal_byte_offset']
+        );
+        $data['diff']['next_remote_index_byte_offset'] = 123;
+        $data['diff']['last_consumed_remote_index_entry_path'] =
             '/wp-content/index.php';
+        $data['diff']['last_processed_next_remote_index_entry_path'] =
+            '/wp-content/themes/twentytwenty/style.css';
 
         $this->expectException(\UnexpectedValueException::class);
         $this->expectExceptionMessage(
-            'missing last_consumed_remote_index_entry_path; unexpected last_consumed_local_index_entry_path'
+            'missing fetch_list_byte_offset, index_diff_cursor, pull_index_wal_byte_offset; ' .
+            'unexpected last_consumed_remote_index_entry_path, ' .
+            'last_processed_next_remote_index_entry_path, next_remote_index_byte_offset'
         );
 
         \PullState::from_array($data);

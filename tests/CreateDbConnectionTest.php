@@ -130,6 +130,124 @@ final class CreateDbConnectionTest extends TestCase {
         );
     }
 
+    public function testSqliteDatabaseIntegrationThreeDriverSupportsPreparedQueries(): void
+    {
+        if (!extension_loaded('pdo_sqlite')) {
+            $this->markTestSkipped('pdo_sqlite extension required');
+        }
+
+        $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
+        $export_path = realpath(__DIR__ . '/../packages/reprint-server/src/export.php');
+        $this->assertIsString($autoload_path);
+        $this->assertIsString($export_path);
+        $connection_script = <<<'PHP'
+        class WP_MySQL_On_SQLite {
+            private $pdo;
+            public function __construct($pdo) {
+                $this->pdo = $pdo;
+            }
+            public function get_sqlite_pdo() {
+                return $this->pdo;
+            }
+            public function query($query) {
+                return $this->pdo->query($query);
+            }
+        }
+        class SqliteThreeWordPressDatabaseTestDouble {
+            private $driver;
+            public function __construct($driver) {
+                $this->driver = $driver;
+            }
+            public function get_driver() {
+                return $this->driver;
+            }
+        }
+        define('SQLITE_DRIVER_VERSION', '3.0.0');
+        require $argv[1];
+        require $argv[2];
+        $driver = new WP_MySQL_On_SQLite(new PDO('sqlite::memory:'));
+        $GLOBALS['wpdb'] = new SqliteThreeWordPressDatabaseTestDouble($driver);
+        $connection = create_db_connection(['db_engine' => 'sqlite']);
+        if (!($connection instanceof SqliteDriverPDO)) {
+            fwrite(STDERR, 'The active SQLite driver was not wrapped for export.');
+            exit(2);
+        }
+        $statement = $connection->prepare('SELECT ?');
+        $statement->execute(['sqlite-3']);
+        fwrite(STDOUT, $statement->fetchColumn());
+        PHP;
+
+        $result = $this->runPhpProcess([
+            PHP_BINARY,
+            '-r',
+            $connection_script,
+            $autoload_path,
+            $export_path,
+        ]);
+        $this->assertSame(
+            0,
+            $result['status'],
+            $result['stderr'] . $result['stdout']
+        );
+        $this->assertSame('sqlite-3', $result['stdout']);
+    }
+
+    public function testSqliteDatabaseIntegrationTwoLegacyDriverStillWorks(): void
+    {
+        if (!extension_loaded('pdo_sqlite')) {
+            $this->markTestSkipped('pdo_sqlite extension required');
+        }
+
+        $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
+        $export_path = realpath(__DIR__ . '/../packages/reprint-server/src/export.php');
+        $this->assertIsString($autoload_path);
+        $this->assertIsString($export_path);
+        $connection_script = <<<'PHP'
+        class LegacySqliteDriverTestDouble {
+            private $pdo;
+            public function __construct($pdo) {
+                $this->pdo = $pdo;
+            }
+            public function query($query) {
+                return $this->pdo->query($query);
+            }
+            public function get_query_results() {
+                return [];
+            }
+            public function get_pdo() {
+                return $this->pdo;
+            }
+        }
+        class SqliteTwoWordPressDatabaseTestDouble {
+            public $dbh;
+            public function __construct($driver) {
+                $this->dbh = $driver;
+            }
+        }
+        require $argv[1];
+        require $argv[2];
+        $pdo = new PDO('sqlite::memory:');
+        $driver = new LegacySqliteDriverTestDouble($pdo);
+        $GLOBALS['wpdb'] = new SqliteTwoWordPressDatabaseTestDouble($driver);
+        $connection = create_db_connection(['db_engine' => 'sqlite']);
+        fwrite(STDOUT, $connection->query('SELECT 2')->fetchColumn());
+        PHP;
+
+        $result = $this->runPhpProcess([
+            PHP_BINARY,
+            '-r',
+            $connection_script,
+            $autoload_path,
+            $export_path,
+        ]);
+        $this->assertSame(
+            0,
+            $result['status'],
+            $result['stderr'] . $result['stdout']
+        );
+        $this->assertSame('2', $result['stdout']);
+    }
+
     public function testBareSocketPathDbHostOpensUnixSocket(): void
     {
         $this->assertDbHostOpensUnixSocket(false);

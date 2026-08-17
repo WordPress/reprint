@@ -30,8 +30,8 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         // Use a large max_statement_size so nothing gets split
         $sql = $this->getDumpSQL(['max_statement_size' => 1024 * 1024]);
 
-        // Should not contain UPDATE statements
-        $this->assertStringNotContainsString('UPDATE', $sql);
+        // Should not contain an oversized-value UPDATE statement.
+        $this->assertStringNotContainsString('UPDATE `small_data` SET', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -59,7 +59,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $sql = $this->getDumpSQL(['max_statement_size' => 10 * 1024]);
 
         // Should contain UPDATE statements with CONCAT
-        $this->assertStringContainsString('UPDATE', $sql);
+        $this->assertStringContainsString('UPDATE `large_data` SET', $sql);
         $this->assertStringContainsString('CONCAT', $sql);
 
         // Round-trip test
@@ -91,7 +91,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $sql = $this->getDumpSQL(['max_statement_size' => 10 * 1024]);
 
         // Should contain UPDATE statements
-        $this->assertStringContainsString('UPDATE', $sql);
+        $this->assertStringContainsString('UPDATE `large_text` SET', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -123,7 +123,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $sql = $this->getDumpSQL(['max_statement_size' => 20 * 1024]);
 
         // Both large columns should trigger updates
-        $updateCount = substr_count($sql, 'UPDATE');
+        $updateCount = substr_count($sql, 'UPDATE `multi_large` SET');
         $this->assertGreaterThan(1, $updateCount, 'Should have multiple UPDATE statements');
 
         // Round-trip test
@@ -168,6 +168,66 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $this->assertEquals($data3, $rows[2]['content']);
     }
 
+    public function testRetainedRowKeepsItsQueryBoundaryAcrossResume(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE retained_boundary (id INT PRIMARY KEY, content LONGBLOB)"
+        );
+        $insert = $this->pdo->prepare("INSERT INTO retained_boundary VALUES (?, ?)");
+        $insert->execute([1, str_repeat('x', 20 * 1024)]);
+        $insert->execute([2, 'second']);
+        $insert->execute([3, 'third']);
+
+        $options = [
+            'batch_size' => 2,
+            'max_statement_size' => 8 * 1024,
+        ];
+        $producer = $this->createProducer($options);
+        do {
+            $this->assertTrue($producer->next_sql_fragment());
+            $fragment = (string) $producer->get_sql_fragment();
+        } while (strpos($fragment, 'INSERT INTO `retained_boundary`') !== 0);
+
+        $options['cursor'] = $producer->get_reentrancy_cursor();
+        $producer = $this->createProducer($options);
+        do {
+            $this->assertTrue($producer->next_sql_fragment());
+            $fragment = (string) $producer->get_sql_fragment();
+        } while (
+            strpos($fragment, 'INSERT INTO `retained_boundary`') !== 0 ||
+            strpos($fragment, base64_encode('second')) === false
+        );
+
+        $cursor = json_decode($producer->get_reentrancy_cursor(), true);
+        $this->assertNull($cursor['current_row']);
+        $this->assertSame(['id' => 2], $cursor['last_pk_values']);
+    }
+
+    public function testRowEmitterStopsAtTheReaderQueryBoundary(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE emitted_boundary (id INT PRIMARY KEY, content LONGBLOB)"
+        );
+        $insert = $this->pdo->prepare("INSERT INTO emitted_boundary VALUES (?, ?)");
+        $insert->execute([1, str_repeat('x', 20 * 1024)]);
+        $insert->execute([2, 'second']);
+        $insert->execute([3, 'third']);
+        $insert->execute([4, 'fourth']);
+
+        $producer = $this->createProducer([
+            'batch_size' => 3,
+            'max_statement_size' => 8 * 1024,
+        ]);
+        do {
+            $this->assertTrue($producer->next_sql_fragment());
+            $fragment = (string) $producer->get_sql_fragment();
+        } while (strpos($fragment, base64_encode('third')) === false);
+
+        $cursor = json_decode($producer->get_reentrancy_cursor(), true);
+        $this->assertNull($cursor['current_row']);
+        $this->assertSame(['id' => 3], $cursor['last_pk_values']);
+    }
+
     /**
      * Test with composite primary key.
      */
@@ -192,7 +252,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $sql = $this->getDumpSQL(['max_statement_size' => 10 * 1024]);
 
         // UPDATE statements should use composite WHERE clause
-        $this->assertStringContainsString('UPDATE', $sql);
+        $this->assertStringContainsString('UPDATE `composite_pk` SET', $sql);
         $this->assertStringContainsString('tenant_id', $sql);
         $this->assertStringContainsString('item_id', $sql);
 
@@ -315,6 +375,13 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
                 $this->assertSame(
                     base64_encode($id),
                     $cursor_data["oversized_pk_values"]["id"]["__binary__"]
+                );
+            }
+
+            if (strpos($producer->get_sql_fragment(), 'UPDATE `reentrant_large_binary_key`') !== false) {
+                $this->assertTrue(
+                    $producer->current_fragment_must_be_its_own_part(),
+                    'Each oversized-value update must be sent in its own multipart part.'
                 );
             }
 
@@ -581,7 +648,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
 
         // The PK value should appear in UPDATE WHERE clauses
         // It should NOT be split
-        $this->assertStringContainsString('UPDATE', $sql);
+        $this->assertStringContainsString('UPDATE `varchar_pk` SET', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);

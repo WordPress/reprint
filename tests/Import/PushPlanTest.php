@@ -302,9 +302,9 @@ final class PushPlanTest extends TestCase
         $first_cursor = $this->planCursor();
         $this->assertSame(
             0,
-            $first_cursor['file_sync_planner_cursor'][
-                'active_deletion_root_byte_offset'
-            ]
+            $first_cursor['file_sync_plan_runner_cursor']['position'][
+                'file_sync_patch_planner_cursor'
+            ]['active_deletion_root_byte_offset']
         );
 
         $this->assertFalse($this->nextPlanStep($plan));
@@ -499,27 +499,6 @@ final class PushPlanTest extends TestCase
         $resumedPlan->close();
     }
 
-    public function testResumesCursorWrittenBeforeDocumentRootMappingAndProgressTotals(): void
-    {
-        $entries = $this->manyFileEntries(2);
-        $current = $this->writeIndex($entries);
-        $plan = $this->startPlan($current);
-
-        $this->assertTrue($this->nextPlanStep($plan));
-        $plan->close();
-
-        unset($this->cursor['document_root_local_relative_path']);
-        unset($this->cursor['position']['local_paths_to_push_count']);
-        unset($this->cursor['position']['local_file_bytes_to_push']);
-
-        $resumedPlan = $this->resumePlan();
-        $this->planToCompletion($resumedPlan);
-
-        $this->assertCount(2, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertNull($this->planCursor()['local_paths_to_push_count']);
-        $this->assertNull($this->planCursor()['local_file_bytes_to_push']);
-    }
-
     public function testResumeDiscardsACompletedStepWhoseCursorWasNotStored(): void
     {
         $plan = $this->startPlan($this->writeIndex($this->manyFileEntries(2)));
@@ -544,8 +523,12 @@ final class PushPlanTest extends TestCase
     public function testStepRetainsTheFollowingFreshLocalIndexEntryUntilClose(): void
     {
         $plan = $this->startPlan($this->writeIndex($this->manyFileEntries(3)));
-        $patch_planner_property = new ReflectionProperty(
+        $file_sync_plan_runner_property = new ReflectionProperty(
             PushPlan::class,
+            'file_sync_plan_runner'
+        );
+        $patch_planner_property = new ReflectionProperty(
+            FileSyncPlanRunner::class,
             'patch_planner'
         );
         $index_diff_property = new ReflectionProperty(
@@ -563,16 +546,19 @@ final class PushPlanTest extends TestCase
 
         $this->assertTrue($this->nextPlanStep($plan));
         $first_plan_cursor = $this->planCursor();
-        $patch_planner = $patch_planner_property->getValue($plan);
+        $file_sync_plan_runner =
+            $file_sync_plan_runner_property->getValue($plan);
+        $patch_planner =
+            $patch_planner_property->getValue($file_sync_plan_runner);
         $index_diff = $index_diff_property->getValue($patch_planner);
         $fresh_local_index_handle = $new_index_handle_property->getValue(
             $index_diff
         );
         $this->assertIsResource($fresh_local_index_handle);
         $this->assertGreaterThan(
-            $first_plan_cursor['file_sync_planner_cursor'][
-                'index_diff_cursor'
-            ]['new_index_byte_offset'],
+            $first_plan_cursor['file_sync_plan_runner_cursor']['position'][
+                'file_sync_patch_planner_cursor'
+            ]['index_diff_cursor']['new_index_byte_offset'],
             ftell($fresh_local_index_handle)
         );
         $retained_fresh_local_index_entry = $new_index_entry_property->getValue(
@@ -584,9 +570,9 @@ final class PushPlanTest extends TestCase
         $this->assertTrue($this->nextPlanStep($plan));
         $second_plan_cursor = $this->planCursor();
         $this->assertGreaterThan(
-            $second_plan_cursor['file_sync_planner_cursor'][
-                'index_diff_cursor'
-            ]['new_index_byte_offset'],
+            $second_plan_cursor['file_sync_plan_runner_cursor']['position'][
+                'file_sync_patch_planner_cursor'
+            ]['index_diff_cursor']['new_index_byte_offset'],
             ftell($fresh_local_index_handle)
         );
         $this->assertPathCounts(2, 0);
@@ -620,33 +606,51 @@ final class PushPlanTest extends TestCase
         $this->assertSame('', $cursor['document_root_local_relative_path']);
         $this->assertSame([
             'phase',
-            'file_sync_planner_cursor',
-            'byte_offset_in_local_paths_to_push',
-            'byte_offset_in_local_paths_to_delete',
-            'local_paths_to_push_count',
-            'local_file_bytes_to_push',
+            'file_sync_plan_runner_cursor',
         ], array_keys($cursor['position']));
+        $runner_cursor = $cursor['position']['file_sync_plan_runner_cursor'];
         $this->assertSame([
-            'patch_base_index_file',
-            'patch_result_index_file',
-            'active_deletion_roots_file',
-            'included_index_path_roots',
-            'excluded_index_path_roots',
-            'index_diff_cursor',
-            'active_deletion_root_byte_offset',
-        ], array_keys($cursor['position']['file_sync_planner_cursor']));
-        $this->assertSame(1, $cursor['position']['local_paths_to_push_count']);
-        $this->assertSame(1, $cursor['position']['local_file_bytes_to_push']);
+            'paths_to_copy_file',
+            'paths_to_delete_file',
+            'deletion_path_prefix',
+            'paths_requiring_copy_file',
+            'position',
+        ], array_keys($runner_cursor));
+        $this->assertSame(
+            1,
+            $runner_cursor['position']['paths_to_copy_count']
+        );
+        $this->assertSame(
+            1,
+            $runner_cursor['position']['file_bytes_to_copy']
+        );
         $this->assertSame(
             filesize($this->planPath('local_paths_to_push.jsonl')),
-            $cursor['position']['byte_offset_in_local_paths_to_push']
+            $runner_cursor['position']['byte_offset_in_paths_to_copy']
         );
         $this->assertSame(
             filesize($this->planPath('local_paths_to_delete')),
-            $cursor['position']['byte_offset_in_local_paths_to_delete']
+            $runner_cursor['position']['byte_offset_in_paths_to_delete']
+        );
+        $file_sync_plan_runner_property = new ReflectionProperty(
+            PushPlan::class,
+            'file_sync_plan_runner'
+        );
+        $this->assertSame(
+            $file_sync_plan_runner_property->getValue($plan)->get_cursor(),
+            $runner_cursor
         );
         $this->assertFileDoesNotExist($this->planPath('cursor.json'));
         $plan->close();
+
+        $resumed_plan = PushPlan::resume($cursor);
+        $this->assertSame(
+            $runner_cursor,
+            $file_sync_plan_runner_property
+                ->getValue($resumed_plan)
+                ->get_cursor()
+        );
+        $resumed_plan->close();
     }
 
     public function testCursorKeepsTheFilesystemRootSlash(): void

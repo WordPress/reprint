@@ -257,7 +257,7 @@ function resolve_db_credentials(): array
  */
 function is_sqlite_site(): bool
 {
-    // @TODO: Actually check for the WP_SQLite_Driver class being used here.
+    // Connection setup checks which supported driver WordPress loaded.
     return defined('SQLITE_DB_DROPIN_VERSION') && isset($GLOBALS['@pdo']);
 }
 
@@ -265,11 +265,10 @@ function is_sqlite_site(): bool
  * Creates a database connection appropriate for the detected backend.
  *
  * For MySQL sites, returns a standard PDO connection.
- * For SQLite sites, wraps the WP_SQLite_Driver that WordPress already
- * loaded (via $wpdb->dbh) in a PDO-compatible adapter. The driver's
- * AST-based translator converts every MySQL query to SQLite on the fly,
- * so MySQLDumpProducer sees MySQL-shaped results and produces valid
- * MySQL SQL output.
+ * For SQLite sites, wraps the MySQL-on-SQLite driver which WordPress already
+ * loaded in a PDO-compatible adapter. The driver's translator converts every
+ * MySQL query to SQLite on the fly, so MySQLDumpProducer sees MySQL-shaped
+ * results and produces valid MySQL SQL output.
  *
  * @param array $creds   Credentials from resolve_db_credentials().
  * @param array $options PDO options (only used for MySQL connections).
@@ -312,10 +311,12 @@ function create_db_connection(array $creds, array $options = [])
 }
 
 /**
- * Wraps the already-loaded WP_SQLite_Driver in a PDO-compatible adapter.
+ * Wraps the SQLite plugin's already-loaded driver in a PDO-compatible adapter.
  *
- * Validates that the sqlite-database-integration plugin version is in the
- * supported range, then extracts the driver and raw PDO from $wpdb->dbh.
+ * Version 3 exposes its active translator through $wpdb->get_driver(). Version
+ * 2 exposes its active translator through wpdb's backward-compatible dbh
+ * property. Both translate MySQL queries, but neither provides every PDO
+ * operation used by MySQLDumpProducer.
  *
  * @return object PDO-compatible adapter (SqliteDriverPDO).
  * @throws RuntimeException If the driver is not available or unsupported.
@@ -325,33 +326,67 @@ function create_sqlite_pdo_adapter()
     global $wpdb;
 
     /**
-     * Minimum sqlite-database-integration version that exposes the API we
-     * depend on: WP_SQLite_Driver::query(), get_query_results(),
-     * get_connection()->get_pdo().
+     * Minimum supported sqlite-database-integration version.
      */
     $min_version = '2.1.0';
 
     require_once __DIR__ . "/class-sqlite-driver-pdo.php";
 
-    if (!isset($wpdb) || !($wpdb->dbh instanceof WP_SQLite_Driver)) {
-        throw new RuntimeException(
-            "SQLite export requires WordPress loaded with the " .
-            "sqlite-database-integration plugin active."
-        );
-    }
+    $driver = null;
+    $raw_pdo = null;
 
-    // Verify the plugin version is in the supported range.
-    if (defined('SQLITE_DRIVER_VERSION')) {
-        if (version_compare(SQLITE_DRIVER_VERSION, $min_version, '<')) {
-            throw new RuntimeException(
-                "sqlite-database-integration plugin version " . SQLITE_DRIVER_VERSION .
-                " is too old. Minimum required: " . $min_version
-            );
+    if (isset($wpdb) && is_object($wpdb) && method_exists($wpdb, 'get_driver')) {
+        $candidate = $wpdb->get_driver();
+        if (
+            is_object($candidate) &&
+            method_exists($candidate, 'query') &&
+            method_exists($candidate, 'get_sqlite_pdo')
+        ) {
+            $candidate_pdo = call_user_func([$candidate, 'get_sqlite_pdo']);
+        } else {
+            $candidate_pdo = null;
+        }
+        if ($candidate_pdo instanceof PDO) {
+            $driver = $candidate;
+            $raw_pdo = $candidate_pdo;
         }
     }
 
-    $driver = $wpdb->dbh;
-    $raw_pdo = $driver->get_connection()->get_pdo();
+    if ($driver === null && isset($wpdb) && is_object($wpdb)) {
+        $candidate = $wpdb->dbh;
+        $candidate_pdo = null;
+        if (is_object($candidate) && method_exists($candidate, 'query')) {
+            if (method_exists($candidate, 'get_pdo')) {
+                $candidate_pdo = call_user_func([$candidate, 'get_pdo']);
+            } elseif (method_exists($candidate, 'get_connection')) {
+                $connection = call_user_func([$candidate, 'get_connection']);
+                if (is_object($connection) && method_exists($connection, 'get_pdo')) {
+                    $candidate_pdo = call_user_func([$connection, 'get_pdo']);
+                }
+            }
+        }
+        if ($candidate_pdo instanceof PDO) {
+            $driver = $candidate;
+            $raw_pdo = $candidate_pdo;
+        }
+    }
+
+    if ($driver === null) {
+        throw new RuntimeException(
+            "SQLite export requires WordPress to load a supported " .
+            "sqlite-database-integration driver."
+        );
+    }
+
+    if (
+        defined('SQLITE_DRIVER_VERSION') &&
+        version_compare(SQLITE_DRIVER_VERSION, $min_version, '<')
+    ) {
+        throw new RuntimeException(
+            "sqlite-database-integration plugin version " . SQLITE_DRIVER_VERSION .
+            " is too old. Minimum required: " . $min_version
+        );
+    }
 
     return new SqliteDriverPDO($driver, $raw_pdo);
 }
@@ -869,6 +904,20 @@ function endpoint_sql_chunk(
         $producer_options["exclude_rows"] = $exclude_rows;
     }
 
+    if (isset($config["skip_tables"])) {
+        if (!is_array($config["skip_tables"])) {
+            throw new InvalidArgumentException("skip_tables must be an array");
+        }
+        foreach ($config["skip_tables"] as $skipped_table) {
+            if (!is_string($skipped_table) || $skipped_table === "") {
+                throw new InvalidArgumentException(
+                    "Every skip_tables entry must be a non-empty string"
+                );
+            }
+        }
+        $producer_options["exclude_tables"] = array_values($config["skip_tables"]);
+    }
+
     if (isset($config["cursor"])) {
         $producer_options["cursor"] = $config["cursor"];
     }
@@ -892,6 +941,22 @@ function endpoint_sql_chunk(
         _e2e_call_hook('test_hook_after_gzip_init', $hook_args);
     }
 
+    if (!isset($config["cursor"])) {
+        // Send the initial connection settings separately so the client can save
+        // them outside db.sql for a later MySQL connection.
+        $session_setup = WordPress\DataLiberation\MySQLDumpProducer::get_session_setup_sql();
+        $gz->write(
+            "--{$boundary}\r\n" .
+            "Content-Type: application/sql\r\n" .
+            "Content-Length: " . strlen($session_setup) . "\r\n" .
+            "X-Chunk-Type: sql_session_setup\r\n" .
+            "\r\n"
+        );
+        $gz->write($session_setup);
+        $gz->write("\r\n");
+        $gz->sync();
+    }
+
     // -- Stream SQL fragments --
     // Pull SQL fragments from the producer in batches, writing each batch
     // as a multipart chunk. Stop when the producer is exhausted or the
@@ -899,29 +964,76 @@ function endpoint_sql_chunk(
     $batches_processed = 0;
     $sql_bytes_processed = 0;
     $aborted = false;
+    /** @var string|null $deferred_fragment */
+    $deferred_fragment = null;
+    /** @var string|null $deferred_fragment_cursor */
+    $deferred_fragment_cursor = null;
 
     try {
         while (
             $budget->has_remaining()
         ) {
-            $sql = [];
+            $sql_fragments = [];
+            $cursor = null;
+            $sql_ends_with_complete_statement = false;
 
             $i = 0;
-            while ($reader->next_sql_fragment()) {
-                $sql[] = $reader->get_sql_fragment();
-                $i++;
+            if ($deferred_fragment !== null) {
+                $sql_fragments[] = $deferred_fragment;
+                $cursor = $deferred_fragment_cursor;
+                $sql_ends_with_complete_statement = true;
+                $deferred_fragment = null;
+                $deferred_fragment_cursor = null;
+            } else {
+                while ($reader->next_sql_fragment()) {
+                    $fragment = (string) $reader->get_sql_fragment();
 
-                if ($i >= $fragments_per_batch) {
-                    break;
-                }
+                    // The importer stores a cursor only after executing a complete part.
+                    // Keep the SET header alone before row data. Do not put DROP/CREATE
+                    // or the footer after INSERTs: their implicit or explicit COMMIT
+                    // could make those rows permanent before the INSERT cursor is stored.
+                    // Keep each CONCAT UPDATE alone so its cursor is stored immediately;
+                    // if MyISAM stops first, the importer refuses to repeat the append.
+                    if (
+                        $reader->current_fragment_must_be_its_own_part() &&
+                        !empty($sql_fragments) &&
+                        $sql_ends_with_complete_statement
+                    ) {
+                        $deferred_fragment = $fragment;
+                        $deferred_fragment_cursor = $reader->get_reentrancy_cursor();
+                        break;
+                    }
 
-                if (
-                    !$budget->has_remaining()
-                ) {
-                    break;
+                    $sql_fragments[] = $fragment;
+                    $i++;
+
+                    $trimmed_fragment = rtrim($fragment);
+                    $sql_ends_with_complete_statement =
+                        $trimmed_fragment !== '' && $trimmed_fragment[-1] === ';';
+                    if ($sql_ends_with_complete_statement) {
+                        $cursor = $reader->get_reentrancy_cursor();
+                    }
+
+                    if ($reader->current_fragment_must_be_its_own_part()) {
+                        break;
+                    }
+
+                    if ($i >= $fragments_per_batch) {
+                        break;
+                    }
+
+                    if (
+                        !$budget->has_remaining()
+                    ) {
+                        break;
+                    }
                 }
             }
-            $sql = implode("", $sql);
+
+            $sql = implode("", $sql_fragments);
+            if ($sql === '') {
+                break;
+            }
             $sql_bytes_processed += strlen($sql);
 
             // Does this chunk end on a complete statement boundary?
@@ -930,15 +1042,16 @@ function endpoint_sql_chunk(
             // character is sufficient.
             $trimmed = rtrim($sql);
             $query_complete = $trimmed !== "" && $trimmed[-1] === ";";
+            if (!$query_complete || $cursor === null) {
+                $cursor = $reader->get_reentrancy_cursor();
+            }
 
             // E2E test hook: before SQL batch is emitted
             if (getenv('SITE_EXPORT_TEST_MODE')) {
-                $cursor_for_hook = $reader->get_reentrancy_cursor();
-                $hook_args = [&$sql, $cursor_for_hook];
+                $hook_args = [&$sql, $cursor];
                 _e2e_call_hook('test_hook_before_sql_batch', $hook_args);
             }
 
-            $cursor = $reader->get_reentrancy_cursor();
             $gz->write(
                 "--{$boundary}\r\n" .
                 "Content-Type: application/sql\r\n" .
@@ -954,7 +1067,7 @@ function endpoint_sql_chunk(
 
             $batches_processed++;
 
-            if ($reader->is_finished()) {
+            if ($reader->is_finished() && $deferred_fragment === null) {
                 break;
             }
         }
@@ -965,7 +1078,9 @@ function endpoint_sql_chunk(
     }
 
     // Best-effort completion chunk — the client already has the data chunks.
-    $status = $aborted ? "partial" : ($reader->is_finished() ? "complete" : "partial");
+    $status = $aborted
+        ? "partial"
+        : ($reader->is_finished() && $deferred_fragment === null ? "complete" : "partial");
 
     // E2E test hook: before completion chunk
     if (getenv('SITE_EXPORT_TEST_MODE')) {

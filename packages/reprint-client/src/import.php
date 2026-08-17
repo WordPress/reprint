@@ -11,9 +11,11 @@
  */
 
 use Reprint\Importer\CurlTimeoutException;
+use Reprint\Importer\DatabaseUrlRewriteProcessor;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\Pull\PullFailureReportedException;
 use Reprint\Importer\State\DatabaseApplyCommandState;
+use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
 use Reprint\Importer\State\DatabaseTableIndexState;
 use Reprint\Importer\State\FetchListProgressState;
 use Reprint\Importer\State\FileDiffProgressState;
@@ -29,6 +31,8 @@ use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
 use function Reprint\Importer\sort_index_file;
+use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
+use function Reprint\Importer\write_local_index_entry;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
 use function WordPress\Reprint\Exporter\assert_valid_path;
@@ -80,8 +84,11 @@ require_once __DIR__ . '/lib/host/load.php';
 // Load target runtime appliers (consume a manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
 
+require_once __DIR__ . '/lib/merge/load.php';
+
 require_once __DIR__ . '/lib/sort-index-file.php';
 require_once __DIR__ . '/lib/local-index-update-functions.php';
+require_once __DIR__ . '/lib/index/class-file-index-diff-processor.php';
 require_once __DIR__ . '/lib/class-reprint-process-lock.php';
 
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
@@ -104,6 +111,8 @@ require_once __DIR__ . '/lib/pull/class-pull.php';
 
 // Pull index reader and the WAL for completed files-pull mutations.
 require_once __DIR__ . '/lib/pull/class-remote-index-reader.php';
+require_once __DIR__ . '/lib/pull/class-remote-to-local-path-mapper.php';
+require_once __DIR__ . '/lib/pull/class-mapped-remote-index-builder.php';
 require_once __DIR__ . '/lib/pull/class-pull-index-journal.php';
 
 /**
@@ -154,12 +163,13 @@ class ImportClient
         "files-stats",
         "db-pull",
         "db-index",
-        "db-domains",
         "db-apply",
+        "db-rewrite-urls",
         "pull-metadata",
         "preflight",
         "preflight-assert",
         "flat-docroot",
+        "merge-wp-content",
         "apply-runtime",
     ];
 
@@ -169,6 +179,11 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
+    private const MYSQL_IMPORT_PROGRESS_TABLE_PREFIX = "__reprint_db_pull_progress_";
+    // Change this UUID whenever the progress-table schema changes.
+    private const MYSQL_IMPORT_PROGRESS_TABLE =
+        self::MYSQL_IMPORT_PROGRESS_TABLE_PREFIX . "49acb118-a97a-45c7-814d-8e670db7f6b4";
+    private const MYSQL_SQL_GROUP_MARKER = "-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 ";
 
     /**
      * Maximum number of consecutive interrupted responses with no cursor
@@ -240,8 +255,14 @@ class ImportClient
      */
     private $next_remote_index_file;
 
+    /** @var string Current remote index sorted by mapped local relative path. */
+    private $mapped_remote_index_file;
+
     /** @var string Path to pull/fetch-list.jsonl — files to download, computed by comparing the next remote index with the remote index. */
     private $fetch_list_file;
+
+    /** @var string Path to the replacement fetch list built during mirror planning. */
+    private $fetch_list_replacement_file;
 
     /** @var string Path to audit.log — append-only log of every operation for debugging. */
     private $audit_log_file;
@@ -313,6 +334,9 @@ class ImportClient
      */
     private $include_caches = false;
 
+    /** @var string `mirror` or `catch-up`. */
+    private $files_pull_mode = "catch-up";
+
     /**
      * @var string Controls behavior when the filesystem root is non-empty at pull start.
      *
@@ -357,6 +381,9 @@ class ImportClient
      * the identity mapping beneath the filesystem root.
      */
     private $resolved_path_mappings = [];
+
+    /** @var RemoteToLocalPathMapper|null Resolved pull mapping for the current invocation. */
+    private $remote_to_local_path_mapper = null;
 
     /**
      * @var array<int,string> Resolved `--include` file paths: a list of real source
@@ -449,7 +476,8 @@ class ImportClient
         string $remote_reprint_api_url,
         string $state_dir,
         string $filesystem_root,
-        ?string $signal_handling_command = null
+        ?string $signal_handling_command = null,
+        ?string $selected_remote_state_directory = null
     )
     {
         // Register the command's signal behavior before constructor work can
@@ -461,6 +489,9 @@ class ImportClient
             }
             if ($signal_handling_command === 'files-push') {
                 $this->enable_files_push_signal_handling();
+            } elseif ($signal_handling_command === 'db-rewrite-urls') {
+                pcntl_signal(SIGINT, [$this, 'handle_database_url_rewrite_shutdown']);
+                pcntl_signal(SIGTERM, [$this, 'handle_database_url_rewrite_shutdown']);
             } elseif ($signal_handling_command !== 'files-diff') {
                 // files-diff must not save the pull command's state from a
                 // shutdown handler; default signal behavior ends the report.
@@ -472,10 +503,12 @@ class ImportClient
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
         $this->state_dir = trim_right_slash($state_dir);
         $this->filesystem_root = trim_right_slash($filesystem_root);
-        $remote_state_directory = self::remote_state_directory_path(
-            $this->remote_reprint_api_url,
-            $this->state_dir
-        );
+        $remote_state_directory = $selected_remote_state_directory === null
+            ? self::remote_state_directory_path(
+                $this->remote_reprint_api_url,
+                $this->state_dir
+            )
+            : trim_right_slash($selected_remote_state_directory);
         $this->pull_state_directory = wp_join_unix_paths($remote_state_directory, "pull");
         $this->local_index_file = wp_join_unix_paths($remote_state_directory, "local_index.jsonl");
         $this->pull_state_file = wp_join_unix_paths($this->pull_state_directory, "state.json");
@@ -484,8 +517,12 @@ class ImportClient
             wp_join_unix_paths($this->pull_state_directory, "index.wal");
         $this->next_remote_index_file =
             wp_join_unix_paths($this->pull_state_directory, "remote-index.next.jsonl");
+        $this->mapped_remote_index_file =
+            wp_join_unix_paths($this->pull_state_directory, "remote-index.local-map.jsonl");
         $this->fetch_list_file =
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl");
+        $this->fetch_list_replacement_file =
+            wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl.new");
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
         $this->volatile_files_file = wp_join_unix_paths($this->pull_state_directory, "volatile-files.json");
         $this->progress_file = wp_join_unix_paths($this->state_dir, "progress.json");
@@ -628,6 +665,8 @@ class ImportClient
         if ($assert_remap) {
             $this->assert_resolved_path_mappings_consistent();
         }
+
+        $this->remote_to_local_path_mapper = null;
     }
 
     /**
@@ -640,9 +679,9 @@ class ImportClient
      */
     public function audit_log_argv(string $command, array $argv): void
     {
-        // Mask the remote URL (argv[2]) to avoid logging secrets embedded in query strings.
+        // Mask the positional remote URL to avoid logging secrets embedded in query strings.
         $masked = $argv;
-        if (isset($masked[2])) {
+        if (isset($masked[2]) && strpos($masked[2], '-') !== 0) {
             $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
             if ($command === 'files-push') {
                 $masked[2] = self::mask_url_credentials($masked[2]);
@@ -913,6 +952,74 @@ class ImportClient
             return;
         }
 
+        if (in_array($command, ["pull", "pull-files", "files-pull"], true)) {
+            $requested_files_pull_mode = $options["files_pull_mode"] ?? null;
+            if (
+                $requested_files_pull_mode !== null
+                && !in_array($requested_files_pull_mode, ["mirror", "catch-up"], true)
+            ) {
+                throw new InvalidArgumentException(
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option value, never HTML.
+                    "Invalid --mode value: {$requested_files_pull_mode}. Valid values: mirror, catch-up"
+                );
+            }
+            $saved_files_pull_mode = $this->get_state()->files_pull_mode;
+            if (
+                !$abort
+                && $requested_files_pull_mode !== null
+                && $requested_files_pull_mode !== $saved_files_pull_mode
+                && $this->get_state()->active_resumable_command->command_name === "files-pull"
+            ) {
+                throw new RuntimeException(
+                    "Cannot change --mode after files-pull starts. Use --abort first."
+                );
+            }
+            $this->files_pull_mode =
+                $requested_files_pull_mode ?? $saved_files_pull_mode;
+
+            $effective_filter = $options["filter"]
+                ?? $this->get_state()->filter
+                ?? "none";
+            $effective_nonempty_behavior = $options["fs_root_nonempty_behavior"]
+                ?? $this->get_state()->fs_root_nonempty_behavior
+                ?? "error";
+            if (
+                !$abort
+                && $this->files_pull_mode === "mirror"
+                && (
+                    !empty($options["include"] ?? $options["only"] ?? [])
+                    || !empty($options["exclude"] ?? [])
+                    || $this->include_caches
+                    || $effective_filter !== "none"
+                    || $effective_nonempty_behavior === "preserve-local"
+                )
+            ) {
+                throw new InvalidArgumentException(
+                    "--mode=mirror requires a full pull without --include, --exclude, "
+                    . "--include-caches, a partial --filter, or "
+                    . "--on-fs-root-nonempty=preserve-local."
+                );
+            }
+            $absolute_state_directory = realpath_with_missing_tail(
+                $this->state_dir[0] === "/"
+                    ? $this->state_dir
+                    : wp_join_unix_paths(getcwd() ?: "/", $this->state_dir)
+            );
+            if (
+                !$abort
+                && $this->files_pull_mode === "mirror"
+                && relative_path_under(
+                    $absolute_state_directory,
+                    $this->filesystem_root
+                ) !== null
+            ) {
+                throw new InvalidArgumentException(
+                    "--mode=mirror requires --state-dir to be outside --fs-root."
+                );
+            }
+            $this->get_state()->files_pull_mode = $this->files_pull_mode;
+        }
+
         // Persist follow_symlinks in state so it survives across invocations.
         // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
         if (isset($options["follow_symlinks"])) {
@@ -1129,17 +1236,16 @@ class ImportClient
             return;
         }
 
-        // db-domains and db-apply are local-only commands that don't need a remote server.
-        if ($command === "db-domains") {
-            $this->run_db_domains();
-            return;
-        }
         if ($command === "files-stats") {
             $this->run_files_stats();
             return;
         }
         if ($command === "flat-docroot") {
             $this->run_flat_document_root($options);
+            return;
+        }
+        if ($command === "merge-wp-content") {
+            $this->run_merge_wp_content($options);
             return;
         }
         if ($command === "apply-runtime") {
@@ -1163,6 +1269,32 @@ class ImportClient
                     "status" => "error",
                     "error" => $e->getMessage(),
                     "error_code" => $this->last_error_code,
+                    "message" => "Error: " . $e->getMessage(),
+                ]);
+                $this->write_progress_file($e->getMessage());
+                throw $e;
+            }
+            return;
+        }
+        if ($command === "db-rewrite-urls") {
+            if ($abort) {
+                $this->handle_abort($command);
+                return;
+            }
+            try {
+                $this->run_db_rewrite_urls($options);
+                $final_status = $this->get_state()->active_resumable_command->completion_state ?? "complete";
+                $this->output_progress([
+                    "status" => $final_status,
+                    "message" => "db-rewrite-urls {$final_status}",
+                ]);
+                if ($final_status === "partial") {
+                    $this->exit_code = 2;
+                }
+            } catch (Exception $e) {
+                $this->output_progress([
+                    "status" => "error",
+                    "error" => $e->getMessage(),
                     "message" => "Error: " . $e->getMessage(),
                 ]);
                 $this->write_progress_file($e->getMessage());
@@ -2161,6 +2293,20 @@ class ImportClient
         die("\nForced exit.\n");
     }
 
+    /** Stops after the active database record step reaches its durable cursor. */
+    // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- PHP passes the signal number to handlers.
+    public function handle_database_url_rewrite_shutdown(int $signal): void
+    {
+        if (!$this->shutdown_requested) {
+            $this->shutdown_requested = true;
+            return;
+        }
+        if (function_exists('posix_kill') && function_exists('posix_getpid')) {
+            posix_kill(posix_getpid(), SIGKILL);
+        }
+        die("\nForced exit.\n");
+    }
+
     /** Installs the files-push first-signal stop behavior when PCNTL exists. */
     public function enable_files_push_signal_handling(): void
     {
@@ -2228,18 +2374,21 @@ class ImportClient
                         );
                     }
                 }
+                $session_setup_file = wp_join_unix_paths(
+                    $this->state_dir,
+                    "db-session-setup.sql",
+                );
+                if (file_exists($session_setup_file)) {
+                    unlink($session_setup_file);
+                    $this->audit_log(
+                        "FILE DELETE | {$session_setup_file} | abort db-pull",
+                    );
+                }
                 $tables_file = wp_join_unix_paths($this->state_dir, "db-tables.jsonl");
                 if (file_exists($tables_file)) {
                     unlink($tables_file);
                     $this->audit_log(
                         "FILE DELETE | {$tables_file} | abort db-pull",
-                    );
-                }
-                $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
-                if (file_exists($domains_file)) {
-                    unlink($domains_file);
-                    $this->audit_log(
-                        "FILE DELETE | {$domains_file} | abort db-pull",
                     );
                 }
                 break;
@@ -2269,6 +2418,28 @@ class ImportClient
                 $this->reset_state();
                 $this->save_state();
                 break;
+
+            case "db-rewrite-urls":
+                $active_command = $this->get_state()->active_resumable_command;
+                if (
+                    $active_command->command_name !== null
+                    && $active_command->command_name !== 'db-rewrite-urls'
+                    && $active_command->completion_state !== 'complete'
+                ) {
+                    throw new RuntimeException(
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error, never HTML.
+                        "Cannot abort db-rewrite-urls while {$active_command->command_name} is incomplete."
+                    );
+                }
+                $this->audit_log(
+                    "RESTART | Clearing db-rewrite-urls state",
+                    true,
+                );
+                $this->get_state()->active_resumable_command =
+                    new \Reprint\Importer\State\ResumableCommandCheckpointState();
+                $this->get_state()->database_url_rewrite = new DatabaseUrlRewriteCommandState();
+                $this->save_state();
+                break;
         }
 
         $this->progress->show_lifecycle_line("State cleared for {$command}.\n");
@@ -2286,15 +2457,24 @@ class ImportClient
             "RESTART | Clearing files-pull progress (keeping remote index and files)",
             true,
         );
-        // Replay the pull index WAL before clearing the cursor which made its records durable.
-        $this->pull_index_journal->apply_pending_records();
-        $this->pull_index_journal->remove_empty_wal();
         $this->reset_state();
 
         if (file_exists($this->next_remote_index_file)) {
             @unlink($this->next_remote_index_file);
             $this->audit_log("FILE DELETE | {$this->next_remote_index_file}");
         }
+        foreach (
+            [$this->mapped_remote_index_file, $this->fetch_list_replacement_file]
+            as $mirror_work_file
+        ) {
+            if (file_exists($mirror_work_file)) {
+                @unlink($mirror_work_file);
+                $this->audit_log("FILE DELETE | {$mirror_work_file}");
+            }
+        }
+        $this->remove_local_plan_directory(
+            wp_join_unix_paths($this->pull_state_directory, "mirror-plan")
+        );
         if (file_exists($this->fetch_list_file)) {
             @unlink($this->fetch_list_file);
             $this->audit_log("FILE DELETE | {$this->fetch_list_file}");
@@ -2306,7 +2486,12 @@ class ImportClient
         $this->get_state()->index = new RemoteFileIndexCursorState();
         $this->get_state()->fetch = new FetchListProgressState();
 
+        // Applying the WAL replaces the remote index read by the diff cursor.
+        // Save the cleared cursor first. If applying the WAL stops partway, the
+        // next run starts with the cleared cursor and applies the WAL again.
         $this->save_state();
+        $this->pull_index_journal->apply_pending_records();
+        $this->pull_index_journal->remove_empty_wal();
     }
 
     /**
@@ -2932,18 +3117,25 @@ class ImportClient
             );
         }
 
-        $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
+        $active_resumable_command =
+            $this->get_state()->active_resumable_command;
+        $state_command = $active_resumable_command->command_name ?? null;
 
         $current_status =
             $state_command === "files-pull"
-                ? $this->get_state()->active_resumable_command->completion_state ?? null
+                ? $active_resumable_command->completion_state ?? null
                 : null;
         $has_progress =
             $state_command === "files-pull" &&
             $current_status !== null &&
             $current_status !== "complete";
 
-        $this->pull_index_journal->apply_pending_records();
+        $resuming_diff =
+            $has_progress
+            && $active_resumable_command->current_stage === "diff";
+        if (!$resuming_diff) {
+            $this->pull_index_journal->apply_pending_records();
+        }
         $this->assert_files_pull_path_selection_unchanged_while_resuming($has_progress);
         $this->assert_local_followed_symlinks_root_unchanged();
 
@@ -3019,7 +3211,12 @@ class ImportClient
             // Starting fresh — validate that the filesystem root is empty.
             // A delta sync ($is_delta) naturally has a non-empty filesystem root
             // because we put those files there during the initial sync.
-            if (!$is_empty && !$is_delta && $this->fs_root_nonempty_behavior === 'error') {
+            if (
+                $this->files_pull_mode === "catch-up"
+                && !$is_empty
+                && !$is_delta
+                && $this->fs_root_nonempty_behavior === 'error'
+            ) {
                 throw new RuntimeException(
                     "Filesystem root is not empty and no cursor found. " .
                         "Either clear the filesystem root, use --abort flag, or use --on-fs-root-nonempty=preserve-local to sync while preserving the existing content.",
@@ -3080,9 +3277,12 @@ class ImportClient
         $this->get_state()->active_resumable_command->completion_state = "in_progress";
         $this->save_state();
 
-        $this->pull_index_journal->open();
         $stage = $this->get_state()->active_resumable_command->current_stage ?? "index";
+        if ($stage !== "diff") {
+            $this->pull_index_journal->open();
+        }
 
+        $starting_diff_stage = false;
         if ($stage === "index") {
             $complete = $this->fetch_next_remote_index();
             if (!$complete) {
@@ -3099,8 +3299,32 @@ class ImportClient
                 }
             }
             $this->sort_next_remote_index_file();
+            if ($this->files_pull_mode === "mirror") {
+                $stage = "local-index";
+                $this->get_state()->active_resumable_command->current_stage = $stage;
+                $this->pull_index_journal->close();
+                $this->save_state();
+            } else {
+                $starting_diff_stage = true;
+            }
+        }
+
+        if ($stage === "local-index") {
+            $this->ensure_local_index_exists();
+            MappedRemoteIndexBuilder::build([
+                "remote_index_file" => $this->next_remote_index_file,
+                "mapped_remote_index_file" => $this->mapped_remote_index_file,
+                "filesystem_root" => $this->filesystem_root,
+                "path_mapper" => $this->path_mapper(),
+            ]);
+            $this->build_files_pull_mirror_local_changes();
+            $starting_diff_stage = true;
+        }
+
+        if ($starting_diff_stage) {
             $this->get_state()->active_resumable_command->current_stage = "diff";
             $this->get_state()->diff = new FileDiffProgressState();
+            $this->pull_index_journal->close();
             if (file_exists($this->fetch_list_file)) {
                 @unlink($this->fetch_list_file);
                 $this->audit_log(
@@ -3111,6 +3335,8 @@ class ImportClient
             $stage = "diff";
         }
 
+        $starting_mirror_stage = false;
+        $starting_fetch_stage = false;
         if ($stage === "diff") {
             $complete = $this->compare_remote_indexes_and_build_fetch_list();
             if (!$complete) {
@@ -3119,12 +3345,38 @@ class ImportClient
                 return;
             }
 
+            if ($this->files_pull_mode === "mirror") {
+                $stage = "mirror";
+                $this->get_state()->active_resumable_command->current_stage = $stage;
+                $this->save_state();
+                $starting_mirror_stage = true;
+            } else {
+                $starting_fetch_stage = true;
+            }
+        }
+
+        if ($stage === "mirror") {
+            if ($starting_mirror_stage) {
+                $this->pull_index_journal->open();
+            }
+            $this->build_files_pull_mirror_fetch_list();
+            $this->pull_index_journal->flush();
+            $starting_fetch_stage = true;
+        }
+
+        if ($starting_fetch_stage) {
             $has_files_to_fetch =
                 file_exists($this->fetch_list_file) &&
                 filesize($this->fetch_list_file) > 0;
-            $stage = $has_files_to_fetch ? "fetch" : null;
+            $stage = "fetch";
             $this->get_state()->active_resumable_command->current_stage = $stage;
+            // Save the fetch stage before applying the WAL. From this stage,
+            // startup applies any pending WAL before it resumes the fetch list.
             $this->save_state();
+            $this->pull_index_journal->apply_pending_records();
+            $this->remove_local_plan_directory(
+                wp_join_unix_paths($this->pull_state_directory, "mirror-plan")
+            );
 
             // In pull mode, finalize the scanning line with a checkmark
             // and start the download progress on a fresh line.
@@ -3167,8 +3419,6 @@ class ImportClient
                 );
             }
 
-            $this->get_state()->active_resumable_command->current_stage = null;
-            $this->save_state();
         }
 
         // Recreate intermediate path symlinks so the full symlink chain
@@ -3181,6 +3431,7 @@ class ImportClient
 
         $this->ensure_local_index_exists();
         $this->get_state()->active_resumable_command->completion_state = "complete";
+        $this->get_state()->active_resumable_command->current_stage = null;
         $this->save_state();
         $this->pull_index_journal->remove_empty_wal();
 
@@ -3206,6 +3457,186 @@ class ImportClient
         ], true);
 
         $this->report_volatile_files();
+    }
+
+    /** Saves the local-before to local-now changes before remote work begins. */
+    private function build_files_pull_mirror_local_changes(): void
+    {
+        $plan_directory = wp_join_unix_paths(
+            $this->pull_state_directory,
+            "mirror-plan"
+        );
+        $this->remove_local_plan_directory($plan_directory);
+        if (!mkdir($plan_directory, 0755, true)) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem path, never HTML output.
+            throw new RuntimeException(
+                "Failed to create the mirror plan directory: {$plan_directory}."
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
+        $fresh_local_index_file = wp_join_unix_paths(
+            $plan_directory,
+            "fresh-local-index.jsonl"
+        );
+        $fresh_local_index_handle = fopen($fresh_local_index_file, "wb");
+        if (!is_resource($fresh_local_index_handle)) {
+            throw new RuntimeException("Failed to create the fresh local index.");
+        }
+        $file_index_processor = FileIndexProcessor::start(
+            [$this->filesystem_root],
+            $this->filesystem_root,
+            false,
+            false,
+            $plan_directory
+        );
+        try {
+            while ($file_index_processor->next_index_step()) {
+                $status = $file_index_processor->get_step_status();
+                if ($status === FileIndexProcessor::STATUS_DIRECTORY_ERROR) {
+                    $error = $file_index_processor->get_directory_error();
+                    throw new RuntimeException(
+                        $error["message"] . ": " . base64_encode($error["path"]) . "."
+                    );
+                }
+                if ($status === FileIndexProcessor::STATUS_INDEXED) {
+                    foreach ($file_index_processor->get_index_entries() as $entry) {
+                        write_file_index_processor_entry_to_local_index(
+                            $fresh_local_index_handle,
+                            $entry,
+                            $this->filesystem_root
+                        );
+                    }
+                }
+            }
+            if (!fflush($fresh_local_index_handle)) {
+                throw new RuntimeException("Failed to flush the fresh local index.");
+            }
+        } finally {
+            $file_index_processor->close();
+            fclose($fresh_local_index_handle);
+        }
+        if (!sort_index_file($fresh_local_index_file)) {
+            throw new RuntimeException("Failed to sort the fresh local index.");
+        }
+
+        $changed_local_paths_file = wp_join_unix_paths(
+            $plan_directory,
+            "changed-local-paths.jsonl"
+        );
+        $changed_local_paths_handle = fopen($changed_local_paths_file, "wb");
+        if (!is_resource($changed_local_paths_handle)) {
+            throw new RuntimeException("Failed to create the changed local paths index.");
+        }
+        $local_index_diff = FileIndexDiffProcessor::create(
+            $this->local_index_file,
+            $fresh_local_index_file
+        );
+        try {
+            while ($local_index_diff->next_path()) {
+                if ($local_index_diff->get_path_transition() === "unchanged") {
+                    continue;
+                }
+                $entry = $local_index_diff->get_entry_in_new_index()
+                    ?? $local_index_diff->get_entry_in_old_index();
+                if ($entry === null) {
+                    throw new LogicException("A changed local path has no local index entry.");
+                }
+                write_local_index_entry($changed_local_paths_handle, $entry);
+            }
+            if (!fflush($changed_local_paths_handle)) {
+                throw new RuntimeException("Failed to flush the changed local paths index.");
+            }
+        } finally {
+            $local_index_diff->close();
+            fclose($changed_local_paths_handle);
+        }
+    }
+
+    /** Adds the saved local changes to the completed remote-diff fetch list. */
+    private function build_files_pull_mirror_fetch_list(): void
+    {
+        $plan_directory = wp_join_unix_paths($this->pull_state_directory, "mirror-plan");
+        $changed_local_paths_file = wp_join_unix_paths(
+            $plan_directory,
+            "changed-local-paths.jsonl"
+        );
+        if (file_exists($this->fetch_list_file)) {
+            if (!copy($this->fetch_list_file, $this->fetch_list_replacement_file)) {
+                throw new RuntimeException("Failed to copy the remote-diff fetch list.");
+            }
+        } elseif (file_put_contents($this->fetch_list_replacement_file, "") !== 0) {
+            throw new RuntimeException("Failed to create the replacement fetch list.");
+        }
+
+        $fetch_list_replacement_file_handle = fopen(
+            $this->fetch_list_replacement_file,
+            "ab"
+        );
+        if (!is_resource($fetch_list_replacement_file_handle)) {
+            throw new RuntimeException("Failed to open the replacement fetch list.");
+        }
+        $decode_mapped_entry = static function (string $line): array {
+            return MappedRemoteIndexBuilder::decode_index_line($line);
+        };
+        $changed_path_diff = FileIndexDiffProcessor::create(
+            $changed_local_paths_file,
+            $this->mapped_remote_index_file,
+            null,
+            $decode_mapped_entry
+        );
+        try {
+            while ($changed_path_diff->next_path()) {
+                $local_entry = $changed_path_diff->get_entry_in_old_index();
+                if ($local_entry === null) {
+                    continue;
+                }
+                $remote_entry = $changed_path_diff->get_entry_in_new_index();
+                if ($remote_entry !== null) {
+                    /** @var array{copy_source_path:string} $remote_entry */
+                    $this->append_to_fetch_list(
+                        $remote_entry["copy_source_path"],
+                        $fetch_list_replacement_file_handle
+                    );
+                    continue;
+                }
+
+                $local_relative_path = $local_entry["path"];
+                $local_absolute_path = wp_join_unix_paths(
+                    $this->filesystem_root,
+                    $local_relative_path
+                );
+                if (
+                    !$this->remove_local_absolute_path_without_following_symlinks(
+                        $local_absolute_path
+                    )
+                ) {
+                    throw new RuntimeException(
+                        "Failed to remove a local path absent from the current remote index."
+                    );
+                }
+                $this->pull_index_journal->record_local_deletion($local_absolute_path);
+                $local_parent_path = dirname($local_absolute_path);
+                while (
+                    $local_parent_path !== $this->filesystem_root
+                    && @rmdir($local_parent_path)
+                ) {
+                    $local_parent_path = dirname($local_parent_path);
+                }
+            }
+            if (!fflush($fetch_list_replacement_file_handle)) {
+                throw new RuntimeException("Failed to flush the replacement fetch list.");
+            }
+        } finally {
+            $changed_path_diff->close();
+            fclose($fetch_list_replacement_file_handle);
+        }
+
+        if (!sort_index_file($this->fetch_list_replacement_file)) {
+            throw new RuntimeException("Failed to sort the replacement fetch list.");
+        }
+        if (!rename($this->fetch_list_replacement_file, $this->fetch_list_file)) {
+            throw new RuntimeException("Failed to replace the fetch list.");
+        }
     }
 
     /** Creates an empty local index when files-pull recorded no local paths. */
@@ -3603,7 +4034,7 @@ class ImportClient
             }
 
             try {
-                $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
+                $local_absolute_path = $this->path_mapper()->remote_path_to_local_path(
                     $remote_absolute_path
                 );
             } catch (RuntimeException $e) {
@@ -3721,7 +4152,11 @@ class ImportClient
 
         $has_progress =
             $state_command === "db-pull" &&
-            ($this->get_state()->active_resumable_command->completion_state ?? null) === "in_progress";
+            in_array(
+                $this->get_state()->active_resumable_command->completion_state ?? null,
+                ["in_progress", "partial"],
+                true,
+            );
         $current_status =
             $state_command === "db-pull"
                 ? $this->get_state()->active_resumable_command->completion_state ?? null
@@ -3749,13 +4184,19 @@ class ImportClient
 
         if ($has_progress) {
             $stage = $this->get_state()->active_resumable_command->current_stage ?? "db-index";
-            $this->audit_log(
-                sprintf(
-                    "RESUME db-pull | stage=%s | cursor=%s",
-                    $stage,
+            $this->get_state()->active_resumable_command->completion_state = "in_progress";
+            $position_summary = $this->sql_output_mode === "mysql" && $stage === "sql"
+                ? "stored in MySQL target"
+                : (
                     !empty($this->get_state()->active_resumable_command->remote_cursor)
                         ? substr($this->get_state()->active_resumable_command->remote_cursor, 0, 20) . "..."
-                        : "none",
+                        : "none"
+                );
+            $this->audit_log(
+                sprintf(
+                    "RESUME db-pull | stage=%s | position=%s",
+                    $stage,
+                    $position_summary,
                 ),
                 true,
             );
@@ -3814,7 +4255,8 @@ class ImportClient
             );
 
             // Transition to sql stage
-            $this->get_state()->active_resumable_command->current_stage = "sql";
+            $stage = $this->sql_output_mode === "mysql" ? "mysql-start" : "sql";
+            $this->get_state()->active_resumable_command->current_stage = $stage;
             $this->get_state()->active_resumable_command->remote_cursor = null;
             $this->save_state();
         }
@@ -3826,7 +4268,7 @@ class ImportClient
             "message" => "Downloading SQL dump",
         ]);
 
-        $this->fetch_sql();
+        $this->fetch_sql($stage === "mysql-start");
 
         // Interrupted response during SQL download — state already saved, exit partial.
         if (($this->get_state()->active_resumable_command->completion_state ?? null) === "partial") {
@@ -3860,82 +4302,6 @@ class ImportClient
             $db_sync_complete["sql_file"] = $sql_file;
         }
         $this->output_progress($db_sync_complete, true);
-    }
-
-    // =========================================================================
-    // db-apply: Apply SQL dump to a target MySQL database with URL rewriting
-    // =========================================================================
-
-    /**
-     * Command: db-apply
-     *
-     * Reads db.sql, optionally rewrites URLs, and executes statements against
-     * a target MySQL database. Supports resumption via statement count tracking.
-     *
-     */
-    private function run_db_domains(): void
-    {
-        $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
-        $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
-
-        if (file_exists($domains_file)) {
-            // Fast path: domains were already discovered during db-pull
-            $domains = json_decode(file_get_contents($domains_file), true);
-            if (!is_array($domains)) {
-                throw new RuntimeException(
-                    "Failed to parse {$domains_file}",
-                );
-            }
-        } elseif (file_exists($sql_file)) {
-            // Scan db.sql for domains using the same pipeline as db-pull
-            $query_stream = new \WP_MySQL_Naive_Query_Stream();
-            $domain_collector = new \DomainCollector();
-
-            $sql_handle = fopen($sql_file, "r");
-            if (!$sql_handle) {
-                throw new RuntimeException("Cannot open SQL file: {$sql_file}");
-            }
-
-            try {
-                $chunk_size = 64 * 1024;
-                while (!feof($sql_handle)) {
-                    $data = fread($sql_handle, $chunk_size);
-                    if ($data === false || $data === '') {
-                        break;
-                    }
-                    $query_stream->append_sql($data);
-                    $this->drain_query_stream_for_domains(
-                        $query_stream,
-                        $domain_collector,
-                    );
-                }
-
-                $query_stream->mark_input_complete();
-                $this->drain_query_stream_for_domains(
-                    $query_stream,
-                    $domain_collector,
-                );
-            } finally {
-                fclose($sql_handle);
-            }
-
-            $domains = $domain_collector->get_domains();
-
-            // Save for future calls
-            file_put_contents(
-                $domains_file,
-                json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-            );
-        } else {
-            throw new RuntimeException(
-                "No domain data found. Run db-pull first, or place a db.sql file in {$this->state_dir}.",
-            );
-        }
-
-        // Print one domain per line to stdout
-        foreach ($domains as $domain) {
-            echo $domain . "\n";
-        }
     }
 
     /**
@@ -4192,7 +4558,62 @@ class ImportClient
         // checks, so a bad --target-* value fails before the output directory
         // is created. The target is either stated on the command line or read
         // from what db-apply connected to.
-        $target = $this->resolve_apply_runtime_database_target($options);
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.
+        $stated_engine = $options["target_engine"] ?? null;
+        if ($stated_engine === null || $stated_engine === "") {
+            $target_flags = [
+                "target_db" => "--target-db",
+                "target_sqlite_path" => "--target-sqlite-path",
+                "target_host" => "--target-host",
+                "target_port" => "--target-port",
+                "target_user" => "--target-user",
+                "target_pass" => "--target-pass",
+            ];
+            foreach ($target_flags as $option_key => $flag) {
+                $value = $options[$option_key] ?? null;
+                if ($value === null || $value === "") {
+                    continue;
+                }
+                throw new InvalidArgumentException(
+                    "apply-runtime received {$flag} without --target-engine. " .
+                    "Add --target-engine=mysql or --target-engine=sqlite to state the database target.",
+                );
+            }
+        }
+
+        $target = $this->resolve_database_target(
+            $options,
+            $this->get_local_site_database_target(),
+            null,
+            "apply-runtime",
+        );
+
+        // DB_DIR reaches runtime.php verbatim, so absolutize a stated path
+        // here; a relative one would resolve against the server's working
+        // directory. A recorded path is used as-is — flat-docroot may have
+        // moved the tree since db-apply saved it, and apply-runtime without a
+        // new path accepts that.
+        $stated_sqlite_path = $options["target_sqlite_path"] ?? null;
+        if (
+            $target["engine"] === "sqlite"
+            && $stated_sqlite_path !== null
+            && $stated_sqlite_path !== ""
+        ) {
+            $stated_sqlite_path = (string) $stated_sqlite_path;
+            $directory = dirname($stated_sqlite_path);
+            $absolute_directory = is_dir($directory) ? realpath($directory) : false;
+            if ($absolute_directory === false) {
+                throw new InvalidArgumentException(
+                    "The directory for --target-sqlite-path={$stated_sqlite_path} does not exist: {$directory}. " .
+                    "Create it first; the database file itself is created on the first request.",
+                );
+            }
+            $target["sqlite_path"] = wp_join_unix_paths(
+                $absolute_directory,
+                basename($stated_sqlite_path),
+            );
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
         // Resolve the local document root from either --flat-document-root
         // (used as-is) or --fs-root (prefixed with the remote document_root).
@@ -4428,19 +4849,33 @@ class ImportClient
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.
     /**
-     * Resolve the database target the generated runtime should point at.
+     * Resolve command options and recorded state into one database target.
      *
-     * Without an explicit engine, apply-runtime uses the database target
-     * db-apply recorded. An explicit engine lets a caller name a database it
-     * keeps outside Reprint's db-apply stage. Options fill missing values from
-     * matching recorded state; a different engine ignores it entirely.
+     * Options fill missing values from matching recorded state. A different
+     * explicitly stated engine ignores the recorded target entirely.
      *
-     * @param array<string,mixed> $options
-     * @return array<string,mixed>
+     * @param array<string,mixed> $options Command options.
+     * @param array $recorded_target {
+     *     Previously recorded database target.
+     *
+     *     @type string|null $engine      mysql, sqlite, or null.
+     *     @type string      $db          MySQL database or SQLite logical database name.
+     *     @type string|null $sqlite_path SQLite database path.
+     *     @type string      $host        MySQL host.
+     *     @type int         $port        MySQL port.
+     *     @type string      $user        MySQL user.
+     *     @type string      $pass        MySQL password.
+     * }
+     * @param string|null $default_engine Engine used when neither options nor state specify one.
+     * @param string      $command        Command name used in errors.
+     * @return array<string,mixed> Canonical database target.
      */
-    private function resolve_apply_runtime_database_target(array $options): array
-    {
-        $recorded_target = $this->get_state()->apply;
+    private function resolve_database_target(
+        array $options,
+        array $recorded_target,
+        ?string $default_engine,
+        string $command
+    ): array {
         $stated_engine = $options["target_engine"] ?? null;
         $engine_was_stated = $stated_engine !== null && $stated_engine !== "";
 
@@ -4451,29 +4886,11 @@ class ImportClient
                     "Invalid --target-engine value: {$stated_engine}. Valid engines: mysql, sqlite.",
                 );
             }
-            if ($recorded_target->target_engine !== $engine) {
-                $recorded_target = null;
+            if (($recorded_target["engine"] ?? null) !== $engine) {
+                $recorded_target = [];
             }
         } else {
-            $target_flags = [
-                "target_db" => "--target-db",
-                "target_sqlite_path" => "--target-sqlite-path",
-                "target_host" => "--target-host",
-                "target_port" => "--target-port",
-                "target_user" => "--target-user",
-                "target_pass" => "--target-pass",
-            ];
-            foreach ($target_flags as $option_key => $flag) {
-                $value = $options[$option_key] ?? null;
-                if ($value === null || $value === "") {
-                    continue;
-                }
-                throw new InvalidArgumentException(
-                    "apply-runtime received {$flag} without --target-engine. " .
-                    "Add --target-engine=mysql or --target-engine=sqlite to state the database target.",
-                );
-            }
-            $engine = $recorded_target->target_engine;
+            $engine = $recorded_target["engine"] ?? $default_engine;
         }
 
         if ($engine === null) {
@@ -4490,40 +4907,20 @@ class ImportClient
         };
 
         if ($engine === "sqlite") {
-            // DB_DIR reaches runtime.php verbatim, so absolutize a stated path
-            // here; a relative one would resolve against the server's working
-            // directory. A recorded path is used as db-apply wrote it —
-            // flat-docroot may have moved the tree since, and apply-runtime
-            // without options accepts that.
-            $stated_sqlite_path = $options["target_sqlite_path"] ?? null;
-            if ($stated_sqlite_path !== null && $stated_sqlite_path !== "") {
-                $stated_sqlite_path = (string) $stated_sqlite_path;
-                $directory = dirname($stated_sqlite_path);
-                $absolute_directory = is_dir($directory) ? realpath($directory) : false;
-                if ($absolute_directory === false) {
-                    throw new InvalidArgumentException(
-                        "The directory for --target-sqlite-path={$stated_sqlite_path} does not exist: {$directory}. " .
-                        "Create it first; the database file itself is created on the first request.",
-                    );
-                }
-                $sqlite_path = wp_join_unix_paths(
-                    $absolute_directory,
-                    basename($stated_sqlite_path),
-                );
-            } else {
-                $sqlite_path = $recorded_target === null
-                    ? null
-                    : $recorded_target->target_sqlite_path;
-                if ($sqlite_path === "") {
-                    $sqlite_path = null;
-                }
+            $sqlite_path = $option_then_recorded(
+                $options["target_sqlite_path"] ?? null,
+                $recorded_target["sqlite_path"] ?? null,
+                null,
+            );
+            if ($sqlite_path === "") {
+                $sqlite_path = null;
             }
 
             return [
                 "engine" => "sqlite",
                 "db" => (string) $option_then_recorded(
                     $options["target_db"] ?? null,
-                    $recorded_target === null ? null : $recorded_target->target_db,
+                    $recorded_target["db"] ?? null,
                     "sqlite_database",
                 ),
                 "sqlite_path" => $sqlite_path === null ? null : (string) $sqlite_path,
@@ -4534,43 +4931,83 @@ class ImportClient
             "engine" => "mysql",
             "db" => (string) $option_then_recorded(
                 $options["target_db"] ?? null,
-                $recorded_target === null ? null : $recorded_target->target_db,
+                $recorded_target["db"] ?? null,
                 "",
             ),
             "host" => (string) $option_then_recorded(
                 $options["target_host"] ?? null,
-                $recorded_target === null ? null : $recorded_target->target_host,
+                $recorded_target["host"] ?? null,
                 "127.0.0.1",
             ),
             "port" => (int) $option_then_recorded(
                 $options["target_port"] ?? null,
-                $recorded_target === null ? null : $recorded_target->target_port,
+                $recorded_target["port"] ?? null,
                 3306,
             ),
             "user" => (string) $option_then_recorded(
                 $options["target_user"] ?? null,
-                $recorded_target === null ? null : $recorded_target->target_user,
+                $recorded_target["user"] ?? null,
                 "",
             ),
             "pass" => (string) $option_then_recorded(
                 $options["target_pass"] ?? null,
-                $recorded_target === null ? null : $recorded_target->target_pass,
+                $recorded_target["pass"] ?? null,
                 "",
             ),
         ];
 
-        if ($engine_was_stated) {
+        if ($default_engine !== null || $engine_was_stated) {
             foreach (["user" => "--target-user", "db" => "--target-db"] as $field => $flag) {
                 if ($target[$field] === "") {
                     throw new InvalidArgumentException(
-                        "apply-runtime with --target-engine=mysql requires {$flag}: " .
-                        "neither the command line nor the recorded db-apply target supplied one.",
+                        "{$command} with --target-engine=mysql requires {$flag}: " .
+                        "neither the command line nor the recorded database target supplied one.",
                     );
                 }
             }
         }
 
         return $target;
+    }
+
+    /**
+     * Return the local site database target recorded by db-apply.
+     *
+     * @return array {
+     *     Recorded database target.
+     *
+     *     @type string|null $engine      mysql, sqlite, or null.
+     *     @type string      $db          MySQL database or SQLite logical database name.
+     *     @type string|null $sqlite_path SQLite database path.
+     *     @type string      $host        MySQL host.
+     *     @type int         $port        MySQL port.
+     *     @type string      $user        MySQL user.
+     *     @type string      $pass        MySQL password.
+     * }
+     */
+    private function get_local_site_database_target(): array
+    {
+        $apply_state = $this->get_state()->apply;
+        if ($apply_state->target_engine === null) {
+            return ["engine" => null];
+        }
+
+        if ($apply_state->target_engine === "sqlite") {
+            return [
+                "engine" => "sqlite",
+                "db" => $apply_state->target_db,
+                "sqlite_path" => $apply_state->target_sqlite_path,
+            ];
+        }
+
+        return [
+            "engine" => "mysql",
+            "db" => $apply_state->target_db,
+            "host" => $apply_state->target_host,
+            "port" => $apply_state->target_port,
+            "user" => $apply_state->target_user,
+            "pass" => $apply_state->target_pass,
+        ];
     }
 
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
@@ -4663,6 +5100,148 @@ class ImportClient
 
         return null;
     }
+
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions carry CLI option values and filesystem paths, never HTML output.
+    /** Move source-only wp-content entries into the pulled tree. */
+    public function run_merge_wp_content(array $options): void
+    {
+        $from = $options["from"] ?? null;
+        if (empty($from)) {
+            throw new InvalidArgumentException(
+                "merge-wp-content requires --from=DIR, the wp-content directory to merge in.",
+            );
+        }
+        // Keep a lexical absolute path because --from may not exist yet.
+        $from = trim_right_slash($from);
+        if (strpos($from, "/") !== 0) {
+            $from = normalize_path(wp_join_unix_paths(getcwd(), $from));
+        }
+        // A WordPress root passed by mistake would move wp-admin, wp-includes
+        // and wp-config.php into the pulled wp-content.
+        if (is_file(wp_join_unix_paths($from, "wp-load.php"))
+            || is_dir(wp_join_unix_paths($from, "wp-includes"))
+        ) {
+            throw new InvalidArgumentException(
+                "--from must name a wp-content directory, but {$from} is a WordPress root. " .
+                    "Pass the content directory inside it.",
+            );
+        }
+
+        $this->require_preflight();
+        $this->assert_file_pull_completed();
+        $state = $this->get_state();
+
+        // WP_CONTENT_DIR defaults to ABSPATH/wp-content.
+        $content_dir = $this->clean_preflight_path(
+            $state->get('preflight.database.wp.paths_urls.content_dir')
+        );
+        if ($content_dir === null) {
+            $abspath = $this->clean_preflight_path(
+                $state->get('preflight.database.wp.paths_urls.abspath')
+            );
+            if ($abspath === null) {
+                throw new RuntimeException(
+                    "Cannot determine where wp-content lives from preflight data. " .
+                        "Run preflight first to detect the WordPress installation.",
+                );
+            }
+            $content_dir = wp_join_unix_paths($abspath, "wp-content");
+        }
+
+        $destination_wp_content = wp_join_unix_paths($this->filesystem_root, $content_dir);
+        $source_wp_content = $from;
+
+        $component_destinations = [];
+        foreach ([
+            "plugins" => 'preflight.database.wp.paths_urls.plugins_dir',
+            "mu-plugins" => 'preflight.database.wp.paths_urls.mu_plugins_dir',
+            "uploads" => 'preflight.database.wp.paths_urls.uploads.basedir',
+        ] as $conventional_name => $preflight_path) {
+            $component_dir = $this->clean_preflight_path($state->get($preflight_path));
+            if ($component_dir !== null) {
+                $component_destinations[$conventional_name] = wp_join_unix_paths(
+                    $this->filesystem_root,
+                    $component_dir
+                );
+            }
+        }
+
+        // Guard only a real source directory. A flattened one resolves to the
+        // destination, and the merge below already does nothing with it.
+        if (!is_link($source_wp_content) && is_dir($source_wp_content)) {
+            foreach (array_merge([$destination_wp_content], array_values($component_destinations)) as $destination) {
+                $this->assert_merge_paths_do_not_overlap($source_wp_content, $destination);
+            }
+        }
+
+        $this->audit_log(
+            "MERGE-WP-CONTENT | {$source_wp_content} -> {$destination_wp_content}",
+        );
+        $merger = new WpContentMerger(
+            $source_wp_content,
+            $destination_wp_content,
+            $component_destinations,
+            function (string $line): void {
+                $this->audit_log("MERGE-WP-CONTENT | {$line}");
+            }
+        );
+        $moved = $merger->merge();
+
+        $this->audit_log(
+            "MERGE-WP-CONTENT | Complete: {$moved} moved",
+            true,
+        );
+
+        $result = [
+            "status" => "complete",
+            "from" => $source_wp_content,
+            "to" => $destination_wp_content,
+            "fs_root" => $this->filesystem_root,
+            "content_dir" => $content_dir,
+            "moved" => $moved,
+        ];
+        if (!$this->progress->is_mode('pipeline')) {
+            fwrite($this->progress_fd, json_encode($result) . "\n");
+        }
+        $this->output_progress(array_merge(["type" => "merge_wp_content_complete"], $result));
+    }
+
+    /** Refuse to merge until files-pull has completed. */
+    private function assert_file_pull_completed(): void
+    {
+        if (is_file($this->pull_index_wal_path)) {
+            throw new RuntimeException(
+                "Finish or abort the interrupted files-pull before running merge-wp-content.",
+            );
+        }
+        if (!is_file($this->local_index_file)) {
+            throw new RuntimeException(
+                "merge-wp-content requires a completed file pull: {$this->local_index_file} " .
+                    "does not exist yet. Run files-pull first.",
+            );
+        }
+    }
+
+    /** Refuse overlapping source and destination paths. */
+    private function assert_merge_paths_do_not_overlap(
+        string $source_wp_content,
+        string $destination
+    ): void {
+        $resolved_source = realpath_with_missing_tail($source_wp_content);
+        $resolved_destination = realpath_with_missing_tail($destination);
+        if (
+            !path_is_same_as_or_descendant_of($resolved_source, $resolved_destination)
+            && !path_is_same_as_or_descendant_of($resolved_destination, $resolved_source)
+        ) {
+            return;
+        }
+        throw new InvalidArgumentException(
+            "merge-wp-content cannot merge {$source_wp_content} into {$destination}: " .
+                "they resolve to {$resolved_source} and {$resolved_destination}, " .
+                "so one holds the other.",
+        );
+    }
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     /**
      * Command: flat-docroot
@@ -5256,10 +5835,244 @@ class ImportClient
         rmdir($dir);
     }
 
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI errors are never HTML.
+    /** Rewrite URL-bearing values in an existing database one record at a time. */
+    public function run_db_rewrite_urls(array $options): void
+    {
+        $this->resolve_new_site_url_option($options);
+        $url_mapping = [];
+        if (!empty($options['rewrite_url'])) {
+            foreach ($options['rewrite_url'] as [$source_url, $target_url]) {
+                $url_mapping[$source_url] = $target_url;
+            }
+        }
+
+        $active_command = $this->get_state()->active_resumable_command;
+        if (
+            $active_command->command_name !== null
+            && $active_command->command_name !== 'db-rewrite-urls'
+            && $active_command->completion_state !== 'complete'
+        ) {
+            throw new RuntimeException(
+                "Finish or abort the incomplete {$active_command->command_name} command "
+                . 'before running db-rewrite-urls.'
+            );
+        }
+        $current_status = $active_command->command_name === 'db-rewrite-urls'
+            ? $active_command->completion_state
+            : null;
+        if ($current_status === 'complete') {
+            throw new RuntimeException(
+                'db-rewrite-urls already completed. Use --abort to start another lifecycle.'
+            );
+        }
+
+        $rewrite_state = $this->get_state()->database_url_rewrite;
+        $is_resume = in_array($current_status, ['in_progress', 'partial'], true);
+
+        $local_site_database_target = $this->get_local_site_database_target();
+        $recorded_target = $is_resume ? ( $rewrite_state->target ?? [] ) : $local_site_database_target;
+        if ($is_resume && ($recorded_target['engine'] ?? null) === 'mysql') {
+            $local_site_database_identity = $local_site_database_target;
+            unset($local_site_database_identity['pass']);
+            if ($local_site_database_identity === $recorded_target) {
+                $recorded_target['pass'] = $local_site_database_target['pass'];
+            }
+        }
+
+        if ($is_resume) {
+            if ($url_mapping === []) {
+                $url_mapping = $rewrite_state->rewrite_url ?? [];
+            } elseif ($url_mapping !== $rewrite_state->rewrite_url) {
+                throw new RuntimeException(
+                    'Cannot change --rewrite-url while db-rewrite-urls is incomplete. '
+                    . 'Finish it or use --abort.'
+                );
+            }
+        } elseif ($url_mapping === []) {
+            throw new InvalidArgumentException(
+                'db-rewrite-urls requires --rewrite-url FROM TO or --new-site-url=URL.'
+            );
+        }
+        if ($url_mapping === []) {
+            throw new RuntimeException(
+                'The saved db-rewrite-urls lifecycle has no URL mapping. Use --abort.'
+            );
+        }
+
+        $target = $this->resolve_database_target(
+            $options,
+            $recorded_target,
+            'mysql',
+            'db-rewrite-urls'
+        );
+        if ($target['engine'] === 'sqlite') {
+            $target_path = $target['sqlite_path'];
+            $resolved_target_path = is_string($target_path) ? realpath($target_path) : false;
+            if ($resolved_target_path === false || !is_file($resolved_target_path)) {
+                throw new InvalidArgumentException(
+                    'db-rewrite-urls requires an existing live SQLite database: '
+                    . (string) $target_path
+                );
+            }
+            $target['sqlite_path'] = $resolved_target_path;
+        }
+
+        $target_identity = $target;
+        unset($target_identity['pass']);
+
+        if ($is_resume) {
+            if ($target_identity !== $rewrite_state->target) {
+                throw new RuntimeException(
+                    'Cannot change the target database while db-rewrite-urls is incomplete. '
+                    . 'Reconnect to the original database or use --abort.'
+                );
+            }
+        }
+
+        [$database, $connection_label] = $this->create_target_database_connection($target, false);
+
+        if (!$is_resume) {
+            $rewrite_state = new DatabaseUrlRewriteCommandState();
+            $rewrite_state->rewrite_url = $url_mapping;
+            $rewrite_state->target = $target_identity;
+            $this->get_state()->database_url_rewrite = $rewrite_state;
+            $active_command->command_name = 'db-rewrite-urls';
+            $active_command->completion_state = 'in_progress';
+            $active_command->current_stage = 'database-records';
+            $this->save_state();
+        }
+
+        $statement_rewriter = new SqlStatementRewriter(
+            new StructuredDataUrlRewriter($url_mapping),
+            $this->get_state()->get('preflight.database.wp.table_prefix'),
+        );
+
+        $cursor = null;
+        if ($rewrite_state->cursor !== null) {
+            $cursor = json_decode($rewrite_state->cursor, true);
+            if (!is_array($cursor)) {
+                throw new RuntimeException(
+                    'The saved db-rewrite-urls record cursor is invalid. Use --abort.'
+                );
+            }
+        }
+        $processor = new DatabaseUrlRewriteProcessor(
+            $database,
+            $statement_rewriter,
+            $cursor
+        );
+
+        $lifecycle_event = $is_resume ? 'resuming' : 'starting';
+        $this->audit_log(
+            strtoupper($lifecycle_event) . " db-rewrite-urls | {$connection_label}",
+            true
+        );
+        $this->output_progress([
+            'type' => 'lifecycle',
+            'event' => $lifecycle_event,
+            'command' => 'db-rewrite-urls',
+            'records_processed' => $rewrite_state->records_processed,
+            'records_changed' => $rewrite_state->records_changed,
+            'message' => ucfirst($lifecycle_event) . ' db-rewrite-urls',
+        ], true);
+
+        while (true) {
+            if (function_exists('pcntl_signal_dispatch')) {
+                pcntl_signal_dispatch();
+            }
+            if ($this->shutdown_requested) {
+                break;
+            }
+
+            $has_more_steps = $processor->next_step();
+            $progress = $processor->get_progress();
+            $encoded_cursor = json_encode($processor->get_cursor());
+            if ($encoded_cursor === false) {
+                throw new RuntimeException(
+                    'Failed to encode the db-rewrite-urls record cursor: '
+                    . json_last_error_msg()
+                );
+            }
+
+            $rewrite_state->cursor = $encoded_cursor;
+            $rewrite_state->records_processed = $progress['records_processed'];
+            $rewrite_state->records_changed = $progress['records_changed'];
+            $rewrite_state->tables_started = $progress['tables_started'];
+            $rewrite_state->current_table = $progress['current_table'];
+            $this->save_state();
+
+            if ($progress['skipped_table'] !== null) {
+                $skip_message = sprintf(
+                    'Skipping %s because it has no primary key.',
+                    $progress['skipped_table']
+                );
+                $this->audit_log($skip_message, false);
+                $this->output_progress([
+                    'type' => 'warning',
+                    'phase' => 'database-records',
+                    'reason' => 'missing_primary_key',
+                    'table' => $progress['skipped_table'],
+                    'message' => $skip_message,
+                ], true);
+                $this->progress->clear_progress_line();
+                $this->progress->show_lifecycle_line($skip_message . "\n");
+            }
+
+            $message = sprintf(
+                '%s records checked, %s changed',
+                number_format($rewrite_state->records_processed),
+                number_format($rewrite_state->records_changed)
+            );
+            $this->output_progress([
+                'phase' => 'database-records',
+                'records_processed' => $rewrite_state->records_processed,
+                'records_changed' => $rewrite_state->records_changed,
+                'tables_started' => $rewrite_state->tables_started,
+                'current_table' => $rewrite_state->current_table,
+                'message' => $message,
+            ]);
+            $this->progress->show_progress_line($message);
+
+            if (!$has_more_steps) {
+                break;
+            }
+        }
+
+        if ($this->shutdown_requested) {
+            $active_command->completion_state = 'partial';
+            $status = 'partial';
+        } else {
+            $active_command->completion_state = 'complete';
+            $status = 'complete';
+        }
+        $this->save_state();
+
+        $message = sprintf(
+            'db-rewrite-urls %s (%d records checked, %d changed)',
+            $status,
+            $rewrite_state->records_processed,
+            $rewrite_state->records_changed
+        );
+        $this->audit_log($message, true);
+        $this->output_progress([
+            'status' => $status,
+            'phase' => 'database-records',
+            'records_processed' => $rewrite_state->records_processed,
+            'records_changed' => $rewrite_state->records_changed,
+            'tables_started' => $rewrite_state->tables_started,
+            'current_table' => $rewrite_state->current_table,
+            'message' => $message,
+        ], true);
+        $this->progress->clear_progress_line();
+        $this->progress->show_lifecycle_line($message . "\n");
+    }
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+
     /**
      * If --new-site-url is set, derive the source origin from the export URL
      * and append implicit --rewrite-url mappings for both HTTP and HTTPS
-     * variants of the old URL to $options. The new URL is used verbatim.
+     * variants. The new URL is used verbatim.
      */
     private function resolve_new_site_url_option(array &$options): void
     {
@@ -5269,6 +6082,12 @@ class ImportClient
 
         $parsed_url = parse_url($this->remote_reprint_api_url);
         if (!$parsed_url || !isset($parsed_url['scheme'], $parsed_url['host'])) {
+            if ($this->remote_reprint_api_url === '') {
+                throw new InvalidArgumentException(
+                    '--new-site-url requires a positional remote Reprint API URL. '
+                    . 'Use --rewrite-url FROM TO when no remote URL is available.'
+                );
+            }
             throw new InvalidArgumentException(
                 "--new-site-url requires a valid export URL to derive the remote site origin.",
             );
@@ -5371,18 +6190,36 @@ class ImportClient
         return $pdo;
     }
 
-    private function create_target_db_apply_connection(array $options): array
+    /**
+     * @param array $target {
+     *     Resolved database target.
+     *
+     *     @type string      $engine      mysql or sqlite.
+     *     @type string      $db          MySQL database or SQLite logical database name.
+     *     @type string|null $sqlite_path SQLite database path.
+     *     @type string      $host        MySQL host.
+     *     @type int         $port        MySQL port.
+     *     @type string      $user        MySQL user.
+     *     @type string      $pass        MySQL password.
+     * }
+     * @param bool $save_runtime_target Whether to save the target for apply-runtime.
+     * @return array {
+     *     Target database connection details.
+     *
+     *     @type mixed  $0 PDO or a PDO-compatible adapter.
+     *     @type string $1 Human-readable connection label.
+     * }
+     */
+    private function create_target_database_connection(
+        array $target,
+        bool $save_runtime_target = true
+    ): array
     {
-        $target_engine = strtolower((string) ($options["target_engine"] ?? "mysql"));
-        if (!in_array($target_engine, ["mysql", "sqlite"], true)) {
-            throw new InvalidArgumentException(
-                "Invalid --target-engine value: {$target_engine}. Valid engines: mysql, sqlite.",
-            );
-        }
+        $target_engine = $target["engine"];
 
         if ($target_engine === "sqlite") {
-            $target_path = $options["target_sqlite_path"] ?? null;
-            $target_db = $options["target_db"] ?? "sqlite_database";
+            $target_path = $target["sqlite_path"];
+            $target_db = $target["db"];
 
             if (!$target_path) {
                 $content_dir = $this->clean_preflight_path(
@@ -5401,14 +6238,18 @@ class ImportClient
                     'database',
                     '.ht.sqlite'
                 );
-                $this->audit_log("DB-APPLY | defaulting SQLite path to: {$target_path}");
+                $this->audit_log(
+                    "DB-APPLY | defaulting SQLite path to: {$target_path}"
+                );
                 $this->progress->show_lifecycle_line("SQLite path: {$target_path}\n");
             }
 
-            // Persist target database configuration for apply-runtime.
-            $this->get_state()->apply->target_engine = "sqlite";
-            $this->get_state()->apply->target_db = $target_db;
-            $this->get_state()->apply->target_sqlite_path = $target_path;
+            if ($save_runtime_target) {
+                // Persist target database configuration for apply-runtime.
+                $this->get_state()->apply->target_engine = "sqlite";
+                $this->get_state()->apply->target_db = $target_db;
+                $this->get_state()->apply->target_sqlite_path = $target_path;
+            }
 
             return [
                 $this->create_sqlite_target_pdo($target_path, $target_db),
@@ -5420,25 +6261,21 @@ class ImportClient
             ];
         }
 
-        $target_host = $options["target_host"] ?? "127.0.0.1";
-        $target_port = (int) ($options["target_port"] ?? 3306);
-        $target_user = $options["target_user"] ?? null;
-        $target_pass = $options["target_pass"] ?? "";
-        $target_db = $options["target_db"] ?? null;
+        $target_host = $target["host"];
+        $target_port = $target["port"];
+        $target_user = $target["user"];
+        $target_pass = $target["pass"];
+        $target_db = $target["db"];
 
-        if (!$target_user || !$target_db) {
-            throw new InvalidArgumentException(
-                "db-apply with --target-engine=mysql requires --target-user and --target-db.",
-            );
+        if ($save_runtime_target) {
+            // Persist target database configuration for apply-runtime.
+            $this->get_state()->apply->target_engine = "mysql";
+            $this->get_state()->apply->target_db = $target_db;
+            $this->get_state()->apply->target_host = $target_host;
+            $this->get_state()->apply->target_port = $target_port;
+            $this->get_state()->apply->target_user = $target_user;
+            $this->get_state()->apply->target_pass = $target_pass;
         }
-
-        // Persist target database configuration for apply-runtime.
-        $this->get_state()->apply->target_engine = "mysql";
-        $this->get_state()->apply->target_db = $target_db;
-        $this->get_state()->apply->target_host = $target_host;
-        $this->get_state()->apply->target_port = $target_port;
-        $this->get_state()->apply->target_user = $target_user;
-        $this->get_state()->apply->target_pass = $target_pass;
 
         $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
         try {
@@ -5467,9 +6304,25 @@ class ImportClient
         ];
     }
 
+    // =========================================================================
+    // db-apply: Apply SQL dump to a target MySQL database with URL rewriting
+    // =========================================================================
+
+    /**
+     * Command: db-apply
+     *
+     * Reads db.sql, optionally rewrites URLs, and executes statements against
+     * a target database. MySQL reuses the same SQL-group importer as db-pull;
+     * SQLite resumes from its locally saved statement position.
+     *
+     */
     public function run_db_apply(array $options): void
     {
         $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
+        $session_setup_file = wp_join_unix_paths(
+            $this->state_dir,
+            "db-session-setup.sql",
+        );
         if (!file_exists($sql_file)) {
             throw new RuntimeException(
                 "db.sql not found in {$this->state_dir}. Run db-pull first.",
@@ -5488,33 +6341,6 @@ class ImportClient
             }
         }
 
-        // Show discovered domains if available
-        $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
-        if (file_exists($domains_file)) {
-            $domains = json_decode(file_get_contents($domains_file), true);
-            if (is_array($domains) && !empty($domains)) {
-                $this->audit_log(
-                    sprintf("DISCOVERED DOMAINS | %s", implode(", ", $domains)),
-                    false,
-                );
-                $this->progress->show_lifecycle_line("Discovered domains in SQL dump:\n");
-                foreach ($domains as $domain) {
-                    $mapped = isset($url_mapping[$domain]) ? " => {$url_mapping[$domain]}" : " (not mapped)";
-                    $this->progress->show_lifecycle_line("  {$domain}{$mapped}\n");
-                }
-                $this->progress->show_lifecycle_line("\n");
-                $domain_map = [];
-                foreach ($domains as $domain) {
-                    $domain_map[$domain] = $url_mapping[$domain] ?? null;
-                }
-                $this->output_progress([
-                    "type" => "domains_discovered",
-                    "domains" => $domain_map,
-                    "message" => "Discovered " . count($domains) . " domain(s) in SQL dump",
-                ], true);
-            }
-        }
-
         // Check state for resume
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
         $current_status = $state_command === "db-apply" ? ($this->get_state()->active_resumable_command->completion_state ?? null) : null;
@@ -5525,35 +6351,75 @@ class ImportClient
             );
         }
 
+        $target = $this->resolve_database_target(
+            $options,
+            $this->get_local_site_database_target(),
+            'mysql',
+            'db-apply'
+        );
+
         $apply_state = $this->get_state()->apply;
         $statements_executed = $apply_state->statements_executed;
         $bytes_read = $apply_state->bytes_read;
-        $is_resume = $current_status === "in_progress" && $statements_executed > 0;
+        $uses_mysql_import = $target["engine"] === "mysql";
+        $is_resume = in_array($current_status, ["in_progress", "partial"], true)
+            && (
+                $uses_mysql_import
+                    ? in_array(
+                        $this->get_state()->active_resumable_command->current_stage,
+                        ["sql", "mysql-cleanup"],
+                        true,
+                    )
+                    : $statements_executed > 0
+            );
+
+        // A resumed apply keeps its URL replacements when the CLI omits them.
+        // A fresh apply must not inherit replacements from an older lifecycle.
+        if ($is_resume && empty($url_mapping) && !empty($apply_state->rewrite_url)) {
+            $url_mapping = $apply_state->rewrite_url;
+        }
 
         if ($is_resume) {
+            $resume_message = $uses_mysql_import
+                ? "Resuming db-apply from the position saved in MySQL"
+                : "Resuming db-apply (executed: {$statements_executed} statements)";
             $this->audit_log(
-                sprintf(
-                    "RESUME db-apply | statements=%d | bytes_read=%d",
-                    $statements_executed,
-                    $bytes_read,
-                ),
+                $uses_mysql_import
+                    ? "RESUME db-apply | position stored in MySQL target"
+                    : "RESUME db-apply | statements={$statements_executed} | bytes_read={$bytes_read}",
                 true,
             );
-            $this->progress->show_lifecycle_line("Resuming db-apply (executed: {$statements_executed} statements)\n");
-            $this->output_progress([
+            $this->progress->show_lifecycle_line($resume_message . "\n");
+            $resume_progress = [
                 "type" => "lifecycle",
                 "event" => "resuming",
                 "command" => "db-apply",
-                "statements_executed" => $statements_executed,
-                "bytes_read" => $bytes_read,
-                "message" => "Resuming db-apply (executed: {$statements_executed} statements)",
-            ], true);
+                "message" => $resume_message,
+            ];
+            if (!$uses_mysql_import) {
+                $resume_progress["statements_executed"] = $statements_executed;
+                $resume_progress["bytes_read"] = $bytes_read;
+            }
+            $this->output_progress($resume_progress, true);
         } else {
             $this->get_state()->active_resumable_command->command_name = "db-apply";
             $this->get_state()->active_resumable_command->completion_state = "in_progress";
+            $this->get_state()->active_resumable_command->current_stage =
+                $uses_mysql_import ? "mysql-start" : null;
+            if ($uses_mysql_import) {
+                $this->get_state()->active_resumable_command->remote_cursor = null;
+            }
             $this->get_state()->apply = new DatabaseApplyCommandState();
             if (!empty($url_mapping)) {
                 $this->get_state()->apply->rewrite_url = $url_mapping;
+            }
+            if ($uses_mysql_import) {
+                $this->get_state()->apply->target_engine = "mysql";
+                $this->get_state()->apply->target_db = $target["db"];
+                $this->get_state()->apply->target_host = $target["host"];
+                $this->get_state()->apply->target_port = $target["port"];
+                $this->get_state()->apply->target_user = $target["user"];
+                $this->get_state()->apply->target_pass = $target["pass"];
             }
             $this->save_state();
             $statements_executed = 0;
@@ -5567,11 +6433,6 @@ class ImportClient
                 "command" => "db-apply",
                 "message" => "Starting db-apply",
             ], true);
-        }
-
-        // On resume, use the persisted URL mapping if none provided on CLI
-        if (empty($url_mapping) && !empty($apply_state->rewrite_url)) {
-            $url_mapping = $apply_state->rewrite_url;
         }
 
         // Set up SQL statement rewriter if we have URL mappings
@@ -5596,12 +6457,25 @@ class ImportClient
             );
         }
 
-        [$pdo, $connection_label] = $this->create_target_db_apply_connection($options);
+        if ($uses_mysql_import) {
+            $this->apply_mysql_dump_file(
+                $sql_file,
+                $session_setup_file,
+                $target,
+                $stmt_rewriter,
+                $is_resume,
+                $url_mapping,
+                $options,
+            );
+            return;
+        }
+
+        [$pdo, $connection_label] = $this->create_target_database_connection($target);
         $sqlite_prepared_pdo = null;
         $sqlite_prepared_statement_cache = [];
         $sqlite_prepared_statement_cache_order = [];
         if (
-            strtolower((string) ($options["target_engine"] ?? "mysql")) === "sqlite"
+            $target["engine"] === "sqlite"
             && method_exists($pdo, 'get_connection')
         ) {
             $sqlite_prepared_pdo = $pdo->get_connection()->get_pdo();
@@ -5905,6 +6779,354 @@ class ImportClient
         } finally {
             fclose($sql_handle);
         }
+    }
+
+    /**
+     * Applies exporter SQL groups through the same MySQL path used by db-pull.
+     *
+     * @param array $target {
+     *     Resolved MySQL target.
+     *
+     *     @type string $host MySQL host.
+     *     @type int    $port MySQL port.
+     *     @type string $user MySQL user.
+     *     @type string $pass MySQL password.
+     *     @type string $db   MySQL database.
+     * }
+     * @param array $url_mapping Effective URL replacements for this apply.
+     * @param array $options Command options used by the post-import plugin cleanup.
+     */
+    private function apply_mysql_dump_file(
+        string $sql_file,
+        string $session_setup_file,
+        array $target,
+        ?SqlStatementRewriter $stmt_rewriter,
+        bool $is_resume,
+        array $url_mapping,
+        array $options
+    ): void {
+        $encoded_url_mapping = json_encode($url_mapping);
+        if ($encoded_url_mapping === false) {
+            throw new RuntimeException("Cannot encode the db-apply URL replacements.");
+        }
+        $source_hash = hash(
+            "sha256",
+            "db.sql\n" . $this->remote_reprint_api_url . "\n" . $encoded_url_mapping,
+        );
+
+        $connection = $this->open_mysql_import_connection($target, "db-apply");
+        $sql_handle = fopen($sql_file, "r");
+        if (!$sql_handle) {
+            $connection->close();
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- File path is CLI text.
+            throw new RuntimeException("Cannot open SQL file: {$sql_file}");
+        }
+
+        $sql_file_size = filesize($sql_file);
+        if (!is_int($sql_file_size)) {
+            fclose($sql_handle);
+            $connection->close();
+            throw new RuntimeException("Cannot read the size of db.sql.");
+        }
+
+        $byte_offset = 0;
+        $statements_executed = 0;
+        try {
+            if (
+                $is_resume
+                && $this->get_state()->active_resumable_command->current_stage === "mysql-cleanup"
+            ) {
+                $this->finish_mysql_dump_file_apply($connection, $target, $options);
+                return;
+            }
+
+            if (!$is_resume) {
+                // Keep mysql-start until the old target cursor is gone. A new
+                // process which stops here repeats this reset before any SQL.
+                $this->reset_mysql_import_position($connection, "db-apply");
+                $this->get_state()->active_resumable_command->current_stage = "sql";
+                $this->get_state()->active_resumable_command->remote_cursor = null;
+            } else {
+                $target_position = $this->read_mysql_import_position(
+                    $connection,
+                    $source_hash,
+                    "db-apply",
+                );
+                if ($target_position !== null) {
+                    $byte_offset = $target_position["file_byte_offset"];
+                    $statements_executed = $this->get_state()->apply->statements_executed;
+                    if ($byte_offset === null) {
+                        throw new RuntimeException(
+                            "MySQL has no db.sql byte offset for this db-apply. " .
+                            "Run db-apply --abort to start again.",
+                        );
+                    }
+                    if ($byte_offset < 0 || $byte_offset > $sql_file_size) {
+                        throw new RuntimeException(
+                            "MySQL saved db.sql byte offset {$byte_offset}, " .
+                            "but the file contains {$sql_file_size} bytes. Run db-pull again.",
+                        );
+                    }
+                    $this->assert_mysql_import_can_repeat_next_group(
+                        $connection,
+                        $target_position["source_cursor"],
+                        "db-apply",
+                    );
+                }
+            }
+
+            $this->get_state()->apply->target_engine = "mysql";
+            $this->get_state()->apply->target_db = $target["db"];
+            $this->get_state()->apply->target_host = $target["host"];
+            $this->get_state()->apply->target_port = $target["port"];
+            $this->get_state()->apply->target_user = $target["user"];
+            $this->get_state()->apply->target_pass = $target["pass"];
+            $this->get_state()->apply->statements_executed = $statements_executed;
+            $this->save_state();
+
+            if ($byte_offset > 0) {
+                $session_setup_sql = @file_get_contents($session_setup_file);
+                if ($session_setup_sql === false || trim($session_setup_sql) === "") {
+                    throw new RuntimeException(
+                        "db-apply cannot continue because db-session-setup.sql is missing or empty. " .
+                        "Run db-pull again to create a complete dump.",
+                    );
+                }
+                $this->execute_mysql_queries($connection, $session_setup_sql);
+                $this->audit_log(
+                    "DB-APPLY | ran saved MySQL session setup after reconnect",
+                    true,
+                );
+            }
+
+            if ($byte_offset > 0 && fseek($sql_handle, $byte_offset) !== 0) {
+                throw new RuntimeException(
+                    "db-apply cannot seek db.sql to its saved byte offset {$byte_offset}.",
+                );
+            }
+
+            $this->audit_log(
+                "CONNECTED | engine=mysql host={$target['host']} port={$target['port']} " .
+                "db={$target['db']} user={$target['user']}",
+                false,
+            );
+            $this->output_progress([
+                "status" => "starting",
+                "phase" => "db-apply",
+                "message" => "Applying SQL",
+            ]);
+
+            while (true) {
+                if (function_exists("pcntl_signal_dispatch")) {
+                    pcntl_signal_dispatch();
+                }
+                if ($this->shutdown_requested) {
+                    break;
+                }
+
+                $group = $this->read_next_mysql_sql_group($sql_handle);
+                if ($group === null) {
+                    break;
+                }
+
+                [$mysql_sql, $group_statement_count] = $this->prepare_mysql_sql_group(
+                    $group["sql"],
+                    $stmt_rewriter,
+                );
+
+                $statements_executed += $group_statement_count;
+                $this->execute_mysql_import_group(
+                    $connection,
+                    $mysql_sql,
+                    $source_hash,
+                    $group["exporter_cursor"],
+                    $group["byte_offset"],
+                );
+                $byte_offset = $group["byte_offset"];
+                // MySQL already contains the cursor and db.sql byte offset.
+                // The local statement count is only progress information.
+                $this->get_state()->apply->statements_executed = $statements_executed;
+                $this->save_state();
+
+                $apply_fraction = $sql_file_size > 0
+                    ? $byte_offset / $sql_file_size
+                    : null;
+                $progress_message = number_format($statements_executed) . " statements";
+                $this->output_progress([
+                    "phase" => "db-apply",
+                    "statements_executed" => $statements_executed,
+                    "bytes_read" => $byte_offset,
+                    "bytes_total" => $sql_file_size,
+                    "pct" => $apply_fraction === null ? 0 : round($apply_fraction * 100, 1),
+                    "message" => $progress_message,
+                ]);
+                $this->progress->show_progress_line($progress_message, $apply_fraction);
+            }
+
+            if ($this->shutdown_requested) {
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
+                $this->audit_log(
+                    "PARTIAL db-apply | {$statements_executed} statements executed",
+                    true,
+                );
+                $this->output_progress([
+                    "status" => "partial",
+                    "phase" => "db-apply",
+                    "statements_executed" => $statements_executed,
+                    "message" => "db-apply partial: {$statements_executed} statements executed",
+                ], true);
+                return;
+            }
+
+            // Save this stage before removing the target cursor. If cleanup is
+            // interrupted, the next process repeats cleanup instead of SQL.
+            $this->get_state()->active_resumable_command->current_stage = "mysql-cleanup";
+            $this->save_state();
+            $this->finish_mysql_dump_file_apply($connection, $target, $options);
+        } finally {
+            fclose($sql_handle);
+            $connection->close();
+        }
+    }
+
+    /**
+     * Finishes idempotent target cleanup after every SQL group is committed.
+     *
+     * @param array $target Resolved MySQL target.
+     * @param array $options Command options used by plugin cleanup.
+     */
+    private function finish_mysql_dump_file_apply(
+        \mysqli $connection,
+        array $target,
+        array $options
+    ): void {
+        // Plugin cleanup uses the existing PDO code. The dump itself has
+        // already gone through the shared mysqli SQL-group importer.
+        [$pdo] = $this->create_target_database_connection($target, false);
+        $deactivated = $this->deactivate_host_plugins($pdo);
+        foreach ($deactivated as $basename) {
+            $this->audit_log("DB-APPLY | deactivated plugin {$basename} (host-specific)");
+        }
+        $deactivated = $this->deactivate_path_incompatible_plugins(
+            $pdo,
+            (string) ( $options["new_site_url"] ?? "" ),
+        );
+        foreach ($deactivated as $basename) {
+            $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
+        }
+
+        $table = self::MYSQL_IMPORT_PROGRESS_TABLE;
+        if (!$connection->query("DROP TABLE IF EXISTS `{$table}`")) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL error is CLI text.
+            throw new RuntimeException(
+                "MySQL could not remove the completed import position: " . $connection->error,
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
+
+        $statements_executed = $this->get_state()->apply->statements_executed;
+        $this->get_state()->active_resumable_command->completion_state = "complete";
+        $this->save_state();
+        $this->audit_log(
+            "db-apply complete | {$statements_executed} statements executed",
+            true,
+        );
+        $this->output_progress([
+            "status" => "complete",
+            "phase" => "db-apply",
+            "statements_executed" => $statements_executed,
+            "message" => "db-apply complete ({$statements_executed} statements executed)",
+        ]);
+        if (!$this->progress->is_mode("pipeline")) {
+            $this->progress->clear_progress_line();
+        }
+        $this->progress->show_lifecycle_line(
+            "db-apply complete ({$statements_executed} statements executed)\n",
+        );
+    }
+
+    /**
+     * Parses one exporter group and applies URL replacements to its statements.
+     *
+     * @return array { Rewritten SQL followed by the number of statements. }
+     */
+    private function prepare_mysql_sql_group(
+        string $sql,
+        ?SqlStatementRewriter $stmt_rewriter
+    ): array {
+        $query_stream = new \WP_MySQL_FastQueryStream();
+        $query_stream->append_sql($sql);
+        $query_stream->mark_input_complete();
+        $mysql_sql = "";
+        $statement_count = 0;
+        while ($query_stream->next_query()) {
+            $query = $query_stream->get_query();
+            if ($stmt_rewriter !== null) {
+                $query = $stmt_rewriter->rewrite($query);
+            }
+            $mysql_sql .= $query . "\n";
+            ++$statement_count;
+        }
+        if ($statement_count === 0) {
+            throw new RuntimeException(
+                "db.sql contains an SQL group with no complete statement. Run db-pull again.",
+            );
+        }
+        return [$mysql_sql, $statement_count];
+    }
+
+    /**
+     * Reads one complete exporter SQL group and its cursor from db.sql.
+     *
+     * @param resource $sql_handle Open db.sql handle.
+     * @return array|null {
+     *     The next SQL group, or null at the end of the file.
+     *
+     *     @type string $sql             SQL to execute.
+     *     @type int    $byte_offset     First byte after the group marker.
+     *     @type string $exporter_cursor Cursor after the group.
+     * }
+     */
+    private function read_next_mysql_sql_group($sql_handle): ?array
+    {
+        $sql = "";
+        while (true) {
+            $line = fgets($sql_handle);
+            if ($line === false) {
+                break;
+            }
+            if (strpos($line, self::MYSQL_SQL_GROUP_MARKER) === 0) {
+                $exporter_cursor = trim(substr($line, strlen(self::MYSQL_SQL_GROUP_MARKER)));
+                $decoded_cursor = base64_decode($exporter_cursor, true);
+                if (
+                    $exporter_cursor === ""
+                    || $decoded_cursor === false
+                    || !is_array(json_decode($decoded_cursor, true))
+                ) {
+                    throw new RuntimeException(
+                        "db.sql contains an invalid SQL group cursor. Run db-pull again.",
+                    );
+                }
+                $byte_offset = ftell($sql_handle);
+                if (!is_int($byte_offset)) {
+                    throw new RuntimeException("Cannot read the current byte offset in db.sql.");
+                }
+                return [
+                    "sql" => $sql,
+                    "byte_offset" => $byte_offset,
+                    "exporter_cursor" => $exporter_cursor,
+                ];
+            }
+            $sql .= $line;
+        }
+
+        if ($sql !== "") {
+            throw new RuntimeException(
+                "db.sql ends without an SQL group cursor. Run db-pull again to download a complete dump.",
+            );
+        }
+        return null;
     }
 
     private function execute_db_apply_query(
@@ -6740,211 +7962,166 @@ class ImportClient
         }
 
         $file_diff_progress_state = $this->get_state()->diff;
-        $next_remote_index_byte_offset =
-            $file_diff_progress_state->next_remote_index_byte_offset;
-        $last_consumed_remote_index_entry_path =
-            $file_diff_progress_state->last_consumed_remote_index_entry_path;
-        $last_processed_next_remote_index_entry_path =
-            $file_diff_progress_state->last_processed_next_remote_index_entry_path;
-        $fetch_list_file_mode = $next_remote_index_byte_offset > 0 ? "a" : "w";
-        if ($fetch_list_file_mode === "w") {
-            $this->audit_log(
-                "FILE CREATE | {$this->fetch_list_file} | building fetch list",
-            );
-        } else {
-            $this->audit_log(
-                "FILE APPEND | {$this->fetch_list_file} | resuming fetch list build",
-            );
-        }
-        $fetch_list_file_handle = fopen(
-            $this->fetch_list_file,
-            $fetch_list_file_mode,
+        $index_diff = FileIndexDiffProcessor::resume(
+            $this->remote_index_file,
+            $this->next_remote_index_file,
+            $file_diff_progress_state->index_diff_cursor,
+            [RemoteIndexReader::class, "decode_index_line"]
         );
-        if (!$fetch_list_file_handle) {
-            throw new RuntimeException("Failed to open fetch list file");
-        }
-
-        $next_remote_index_reader = new RemoteIndexReader(
-            $this->next_remote_index_file
-        );
+        $fetch_list_file_handle = null;
         try {
-            $next_remote_index_reader->open();
-            if ($next_remote_index_byte_offset > 0) {
-                $next_remote_index_reader->seek_to_byte_offset(
-                    $next_remote_index_byte_offset
-                );
-            }
-        } catch (RuntimeException $exception) {
-            $next_remote_index_reader->close();
-            fclose($fetch_list_file_handle);
-            throw $exception;
-        }
-
-        $remote_index_reader = new RemoteIndexReader($this->remote_index_file);
-        try {
-            $remote_index_reader->open();
-        } catch (RuntimeException $exception) {
-            $next_remote_index_reader->close();
-            fclose($fetch_list_file_handle);
-            throw $exception;
-        }
-        $remote_index_entry = $remote_index_reader->next_entry();
-        if ($last_consumed_remote_index_entry_path) {
-            while (
-                $remote_index_entry !== null &&
-                strcmp(
-                    $remote_index_entry["path"],
-                    $last_consumed_remote_index_entry_path,
-                ) <= 0
-            ) {
-                $remote_index_entry = $remote_index_reader->next_entry();
-            }
-        }
-        $this->pull_index_journal->open();
-        $next_remote_index_entries_processed = 0;
-
-        while (($next_remote_index_entry = $next_remote_index_reader->next_entry()) !== null) {
-            if ($this->shutdown_requested) {
-                break;
-            }
-
-            if (function_exists("pcntl_signal_dispatch")) {
-                pcntl_signal_dispatch();
-            }
-
-            $next_remote_index_byte_offset = $next_remote_index_reader->byte_offset();
-
-            while (
-                $remote_index_entry !== null &&
-                strcmp($remote_index_entry["path"], $next_remote_index_entry["path"]) < 0
-            ) {
-                // The remote index is a union across files-pull path selections.
-                // Keep entries outside this run's selection.
-                if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
-                    $missing_remote_index_entry_path = $remote_index_entry["path"];
-                    $remote_deletion_root = $this->derive_remote_deletion_root_from_sparse_index(
-                        $missing_remote_index_entry_path,
-                        $last_processed_next_remote_index_entry_path,
-                        $next_remote_index_entry["path"],
-                    );
-                    $local_absolute_path = $this->remove_remote_path_locally(
-                        $remote_deletion_root
-                    );
-                    if ($local_absolute_path === null) {
-                        $this->pull_index_journal->record_remote_invalidation(
-                            $missing_remote_index_entry_path
-                        );
-                    } else {
-                        $this->pull_index_journal->record_successful_deletion(
-                            $missing_remote_index_entry_path,
-                            $local_absolute_path
-                        );
-                    }
-                }
-                $last_consumed_remote_index_entry_path =
-                    $remote_index_entry["path"];
-                $remote_index_entry = $remote_index_reader->next_entry();
-            }
-
+            $fetch_list_file_handle = fopen($this->fetch_list_file, "c+b");
+            $fetch_list_file_stat = is_resource($fetch_list_file_handle)
+                ? fstat($fetch_list_file_handle)
+                : false;
             if (
-                $remote_index_entry !== null &&
-                $remote_index_entry["path"] === $next_remote_index_entry["path"]
-            ) {
-                if (
-                    $remote_index_entry["ctime"] !== $next_remote_index_entry["ctime"] ||
-                    $remote_index_entry["size"] !== $next_remote_index_entry["size"] ||
-                    $remote_index_entry["type"] !== $next_remote_index_entry["type"]
-                ) {
-                    // Re-download it when selected — the remote index confirms
-                    // that an earlier files-pull accounted for this path, so
-                    // preserve-local does not protect it.
-                    if ($this->is_selected_for_pulling($next_remote_index_entry["path"], true)) {
-                        $this->append_to_fetch_list(
-                            $next_remote_index_entry["path"],
-                            $fetch_list_file_handle,
-                        );
-                    }
-                }
-                $last_consumed_remote_index_entry_path =
-                    $remote_index_entry["path"];
-                $remote_index_entry = $remote_index_reader->next_entry();
-            } elseif (
-                $this->is_selected_for_pulling($next_remote_index_entry["path"], true) &&
-                (
-                    $remote_index_entry === null ||
-                    strcmp($remote_index_entry["path"], $next_remote_index_entry["path"]) > 0
+                !is_resource($fetch_list_file_handle)
+                || $file_diff_progress_state->fetch_list_byte_offset < 0
+                || $fetch_list_file_stat === false
+                || $file_diff_progress_state->fetch_list_byte_offset
+                    > $fetch_list_file_stat["size"]
+                || !ftruncate(
+                    $fetch_list_file_handle,
+                    $file_diff_progress_state->fetch_list_byte_offset
                 )
+                || fseek(
+                    $fetch_list_file_handle,
+                    $file_diff_progress_state->fetch_list_byte_offset
+                ) !== 0
             ) {
-                $preserve_local_skip_reason =
-                    $this->should_skip_for_preserve_local(
-                        $next_remote_index_entry["path"],
-                    );
-                if ($preserve_local_skip_reason) {
-                    $this->audit_log($preserve_local_skip_reason, true);
-                    $this->emit_skip_progress($next_remote_index_entry["path"]);
-                } else {
-                    $this->append_to_fetch_list(
-                        $next_remote_index_entry["path"],
-                        $fetch_list_file_handle,
-                    );
-                }
+                throw new RuntimeException("Failed to resume the fetch list.");
+            }
+            $this->pull_index_journal->open_and_truncate_to_saved_byte_offset(
+                $file_diff_progress_state->pull_index_wal_byte_offset
+            );
+
+            if ($file_diff_progress_state->fetch_list_byte_offset === 0) {
+                $this->audit_log(
+                    "FILE CREATE | {$this->fetch_list_file} | building fetch list",
+                );
+            } else {
+                $this->audit_log(
+                    "FILE APPEND | {$this->fetch_list_file} | resuming fetch list build",
+                );
             }
 
-            $last_processed_next_remote_index_entry_path =
-                $next_remote_index_entry["path"];
-            $next_remote_index_entries_processed++;
-            if ($next_remote_index_entries_processed % 200 === 0) {
-                $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
-                $this->get_state()->diff->last_consumed_remote_index_entry_path =
-                    $last_consumed_remote_index_entry_path;
-                $this->get_state()->diff->last_processed_next_remote_index_entry_path =
-                    $last_processed_next_remote_index_entry_path;
+            $has_path = $index_diff->next_path();
+            while ($has_path) {
+                $paths_processed = 0;
+                while ($has_path && $paths_processed < 200) {
+                    if (function_exists("pcntl_signal_dispatch")) {
+                        pcntl_signal_dispatch();
+                    }
+                    if ($this->shutdown_requested) {
+                        break;
+                    }
+
+                    $remote_absolute_path = $index_diff->get_path();
+                    $transition = $index_diff->get_path_transition();
+                    if ($transition === "deleted") {
+                        // The remote index is a union across files-pull path
+                        // selections. Keep paths outside this run's selection.
+                        if (
+                            $this->is_selected_for_pulling(
+                                $remote_absolute_path,
+                                false
+                            )
+                        ) {
+                            $remote_deletion_root =
+                                $this->derive_remote_deletion_root_from_sparse_index(
+                                    $remote_absolute_path,
+                                    $index_diff->get_preceding_path_in_new_index(),
+                                    $index_diff->get_following_path_in_new_index()
+                                );
+                            $local_absolute_path =
+                                $this->remove_remote_path_locally(
+                                    $remote_deletion_root
+                                );
+                            if ($local_absolute_path === null) {
+                                $this->pull_index_journal->record_remote_invalidation(
+                                    $remote_absolute_path
+                                );
+                            } else {
+                                $this->pull_index_journal->record_successful_deletion(
+                                    $remote_absolute_path,
+                                    $local_absolute_path
+                                );
+                            }
+                        }
+                    } elseif (
+                        $transition !== "unchanged"
+                        && $this->is_selected_for_pulling(
+                            $remote_absolute_path,
+                            true
+                        )
+                    ) {
+                        // Preserve-local protects only paths which no earlier
+                        // files-pull recorded in the remote index.
+                        $preserve_local_skip_reason = $transition === "added"
+                            ? $this->should_skip_for_preserve_local(
+                                $remote_absolute_path
+                            )
+                            : null;
+                        if ($preserve_local_skip_reason) {
+                            $this->audit_log(
+                                $preserve_local_skip_reason,
+                                true
+                            );
+                            $this->emit_skip_progress($remote_absolute_path);
+                        } else {
+                            $this->append_to_fetch_list(
+                                $remote_absolute_path,
+                                $fetch_list_file_handle
+                            );
+                        }
+                    }
+
+                    $has_path = $index_diff->next_path();
+                    ++$paths_processed;
+                }
+
+                if ($paths_processed === 0) {
+                    break;
+                }
+                if (!fflush($fetch_list_file_handle)) {
+                    throw new RuntimeException(
+                        "Failed to flush the fetch list."
+                    );
+                }
                 $this->pull_index_journal->flush();
-                $this->save_state();
-                $this->progress->tick_spinner();
-            }
-        }
-
-        while ($remote_index_entry !== null) {
-            if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
-                $missing_remote_index_entry_path = $remote_index_entry["path"];
-                $remote_deletion_root = $this->derive_remote_deletion_root_from_sparse_index(
-                    $missing_remote_index_entry_path,
-                    $last_processed_next_remote_index_entry_path,
-                    null,
+                $fetch_list_byte_offset = ftell(
+                    $fetch_list_file_handle
                 );
-                $local_absolute_path = $this->remove_remote_path_locally(
-                    $remote_deletion_root
-                );
-                if ($local_absolute_path === null) {
-                    $this->pull_index_journal->record_remote_invalidation(
-                        $missing_remote_index_entry_path
-                    );
-                } else {
-                    $this->pull_index_journal->record_successful_deletion(
-                        $missing_remote_index_entry_path,
-                        $local_absolute_path
+                if (!is_int($fetch_list_byte_offset)) {
+                    throw new RuntimeException(
+                        "Failed to read the fetch-list byte offset."
                     );
                 }
+                // Build the three positions in a new object, then replace the
+                // saved checkpoint in one assignment. An async signal can save
+                // either complete checkpoint.
+                $next_file_diff_progress_state = new FileDiffProgressState();
+                $next_file_diff_progress_state->index_diff_cursor =
+                    $index_diff->get_cursor();
+                $next_file_diff_progress_state->fetch_list_byte_offset =
+                    $fetch_list_byte_offset;
+                $next_file_diff_progress_state->pull_index_wal_byte_offset =
+                    $this->pull_index_journal->byte_offset();
+                $this->get_state()->diff = $next_file_diff_progress_state;
+                $this->save_state();
+                if ($paths_processed === 200) {
+                    $this->progress->tick_spinner();
+                }
             }
-            $last_consumed_remote_index_entry_path =
-                $remote_index_entry["path"];
-            $remote_index_entry = $remote_index_reader->next_entry();
+        } finally {
+            $index_diff->close();
+            if (is_resource($fetch_list_file_handle)) {
+                fclose($fetch_list_file_handle);
+            }
+            $this->pull_index_journal->close();
         }
 
-        $remote_index_reader->close();
-        $next_remote_index_reader->close();
-        fclose($fetch_list_file_handle);
-
-        $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
-        $this->get_state()->diff->last_consumed_remote_index_entry_path =
-            $last_consumed_remote_index_entry_path;
-        $this->get_state()->diff->last_processed_next_remote_index_entry_path =
-            $last_processed_next_remote_index_entry_path;
-        $this->pull_index_journal->apply_pending_records();
-        $this->save_state();
-
-        return !$this->shutdown_requested;
+        return !$has_path;
     }
 
     /**
@@ -7228,10 +8405,13 @@ class ImportClient
     {
         $fetch_list_json_line = json_encode(
             ["path" => base64_encode($remote_absolute_path)],
-            JSON_UNESCAPED_SLASHES,
-        );
-        if ($fetch_list_json_line !== false) {
-            fwrite($fetch_list_file_handle, $fetch_list_json_line . "\n");
+            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+        ) . "\n";
+        if (
+            fwrite($fetch_list_file_handle, $fetch_list_json_line)
+            !== strlen($fetch_list_json_line)
+        ) {
+            throw new RuntimeException("Failed to write to the fetch list.");
         }
         $this->audit_log(
             "Added to the fetch list: {$remote_absolute_path}",
@@ -7252,7 +8432,7 @@ class ImportClient
             return null;
         }
         try {
-            $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
+            $local_absolute_path = $this->path_mapper()->remote_path_to_local_path(
                 $remote_deletion_root
             );
         } catch (RuntimeException $e) {
@@ -7398,8 +8578,10 @@ class ImportClient
 
     /**
      * Download SQL from remote.
+     *
+     * @param bool $starts_mysql_output Whether to clear an older target position before reading SQL.
      */
-    private function fetch_sql(): void
+    private function fetch_sql(bool $starts_mysql_output = false): void
     {
         $cursor = $this->get_state()->active_resumable_command->remote_cursor ?? null;
         $complete = false;
@@ -7409,9 +8591,12 @@ class ImportClient
 
         $sql_handle = null;
         $mysql_conn = null;
-        $sql_buffer_handle = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
+        $session_setup_file = wp_join_unix_paths(
+            $this->state_dir,
+            "db-session-setup.sql",
+        );
 
         if ($mode === "file") {
             $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
@@ -7451,89 +8636,72 @@ class ImportClient
 
         } elseif ($mode === "mysql") {
             $sql_bytes_written = $this->get_state()->sql_bytes ?? 0;
-
-            $host = $this->mysql_host ?? "127.0.0.1";
-            $user = $this->mysql_user ?? "root";
-            $pass = $this->mysql_password ?? "";
-            $name = $this->mysql_database;
-
-            // Parse host for port/socket (same format as WordPress DB_HOST).
-            // An explicit --mysql-port takes precedence over a port embedded
-            // in the host string.
-            $port = $this->mysql_port ?? 3306;
-            $socket = null;
-            if (strpos($host, ":") !== false) {
-                list($host, $port_or_socket) = explode(":", $host, 2);
-                if ($port_or_socket[0] === "/") {
-                    $socket = $port_or_socket;
-                } elseif ($this->mysql_port === null) {
-                    $port = (int) $port_or_socket;
+            $mysql_target = [
+                "host" => $this->mysql_host ?? "127.0.0.1",
+                "port" => $this->mysql_port ?? 3306,
+                "user" => $this->mysql_user ?? "root",
+                "pass" => $this->mysql_password ?? "",
+                "db" => $this->mysql_database,
+                "use_host_port" => $this->mysql_port === null,
+            ];
+            $mysql_conn = $this->open_mysql_import_connection($mysql_target, "db-pull");
+            if ($starts_mysql_output) {
+                // Keep the mysql-start stage until the old target position is gone.
+                // If this process stops before save_state(), the next process
+                // deletes that position again instead of treating it as current.
+                $this->reset_mysql_import_position($mysql_conn, "db-pull");
+                $cursor = null;
+                $this->get_state()->active_resumable_command->current_stage = "sql";
+                $this->get_state()->active_resumable_command->remote_cursor = null;
+                $this->save_state();
+            } else {
+                $target_position = $this->read_mysql_import_position(
+                    $mysql_conn,
+                    hash("sha256", $this->remote_reprint_api_url),
+                    "db-pull",
+                );
+                $cursor = $target_position["source_cursor"] ?? null;
+                if ($cursor !== null) {
+                    $this->assert_mysql_import_can_repeat_next_group(
+                        $mysql_conn,
+                        $cursor,
+                        "db-pull",
+                    );
                 }
             }
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
-            $mysql_conn = new \mysqli($host, $user, $pass, $name, $port, $socket);
-            if ($mysql_conn->connect_error) {
-                throw new RuntimeException("MySQL connection failed: " . $mysql_conn->connect_error);
-            }
-            $mysql_conn->set_charset("utf8mb4");
-
-            $this->audit_log(
-                "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
-                true,
-            );
-
-            // Open a persistent buffer file so partial queries survive crashes.
-            // Each SQL chunk is appended to this file as it arrives; when the
-            // query completes and executes, the file is truncated. If the process
-            // dies at any point, the next run reloads whatever was accumulated.
-            $sql_buffer_file = wp_join_unix_paths($this->pull_state_directory, "sql-buffer");
-            if (file_exists($sql_buffer_file)) {
-                $sql_buffer = file_get_contents($sql_buffer_file);
+            if ($cursor !== null) {
+                $session_setup_sql = @file_get_contents($session_setup_file);
+                if ($session_setup_sql === false || trim($session_setup_sql) === "") {
+                    throw new RuntimeException(
+                        "Cannot continue db-pull because db-session-setup.sql is missing or empty. " .
+                        "Run db-pull --abort and start again.",
+                    );
+                }
+                $this->execute_mysql_queries($mysql_conn, $session_setup_sql);
                 $this->audit_log(
-                    sprintf("CRASH RECOVERY | Restored %d bytes from pull/sql-buffer", strlen($sql_buffer)),
+                    "SQL OUTPUT mysql | ran saved session setup after reconnect",
                     true,
                 );
             }
-            // Open in write mode (truncate) if we loaded nothing, append if we
-            // have a partial query to continue accumulating into.
-            $sql_buffer_handle = fopen($sql_buffer_file, $sql_buffer !== "" ? "a" : "w");
-            if (!$sql_buffer_handle) {
-                throw new RuntimeException("Cannot open SQL buffer file: {$sql_buffer_file}");
-            }
+
+            $this->get_state()->active_resumable_command->remote_cursor = null;
+            $this->save_state();
+
+            $this->audit_log(
+                "SQL OUTPUT mysql | connected via multi_query(): " .
+                "{$mysql_target['user']}@{$mysql_target['host']}:{$mysql_target['port']}/{$mysql_target['db']}",
+                true,
+            );
         }
 
-        // Domain discovery and statement counting: scan SQL for URLs during download
+        // Count SQL statements during download for db-apply progress reporting.
         $query_stream = class_exists('WP_MySQL_Naive_Query_Stream')
             ? new \WP_MySQL_Naive_Query_Stream()
             : null;
-        $domain_collector = class_exists('DomainCollector')
-            ? new \DomainCollector()
-            : null;
-        $domains_file = wp_join_unix_paths($this->pull_state_directory, "domains.json");
         $sql_stats_file = wp_join_unix_paths($this->pull_state_directory, "sql-stats.json");
         $sql_statements_counted = (int) ($this->get_state()->sql_statements_counted ?? 0);
-
-        // Auto-detect the remote site domain from the export URL so it
-        // always appears in pull/domains.json even if the SQL dump
-        // hasn't been fully scanned yet.
-        if ($domain_collector) {
-            $parsed_url = parse_url($this->remote_reprint_api_url);
-            if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
-                $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
-                if (!empty($parsed_url['port'])) {
-                    $source_origin .= ':' . $parsed_url['port'];
-                }
-                $domain_collector->merge([$source_origin]);
-            }
-        }
-
-        // Load previously discovered domains (from earlier partial downloads)
-        if ($domain_collector && file_exists($domains_file)) {
-            $prev = json_decode(file_get_contents($domains_file), true);
-            if (is_array($prev)) {
-                $domain_collector->merge($prev);
-            }
-        }
 
         // Log current progress at start of request
         $has_cursor = $cursor !== null;
@@ -7551,8 +8719,15 @@ class ImportClient
         $buffer_not_flushed = "";
         $chunks_since_save = 0;
         try {
+            if ($mode === "mysql") {
+                $this->audit_log(
+                    "SKIPPING SOURCE TABLES IF PRESENT | " . self::MYSQL_IMPORT_PROGRESS_TABLE_PREFIX . "*",
+                    true,
+                );
+            }
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
+                $params["skip_tables"] = [self::MYSQL_IMPORT_PROGRESS_TABLE];
                 $url = $this->build_url("sql_chunk", $cursor, $params);
 
                 $context = new StreamingContext();
@@ -7562,13 +8737,11 @@ class ImportClient
                     &$complete,
                     &$sql_handle,
                     $mysql_conn,
-                    &$sql_buffer_handle,
                     &$sql_buffer,
+                    $session_setup_file,
                     &$sql_bytes_written,
                     $context,
                     $query_stream,
-                    $domain_collector,
-                    $domains_file,
                     &$sql_statements_counted,
                     &$chunks_since_save
                 ) {
@@ -7582,42 +8755,26 @@ class ImportClient
                         pcntl_signal_dispatch();
                     }
 
-                    $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
-
-                    // Save cursor periodically (every 50 chunks).
-                    // Skip saving when there's buffered SQL waiting for a
-                    // complete statement — crash recovery would replay the
-                    // cursor but miss the buffered bytes.
-                    $chunks_since_save++;
-                    if (
-                        $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
-                        && $sql_buffer === ""
-                    ) {
-                        if ($sql_handle) {
-                            fflush($sql_handle);
+                    $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
+                    if ($chunk_type === "sql_session_setup") {
+                        $session_setup_sql = $chunk["body"];
+                        $session_setup_tmp_file = $session_setup_file . ".tmp";
+                        $written = file_put_contents(
+                            $session_setup_tmp_file,
+                            $session_setup_sql,
+                        );
+                        if (
+                            $written !== strlen($session_setup_sql)
+                            || !rename($session_setup_tmp_file, $session_setup_file)
+                        ) {
+                            throw new RuntimeException(
+                                "Cannot save MySQL session setup to db-session-setup.sql",
+                            );
                         }
-                        $this->get_state()->active_resumable_command->remote_cursor = $cursor;
-                        $this->get_state()->sql_bytes = $sql_bytes_written;
-                        $this->get_state()->sql_statements_counted = $sql_statements_counted;
-                        $this->save_state();
-                        $chunks_since_save = 0;
-
-                        // Also persist discovered domains so they survive crashes.
-                        // On resume, the SQL download picks up from the cursor,
-                        // skipping already-downloaded data — so domains from that
-                        // earlier data would be lost without periodic saves.
-                        if ($domain_collector) {
-                            $domains = $domain_collector->get_domains();
-                            if (!empty($domains)) {
-                                file_put_contents(
-                                    $domains_file,
-                                    json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-                                );
-                            }
-                        }
+                        return;
                     }
 
-                    $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
+                    $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
 
                     if ($chunk_type === "sql") {
                         $query_complete = ($chunk["headers"]["x-query-complete"] ?? "1") === "1";
@@ -7627,12 +8784,36 @@ class ImportClient
                             case "file":
                                 $bytes = fwrite($sql_handle, $data);
                                 if ($bytes === false || $bytes !== strlen($data)) {
+                                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Byte counts are CLI text.
                                     throw new RuntimeException(
                                         "SQL write failed: wrote " . ($bytes === false ? "0" : $bytes) .
                                         "/" . strlen($data) . " bytes (disk full?)"
                                     );
                                 }
                                 $sql_bytes_written += $bytes;
+                                if ($query_complete) {
+                                    if ($cursor === null) {
+                                        throw new RuntimeException(
+                                            "The source returned a complete SQL group without a cursor.",
+                                        );
+                                    }
+                                    // Preserve the same groups which direct MySQL
+                                    // output executes. The comment is harmless SQL;
+                                    // db-apply gets the next byte offset and
+                                    // exporter cursor from it.
+                                    $marker = "\n" . self::MYSQL_SQL_GROUP_MARKER . $cursor . "\n";
+                                    $marker_bytes = fwrite($sql_handle, $marker);
+                                    if ($marker_bytes === false || $marker_bytes !== strlen($marker)) {
+                                        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Byte counts are CLI text.
+                                        throw new RuntimeException(
+                                            "SQL marker write failed: wrote " .
+                                            ($marker_bytes === false ? "0" : $marker_bytes) .
+                                            "/" . strlen($marker) . " bytes (disk full?)"
+                                        );
+                                        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+                                    }
+                                    $sql_bytes_written += $marker_bytes;
+                                }
                                 break;
 
                             case "stdout":
@@ -7647,46 +8828,52 @@ class ImportClient
                                 break;
 
                             case "mysql":
-                                // Append to disk immediately so the buffer survives
-                                // even if the process is killed mid-chunk.
-                                if ($sql_buffer_handle) {
-                                    fwrite($sql_buffer_handle, $data);
-                                    fflush($sql_buffer_handle);
-                                }
-
                                 $sql_buffer .= $data;
                                 $sql_bytes_written += strlen($data);
 
                                 if ($query_complete) {
-                                    if (!$mysql_conn->multi_query($sql_buffer)) {
-                                        throw new RuntimeException("MySQL execution failed: " . $mysql_conn->error);
+                                    if ($cursor === null) {
+                                        throw new RuntimeException(
+                                            "The source returned a complete SQL group without a cursor.",
+                                        );
                                     }
-                                    // Drain all result sets from multi_query before sending the
-                                    // next chunk — mysqli requires this.
-                                    do {
-                                        $result = $mysql_conn->store_result();
-                                        if ($result) { $result->free(); }
-                                        if ($mysql_conn->errno) {
-                                            throw new RuntimeException("MySQL statement error: " . $mysql_conn->error);
-                                        }
-                                    } while ($mysql_conn->more_results() && $mysql_conn->next_result());
-
-                                    // Query executed — truncate the buffer file and reset.
-                                    if ($sql_buffer_handle) {
-                                        ftruncate($sql_buffer_handle, 0);
-                                        rewind($sql_buffer_handle);
-                                    }
+                                    $this->execute_mysql_import_group(
+                                        $mysql_conn,
+                                        $sql_buffer,
+                                        hash("sha256", $this->remote_reprint_api_url),
+                                        $cursor,
+                                        null,
+                                    );
                                     $sql_buffer = "";
                                 }
                                 break;
                         }
 
-                        // Feed data to query stream for domain discovery and statement counting
-                        if ($query_stream && $domain_collector) {
+                        // Save local progress every 50 SQL parts, but only after
+                        // this part's file bytes or target transaction. Direct
+                        // MySQL keeps its resume position only in the target.
+                        ++$chunks_since_save;
+                        if (
+                            $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
+                            && $sql_buffer === ""
+                        ) {
+                            if ($sql_handle && !fflush($sql_handle)) {
+                                throw new RuntimeException(
+                                    "Cannot flush db.sql before saving its cursor.",
+                                );
+                            }
+                            $this->get_state()->active_resumable_command->remote_cursor =
+                                $mode === "mysql" ? null : $cursor;
+                            $this->get_state()->sql_bytes = $sql_bytes_written;
+                            $this->get_state()->sql_statements_counted = $sql_statements_counted;
+                            $this->save_state();
+                            $chunks_since_save = 0;
+                        }
+
+                        if ($query_stream) {
                             $query_stream->append_sql($data);
-                            $this->drain_query_stream_for_domains(
+                            $this->count_complete_queries(
                                 $query_stream,
-                                $domain_collector,
                                 $sql_statements_counted,
                             );
                         }
@@ -7780,41 +8967,27 @@ class ImportClient
                     $context->response_stats ?? [],
                 );
 
-                // Save cursor for resumption (keep it even when complete for reference)
-                if ($sql_handle) {
-                    fflush($sql_handle);
+                // Save the file cursor, or only progress for direct MySQL output.
+                if ($sql_handle && !fflush($sql_handle)) {
+                    throw new RuntimeException(
+                        "Cannot flush db.sql before saving its cursor.",
+                    );
                 }
 
-                $this->get_state()->active_resumable_command->remote_cursor = $cursor;
+                $this->get_state()->active_resumable_command->remote_cursor =
+                    $mode === "mysql" ? null : $cursor;
                 // Clear sql_bytes when complete, otherwise save current position
                 $this->get_state()->sql_bytes = $complete ? null : $sql_bytes_written;
                 $this->save_state();
             }
 
-            // Drain any remaining statements after download completes
-            if ($query_stream && $domain_collector) {
+            // Count any statement completed by the end of the download.
+            if ($query_stream) {
                 $query_stream->mark_input_complete();
-                $this->drain_query_stream_for_domains(
+                $this->count_complete_queries(
                     $query_stream,
-                    $domain_collector,
                     $sql_statements_counted,
                 );
-
-                // Save discovered domains
-                $domains = $domain_collector->get_domains();
-                if (!empty($domains)) {
-                    file_put_contents(
-                        $domains_file,
-                        json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-                    );
-                    $this->audit_log(
-                        sprintf(
-                            "DOMAINS DISCOVERED | %d unique domains saved to pull/domains.json",
-                            count($domains),
-                        ),
-                        false,
-                    );
-                }
 
                 // Save statement count for db-apply progress reporting
                 if ($sql_statements_counted > 0) {
@@ -7838,30 +9011,15 @@ class ImportClient
             if ($sql_handle) {
                 fclose($sql_handle);
             }
-            if ($sql_buffer_handle) {
-                fclose($sql_buffer_handle);
-                $sql_buffer_handle = null;
-            }
             if ($mysql_conn) {
                 $pending = $sql_buffer;
                 $mysql_conn->close();
                 $mysql_conn = null;
-                // Clean up buffer file — if we got here with an empty buffer,
-                // all queries were executed successfully.
-                $sql_buffer_file = wp_join_unix_paths($this->pull_state_directory, "sql-buffer");
-                if ($pending === "" && file_exists($sql_buffer_file)) {
-                    unlink($sql_buffer_file);
-                }
                 if ($pending !== "") {
                     if ($caught_exception !== null) {
-                        // An exception is already in flight (e.g. curl error,
-                        // MySQL error). Don't mask it by throwing about the
-                        // buffer — the buffer data is safely persisted in
-                        // pull/sql-buffer and will be recovered on the next run.
                         $this->audit_log(
-                            "BUFFER NOT FLUSHED | " . strlen($pending) .
-                            " bytes in SQL buffer during exception unwind" .
-                            " (original error: " . $caught_exception->getMessage() . ")",
+                            "DISCARDED INCOMPLETE SQL | " . strlen($pending) .
+                            " bytes | the next process will request them again from the saved target position",
                             true,
                         );
                     } else {
@@ -7880,225 +9038,378 @@ class ImportClient
     }
 
     /**
-     * Drain complete SQL statements from a query stream and scan their
-     * base64-decoded values for URL domains.
-     */
-    private function drain_query_stream_for_domains(
-        \WP_MySQL_Naive_Query_Stream $query_stream,
-        \DomainCollector $domain_collector,
-        ?int &$statements_counted = null
-    ) {
-        while ($query_stream->next_query()) {
-            $query = $query_stream->get_query();
-            if ($statements_counted !== null) {
-                $statements_counted++;
-            }
-            // Only scan INSERT statements (they contain data values).
-            if (!self::sql_starts_with_token($query, \WP_MySQL_Lexer::INSERT_SYMBOL)) {
-                continue;
-            }
-            // Only scan statements with base64 values
-            if (strpos($query, "FROM_BASE64(") === false) {
-                continue;
-            }
-
-            $table = self::extract_insert_table($query);
-            $is_options_table = substr($table, -8) === '_options';
-
-            $scanner = new \Base64ValueScanner($query);
-            while ($scanner->next_value()) {
-                // For _options tables, extract the option_name (second column)
-                // and skip transients — they contain ephemeral cached data
-                // that would pollute the domain list.
-                $option_name = null;
-                $match_offset = $scanner->get_match_offset();
-                if ($is_options_table) {
-                    $option_name = self::extract_option_name($query, $match_offset);
-                    if ($option_name !== null && (
-                        strpos($option_name, '_transient') === 0 ||
-                        strpos($option_name, '_site_transient') === 0
-                    )) {
-                        continue;
-                    }
-                }
-
-                $new_domains = $domain_collector->scan($scanner->get_value());
-                if (!empty($new_domains)) {
-                    $row_id = self::extract_row_identifier($query, $match_offset);
-
-                    $option_ctx = '';
-                    if ($option_name !== null) {
-                        $option_ctx = ' option=' . $option_name;
-                    }
-
-                    foreach ($new_domains as $domain) {
-                        $this->audit_log(
-                            sprintf(
-                                "NEW DOMAIN | %s | table=%s %s%s",
-                                $domain,
-                                $table,
-                                $row_id,
-                                $option_ctx,
-                            ),
-                            false,
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * Extract the table name from an INSERT INTO statement.
-     */
-    private static function extract_insert_table(string $query): string
-    {
-        if (preg_match('/INSERT\s+INTO\s+`([^`]+)`/i', $query, $m)) {
-            return $m[1];
-        }
-        return '?';
-    }
-
-    /**
-     * Extract a row identifier (PK value or offset) from the INSERT row
-     * containing the base64 expression at $offset.
+     * @param array $target {
+     *     MySQL target.
      *
-     * Scans backwards from $offset to find the row-opening parenthesis,
-     * then reads the first column value — typically the primary key.
+     *     @type string $host MySQL host, optionally followed by a port or socket.
+     *     @type int    $port MySQL port.
+     *     @type string $user MySQL user.
+     *     @type string $pass MySQL password.
+     *     @type string $db   MySQL database.
+     *     @type bool   $use_host_port Whether a numeric port in host overrides port.
+     * }
      */
-    private static function extract_row_identifier(string $query, int $offset): string
+    private function open_mysql_import_connection(array $target, string $command): \mysqli
     {
-        // Walk backwards from the match to find the row-opening '('.
-        // Track parenthesis depth so we skip inner '(' from FROM_BASE64()
-        // and CONVERT() wrappers.
-        $depth = 0;
-        $row_start = -1;
-        for ($i = $offset - 1; $i >= 0; $i--) {
-            $ch = $query[$i];
-            if ($ch === ')') {
-                $depth++;
-            } elseif ($ch === '(') {
-                if ($depth === 0) {
-                    $row_start = $i + 1;
-                    break;
-                }
-                $depth--;
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+        $host = $target["host"];
+        $port = $target["port"];
+        $socket = null;
+        // WordPress also permits DB_HOST as host:port or host:/socket. An
+        // explicit direct-output --mysql-port still wins over host:port.
+        if (strpos($host, ":") !== false) {
+            [$host, $port_or_socket] = explode(":", $host, 2);
+            if (isset($port_or_socket[0]) && $port_or_socket[0] === "/") {
+                $socket = $port_or_socket;
+            } elseif (!empty($target["use_host_port"])) {
+                $port = (int) $port_or_socket;
             }
         }
 
-        if ($row_start < 0) {
-            return 'offset=?';
+        $connection = new \mysqli(
+            $host,
+            $target["user"],
+            $target["pass"],
+            $target["db"],
+            $port,
+            $socket,
+        );
+        if ($connection->connect_error) {
+            throw new RuntimeException(
+                "Cannot connect to the MySQL target for {$command}: " . $connection->connect_error,
+            );
+        }
+        if (!$connection->set_charset("utf8mb4")) {
+            throw new RuntimeException(
+                "Cannot use utf8mb4 for {$command}: " . $connection->error,
+            );
         }
 
-        // Read the first value after the row-opening '('.
-        // Numeric PKs: (123, ...  or (-5, ...
-        $after = substr($query, $row_start, 40);
-        if (preg_match('/^(-?\d+)/', $after, $m)) {
-            return 'pk=' . $m[1];
+        // A query may keep running in MySQL briefly after its PHP process is
+        // killed. The next process waits here before reading or changing the
+        // saved cursor, so the two processes cannot write at the same time.
+        $lock_name = "reprint-db-pull-" . substr(
+            hash("sha256", (string) $target["db"]),
+            0,
+            40,
+        );
+        $lock_statement = $connection->prepare("SELECT GET_LOCK(?, 60)");
+        if (!$lock_statement) {
+            throw new RuntimeException(
+                "MySQL could not prepare the import lock for {$command}: " . $connection->error,
+            );
         }
-        // String PKs: ('some-uuid', ...
-        if (preg_match("/^'([^']{0,30})'/", $after, $m)) {
-            return "pk=" . $m[1];
+        $lock_statement->bind_param("s", $lock_name);
+        if (!$lock_statement->execute()) {
+            $error = $lock_statement->error;
+            $lock_statement->close();
+            throw new RuntimeException(
+                "MySQL could not lock the target for {$command}: " . $error,
+            );
         }
-        if (preg_match('/^NULL/i', $after)) {
-            return 'pk=NULL';
+        $lock_acquired = null;
+        $lock_statement->bind_result($lock_acquired);
+        $has_lock_result = $lock_statement->fetch() === true;
+        $lock_statement->close();
+        if (!$has_lock_result || (int) $lock_acquired !== 1) {
+            throw new RuntimeException(
+                "Another database import is still writing to the target. Try again after it stops.",
+            );
         }
 
-        return 'offset=?';
+        $table = self::MYSQL_IMPORT_PROGRESS_TABLE;
+        $create_table_sql = "CREATE TABLE IF NOT EXISTS `{$table}` (" .
+            "`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY," .
+            "`source_hash` CHAR(64) CHARACTER SET ascii NOT NULL," .
+            "`source_cursor` MEDIUMTEXT NOT NULL," .
+            "`file_byte_offset` BIGINT UNSIGNED NULL" .
+            ") ENGINE=InnoDB";
+        if (!$connection->query($create_table_sql)) {
+            throw new RuntimeException(
+                "MySQL could not create the import progress table: " . $connection->error,
+            );
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        return $connection;
+    }
+
+    /** Removes the cursor before a new MySQL import starts. */
+    private function reset_mysql_import_position(\mysqli $connection, string $command): void
+    {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text.
+        $table = self::MYSQL_IMPORT_PROGRESS_TABLE;
+        if (!$connection->query("DELETE FROM `{$table}` WHERE `id` = 1")) {
+            throw new RuntimeException(
+                "MySQL could not reset the previous {$command} position: " . $connection->error,
+            );
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
     }
 
     /**
-     * Extract the option_name (second column) from a wp_options INSERT row.
+     * Reads the position which MySQL saved after the last complete SQL group.
      *
-     * WordPress options tables have columns: option_id, option_name, option_value, autoload.
-     * Given an offset inside the row, this finds the row-opening '(' and reads
-     * past the first column (option_id) to extract the second column (option_name).
+     * @return array|null {
+     *     The saved position, or null before the first committed group.
+     *
+     *     @type string   $source_cursor    Exporter cursor after the group.
+     *     @type int|null $file_byte_offset First db.sql byte after the group marker.
+     * }
      */
-    private static function extract_option_name(string $query, int $offset): ?string
-    {
-        // Find the row-opening '(' by walking backwards, same as extract_row_identifier.
-        $depth = 0;
-        $row_start = -1;
-        for ($i = $offset - 1; $i >= 0; $i--) {
-            $ch = $query[$i];
-            if ($ch === ')') {
-                $depth++;
-            } elseif ($ch === '(') {
-                if ($depth === 0) {
-                    $row_start = $i + 1;
-                    break;
-                }
-                $depth--;
-            }
+    private function read_mysql_import_position(
+        \mysqli $connection,
+        string $source_hash,
+        string $command
+    ): ?array {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+        $table = self::MYSQL_IMPORT_PROGRESS_TABLE;
+        // No row means this target has not committed an SQL group for the
+        // current import yet, so its reader starts from the beginning.
+        $result = $connection->query(
+            "SELECT `source_hash`, `source_cursor`, `file_byte_offset` " .
+            "FROM `{$table}` WHERE `id` = 1"
+        );
+        if (!$result) {
+            throw new RuntimeException(
+                "MySQL could not read the saved {$command} position: " . $connection->error,
+            );
         }
-
-        if ($row_start < 0) {
+        $row = $result->fetch_assoc();
+        $result->free();
+        if (!$row) {
             return null;
         }
+        // A different source hash describes different SQL. Its cursor cannot
+        // tell either the HTTP reader or db.sql reader where to continue.
+        if (!hash_equals($source_hash, $row["source_hash"])) {
+            throw new RuntimeException(
+                "The target contains an unfinished import from different SQL. " .
+                "Finish that import or run {$command} --abort before starting this one.",
+            );
+        }
 
-        // Skip the first column value (option_id) and the comma separator,
-        // then read the second column value (option_name) which is a quoted string.
-        $after = substr($query, $row_start, 200);
-        // First column is typically a number: "123," or could be FROM_BASE64(...)
-        // Skip to the first comma that's outside parentheses.
-        $len = strlen($after);
-        $d = 0;
-        $comma_pos = -1;
-        for ($j = 0; $j < $len; $j++) {
-            $c = $after[$j];
-            if ($c === '(') { $d++; }
-            elseif ($c === ')') { $d--; }
-            elseif ($c === ',' && $d === 0) {
-                $comma_pos = $j;
+        $file_byte_offset = null;
+        if ($row["file_byte_offset"] !== null) {
+            $file_byte_offset = filter_var($row["file_byte_offset"], FILTER_VALIDATE_INT);
+            if ($file_byte_offset === false || $file_byte_offset < 0) {
+                throw new RuntimeException(
+                    "MySQL contains an invalid db.sql byte offset for {$command}. " .
+                    "Run {$command} --abort to start again.",
+                );
+            }
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        return [
+            "source_cursor" => $row["source_cursor"],
+            "file_byte_offset" => $file_byte_offset,
+        ];
+    }
+
+    /** Executes one complete SQL group, saves its next position, and commits both. */
+    private function execute_mysql_import_group(
+        \mysqli $connection,
+        string $sql,
+        string $source_hash,
+        string $next_cursor,
+        ?int $next_file_byte_offset
+    ): void {
+        $this->execute_mysql_queries($connection, $sql);
+
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+        $table = self::MYSQL_IMPORT_PROGRESS_TABLE;
+        $statement = $connection->prepare(
+            "INSERT INTO `{$table}` " .
+            "(`id`, `source_hash`, `source_cursor`, `file_byte_offset`) VALUES (1, ?, ?, ?) " .
+            "ON DUPLICATE KEY UPDATE `source_hash` = VALUES(`source_hash`), " .
+            "`source_cursor` = VALUES(`source_cursor`), " .
+            "`file_byte_offset` = VALUES(`file_byte_offset`)"
+        );
+        if (!$statement) {
+            throw new RuntimeException(
+                "MySQL could not prepare the import position update: " . $connection->error,
+            );
+        }
+
+        $statement->bind_param("ssi", $source_hash, $next_cursor, $next_file_byte_offset);
+        if (!$statement->execute()) {
+            $error = $statement->error;
+            $statement->close();
+            throw new RuntimeException("MySQL could not save the import position: " . $error);
+        }
+        $statement->close();
+
+        if (!$connection->commit()) {
+            throw new RuntimeException("MySQL could not commit the imported SQL and its source position: " . $connection->error);
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+    }
+
+    /** Checks whether a stopped MySQL import can safely repeat its next SQL group. */
+    private function assert_mysql_import_can_repeat_next_group(
+        \mysqli $connection,
+        string $exporter_cursor,
+        string $command
+    ): void {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors and table names are CLI text, not HTML.
+        // The cursor is base64-encoded JSON produced by the exporter. We need
+        // its current table to decide whether an interrupted query can be run again.
+        $cursor_json = base64_decode($exporter_cursor, true);
+        $cursor_data = $cursor_json === false ? null : json_decode($cursor_json, true);
+        if (!is_array($cursor_data)) {
+            throw new RuntimeException(
+                "MySQL contains a {$command} position that Reprint cannot read. " .
+                "Run {$command} --abort to start again."
+            );
+        }
+
+        if (($cursor_data["state"] ?? null) === "next_table") {
+            // The previous table is finished. The next group replaces the next
+            // table, so it cannot repeat an INSERT in the previous MyISAM table.
+            return;
+        }
+
+        $current_table = $cursor_data["current_table"] ?? null;
+        if ($current_table === null) {
+            // This cursor sits outside a table's row stream, so there cannot be
+            // a partly applied INSERT for a table to inspect.
+            return;
+        }
+        if (!is_string($current_table) || $current_table === "") {
+            throw new RuntimeException(
+                "MySQL contains a {$command} position with an invalid table name. " .
+                "Run {$command} --abort to start again."
+            );
+        }
+
+        // The saved cursor comes before any SQL that was still running when
+        // the process stopped. Check the target table before repeating that SQL.
+        $table_statement = $connection->prepare(
+            "SELECT `TABLES`.`TABLE_TYPE`, `TABLES`.`ENGINE`, `ENGINES`.`TRANSACTIONS` " .
+            "FROM `INFORMATION_SCHEMA`.`TABLES` AS `TABLES` " .
+            "LEFT JOIN `INFORMATION_SCHEMA`.`ENGINES` AS `ENGINES` " .
+            "ON `ENGINES`.`ENGINE` = `TABLES`.`ENGINE` " .
+            "WHERE `TABLES`.`TABLE_SCHEMA` = DATABASE() " .
+            "AND BINARY `TABLES`.`TABLE_NAME` = BINARY ?"
+        );
+        if (!$table_statement) {
+            throw new RuntimeException(
+                "MySQL could not check the saved {$command} table: " . $connection->error
+            );
+        }
+        $table_statement->bind_param("s", $current_table);
+        if (!$table_statement->execute()) {
+            $error = $table_statement->error;
+            $table_statement->close();
+            throw new RuntimeException("MySQL could not check the saved {$command} table: " . $error);
+        }
+        $table_type = null;
+        $engine = null;
+        $supports_transactions = null;
+        $table_statement->bind_result($table_type, $engine, $supports_transactions);
+        $found_table = $table_statement->fetch() === true;
+        $table_statement->close();
+        if (!$found_table) {
+            throw new RuntimeException(
+                "Cannot continue {$command} because target table `{$current_table}` is missing. " .
+                "Run {$command} --abort to rebuild the target."
+            );
+        }
+        if ($table_type === "VIEW" || $supports_transactions === "YES") {
+            // InnoDB rolls back an interrupted statement, so repeating it
+            // starts from the same rows that existed at the saved cursor. Views
+            // do not need the non-transactional table key check below.
+            return;
+        }
+
+        // Large values are written by UPDATE statements which append pieces.
+        // A non-transactional table may keep one piece, so repeating the UPDATE
+        // could append those bytes twice.
+        if (!empty($cursor_data["oversized_queue"])) {
+            throw new RuntimeException(
+                "Cannot continue {$command} in target table `{$current_table}` because {$engine} may have " .
+                "already appended part of a large value. Run {$command} --abort to rebuild the target."
+            );
+        }
+
+        // MyISAM may keep the first rows from an interrupted INSERT. The dump's
+        // ON DUPLICATE KEY no-op makes repeating those rows safe only when a
+        // non-null unique key can identify them.
+        $key_statement = $connection->prepare(
+            "SELECT `STATISTICS`.`INDEX_NAME` " .
+            "FROM `INFORMATION_SCHEMA`.`STATISTICS` AS `STATISTICS` " .
+            "INNER JOIN `INFORMATION_SCHEMA`.`COLUMNS` AS `COLUMNS` " .
+            "ON `COLUMNS`.`TABLE_SCHEMA` = `STATISTICS`.`TABLE_SCHEMA` " .
+            "AND `COLUMNS`.`TABLE_NAME` = `STATISTICS`.`TABLE_NAME` " .
+            "AND `COLUMNS`.`COLUMN_NAME` = `STATISTICS`.`COLUMN_NAME` " .
+            "WHERE `STATISTICS`.`TABLE_SCHEMA` = DATABASE() " .
+            "AND BINARY `STATISTICS`.`TABLE_NAME` = BINARY ? " .
+            "AND `STATISTICS`.`NON_UNIQUE` = 0 " .
+            "GROUP BY `STATISTICS`.`INDEX_NAME` " .
+            "HAVING SUM(`COLUMNS`.`IS_NULLABLE` = 'YES') = 0 LIMIT 1"
+        );
+        if (!$key_statement) {
+            throw new RuntimeException(
+                "MySQL could not check the keys for target table `{$current_table}`: " .
+                $connection->error
+            );
+        }
+        $key_statement->bind_param("s", $current_table);
+        if (!$key_statement->execute()) {
+            $error = $key_statement->error;
+            $key_statement->close();
+            throw new RuntimeException(
+                "MySQL could not check the keys for target table `{$current_table}`: " . $error
+            );
+        }
+        $index_name = null;
+        $key_statement->bind_result($index_name);
+        $has_replay_key = $key_statement->fetch() === true;
+        $key_statement->close();
+        if (!$has_replay_key) {
+            throw new RuntimeException(
+                "Cannot continue {$command} in target table `{$current_table}` because {$engine} may have " .
+                "kept some rows from an interrupted INSERT, and the table has no non-null unique key " .
+                "that can identify them. Run {$command} --abort to rebuild the target."
+            );
+        }
+
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+    }
+
+    /** Count complete SQL queries waiting in the stream. */
+    private function count_complete_queries(
+        \WP_MySQL_Naive_Query_Stream $query_stream,
+        int &$sql_statements_counted
+    ): void {
+        while ($query_stream->next_query()) {
+            $sql_statements_counted++;
+        }
+    }
+
+    /** Executes SQL and consumes every result before the next query. */
+    private function execute_mysql_queries(\mysqli $connection, string $sql): void
+    {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- MySQL errors are CLI text, not HTML.
+        if (!$connection->multi_query($sql)) {
+            throw new RuntimeException("MySQL execution failed: " . $connection->error);
+        }
+
+        while (true) {
+            $result = $connection->store_result();
+            if ($result) {
+                $result->free();
+            }
+            if ($connection->errno) {
+                throw new RuntimeException("MySQL statement error: " . $connection->error);
+            }
+            if (!$connection->more_results()) {
                 break;
             }
-        }
-
-        if ($comma_pos < 0) {
-            return null;
-        }
-
-        // After the comma, skip whitespace and read a quoted string or FROM_BASE64(...)
-        $rest = ltrim(substr($after, $comma_pos + 1));
-        // Simple quoted string: 'option_name'
-        if (isset($rest[0]) && $rest[0] === "'") {
-            if (preg_match("/^'([^']{0,80})'/", $rest, $m)) {
-                return $m[1];
+            if (!$connection->next_result()) {
+                throw new RuntimeException("MySQL statement error: " . $connection->error);
             }
         }
-        // FROM_BASE64('...') wrapped value — decode it
-        if (strpos($rest, 'FROM_BASE64(') === 0) {
-            if (preg_match("/^FROM_BASE64\\('([A-Za-z0-9+\\/=]+)'\\)/", $rest, $m)) {
-                $decoded = base64_decode($m[1], true);
-                if ($decoded !== false) {
-                    return substr($decoded, 0, 80);
-                }
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Check whether a SQL statement's first keyword token matches a given token ID.
-     * Skips leading whitespace and comments, so "/* ... *​/ INSERT INTO ..." is handled.
-     */
-    private static function sql_starts_with_token(string $sql, int $expected_token_id): bool
-    {
-        $lexer = new \WP_MySQL_Lexer($sql);
-        while ($lexer->next_token()) {
-            $token = $lexer->get_token();
-            if (
-                $token->id === \WP_MySQL_Lexer::WHITESPACE
-                || $token->id === \WP_MySQL_Lexer::COMMENT
-                || $token->id === \WP_MySQL_Lexer::MYSQL_COMMENT_START
-                || $token->id === \WP_MySQL_Lexer::MYSQL_COMMENT_END
-            ) {
-                continue;
-            }
-            return $token->id === $expected_token_id;
-        }
-        return false;
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
     }
 
     /**
@@ -8373,7 +9684,7 @@ class ImportClient
 
         // Repoint to where the target's content is placed by the same pull
         // mapping used for file chunks, so the symlink does not dangle.
-        $local_absolute_target = $this->map_remote_absolute_path_to_local_absolute_path(
+        $local_absolute_target = $this->path_mapper()->remote_path_to_local_path(
             $remote_absolute_target
         );
         $local_relative_target = self::compute_relative_path(
@@ -8870,42 +10181,19 @@ class ImportClient
         return $resolved;
     }
 
-    /**
-     * Map a remote absolute path to a local absolute path under the filesystem
-     * root. Symlink traversal checks prevent writes outside the filesystem root.
-     *
-     * With --remap active, a matched remote absolute path is routed to its
-     * mapped local absolute path. An unmatched path remains nested beneath
-     * --fs-root, as in an identity pull mapping.
-     */
-    private function map_remote_absolute_path_to_local_absolute_path(
-        string $remote_absolute_path
-    ): string {
-        assert_valid_path($remote_absolute_path, "remote absolute path");
-        $local_absolute_path = null;
-        $longest_remote_prefix_length = -1;
-        foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
-            $remainder = path_remainder_under($remote_absolute_path, $remote_prefix);
-            if ($remainder !== null && strlen($remote_prefix) > $longest_remote_prefix_length) {
-                $local_absolute_path = wp_join_unix_paths($local_prefix, $remainder);
-                $longest_remote_prefix_length = strlen($remote_prefix);
-            }
-        }
-        if ($local_absolute_path !== null) {
-            return $local_absolute_path;
-        }
-
-        // Following symlinks is currently the only way paths outside the original export scope reach this mapper.
-        // Use the same local followed symlinks root for copied content and rewritten symlink targets so the links do not dangle.
-        if ($this->local_followed_symlinks_root !== null
-            && !$this->path_is_within_original_export_scope($remote_absolute_path)) {
-            return wp_join_unix_paths(
-                $this->local_followed_symlinks_root,
-                $remote_absolute_path
+    /** Returns the resolved path mapper for the current files-pull options. */
+    private function path_mapper(): RemoteToLocalPathMapper
+    {
+        if ($this->remote_to_local_path_mapper === null) {
+            $this->remote_to_local_path_mapper = new RemoteToLocalPathMapper(
+                $this->filesystem_root,
+                $this->get_export_directories(),
+                $this->resolved_path_mappings,
+                $this->local_followed_symlinks_root
             );
         }
 
-        return wp_join_unix_paths($this->filesystem_root, $remote_absolute_path);
+        return $this->remote_to_local_path_mapper;
     }
 
 
@@ -8945,7 +10233,7 @@ class ImportClient
             return;
         }
 
-        $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path($path);
+        $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($path);
 
         // Open file on first chunk
         if ($is_first) {
@@ -9146,7 +10434,7 @@ class ImportClient
             return null;
         }
 
-        $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
+        $local_absolute_path = $this->path_mapper()->remote_path_to_local_path(
             $remote_absolute_path
         );
 
@@ -9337,7 +10625,7 @@ class ImportClient
             return;
         }
 
-        $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
+        $local_absolute_path = $this->path_mapper()->remote_path_to_local_path(
             $remote_absolute_path
         );
 
@@ -9431,7 +10719,7 @@ class ImportClient
             return;
         }
 
-        $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path($path);
+        $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($path);
         $target_for_local = $this->rewrite_symlink_target_for_local_filesystem(
             $path,
             $local_absolute_path,
@@ -9692,22 +10980,6 @@ class ImportClient
             );
         }
         return $dirs;
-    }
-
-    /**
-     * Whether $path falls under one of the ORIGINAL export directories (the
-     * --include prefixes, or the base roots without --include) — i.e. it was going to
-     * be pulled anyway. Evaluated against the pre-follow scope; a followed
-     * target outside all of these is "escaping" and eligible for symlink bundling.
-     */
-    private function path_is_within_original_export_scope(string $path): bool
-    {
-        foreach ($this->get_export_directories() as $root) {
-            if (path_is_same_as_or_descendant_of($path, $root)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
@@ -10751,12 +12023,6 @@ class ImportClient
      */
     private function encode_state_paths(array $state): array
     {
-        $state["diff"]["last_consumed_remote_index_entry_path"] = $this->encode_state_path_value(
-            $state["diff"]["last_consumed_remote_index_entry_path"] ?? null,
-        );
-        $state["diff"]["last_processed_next_remote_index_entry_path"] = $this->encode_state_path_value(
-            $state["diff"]["last_processed_next_remote_index_entry_path"] ?? null,
-        );
         $state["fetch"]["batch_file"] = $this->encode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
         );
@@ -10786,12 +12052,6 @@ class ImportClient
      */
     private function decode_state_paths(array $state): array
     {
-        $state["diff"]["last_consumed_remote_index_entry_path"] = $this->decode_state_path_value(
-            $state["diff"]["last_consumed_remote_index_entry_path"] ?? null,
-        );
-        $state["diff"]["last_processed_next_remote_index_entry_path"] = $this->decode_state_path_value(
-            $state["diff"]["last_processed_next_remote_index_entry_path"] ?? null,
-        );
         $state["fetch"]["batch_file"] = $this->decode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
         );
@@ -11131,7 +12391,15 @@ class ImportClient
         $this->shutdown_requested = true;
         $this->progress->clear_progress_line();
 
-        if ($this->pull_index_journal->is_open()) {
+        $active_resumable_command =
+            $this->get_state()->active_resumable_command;
+        $applying_diff_records_would_rewrite_an_open_index =
+            $active_resumable_command->command_name === "files-pull"
+            && $active_resumable_command->current_stage === "diff";
+        if (
+            $this->pull_index_journal->is_open()
+            && !$applying_diff_records_would_rewrite_an_open_index
+        ) {
             try {
                 $this->pull_index_journal->apply_pending_records();
             } catch (Exception $e) {
@@ -11146,7 +12414,8 @@ class ImportClient
         // Log final progress before exit
         $remote_index_entry_count = $this->remote_index_entry_count();
         $files_pulled = $this->files_pulled; // Files completed in this run
-        $current_command = $this->get_state()->active_resumable_command->command_name ?? "unknown";
+        $current_command =
+            $active_resumable_command->command_name ?? "unknown";
 
         $this->audit_log(
             sprintf(
@@ -11368,7 +12637,7 @@ if (
             'target' => 'abort',
             'help' => 'Abort current sync and exit (preserves downloaded files)',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls'],
         ],
         [
             'name' => 'verbose',
@@ -11377,7 +12646,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -11404,6 +12673,16 @@ if (
             'help' => 'Follow symlinks, consolidating escaping (out-of-scope) targets into DIR ' .
                 '(a :fs-root: path or an absolute path within --fs-root), nested by source path. ' .
                 'Bare --follow-symlinks is equivalent to --follow-symlinks=:fs-root:.',
+            'commands' => ['pull', 'pull-files', 'files-pull'],
+        ],
+        [
+            'name' => 'mode',
+            'type' => 'value',
+            'target' => 'files_pull_mode',
+            'placeholder' => 'MODE',
+            'valid_values' => ['catch-up', 'mirror'],
+            'help' => 'File pull mode (catch-up|mirror)',
+            'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
         [
@@ -11548,7 +12827,7 @@ if (
             'target' => 'target_engine',
             'placeholder' => 'ENGINE',
             'help' => 'Target database engine: mysql or sqlite',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'target-host',
@@ -11556,7 +12835,7 @@ if (
             'target' => 'target_host',
             'placeholder' => 'HOST',
             'help' => 'Target MySQL host (default: 127.0.0.1)',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'target-port',
@@ -11565,7 +12844,7 @@ if (
             'placeholder' => 'PORT',
             'cast' => 'int',
             'help' => 'Target MySQL port (default: 3306)',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'target-user',
@@ -11573,7 +12852,7 @@ if (
             'target' => 'target_user',
             'placeholder' => 'USER',
             'help' => 'Target MySQL user (required for mysql)',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'target-pass',
@@ -11581,7 +12860,7 @@ if (
             'target' => 'target_pass',
             'placeholder' => 'PASS',
             'help' => 'Target MySQL password',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'target-db',
@@ -11589,7 +12868,7 @@ if (
             'target' => 'target_db',
             'placeholder' => 'NAME',
             'help' => 'Target DB name (required for mysql, optional for sqlite)',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'target-sqlite-path',
@@ -11597,7 +12876,7 @@ if (
             'target' => 'target_sqlite_path',
             'placeholder' => 'PATH',
             'help' => 'Target SQLite database file (default: <wp-content>/database/.ht.sqlite)',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'apply-runtime'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [
             'name' => 'rewrite-url',
@@ -11605,7 +12884,7 @@ if (
             'target' => 'rewrite_url',
             'argument_labels' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
-            'commands' => ['pull', 'pull-db', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
         ],
         [
             'name' => 'new-site-url',
@@ -11613,7 +12892,7 @@ if (
             'target' => 'new_site_url',
             'placeholder' => 'URL',
             'help' => 'New site URL (auto-creates --rewrite-url from export URL origin)',
-            'commands' => ['pull', 'pull-db', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
         ],
         [
             'name' => 'remap',
@@ -11661,6 +12940,16 @@ if (
             'target' => 'force',
             'help' => 'Remove conflicting non-symlink files and replace with symlinks',
             'commands' => ['pull', 'flat-docroot'],
+        ],
+
+        // ── merge-wp-content options ─────────────────────────────
+        [
+            'name' => 'from',
+            'type' => 'value',
+            'target' => 'from',
+            'placeholder' => 'DIR',
+            'help' => 'Local wp-content directory to merge into the pulled one',
+            'commands' => ['merge-wp-content'],
         ],
 
         // ── apply-runtime options ────────────────────────────────
@@ -12377,8 +13666,7 @@ if (
             "description" =>
                 "Indexes remote tables, then streams the full SQL dump into\n" .
                 "--state-dir/db.sql (default), to stdout, or directly into a\n" .
-                "MySQL connection. Resumes from the last cursor if interrupted.\n" .
-                "Discovered domains are cached for later use by db-apply.\n",
+                "MySQL connection. Resumes from the last cursor if interrupted.\n",
             "extra" =>
                 "Output modes:\n" .
                 "  file    Write to --state-dir/db.sql (default)\n" .
@@ -12395,20 +13683,6 @@ if (
             "extra" =>
                 "Output files:\n" .
                 "  db-tables.jsonl  One JSON object per table\n",
-        ],
-        "db-domains" => [
-            "level" => "low",
-            "short" => "Extract domains from the pulled SQL dump",
-            "description" =>
-                "Prints domains found in the SQL dump, one per line.\n" .
-                "\n" .
-                "If <remote-state-directory>/pull/domains.json exists (cached by db-pull), it is read\n" .
-                "directly. Otherwise, db.sql is scanned and the result is cached\n" .
-                "for future calls. No network calls.\n" .
-                "\n" .
-                "Example:\n" .
-                "  reprint db-domains https://example.com --state-dir=/path/to/state\n",
-            "extra" => null,
         ],
         "pull-metadata" => [
             "level" => "low",
@@ -12427,8 +13701,9 @@ if (
             "short" => "Apply the SQL dump to a local MySQL or SQLite database",
             "description" =>
                 "Reads db.sql from --state-dir, optionally rewrites URLs, and executes\n" .
-                "all statements against a target database. Resumable. Saves target\n" .
-                "database credentials to state for use by apply-runtime.\n",
+                "all statements against a target database. MySQL saves the next file\n" .
+                "group in the target and continues there after interruption. Saves\n" .
+                "target database credentials to state for use by apply-runtime.\n",
             "extra" =>
                 "MySQL example:\n" .
                 "  reprint db-apply https://example.com --state-dir=./state --fs-root=./files \\\n" .
@@ -12438,6 +13713,31 @@ if (
                 "SQLite example:\n" .
                 "  reprint db-apply https://example.com --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-engine=sqlite --target-sqlite-path=/path/to/db.sqlite \\\n" .
+                "    --rewrite-url https://old.com https://new.com\n",
+        ],
+        "db-rewrite-urls" => [
+            "level" => "low",
+            "short" => "Rewrite URLs in an existing live database",
+            "usage" =>
+                "reprint db-rewrite-urls [<remote-reprint-api-url>] " .
+                "--state-dir=DIR [options]",
+            "description" =>
+                "Rewrites URL-bearing values in a live MySQL or SQLite database,\n" .
+                "one primary-keyed record at a time. Each bounded step reads one\n" .
+                "record and updates only columns whose rewritten value changed.\n" .
+                "\n" .
+                "Resumes from the last saved record cursor and reports records\n" .
+                "checked, records changed, tables started, and the current table.\n" .
+                "Tables containing records must have a primary key. --fs-root is\n" .
+                "not used.\n",
+            "extra" =>
+                "The positional URL selects prior state when --state-dir contains\n" .
+                "more than one remote. With one remote it is optional; with none,\n" .
+                "the command creates its own state. Target options default to the\n" .
+                "database recorded by db-apply.\n" .
+                "\n" .
+                "Example:\n" .
+                "  reprint db-rewrite-urls --state-dir=./state \\\n" .
                 "    --rewrite-url https://old.com https://new.com\n",
         ],
         "flat-docroot" => [
@@ -12457,6 +13757,42 @@ if (
                 "If a path that should be a symlink is a regular file or directory,\n" .
                 "the command stops with an error unless --force is specified.\n",
             "extra" => null,
+        ],
+        "merge-wp-content" => [
+            "level" => "low",
+            "short" => "Move wp-content entries only the local site has into the pulled tree",
+            "usage" =>
+                "reprint merge-wp-content <remote-reprint-api-url> --state-dir=DIR " .
+                "--fs-root=DIR --from=DIR",
+            "description" =>
+                "Folds the wp-content directory named by --from into the one the\n" .
+                "file pull wrote under --fs-root. --from is that directory itself,\n" .
+                "whatever it is called, so a site which moved WP_CONTENT_DIR works\n" .
+                "the same as a conventional one.\n" .
+                "\n" .
+                "Entries the pulled tree does not have move there. Entries it has\n" .
+                "stay as they are, so the pulled copy always wins. Nothing is\n" .
+                "deleted, and entries move rather than copy: after a run they no\n" .
+                "longer exist under --from.\n" .
+                "\n" .
+                "Run this before flat-docroot, which replaces the local wp-content\n" .
+                "with a symlink and would otherwise delete whatever only that\n" .
+                "directory held. The remote Reprint API URL selects the state that\n" .
+                "says where the source site kept wp-content, its plugins, its\n" .
+                "mu-plugins and its uploads; no network calls are made.\n",
+            "extra" =>
+                "What counts as one entry:\n" .
+                "  plugins, mu-plugins, themes  one level down, each child whole\n" .
+                "  uploads                      all the way down, each file its own\n" .
+                "  anything else                whole\n" .
+                "\n" .
+                "A plugin or theme both sides have is never merged: keeping the\n" .
+                "files the pulled version dropped would leave a directory matching\n" .
+                "no release, and push them to the source site later.\n" .
+                "\n" .
+                "Example:\n" .
+                "  reprint merge-wp-content https://example.com --state-dir=./state \\\n" .
+                "    --fs-root=./files --from=./site/wp-content\n",
         ],
         "apply-runtime" => [
             "level" => "low",
@@ -12569,19 +13905,22 @@ if (
         exit(0);
     }
 
-    // Every command which reads or writes state names the remote Reprint API
-    // URL whose remote state directory it uses. Local commands use the URL to
-    // select state without making a network request.
-    $remote_reprint_api_url = $argv[2] ?? null;
-    if (
-        !$remote_reprint_api_url
-        || strpos($remote_reprint_api_url, '-') === 0
-    ) {
+    // Most commands name the remote Reprint API URL whose state they use.
+    // db-rewrite-urls can select the only saved remote or use command-local state.
+    $reprint_remote_reprint_api_url_argument = $argv[2] ?? null;
+    $reprint_has_remote_reprint_api_url =
+        is_string($reprint_remote_reprint_api_url_argument)
+        && $reprint_remote_reprint_api_url_argument !== ''
+        && strpos($reprint_remote_reprint_api_url_argument, '-') !== 0;
+    if (!$reprint_has_remote_reprint_api_url && $command !== 'db-rewrite-urls') {
         fwrite(STDERR, "Error: <remote-reprint-api-url> is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
-    $option_start_index = 3;
+    $remote_reprint_api_url = $reprint_has_remote_reprint_api_url
+        ? $reprint_remote_reprint_api_url_argument
+        : '';
+    $option_start_index = $reprint_has_remote_reprint_api_url ? 3 : 2;
 
     [$state_dir, $filesystem_root, $options] = _cli_parse_options(
         $argv, $argc, $option_start_index, $option_defs
@@ -12625,12 +13964,59 @@ if (
 
     if (!$state_dir) {
         fwrite(STDERR, "Error: --state-dir=DIR is required\n");
-        fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        if ($command === 'db-rewrite-urls') {
+            fwrite(STDERR, "Usage: reprint db-rewrite-urls [<remote-reprint-api-url>] --state-dir=DIR [options]\n");
+        } else {
+            fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        }
         exit(1);
     }
 
     // apply-runtime accepts --flat-document-root as an alternative to --fs-root.
     $flat_document_root = $options["flat_document_root"] ?? null;
+    $reprint_selected_remote_state_directory = null;
+    if ($command === 'db-rewrite-urls') {
+        if ($filesystem_root || $flat_document_root) {
+            fwrite(STDERR, "Error: db-rewrite-urls does not accept --fs-root or --flat-document-root.\n");
+            exit(1);
+        }
+        $filesystem_root = $state_dir; // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound
+        if (!$reprint_has_remote_reprint_api_url) {
+            $reprint_command_local_state_directory =
+                wp_join_unix_paths($state_dir, 'db-rewrite-urls');
+            if (
+                is_file(
+                    wp_join_unix_paths(
+                        $reprint_command_local_state_directory,
+                        'pull',
+                        'state.json'
+                    )
+                )
+            ) {
+                $reprint_selected_remote_state_directory =
+                    $reprint_command_local_state_directory;
+            } else {
+                $reprint_saved_remote_state_files = glob(
+                    wp_join_unix_paths($state_dir, 'remotes', '*', 'pull', 'state.json')
+                );
+                $reprint_saved_remote_state_files = $reprint_saved_remote_state_files === false
+                    ? []
+                    : array_values(array_filter($reprint_saved_remote_state_files, 'is_file'));
+                if (count($reprint_saved_remote_state_files) > 1) {
+                    fwrite(
+                        STDERR,
+                        "Error: --state-dir contains more than one saved remote. "
+                        . "Provide <remote-reprint-api-url> to select one.\n"
+                    );
+                    exit(1);
+                }
+                $reprint_selected_remote_state_directory =
+                    count($reprint_saved_remote_state_files) === 1
+                        ? dirname(dirname($reprint_saved_remote_state_files[0]))
+                        : $reprint_command_local_state_directory;
+            }
+        }
+    }
     if ($filesystem_root && $flat_document_root) {
         fwrite(STDERR, "Error: --fs-root and --flat-document-root are mutually exclusive.\n");
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
@@ -12671,7 +14057,13 @@ if (
                 'files-diff'
             );
         }
-        $client = new ImportClient($remote_reprint_api_url, $state_dir, $filesystem_root, $command);
+        $client = new ImportClient(
+            $remote_reprint_api_url,
+            $state_dir,
+            $filesystem_root,
+            $command,
+            $reprint_selected_remote_state_directory
+        );
         $client->audit_log_argv($command, $argv);
         $client->run(
             $options

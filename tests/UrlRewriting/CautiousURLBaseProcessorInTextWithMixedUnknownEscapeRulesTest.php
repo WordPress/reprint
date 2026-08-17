@@ -35,11 +35,44 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
         $this->assertSame($expected, $this->rewrite($input, $mapping));
     }
 
+    public function testPreparedMappingCanBeReusedForDifferentTextValues(): void
+    {
+        $mapping = new CautiousURLBaseRewriteMapping([
+            'https://source.example' => 'https://destination.example',
+        ]);
+
+        $first = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
+            'https://source.example/first.png',
+            $mapping
+        );
+        while ($first->next_url()) {
+            $first->replace_url_base();
+        }
+        $this->assertSame(
+            'https://destination.example/first.png',
+            $first->get_updated_text()
+        );
+
+        $second = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
+            'https://source.example/second.png',
+            $mapping
+        );
+        while ($second->next_url()) {
+            $second->replace_url_base();
+        }
+        $this->assertSame(
+            'https://destination.example/second.png',
+            $second->get_updated_text()
+        );
+    }
+
     /**
      * @return array<string, array{0:string, 1:string, 2:array<string, string>}>
      */
     public static function supported_cases(): array
     {
+        $eight_backslash_separator = str_repeat('\\', 8) . '/';
+
         return [
             'unquoted CSS URL preserves its terminator' => [
                 '.hero{background-image:url(https://source.example/wp-content/uploads/2026/01/hero.jpg);}',
@@ -80,6 +113,25 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 '[builder_data value="{\\\"url\\\":\\\"https:\\\\\\/\\\\\\/source.example\\\\\\/wp-content\\\\\\/uploads\\\\\\/2026\\\\\\/01\\\\\\/hero.jpg\\\"}"]',
                 '[builder_data value="{\\\"url\\\":\\\"https:\\\\\\/\\\\\\/destination.example\\\\\\/wp-content\\\\\\/uploads\\\\\\/2026\\\\\\/01\\\\\\/hero.jpg\\\"}"]',
                 ['https://source.example' => 'https://destination.example'],
+            ],
+            'two-backslash URL separators' => [
+                'https:\\\\/\\\\/source.example\\\\/media\\\\/logo.png',
+                'https:\\\\/\\\\/destination.example\\\\/assets\\\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'four-backslash URL separators' => [
+                'https:\\\\\\\\/\\\\\\\\/source.example\\\\\\\\/media\\\\\\\\/logo.png',
+                'https:\\\\\\\\/\\\\\\\\/destination.example\\\\\\\\/assets\\\\\\\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'eight-backslash URL separators' => [
+                'https:' . $eight_backslash_separator . $eight_backslash_separator
+                    . 'source.example' . $eight_backslash_separator . 'media'
+                    . $eight_backslash_separator . 'logo.png',
+                'https:' . $eight_backslash_separator . $eight_backslash_separator
+                    . 'destination.example' . $eight_backslash_separator . 'assets'
+                    . $eight_backslash_separator . 'logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
             ],
             'username, password, and suffix remain unchanged' => [
                 'url("https://user:password@source.example/wp-content/uploads/logo.png?download=1#preview");',
@@ -216,6 +268,101 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://site.com/source.com/media?next=https://destination.com/media/logo.png',
                 ['https://source.com' => 'https://destination.com'],
             ],
+            'literal target path replaces a configured source path' => [
+                'https://source.example/media/logo.png',
+                'https://destination.example/assets/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'target path accepts hyphen underscore and nested components' => [
+                'https://source.example/media/logo.png',
+                'https://destination.example/assets-2026/_private/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets-2026/_private'],
+            ],
+            'escaped target path copies the protocol slash spelling' => [
+                'https:\\/\\/source.example\\/media\\/logo.png',
+                'https:\\/\\/destination.example\\/assets\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'target path uses the protocol separator when the URL has no suffix' => [
+                'https:\\\\\/\\\\\\/source.example',
+                'https:\\\\\/\\\\\\/destination.example\\\\\\/assets',
+                ['https://source.example' => 'https://destination.example/assets'],
+            ],
+            'target path copies the protocol slash when the source path slash differs' => [
+                'https:\\/\\/source.example/media/logo.png',
+                'https:\\/\\/destination.example\\/assets/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'target path comes before a query after an unmapped authority' => [
+                'https:\\/\\/source.example?download=1',
+                'https:\\/\\/destination.example\\/assets?download=1',
+                ['https://source.example' => 'https://destination.example/assets'],
+            ],
+            'target path skips a preceding scheme-less occurrence' => [
+                'source.example https:\\/\\/source.example',
+                'source.example https:\\/\\/destination.example\\/assets',
+                ['https://source.example' => 'https://destination.example/assets'],
+            ],
+            'target path and protocol change use the same match' => [
+                'http:\\/\\/source.example\\/media\\/logo.png',
+                'https:\\/\\/destination.example\\/assets\\/logo.png',
+                ['http://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'protocol-relative URL' => [
+                '//source.com/media/logo.png',
+                '//destination.com/media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'protocol-relative URL with a target path' => [
+                '//source.example/media/logo.png',
+                '//destination.example/assets/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'escaped protocol-relative URL with a target path' => [
+                '\\/\\/source.example\\/media\\/logo.png',
+                '\\/\\/destination.example\\/assets\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'scheme-less URL copies its configured path slash' => [
+                'source.example\\/media\\/logo.png',
+                'destination.example\\/assets\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets'],
+            ],
+            'scheme-less URL copies its following path slash' => [
+                'source.example\\/logo.png',
+                'destination.example\\/assets\\/logo.png',
+                ['https://source.example' => 'https://destination.example/assets'],
+            ],
+            'scheme-less target path skips a longer unrelated host' => [
+                'not-the-source.com/media/logo.png source.com/media/logo.png',
+                'not-the-source.com/media/logo.png destination.com/assets/media/logo.png',
+                ['https://source.com' => 'https://destination.com/assets'],
+            ],
+            'literal target port' => [
+                'https://source.example/media/logo.png',
+                'https://destination.example:8443/media/logo.png',
+                ['https://source.example' => 'https://destination.example:8443'],
+            ],
+            'target port copies the scheme colon spelling' => [
+                'https\\:\\/\\/source.example\\/media\\/logo.png',
+                'https\\:\\/\\/destination.example\\:8443\\/media\\/logo.png',
+                ['https://source.example' => 'https://destination.example:8443'],
+            ],
+            'protocol-relative target port uses a literal colon' => [
+                '\\/\\/source.example\\/media\\/logo.png',
+                '\\/\\/destination.example:8443\\/media\\/logo.png',
+                ['https://source.example' => 'https://destination.example:8443'],
+            ],
+            'scheme-less target port uses a literal colon' => [
+                'source.example\\/media\\/logo.png',
+                'destination.example:8443\\/media\\/logo.png',
+                ['https://source.example' => 'https://destination.example:8443'],
+            ],
+            'target port and path use their captured spellings' => [
+                'https\\:\\/\\/source.example\\/media\\/logo.png',
+                'https\\:\\/\\/destination.example\\:8443\\/assets\\/logo.png',
+                ['https://source.example/media' => 'https://destination.example:8443/assets'],
+            ],
         ];
     }
 
@@ -224,16 +371,38 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
      */
     public static function unsupported_cases(): array
     {
+        $nine_backslash_separator = str_repeat('\\', 9) . '/';
+
         return [
             'configured source path differs by case' => [
                 'https://SOURCE.EXAMPLE/Media/logo.png',
                 'https://SOURCE.EXAMPLE/Media/logo.png',
                 ['https://source.example/media' => 'https://destination.example'],
             ],
-            'target has a path' => [
+            'target path has a dot segment' => [
                 'https://source.example/media/logo.png',
                 'https://source.example/media/logo.png',
-                ['https://source.example/media' => 'https://destination.example/assets'],
+                ['https://source.example/media' => 'https://destination.example/assets/../private'],
+            ],
+            'target path has an empty segment' => [
+                'https://source.example/media/logo.png',
+                'https://source.example/media/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets//private'],
+            ],
+            'target path has a percent escape' => [
+                'https://source.example/media/logo.png',
+                'https://source.example/media/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets%2Fprivate'],
+            ],
+            'target path ends with a slash' => [
+                'https://source.example/media/logo.png',
+                'https://source.example/media/logo.png',
+                ['https://source.example/media' => 'https://destination.example/assets/'],
+            ],
+            'scheme-less authority without a separator stays unchanged' => [
+                'source.example',
+                'source.example',
+                ['https://source.example' => 'https://destination.example/assets'],
             ],
             'target has a percent-encoded path' => [
                 'https://source.example/media/logo.png',
@@ -259,11 +428,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://source.example/media/logo.png',
                 'https://source.example/media/logo.png',
                 ['https://source.example/media' => 'https://destination.example/über-uns'],
-            ],
-            'target has a port' => [
-                'https://source.example/media/logo.png',
-                'https://source.example/media/logo.png',
-                ['https://source.example/media' => 'https://destination.example:8443'],
             ],
             'target has a username and password' => [
                 'https://source.example/media/logo.png',
@@ -340,11 +504,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'ftp://source.com/media/logo.png',
                 ['https://source.com' => 'https://destination.com'],
             ],
-            'HTTPS mapping does not match a protocol-relative URL' => [
-                '//source.com/media/logo.png',
-                '//source.com/media/logo.png',
-                ['https://source.com' => 'https://destination.com'],
-            ],
             'host is a hyphenated suffix of another host' => [
                 'https://not-the-right-source.com/media/logo.png',
                 'https://not-the-right-source.com/media/logo.png',
@@ -410,9 +569,16 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 "https://source.example/media\x80archive/logo.png",
                 ["https://source.example/media\x80archive" => 'https://destination.example'],
             ],
-            'protocol separators use two backslashes' => [
-                'https:\\\\/\\\\/source.example\\\\/media\\\\/logo.png',
-                'https:\\\\/\\\\/source.example\\\\/media\\\\/logo.png',
+            'protocol slashes use different escaping' => [
+                'https:\\/\\\\/source.example\\/media\\/logo.png',
+                'https:\\/\\\\/source.example\\/media\\/logo.png',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'protocol separators use nine backslashes' => [
+                'https:' . $nine_backslash_separator . $nine_backslash_separator
+                    . 'source.example' . $nine_backslash_separator . 'media/logo.png',
+                'https:' . $nine_backslash_separator . $nine_backslash_separator
+                    . 'source.example' . $nine_backslash_separator . 'media/logo.png',
                 ['https://source.example' => 'https://destination.example'],
             ],
             'protocol separators are percent encoded' => [
@@ -483,7 +649,10 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
      */
     private function rewrite(string $text, array $mapping): string
     {
-        $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules($text, $mapping);
+        $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
+            $text,
+            new CautiousURLBaseRewriteMapping($mapping)
+        );
 
         while ($processor->next_url()) {
             $processor->replace_url_base();

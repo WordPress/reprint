@@ -17,7 +17,7 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
  * 3. Base64 → decode, recurse on decoded content, re-encode if changed
- * 4. Leaf text → CautiousTextBlockMarkupUrlProcessor (block_markup hint)
+ * 4. Leaf text → StructuredBlockMarkupUrlProcessor (block_markup hint)
  *    or CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules (default)
  *
  * HTML is never auto-detected — the caller must explicitly pass
@@ -36,14 +36,8 @@ class StructuredDataUrlRewriter
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
 
-    /**
-     * Exact configured URL spellings used for byte-level replacement in block
-     * markup text tokens. The parsed mapping below serves the structured URL
-     * processors; it cannot preserve the caller's lexical source base.
-     *
-     * @var array<string, string>
-     */
-    private array $url_mapping;
+    /** Prepared URL mapping shared by cautious text processors. */
+    private CautiousURLBaseRewriteMapping $cautious_url_base_rewrite_mapping;
 
     /**
      * Pre-parsed url_mapping: each entry is
@@ -91,7 +85,7 @@ class StructuredDataUrlRewriter
      */
     public function __construct(array $url_mapping)
     {
-        $this->url_mapping = $url_mapping;
+        $this->cautious_url_base_rewrite_mapping = new CautiousURLBaseRewriteMapping($url_mapping);
 
         // Extract unique source domains for the quick-reject check.
         $domains = [];
@@ -126,7 +120,7 @@ class StructuredDataUrlRewriter
      *
      * @param string      $value        The decoded database value.
      * @param string|null $content_type Content type hint: null (auto-detect, plain text default),
-     *                                  'block_markup' (use BlockMarkupUrlProcessor), or 'skip' (no-op).
+     *                                  'block_markup' (use StructuredBlockMarkupUrlProcessor), or 'skip' (no-op).
      * @return string The rewritten value, or the original if no changes were made.
      */
     public function rewrite(string $value, ?string $content_type = null): string
@@ -444,7 +438,7 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
-                $p = new CautiousTextBlockMarkupUrlProcessor( $content, $base_url, $this->url_mapping );
+                $p = new StructuredBlockMarkupUrlProcessor( $content, $base_url );
                 while ( $p->next_token() ) {
                     $token_type = $p->get_token_type() ?? '';
                     while ( $p->next_url_in_current_token() ) {
@@ -485,6 +479,7 @@ class StructuredDataUrlRewriter
                         }
                         $this->set_cached_rewrite_result($cache_key, $cache_value);
                     }
+                    $p->replace_url_bases_in_current_token( $this->cautious_url_base_rewrite_mapping );
                 }
 
                 return $p->get_updated_html();
@@ -496,7 +491,7 @@ class StructuredDataUrlRewriter
 
                 $p = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
                     $content,
-                    $this->url_mapping
+                    $this->cautious_url_base_rewrite_mapping
                 );
                 while ( $p->next_url() ) {
                     $p->replace_url_base();

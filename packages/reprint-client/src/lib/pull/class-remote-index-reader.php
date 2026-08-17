@@ -159,10 +159,10 @@ class RemoteIndexReader
             return null;
         }
         while (( $remote_index_json_line = fgets($this->remote_index_file_handle) ) !== false) {
-            $remote_index_entry = $this->parse_index_line($remote_index_json_line);
-            if ($remote_index_entry !== null) {
-                return $remote_index_entry;
+            if (trim($remote_index_json_line) === "") {
+                continue;
             }
+            return self::decode_index_line($remote_index_json_line);
         }
         return null;
     }
@@ -232,8 +232,8 @@ class RemoteIndexReader
      * `file`, preserving the historical remote-index parsing contract.
      *
      * @param string $line One JSONL line from a remote index file.
-     * @return array|null {
-     *     Decoded index entry, or null for an empty line.
+     * @return array {
+     *     Decoded index entry.
      *
      *     @type string $path  Decoded absolute path.
      *     @type int    $ctime Change time reported by the exporter.
@@ -244,12 +244,9 @@ class RemoteIndexReader
      * @throws InvalidArgumentException When the decoded path is not a valid
      *                                  remote absolute path.
      */
-    private function parse_index_line(string $line): ?array
+    public static function decode_index_line(string $line): array
     {
         $line = trim($line);
-        if ($line === "") {
-            return null;
-        }
         $data = json_decode($line, true);
         if (!is_array($data)) {
             throw new RuntimeException("Invalid index line format");

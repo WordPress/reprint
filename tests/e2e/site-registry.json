@@ -140,8 +140,23 @@
     "db-index-interruption": {
       "port": 8125
     },
-    "only-symlinked-directory-root": {
+    "mysql-session-settings-resume": {
       "port": 8126
+    },
+    "sqlite-legacy": {
+      "port": 8127
+    },
+    "mysql-target-cursor-resume": {
+      "port": 8128
+    },
+    "budgeted-mysql-sql-groups": {
+      "port": 8129
+    },
+    "files-pull-mirror": {
+      "port": 8130
+    },
+    "only-symlinked-directory-root": {
+      "port": 8131
     }
   }
 }

@@ -414,6 +414,7 @@
                     "WordPress\\DataLiberation\\": "src/"
                 },
                 "classmap": [
+                    "src/class-database-rows-reader.php",
                     "src/class-mysql-dump-producer.php",
                     "src/class-file-index-processor.php",
                     "src/class-file-tree-producer.php",
