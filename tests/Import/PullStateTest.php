@@ -69,6 +69,29 @@ class PullStateTest extends TestCase
         $this->assertSame('mirror', \PullState::from_array($array)->files_pull_mode);
     }
 
+    public function testStateDefaultsAnOlderMissingFilesPullModeToCatchUp(): void
+    {
+        $array = ( new \PullState() )->to_array();
+        unset($array['files_pull_mode']);
+
+        $this->assertSame(
+            'catch-up',
+            \PullState::from_array($array)->files_pull_mode
+        );
+    }
+
+    public function testStateRejectsAnUnknownFilesPullMode(): void
+    {
+        $array = ( new \PullState() )->to_array();
+        $array['files_pull_mode'] = 'partial';
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage(
+            'PullState files_pull_mode must be mirror or catch-up.'
+        );
+        \PullState::from_array($array);
+    }
+
     public function testGetAppliesDefaultsOverVerbatimPreflight(): void
     {
         $state = new \PullState();

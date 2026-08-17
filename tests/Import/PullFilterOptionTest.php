@@ -479,6 +479,47 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('essential-files', $state["filter"]);
     }
 
+    public function testPullFilesPassesMirrorModeToTheFileStage(): void
+    {
+        $client = $this->makeClient();
+
+        ob_start();
+        $client->run([
+            "command" => "pull-files",
+            "files_pull_mode" => "mirror",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(1, $client->files_pull_runs);
+        $this->assertSame('mirror', $state['files_pull_mode']);
+        $this->assertSame(
+            'files-pull',
+            $state['pull_pipeline']['last_completed_stage']
+        );
+    }
+
+    public function testPullPassesMirrorModeToTheFileStage(): void
+    {
+        $client = $this->makeClient();
+
+        ob_start();
+        $client->run([
+            "command" => "pull",
+            "files_pull_mode" => "mirror",
+            "runtime" => "none",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(1, $client->files_pull_runs);
+        $this->assertSame('mirror', $state['files_pull_mode']);
+        $this->assertSame(
+            'db-apply',
+            $state['pull_pipeline']['last_completed_stage']
+        );
+    }
+
     public function testPullFilesDoesNotAdvancePastFailedPreflight(): void
     {
         $client = new PullFailingPreflightFakeClient($this->stateDir, $this->filesystem_root);
