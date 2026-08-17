@@ -177,6 +177,38 @@ class SqliteSqlGroupImporterTest extends TestCase
         $this->assertSame(0, (int) $positionTables);
     }
 
+    public function testRefusesATamperedUnfinishedStageBeforeExecutingSql(): void
+    {
+        $this->writeGroups([
+            [
+                'sql' => "UPDATE `import_probe` SET `attempts` = `attempts` + 1 WHERE `id` = 1;\n",
+                'cursor' => ['current_table' => 'import_probe'],
+            ],
+        ]);
+
+        $client = new \ImportClient(
+            $this->remoteUrl,
+            $this->tempDir,
+            $this->tempDir . '/fs-root'
+        );
+        $state = $client->get_state()->active_resumable_command;
+        $state->command_name = 'db-apply';
+        $state->completion_state = 'partial';
+        $state->current_stage = null;
+        $client->save_state();
+
+        $error = null;
+        try {
+            $this->runApply($client);
+        } catch (\RuntimeException $caughtError) {
+            $error = $caughtError;
+        }
+
+        $this->assertInstanceOf(\RuntimeException::class, $error);
+        $this->assertStringContainsString('saved stage is not supported', $error->getMessage());
+        $this->assertSame(0, $this->readProbe()['attempts']);
+    }
+
     private function runApply(\ImportClient $client): void
     {
         $client->run([

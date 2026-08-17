@@ -6314,10 +6314,18 @@ class ImportClient
 
         $mysql_host = $target_host;
         $mysql_socket = null;
+        $port_or_socket = null;
         // WordPress also permits DB_HOST as host:port or host:/socket. An
         // explicit direct-output --mysql-port still wins over host:port.
-        if (strpos($mysql_host, ':') !== false) {
-            [$mysql_host, $port_or_socket] = explode(':', $mysql_host, 2);
+        // Split only known suffixes; other colons belong to a bare IPv6 address.
+        if (preg_match('/^\[([^\]]+)\](?::(\d+|\/.*))?$/D', $mysql_host, $matches)) {
+            $mysql_host = $matches[1];
+            $port_or_socket = $matches[2] ?? null;
+        } elseif (preg_match('/^([^:]+):(\d+|\/.*)$/D', $mysql_host, $matches)) {
+            $mysql_host = $matches[1];
+            $port_or_socket = $matches[2];
+        }
+        if ($port_or_socket !== null) {
             if (isset($port_or_socket[0]) && $port_or_socket[0] === '/') {
                 $mysql_socket = $port_or_socket;
             } elseif (!empty($target['use_host_port'])) {
@@ -6409,6 +6417,26 @@ class ImportClient
             );
         }
 
+        $current_stage = $this->get_state()->active_resumable_command->current_stage;
+        $has_unfinished_apply = in_array(
+            $current_status,
+            ["in_progress", "partial"],
+            true,
+        );
+        if (
+            $has_unfinished_apply
+            && !in_array(
+                $current_stage,
+                ["database-start", "sql", "database-cleanup"],
+                true,
+            )
+        ) {
+            throw new RuntimeException(
+                "Cannot continue db-apply because its saved stage is not supported by this " .
+                "Reprint version. Run db-apply --abort to start again.",
+            );
+        }
+
         $target = $this->resolve_database_target(
             $options,
             $this->get_local_site_database_target(),
@@ -6417,12 +6445,8 @@ class ImportClient
         );
 
         $apply_state = $this->get_state()->apply;
-        $is_resume = in_array($current_status, ["in_progress", "partial"], true)
-            && in_array(
-                $this->get_state()->active_resumable_command->current_stage,
-                ["sql", "database-cleanup"],
-                true,
-            );
+        $is_resume = $has_unfinished_apply
+            && in_array($current_stage, ["sql", "database-cleanup"], true);
 
         // A resumed apply keeps its URL replacements when the CLI omits them.
         // A fresh apply must not inherit replacements from an older lifecycle.
