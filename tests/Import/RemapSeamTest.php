@@ -82,6 +82,25 @@ class RemapSeamTest extends TestCase
         $this->assertSame($this->root . '/wp-content/plugins/woo/woo.php', $local_absolute_path);
     }
 
+    public function testRemoteSelectionIncludesNestedRemapRoots(): void
+    {
+        $mapper = $this->mapperWithRules(array(
+            '/var/www/html/wp-content' => $this->root . '/wp-content',
+            '/var/www/html/wp-content/uploads' => $this->root . '/media',
+            '/var/www/html/wp-admin' => $this->root . '/admin',
+        ));
+
+        $this->assertSame(
+            array(
+                $this->root . '/wp-content',
+                $this->root . '/media',
+            ),
+            $mapper->remote_path_prefixes_to_local_path_prefixes(array(
+                '/var/www/html/wp-content',
+            ))
+        );
+    }
+
     public function testDeeperRemotePrefixWinsRegardlessOfLocalPrefixLength(): void
     {
         // Two nested remote prefixes; the deeper (more specific) one has the

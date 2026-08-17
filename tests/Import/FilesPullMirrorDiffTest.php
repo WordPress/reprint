@@ -99,6 +99,47 @@ final class FilesPullMirrorDiffTest extends TestCase
         ], $this->readJsonLines($this->path($client, 'pull_index_wal_path')));
     }
 
+    public function testUsesCurrentRemoteIndexEntriesOutsideTheIncludeRoot(): void
+    {
+        $client = $this->client();
+        $localPath = $client->filesystem_root . '/followed/file.txt';
+        mkdir(dirname($localPath), 0755, true);
+        file_put_contents($localPath, 'local edit');
+        $localStat = lstat($localPath);
+        $this->assertIsArray($localStat);
+        $this->writeIndex($this->path($client, 'local_index_file'), [[
+            'path' => 'followed/file.txt',
+            'ctime' => $localStat['ctime'] - 1,
+            'size' => strlen('local edit'),
+            'type' => 'file',
+        ]]);
+        $this->writeMappedIndex($client, [[
+            'followed/file.txt',
+            '/outside/followed/file.txt',
+            'file',
+            strlen('remote'),
+        ]]);
+        $this->writeFetchList($client, []);
+        ( new \ReflectionProperty(
+            \ImportClient::class,
+            'pull_only_files_with_path_prefixes'
+        ) )->setValue($client, ['/remote/included']);
+
+        ( new \ReflectionMethod(
+            \ImportClient::class,
+            'build_files_pull_mirror_local_changes'
+        ) )->invoke($client);
+        ( new \ReflectionMethod(
+            \ImportClient::class,
+            'build_files_pull_mirror_fetch_list'
+        ) )->invoke($client);
+
+        $this->assertSame(
+            ['/outside/followed/file.txt'],
+            $this->readFetchList($client)
+        );
+    }
+
     private function client(): \ImportClient
     {
         return new \ImportClient(

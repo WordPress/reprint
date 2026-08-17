@@ -433,52 +433,286 @@ final class FilesPullLocalIndexTest extends TestCase
     }
 
     /**
-     * @dataProvider mirrorIncompatibleOptionProvider
-     * @param list<string> $arguments
+     * @dataProvider mirrorIncludeOptionProvider
      */
-    public function testMirrorRejectsPartialPathSelectionBeforeStarting(
-        array $arguments
-    ): void
-    {
-        $mirror = $this->runFilesPull(
-            array_merge(['--mode=mirror'], $arguments)
+    public function testMirrorChangesOnlyIncludedLocalPaths(
+        string $includeOption
+    ): void {
+        $arguments = [
+            '--mode=mirror',
+            $includeOption . '=/var/www/html/selected',
+        ];
+        $initial = $this->runFilesPull(['--mode=mirror']);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $this->assertFileExists(
+            $this->localTree . '/' . self::PULLED_PATH
+        );
+        $this->assertFileExists(
+            $this->localTree . '/unchanged.txt'
         );
 
-        $this->assertSame(1, $mirror['exit'], $mirror['output']);
-        $this->assertStringContainsString(
-            '--mode=mirror requires a full pull',
-            $mirror['output']
+        file_put_contents(
+            $this->localTree . '/' . self::PULLED_PATH,
+            'local selected edit'
         );
-        $savedState = json_decode(
-            file_get_contents($this->pullStateDirectory . '/state.json'),
-            true,
-            512,
-            JSON_THROW_ON_ERROR
+        file_put_contents(
+            $this->localTree . '/selected/local-only.txt',
+            'local selected addition'
         );
-        $this->assertSame('catch-up', $savedState['files_pull_mode']);
-        $this->assertNull(
-            $savedState['active_resumable_command']['command_name']
+        file_put_contents(
+            $this->localTree . '/unchanged.txt',
+            'local unselected edit'
+        );
+        unlink($this->localTree . '/deleted.txt');
+        mkdir($this->localTree . '/unselected', 0700, true);
+        file_put_contents(
+            $this->localTree . '/unselected/local-only.txt',
+            'local unselected addition'
+        );
+
+        $this->abortFilesPull();
+        $mirror = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $mirror['exit'], $mirror['output']);
+        $this->assertSame(
+            self::PULLED_CONTENTS,
+            file_get_contents($this->localTree . '/' . self::PULLED_PATH)
+        );
+        $this->assertFileDoesNotExist(
+            $this->localTree . '/selected/local-only.txt'
+        );
+        $this->assertSame(
+            'local unselected edit',
+            file_get_contents($this->localTree . '/unchanged.txt')
+        );
+        $this->assertFileDoesNotExist($this->localTree . '/deleted.txt');
+        $this->assertSame(
+            'local unselected addition',
+            file_get_contents(
+                $this->localTree . '/unselected/local-only.txt'
+            )
         );
     }
 
-    /** @return iterable<string,array{list<string>}> */
-    public static function mirrorIncompatibleOptionProvider(): iterable
+    /** @return iterable<string,array{string}> */
+    public static function mirrorIncludeOptionProvider(): iterable
     {
-        yield 'included path' => [[
-            '--include=/var/www/html/selected',
-        ]];
-        yield 'excluded path' => [[
-            '--exclude=/var/www/html/ignored',
-        ]];
-        yield 'default skipped paths' => [[
-            '--include-caches',
-        ]];
-        yield 'partial filter' => [[
+        yield 'include' => ['--include'];
+        yield 'only alias' => ['--only'];
+    }
+
+    public function testMirrorKeepsExcludedLocalPaths(): void
+    {
+        $arguments = [
+            '--mode=mirror',
+            '--exclude=/var/www/html/folder',
+        ];
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $this->assertDirectoryDoesNotExist($this->localTree . '/folder');
+
+        mkdir($this->localTree . '/folder', 0700, true);
+        file_put_contents(
+            $this->localTree . '/folder/remote-deleted.txt',
+            'excluded local edit'
+        );
+        file_put_contents(
+            $this->localTree . '/folder/local-only.txt',
+            'excluded local addition'
+        );
+        file_put_contents(
+            $this->localTree . '/unchanged.txt',
+            'selected local edit'
+        );
+
+        $this->abortFilesPull();
+        $mirror = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $mirror['exit'], $mirror['output']);
+        $this->assertSame(
+            'excluded local edit',
+            file_get_contents(
+                $this->localTree . '/folder/remote-deleted.txt'
+            )
+        );
+        $this->assertSame(
+            'excluded local addition',
+            file_get_contents($this->localTree . '/folder/local-only.txt')
+        );
+        $this->assertSame(
+            $this->remoteFiles['unchanged.txt'],
+            file_get_contents($this->localTree . '/unchanged.txt')
+        );
+    }
+
+    public function testEssentialFilesMirrorKeepsLocalUploads(): void
+    {
+        $remoteUpload = 'wp-content/uploads/remote.txt';
+        $arguments = [
+            '--mode=mirror',
             '--filter=essential-files',
-        ]];
-        yield 'preserved local paths' => [[
+        ];
+        $this->writeRemoteOverrides([
+            'added_files' => [$remoteUpload => 'remote upload'],
+        ]);
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $this->assertFileDoesNotExist($this->localTree . '/' . $remoteUpload);
+
+        mkdir($this->localTree . '/wp-content/uploads', 0700, true);
+        file_put_contents(
+            $this->localTree . '/' . $remoteUpload,
+            'local upload'
+        );
+        file_put_contents(
+            $this->localTree . '/wp-content/uploads/local-only.txt',
+            'local only upload'
+        );
+        file_put_contents(
+            $this->localTree . '/unchanged.txt',
+            'selected local edit'
+        );
+
+        $this->abortFilesPull();
+        $mirror = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $mirror['exit'], $mirror['output']);
+        $this->assertSame(
+            'local upload',
+            file_get_contents($this->localTree . '/' . $remoteUpload)
+        );
+        $this->assertSame(
+            'local only upload',
+            file_get_contents(
+                $this->localTree . '/wp-content/uploads/local-only.txt'
+            )
+        );
+        $this->assertSame(
+            $this->remoteFiles['unchanged.txt'],
+            file_get_contents($this->localTree . '/unchanged.txt')
+        );
+    }
+
+    public function testSkippedEarlierMirrorChangesOnlyUploads(): void
+    {
+        $remoteUpload = 'wp-content/uploads/remote.txt';
+        $arguments = [
+            '--mode=mirror',
+            '--filter=skipped-earlier',
+        ];
+        $this->writeRemoteOverrides([
+            'added_files' => [$remoteUpload => 'remote upload'],
+        ]);
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $this->assertSame(
+            'remote upload',
+            file_get_contents($this->localTree . '/' . $remoteUpload)
+        );
+        $this->assertFileDoesNotExist($this->localTree . '/unchanged.txt');
+
+        file_put_contents(
+            $this->localTree . '/' . $remoteUpload,
+            'local upload edit'
+        );
+        file_put_contents(
+            $this->localTree . '/unchanged.txt',
+            'local essential file'
+        );
+
+        $this->abortFilesPull();
+        $mirror = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $mirror['exit'], $mirror['output']);
+        $this->assertSame(
+            'remote upload',
+            file_get_contents($this->localTree . '/' . $remoteUpload)
+        );
+        $this->assertSame(
+            'local essential file',
+            file_get_contents($this->localTree . '/unchanged.txt')
+        );
+    }
+
+    public function testMirrorIncludesGeneratedCachePathsWhenRequested(): void
+    {
+        $remoteCache = 'wp-content/cache/remote.txt';
+        $this->writeRemoteOverrides([
+            'added_files' => [$remoteCache => 'remote cache'],
+        ]);
+        mkdir($this->localTree . '/wp-content/cache', 0700, true);
+        file_put_contents(
+            $this->localTree . '/' . $remoteCache,
+            'local cache edit'
+        );
+        file_put_contents(
+            $this->localTree . '/wp-content/cache/local-only.txt',
+            'local only cache'
+        );
+
+        $mirror = $this->runFilesPull([
+            '--mode=mirror',
+            '--include-caches',
+        ]);
+
+        $this->assertSame(0, $mirror['exit'], $mirror['output']);
+        $this->assertSame(
+            'remote cache',
+            file_get_contents($this->localTree . '/' . $remoteCache)
+        );
+        $this->assertFileDoesNotExist(
+            $this->localTree . '/wp-content/cache/local-only.txt'
+        );
+    }
+
+    public function testMirrorPreservesUnrecordedLocalPathsWhenRequested(): void
+    {
+        mkdir($this->localTree . '/local-only', 0700, true);
+        file_put_contents(
+            $this->localTree . '/unchanged.txt',
+            'pre-existing local file'
+        );
+        file_put_contents(
+            $this->localTree . '/local-only/file.txt',
+            'pre-existing local-only file'
+        );
+        $arguments = [
+            '--mode=mirror',
             '--on-fs-root-nonempty=preserve-local',
-        ]];
+        ];
+
+        $initial = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $this->assertSame(
+            'pre-existing local file',
+            file_get_contents($this->localTree . '/unchanged.txt')
+        );
+        $this->assertSame(
+            'pre-existing local-only file',
+            file_get_contents($this->localTree . '/local-only/file.txt')
+        );
+        $this->assertSame(
+            $this->remoteFiles['edited.txt'],
+            file_get_contents($this->localTree . '/edited.txt')
+        );
+
+        file_put_contents(
+            $this->localTree . '/edited.txt',
+            'local edit after the pull'
+        );
+        $this->abortFilesPull();
+        $mirror = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $mirror['exit'], $mirror['output']);
+        $this->assertSame(
+            $this->remoteFiles['edited.txt'],
+            file_get_contents($this->localTree . '/edited.txt')
+        );
+        $this->assertSame(
+            'pre-existing local-only file',
+            file_get_contents($this->localTree . '/local-only/file.txt')
+        );
     }
 
     public function testMirrorRejectsAStateDirectoryInsideTheFilesystemRoot(): void
@@ -496,6 +730,84 @@ final class FilesPullLocalIndexTest extends TestCase
             '--mode=mirror requires --state-dir to be outside --fs-root.',
             $mirror['output']
         );
+    }
+
+    public function testMirrorAppliesIncludedPathsAfterLocalRemapping(): void
+    {
+        $arguments = [
+            '--mode=mirror',
+            '--include=/var/www/html/selected',
+            '--remap',
+            '/var/www/html',
+            ':fs-root:/var/www/html/remapped',
+        ];
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $remappedRoot = $this->localTree . '/remapped';
+        $selectedPath = $remappedRoot . '/' . self::PULLED_PATH;
+        $this->assertFileExists($selectedPath);
+
+        file_put_contents($selectedPath, 'local selected edit');
+        file_put_contents(
+            $remappedRoot . '/selected/local-only.txt',
+            'local selected addition'
+        );
+        file_put_contents(
+            $remappedRoot . '/outside-selection.txt',
+            'local unselected addition'
+        );
+
+        $this->abortFilesPull();
+        $mirror = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $mirror['exit'], $mirror['output']);
+        $this->assertSame(
+            self::PULLED_CONTENTS,
+            file_get_contents($selectedPath)
+        );
+        $this->assertFileDoesNotExist(
+            $remappedRoot . '/selected/local-only.txt'
+        );
+        $this->assertSame(
+            'local unselected addition',
+            file_get_contents($remappedRoot . '/outside-selection.txt')
+        );
+    }
+
+    public function testMirrorAppliesIncludedPathsInsideANestedRemap(): void
+    {
+        $remotePath = 'selected/nested/remote.txt';
+        $this->writeRemoteOverrides([
+            'added_files' => [$remotePath => 'remote nested contents'],
+        ]);
+        $arguments = [
+            '--mode=mirror',
+            '--include=/var/www/html/selected',
+            '--remap',
+            '/var/www/html/selected/nested',
+            ':fs-root:/detached',
+        ];
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $mappedRemotePath = $this->rawFileRoot . '/detached/remote.txt';
+        $mappedLocalOnlyPath = $this->rawFileRoot . '/detached/local-only.txt';
+        $this->assertSame(
+            'remote nested contents',
+            file_get_contents($mappedRemotePath)
+        );
+
+        file_put_contents($mappedRemotePath, 'local nested edit');
+        file_put_contents($mappedLocalOnlyPath, 'local nested addition');
+
+        $this->abortFilesPull();
+        $mirror = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $mirror['exit'], $mirror['output']);
+        $this->assertSame(
+            'remote nested contents',
+            file_get_contents($mappedRemotePath)
+        );
+        $this->assertFileDoesNotExist($mappedLocalOnlyPath);
     }
 
     public function testMirrorUsesRemotePathsAfterLocalRemapping(): void

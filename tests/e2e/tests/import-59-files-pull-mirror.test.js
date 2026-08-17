@@ -47,6 +47,10 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
     let nonemptyMirrorTempDir;
     let remappedMirrorTempDir;
     let typeChangeMirrorTempDir;
+    let selectedMirrorTempDir;
+    let filteredMirrorTempDir;
+    let cacheMirrorTempDir;
+    let preservedMirrorTempDir;
 
     const remoteConflictFile = join(
         getSiteDir(site),
@@ -100,6 +104,10 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         nonemptyMirrorTempDir = createTempDir('e2e-files-pull-mirror-nonempty');
         remappedMirrorTempDir = createTempDir('e2e-files-pull-mirror-remapped');
         typeChangeMirrorTempDir = createTempDir('e2e-files-pull-mirror-types');
+        selectedMirrorTempDir = createTempDir('e2e-files-pull-mirror-selected');
+        filteredMirrorTempDir = createTempDir('e2e-files-pull-mirror-filtered');
+        cacheMirrorTempDir = createTempDir('e2e-files-pull-mirror-caches');
+        preservedMirrorTempDir = createTempDir('e2e-files-pull-mirror-preserved');
         clearHookState(site);
         removeTestHooks(site);
     });
@@ -114,6 +122,10 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         cleanupTempDir(nonemptyMirrorTempDir);
         cleanupTempDir(remappedMirrorTempDir);
         cleanupTempDir(typeChangeMirrorTempDir);
+        cleanupTempDir(selectedMirrorTempDir);
+        cleanupTempDir(filteredMirrorTempDir);
+        cleanupTempDir(cacheMirrorTempDir);
+        cleanupTempDir(preservedMirrorTempDir);
         writeRemoteFile(remoteConflictFile, 'initial remote content\n');
         writeRemoteFile(remoteDeletedFile, 'present before remote deletion\n');
         removeRemotePath(remoteAddedFile);
@@ -441,6 +453,217 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
             `Repeated remapped mirror failed\nstderr: ${repeated.stderr}\nstdout: ${repeated.stdout}`,
         );
         assertTreesMatch(getSiteDir(site), remappedLocalRoot);
+    });
+
+    it('changes only the included paths outside excluded subtrees', () => {
+        const initial = runFilesPull(selectedMirrorTempDir, 'mirror');
+        assert.equal(
+            initial.exitCode,
+            0,
+            `Selected mirror setup failed\nstderr: ${initial.stderr}\nstdout: ${initial.stdout}`,
+        );
+        resetCompletedFilesPull(selectedMirrorTempDir);
+
+        const localRoot = localSiteRoot(selectedMirrorTempDir);
+        const selectedFile = join(localRoot, 'test-data', 'hello.txt');
+        const excludedFile = join(
+            localRoot,
+            'test-data',
+            'subdir',
+            'nested',
+            'deep.txt',
+        );
+        writeFileSync(selectedFile, 'selected local edit\n');
+        writeFileSync(excludedFile, 'excluded local edit\n');
+        writeFileSync(
+            join(localRoot, 'test-data', 'local-only.txt'),
+            'selected local-only file\n',
+        );
+        writeFileSync(
+            join(localRoot, 'test-data', 'subdir', 'local-only.txt'),
+            'excluded local-only file\n',
+        );
+
+        const result = runFilesPull(selectedMirrorTempDir, 'mirror', {
+            extraArgs: [
+                `--include=${join(getSiteDir(site), 'test-data')}`,
+                `--exclude=${join(getSiteDir(site), 'test-data', 'subdir')}`,
+            ],
+        });
+        assert.equal(
+            result.exitCode,
+            0,
+            `Selected mirror failed\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
+        );
+        assert.deepEqual(
+            readFileSync(selectedFile),
+            readFileSync(join(getSiteDir(site), 'test-data', 'hello.txt')),
+        );
+        assert.ok(!existsSync(join(localRoot, 'test-data', 'local-only.txt')));
+        assert.equal(readFileSync(excludedFile, 'utf-8'), 'excluded local edit\n');
+        assert.equal(
+            readFileSync(
+                join(localRoot, 'test-data', 'subdir', 'local-only.txt'),
+                'utf-8',
+            ),
+            'excluded local-only file\n',
+        );
+    });
+
+    it('mirrors essential files and uploads in separate filter passes', () => {
+        const remoteUpload = join(
+            getSiteDir(site),
+            'wp-content',
+            'uploads',
+            'mirror-selection',
+            'remote.txt',
+        );
+        execFileSync('sudo', ['mkdir', '-p', join(remoteUpload, '..')]);
+        writeRemoteFile(remoteUpload, 'remote upload\n');
+        try {
+            const initial = runFilesPull(filteredMirrorTempDir, 'mirror');
+            assert.equal(
+                initial.exitCode,
+                0,
+                `Filtered mirror setup failed\nstderr: ${initial.stderr}\nstdout: ${initial.stdout}`,
+            );
+            resetCompletedFilesPull(filteredMirrorTempDir);
+
+            const localRoot = localSiteRoot(filteredMirrorTempDir);
+            const localUpload = join(
+                localRoot,
+                'wp-content',
+                'uploads',
+                'mirror-selection',
+                'remote.txt',
+            );
+            const localEssentialFile = join(localRoot, 'test-data', 'hello.txt');
+            writeFileSync(localUpload, 'local upload edit\n');
+            writeFileSync(localEssentialFile, 'local essential edit\n');
+
+            const essential = runFilesPull(filteredMirrorTempDir, 'mirror', {
+                extraArgs: ['--filter=essential-files'],
+            });
+            assert.equal(
+                essential.exitCode,
+                0,
+                `Essential-files mirror failed\nstderr: ${essential.stderr}\nstdout: ${essential.stdout}`,
+            );
+            assert.equal(readFileSync(localUpload, 'utf-8'), 'local upload edit\n');
+            assert.deepEqual(
+                readFileSync(localEssentialFile),
+                readFileSync(join(getSiteDir(site), 'test-data', 'hello.txt')),
+            );
+
+            resetCompletedFilesPull(filteredMirrorTempDir);
+            writeFileSync(localEssentialFile, 'second local essential edit\n');
+            const uploads = runFilesPull(filteredMirrorTempDir, 'mirror', {
+                extraArgs: ['--filter=skipped-earlier'],
+            });
+            assert.equal(
+                uploads.exitCode,
+                0,
+                `Skipped-earlier mirror failed\nstderr: ${uploads.stderr}\nstdout: ${uploads.stdout}`,
+            );
+            assert.equal(readFileSync(localUpload, 'utf-8'), 'remote upload\n');
+            assert.equal(
+                readFileSync(localEssentialFile, 'utf-8'),
+                'second local essential edit\n',
+            );
+        } finally {
+            removeRemotePath(join(getSiteDir(site), 'wp-content', 'uploads', 'mirror-selection'));
+        }
+    });
+
+    it('includes caches and preserves unrecorded local paths when requested', () => {
+        const remoteCache = join(
+            getSiteDir(site),
+            'wp-content',
+            'cache',
+            'mirror-selection',
+            'remote.txt',
+        );
+        execFileSync('sudo', ['mkdir', '-p', join(remoteCache, '..')]);
+        writeRemoteFile(remoteCache, 'remote cache\n');
+        try {
+            const cacheLocalRoot = localSiteRoot(cacheMirrorTempDir);
+            const localCacheDirectory = join(
+                cacheLocalRoot,
+                'wp-content',
+                'cache',
+                'mirror-selection',
+            );
+            mkdirSync(localCacheDirectory, { recursive: true });
+            writeFileSync(join(localCacheDirectory, 'remote.txt'), 'local cache edit\n');
+            writeFileSync(join(localCacheDirectory, 'local-only.txt'), 'local cache only\n');
+
+            const cacheResult = runFilesPull(cacheMirrorTempDir, 'mirror', {
+                extraArgs: ['--include-caches'],
+            });
+            assert.equal(
+                cacheResult.exitCode,
+                0,
+                `Cache mirror failed\nstderr: ${cacheResult.stderr}\nstdout: ${cacheResult.stdout}`,
+            );
+            assert.equal(
+                readFileSync(join(localCacheDirectory, 'remote.txt'), 'utf-8'),
+                'remote cache\n',
+            );
+            assert.ok(!existsSync(join(localCacheDirectory, 'local-only.txt')));
+
+            const preservedLocalRoot = localSiteRoot(preservedMirrorTempDir);
+            mkdirSync(join(preservedLocalRoot, 'test-data', 'local-only'), {
+                recursive: true,
+            });
+            writeFileSync(
+                join(preservedLocalRoot, 'test-data', 'hello.txt'),
+                'pre-existing local file\n',
+            );
+            writeFileSync(
+                join(preservedLocalRoot, 'test-data', 'local-only', 'file.txt'),
+                'pre-existing local-only file\n',
+            );
+            const preserveResult = runFilesPull(preservedMirrorTempDir, 'mirror', {
+                extraArgs: ['--on-fs-root-nonempty=preserve-local'],
+            });
+            assert.equal(
+                preserveResult.exitCode,
+                0,
+                `Preserve-local mirror failed\nstderr: ${preserveResult.stderr}\nstdout: ${preserveResult.stdout}`,
+            );
+            assert.equal(
+                readFileSync(
+                    join(preservedLocalRoot, 'test-data', 'hello.txt'),
+                    'utf-8',
+                ),
+                'pre-existing local file\n',
+            );
+            assert.equal(
+                readFileSync(
+                    join(
+                        preservedLocalRoot,
+                        'test-data',
+                        'local-only',
+                        'file.txt',
+                    ),
+                    'utf-8',
+                ),
+                'pre-existing local-only file\n',
+            );
+            assert.ok(
+                existsSync(
+                    join(
+                        preservedLocalRoot,
+                        'test-data',
+                        'subdir',
+                        'nested',
+                        'deep.txt',
+                    ),
+                ),
+            );
+        } finally {
+            removeRemotePath(join(getSiteDir(site), 'wp-content', 'cache', 'mirror-selection'));
+        }
     });
 
     it('applies remote additions, deletions, and conflicts on both modes', () => {
