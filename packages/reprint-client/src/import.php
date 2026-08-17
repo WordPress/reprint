@@ -3623,7 +3623,7 @@ class ImportClient
                 if (
                     (
                         !$this->include_caches
-                        && $this->is_default_skipped_local_absolute_path(
+                        && $this->local_path_requires_include_caches(
                             $local_absolute_path,
                             $local_relative_path
                         )
@@ -3672,8 +3672,16 @@ class ImportClient
         }
     }
 
-    /** Whether the local path spells a default-skipped path before or after remapping. */
-    private function is_default_skipped_local_absolute_path(
+    /**
+     * Checks whether mirroring this local path requires --include-caches.
+     *
+     * Unless --include-caches is set, the file index omits generated caches,
+     * version-control metadata, OS metadata, and editor scratch files. A remap
+     * may place one of those paths under a different local name, so this checks
+     * both the path relative to --fs-root and every matching remote path before
+     * allowing its removal.
+     */
+    private function local_path_requires_include_caches(
         string $local_absolute_path,
         string $local_relative_path
     ): bool {
@@ -9777,20 +9785,24 @@ class ImportClient
     }
 
     /**
-     * Whether a path is selected by the active --include and --exclude prefixes.
+     * Checks whether a remote or local path passes --include and --exclude.
      *
-     * The exporter has already applied --include to entries in the next remote
-     * index, including followed symlink targets outside an --include prefix. Other
-     * paths are checked against --include locally. An included root itself is not
-     * selected because the next remote index lists its contents, not the root
-     * entry. Exclusions always win.
+     * The server has already applied --include to current remote index entries,
+     * including followed symlink targets outside an include prefix. Locally
+     * discovered paths still need that include check. Mirror supplies local
+     * prefixes for those paths because remapping has changed their coordinates.
+     * An included root itself is not selected because the current remote index
+     * lists its contents, not the root entry. Exclusions always win.
      *
-     * @param bool $is_next_remote_index_entry Whether the path came from the
-     *                                         current next remote index.
-     * @param list<string>|null $included_path_prefixes Included roots, or the
-     *                                                   current pull includes.
-     * @param list<string>|null $excluded_path_prefixes Excluded roots, or the
-     *                                                   current pull exclusions.
+     * @param string $path Remote or local absolute path to check.
+     * @param bool $is_next_remote_index_entry Whether the server already applied
+     *                                         the include filter to this path.
+     * @param list<string>|null $included_path_prefixes Include prefixes in the
+     *                                                   path's coordinates, or
+     *                                                   null for the remote prefixes.
+     * @param list<string>|null $excluded_path_prefixes Exclude prefixes in the
+     *                                                   path's coordinates, or
+     *                                                   null for the remote prefixes.
      */
     private function is_selected_for_pulling(
         string $path,

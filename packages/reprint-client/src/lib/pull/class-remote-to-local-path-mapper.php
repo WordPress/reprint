@@ -110,10 +110,16 @@ final class RemoteToLocalPathMapper
     }
 
     /**
-     * Maps remote selection roots and nested remaps into local selection roots.
+     * Returns every local prefix reached by remote include or exclude prefixes.
      *
-     * @param list<string> $remote_absolute_path_prefixes Remote selection roots.
-     * @return list<string> Local selection roots.
+     * A nested remap can split one remote subtree across several local roots.
+     * For example, /remote/wp-content may map to /local/wp-content while its
+     * /remote/wp-content/uploads subtree maps separately to /local/media. The
+     * remote /remote/wp-content prefix therefore covers both local roots.
+     *
+     * @param list<string> $remote_absolute_path_prefixes Remote absolute include
+     *                                                    or exclude prefixes.
+     * @return list<string> Local absolute prefixes covered by the remote prefixes.
      */
     public function remote_path_prefixes_to_local_path_prefixes(
         array $remote_absolute_path_prefixes

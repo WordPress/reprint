@@ -634,7 +634,7 @@ final class FilesPullLocalIndexTest extends TestCase
         );
     }
 
-    public function testMirrorIncludesDefaultSkippedPathsWhenRequested(): void
+    public function testMirrorIncludesGeneratedCachePathsWhenRequested(): void
     {
         $remoteCache = 'wp-content/cache/remote.txt';
         $this->writeRemoteOverrides([
