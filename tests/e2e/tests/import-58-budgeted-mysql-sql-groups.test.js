@@ -23,7 +23,7 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
                     `CREATE TABLE \`${firstTable}\` (`
                     + '`id` INT NOT NULL PRIMARY KEY, `value` VARCHAR(64) NOT NULL) ENGINE=InnoDB'
                 );
-                const rows = Array.from({ length: 600 }, (_, index) => [
+                const rows = Array.from({ length: 1001 }, (_, index) => [
                     index + 1,
                     `row-${index + 1}`,
                 ]);
@@ -57,14 +57,18 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
         }
     });
 
-    async function sqlParts(fragmentsPerBatch) {
+    async function sqlParts(fragmentsPerBatch, cursor = null) {
+        const request = {
+            directory: getSiteDir(site),
+            fragments_per_batch: fragmentsPerBatch,
+            skip_tables: skippedTables,
+        };
+        if (cursor !== null) {
+            request.cursor = cursor;
+        }
         const response = await apiRequest(site, 'sql_chunk', {}, {
             method: 'POST',
-            body: JSON.stringify({
-                directory: getSiteDir(site),
-                fragments_per_batch: fragmentsPerBatch,
-                skip_tables: skippedTables,
-            }),
+            body: JSON.stringify(request),
         });
         assert.equal(
             response.status,
@@ -74,7 +78,7 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
         return response.chunks.filter(chunk => chunk.headers['x-chunk-type'] === 'sql');
     }
 
-    it('allows the existing fragment budget to group complete INSERT statements', async () => {
+    it('emits a complete SQL part before an unfinished batch suffix', async () => {
         const parts = await sqlParts(1000);
         const firstTableInsertPart = parts.find(
             part => part.body.includes(`INSERT INTO \`${firstTable}\``)
@@ -84,6 +88,35 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
             firstTableInsertPart.body.match(new RegExp('INSERT INTO `' + firstTable + '`', 'g'))?.length,
             3,
             'Expected the three producer INSERT statements in one budgeted SQL part',
+        );
+        assert.equal(
+            firstTableInsertPart.headers['x-query-complete'],
+            '1',
+            'The complete prefix should be exposed as its own SQL part',
+        );
+        const firstTableInsertPartIndex = parts.indexOf(firstTableInsertPart);
+        const incompleteSuffixPart = parts[firstTableInsertPartIndex + 1];
+        assert.equal(
+            incompleteSuffixPart?.headers['x-query-complete'],
+            '0',
+            'The unfinished INSERT suffix should follow the complete prefix',
+        );
+        assert.ok(
+            incompleteSuffixPart.body.includes(`INSERT INTO \`${firstTable}\``),
+            'The unfinished suffix should contain the next INSERT statement',
+        );
+        assert.ok(
+            !incompleteSuffixPart.body.includes(';'),
+            'The unfinished suffix must not retain a complete statement',
+        );
+        const resumedParts = await sqlParts(
+            1000,
+            firstTableInsertPart.headers['x-cursor'],
+        );
+        assert.equal(
+            resumedParts.map(part => part.body).join(''),
+            parts.slice(firstTableInsertPartIndex + 1).map(part => part.body).join(''),
+            'The complete prefix cursor should resume at the unfinished suffix',
         );
         assert.ok(
             !firstTableInsertPart.body.includes(`DROP TABLE IF EXISTS \`${secondTable}\``),

@@ -103,6 +103,9 @@ jobs:
         run: node benchmark/bench-pull.mjs
 
       - name: Capture commit metadata
+        # A branch dispatch may validate the full benchmark, but only merged
+        # trunk commits belong in the published history.
+        if: github.ref == 'refs/heads/trunk'
         id: commit
         run: |
           echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
@@ -115,6 +118,7 @@ jobs:
           echo "date=$(git log -1 --pretty=%cI)" >> "$GITHUB_OUTPUT"
 
       - name: Checkout gh-pages branch
+        if: github.ref == 'refs/heads/trunk'
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
@@ -129,6 +133,7 @@ jobs:
           fi
 
       - name: Update site files and append history entry
+        if: github.ref == 'refs/heads/trunk'
         env:
           BENCH_JSON: tests/e2e/bench-trunk.json
           HISTORY_JSON: pages/data/history.json
@@ -146,6 +151,7 @@ jobs:
           node tests/e2e/benchmark/append-history.mjs
 
       - name: Commit and push
+        if: github.ref == 'refs/heads/trunk'
         working-directory: pages
         run: |
           set -euo pipefail
