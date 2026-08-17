@@ -77,7 +77,7 @@ php reprint.phar pull https://example.com --secret=TOKEN \
 
 **Runtime** — defaults to `php-builtin` (starts a server at the end). Override with `--runtime=nginx-fpm` or `--runtime=playground-cli` for other environments.
 
-**Resume** — if interrupted, re-run the same command. It picks up where it left off. Running pull again after completion performs a delta sync (only downloads what changed).
+**Resume** — if interrupted, re-run the same command. It picks up where it left off. Running pull again after completion performs a delta sync. By default, the delta [catches up with remote changes](#file-pull-modes); mirror mode is available when the selected local paths must match the remote site.
 
 **All options** — run `php reprint.phar pull --help` for the full list.
 
@@ -240,6 +240,37 @@ The command returns one of three exit codes:
 - 2: partial completion, needs re-running
 
 Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
+
+**File pull modes**
+
+`files-pull`, `pull-files`, and `pull` use `--mode=catch-up` by default.
+Catch-up applies paths whose remote index entries changed since the previous
+completed pull. A local edit remains when that remote path did not change, and
+a path found only in the local tree remains in place.
+
+Use mirror mode when paths inside today's pull selection must match today's
+remote index:
+
+```bash
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+    --mode=mirror
+```
+
+For example, suppose `wp-content/themes/example/style.css` still contains
+`blue` remotely but contains `red` locally, and `debug.log` exists only
+locally. Catch-up leaves both paths alone when the remote index did not change.
+Mirror downloads the remote `style.css` and removes `debug.log` when both paths
+are inside the current pull selection.
+
+The normal path options define that selection. This includes `--include`,
+`--exclude`, `--filter`, `--include-caches`, and `--remap`. Mirror does not
+change paths outside the selection. `--on-fs-root-nonempty=preserve-local`
+also keeps pre-existing local paths which were not recorded by the first pull.
+
+Mirror mode requires `--state-dir` to be outside `--fs-root`, because the state
+files must not appear in the local tree being compared. The selected mode is
+saved when `files-pull` starts. To switch modes, first run the same command with
+`--abort`, then start it again with the other `--mode` value.
 
 **Non-empty local fs-root**
 
@@ -821,7 +852,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary in terminal mode or one structured result in JSONL mode. Exits with code 0 if migration looks feasible, code 1 if not.
 * `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
 * `pull-db` — Runs `preflight`, `db-pull`, and `db-apply` as one resumable high-level command.
-* `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
+* `files-pull` — Pull all files (initial) or a delta. Catch-up mode applies remote changes; mirror mode makes the selected local paths match the current remote index. Runs files-index if needed.
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Both engines continue from the file group named by the cursor stored in the target. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
