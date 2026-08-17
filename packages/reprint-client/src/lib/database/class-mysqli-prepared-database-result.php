@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Reprint\Importer\Database;
 
 use mysqli_result;
+use mysqli_sql_exception;
 use mysqli_stmt;
 use PDO;
 use PDOException;
@@ -59,7 +60,17 @@ class MysqliPreparedDatabaseResult implements DatabaseResult {
         }
 
         $statement = $this->get_statement();
-        $fetched = $statement->fetch();
+        try {
+            $fetched = $statement->fetch();
+        } catch (mysqli_sql_exception $error) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Database errors are CLI text.
+            throw new PDOException(
+                'The target database could not fetch a prepared query row: ' . $error->getMessage(),
+                $error->getCode(),
+                $error,
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
         if ($fetched === null) {
             return false;
         }

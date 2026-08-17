@@ -248,4 +248,68 @@ class DatabaseConnectionTest extends TestCase {
         $this->expectExceptionMessage('The target database prepared query failed');
         $database->query('SELECT ? AS value', [1, 2]);
     }
+
+    public function testMysqliPreparedResultReportsFetchFailuresAsDatabaseErrors(): void
+    {
+        if (!extension_loaded('mysqli')) {
+            $this->markTestSkipped('mysqli extension required');
+        }
+
+        $metadata = new class() extends \mysqli_result {
+            public function __construct()
+            {
+            }
+
+            public function fetch_fields(): array
+            {
+                return [ (object) ['name' => 'value'] ];
+            }
+
+            public function free(): void
+            {
+            }
+        };
+        $statement = new class($metadata) extends \mysqli_stmt {
+            private \mysqli_result $metadata;
+
+            public function __construct(\mysqli_result $metadata)
+            {
+                $this->metadata = $metadata;
+            }
+
+            public function result_metadata(): \mysqli_result|false
+            {
+                return $this->metadata;
+            }
+
+            public function bind_result(mixed &...$vars): bool
+            {
+                return true;
+            }
+
+            public function fetch(): ?bool
+            {
+                throw new \mysqli_sql_exception('The connection was lost while reading a row.', 2013);
+            }
+
+            #[\ReturnTypeWillChange]
+            public function close()
+            {
+                return true;
+            }
+        };
+        $result = new MysqliPreparedDatabaseResult($statement);
+
+        try {
+            $result->fetch(PDO::FETCH_ASSOC);
+            $this->fail('The mysqli prepared result did not report its fetch failure.');
+        } catch (PDOException $error) {
+            $this->assertStringContainsString(
+                'The target database could not fetch a prepared query row',
+                $error->getMessage()
+            );
+            $this->assertSame(2013, $error->getCode());
+            $this->assertInstanceOf(\mysqli_sql_exception::class, $error->getPrevious());
+        }
+    }
 }
