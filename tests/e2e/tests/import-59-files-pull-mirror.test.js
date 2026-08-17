@@ -12,8 +12,11 @@ import {
     existsSync,
     lstatSync,
     mkdirSync,
+    readdirSync,
+    readlinkSync,
     readFileSync,
     rmSync,
+    statSync,
     unlinkSync,
     writeFileSync,
 } from 'node:fs';
@@ -39,8 +42,11 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
     const site = 'files-pull-mirror';
     let mirrorTempDir;
     let catchUpTempDir;
+    let defaultMirrorTempDir;
+    let emptyRemoteMirrorTempDir;
     let nonemptyMirrorTempDir;
     let remappedMirrorTempDir;
+    let typeChangeMirrorTempDir;
 
     const remoteConflictFile = join(
         getSiteDir(site),
@@ -57,6 +63,21 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         'test-data',
         'added-remotely.txt',
     );
+    const remoteEmptyDirectory = join(
+        getSiteDir(site),
+        'test-data',
+        'mirror-empty-directory',
+    );
+    const remoteSymlink = join(
+        getSiteDir(site),
+        'test-data',
+        'mirror-link',
+    );
+    const remoteSymlinkTarget = join(
+        getSiteDir(site),
+        'test-data',
+        'mirror-link-target.txt',
+    );
 
     beforeAll(async () => {
         await ensureSite(site, {
@@ -71,10 +92,14 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
                 );
             },
         });
+        resetRemoteMirrorFixtures();
         mirrorTempDir = createTempDir('e2e-files-pull-mirror');
         catchUpTempDir = createTempDir('e2e-files-pull-catch-up');
+        defaultMirrorTempDir = createTempDir('e2e-files-pull-default-mirror');
+        emptyRemoteMirrorTempDir = createTempDir('e2e-files-pull-empty-remote');
         nonemptyMirrorTempDir = createTempDir('e2e-files-pull-mirror-nonempty');
         remappedMirrorTempDir = createTempDir('e2e-files-pull-mirror-remapped');
+        typeChangeMirrorTempDir = createTempDir('e2e-files-pull-mirror-types');
         clearHookState(site);
         removeTestHooks(site);
     });
@@ -84,11 +109,15 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         clearHookState(site);
         cleanupTempDir(mirrorTempDir);
         cleanupTempDir(catchUpTempDir);
+        cleanupTempDir(defaultMirrorTempDir);
+        cleanupTempDir(emptyRemoteMirrorTempDir);
         cleanupTempDir(nonemptyMirrorTempDir);
         cleanupTempDir(remappedMirrorTempDir);
+        cleanupTempDir(typeChangeMirrorTempDir);
         writeRemoteFile(remoteConflictFile, 'initial remote content\n');
         writeRemoteFile(remoteDeletedFile, 'present before remote deletion\n');
         removeRemotePath(remoteAddedFile);
+        resetRemoteMirrorFixtures();
     });
 
     function importUrl() {
@@ -97,6 +126,10 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
 
     function localSiteRoot(tempDir) {
         return join(fsRootDir(tempDir), getSiteDir(site));
+    }
+
+    function emptyRemoteImportUrl() {
+        return `${getSiteUrl(site)}&directory=${remoteEmptyDirectory}`;
     }
 
     function changeLocalTree(localRoot) {
@@ -120,13 +153,22 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         execFileSync('sudo', ['rm', '-rf', path]);
     }
 
-    function runFilesPull(tempDir, mode, options = {}) {
-        return runImporter(importUrl(), tempDir, 'files-pull', {
+    function resetRemoteMirrorFixtures() {
+        removeRemotePath(remoteEmptyDirectory);
+        removeRemotePath(remoteSymlink);
+        execFileSync('sudo', ['mkdir', '-p', remoteEmptyDirectory]);
+        writeRemoteFile(remoteSymlinkTarget, 'remote symlink target\n');
+        execFileSync('sudo', ['ln', '-s', 'mirror-link-target.txt', remoteSymlink]);
+    }
+
+    function runFilesPull(tempDir, mode, options = {}, url = importUrl()) {
+        const modeArgument = mode === null ? [] : [`--mode=${mode}`];
+        return runImporter(url, tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             timeout: 180000,
             wallTimeout: 240000,
             ...options,
-            extraArgs: [`--mode=${mode}`, ...(options.extraArgs || [])],
+            extraArgs: [...modeArgument, ...(options.extraArgs || [])],
         });
     }
 
@@ -173,6 +215,123 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
             `Initial nonempty mirror failed\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
         );
         assertTreesMatch(getSiteDir(site), localRoot);
+    });
+
+    it('keeps catch-up as the default and rejects a mode change without abort', () => {
+        const initial = runFilesPull(defaultMirrorTempDir, null);
+        assert.equal(
+            initial.exitCode,
+            0,
+            `Default files-pull failed\nstderr: ${initial.stderr}\nstdout: ${initial.stdout}`,
+        );
+        assertTreesMatch(getSiteDir(site), localSiteRoot(defaultMirrorTempDir));
+
+        const changedMode = runFilesPull(defaultMirrorTempDir, 'mirror', {
+            autoResume: false,
+        });
+        assert.equal(changedMode.exitCode, 1);
+        assert.match(
+            `${changedMode.stderr}\n${changedMode.stdout}`,
+            /Cannot change --mode after files-pull starts/,
+        );
+    });
+
+    it('restores a same-size local edit when the remote index did not change', () => {
+        resetCompletedFilesPull(defaultMirrorTempDir);
+        const localPath = join(
+            localSiteRoot(defaultMirrorTempDir),
+            'test-data',
+            'hello.txt',
+        );
+        const remoteContents = readFileSync(
+            join(getSiteDir(site), 'test-data', 'hello.txt'),
+        );
+        const retainedCtimeSeconds = Math.floor(statSync(localPath).ctimeMs / 1000);
+
+        execFileSync('sleep', ['1']);
+        const localEdit = Buffer.alloc(remoteContents.length, 0x78);
+        assert.notDeepEqual(localEdit, remoteContents);
+        writeFileSync(localPath, localEdit);
+        assert.equal(statSync(localPath).size, remoteContents.length);
+        assert.ok(
+            Math.floor(statSync(localPath).ctimeMs / 1000) > retainedCtimeSeconds,
+            'The local ctime must advance so the retained index detects the edit',
+        );
+
+        const result = runFilesPull(defaultMirrorTempDir, 'mirror');
+        assert.equal(
+            result.exitCode,
+            0,
+            `Same-size mirror failed\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
+        );
+        assert.deepEqual(readFileSync(localPath), remoteContents);
+    });
+
+    it('restores local file, directory, empty-directory, and symlink type changes', () => {
+        const initial = runFilesPull(typeChangeMirrorTempDir, 'mirror');
+        assert.equal(
+            initial.exitCode,
+            0,
+            `Type-change setup failed\nstderr: ${initial.stderr}\nstdout: ${initial.stdout}`,
+        );
+        resetCompletedFilesPull(typeChangeMirrorTempDir);
+
+        const localRoot = localSiteRoot(typeChangeMirrorTempDir);
+        const localFile = join(localRoot, 'test-data', 'hello.txt');
+        rmSync(localFile);
+        mkdirSync(localFile);
+        writeFileSync(join(localFile, 'local-child.txt'), 'local directory\n');
+
+        const localDirectory = join(localRoot, 'test-data', 'subdir', 'nested');
+        rmSync(localDirectory, { recursive: true });
+        writeFileSync(localDirectory, 'local file\n');
+
+        const localEmptyDirectory = join(
+            localRoot,
+            'test-data',
+            'mirror-empty-directory',
+        );
+        rmSync(localEmptyDirectory, { recursive: true });
+        writeFileSync(localEmptyDirectory, 'local file\n');
+
+        const localSymlink = join(localRoot, 'test-data', 'mirror-link');
+        rmSync(localSymlink);
+        writeFileSync(localSymlink, 'local file\n');
+
+        const result = runFilesPull(typeChangeMirrorTempDir, 'mirror');
+        assert.equal(
+            result.exitCode,
+            0,
+            `Type-change mirror failed\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
+        );
+
+        assert.ok(lstatSync(localFile).isFile());
+        assert.ok(lstatSync(localDirectory).isDirectory());
+        assert.ok(lstatSync(localEmptyDirectory).isDirectory());
+        assert.deepEqual(readdirSync(localEmptyDirectory), []);
+        assert.ok(lstatSync(localSymlink).isSymbolicLink());
+        assert.equal(readlinkSync(localSymlink), 'mirror-link-target.txt');
+        assertTreesMatch(getSiteDir(site), localRoot);
+    });
+
+    it('removes local paths when the selected remote directory is empty', () => {
+        const localRoot = join(fsRootDir(emptyRemoteMirrorTempDir), remoteEmptyDirectory);
+        const localOnlyPath = join(localRoot, 'local-only', 'nested.txt');
+        mkdirSync(join(localRoot, 'local-only'), { recursive: true });
+        writeFileSync(localOnlyPath, 'local only\n');
+
+        const result = runFilesPull(
+            emptyRemoteMirrorTempDir,
+            'mirror',
+            {},
+            emptyRemoteImportUrl(),
+        );
+        assert.equal(
+            result.exitCode,
+            0,
+            `Empty-remote mirror failed\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
+        );
+        assert.ok(!existsSync(localOnlyPath));
     });
 
     it('resumes an interrupted mirror and restores the current remote tree', () => {
