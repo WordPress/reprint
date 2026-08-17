@@ -32,8 +32,19 @@ class PdoDatabaseConnection implements DatabaseConnection {
         $this->prepared_database = $prepared_database ?? $query_database;
     }
 
-    public function query(string $sql): DatabaseResult
+    public function query(string $sql, array $params = []): DatabaseResult
     {
+        if ($params !== []) {
+            $statement = $this->get_prepared_database()->prepare($sql);
+            if ($statement === false) {
+                throw new PDOException('The target database could not prepare a query.');
+            }
+            if (!$statement->execute($params)) {
+                throw new PDOException('The target database prepared query failed.');
+            }
+            return new PdoDatabaseResult($statement);
+        }
+
         $statement = $this->get_query_database()->query($sql);
         if ($statement === false) {
             throw new PDOException('The target database query failed.');

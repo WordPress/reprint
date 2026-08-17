@@ -408,10 +408,10 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
         ) extends \Reprint\Importer\Database\PdoDatabaseConnection {
             public array $queries = [];
 
-            public function query(string $sql): \Reprint\Importer\Database\DatabaseResult
+            public function query(string $sql, array $params = []): \Reprint\Importer\Database\DatabaseResult
             {
                 $this->queries[] = $sql;
-                return parent::query($sql);
+                return parent::query($sql, $params);
             }
         };
         $processor = new \Reprint\Importer\DatabaseUrlRewriteProcessor(
