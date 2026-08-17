@@ -1406,6 +1406,56 @@ function resolve_file_index_roots(array $config): array
     return $roots;
 }
 
+/**
+ * Resolves the root scheduled first for a file-index request.
+ *
+ * A request normally starts from one of its selected roots. With symlink
+ * following enabled, the client may instead start a separate request at a
+ * physical directory reached from a selected link.
+ *
+ * @param array[] $roots           File-index roots returned by resolve_file_index_roots().
+ * @param string  $list_directory  Requested root where this traversal begins.
+ * @param bool    $follow_symlinks Whether a followed target may begin a traversal.
+ * @return array {
+ *     Root scheduled first.
+ *
+ *     @type string      $requested_path Requested normalized root path.
+ *     @type string|null $resolved_path  Physical root path, when available.
+ *     @type string      $type           directory, file, symlink, or missing.
+ * }
+ */
+function resolve_file_index_start_root(
+    array $roots,
+    string $list_directory,
+    bool $follow_symlinks
+): array {
+    $requested_path = normalize_path($list_directory);
+    foreach ($roots as $root) {
+        if ($root["requested_path"] === $requested_path) {
+            return $root;
+        }
+    }
+
+    if (!$follow_symlinks) {
+        throw new InvalidArgumentException(
+            "list_dir must name a selected root unless follow_symlinks is enabled: {$requested_path}"
+        );
+    }
+
+    $resolved_path = @realpath($requested_path);
+    if ($resolved_path === false || !is_dir($resolved_path)) {
+        throw new InvalidArgumentException(
+            "Followed symlink target directory does not exist or is not accessible: {$requested_path}"
+        );
+    }
+
+    return [
+        "requested_path" => $requested_path,
+        "resolved_path" => $resolved_path,
+        "type" => "directory",
+    ];
+}
+
 /** Returns whether the parent can confirm that a selected name is absent. */
 function file_index_root_is_confirmed_absent(string $requested_path): bool
 {
@@ -2784,9 +2834,14 @@ function endpoint_file_index(
         if (!is_string($list_directory) || $list_directory === "") {
             throw new InvalidArgumentException("list_dir is required for file_index");
         }
-        $file_index = FileIndexProcessor::start(
+        $start_root = resolve_file_index_start_root(
             $file_index_roots,
             $list_directory,
+            $follow_symlinks
+        );
+        $file_index = FileIndexProcessor::start(
+            $file_index_roots,
+            $start_root,
             $follow_symlinks,
             $include_caches,
             $storage_path

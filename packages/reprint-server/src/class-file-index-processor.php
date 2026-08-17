@@ -26,6 +26,11 @@ use function WordPress\Filesystem\wp_join_unix_paths;
  * the endpoint's established ordering and cursor behavior. It also means one
  * unusually wide directory is held in memory; changing that requires a
  * separate traversal design rather than hiding it inside this extraction.
+ *
+ * @phpstan-type FileIndexRoot (
+ *     array{requested_path:string,resolved_path:string,type:'directory'|'file'|'symlink'}
+ *     | array{requested_path:string,resolved_path:null,type:'missing'}
+ * )
  */
 final class FileIndexProcessor {
 
@@ -91,63 +96,45 @@ final class FileIndexProcessor {
     /**
      * Starts a traversal at the requested root and schedules the other roots.
      *
-     * @param array[]|string[] $roots    Structured roots or legacy directory roots.
-     * @param string   $index_directory  Requested root where indexing begins.
-     * @param bool     $follow_symlinks  Whether directory symlinks may lead outside the allowed directories.
-     * @param bool     $include_caches   Whether generated caches and development files are included.
-     * @param string   $storage_path     Reprint storage path omitted from the index, or an empty string.
+     * @param FileIndexRoot[] $roots       Structured roots scheduled for this index.
+     * @param FileIndexRoot   $start_root  Root scheduled first. It may be an
+     *                                      external directory reached by a followed link.
+     * @param bool            $follow_symlinks Whether directory symlinks may lead outside the allowed directories.
+     * @param bool            $include_caches Whether generated caches and development files are included.
+     * @param string          $storage_path Reprint storage path omitted from the index, or an empty string.
      * @return self New file-index processor.
      */
     public static function start(
         array $roots,
-        string $index_directory,
+        array $start_root,
         bool $follow_symlinks,
         bool $include_caches,
         string $storage_path
     ): self {
-        $legacy_string_roots = isset($roots[0]) && is_string($roots[0]);
-        $roots = self::normalize_roots($roots);
-        $requested_index_root = \WordPress\Reprint\Exporter\normalize_path($index_directory);
-        $index_root = null;
+        $roots = self::validate_roots($roots);
+        $start_root = self::validate_root($start_root);
+        $start_root_is_configured = false;
         foreach ($roots as $root) {
-            if ($root["requested_path"] === $requested_index_root) {
-                $index_root = $root;
+            if ($root["requested_path"] === $start_root["requested_path"]) {
+                $start_root_is_configured = true;
                 break;
             }
         }
-        if ($index_root === null) {
-            $resolved_index_root = @realpath($index_directory);
-            if (
-                $resolved_index_root === false
-                || !is_dir($resolved_index_root)
-                || ( !$legacy_string_roots && !$follow_symlinks )
-            ) {
-                throw new InvalidArgumentException("list_dir is not a configured file-index root: {$index_directory}");
-            }
-            $index_root = [
-                "requested_path" => $requested_index_root,
-                "resolved_path" => $resolved_index_root,
-                "type" => "directory",
-            ];
-        }
-
-        // An ordinary traversal must begin inside a configured root. Following
-        // links deliberately relaxes that boundary because a link target may
-        // be outside every configured root and still belong in the index.
-        $directories = self::resolved_directory_roots($roots, $follow_symlinks);
-        if (!$legacy_string_roots && !$follow_symlinks && !empty($directories) && $index_root["resolved_path"] !== null && !\WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of($index_root["resolved_path"], $directories)) {
+        if (!$start_root_is_configured && $start_root["type"] !== "directory") {
             throw new InvalidArgumentException(
-                "list_dir is outside of allowed roots: {$requested_index_root}"
+                "File-index start root must be a configured root or a directory: {$start_root["requested_path"]}"
             );
         }
+
+        $directories = self::resolved_directory_roots($roots, $follow_symlinks);
 
         // Visit the requested directory first, followed by every other root in
         // stable byte order. Stable ordering makes a cursor independent of the
         // order in which configuration discovered the additional roots.
-        $ordered_roots = [$index_root];
+        $ordered_roots = [$start_root];
         $extra_roots = [];
         foreach ($roots as $root) {
-            if ($root["requested_path"] !== $index_root["requested_path"]) {
+            if ($root["requested_path"] !== $start_root["requested_path"]) {
                 $extra_roots[] = $root;
             }
         }
@@ -188,16 +175,18 @@ final class FileIndexProcessor {
         if ($follow_symlinks) {
             foreach ($ordered_roots as $root) {
                 if ($root["type"] === "directory") {
-                    $parent_path = $legacy_string_roots ? $root["resolved_path"] : $root["requested_path"];
-                    $initial_index_entries = array_merge($initial_index_entries, self::find_parent_symlinks($parent_path));
+                    $initial_index_entries = array_merge(
+                        $initial_index_entries,
+                        self::find_parent_symlinks($root["requested_path"])
+                    );
                 }
             }
         }
 
         // X-Index-Dir names a directory, so a named path reports its parent.
-        $reported_index_directory = $index_root["type"] === "directory"
-            ? $index_root["resolved_path"]
-            : dirname($index_root["requested_path"]);
+        $reported_index_directory = $start_root["type"] === "directory"
+            ? $start_root["resolved_path"]
+            : dirname($start_root["requested_path"]);
 
         return new self(
             $roots,
@@ -215,11 +204,11 @@ final class FileIndexProcessor {
     /**
      * Resumes traversal from a cursor returned by get_cursor().
      *
-     * @param array[]|string[] $roots   Structured roots or legacy directory roots.
-     * @param string   $cursor_json     JSON cursor returned by the preceding request.
-     * @param bool     $follow_symlinks Whether directory symlinks may lead outside the allowed directories.
-     * @param bool     $include_caches  Whether generated caches and development files are included.
-     * @param string   $storage_path    Reprint storage path omitted from the index, or an empty string.
+     * @param FileIndexRoot[] $roots   Structured roots scheduled for this index.
+     * @param string          $cursor_json JSON cursor returned by the preceding request.
+     * @param bool            $follow_symlinks Whether directory symlinks may lead outside the allowed directories.
+     * @param bool            $include_caches Whether generated caches and development files are included.
+     * @param string          $storage_path Reprint storage path omitted from the index, or an empty string.
      * @return self Resumed file-index processor.
      */
     public static function resume(
@@ -229,7 +218,7 @@ final class FileIndexProcessor {
         bool $include_caches,
         string $storage_path
     ): self {
-        $roots = self::normalize_roots($roots);
+        $roots = self::validate_roots($roots);
         $directories = self::resolved_directory_roots($roots, $follow_symlinks);
 
         // A cursor is caller-held continuation state. Reject malformed JSON or
@@ -889,55 +878,60 @@ final class FileIndexProcessor {
     }
 
     /**
-     * Normalizes legacy string roots and validates structured root records.
+     * Validates root records produced by the endpoint resolver or local callers.
      *
-     * @param array[]|string[] $roots File-index roots.
-     * @return array[] Structured roots.
+     * @param array[] $roots File-index roots.
+     * @return FileIndexRoot[]
      */
-    private static function normalize_roots(array $roots): array
+    private static function validate_roots(array $roots): array
     {
-        $normalized = [];
+        $validated_roots = [];
         foreach ($roots as $root) {
-            if (is_string($root)) {
-                clearstatcache(true, $root);
-                $stat = @lstat($root);
-                if ($stat === false) {
-                    throw new InvalidArgumentException("File-index root does not exist or is not accessible: {$root}");
-                }
-                $requested_path = \WordPress\Reprint\Exporter\normalize_path($root);
-                $resolved_path = @realpath($requested_path);
-                $mode = $stat["mode"] & self::STAT_TYPE_MASK;
-                $type = $mode === self::STAT_TYPE_LINK ? "symlink" : ( is_dir($requested_path) ? "directory" : "file" );
-                $normalized[] = [
-                    "requested_path" => $requested_path,
-                    "resolved_path" => $resolved_path === false ? null : $resolved_path,
-                    "type" => $type,
-                ];
-                continue;
-            }
-            if (!is_array($root) || !isset($root["requested_path"], $root["type"])) {
-                throw new InvalidArgumentException("File-index roots must contain requested_path and type");
-            }
-            if (!is_string($root["requested_path"]) || !is_string($root["type"])) {
-                throw new InvalidArgumentException("File-index root fields have invalid types");
-            }
-            $resolved_path = $root["resolved_path"] ?? null;
-            if ($resolved_path !== null && !is_string($resolved_path)) {
-                throw new InvalidArgumentException("File-index root resolved_path has invalid type");
-            }
-            if (!in_array($root["type"], ["directory", "file", "symlink", "missing"], true)) {
-                throw new InvalidArgumentException("File-index root type is invalid: {$root["type"]}");
-            }
-            if ($root["type"] !== "missing" && ($resolved_path === null || $resolved_path === "")) {
-                throw new InvalidArgumentException("File-index root missing resolved_path: {$root["requested_path"]}");
-            }
-            $normalized[] = [
-                "requested_path" => \WordPress\Reprint\Exporter\normalize_path($root["requested_path"]),
-                "resolved_path" => $resolved_path,
-                "type" => $root["type"],
-            ];
+            $validated_roots[] = self::validate_root($root);
         }
-        return $normalized;
+        return $validated_roots;
+    }
+
+    /**
+     * @param mixed $root Candidate file-index root.
+     * @return FileIndexRoot Validated file-index root.
+     */
+    private static function validate_root($root): array
+    {
+        if (!is_array($root) || !isset($root["requested_path"], $root["type"])) {
+            throw new InvalidArgumentException("File-index roots must contain requested_path and type");
+        }
+        if (!is_string($root["requested_path"]) || !is_string($root["type"])) {
+            throw new InvalidArgumentException("File-index root fields have invalid types");
+        }
+        $requested_path = $root["requested_path"];
+        if (
+            $requested_path === ""
+            || \WordPress\Reprint\Exporter\normalize_path($requested_path) !== $requested_path
+        ) {
+            throw new InvalidArgumentException("File-index root requested_path must be normalized");
+        }
+        $resolved_path = $root["resolved_path"] ?? null;
+        if ($resolved_path !== null && !is_string($resolved_path)) {
+            throw new InvalidArgumentException("File-index root resolved_path has invalid type");
+        }
+        if (!in_array($root["type"], ["directory", "file", "symlink", "missing"], true)) {
+            throw new InvalidArgumentException("File-index root type is invalid: {$root["type"]}");
+        }
+        if ($root["type"] === "missing") {
+            if ($resolved_path !== null) {
+                throw new InvalidArgumentException(
+                    "Missing file-index root has a resolved_path: {$requested_path}"
+                );
+            }
+        } elseif ($resolved_path === null || $resolved_path === "") {
+            throw new InvalidArgumentException("File-index root missing resolved_path: {$requested_path}");
+        }
+        return [
+            "requested_path" => $requested_path,
+            "resolved_path" => $resolved_path,
+            "type" => $root["type"],
+        ];
     }
 
     /** Returns physical directory roots, including followed directory links. */

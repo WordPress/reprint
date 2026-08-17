@@ -123,7 +123,13 @@ final class FileIndexNamedRootTest extends TestCase
     /** @param array[] $roots @return array[] */
     private function collect(array $roots, string $start, bool $resume = false): array
     {
-        $processor = FileIndexProcessor::start($roots, $start, true, true, '');
+        $processor = FileIndexProcessor::start(
+            $roots,
+            $this->startRoot($roots, $start),
+            true,
+            true,
+            ''
+        );
         $entries = [];
         while ($processor->next_index_step()) {
             foreach ($processor->get_index_entries() as $entry) {
@@ -143,6 +149,21 @@ final class FileIndexNamedRootTest extends TestCase
     private function root(string $requested, string $resolved, string $type): array
     {
         return ['requested_path' => $requested, 'resolved_path' => $resolved, 'type' => $type];
+    }
+
+    /** @param array[] $roots @return array{requested_path:string,resolved_path:string,type:string} */
+    private function startRoot(array $roots, string $start): array
+    {
+        foreach ($roots as $root) {
+            if ($root['requested_path'] === $start) {
+                return $root;
+            }
+        }
+        $resolved = realpath($start);
+        if ($resolved === false || !is_dir($resolved)) {
+            throw new RuntimeException("Test start root is not a directory: {$start}");
+        }
+        return $this->root($start, $resolved, 'directory');
     }
 
     /** @param array[] $entries @return array */

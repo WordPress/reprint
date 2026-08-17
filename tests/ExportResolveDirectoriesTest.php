@@ -62,6 +62,55 @@ final class ExportResolveDirectoriesTest extends TestCase {
         );
     }
 
+    public function testFileIndexStartRootUsesTheSelectedRootRecord(): void
+    {
+        $path = $this->tempDir . '/site/config-link.php';
+        $roots = resolve_file_index_roots([
+            'directory' => [$path],
+            'follow_symlinks' => true,
+        ]);
+
+        $this->assertSame(
+            $roots[0],
+            resolve_file_index_start_root($roots, $path, true)
+        );
+    }
+
+    public function testFileIndexStartRootAllowsAnExternalDirectoryOnlyWhenFollowingLinks(): void
+    {
+        $shared = $this->tempDir . '/shared';
+        mkdir($shared, 0755, true);
+        $roots = resolve_file_index_roots([
+            'directory' => [$this->tempDir . '/site'],
+            'follow_symlinks' => true,
+        ]);
+
+        $this->assertSame(
+            [
+                'requested_path' => $shared,
+                'resolved_path' => realpath($shared),
+                'type' => 'directory',
+            ],
+            resolve_file_index_start_root($roots, $shared, true)
+        );
+    }
+
+    public function testFileIndexStartRootRejectsAnUnselectedDirectoryWithoutFollowingLinks(): void
+    {
+        $shared = $this->tempDir . '/shared';
+        mkdir($shared, 0755, true);
+        $site = (string) realpath($this->tempDir . '/site');
+        $shared = (string) realpath($shared);
+        $roots = resolve_file_index_roots([
+            'directory' => [$site],
+        ]);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('must name a selected root unless follow_symlinks is enabled');
+
+        resolve_file_index_start_root($roots, $shared, false);
+    }
+
     public function testMissingEntryNamesTheObservedPath(): void
     {
         $missing = $this->tempDir . '/site/absent.php';

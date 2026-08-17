@@ -3478,9 +3478,14 @@ class ImportClient
         if (!is_resource($fresh_local_index_handle)) {
             throw new RuntimeException("Failed to create the fresh local index.");
         }
+        $filesystem_root_record = [
+            "requested_path" => $this->filesystem_root,
+            "resolved_path" => $this->filesystem_root,
+            "type" => "directory",
+        ];
         $file_index_processor = FileIndexProcessor::start(
-            [$this->filesystem_root],
-            $this->filesystem_root,
+            [$filesystem_root_record],
+            $filesystem_root_record,
             false,
             $this->include_caches,
             $plan_directory
