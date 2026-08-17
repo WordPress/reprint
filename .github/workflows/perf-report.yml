@@ -7,6 +7,11 @@ permissions:
   contents: read
   pull-requests: write
 
+# Two PHAR builds can install GitHub-hosted archives at the same time. Keep each
+# Composer process serial so the workflow does not create a burst of requests.
+env:
+  COMPOSER_MAX_PARALLEL_HTTP: '1'
+
 jobs:
   build-pr-phar:
     name: Build reprint.phar (PR)
@@ -21,7 +26,19 @@ jobs:
           php-version: '8.5'
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
 
-      - run: composer install --no-dev --no-interaction --prefer-dist
+      - name: Install production dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if composer install --no-dev --no-interaction --prefer-dist; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            wait_seconds=$((attempt * 20))
+            echo "Composer install attempt ${attempt}/3 failed; retrying in ${wait_seconds} seconds."
+            sleep "$wait_seconds"
+          done
       - run: ./bin/build-reprint-phar.sh
 
       - uses: actions/upload-artifact@v4
@@ -43,7 +60,19 @@ jobs:
           php-version: '8.5'
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
 
-      - run: composer install --no-dev --no-interaction --prefer-dist
+      - name: Install production dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if composer install --no-dev --no-interaction --prefer-dist; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            wait_seconds=$((attempt * 20))
+            echo "Composer install attempt ${attempt}/3 failed; retrying in ${wait_seconds} seconds."
+            sleep "$wait_seconds"
+          done
       - run: ./bin/build-reprint-phar.sh
 
       - uses: actions/upload-artifact@v4
@@ -203,6 +232,9 @@ jobs:
           github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
           steps.check_md.outputs.exists == 'true'
+        # The step summary and artifact already contain the benchmark result.
+        # A GitHub comment outage must not replace that result with a red check.
+        continue-on-error: true
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: pull-pipeline-perf

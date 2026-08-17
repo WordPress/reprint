@@ -260,10 +260,7 @@ function runPlaygroundSqliteDbPullBenchmark() {
     mkdirSync(stateDir, { recursive: true });
     mkdirSync(fsRootDir(stateDir), { recursive: true });
 
-    requireBenchStageOk(
-        runStage('preflight', stateDir),
-        'playground sqlite benchmark preflight',
-    );
+    runPreflightForSite(SITE, stateDir);
     const proof = runNativeMysqlParserProof({ requireParser: false });
     const baseDetails = {
         condition: 'db-pull in PHP.wasm',
@@ -295,10 +292,7 @@ function runPlaygroundSqliteDbApplyBenchmark() {
     mkdirSync(stateDir, { recursive: true });
     mkdirSync(fsRootDir(stateDir), { recursive: true });
 
-    requireBenchStageOk(
-        runStage('preflight', stateDir),
-        'playground sqlite benchmark preflight',
-    );
+    runPreflightForSite(SITE, stateDir);
     requireBenchStageOk(
         runStage('db-pull', stateDir),
         'playground sqlite benchmark db-pull',
@@ -536,7 +530,7 @@ register_shutdown_function(function () {
 function runPreflightForSite(site, stateDir) {
     const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     const args = [
-        IMPORTER_PATH,
+        PREFLIGHT_IMPORTER_PATH,
         'preflight',
         url,
         `--state-dir=${stateDir}`,

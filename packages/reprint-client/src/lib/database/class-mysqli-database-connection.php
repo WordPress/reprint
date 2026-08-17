@@ -7,6 +7,7 @@ namespace Reprint\Importer\Database;
 use mysqli;
 use mysqli_result;
 use mysqli_sql_exception;
+use mysqli_stmt;
 use PDOException;
 use RuntimeException;
 
@@ -21,8 +22,16 @@ class MysqliDatabaseConnection implements DatabaseConnection {
         $this->database = $database;
     }
 
-    public function query(string $sql): DatabaseResult
+    public function query(string $sql, array $params = []): DatabaseResult
     {
+        if ($params !== []) {
+            return $this->run_mysqli_operation('prepared query', function () use ($sql, $params): DatabaseResult {
+                return new MysqliPreparedDatabaseResult(
+                    $this->prepare_and_execute($sql, $params, 'prepared query')
+                );
+            });
+        }
+
         return $this->run_mysqli_operation('query', function () use ($sql): DatabaseResult {
             $result = $this->get_database()->query($sql);
             if (!$result instanceof mysqli_result) {
@@ -70,42 +79,7 @@ class MysqliDatabaseConnection implements DatabaseConnection {
     public function execute(string $sql, array $params = []): int
     {
         return $this->run_mysqli_operation('prepared statement', function () use ($sql, $params): int {
-            $statement = $this->get_database()->prepare($sql);
-            if ($statement === false) {
-                throw $this->new_query_exception('prepared statement');
-            }
-
-            if ($params !== []) {
-                $values = array_values($params);
-                $types = '';
-                foreach ($values as $value) {
-                    if (is_int($value) || is_bool($value)) {
-                        $types .= 'i';
-                    } elseif (is_float($value)) {
-                        $types .= 'd';
-                    } else {
-                        $types .= 's';
-                    }
-                }
-                $arguments = [$types];
-                foreach ($values as $index => &$value) {
-                    $arguments[] = &$values[$index];
-                }
-                unset($value);
-                if (!call_user_func_array([$statement, 'bind_param'], $arguments)) {
-                    $error = $statement->error;
-                    $statement->close();
-                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Database errors are CLI text.
-                    throw new PDOException('The target database could not bind a prepared statement: ' . $error);
-                }
-            }
-
-            if (!$statement->execute()) {
-                $error = $statement->error;
-                $statement->close();
-                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Database errors are CLI text.
-                throw new PDOException('The target database prepared statement failed: ' . $error);
-            }
+            $statement = $this->prepare_and_execute($sql, $params, 'prepared statement');
             $affected_rows = max(0, $statement->affected_rows);
             $statement->close();
             return $affected_rows;
@@ -178,6 +152,51 @@ class MysqliDatabaseConnection implements DatabaseConnection {
     }
 
     /**
+     * @param array<int,mixed> $params Values for the statement's question marks.
+     */
+    private function prepare_and_execute(string $sql, array $params, string $operation): mysqli_stmt
+    {
+        $statement = $this->get_database()->prepare($sql);
+        if ($statement === false) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The operation is a fixed adapter label.
+            throw $this->new_query_exception($operation);
+        }
+
+        if ($params !== []) {
+            $values = array_values($params);
+            $types = '';
+            foreach ($values as $value) {
+                if (is_int($value) || is_bool($value)) {
+                    $types .= 'i';
+                } elseif (is_float($value)) {
+                    $types .= 'd';
+                } else {
+                    $types .= 's';
+                }
+            }
+            $arguments = [$types];
+            foreach ($values as $index => &$value) {
+                $arguments[] = &$values[$index];
+            }
+            unset($value);
+            if (!call_user_func_array([$statement, 'bind_param'], $arguments)) {
+                $error = $statement->error;
+                $statement->close();
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Database errors are CLI text.
+                throw new PDOException("The target database could not bind a {$operation}: {$error}");
+            }
+        }
+
+        if (!$statement->execute()) {
+            $error = $statement->error;
+            $statement->close();
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Database errors are CLI text.
+            throw new PDOException("The target database {$operation} failed: {$error}");
+        }
+        return $statement;
+    }
+
+    /**
      * @template T
      * @param callable():T $callback Native mysqli call.
      * @return T
@@ -191,6 +210,14 @@ class MysqliDatabaseConnection implements DatabaseConnection {
             throw new PDOException(
                 "The target database {$operation} failed: {$error->getMessage()}",
                 $error->getCode(),
+                $error,
+            );
+        } catch (\ArgumentCountError $error) {
+            // mysqli throws this when the number of values does not match the
+            // prepared statement. Expose it through the same error type as PDO.
+            throw new PDOException(
+                "The target database {$operation} failed: {$error->getMessage()}",
+                0,
                 $error,
             );
             // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
