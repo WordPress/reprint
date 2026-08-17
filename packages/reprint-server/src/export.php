@@ -1331,6 +1331,11 @@ function resolve_directories(array $config): array
 /**
  * Resolves the configured roots for the file-index endpoint.
  *
+ * `directory[]` is the established wire parameter name, but file_index treats
+ * each value as a selected root: a directory, regular file, or symlink.
+ * Keep resolve_directories() for preflight and file_fetch, whose callers need
+ * actual directories.
+ *
  * requested_path retains the caller's normalized spelling. resolved_path is
  * the physical target used for walking and target de-duplication.
  *
