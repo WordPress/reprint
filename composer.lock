@@ -366,7 +366,6 @@
             },
             "require": {
                 "ext-pdo": "*",
-                "ext-pdo_mysql": "*",
                 "php": ">=7.4",
                 "wp-php-toolkit/data-liberation": "^0.8.0",
                 "wp-php-toolkit/html": "^0.8.0",

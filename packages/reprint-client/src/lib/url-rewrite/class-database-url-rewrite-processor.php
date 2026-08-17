@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace Reprint\Importer;
 
+use Reprint\Importer\Database\DatabaseConnection;
 use RuntimeException;
 use SqlStatementRewriter;
 use WordPress\DataLiberation\DatabaseRowsReader;
@@ -22,8 +23,7 @@ class DatabaseUrlRewriteProcessor {
     private const READER_PHASE_NEXT_RECORD = 'next_record';
     private const READER_PHASE_PROCESS_RECORD = 'process_record';
 
-    /** Native PDO connection used for bound updates. */
-    private $update_database;
+    private DatabaseConnection $database;
 
     private SqlStatementRewriter $statement_rewriter;
     private DatabaseRowsReader $row_reader;
@@ -36,18 +36,14 @@ class DatabaseUrlRewriteProcessor {
     private bool $complete = false;
 
     /**
-     * @param mixed        $database           PDO or a PDO-compatible adapter.
-     * @param array|null   $cursor             Cursor returned by get_cursor().
+     * @param array|null $cursor Cursor returned by get_cursor().
      */
     public function __construct(
-        $database,
+        DatabaseConnection $database,
         SqlStatementRewriter $statement_rewriter,
         ?array $cursor = null
     ) {
-        $this->update_database = $database;
-        if (method_exists($database, 'get_connection')) {
-            $this->update_database = $database->get_connection()->get_pdo();
-        }
+        $this->database = $database;
         $this->statement_rewriter = $statement_rewriter;
         if (
             $cursor !== null &&
@@ -282,10 +278,7 @@ class DatabaseUrlRewriteProcessor {
         $sql = "UPDATE {$this->quote_identifier($table)} "
             . 'SET ' . implode(', ', $set_parts)
             . ' WHERE ' . implode(' AND ', $where_parts);
-        $statement = $this->update_database->prepare($sql);
-        if ($statement === false || $statement->execute($params) === false) {
-            throw new RuntimeException("Failed to update the selected {$table} record.");
-        }
+        $this->database->execute($sql, $params);
         // Zero rows means either that an earlier attempt committed before its
         // cursor was saved, or that the selected values changed or disappeared.
         // These cases cannot be distinguished for overlapping URL mappings.

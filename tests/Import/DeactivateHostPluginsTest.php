@@ -4,23 +4,25 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use PDO;
-use PDOException;
+use Reprint\Importer\Database\DatabaseConnection;
+use Reprint\Importer\Database\MysqliDatabaseConnection;
+use Reprint\Importer\Database\PdoDatabaseConnection;
 use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
- * Verify deactivate_host_plugins() rewrites active_plugins identically on
- * MySQL and SQLite targets. Regression: prepare() used to throw "object
- * is uninitialized" against the WP_PDO_MySQL_On_SQLite wrapper.
+ * Verify deactivate_host_plugins() uses the shared target database API for
+ * MySQL and SQLite. Regression: prepare() used to throw "object is
+ * uninitialized" against the WP_PDO_MySQL_On_SQLite wrapper.
  */
 class DeactivateHostPluginsTest extends TestCase
 {
     private string $tempDir;
     private string $stateDir;
     private string $fsRoot;
-    private ?PDO $cleanupPdo = null;
+    private ?\mysqli $cleanupMysql = null;
     private ?string $mysqlDbName = null;
 
     protected function setUp(): void
@@ -35,14 +37,15 @@ class DeactivateHostPluginsTest extends TestCase
 
     protected function tearDown(): void
     {
-        if ($this->cleanupPdo !== null && $this->mysqlDbName !== null) {
+        if ($this->cleanupMysql !== null && $this->mysqlDbName !== null) {
             try {
-                $this->cleanupPdo->exec("DROP DATABASE IF EXISTS `{$this->mysqlDbName}`");
-            } catch (PDOException $_) {
+                $this->cleanupMysql->query("DROP DATABASE IF EXISTS `{$this->mysqlDbName}`");
+            } catch (\Throwable $_) {
                 // best-effort
             }
+            $this->cleanupMysql->close();
         }
-        $this->cleanupPdo = null;
+        $this->cleanupMysql = null;
         $this->mysqlDbName = null;
         $this->recursiveDelete($this->tempDir);
         parent::tearDown();
@@ -61,9 +64,9 @@ class DeactivateHostPluginsTest extends TestCase
      */
     public function testRemovesHostPluginsFromActivePluginsOption(string $engine): void
     {
-        $pdo = $this->createPdo($engine);
-        $this->createWpOptionsTable($pdo);
-        $this->insertOption($pdo, 'active_plugins', serialize([
+        $database = $this->createDatabase($engine);
+        $this->createWpOptionsTable($database);
+        $this->insertOption($database, 'active_plugins', serialize([
             'sg-cachepress/sg-cachepress.php',
             'sg-security/sg-security.php',
             'sg-cachepress-extra/sg-cachepress-extra.php',
@@ -82,7 +85,7 @@ class DeactivateHostPluginsTest extends TestCase
         $client = $this->makeClient();
         $this->loadClientState($client);
 
-        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$pdo]);
+        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$database]);
 
         sort($result);
         $this->assertSame(
@@ -94,7 +97,7 @@ class DeactivateHostPluginsTest extends TestCase
             'expected only sg-* entries to be reported as deactivated',
         );
 
-        $remaining = unserialize($this->fetchOption($pdo, 'active_plugins'));
+        $remaining = unserialize($this->fetchOption($database, 'active_plugins'));
         $this->assertSame(
             [
                 'sg-cachepress-extra/sg-cachepress-extra.php',
@@ -111,9 +114,9 @@ class DeactivateHostPluginsTest extends TestCase
      */
     public function testHonorsCustomTablePrefix(string $engine): void
     {
-        $pdo = $this->createPdo($engine);
-        $this->createWpOptionsTable($pdo, 'custom_');
-        $this->insertOption($pdo, 'active_plugins', serialize([
+        $database = $this->createDatabase($engine);
+        $this->createWpOptionsTable($database, 'custom_');
+        $this->insertOption($database, 'active_plugins', serialize([
             'sg-cachepress/sg-cachepress.php',
             'akismet/akismet.php',
         ]), 'custom_');
@@ -129,10 +132,10 @@ class DeactivateHostPluginsTest extends TestCase
         $client = $this->makeClient();
         $this->loadClientState($client);
 
-        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$pdo]);
+        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$database]);
         $this->assertSame(['sg-cachepress/sg-cachepress.php'], $result);
 
-        $remaining = unserialize($this->fetchOption($pdo, 'active_plugins', 'custom_'));
+        $remaining = unserialize($this->fetchOption($database, 'active_plugins', 'custom_'));
         $this->assertSame(['akismet/akismet.php'], array_values($remaining));
     }
 
@@ -144,10 +147,10 @@ class DeactivateHostPluginsTest extends TestCase
         // wpcloud only declares paths under mu-plugins and object-cache.php;
         // none match wp-content/plugins/, so deactivate should be a no-op
         // and the active_plugins value must be untouched.
-        $pdo = $this->createPdo($engine);
-        $this->createWpOptionsTable($pdo);
+        $database = $this->createDatabase($engine);
+        $this->createWpOptionsTable($database);
         $serialized = serialize(['akismet/akismet.php']);
-        $this->insertOption($pdo, 'active_plugins', $serialized);
+        $this->insertOption($database, 'active_plugins', $serialized);
 
         $this->writeState([
             'webhost' => 'wpcloud',
@@ -162,9 +165,9 @@ class DeactivateHostPluginsTest extends TestCase
         $client = $this->makeClient();
         $this->loadClientState($client);
 
-        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$pdo]);
+        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$database]);
         $this->assertSame([], $result);
-        $this->assertSame($serialized, $this->fetchOption($pdo, 'active_plugins'));
+        $this->assertSame($serialized, $this->fetchOption($database, 'active_plugins'));
     }
 
     /**
@@ -172,8 +175,8 @@ class DeactivateHostPluginsTest extends TestCase
      */
     public function testReturnsEmptyWhenActivePluginsRowMissing(string $engine): void
     {
-        $pdo = $this->createPdo($engine);
-        $this->createWpOptionsTable($pdo);
+        $database = $this->createDatabase($engine);
+        $this->createWpOptionsTable($database);
         // Intentionally no active_plugins row.
 
         $this->writeState([
@@ -187,24 +190,24 @@ class DeactivateHostPluginsTest extends TestCase
         $client = $this->makeClient();
         $this->loadClientState($client);
 
-        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$pdo]);
+        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$database]);
         $this->assertSame([], $result);
     }
 
     // ---- helpers ----
 
-    private function createPdo(string $engine): PDO
+    private function createDatabase(string $engine): DatabaseConnection
     {
         if ($engine === 'mysql') {
-            return $this->createMysqlPdo();
+            return $this->createMysqlDatabase();
         }
         if ($engine === 'sqlite') {
-            return $this->createSqlitePdo();
+            return $this->createSqliteDatabase();
         }
         $this->fail("unknown engine: {$engine}");
     }
 
-    private function createMysqlPdo(): PDO
+    private function createMysqlDatabase(): DatabaseConnection
     {
         $host = getenv('DB_HOST') ?: '127.0.0.1';
         $user = getenv('DB_USER') ?: 'root';
@@ -212,31 +215,23 @@ class DeactivateHostPluginsTest extends TestCase
         $this->mysqlDbName = 'test_deactivate_host_plugins_' . bin2hex(random_bytes(4));
 
         try {
-            $root = new PDO("mysql:host={$host};charset=utf8mb4", $user, $pass, [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            ]);
-        } catch (PDOException $e) {
+            $root = new \mysqli($host, $user, $pass);
+        } catch (\Throwable $e) {
             $this->markTestSkipped('MySQL not reachable: ' . $e->getMessage());
         }
 
-        $root->exec("DROP DATABASE IF EXISTS `{$this->mysqlDbName}`");
-        $root->exec("CREATE DATABASE `{$this->mysqlDbName}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
-        $this->cleanupPdo = $root;
-
-        $pdo = new PDO(
-            "mysql:host={$host};dbname={$this->mysqlDbName};charset=utf8mb4",
-            $user,
-            $pass,
-            [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            ],
+        $root->query("DROP DATABASE IF EXISTS `{$this->mysqlDbName}`");
+        $root->query(
+            "CREATE DATABASE `{$this->mysqlDbName}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
         );
-        return $pdo;
+        $this->cleanupMysql = $root;
+
+        $mysqli = new \mysqli($host, $user, $pass, $this->mysqlDbName);
+        $mysqli->set_charset('utf8mb4');
+        return new MysqliDatabaseConnection($mysqli);
     }
 
-    private function createSqlitePdo(): PDO
+    private function createSqliteDatabase(): DatabaseConnection
     {
         if (!extension_loaded('pdo_sqlite')) {
             $this->markTestSkipped('pdo_sqlite extension required');
@@ -249,24 +244,25 @@ class DeactivateHostPluginsTest extends TestCase
 
         $dbPath = $this->tempDir . '/target.sqlite';
         $dsn = "mysql-on-sqlite:path={$dbPath};dbname=test_db";
-        $pdo = new \WP_PDO_MySQL_On_SQLite($dsn, null, null, [
+        $database = new \WP_PDO_MySQL_On_SQLite($dsn, null, null, [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         ]);
 
         // Mirror create_sqlite_target_pdo() — deactivate_host_plugins()
         // requires FROM_BASE64 on the SQLite connection.
-        register_sqlite_function($pdo->get_connection()->get_pdo(), 'FROM_BASE64', function ($data) {
+        $sqlitePdo = $database->get_connection()->get_pdo();
+        register_sqlite_function($sqlitePdo, 'FROM_BASE64', function ($data) {
             return $data === null ? null : base64_decode($data);
         });
-        return $pdo;
+        return new PdoDatabaseConnection($database, $sqlitePdo);
     }
 
-    private function createWpOptionsTable(PDO $pdo, string $prefix = 'wp_'): void
+    private function createWpOptionsTable(DatabaseConnection $database, string $prefix = 'wp_'): void
     {
         $table = '`' . $prefix . 'options`';
-        $pdo->exec("DROP TABLE IF EXISTS {$table}");
-        $pdo->exec(
+        $database->exec("DROP TABLE IF EXISTS {$table}");
+        $database->exec(
             "CREATE TABLE {$table} ("
             . "`option_id` bigint(20) unsigned NOT NULL AUTO_INCREMENT, "
             . "`option_name` varchar(191) NOT NULL DEFAULT '', "
@@ -278,35 +274,37 @@ class DeactivateHostPluginsTest extends TestCase
         );
     }
 
-    private function insertOption(PDO $pdo, string $name, string $value, string $prefix = 'wp_'): void
+    private function insertOption(
+        DatabaseConnection $database,
+        string $name,
+        string $value,
+        string $prefix = 'wp_'
+    ): void
     {
-        // Use exec() with ANSI-escaped literals to stay within the universal
-        // PDO surface that WP_PDO_MySQL_On_SQLite supports.
         $table = '`' . $prefix . 'options`';
-        $quotedName = $this->ansiQuote($name);
-        $quotedValue = $this->ansiQuote($value);
-        $pdo->exec(
+        $quotedName = $database->quote($name);
+        $quotedValue = $database->quote($value);
+        $database->exec(
             "INSERT INTO {$table} (option_name, option_value, autoload) "
             . "VALUES ({$quotedName}, {$quotedValue}, 'yes')"
         );
     }
 
-    private function fetchOption(PDO $pdo, string $name, string $prefix = 'wp_'): string
+    private function fetchOption(
+        DatabaseConnection $database,
+        string $name,
+        string $prefix = 'wp_'
+    ): string
     {
         $table = '`' . $prefix . 'options`';
-        $quotedName = $this->ansiQuote($name);
-        $stmt = $pdo->query(
+        $quotedName = $database->quote($name);
+        $stmt = $database->query(
             "SELECT option_value FROM {$table} WHERE option_name = {$quotedName}"
         );
-        $this->assertNotFalse($stmt, 'query returned false');
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        $stmt->closeCursor();
         $this->assertIsArray($row, "no row for option {$name}");
         return $row['option_value'];
-    }
-
-    private function ansiQuote(string $value): string
-    {
-        return "'" . str_replace("'", "''", $value) . "'";
     }
 
     private function writeState(array $state): void

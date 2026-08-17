@@ -397,25 +397,21 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
 
     public function testSqliteMetadataUsesPublicMysqlQueries(): void
     {
-        $driver = $this->open_mysql_on_sqlite_database();
-        $database = new class($driver) {
-            private $driver;
+        $dsn = "mysql-on-sqlite:path={$this->database_path};dbname=wp_test";
+        $driver = new \WP_PDO_MySQL_On_SQLite($dsn, null, null, [
+            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+        ]);
+        $database = new class(
+            $driver,
+            $driver->get_connection()->get_pdo()
+        ) extends \Reprint\Importer\Database\PdoDatabaseConnection {
             public array $queries = [];
 
-            public function __construct($driver)
-            {
-                $this->driver = $driver;
-            }
-
-            public function query(string $sql)
+            public function query(string $sql): \Reprint\Importer\Database\DatabaseResult
             {
                 $this->queries[] = $sql;
-                return $this->driver->query($sql);
-            }
-
-            public function get_connection()
-            {
-                return $this->driver->get_connection();
+                return parent::query($sql);
             }
         };
         $processor = new \Reprint\Importer\DatabaseUrlRewriteProcessor(
@@ -648,7 +644,7 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
         );
     }
 
-    private function open_mysql_on_sqlite_database(): \WP_PDO_MySQL_On_SQLite
+    private function open_mysql_on_sqlite_database(): \Reprint\Importer\Database\DatabaseConnection
     {
         $dsn = "mysql-on-sqlite:path={$this->database_path};dbname=wp_test";
         $database = new \WP_PDO_MySQL_On_SQLite($dsn, null, null, [
@@ -659,7 +655,7 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
         \Reprint\Importer\register_sqlite_function($sqlite_pdo, 'FROM_BASE64', function ($data) {
             return $data === null ? null : base64_decode($data);
         });
-        return $database;
+        return new \Reprint\Importer\Database\PdoDatabaseConnection($database, $sqlite_pdo);
     }
 
     private function command_options(): array
