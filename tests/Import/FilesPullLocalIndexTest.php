@@ -129,6 +129,38 @@ final class FilesPullLocalIndexTest extends TestCase
         ]], $this->filesDiffRecords($diff['stdout']));
     }
 
+    public function testFilesPullTransfersAPathContainingInvalidUtf8Bytes(): void
+    {
+        $path = "binary-\xff.txt";
+        $probePath = $this->rawFileRoot . '/probe-' . $path;
+        if (@file_put_contents($probePath, 'probe') === false) {
+            $this->markTestSkipped(
+                'This filesystem does not accept invalid UTF-8 path bytes.'
+            );
+        }
+        unlink($probePath);
+        $contents = 'binary path contents';
+        $this->writeRemoteOverrides([
+            'added_files_b64' => [[
+                'path_b64' => base64_encode($path),
+                'contents_b64' => base64_encode($contents),
+            ]],
+        ]);
+
+        $pull = $this->runFilesPull();
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertFileExists($this->localTree . '/' . $path);
+        $this->assertSame(
+            $contents,
+            file_get_contents($this->localTree . '/' . $path)
+        );
+        $this->assertArrayHasKey(
+            $this->localIndexEntryPath($path),
+            $this->readIndex($this->localIndexPath())
+        );
+    }
+
     public function testEmptyInitialPullCreatesAnEmptyLocalIndex(): void
     {
         $this->writeRemoteOverrides([
@@ -1225,6 +1257,15 @@ $added_files = array_fill_keys(
     array_keys($overrides['added_files'] ?? array()),
     true
 );
+foreach (($overrides['added_files_b64'] ?? array()) as $encoded_file) {
+    $path = base64_decode($encoded_file['path_b64'] ?? '', true);
+    $contents = base64_decode($encoded_file['contents_b64'] ?? '', true);
+    if (!is_string($path) || $path === '' || !is_string($contents)) {
+        continue;
+    }
+    $remote_files[$path] = $contents;
+    $added_files[$path] = true;
+}
 $added_directories = array_fill_keys(
     $overrides['added_directories'] ?? array(),
     true
@@ -1330,10 +1371,19 @@ if ($endpoint === 'file_index') {
         isset($_FILES['file_list']['tmp_name'])
         && is_file($_FILES['file_list']['tmp_name'])
     ) {
-        $requested_paths = array_fill_keys(
-            json_decode((string) file_get_contents($_FILES['file_list']['tmp_name']), true),
+        $requested_paths = array();
+        $file_list = json_decode(
+            (string) file_get_contents($_FILES['file_list']['tmp_name']),
             true
         );
+        foreach ($file_list as $entry) {
+            $path = is_array($entry)
+                ? base64_decode($entry['path'] ?? '', true)
+                : false;
+            if (is_string($path) && $path !== '') {
+                $requested_paths[$path] = true;
+            }
+        }
     }
     $parts = array();
     foreach ($remote_index as $path => $entry) {

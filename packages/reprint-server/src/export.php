@@ -31,7 +31,7 @@ if (!ob_get_level()) {
  * protocol (cursor encoding, multipart structure, header names, endpoint
  * parameters, response format) would break an older importer.
  */
-define('EXPORT_PROTOCOL_VERSION', 1);
+define('EXPORT_PROTOCOL_VERSION', 2);
 
 // File type mask + file type values (top bits of st_mode)
 define('STAT_TYPE_MASK',   0170000);
@@ -2936,7 +2936,7 @@ function emit_file_index_error(
 }
 
 /**
- * Streams files from a client-provided path list (uploaded as JSON).
+ * Streams files from client-provided base64 path records uploaded as JSON.
  */
 function endpoint_file_fetch(
     array $config,
@@ -2972,14 +2972,25 @@ function endpoint_file_fetch(
     $decoded = json_decode($raw, true);
     if (!is_array($decoded)) {
         throw new InvalidArgumentException(
-            "file_list must be a JSON array of paths"
+            "file_list must be a JSON array of base64 path records"
         );
     }
     $paths = [];
-    foreach ($decoded as $path) {
-        if (!is_string($path) || $path === "") {
-            continue;
+    foreach ($decoded as $entry_index => $entry) {
+        $encoded_path = null;
+        if (is_array($entry)) {
+            $encoded_path = $entry["path"] ?? null;
         }
+        $path = is_string($encoded_path)
+            ? base64_decode($encoded_path, true)
+            : false;
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error, never HTML output.
+        if (!is_string($path) || $path === "") {
+            throw new InvalidArgumentException(
+                "file_list entry {$entry_index} must contain a nonempty base64 path"
+            );
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         $paths[] = $path;
     }
 

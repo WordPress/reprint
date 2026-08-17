@@ -125,7 +125,7 @@ require_once __DIR__ . '/lib/pull/class-pull-index-journal.php';
  * multipart structure, header names, endpoint parameters, response format)
  * would break an older export plugin.
  */
-define('PULL_PROTOCOL_VERSION', 1);
+define('PULL_PROTOCOL_VERSION', 2);
 
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -2693,7 +2693,16 @@ class ImportClient
             if ($tmp === false) {
                 continue;
             }
-            file_put_contents($tmp, json_encode($dir_files, JSON_UNESCAPED_SLASHES));
+            $encoded_files = [];
+            foreach ($dir_files as $remote_absolute_path) {
+                $encoded_files[] = [
+                    "path" => base64_encode($remote_absolute_path),
+                ];
+            }
+            file_put_contents(
+                $tmp,
+                json_encode($encoded_files, JSON_UNESCAPED_SLASHES)
+            );
 
             $post_data = [
                 "file_list" => new \CURLFile($tmp, "application/json", "file_list"),
@@ -8290,8 +8299,8 @@ class ImportClient
             fseek($handle, $offset);
         }
 
-        // The output is a temp file containing a JSON array of paths, e.g.
-        // ["/wp-content/uploads/photo.jpg","/wp-content/themes/flavor/style.css"]
+        // The output is a temp file containing a JSON array of base64 path
+        // records. Paths are arbitrary bytes and cannot appear directly in JSON.
         // This file gets uploaded as the request body for the file_fetch endpoint.
         $tmp = tempnam(sys_get_temp_dir(), "file-fetch-");
         if ($tmp === false) {
@@ -8307,9 +8316,7 @@ class ImportClient
 
         // Read lines from the fetch list (one JSON entry per line) and
         // accumulate them into the JSON array until we approach the size limit.
-        // The fetch list supports two formats:
-        //   - A bare JSON string:   "/path/to/file"
-        //   - A JSON object:        {"path": "<base64-encoded path>"}
+        // Each fetch-list entry is a JSON object whose path is base64 encoded.
         $bytes = 0;
         $entries = 0;
         $first = true;
@@ -8328,25 +8335,20 @@ class ImportClient
                 continue;
             }
             $decoded = json_decode($line, true);
-            if (is_string($decoded)) {
-                $path = $decoded;
-            } elseif (is_array($decoded) && isset($decoded["path"])) {
-                $path = base64_decode($decoded["path"]);
-            } else {
+            if (
+                !is_array($decoded)
+                || !isset($decoded["path"])
+                || !is_string($decoded["path"])
+                || $decoded["path"] === ""
+            ) {
                 continue;
             }
-            if (!is_string($path) || $path === "") {
-                continue;
-            }
-            $json_path = json_encode(
-                $path,
-                JSON_UNESCAPED_SLASHES,
+            $json_entry = json_encode(
+                ["path" => $decoded["path"]],
+                JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
             );
-            if ($json_path === false) {
-                continue;
-            }
             $prefix = $first ? "" : ",";
-            $chunk = $prefix . $json_path;
+            $chunk = $prefix . $json_entry;
             $needed = $bytes + strlen($chunk) + 1; // +1 for closing bracket
 
             // Would this entry push us over the limit?

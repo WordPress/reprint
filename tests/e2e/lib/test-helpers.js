@@ -614,7 +614,7 @@ export function clearHookState(siteName) {
 }
 
 /**
- * Make a file_fetch request with a file_list upload.
+ * Make a file_fetch request with a base64 path record file_list upload.
  * Uses multipart/form-data to upload the file list as a file.
  */
 export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
@@ -625,7 +625,9 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
         url.searchParams.set(k, String(v));
     }
 
-    const fileListJson = JSON.stringify(filePaths);
+    const fileListJson = JSON.stringify(filePaths.map(path => ({
+        path: Buffer.from(path).toString('base64'),
+    })));
 
     // Create form data with file upload
     const formData = new FormData();
