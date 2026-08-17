@@ -108,4 +108,37 @@ final class RemoteToLocalPathMapper
 
         return wp_join_unix_paths($this->filesystem_root, $remote_absolute_path);
     }
+
+    /**
+     * Maps remote selection roots and nested remaps into local selection roots.
+     *
+     * @param list<string> $remote_absolute_path_prefixes Remote selection roots.
+     * @return list<string> Local selection roots.
+     */
+    public function remote_path_prefixes_to_local_path_prefixes(
+        array $remote_absolute_path_prefixes
+    ): array {
+        $local_absolute_path_prefixes = [];
+        foreach ($remote_absolute_path_prefixes as $remote_absolute_path_prefix) {
+            $local_absolute_path_prefixes[
+                $this->remote_path_to_local_path($remote_absolute_path_prefix)
+            ] = true;
+            foreach (
+                $this->resolved_path_mappings
+                as $mapped_remote_absolute_path_prefix => $mapped_local_absolute_path_prefix
+            ) {
+                if (
+                    path_remainder_under(
+                        $mapped_remote_absolute_path_prefix,
+                        $remote_absolute_path_prefix
+                    ) !== null
+                ) {
+                    $local_absolute_path_prefixes[
+                        $mapped_local_absolute_path_prefix
+                    ] = true;
+                }
+            }
+        }
+        return array_keys($local_absolute_path_prefixes);
+    }
 }

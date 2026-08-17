@@ -2,6 +2,7 @@
 
 use function Reprint\Importer\sort_index_file;
 use function WordPress\Reprint\Exporter\path_is_descendant_of;
+use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\relative_path_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Filesystem paths are CLI values, never HTML output.
@@ -24,6 +25,7 @@ final class MappedRemoteIndexBuilder
      *     @type string                  $mapped_remote_index_file Output in mapped local order.
      *     @type string                  $filesystem_root          Local filesystem root.
      *     @type RemoteToLocalPathMapper $path_mapper              Remote-to-local path mapper.
+     *     @type list<string>            $excluded_remote_absolute_path_prefixes Remote prefixes omitted from the mapped index. Default empty.
      * }
      */
     public static function build(array $options): void
@@ -33,6 +35,7 @@ final class MappedRemoteIndexBuilder
             "mapped_remote_index_file",
             "filesystem_root",
             "path_mapper",
+            "excluded_remote_absolute_path_prefixes",
         ];
         $unknown_options = array_diff(array_keys($options), $allowed_options);
         if ($unknown_options !== []) {
@@ -75,6 +78,27 @@ final class MappedRemoteIndexBuilder
         $filesystem_root = $options["filesystem_root"];
         /** @var RemoteToLocalPathMapper $path_mapper */
         $path_mapper = $options["path_mapper"];
+        $excluded_remote_absolute_path_prefixes =
+            $options["excluded_remote_absolute_path_prefixes"] ?? [];
+        if (
+            !is_array($excluded_remote_absolute_path_prefixes)
+            || array_values($excluded_remote_absolute_path_prefixes)
+                !== $excluded_remote_absolute_path_prefixes
+        ) {
+            throw new InvalidArgumentException(
+                "Mapped remote-index option excluded_remote_absolute_path_prefixes "
+                . "must be a list of strings."
+            );
+        }
+        foreach ($excluded_remote_absolute_path_prefixes as $excluded_prefix) {
+            if (!is_string($excluded_prefix) || $excluded_prefix === "") {
+                $observed_type = gettype($excluded_prefix);
+                throw new InvalidArgumentException(
+                    "Mapped remote-index option excluded_remote_absolute_path_prefixes "
+                    . "must contain non-empty strings; received {$observed_type}."
+                );
+            }
+        }
 
         $remote_index_reader = new RemoteIndexReader($remote_index_file);
         $mapped_index_handle = fopen($mapped_remote_index_file, "wb");
@@ -87,12 +111,19 @@ final class MappedRemoteIndexBuilder
             $remote_index_reader->open();
             $remote_entry = $remote_index_reader->next_entry();
             while ($remote_entry !== null) {
-                self::write_mapped_entry(
-                    $mapped_index_handle,
-                    $remote_entry,
-                    $filesystem_root,
-                    $path_mapper
-                );
+                if (
+                    !self::path_is_excluded(
+                        $remote_entry["path"],
+                        $excluded_remote_absolute_path_prefixes
+                    )
+                ) {
+                    self::write_mapped_entry(
+                        $mapped_index_handle,
+                        $remote_entry,
+                        $filesystem_root,
+                        $path_mapper
+                    );
+                }
                 $remote_entry = $remote_index_reader->next_entry();
             }
             if (!fflush($mapped_index_handle)) {
@@ -111,6 +142,19 @@ final class MappedRemoteIndexBuilder
             );
         }
         self::assert_no_path_collisions($mapped_remote_index_file);
+    }
+
+    /** @param list<string> $excluded_remote_absolute_path_prefixes */
+    private static function path_is_excluded(
+        string $remote_absolute_path,
+        array $excluded_remote_absolute_path_prefixes
+    ): bool {
+        foreach ($excluded_remote_absolute_path_prefixes as $excluded_prefix) {
+            if (path_remainder_under($remote_absolute_path, $excluded_prefix) !== null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

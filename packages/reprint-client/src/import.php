@@ -982,29 +982,6 @@ class ImportClient
             $this->files_pull_mode =
                 $requested_files_pull_mode ?? $saved_files_pull_mode;
 
-            $effective_filter = $options["filter"]
-                ?? $this->get_state()->filter
-                ?? "none";
-            $effective_nonempty_behavior = $options["fs_root_nonempty_behavior"]
-                ?? $this->get_state()->fs_root_nonempty_behavior
-                ?? "error";
-            if (
-                !$abort
-                && $this->files_pull_mode === "mirror"
-                && (
-                    !empty($options["include"] ?? $options["only"] ?? [])
-                    || !empty($options["exclude"] ?? [])
-                    || $this->include_caches
-                    || $effective_filter !== "none"
-                    || $effective_nonempty_behavior === "preserve-local"
-                )
-            ) {
-                throw new InvalidArgumentException(
-                    "--mode=mirror requires a full pull without --include, --exclude, "
-                    . "--include-caches, a partial --filter, or "
-                    . "--on-fs-root-nonempty=preserve-local."
-                );
-            }
             $absolute_state_directory = realpath_with_missing_tail(
                 $this->state_dir[0] === "/"
                     ? $this->state_dir
@@ -3330,6 +3307,8 @@ class ImportClient
                 "mapped_remote_index_file" => $this->mapped_remote_index_file,
                 "filesystem_root" => $this->filesystem_root,
                 "path_mapper" => $this->path_mapper(),
+                "excluded_remote_absolute_path_prefixes" =>
+                    $this->pull_excluded_files_with_path_prefixes,
             ]);
             $this->build_files_pull_mirror_local_changes();
             $starting_diff_stage = true;
@@ -3500,7 +3479,7 @@ class ImportClient
             [$this->filesystem_root],
             $this->filesystem_root,
             false,
-            false,
+            $this->include_caches,
             $plan_directory
         );
         try {
@@ -3548,6 +3527,12 @@ class ImportClient
         try {
             while ($local_index_diff->next_path()) {
                 if ($local_index_diff->get_path_transition() === "unchanged") {
+                    continue;
+                }
+                if (
+                    $this->fs_root_nonempty_behavior === "preserve-local"
+                    && $local_index_diff->get_entry_in_old_index() === null
+                ) {
                     continue;
                 }
                 $entry = $local_index_diff->get_entry_in_new_index()
@@ -3598,15 +3583,32 @@ class ImportClient
             null,
             $decode_mapped_entry
         );
+        $included_local_absolute_path_prefixes =
+            $this->path_mapper()->remote_path_prefixes_to_local_path_prefixes(
+                $this->pull_only_files_with_path_prefixes
+            );
+        $excluded_local_absolute_path_prefixes =
+            $this->path_mapper()->remote_path_prefixes_to_local_path_prefixes(
+                $this->pull_excluded_files_with_path_prefixes
+            );
         try {
             while ($changed_path_diff->next_path()) {
                 $local_entry = $changed_path_diff->get_entry_in_old_index();
                 if ($local_entry === null) {
                     continue;
                 }
+                $local_relative_path = $local_entry["path"];
                 $remote_entry = $changed_path_diff->get_entry_in_new_index();
                 if ($remote_entry !== null) {
                     /** @var array{copy_source_path:string} $remote_entry */
+                    if (
+                        !$this->is_selected_for_pulling(
+                            $remote_entry["copy_source_path"],
+                            true
+                        )
+                    ) {
+                        continue;
+                    }
                     $this->append_to_fetch_list(
                         $remote_entry["copy_source_path"],
                         $fetch_list_replacement_file_handle
@@ -3614,11 +3616,28 @@ class ImportClient
                     continue;
                 }
 
-                $local_relative_path = $local_entry["path"];
                 $local_absolute_path = wp_join_unix_paths(
                     $this->filesystem_root,
                     $local_relative_path
                 );
+                if (
+                    (
+                        !$this->include_caches
+                        && $this->is_default_skipped_local_absolute_path(
+                            $local_absolute_path,
+                            $local_relative_path
+                        )
+                    )
+                    || !$this->is_selected_for_pulling(
+                        $local_absolute_path,
+                        false,
+                        $included_local_absolute_path_prefixes,
+                        $excluded_local_absolute_path_prefixes
+                    )
+                ) {
+                    continue;
+                }
+
                 if (
                     !$this->remove_local_absolute_path_without_following_symlinks(
                         $local_absolute_path
@@ -3651,6 +3670,32 @@ class ImportClient
         if (!rename($this->fetch_list_replacement_file, $this->fetch_list_file)) {
             throw new RuntimeException("Failed to replace the fetch list.");
         }
+    }
+
+    /** Whether the local path spells a default-skipped path before or after remapping. */
+    private function is_default_skipped_local_absolute_path(
+        string $local_absolute_path,
+        string $local_relative_path
+    ): bool {
+        $candidate_paths = [$local_relative_path];
+        foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
+            $remainder = path_remainder_under(
+                $local_absolute_path,
+                $local_prefix
+            );
+            if ($remainder !== null) {
+                $candidate_paths[] = wp_join_unix_paths(
+                    $remote_prefix,
+                    $remainder
+                );
+            }
+        }
+        foreach ($candidate_paths as $candidate_path) {
+            if (FileIndexProcessor::path_is_default_skipped($candidate_path)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Creates an empty local index when files-pull recorded no local paths. */
@@ -9740,17 +9785,30 @@ class ImportClient
      *
      * @param bool $is_next_remote_index_entry Whether the path came from the
      *                                         current next remote index.
+     * @param list<string>|null $included_path_prefixes Included roots, or the
+     *                                                   current pull includes.
+     * @param list<string>|null $excluded_path_prefixes Excluded roots, or the
+     *                                                   current pull exclusions.
      */
     private function is_selected_for_pulling(
         string $path,
-        bool $is_next_remote_index_entry
+        bool $is_next_remote_index_entry,
+        ?array $included_path_prefixes = null,
+        ?array $excluded_path_prefixes = null
     ): bool
     {
+        $included_path_prefixes ??=
+            $this->pull_only_files_with_path_prefixes;
+        $excluded_path_prefixes ??=
+            $this->pull_excluded_files_with_path_prefixes;
         if (!$is_next_remote_index_entry) {
-            $selected = empty($this->pull_only_files_with_path_prefixes);
+            $selected = empty($included_path_prefixes);
 
-            foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
-                $remainder = path_remainder_under($path, $prefix);
+            foreach ($included_path_prefixes as $included_path_prefix) {
+                $remainder = path_remainder_under(
+                    $path,
+                    $included_path_prefix
+                );
                 if ($remainder === "") {
                     return false;
                 }
@@ -9765,8 +9823,11 @@ class ImportClient
             }
         }
 
-        foreach ($this->pull_excluded_files_with_path_prefixes as $prefix) {
-            if (path_remainder_under($path, $prefix) !== null) {
+        foreach ($excluded_path_prefixes as $excluded_path_prefix) {
+            if (
+                path_remainder_under($path, $excluded_path_prefix)
+                !== null
+            ) {
                 return false;
             }
         }

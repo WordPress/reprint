@@ -113,6 +113,49 @@ final class MappedRemoteIndexBuilderTest extends TestCase
         \MappedRemoteIndexBuilder::build(['remote_file' => 'index.jsonl']);
     }
 
+    public function testOmitsExcludedRemotePathsBeforeCollisionValidation(): void
+    {
+        $remoteIndex = $this->root . '/remote.jsonl';
+        $mappedIndex = $this->root . '/mapped.jsonl';
+        $this->writeRemoteIndex($remoteIndex, [
+            '/remote/included/file.txt',
+            '/remote/excluded/a.txt',
+            '/remote/excluded/b.txt',
+        ]);
+        $mapper = new \RemoteToLocalPathMapper(
+            $this->root . '/files',
+            ['/remote'],
+            [
+                '/remote/included' => $this->root . '/files/included',
+                '/remote/excluded/a.txt' => $this->root . '/files/collision',
+                '/remote/excluded/b.txt' => $this->root . '/files/collision',
+            ]
+        );
+
+        \MappedRemoteIndexBuilder::build([
+            'remote_index_file' => $remoteIndex,
+            'mapped_remote_index_file' => $mappedIndex,
+            'filesystem_root' => $this->root . '/files',
+            'path_mapper' => $mapper,
+            'excluded_remote_absolute_path_prefixes' => [
+                '/remote/excluded',
+            ],
+        ]);
+
+        $lines = file(
+            $mappedIndex,
+            FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES
+        );
+        $this->assertIsArray($lines);
+        $this->assertCount(1, $lines);
+        $this->assertSame(
+            '/remote/included/file.txt',
+            \MappedRemoteIndexBuilder::decode_index_line(
+                $lines[0]
+            )['copy_source_path']
+        );
+    }
+
     /** @param list<string> $remotePaths */
     private function writeRemoteIndex(string $path, array $remotePaths): void
     {
