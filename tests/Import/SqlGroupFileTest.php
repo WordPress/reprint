@@ -6,7 +6,7 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
-class MysqlSqlGroupFileTest extends TestCase
+class SqlGroupFileTest extends TestCase
 {
     private const MARKER = '-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 ';
 
@@ -23,7 +23,7 @@ class MysqlSqlGroupFileTest extends TestCase
         rewind($handle);
 
         $client = ( new \ReflectionClass(\ImportClient::class) )->newInstanceWithoutConstructor();
-        $read_group = new \ReflectionMethod(\ImportClient::class, 'read_next_mysql_sql_group');
+        $read_group = new \ReflectionMethod(\ImportClient::class, 'read_next_sql_group');
         $read_group->setAccessible(true);
 
         $first = $read_group->invoke($client, $handle);
@@ -54,7 +54,7 @@ class MysqlSqlGroupFileTest extends TestCase
         rewind($handle);
 
         $client = ( new \ReflectionClass(\ImportClient::class) )->newInstanceWithoutConstructor();
-        $read_group = new \ReflectionMethod(\ImportClient::class, 'read_next_mysql_sql_group');
+        $read_group = new \ReflectionMethod(\ImportClient::class, 'read_next_sql_group');
         $read_group->setAccessible(true);
         $read_group->invoke($client, $handle);
 

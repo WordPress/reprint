@@ -15,6 +15,8 @@ require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
  */
 class NewSiteUrlSqliteTest extends TestCase
 {
+    private const SQL_GROUP_MARKER = '-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 ';
+
     private string $tempDir;
 
     protected function setUp(): void
@@ -97,7 +99,13 @@ class NewSiteUrlSqliteTest extends TestCase
             base64_encode('yes'),
         );
 
-        return implode("\n", $stmts) . "\n";
+        $table_cursor = base64_encode(json_encode(['current_table' => 'wp_options']));
+        $complete_cursor = base64_encode(json_encode(['current_table' => null]));
+
+        return implode("\n", array_slice($stmts, 0, 2)) . "\n" .
+            self::SQL_GROUP_MARKER . $table_cursor . "\n" .
+            implode("\n", array_slice($stmts, 2)) . "\n" .
+            self::SQL_GROUP_MARKER . $complete_cursor . "\n";
     }
 
     /**
@@ -345,6 +353,9 @@ class NewSiteUrlSqliteTest extends TestCase
             . "`post_title` varchar(255) NOT NULL DEFAULT '', "
             . "PRIMARY KEY (`ID`)"
             . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
+        $sql .= self::SQL_GROUP_MARKER . base64_encode(json_encode([
+            'current_table' => 'wp_posts',
+        ])) . "\n";
 
         $content = '<p>Visit <a href="https://old-site.example.com/about">About</a></p>'
             . '<!-- wp:image {"url":"https://old-site.example.com/wp-content/uploads/photo.jpg"} -->';
@@ -353,6 +364,9 @@ class NewSiteUrlSqliteTest extends TestCase
             base64_encode($content),
             base64_encode('Test Post'),
         );
+        $sql .= self::SQL_GROUP_MARKER . base64_encode(json_encode([
+            'current_table' => null,
+        ])) . "\n";
 
         file_put_contents($this->tempDir . '/db.sql', $sql);
         $this->writeState($exportUrl, [
@@ -421,7 +435,17 @@ class NewSiteUrlSqliteTest extends TestCase
             base64_encode('yes')
         );
 
-        file_put_contents($this->tempDir . '/db.sql', implode("\n", $stmts) . "\n");
+        file_put_contents(
+            $this->tempDir . '/db.sql',
+            implode("\n", array_slice($stmts, 0, 2)) . "\n" .
+            self::SQL_GROUP_MARKER . base64_encode(json_encode([
+                'current_table' => 'wp_options',
+            ])) . "\n" .
+            $stmts[2] . "\n" .
+            self::SQL_GROUP_MARKER . base64_encode(json_encode([
+                'current_table' => null,
+            ])) . "\n"
+        );
         $this->writeState($remoteReprintApiUrl);
 
         $client = new \ImportClient(
@@ -469,7 +493,14 @@ class NewSiteUrlSqliteTest extends TestCase
             base64_encode('https://example.com'),
             base64_encode('yes')
         );
-        $sql = implode("\n", [$drop, $create, $insert]);
+        $sql = implode("\n", [$drop, $create]) . "\n" .
+            self::SQL_GROUP_MARKER . base64_encode(json_encode([
+                'current_table' => 'wp_options',
+            ])) . "\n" .
+            $insert . "\n" .
+            self::SQL_GROUP_MARKER . base64_encode(json_encode([
+                'current_table' => null,
+            ])) . "\n";
 
         file_put_contents($this->tempDir . '/db.sql', $sql);
         $this->writeState($remoteReprintApiUrl);
@@ -496,6 +527,6 @@ class NewSiteUrlSqliteTest extends TestCase
         );
         $this->assertSame('complete', $state['active_resumable_command']['completion_state']);
         $this->assertSame(3, $state['apply']['statements_executed']);
-        $this->assertSame(strlen($sql), $state['apply']['bytes_read']);
+        $this->assertSame(0, $state['apply']['bytes_read']);
     }
 }
