@@ -166,9 +166,8 @@ final class FilesPullMirrorDiffTest extends TestCase
         $lines = '';
         foreach ($entries as [$localPath, $remotePath, $type, $size]) {
             $lines .= json_encode([
-                'path' => base64_encode(
-                    bin2hex($localPath) . '/' . bin2hex($remotePath)
-                ),
+                'path' => base64_encode($localPath),
+                'copy_source_path' => base64_encode($remotePath),
                 'ctime' => 0,
                 'size' => $size,
                 'type' => $type,
@@ -176,7 +175,15 @@ final class FilesPullMirrorDiffTest extends TestCase
         }
         $path = $this->path($client, 'mapped_remote_index_file');
         file_put_contents($path, $lines);
-        $this->assertTrue(sort_index_file($path));
+        $this->assertTrue(sort_index_file(
+            $path,
+            static function (string $line): string {
+                $entry = \MappedRemoteIndexBuilder::decode_index_line($line);
+                return bin2hex($entry['path'])
+                    . '/'
+                    . bin2hex($entry['copy_source_path']);
+            }
+        ));
     }
 
     /** @param list<string> $remotePaths */

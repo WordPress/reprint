@@ -46,6 +46,11 @@ final class MappedRemoteIndexBuilderTest extends TestCase
             'path_mapper' => $mapper,
         ]);
 
+        $storedLines = file(
+            $mappedIndex,
+            FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES
+        );
+        $this->assertIsArray($storedLines);
         $this->assertSame([
             ['path' => 'a', 'source' => '/remote/b'],
             ['path' => 'z', 'source' => '/remote/a'],
@@ -57,9 +62,52 @@ final class MappedRemoteIndexBuilderTest extends TestCase
                     'source' => $entry['copy_source_path'],
                 ];
             },
-            file($mappedIndex, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES)
+            $storedLines
         ));
+        $firstStoredEntry = json_decode(
+            $storedLines[0],
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertSame(base64_encode('a'), $firstStoredEntry['path']);
+        $this->assertSame(
+            base64_encode('/remote/b'),
+            $firstStoredEntry['copy_source_path']
+        );
         $this->assertFileDoesNotExist($mappedIndex . '.collision-stack');
+    }
+
+    public function testPreservesArbitraryPathBytesInSeparateFields(): void
+    {
+        $remotePath = "/remote/source-\xff";
+        $localPath = "local-\xfe";
+        $remoteIndex = $this->root . '/remote.jsonl';
+        $mappedIndex = $this->root . '/mapped.jsonl';
+        $this->writeRemoteIndex($remoteIndex, [$remotePath]);
+
+        \MappedRemoteIndexBuilder::build([
+            'remote_index_file' => $remoteIndex,
+            'mapped_remote_index_file' => $mappedIndex,
+            'filesystem_root' => $this->root . '/files',
+            'path_mapper' => new \RemoteToLocalPathMapper(
+                $this->root . '/files',
+                ['/remote'],
+                [$remotePath => $this->root . '/files/' . $localPath]
+            ),
+        ]);
+
+        $line = file_get_contents($mappedIndex);
+        $this->assertIsString($line);
+        $storedEntry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(base64_encode($localPath), $storedEntry['path']);
+        $this->assertSame(
+            base64_encode($remotePath),
+            $storedEntry['copy_source_path']
+        );
+        $decodedEntry = \MappedRemoteIndexBuilder::decode_index_line($line);
+        $this->assertSame($localPath, $decodedEntry['path']);
+        $this->assertSame($remotePath, $decodedEntry['copy_source_path']);
     }
 
     /**

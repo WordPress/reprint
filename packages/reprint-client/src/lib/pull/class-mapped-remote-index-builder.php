@@ -9,7 +9,13 @@ use function WordPress\Reprint\Server\relative_path_under;
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
 
-/** Builds the current remote index in mapped local path order. */
+/**
+ * Builds the current remote index in mapped local path order.
+ *
+ * Each row stores the local relative path in `path` and the remote absolute
+ * path in `copy_source_path`. Both values are base64 text because filesystem
+ * paths may contain bytes which JSON strings cannot represent.
+ */
 final class MappedRemoteIndexBuilder
 {
     /**
@@ -136,7 +142,13 @@ final class MappedRemoteIndexBuilder
             fclose($mapped_index_handle);
         }
 
-        if (!sort_index_file($mapped_remote_index_file)) {
+        $get_sort_key = static function (string $line): string {
+            $mapped_entry = self::decode_index_line($line);
+            return bin2hex($mapped_entry["path"])
+                . "/"
+                . bin2hex($mapped_entry["copy_source_path"]);
+        };
+        if (!sort_index_file($mapped_remote_index_file, $get_sort_key)) {
             throw new RuntimeException(
                 "Failed to sort the mapped remote index: {$mapped_remote_index_file}."
             );
@@ -172,17 +184,18 @@ final class MappedRemoteIndexBuilder
     public static function decode_index_line(string $line): array
     {
         $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
-        $encoded_mapping = is_array($entry) ? $entry["path"] ?? null : null;
-        $mapping = is_string($encoded_mapping)
-            ? base64_decode($encoded_mapping, true)
+        $encoded_local_relative_path = is_array($entry)
+            ? $entry["path"] ?? null
+            : null;
+        $local_relative_path = is_string($encoded_local_relative_path)
+            ? base64_decode($encoded_local_relative_path, true)
             : false;
-        $separator = is_string($mapping) ? strpos($mapping, "/") : false;
-        $local_relative_path = $separator === false
-            ? false
-            : @hex2bin(substr($mapping, 0, $separator));
-        $remote_absolute_path = $separator === false
-            ? false
-            : @hex2bin(substr($mapping, $separator + 1));
+        $encoded_remote_absolute_path = is_array($entry)
+            ? $entry["copy_source_path"] ?? null
+            : null;
+        $remote_absolute_path = is_string($encoded_remote_absolute_path)
+            ? base64_decode($encoded_remote_absolute_path, true)
+            : false;
         $type = is_array($entry) ? $entry["type"] ?? null : null;
         if (
             !is_string($local_relative_path)
@@ -228,12 +241,10 @@ final class MappedRemoteIndexBuilder
             return;
         }
 
-        $mapped_key = bin2hex($local_relative_path)
-            . "/"
-            . bin2hex($remote_absolute_path);
         $line = json_encode(
             [
-                "path" => base64_encode($mapped_key),
+                "path" => base64_encode($local_relative_path),
+                "copy_source_path" => base64_encode($remote_absolute_path),
                 "ctime" => 0,
                 "size" => $remote_entry["size"],
                 "type" => $remote_entry["type"],
