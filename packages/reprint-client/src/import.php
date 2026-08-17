@@ -6228,10 +6228,12 @@ class ImportClient
         }
 
         $params = $this->get_tuned_params("file_fetch");
-        // Always send directory[] – see comment in fetch_next_remote_index().
-        $export_dirs = $this->get_export_directories();
-        if (!empty($export_dirs)) {
-            $params["directory"] = $export_dirs;
+        // file_fetch retains its directory-only server contract. --only may
+        // name a file, so use the preflight directory roots rather than the
+        // scoped file-index roots used by fetch_next_remote_index().
+        $fetch_directories = $this->get_root_directories_from_preflight();
+        if (!empty($fetch_directories)) {
+            $params["directory"] = $fetch_directories;
         }
         $url = $this->build_url("file_fetch", $cursor, $params);
         $this->audit_log("Downloading file fetch from {$url}");
@@ -6538,6 +6540,10 @@ class ImportClient
         if (!empty($export_dirs)) {
             $params["directory"] = $export_dirs;
         }
+        $missing_roots = $this->previously_indexed_selected_roots();
+        if ($missing_roots !== []) {
+            $params["missing_roots"] = $missing_roots;
+        }
         $url = $this->build_url("file_index", $cursor, $params);
         $context = new StreamingContext();
 
@@ -6803,7 +6809,11 @@ class ImportClient
             ) {
                 // The remote index is a union across files-pull path selections.
                 // Keep entries outside this run's selection.
-                if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
+                if ($this->is_selected_for_pulling(
+                    $remote_index_entry["path"],
+                    false,
+                    $remote_index_entry["type"]
+                )) {
                     $missing_remote_index_entry_path = $remote_index_entry["path"];
                     $remote_deletion_root = $this->derive_remote_deletion_root_from_sparse_index(
                         $missing_remote_index_entry_path,
@@ -6889,7 +6899,11 @@ class ImportClient
         }
 
         while ($remote_index_entry !== null) {
-            if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
+            if ($this->is_selected_for_pulling(
+                $remote_index_entry["path"],
+                false,
+                $remote_index_entry["type"]
+            )) {
                 $missing_remote_index_entry_path = $remote_index_entry["path"];
                 $remote_deletion_root = $this->derive_remote_deletion_root_from_sparse_index(
                     $missing_remote_index_entry_path,
@@ -8720,6 +8734,45 @@ class ImportClient
     }
 
     /**
+     * Returns selected roots that the prior remote index confirms as tracked.
+     *
+     * The server may represent only these roots as an empty selected result
+     * when it can confirm their current absence. A newly typed missing path is
+     * still rejected at the endpoint.
+     *
+     * @return string[] Selected roots present in the prior remote index.
+     */
+    private function previously_indexed_selected_roots(): array
+    {
+        if ($this->pull_only_files_with_path_prefixes === [] || !is_file($this->remote_index_file)) {
+            return [];
+        }
+        $remaining = array_fill_keys($this->pull_only_files_with_path_prefixes, true);
+        $handle = fopen($this->remote_index_file, 'r');
+        if (!is_resource($handle)) {
+            throw new RuntimeException("Failed to open the current remote index for selected roots.");
+        }
+        try {
+            while ($remaining !== [] && ($line = fgets($handle)) !== false) {
+                $entry = json_decode($line, true);
+                if (!is_array($entry) || !isset($entry['path']) || !is_string($entry['path'])) {
+                    continue;
+                }
+                $path = base64_decode($entry['path'], true);
+                if ($path !== false) {
+                    unset($remaining[$path]);
+                }
+            }
+        } finally {
+            fclose($handle);
+        }
+        return array_values(array_diff(
+            $this->pull_only_files_with_path_prefixes,
+            array_keys($remaining)
+        ));
+    }
+
+    /**
      * Whether a path is selected by the active --include and --exclude prefixes.
      *
      * The exporter has already applied --include to entries in the next remote
@@ -8733,7 +8786,8 @@ class ImportClient
      */
     private function is_selected_for_pulling(
         string $path,
-        bool $is_next_remote_index_entry
+        bool $is_next_remote_index_entry,
+        ?string $path_type = null
     ): bool
     {
         if (!$is_next_remote_index_entry) {
@@ -8742,7 +8796,11 @@ class ImportClient
             foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
                 $remainder = path_remainder_under($path, $prefix);
                 if ($remainder === "") {
-                    return false;
+                    // Directory roots have no row in a freshly indexed tree,
+                    // so their old row must survive a scoped delta. Named
+                    // file and link roots do have one; their confirmed absence
+                    // must remove the tracked local path.
+                    return $path_type !== "dir";
                 }
                 if ($remainder !== null) {
                     $selected = true;

@@ -1246,7 +1246,10 @@ function resolve_file_index_roots(array $config): array
         clearstatcache(true, $requested_path);
         $stat = @lstat($requested_path);
         if ($stat === false) {
-            if (!empty($config["allow_missing_roots"]) && file_index_root_is_confirmed_absent($requested_path)) {
+            $missing_roots = isset($config["missing_roots"]) && is_array($config["missing_roots"])
+                ? $config["missing_roots"]
+                : [];
+            if (in_array($requested_path, $missing_roots, true) && file_index_root_is_confirmed_absent($requested_path)) {
                 $roots[] = [
                     "requested_path" => $requested_path,
                     "resolved_path" => null,

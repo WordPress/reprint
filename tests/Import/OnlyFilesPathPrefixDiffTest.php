@@ -282,4 +282,38 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $this->assertFileDoesNotExist($orphan);
         $this->assertNotContains('/wp-content/themes/old/orphan.css', $this->readRemoteIndexEntryPaths());
     }
+
+    public function testConfirmedAbsentSelectedFileRootIsDeleted(): void
+    {
+        $this->writeIndex(
+            'remote-index.jsonl',
+            $this->indexLine('/wp-config.php', 1000, 10)
+        );
+        $this->writeIndex('remote-index.next.jsonl', '');
+        $local = $this->seedLocalFile('/wp-config.php');
+
+        [$client, $reflection] = $this->prepareClient(['/wp-config.php']);
+        $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
+
+        $this->assertFileDoesNotExist($local);
+        $this->assertNotContains('/wp-config.php', $this->readRemoteIndexEntryPaths());
+    }
+
+    public function testOnlyPreviouslyIndexedRootsMayBeReportedMissing(): void
+    {
+        $this->writeIndex(
+            'remote-index.jsonl',
+            $this->indexLine('/wp-config.php', 1000, 10)
+        );
+
+        [$client, $reflection] = $this->prepareClient([
+            '/wp-config.php',
+            '/new-file.php',
+        ]);
+
+        $this->assertSame(
+            ['/wp-config.php'],
+            $reflection->getMethod('previously_indexed_selected_roots')->invoke($client)
+        );
+    }
 }

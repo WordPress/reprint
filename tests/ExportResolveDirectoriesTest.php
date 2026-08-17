@@ -71,4 +71,30 @@ final class ExportResolveDirectoriesTest extends TestCase {
 
         resolve_directories(['directory' => [$missing]]);
     }
+
+    public function testFileIndexResolverRejectsBrokenSelectedSymlink(): void
+    {
+        $path = $this->tempDir . '/site/broken.php';
+        symlink('absent.php', $path);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('broken symlink');
+
+        resolve_file_index_roots(['directory' => [$path], 'follow_symlinks' => true]);
+    }
+
+    public function testFileIndexResolverRejectsParentSymlinkWithoutFollowing(): void
+    {
+        $releases = $this->tempDir . '/releases';
+        mkdir($releases, 0755, true);
+        file_put_contents($releases . '/wp-config.php', '<?php');
+        $current = (string) realpath($this->tempDir) . '/current';
+        symlink($releases, $current);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage($current);
+        $this->expectExceptionMessage('use --follow-symlinks');
+
+        resolve_file_index_roots(['directory' => [$current . '/wp-config.php']]);
+    }
 }

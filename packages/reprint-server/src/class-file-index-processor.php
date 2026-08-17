@@ -91,7 +91,7 @@ final class FileIndexProcessor {
     /**
      * Starts a traversal at the requested root and schedules the other roots.
      *
-     * @param array[]  $roots            Structured file-index roots.
+     * @param array[]|string[] $roots    Structured roots or legacy directory roots.
      * @param string   $index_directory  Requested root where indexing begins.
      * @param bool     $follow_symlinks  Whether directory symlinks may lead outside the allowed directories.
      * @param bool     $include_caches   Whether generated caches and development files are included.
@@ -210,7 +210,7 @@ final class FileIndexProcessor {
     /**
      * Resumes traversal from a cursor returned by get_cursor().
      *
-     * @param array[]  $roots           Structured file-index roots.
+     * @param array[]|string[] $roots   Structured roots or legacy directory roots.
      * @param string   $cursor_json     JSON cursor returned by the preceding request.
      * @param bool     $follow_symlinks Whether directory symlinks may lead outside the allowed directories.
      * @param bool     $include_caches  Whether generated caches and development files are included.
@@ -812,18 +812,22 @@ final class FileIndexProcessor {
             $entries = self::find_parent_symlinks(dirname($path_root));
         }
         $inspected_path = self::index_entries_for_path($path_root, $stat, $this->follow_symlinks);
+        $resolved_target_was_indexed = $root["resolved_path"] !== null
+            && $this->resolved_target_was_indexed($root);
 
         // A selected symlink always remains at its requested path. When
         // followed, its target content is emitted in the physical namespace
         // that normal traversal already uses. Two aliases may therefore share
         // one target entry while both link entries remain present.
-        $entries = array_merge($entries, $inspected_path["entries"]);
+        if (!($root["type"] === "file" && $resolved_target_was_indexed)) {
+            $entries = array_merge($entries, $inspected_path["entries"]);
+        }
         if (
             $this->follow_symlinks
             && $root["type"] === "symlink"
             && $root["resolved_path"] !== null
             && !is_dir($root["resolved_path"])
-            && !$this->resolved_target_was_indexed($root)
+            && !$resolved_target_was_indexed
         ) {
             clearstatcache(true, $root["resolved_path"]);
             $target_stat = @lstat($root["resolved_path"]);
@@ -836,11 +840,15 @@ final class FileIndexProcessor {
             $root["type"] === "file"
             && $root["resolved_path"] !== null
             && $root["resolved_path"] !== $root["requested_path"]
+            && !$resolved_target_was_indexed
         ) {
             // A regular root reached through no link normally has identical
             // coordinates. Keep this branch for records supplied by callers
             // which already normalized a physical file root.
-            $entries = self::index_entries_for_path($root["resolved_path"], $stat, false)["entries"];
+            $entries = array_merge(
+                $entries,
+                self::index_entries_for_path($root["resolved_path"], $stat, false)["entries"]
+            );
         }
         $this->index_entries = $entries;
         $this->step_status = self::STATUS_INDEXED;
@@ -861,10 +869,9 @@ final class FileIndexProcessor {
     private function resolved_target_was_indexed(array $root): bool
     {
         foreach ($this->roots as $candidate) {
-            if ($candidate["requested_path"] === $root["requested_path"]) {
-                return false;
-            }
             if (
+                $candidate["requested_path"] !== $root["requested_path"]
+                &&
                 $candidate["resolved_path"] === $root["resolved_path"]
                 && !in_array($candidate["requested_path"], $this->pending_path_roots, true)
             ) {
@@ -1096,8 +1103,9 @@ final class FileIndexProcessor {
         $parts = explode("/", $absolute_path);
         $current = "";
 
-        // Inspect each accumulated parent path. After a link, continue from its
-        // canonical location so later segments refer to the path PHP will use.
+        // Keep the requested spelling while inspecting each parent. PHP follows
+        // a parent link when checking the next component, so changing $current
+        // to realpath() would turn later emitted links into physical paths.
         foreach ($parts as $part) {
             if ($part === "") {
                 $current = "/";
@@ -1121,13 +1129,6 @@ final class FileIndexProcessor {
                     "target" => $target,
                     "intermediate" => true,
                 ];
-            }
-
-            // Resolve only the parent already inspected. This keeps the walk
-            // iterative and leaves any later link visible to the next segment.
-            $canonical_current = @realpath($current);
-            if ($canonical_current !== false) {
-                $current = $canonical_current;
             }
         }
         return $entries;
