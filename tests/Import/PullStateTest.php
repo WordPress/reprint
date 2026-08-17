@@ -51,6 +51,7 @@ class PullStateTest extends TestCase
         $state->diff->fetch_list_byte_offset = 789;
         $state->diff->pull_index_wal_byte_offset = 321;
         $state->sql_statements_counted = 99;
+        $state->files_pull_mode = 'mirror';
 
         $array = $state->to_array();
 
@@ -64,6 +65,8 @@ class PullStateTest extends TestCase
         $this->assertSame(789, $array['diff']['fetch_list_byte_offset']);
         $this->assertSame(321, $array['diff']['pull_index_wal_byte_offset']);
         $this->assertSame(99, $array['sql_statements_counted']);
+        $this->assertSame('mirror', $array['files_pull_mode']);
+        $this->assertSame('mirror', \PullState::from_array($array)->files_pull_mode);
     }
 
     public function testGetAppliesDefaultsOverVerbatimPreflight(): void

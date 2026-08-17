@@ -31,6 +31,8 @@ use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
 use function Reprint\Importer\sort_index_file;
+use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
+use function Reprint\Importer\write_local_index_entry;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
 use function WordPress\Reprint\Exporter\assert_valid_path;
@@ -110,6 +112,7 @@ require_once __DIR__ . '/lib/pull/class-pull.php';
 // Pull index reader and the WAL for completed files-pull mutations.
 require_once __DIR__ . '/lib/pull/class-remote-index-reader.php';
 require_once __DIR__ . '/lib/pull/class-remote-to-local-path-mapper.php';
+require_once __DIR__ . '/lib/pull/class-mapped-remote-index-builder.php';
 require_once __DIR__ . '/lib/pull/class-pull-index-journal.php';
 
 /**
@@ -252,8 +255,14 @@ class ImportClient
      */
     private $next_remote_index_file;
 
+    /** @var string Current remote index sorted by mapped local relative path. */
+    private $mapped_remote_index_file;
+
     /** @var string Path to pull/fetch-list.jsonl — files to download, computed by comparing the next remote index with the remote index. */
     private $fetch_list_file;
+
+    /** @var string Unpublished mirror replacement for the fetch list. */
+    private $next_fetch_list_file;
 
     /** @var string Path to audit.log — append-only log of every operation for debugging. */
     private $audit_log_file;
@@ -324,6 +333,9 @@ class ImportClient
      * with no source).
      */
     private $include_caches = false;
+
+    /** @var string `mirror` or `catch-up`. */
+    private $files_pull_mode = "catch-up";
 
     /**
      * @var string Controls behavior when the filesystem root is non-empty at pull start.
@@ -505,8 +517,12 @@ class ImportClient
             wp_join_unix_paths($this->pull_state_directory, "index.wal");
         $this->next_remote_index_file =
             wp_join_unix_paths($this->pull_state_directory, "remote-index.next.jsonl");
+        $this->mapped_remote_index_file =
+            wp_join_unix_paths($this->pull_state_directory, "remote-index.local-map.jsonl");
         $this->fetch_list_file =
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl");
+        $this->next_fetch_list_file =
+            wp_join_unix_paths($this->pull_state_directory, "fetch-list.next.jsonl");
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
         $this->volatile_files_file = wp_join_unix_paths($this->pull_state_directory, "volatile-files.json");
         $this->progress_file = wp_join_unix_paths($this->state_dir, "progress.json");
@@ -934,6 +950,74 @@ class ImportClient
         if ($command === "pull-metadata") {
             $this->run_pull_metadata();
             return;
+        }
+
+        if (in_array($command, ["pull", "pull-files", "files-pull"], true)) {
+            $requested_files_pull_mode = $options["files_pull_mode"] ?? null;
+            if (
+                $requested_files_pull_mode !== null
+                && !in_array($requested_files_pull_mode, ["mirror", "catch-up"], true)
+            ) {
+                throw new InvalidArgumentException(
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option value, never HTML.
+                    "Invalid --mode value: {$requested_files_pull_mode}. Valid values: mirror, catch-up"
+                );
+            }
+            $saved_files_pull_mode = $this->get_state()->files_pull_mode;
+            if (
+                !$abort
+                && $requested_files_pull_mode !== null
+                && $requested_files_pull_mode !== $saved_files_pull_mode
+                && $this->get_state()->active_resumable_command->command_name === "files-pull"
+            ) {
+                throw new RuntimeException(
+                    "Cannot change --mode after files-pull starts. Use --abort first."
+                );
+            }
+            $this->files_pull_mode =
+                $requested_files_pull_mode ?? $saved_files_pull_mode;
+
+            $effective_filter = $options["filter"]
+                ?? $this->get_state()->filter
+                ?? "none";
+            $effective_nonempty_behavior = $options["fs_root_nonempty_behavior"]
+                ?? $this->get_state()->fs_root_nonempty_behavior
+                ?? "error";
+            if (
+                !$abort
+                && $this->files_pull_mode === "mirror"
+                && (
+                    !empty($options["include"] ?? $options["only"] ?? [])
+                    || !empty($options["exclude"] ?? [])
+                    || $this->include_caches
+                    || $effective_filter !== "none"
+                    || $effective_nonempty_behavior === "preserve-local"
+                )
+            ) {
+                throw new InvalidArgumentException(
+                    "--mode=mirror requires a full pull without --include, --exclude, "
+                    . "--include-caches, a partial --filter, or "
+                    . "--on-fs-root-nonempty=preserve-local."
+                );
+            }
+            $absolute_state_directory = realpath_with_missing_tail(
+                $this->state_dir[0] === "/"
+                    ? $this->state_dir
+                    : wp_join_unix_paths(getcwd() ?: "/", $this->state_dir)
+            );
+            if (
+                !$abort
+                && $this->files_pull_mode === "mirror"
+                && relative_path_under(
+                    $absolute_state_directory,
+                    $this->filesystem_root
+                ) !== null
+            ) {
+                throw new InvalidArgumentException(
+                    "--mode=mirror requires --state-dir to be outside --fs-root."
+                );
+            }
+            $this->get_state()->files_pull_mode = $this->files_pull_mode;
         }
 
         // Persist follow_symlinks in state so it survives across invocations.
@@ -2379,6 +2463,18 @@ class ImportClient
             @unlink($this->next_remote_index_file);
             $this->audit_log("FILE DELETE | {$this->next_remote_index_file}");
         }
+        foreach (
+            [$this->mapped_remote_index_file, $this->next_fetch_list_file]
+            as $mirror_work_file
+        ) {
+            if (file_exists($mirror_work_file)) {
+                @unlink($mirror_work_file);
+                $this->audit_log("FILE DELETE | {$mirror_work_file}");
+            }
+        }
+        $this->remove_local_plan_directory(
+            wp_join_unix_paths($this->pull_state_directory, "mirror-plan")
+        );
         if (file_exists($this->fetch_list_file)) {
             @unlink($this->fetch_list_file);
             $this->audit_log("FILE DELETE | {$this->fetch_list_file}");
@@ -3115,7 +3211,12 @@ class ImportClient
             // Starting fresh — validate that the filesystem root is empty.
             // A delta sync ($is_delta) naturally has a non-empty filesystem root
             // because we put those files there during the initial sync.
-            if (!$is_empty && !$is_delta && $this->fs_root_nonempty_behavior === 'error') {
+            if (
+                $this->files_pull_mode === "catch-up"
+                && !$is_empty
+                && !$is_delta
+                && $this->fs_root_nonempty_behavior === 'error'
+            ) {
                 throw new RuntimeException(
                     "Filesystem root is not empty and no cursor found. " .
                         "Either clear the filesystem root, use --abort flag, or use --on-fs-root-nonempty=preserve-local to sync while preserving the existing content.",
@@ -3181,6 +3282,7 @@ class ImportClient
             $this->pull_index_journal->open();
         }
 
+        $starting_diff_stage = false;
         if ($stage === "index") {
             $complete = $this->fetch_next_remote_index();
             if (!$complete) {
@@ -3197,6 +3299,29 @@ class ImportClient
                 }
             }
             $this->sort_next_remote_index_file();
+            if ($this->files_pull_mode === "mirror") {
+                $stage = "local-index";
+                $this->get_state()->active_resumable_command->current_stage = $stage;
+                $this->pull_index_journal->close();
+                $this->save_state();
+            } else {
+                $starting_diff_stage = true;
+            }
+        }
+
+        if ($stage === "local-index") {
+            $this->ensure_local_index_exists();
+            MappedRemoteIndexBuilder::build([
+                "remote_index_file" => $this->next_remote_index_file,
+                "mapped_remote_index_file" => $this->mapped_remote_index_file,
+                "filesystem_root" => $this->filesystem_root,
+                "path_mapper" => $this->path_mapper(),
+            ]);
+            $this->build_files_pull_mirror_local_changes();
+            $starting_diff_stage = true;
+        }
+
+        if ($starting_diff_stage) {
             $this->get_state()->active_resumable_command->current_stage = "diff";
             $this->get_state()->diff = new FileDiffProgressState();
             $this->pull_index_journal->close();
@@ -3210,6 +3335,8 @@ class ImportClient
             $stage = "diff";
         }
 
+        $starting_mirror_stage = false;
+        $starting_fetch_stage = false;
         if ($stage === "diff") {
             $complete = $this->compare_remote_indexes_and_build_fetch_list();
             if (!$complete) {
@@ -3218,6 +3345,26 @@ class ImportClient
                 return;
             }
 
+            if ($this->files_pull_mode === "mirror") {
+                $stage = "mirror";
+                $this->get_state()->active_resumable_command->current_stage = $stage;
+                $this->save_state();
+                $starting_mirror_stage = true;
+            } else {
+                $starting_fetch_stage = true;
+            }
+        }
+
+        if ($stage === "mirror") {
+            if ($starting_mirror_stage) {
+                $this->pull_index_journal->open();
+            }
+            $this->build_files_pull_mirror_fetch_list();
+            $this->pull_index_journal->flush();
+            $starting_fetch_stage = true;
+        }
+
+        if ($starting_fetch_stage) {
             $has_files_to_fetch =
                 file_exists($this->fetch_list_file) &&
                 filesize($this->fetch_list_file) > 0;
@@ -3227,6 +3374,9 @@ class ImportClient
             // startup applies any pending WAL before it resumes the fetch list.
             $this->save_state();
             $this->pull_index_journal->apply_pending_records();
+            $this->remove_local_plan_directory(
+                wp_join_unix_paths($this->pull_state_directory, "mirror-plan")
+            );
 
             // In pull mode, finalize the scanning line with a checkmark
             // and start the download progress on a fresh line.
@@ -3307,6 +3457,183 @@ class ImportClient
         ], true);
 
         $this->report_volatile_files();
+    }
+
+    /** Saves the local-before to local-now changes before remote work begins. */
+    private function build_files_pull_mirror_local_changes(): void
+    {
+        $plan_directory = wp_join_unix_paths(
+            $this->pull_state_directory,
+            "mirror-plan"
+        );
+        $this->remove_local_plan_directory($plan_directory);
+        if (!mkdir($plan_directory, 0755, true)) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem path, never HTML output.
+            throw new RuntimeException(
+                "Failed to create the mirror plan directory: {$plan_directory}."
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
+        $fresh_local_index_file = wp_join_unix_paths(
+            $plan_directory,
+            "fresh-local-index.jsonl"
+        );
+        $fresh_local_index_handle = fopen($fresh_local_index_file, "wb");
+        if (!is_resource($fresh_local_index_handle)) {
+            throw new RuntimeException("Failed to create the fresh local index.");
+        }
+        $file_index_processor = FileIndexProcessor::start(
+            [$this->filesystem_root],
+            $this->filesystem_root,
+            false,
+            false,
+            $plan_directory
+        );
+        try {
+            while ($file_index_processor->next_index_step()) {
+                $status = $file_index_processor->get_step_status();
+                if ($status === FileIndexProcessor::STATUS_DIRECTORY_ERROR) {
+                    $error = $file_index_processor->get_directory_error();
+                    throw new RuntimeException(
+                        $error["message"] . ": " . base64_encode($error["path"]) . "."
+                    );
+                }
+                if ($status === FileIndexProcessor::STATUS_INDEXED) {
+                    foreach ($file_index_processor->get_index_entries() as $entry) {
+                        write_file_index_processor_entry_to_local_index(
+                            $fresh_local_index_handle,
+                            $entry,
+                            $this->filesystem_root
+                        );
+                    }
+                }
+            }
+            if (!fflush($fresh_local_index_handle)) {
+                throw new RuntimeException("Failed to flush the fresh local index.");
+            }
+        } finally {
+            $file_index_processor->close();
+            fclose($fresh_local_index_handle);
+        }
+        if (!sort_index_file($fresh_local_index_file)) {
+            throw new RuntimeException("Failed to sort the fresh local index.");
+        }
+
+        $changed_local_paths_file = wp_join_unix_paths(
+            $plan_directory,
+            "changed-local-paths.jsonl"
+        );
+        $changed_local_paths_handle = fopen($changed_local_paths_file, "wb");
+        if (!is_resource($changed_local_paths_handle)) {
+            throw new RuntimeException("Failed to create the changed local paths index.");
+        }
+        $local_index_diff = FileIndexDiffProcessor::create(
+            $this->local_index_file,
+            $fresh_local_index_file
+        );
+        try {
+            while ($local_index_diff->next_path()) {
+                if ($local_index_diff->get_path_transition() === "unchanged") {
+                    continue;
+                }
+                $entry = $local_index_diff->get_entry_in_new_index()
+                    ?? $local_index_diff->get_entry_in_old_index();
+                if ($entry === null) {
+                    throw new LogicException("A changed local path has no local index entry.");
+                }
+                write_local_index_entry($changed_local_paths_handle, $entry);
+            }
+            if (!fflush($changed_local_paths_handle)) {
+                throw new RuntimeException("Failed to flush the changed local paths index.");
+            }
+        } finally {
+            $local_index_diff->close();
+            fclose($changed_local_paths_handle);
+        }
+    }
+
+    /** Adds the saved local changes to the completed remote-diff fetch list. */
+    private function build_files_pull_mirror_fetch_list(): void
+    {
+        $plan_directory = wp_join_unix_paths($this->pull_state_directory, "mirror-plan");
+        $changed_local_paths_file = wp_join_unix_paths(
+            $plan_directory,
+            "changed-local-paths.jsonl"
+        );
+        if (file_exists($this->fetch_list_file)) {
+            if (!copy($this->fetch_list_file, $this->next_fetch_list_file)) {
+                throw new RuntimeException("Failed to copy the remote-diff fetch list.");
+            }
+        } elseif (file_put_contents($this->next_fetch_list_file, "") !== 0) {
+            throw new RuntimeException("Failed to create the mirror fetch list.");
+        }
+
+        $next_fetch_list_handle = fopen($this->next_fetch_list_file, "ab");
+        if (!is_resource($next_fetch_list_handle)) {
+            throw new RuntimeException("Failed to open the mirror fetch list.");
+        }
+        $decode_mapped_entry = static function (string $line): array {
+            return MappedRemoteIndexBuilder::decode_index_line($line);
+        };
+        $changed_path_diff = FileIndexDiffProcessor::create(
+            $changed_local_paths_file,
+            $this->mapped_remote_index_file,
+            null,
+            $decode_mapped_entry
+        );
+        try {
+            while ($changed_path_diff->next_path()) {
+                $local_entry = $changed_path_diff->get_entry_in_old_index();
+                if ($local_entry === null) {
+                    continue;
+                }
+                $remote_entry = $changed_path_diff->get_entry_in_new_index();
+                if ($remote_entry !== null) {
+                    /** @var array{copy_source_path:string} $remote_entry */
+                    $this->append_to_fetch_list(
+                        $remote_entry["copy_source_path"],
+                        $next_fetch_list_handle
+                    );
+                    continue;
+                }
+
+                $local_relative_path = $local_entry["path"];
+                $local_absolute_path = wp_join_unix_paths(
+                    $this->filesystem_root,
+                    $local_relative_path
+                );
+                if (
+                    !$this->remove_local_absolute_path_without_following_symlinks(
+                        $local_absolute_path
+                    )
+                ) {
+                    throw new RuntimeException(
+                        "Failed to remove a local path absent from the current remote index."
+                    );
+                }
+                $this->pull_index_journal->record_local_deletion($local_absolute_path);
+                $local_parent_path = dirname($local_absolute_path);
+                while (
+                    $local_parent_path !== $this->filesystem_root
+                    && @rmdir($local_parent_path)
+                ) {
+                    $local_parent_path = dirname($local_parent_path);
+                }
+            }
+            if (!fflush($next_fetch_list_handle)) {
+                throw new RuntimeException("Failed to flush the mirror fetch list.");
+            }
+        } finally {
+            $changed_path_diff->close();
+            fclose($next_fetch_list_handle);
+        }
+
+        if (!sort_index_file($this->next_fetch_list_file)) {
+            throw new RuntimeException("Failed to sort the mirror fetch list.");
+        }
+        if (!rename($this->next_fetch_list_file, $this->fetch_list_file)) {
+            throw new RuntimeException("Failed to publish the mirror fetch list.");
+        }
     }
 
     /** Creates an empty local index when files-pull recorded no local paths. */
@@ -12343,6 +12670,16 @@ if (
             'help' => 'Follow symlinks, consolidating escaping (out-of-scope) targets into DIR ' .
                 '(a :fs-root: path or an absolute path within --fs-root), nested by source path. ' .
                 'Bare --follow-symlinks is equivalent to --follow-symlinks=:fs-root:.',
+            'commands' => ['pull', 'pull-files', 'files-pull'],
+        ],
+        [
+            'name' => 'mode',
+            'type' => 'value',
+            'target' => 'files_pull_mode',
+            'placeholder' => 'MODE',
+            'valid_values' => ['catch-up', 'mirror'],
+            'help' => 'File pull mode (catch-up|mirror)',
+            'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
         [
