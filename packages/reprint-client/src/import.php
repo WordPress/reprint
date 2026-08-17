@@ -8866,7 +8866,8 @@ class ImportClient
             40,
         );
         $lock_result = $database->query(
-            'SELECT GET_LOCK(' . $database->quote($lock_name) . ', 60)'
+            'SELECT GET_LOCK(?, 60)',
+            [$lock_name]
         );
         $lock_acquired = $lock_result->fetchColumn();
         $lock_result->closeCursor();
@@ -9019,7 +9020,6 @@ class ImportClient
 
         // The saved cursor comes before any SQL that was still running when
         // the process stopped. Check the target table before repeating that SQL.
-        $quoted_current_table = $database->quote($current_table);
         $table_result = $database->query(
             "SELECT `TABLES`.`TABLE_TYPE` AS `table_type`, " .
             "`TABLES`.`ENGINE` AS `engine`, `ENGINES`.`TRANSACTIONS` AS `supports_transactions` " .
@@ -9027,7 +9027,8 @@ class ImportClient
             "LEFT JOIN `INFORMATION_SCHEMA`.`ENGINES` AS `ENGINES` " .
             "ON `ENGINES`.`ENGINE` = `TABLES`.`ENGINE` " .
             "WHERE `TABLES`.`TABLE_SCHEMA` = DATABASE() " .
-            "AND BINARY `TABLES`.`TABLE_NAME` = BINARY {$quoted_current_table}"
+            "AND BINARY `TABLES`.`TABLE_NAME` = BINARY ?",
+            [$current_table]
         );
         $table = $table_result->fetch(PDO::FETCH_ASSOC);
         $table_result->closeCursor();
@@ -9066,10 +9067,11 @@ class ImportClient
             "AND `COLUMNS`.`TABLE_NAME` = `STATISTICS`.`TABLE_NAME` " .
             "AND `COLUMNS`.`COLUMN_NAME` = `STATISTICS`.`COLUMN_NAME` " .
             "WHERE `STATISTICS`.`TABLE_SCHEMA` = DATABASE() " .
-            "AND BINARY `STATISTICS`.`TABLE_NAME` = BINARY {$quoted_current_table} " .
+            "AND BINARY `STATISTICS`.`TABLE_NAME` = BINARY ? " .
             "AND `STATISTICS`.`NON_UNIQUE` = 0 " .
             "GROUP BY `STATISTICS`.`INDEX_NAME` " .
-            "HAVING SUM(`COLUMNS`.`IS_NULLABLE` = 'YES') = 0 LIMIT 1"
+            "HAVING SUM(`COLUMNS`.`IS_NULLABLE` = 'YES') = 0 LIMIT 1",
+            [$current_table]
         );
         $has_replay_key = $key_result->fetchColumn() !== false;
         $key_result->closeCursor();

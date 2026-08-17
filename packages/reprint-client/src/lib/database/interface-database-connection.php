@@ -7,8 +7,12 @@ namespace Reprint\Importer\Database;
 /** The database operations used by Reprint's target-side commands. */
 interface DatabaseConnection {
 
-    /** Executes a query which returns rows. */
-    public function query(string $sql): DatabaseResult;
+    /**
+     * Executes a query which returns rows.
+     *
+     * @param array<int,mixed> $params Values for the query's question marks.
+     */
+    public function query(string $sql, array $params = []): DatabaseResult;
 
     /** Quotes one string for use as an SQL literal. */
     public function quote(string $value): string;

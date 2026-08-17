@@ -43,7 +43,8 @@ describeWithHostPhpProcess('Target database connection classes', () => {
                 $null_result->closeCursor();
 
                 $duplicate_columns = $database->query(
-                    'SELECT 1 AS duplicate_value, 2 AS duplicate_value'
+                    'SELECT ? AS duplicate_value, ? AS duplicate_value',
+                    array(1, 2)
                 );
                 $duplicate_values = $duplicate_columns->fetch(PDO::FETCH_NUM);
                 if (array_map('intval', $duplicate_values) !== array(1, 2)) {
@@ -55,7 +56,8 @@ describeWithHostPhpProcess('Target database connection classes', () => {
                     array(1, 'first')
                 );
                 $row = $database->query(
-                    'SELECT id, value FROM reprint_connection_contract WHERE id = 1'
+                    'SELECT id, value FROM reprint_connection_contract WHERE id = ?',
+                    array(1)
                 )->fetch(PDO::FETCH_ASSOC);
                 if ((int) $row['id'] !== 1 || $row['value'] !== 'first') {
                     throw new RuntimeException('The target query returned the wrong row.');

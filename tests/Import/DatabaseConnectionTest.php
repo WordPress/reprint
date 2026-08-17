@@ -4,9 +4,13 @@
 namespace ImportTests;
 
 use PDO;
+use PDOException;
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Database\MysqliDatabaseConnection;
 use Reprint\Importer\Database\MysqliDatabaseResult;
+use Reprint\Importer\Database\MysqliPreparedDatabaseResult;
 use Reprint\Importer\Database\PdoDatabaseConnection;
+use RuntimeException;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/database/load.php';
 
@@ -28,7 +32,10 @@ class DatabaseConnectionTest extends TestCase {
             $database->execute('INSERT INTO records (id, value) VALUES (?, ?)', [1, 'first'])
         );
 
-        $result = $database->query('SELECT id, value FROM records');
+        $result = $database->query(
+            'SELECT id, value FROM records WHERE value = ?',
+            ['first']
+        );
         $this->assertSame(['id' => 1, 'value' => 'first'], $result->fetch(PDO::FETCH_ASSOC));
         $this->assertFalse($result->fetch(PDO::FETCH_ASSOC));
         $this->assertTrue($result->closeCursor());
@@ -105,5 +112,204 @@ class DatabaseConnectionTest extends TestCase {
         $this->assertFalse($result->fetch(PDO::FETCH_ASSOC));
         $this->assertTrue($result->closeCursor());
         $this->assertTrue($result->closeCursor());
+    }
+
+    public function testMysqliPreparedResultUsesTheSameFetchModes(): void
+    {
+        if (!extension_loaded('mysqli')) {
+            $this->markTestSkipped('mysqli extension required');
+        }
+
+        $metadata = new class() extends \mysqli_result {
+            public function __construct()
+            {
+            }
+
+            public function fetch_fields(): array
+            {
+                return [
+                    (object) ['name' => 'duplicate_value'],
+                    (object) ['name' => 'duplicate_value'],
+                ];
+            }
+
+            public function free(): void
+            {
+            }
+        };
+        $statement = new class($metadata) extends \mysqli_stmt {
+            private \mysqli_result $metadata;
+            private array $rows = [[1, 2], [3, 4], [5, 6]];
+            private array $bound_values = [];
+
+            public function __construct(\mysqli_result $metadata)
+            {
+                $this->metadata = $metadata;
+            }
+
+            public function result_metadata(): \mysqli_result|false
+            {
+                return $this->metadata;
+            }
+
+            public function bind_result(mixed &...$vars): bool
+            {
+                foreach ($vars as $index => &$value) {
+                    $this->bound_values[$index] = &$value;
+                }
+                unset($value);
+                return true;
+            }
+
+            public function fetch(): ?bool
+            {
+                $row = array_shift($this->rows);
+                if ($row === null) {
+                    return null;
+                }
+                foreach ($row as $index => $value) {
+                    $this->bound_values[$index] = $value;
+                }
+                return true;
+            }
+
+            public function free_result(): void
+            {
+            }
+
+            #[\ReturnTypeWillChange]
+            public function close()
+            {
+                return true;
+            }
+        };
+        $result = new MysqliPreparedDatabaseResult($statement);
+
+        try {
+            $result->fetch(PDO::FETCH_OBJ);
+            $this->fail('The mysqli prepared result accepted an unsupported fetch mode.');
+        } catch (RuntimeException $error) {
+            $this->assertStringContainsString('FETCH_ASSOC, FETCH_NUM, and FETCH_BOTH', $error->getMessage());
+        }
+
+        $this->assertSame([1, 2], $result->fetch(PDO::FETCH_NUM));
+        $this->assertSame(['duplicate_value' => 4], $result->fetch(PDO::FETCH_ASSOC));
+        $this->assertSame(
+            [[0 => 5, 'duplicate_value' => 6, 1 => 6]],
+            $result->fetchAll(PDO::FETCH_BOTH)
+        );
+        $this->assertFalse($result->fetch(PDO::FETCH_ASSOC));
+        $this->assertTrue($result->closeCursor());
+        $this->assertTrue($result->closeCursor());
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('The database result is already closed.');
+        $result->fetch(PDO::FETCH_ASSOC);
+    }
+
+    public function testMysqliPreparedQueryReportsExtraParametersAsADatabaseError(): void
+    {
+        if (!extension_loaded('mysqli')) {
+            $this->markTestSkipped('mysqli extension required');
+        }
+
+        $statement = new class() extends \mysqli_stmt {
+            public function __construct()
+            {
+            }
+
+            public function bind_param(string $types, mixed &...$vars): bool
+            {
+                throw new \ArgumentCountError('The number of variables must match the number of parameters.');
+            }
+
+            #[\ReturnTypeWillChange]
+            public function close()
+            {
+                return true;
+            }
+        };
+        $mysqli = new class($statement) extends \mysqli {
+            private \mysqli_stmt $statement;
+
+            public function __construct(\mysqli_stmt $statement)
+            {
+                $this->statement = $statement;
+            }
+
+            public function prepare(string $query): \mysqli_stmt|false
+            {
+                return $this->statement;
+            }
+        };
+        $database = new MysqliDatabaseConnection($mysqli);
+
+        $this->expectException(PDOException::class);
+        $this->expectExceptionMessage('The target database prepared query failed');
+        $database->query('SELECT ? AS value', [1, 2]);
+    }
+
+    public function testMysqliPreparedResultReportsFetchFailuresAsDatabaseErrors(): void
+    {
+        if (!extension_loaded('mysqli')) {
+            $this->markTestSkipped('mysqli extension required');
+        }
+
+        $metadata = new class() extends \mysqli_result {
+            public function __construct()
+            {
+            }
+
+            public function fetch_fields(): array
+            {
+                return [ (object) ['name' => 'value'] ];
+            }
+
+            public function free(): void
+            {
+            }
+        };
+        $statement = new class($metadata) extends \mysqli_stmt {
+            private \mysqli_result $metadata;
+
+            public function __construct(\mysqli_result $metadata)
+            {
+                $this->metadata = $metadata;
+            }
+
+            public function result_metadata(): \mysqli_result|false
+            {
+                return $this->metadata;
+            }
+
+            public function bind_result(mixed &...$vars): bool
+            {
+                return true;
+            }
+
+            public function fetch(): ?bool
+            {
+                throw new \mysqli_sql_exception('The connection was lost while reading a row.', 2013);
+            }
+
+            #[\ReturnTypeWillChange]
+            public function close()
+            {
+                return true;
+            }
+        };
+        $result = new MysqliPreparedDatabaseResult($statement);
+
+        try {
+            $result->fetch(PDO::FETCH_ASSOC);
+            $this->fail('The mysqli prepared result did not report its fetch failure.');
+        } catch (PDOException $error) {
+            $this->assertStringContainsString(
+                'The target database could not fetch a prepared query row',
+                $error->getMessage()
+            );
+            $this->assertSame(2013, $error->getCode());
+            $this->assertInstanceOf(\mysqli_sql_exception::class, $error->getPrevious());
+        }
     }
 }
