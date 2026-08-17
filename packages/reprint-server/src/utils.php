@@ -395,38 +395,6 @@ function path_is_same_as_or_descendant_of($path, $ancestor): bool
 }
 
 /**
- * Canonicalizes one configured root path.
- *
- * A regular file or file symlink keeps its final component after its parent is
- * canonicalized. For example, `/srv/site/config-link.php` remains
- * `config-link.php` rather than becoming its target. Directory symlinks are
- * directories to PHP and resolve to their physical directory.
- *
- * @param string $path Root path as configured.
- * @return string|null Canonical root path, or null when it does not exist.
- */
-function canonical_root_path(string $path): ?string
-{
-    clearstatcache(true, $path);
-    if (is_dir($path)) {
-        $canonical_path = realpath($path);
-        return $canonical_path === false ? null : $canonical_path;
-    }
-
-    // file_exists() follows links and so reports a broken link as absent.
-    if (@lstat($path) === false) {
-        return null;
-    }
-
-    $canonical_parent = realpath(dirname($path));
-    if ($canonical_parent === false) {
-        return null;
-    }
-
-    return wp_join_unix_paths($canonical_parent, basename($path));
-}
-
-/**
  * Indicates whether a candidate path is a descendant of an ancestor.
  *
  * Either argument may be a list. The result is true when any candidate-and-

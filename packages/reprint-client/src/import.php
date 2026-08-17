@@ -403,6 +403,9 @@ class ImportClient
      */
     private $pull_excluded_files_with_path_prefixes = [];
 
+    /** @var string[]|null Selected roots found in the current remote index. */
+    private $previously_indexed_selected_root_paths = null;
+
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
 
@@ -9820,8 +9823,12 @@ class ImportClient
      */
     private function previously_indexed_selected_roots(): array
     {
+        if ($this->previously_indexed_selected_root_paths !== null) {
+            return $this->previously_indexed_selected_root_paths;
+        }
         if ($this->pull_only_files_with_path_prefixes === [] || !is_file($this->remote_index_file)) {
-            return [];
+            $this->previously_indexed_selected_root_paths = [];
+            return $this->previously_indexed_selected_root_paths;
         }
         $remaining = array_fill_keys($this->pull_only_files_with_path_prefixes, true);
         $handle = fopen($this->remote_index_file, 'r');
@@ -9842,10 +9849,11 @@ class ImportClient
         } finally {
             fclose($handle);
         }
-        return array_values(array_diff(
+        $this->previously_indexed_selected_root_paths = array_values(array_diff(
             $this->pull_only_files_with_path_prefixes,
             array_keys($remaining)
         ));
+        return $this->previously_indexed_selected_root_paths;
     }
 
     /**

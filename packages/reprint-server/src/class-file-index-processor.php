@@ -117,7 +117,11 @@ final class FileIndexProcessor {
         }
         if ($index_root === null) {
             $resolved_index_root = @realpath($index_directory);
-            if (!$legacy_string_roots || $resolved_index_root === false || !is_dir($resolved_index_root)) {
+            if (
+                $resolved_index_root === false
+                || !is_dir($resolved_index_root)
+                || ( !$legacy_string_roots && !$follow_symlinks )
+            ) {
                 throw new InvalidArgumentException("list_dir is not a configured file-index root: {$index_directory}");
             }
             $index_root = [

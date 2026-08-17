@@ -36,7 +36,8 @@ final class FileIndexSkipDefaultsTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->tempDir = sys_get_temp_dir() . '/file-index-skip-test-' . uniqid();
+        $tempRoot = realpath(sys_get_temp_dir()) ?: sys_get_temp_dir();
+        $this->tempDir = $tempRoot . '/file-index-skip-test-' . uniqid();
         mkdir($this->tempDir, 0755, true);
     }
 

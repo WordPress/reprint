@@ -1,4 +1,4 @@
-/** Test 55: `--only` accepts a single file, not just a directory (issue #539). */
+/** Test 56: `--only` accepts a single file, not just a directory (issue #539). */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';

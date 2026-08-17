@@ -6,7 +6,6 @@
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\build_pdo_dsn;
-use function WordPress\Reprint\Exporter\canonical_root_path;
 use function WordPress\Reprint\Exporter\json_encode_or_throw;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;

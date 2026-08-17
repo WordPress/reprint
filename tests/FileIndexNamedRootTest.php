@@ -63,6 +63,24 @@ final class FileIndexNamedRootTest extends TestCase
         );
     }
 
+    public function testFollowedTargetOutsideConfiguredRootsCanStartAnIndex(): void
+    {
+        $site = $this->tempDir . '/site';
+        $shared = $this->tempDir . '/shared';
+        mkdir($site, 0755, true);
+        mkdir($shared . '/theme', 0755, true);
+        file_put_contents($shared . '/theme/style.css', 'body{}');
+        symlink($shared . '/theme', $site . '/theme');
+
+        $target = (string) realpath($shared . '/theme');
+        $entries = $this->collect([
+            $this->root($site . '/theme', $target, 'symlink'),
+        ], $target);
+
+        $this->assertContains($site . '/theme', array_column($entries, 'path'));
+        $this->assertContains($target . '/style.css', array_column($entries, 'path'));
+    }
+
     public function testParentSymlinkIsEmittedAtRequestedPathAndFileAtResolvedPath(): void
     {
         $releases = $this->tempDir . '/releases/42';

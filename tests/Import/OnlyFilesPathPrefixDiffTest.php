@@ -311,6 +311,25 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $this->assertNotContains('/wp-config.php', $this->readRemoteIndexEntryPaths());
     }
 
+    public function testExcludedSelectedLinkRootIsNotDeleted(): void
+    {
+        $this->writeIndex(
+            'remote-index.jsonl',
+            $this->indexLine('/mnt/uploads', 1000, 10, 'link')
+        );
+        $this->writeIndex('remote-index.next.jsonl', '');
+        $local = $this->seedLocalFile('/mnt/uploads');
+
+        [$client, $reflection] = $this->prepareClient(
+            ['/mnt/uploads'],
+            ['/mnt/uploads']
+        );
+        $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
+
+        $this->assertFileExists($local);
+        $this->assertContains('/mnt/uploads', $this->readRemoteIndexEntryPaths());
+    }
+
     public function testOnlyPreviouslyIndexedRootsMayBeReportedMissing(): void
     {
         $this->writeIndex(

@@ -52,4 +52,20 @@ final class FileIndexFilePathRootTest extends TestCase
         $this->assertContains($configPath, $paths);
         $this->assertContains($pluginsPath . '/hello/hello.php', $paths);
     }
+
+    public function testEndpointIndexesAFollowedTargetOutsideTheConfiguredRoot(): void
+    {
+        $site = $this->tempDir . '/site';
+        $shared = $this->tempDir . '/shared';
+        mkdir($site, 0755, true);
+        mkdir($shared . '/theme', 0755, true);
+        file_put_contents($shared . '/theme/style.css', 'body{}');
+        symlink($shared . '/theme', $site . '/theme');
+
+        $target = (string) realpath($shared . '/theme');
+        $paths = $this->runFileIndex([$site . '/theme'], $target);
+
+        $this->assertContains($site . '/theme', $paths);
+        $this->assertContains($target . '/style.css', $paths);
+    }
 }

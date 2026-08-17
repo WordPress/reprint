@@ -29,7 +29,7 @@
             <file>FileIndexSkipDefaultsTest.php</file>
             <file>FileIndexProcessorTest.php</file>
             <file>FileIndexFilePathRootTest.php</file>
-            <file>ExporterUtilsTest.php</file>
+            <file>FileIndexNamedRootTest.php</file>
             <file>HmacServerTest.php</file>
             <file>MultipartProcessorTest.php</file>
             <file>PushEndpointsTest.php</file>
