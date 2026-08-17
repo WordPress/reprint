@@ -3600,11 +3600,12 @@ class ImportClient
                 $local_relative_path = $local_entry["path"];
                 $remote_entry = $changed_path_diff->get_entry_in_new_index();
                 if ($remote_entry !== null) {
-                    /** @var array{copy_source_path:string} $remote_entry */
+                    /** @var array{copy_source_path:string,type:string} $remote_entry */
                     if (
                         !$this->is_selected_for_pulling(
                             $remote_entry["copy_source_path"],
-                            true
+                            true,
+                            $remote_entry["type"]
                         )
                     ) {
                         continue;
@@ -3631,6 +3632,7 @@ class ImportClient
                     || !$this->is_selected_for_pulling(
                         $local_absolute_path,
                         false,
+                        $local_entry["type"],
                         $included_local_absolute_path_prefixes,
                         $excluded_local_absolute_path_prefixes
                     )
@@ -7336,10 +7338,12 @@ class ImportClient
         }
 
         $params = $this->get_tuned_params("file_fetch");
-        // Always send directory[] – see comment in fetch_next_remote_index().
-        $export_dirs = $this->get_export_directories();
-        if (!empty($export_dirs)) {
-            $params["directory"] = $export_dirs;
+        // file_fetch retains its directory-only server contract. --only may
+        // name a file, so use the preflight directory roots rather than the
+        // scoped file-index roots used by fetch_next_remote_index().
+        $fetch_directories = $this->get_root_directories_from_preflight();
+        if (!empty($fetch_directories)) {
+            $params["directory"] = $fetch_directories;
         }
         $url = $this->build_url("file_fetch", $cursor, $params);
         $this->audit_log("Downloading file fetch from {$url}");
@@ -7646,6 +7650,10 @@ class ImportClient
         if (!empty($export_dirs)) {
             $params["directory"] = $export_dirs;
         }
+        $missing_roots = $this->previously_indexed_selected_roots();
+        if ($missing_roots !== []) {
+            $params["missing_roots"] = $missing_roots;
+        }
         $url = $this->build_url("file_index", $cursor, $params);
         $context = new StreamingContext();
 
@@ -7888,12 +7896,20 @@ class ImportClient
                     $remote_absolute_path = $index_diff->get_path();
                     $transition = $index_diff->get_path_transition();
                     if ($transition === "deleted") {
+                        $remote_path_type =
+                            $index_diff->get_path_type_in_old_index();
+                        if ($remote_path_type === null) {
+                            throw new LogicException(
+                                "Deleted remote index path is absent from the prior remote index: {$remote_absolute_path}"
+                            );
+                        }
                         // The remote index is a union across files-pull path
                         // selections. Keep paths outside this run's selection.
                         if (
                             $this->is_selected_for_pulling(
                                 $remote_absolute_path,
-                                false
+                                false,
+                                $remote_path_type
                             )
                         ) {
                             $remote_deletion_root =
@@ -7917,31 +7933,40 @@ class ImportClient
                                 );
                             }
                         }
-                    } elseif (
-                        $transition !== "unchanged"
-                        && $this->is_selected_for_pulling(
-                            $remote_absolute_path,
-                            true
-                        )
-                    ) {
-                        // Preserve-local protects only paths which no earlier
-                        // files-pull recorded in the remote index.
-                        $preserve_local_skip_reason = $transition === "added"
-                            ? $this->should_skip_for_preserve_local(
-                                $remote_absolute_path
-                            )
-                            : null;
-                        if ($preserve_local_skip_reason) {
-                            $this->audit_log(
-                                $preserve_local_skip_reason,
-                                true
+                    } elseif ($transition !== "unchanged") {
+                        $remote_path_type =
+                            $index_diff->get_path_type_in_new_index();
+                        if ($remote_path_type === null) {
+                            throw new LogicException(
+                                "Remote index path is absent from the next remote index: {$remote_absolute_path}"
                             );
-                            $this->emit_skip_progress($remote_absolute_path);
-                        } else {
-                            $this->append_to_fetch_list(
+                        }
+                        if (
+                            $this->is_selected_for_pulling(
                                 $remote_absolute_path,
-                                $fetch_list_file_handle
-                            );
+                                true,
+                                $remote_path_type
+                            )
+                        ) {
+                            // Preserve-local protects only paths which no earlier
+                            // files-pull recorded in the remote index.
+                            $preserve_local_skip_reason = $transition === "added"
+                                ? $this->should_skip_for_preserve_local(
+                                    $remote_absolute_path
+                                )
+                                : null;
+                            if ($preserve_local_skip_reason) {
+                                $this->audit_log(
+                                    $preserve_local_skip_reason,
+                                    true
+                                );
+                                $this->emit_skip_progress($remote_absolute_path);
+                            } else {
+                                $this->append_to_fetch_list(
+                                    $remote_absolute_path,
+                                    $fetch_list_file_handle
+                                );
+                            }
                         }
                     }
 
@@ -9785,18 +9810,59 @@ class ImportClient
     }
 
     /**
+     * Returns selected roots that the prior remote index confirms as tracked.
+     *
+     * The server may represent only these roots as an empty selected result
+     * when it can confirm their current absence. A newly typed missing path is
+     * still rejected at the endpoint.
+     *
+     * @return string[] Selected roots present in the prior remote index.
+     */
+    private function previously_indexed_selected_roots(): array
+    {
+        if ($this->pull_only_files_with_path_prefixes === [] || !is_file($this->remote_index_file)) {
+            return [];
+        }
+        $remaining = array_fill_keys($this->pull_only_files_with_path_prefixes, true);
+        $handle = fopen($this->remote_index_file, 'r');
+        if (!is_resource($handle)) {
+            throw new RuntimeException("Failed to open the current remote index for selected roots.");
+        }
+        try {
+            while ($remaining !== [] && ($line = fgets($handle)) !== false) {
+                $entry = json_decode($line, true);
+                if (!is_array($entry) || !isset($entry['path']) || !is_string($entry['path'])) {
+                    continue;
+                }
+                $path = base64_decode($entry['path'], true);
+                if ($path !== false) {
+                    unset($remaining[$path]);
+                }
+            }
+        } finally {
+            fclose($handle);
+        }
+        return array_values(array_diff(
+            $this->pull_only_files_with_path_prefixes,
+            array_keys($remaining)
+        ));
+    }
+
+    /**
      * Checks whether a remote or local path passes --include and --exclude.
      *
      * The server has already applied --include to current remote index entries,
      * including followed symlink targets outside an include prefix. Locally
      * discovered paths still need that include check. Mirror supplies local
      * prefixes for those paths because remapping has changed their coordinates.
-     * An included root itself is not selected because the current remote index
-     * lists its contents, not the root entry. Exclusions always win.
+     * An included directory root itself is not selected because the current
+     * remote index lists its contents, not the root entry. Exclusions always
+     * win.
      *
      * @param string $path Remote or local absolute path to check.
      * @param bool $is_next_remote_index_entry Whether the server already applied
      *                                         the include filter to this path.
+     * @param string $path_type Type recorded for the path in its index.
      * @param list<string>|null $included_path_prefixes Include prefixes in the
      *                                                   path's coordinates, or
      *                                                   null for the remote prefixes.
@@ -9807,6 +9873,7 @@ class ImportClient
     private function is_selected_for_pulling(
         string $path,
         bool $is_next_remote_index_entry,
+        string $path_type,
         ?array $included_path_prefixes = null,
         ?array $excluded_path_prefixes = null
     ): bool
@@ -9824,7 +9891,12 @@ class ImportClient
                     $included_path_prefix
                 );
                 if ($remainder === "") {
-                    return false;
+                    // Directory roots have no row in a freshly indexed tree,
+                    // so their old row must survive a scoped delta. Named
+                    // file and link roots do have one; their confirmed absence
+                    // must remove the tracked local path.
+                    $selected = $path_type !== "dir";
+                    break;
                 }
                 if ($remainder !== null) {
                     $selected = true;
