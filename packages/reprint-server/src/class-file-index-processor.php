@@ -48,8 +48,8 @@ final class FileIndexProcessor {
     /** @var array[] Configured file-index roots, in requested order. */
     private $roots;
 
-    /** @var string[] Canonical directories allowed during traversal. */
-    private $directories;
+    /** @var string[] Canonical directories selected by the request. */
+    private $configured_directories;
 
     /** @var bool Whether directory symlinks may lead outside the allowed directories. */
     private $follow_symlinks;
@@ -126,7 +126,7 @@ final class FileIndexProcessor {
             );
         }
 
-        $directories = self::resolved_directory_roots($roots, $follow_symlinks);
+        $configured_directories = self::resolved_directory_roots($roots, $follow_symlinks);
 
         // Visit the requested directory first, followed by every other root in
         // stable byte order. Stable ordering makes a cursor independent of the
@@ -143,27 +143,23 @@ final class FileIndexProcessor {
         });
         $ordered_roots = array_merge($ordered_roots, $extra_roots);
 
-        // `--only` may select wp-config.php or a symlink. Index one named root
-        // per step, then continue with directory walking.
-        $directory_roots = [];
-        $path_roots = [];
+        // A selected directory symlink has two responsibilities: emit its
+        // requested link entry and traverse its resolved target. Keep the
+        // two work lists separate so each follows its own coordinate.
+        $traversal_directories = self::resolved_directory_roots($ordered_roots, $follow_symlinks);
+        $pending_named_roots = [];
         foreach ($ordered_roots as $root) {
-            if ($root["type"] === "directory" || ($follow_symlinks && $root["type"] === "symlink" && is_dir($root["resolved_path"]))) {
-                if (!in_array($root["resolved_path"], $directory_roots, true)) {
-                    $directory_roots[] = $root["resolved_path"];
-                }
-            }
             if ($root["type"] !== "directory") {
-                $path_roots[] = $root["requested_path"];
+                $pending_named_roots[] = $root["requested_path"];
             }
         }
 
         // The last stack element is visited next, so reverse the desired order
         // while constructing the depth-first traversal stack.
         $directory_stack = [];
-        for ($i = count($directory_roots) - 1; $i >= 0; $i--) {
+        for ($i = count($traversal_directories) - 1; $i >= 0; $i--) {
             $directory_stack[] = [
-                "dir" => $directory_roots[$i],
+                "dir" => $traversal_directories[$i],
                 "after" => null,
             ];
         }
@@ -190,14 +186,14 @@ final class FileIndexProcessor {
 
         return new self(
             $roots,
-            $directories,
+            $configured_directories,
             $follow_symlinks,
             $include_caches,
             $storage_path,
             $directory_stack,
             $reported_index_directory,
             $initial_index_entries,
-            $path_roots
+            $pending_named_roots
         );
     }
 
@@ -219,7 +215,7 @@ final class FileIndexProcessor {
         string $storage_path
     ): self {
         $roots = self::validate_roots($roots);
-        $directories = self::resolved_directory_roots($roots, $follow_symlinks);
+        $configured_directories = self::resolved_directory_roots($roots, $follow_symlinks);
 
         // A cursor is caller-held continuation state. Reject malformed JSON or
         // a missing stack before any filesystem work begins.
@@ -288,11 +284,11 @@ final class FileIndexProcessor {
         // directory, so it falls back to the first configured root.
         $index_directory = !empty($directory_stack)
             ? $directory_stack[count($directory_stack) - 1]["dir"]
-            : ( isset($directories[0]) ? $directories[0] : "/" );
+            : ( isset($configured_directories[0]) ? $configured_directories[0] : "/" );
 
         return new self(
             $roots,
-            $directories,
+            $configured_directories,
             $follow_symlinks,
             $include_caches,
             $storage_path,
@@ -403,7 +399,7 @@ final class FileIndexProcessor {
             $canonical_directory = realpath($path);
             if (
                 $canonical_directory === false
-                || !\WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of($this->directories, $canonical_directory)
+                || !\WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of($this->configured_directories, $canonical_directory)
             ) {
                 $this->directory_stack[] = [
                     "dir" => $path,
@@ -582,7 +578,7 @@ final class FileIndexProcessor {
      * Initializes common traversal state.
      *
      * @param array[]  $roots                Structured file-index roots.
-     * @param string[] $directories          Canonical directories allowed during traversal.
+     * @param string[] $configured_directories Canonical directories selected by the request.
      * @param bool     $follow_symlinks      Whether directory symlinks may leave the allowed directories.
      * @param bool     $include_caches       Whether generated caches and development files are included.
      * @param string   $storage_path         Reprint storage path omitted from the index, or an empty string.
@@ -593,7 +589,7 @@ final class FileIndexProcessor {
      */
     private function __construct(
         array $roots,
-        array $directories,
+        array $configured_directories,
         bool $follow_symlinks,
         bool $include_caches,
         string $storage_path,
@@ -603,7 +599,7 @@ final class FileIndexProcessor {
         array $pending_named_roots = []
     ) {
         $this->roots = $roots;
-        $this->directories = $directories;
+        $this->configured_directories = $configured_directories;
         $this->follow_symlinks = $follow_symlinks;
         $this->include_caches = $include_caches;
         $this->storage_path = self::canonical_storage_path($storage_path);
@@ -651,7 +647,7 @@ final class FileIndexProcessor {
         // boundary, then continue with the remaining stack.
         if (
             !$this->follow_symlinks
-            && !\WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of($canonical_directory, $this->directories)
+            && !\WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of($canonical_directory, $this->configured_directories)
         ) {
             array_pop($this->directory_stack);
             $this->directory_error = [
@@ -812,7 +808,7 @@ final class FileIndexProcessor {
             && $this->resolved_target_was_indexed($root);
 
         // A selected symlink always remains at its requested path. When
-        // followed, its target content is emitted in the physical namespace
+        // followed, its target content is emitted in the resolved-path namespace
         // that normal traversal already uses. Two aliases may therefore share
         // one target entry while both link entries remain present.
         if (!( $root["type"] === "file" && $resolved_target_was_indexed )) {
@@ -840,7 +836,7 @@ final class FileIndexProcessor {
         ) {
             // A regular root reached through no link normally has identical
             // coordinates. Keep this branch for records supplied by callers
-            // which already normalized a physical file root.
+            // which already normalized a resolved file root.
             $entries = array_merge(
                 $entries,
                 self::index_entries_for_path($root["resolved_path"], $stat, false)["entries"]
@@ -861,7 +857,7 @@ final class FileIndexProcessor {
         return null;
     }
 
-    /** Whether an earlier named root already emitted this physical target. */
+    /** Whether an earlier named root already emitted this resolved target. */
     private function resolved_target_was_indexed(array $root): bool
     {
         foreach ($this->roots as $candidate) {
@@ -934,7 +930,14 @@ final class FileIndexProcessor {
         ];
     }
 
-    /** Returns physical directory roots, including followed directory links. */
+    /**
+     * Returns resolved directory roots, including followed directory links.
+     *
+     * @param FileIndexRoot[] $roots Structured roots. Each has requested_path,
+     *                                resolved_path, and type keys; type is directory,
+     *                                file, symlink, or missing.
+     * @return string[] Resolved directory paths.
+     */
     private static function resolved_directory_roots(array $roots, bool $follow_symlinks): array
     {
         $directories = [];
@@ -1111,7 +1114,7 @@ final class FileIndexProcessor {
 
         // Keep the requested spelling while inspecting each parent. PHP follows
         // a parent link when checking the next component, so changing $current
-        // to realpath() would turn later emitted links into physical paths.
+        // to realpath() would turn later emitted links into resolved paths.
         foreach ($parts as $part) {
             if ($part === "") {
                 $current = "/";
