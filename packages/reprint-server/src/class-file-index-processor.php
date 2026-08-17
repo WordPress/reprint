@@ -995,8 +995,8 @@ final class FileIndexProcessor {
             $item["target"] = $link_target;
         }
         if ($type === "dir") {
-            // This is physical emptiness, not a directory whose children are
-            // merely excluded from synchronization.
+            // Actual empty directory, not a directory with all its children
+            // excluded from the synchronization
             $directory_handle = @opendir($path);
             if ($directory_handle !== false) {
                 $item["empty"] = true;
