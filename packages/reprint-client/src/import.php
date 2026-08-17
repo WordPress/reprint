@@ -6385,10 +6385,6 @@ class ImportClient
     public function run_db_apply(array $options): void
     {
         $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
-        $session_setup_file = wp_join_unix_paths(
-            $this->state_dir,
-            "db-session-setup.sql",
-        );
         if (!file_exists($sql_file)) {
             throw new RuntimeException(
                 "db.sql not found in {$this->state_dir}. Run db-pull first.",
@@ -6525,7 +6521,6 @@ class ImportClient
 
         $this->apply_database_dump_file(
             $sql_file,
-            $session_setup_file,
             $target,
             $stmt_rewriter,
             $is_resume,
@@ -6553,7 +6548,6 @@ class ImportClient
      */
     private function apply_database_dump_file(
         string $sql_file,
-        string $session_setup_file,
         array $target,
         ?SqlStatementRewriter $stmt_rewriter,
         bool $is_resume,
@@ -6600,60 +6594,37 @@ class ImportClient
                 return;
             }
 
+            $target_position = $this->prepare_database_import_target(
+                $connection,
+                $target_engine,
+                $source_hash,
+                "db-apply",
+                !$is_resume,
+            );
             if (!$is_resume) {
                 // Keep database-start until the old target cursor is gone. A new
                 // process which stops here repeats this reset before any SQL.
-                $this->reset_database_import_position($connection);
                 $this->get_state()->active_resumable_command->current_stage = "sql";
                 $this->get_state()->active_resumable_command->remote_cursor = null;
-            } else {
-                $target_position = $this->read_database_import_position(
-                    $connection,
-                    $source_hash,
-                    "db-apply",
-                );
-                if ($target_position !== null) {
-                    $byte_offset = $target_position["file_byte_offset"];
-                    $statements_executed = $this->get_state()->apply->statements_executed;
-                    if ($byte_offset === null) {
-                        throw new RuntimeException(
-                            "The target database has no db.sql byte offset for this db-apply. " .
-                            "Run db-apply --abort to start again.",
-                        );
-                    }
-                    if ($byte_offset < 0 || $byte_offset > $sql_file_size) {
-                        throw new RuntimeException(
-                            "The target database saved db.sql byte offset {$byte_offset}, " .
-                            "but the file contains {$sql_file_size} bytes. Run db-pull again.",
-                        );
-                    }
-                    if ($target_engine === 'mysql') {
-                        $this->assert_mysql_import_can_repeat_next_group(
-                            $connection,
-                            $target_position["source_cursor"],
-                            "db-apply",
-                        );
-                    }
+            } elseif ($target_position !== null) {
+                $byte_offset = $target_position["file_byte_offset"];
+                $statements_executed = $this->get_state()->apply->statements_executed;
+                if ($byte_offset === null) {
+                    throw new RuntimeException(
+                        "The target database has no db.sql byte offset for this db-apply. " .
+                        "Run db-apply --abort to start again.",
+                    );
+                }
+                if ($byte_offset < 0 || $byte_offset > $sql_file_size) {
+                    throw new RuntimeException(
+                        "The target database saved db.sql byte offset {$byte_offset}, " .
+                        "but the file contains {$sql_file_size} bytes. Run db-pull again.",
+                    );
                 }
             }
 
             $this->get_state()->apply->statements_executed = $statements_executed;
             $this->save_state();
-
-            if ($byte_offset > 0 && $target_engine === 'mysql') {
-                $session_setup_sql = @file_get_contents($session_setup_file);
-                if ($session_setup_sql === false || trim($session_setup_sql) === "") {
-                    throw new RuntimeException(
-                        "db-apply cannot continue because db-session-setup.sql is missing or empty. " .
-                        "Run db-pull again to create a complete dump.",
-                    );
-                }
-                $connection->exec($session_setup_sql);
-                $this->audit_log(
-                    "DB-APPLY | ran saved MySQL session setup after reconnect",
-                    true,
-                );
-            }
 
             if ($byte_offset > 0 && fseek($sql_handle, $byte_offset) !== 0) {
                 throw new RuntimeException(
@@ -8459,46 +8430,25 @@ class ImportClient
                 false,
                 'db-pull',
             );
+            $target_position = $this->prepare_database_import_target(
+                $mysql_conn,
+                "mysql",
+                hash("sha256", $this->remote_reprint_api_url),
+                "db-pull",
+                $starts_mysql_output,
+            );
             if ($starts_mysql_output) {
                 // Keep the mysql-start stage until the old target position is gone.
                 // If this process stops before save_state(), the next process
                 // deletes that position again instead of treating it as current.
-                $this->reset_database_import_position($mysql_conn);
                 $cursor = null;
                 $this->get_state()->active_resumable_command->current_stage = "sql";
                 $this->get_state()->active_resumable_command->remote_cursor = null;
                 $this->save_state();
             } else {
-                $target_position = $this->read_database_import_position(
-                    $mysql_conn,
-                    hash("sha256", $this->remote_reprint_api_url),
-                    "db-pull",
-                );
                 $cursor = $target_position["source_cursor"] ?? null;
-                if ($cursor !== null) {
-                    $this->assert_mysql_import_can_repeat_next_group(
-                        $mysql_conn,
-                        $cursor,
-                        "db-pull",
-                    );
-                }
             }
             // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-
-            if ($cursor !== null) {
-                $session_setup_sql = @file_get_contents($session_setup_file);
-                if ($session_setup_sql === false || trim($session_setup_sql) === "") {
-                    throw new RuntimeException(
-                        "Cannot continue db-pull because db-session-setup.sql is missing or empty. " .
-                        "Run db-pull --abort and start again.",
-                    );
-                }
-                $mysql_conn->exec($session_setup_sql);
-                $this->audit_log(
-                    "SQL OUTPUT mysql | ran saved session setup after reconnect",
-                    true,
-                );
-            }
 
             $this->get_state()->active_resumable_command->remote_cursor = null;
             $this->save_state();
@@ -8888,6 +8838,76 @@ class ImportClient
             "`file_byte_offset` BIGINT UNSIGNED NULL" .
             ") ENGINE=InnoDB";
         $database->exec($create_table_sql);
+    }
+
+    /**
+     * Prepares one target for a new or resumed database import.
+     *
+     * A new import clears the previous position. A resumed import reads the
+     * target position, checks that its next MySQL group may be repeated, and
+     * restores the dump's connection-local MySQL settings.
+     *
+     * @param DatabaseConnection $database           Open target connection.
+     * @param string             $target_engine      mysql or sqlite.
+     * @param string             $source_hash        Identity of the SQL being imported.
+     * @param string             $command            db-pull or db-apply.
+     * @param bool               $starts_new_import  Whether to clear an older target position.
+     * @return array|null {
+     *     The saved position, or null for a new import or before its first committed group.
+     *
+     *     @type string   $source_cursor    Exporter cursor after the group.
+     *     @type int|null $file_byte_offset First db.sql byte after the group marker.
+     * }
+     */
+    private function prepare_database_import_target(
+        DatabaseConnection $database,
+        string $target_engine,
+        string $source_hash,
+        string $command,
+        bool $starts_new_import
+    ): ?array {
+        if ($starts_new_import) {
+            $this->reset_database_import_position($database);
+            return null;
+        }
+
+        $target_position = $this->read_database_import_position(
+            $database,
+            $source_hash,
+            $command,
+        );
+        if ($target_position === null || $target_engine !== "mysql") {
+            return $target_position;
+        }
+
+        $this->assert_mysql_import_can_repeat_next_group(
+            $database,
+            $target_position["source_cursor"],
+            $command,
+        );
+
+        $session_setup_file = wp_join_unix_paths(
+            $this->state_dir,
+            "db-session-setup.sql",
+        );
+        $session_setup_sql = @file_get_contents($session_setup_file);
+        if ($session_setup_sql === false || trim($session_setup_sql) === "") {
+            $message = $command === "db-apply"
+                ? "db-apply cannot continue because db-session-setup.sql is missing or empty. " .
+                    "Run db-pull again to create a complete dump."
+                : "Cannot continue db-pull because db-session-setup.sql is missing or empty. " .
+                    "Run db-pull --abort and start again.";
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Fixed command-specific CLI text.
+            throw new RuntimeException($message);
+        }
+        $database->exec($session_setup_sql);
+        $audit_prefix = $command === "db-apply" ? "DB-APPLY" : "SQL OUTPUT mysql";
+        $this->audit_log(
+            "{$audit_prefix} | ran saved session setup after reconnect",
+            true,
+        );
+
+        return $target_position;
     }
 
     /**
