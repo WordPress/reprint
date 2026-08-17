@@ -1,7 +1,7 @@
 /** Test 61: `--only` preserves a selected symlinked directory. */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -22,6 +22,7 @@ describe('Import: files-pull --only <symlinked directory>', { timeout: 180000 },
                 const link = join(remoteSiteDir, 'wp-content', 'plugins', 'akismet');
                 mkdirSync(target, { recursive: true });
                 writeFileSync(join(target, 'akismet.php'), '<?php // akismet\n');
+                rmSync(link, { recursive: true, force: true });
                 symlinkSync(linkTarget, link);
             },
         });
