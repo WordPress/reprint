@@ -53,7 +53,7 @@ describe('Import: files-pull --only <symlinked directory>', { timeout: 180000 },
         const importedRoot = join(fsRootDir(tempDir), siteDir);
         const link = join(importedRoot, 'wp-content', 'plugins', 'akismet');
         assert.ok(lstatSync(link).isSymbolicLink(), `Expected symlink at ${link}`);
-        assert.equal(readFileSync(link, 'utf-8'), '<?php // akismet\n');
+        assert.equal(readFileSync(join(link, 'akismet.php'), 'utf-8'), '<?php // akismet\n');
         assert.equal(readlinkSync(link), linkTarget);
     });
 
