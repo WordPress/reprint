@@ -10,13 +10,13 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
-/** Stops after the replacement fetch list is published but before its stage is saved. */
+/** Stops after the replacement fetch list moves into place but before its stage is saved. */
 final class SimulatedStopBeforeMirrorFetchStageSave extends \RuntimeException
 {
 }
 
-/** Stops files-pull at the publication boundary selected by the test. */
-final class MirrorFetchPublicationTestClient extends \ImportClient
+/** Stops files-pull at the fetch-list replacement boundary selected by the test. */
+final class MirrorFetchReplacementTestClient extends \ImportClient
 {
     public bool $throw_before_fetch_stage_save = false;
 
@@ -641,7 +641,7 @@ final class FilesPullLocalIndexTest extends TestCase
         ]], $this->filesDiffRecords($diff['stdout']));
     }
 
-    public function testMirrorResumesAfterPublishingTheFetchListBeforeSavingItsStage(): void
+    public function testMirrorResumesAfterReplacingTheFetchListBeforeSavingItsStage(): void
     {
         $initial = $this->runFilesPull(['--mode=mirror']);
         $this->assertSame(0, $initial['exit'], $initial['output']);
@@ -654,7 +654,7 @@ final class FilesPullLocalIndexTest extends TestCase
             'local only'
         );
 
-        $client = new MirrorFetchPublicationTestClient(
+        $client = new MirrorFetchReplacementTestClient(
             $this->targetUrl,
             $this->stateDirectory,
             $this->rawFileRoot,
@@ -692,7 +692,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->pullStateDirectory . '/fetch-list.jsonl'
         );
         $this->assertFileDoesNotExist(
-            $this->pullStateDirectory . '/fetch-list.next.jsonl'
+            $this->pullStateDirectory . '/fetch-list.jsonl.new'
         );
 
         $resumed = $this->runFilesPull(['--mode=mirror']);
