@@ -3,13 +3,13 @@
  * Unified export API for SQL and file operations.
  */
 
-use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\build_pdo_dsn;
 use function WordPress\Reprint\Exporter\json_encode_or_throw;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Exporter\trim_right_slash;
+use function WordPress\Reprint\Exporter\wp_join_unix_paths;
 
 require_once __DIR__ . '/class-file-index-processor.php';
 

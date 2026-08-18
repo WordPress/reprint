@@ -1,6 +1,6 @@
 <?php
 
-use function WordPress\Filesystem\wp_join_unix_paths;
+use function WordPress\Reprint\Exporter\wp_join_unix_paths;
 
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Exporter classes use unprefixed domain names.
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Traversal failures become API or CLI values, never HTML output.

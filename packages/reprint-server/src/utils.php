@@ -36,14 +36,20 @@ namespace WordPress\Reprint\Exporter {
 use InvalidArgumentException;
 use RuntimeException;
 
-// Composer's "files" autoload includes this file once per registered
-// path. In a monorepo where the same package is mirrored into vendor/
-// (e.g. tests/ pulls in vendor/wp-php-toolkit/reprint-server/src/utils.php
-// AND packages/reprint-server/src/utils.php), both copies are loaded.
-// `return` from inside a bracketed namespace block does not abort the
-// whole file, so guard the declarations themselves.
-if (!function_exists(__NAMESPACE__ . '\\build_pdo_dsn')) {
+// Every declaration below carries its own function_exists() guard, and the
+// guards are deliberately per-function rather than one block-wide check.
+//
+// Two plugins on the same site can each ship a copy of this package — wpcomsh
+// and Jetpack both do on WordPress.com — and the older copy may load first.
+// A single guard keyed on one sentinel function would then skip every other
+// declaration in this file, and the first call to a helper the older copy
+// does not have is a fatal. Per-function guards degrade to "the older copy
+// wins the functions it has, this copy supplies the rest" instead.
+//
+// Function bodies stay unindented inside their guards, matching how the
+// bracketed namespace blocks in this file are written.
 
+if (!function_exists(__NAMESPACE__ . '\\build_pdo_dsn')) {
 /**
  * Builds a PDO DSN string from a WordPress DB_HOST value.
  *
@@ -120,7 +126,9 @@ function build_pdo_dsn(string $db_host, string $db_name): string
     $dsn .= ";dbname={$db_name};charset=utf8mb4";
     return $dsn;
 }
+}
 
+if (!function_exists(__NAMESPACE__ . '\\parse_size')) {
 /**
  * Parse a human-readable size string (e.g. "16M", "1G", "512K") into bytes.
  * Accepts plain integers as well.
@@ -146,7 +154,9 @@ function parse_size(string $value): int
             return (int) $num;
     }
 }
+}
 
+if (!function_exists(__NAMESPACE__ . '\\json_encode_or_throw')) {
 /**
  * Throws on json_encode failure instead of returning false.
  *
@@ -160,7 +170,9 @@ function json_encode_or_throw($value, int $flags = 0): string
     }
     return $json;
 }
+}
 
+if (!function_exists(__NAMESPACE__ . '\\normalize_path')) {
 /**
  * Resolve ".." and "." segments in a path without touching the filesystem.
  *
@@ -182,7 +194,9 @@ function normalize_path(string $path): string
     }
     return "/" . implode("/", $resolved);
 }
+}
 
+if (!function_exists(__NAMESPACE__ . '\\trim_right_slash')) {
 /**
  * Removes trailing slashes without changing the filesystem root into an empty path.
  *
@@ -203,7 +217,9 @@ function trim_right_slash(string $path): string
 {
     return rtrim($path, '/') ?: '/';
 }
+}
 
+if (!function_exists(__NAMESPACE__ . '\\realpath_with_missing_tail')) {
 /**
  * Canonicalizes an absolute path through the nearest ancestor realpath() can resolve.
  *
@@ -261,7 +277,9 @@ function realpath_with_missing_tail(string $absolute_path): string
         $canonical_existing_ancestor . '/' . implode('/', $missing_components)
     );
 }
+}
 
+if (!function_exists(__NAMESPACE__ . '\\normalize_excluded_paths')) {
 /**
  * Normalizes document-root-relative excluded paths.
  *
@@ -297,7 +315,9 @@ function normalize_excluded_paths(array $excluded_paths): array
     }
     return $normalized_excluded_paths;
 }
+}
 
+if (!function_exists(__NAMESPACE__ . '\\assert_valid_relative_path')) {
 /**
  * Validates a document-root-relative path carried as raw bytes.
  *
@@ -342,8 +362,11 @@ function assert_valid_relative_path(string $path, string $label): void
         }
     }
 }
+}
+
 // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
+if (!function_exists(__NAMESPACE__ . '\\path_is_same_as_or_descendant_of')) {
 /**
  * Indicates whether a candidate path is the same as or a descendant of an
  * ancestor.
@@ -392,7 +415,9 @@ function path_is_same_as_or_descendant_of($path, $ancestor): bool
     }
     return $path === $ancestor || str_starts_with($path, $ancestor . "/");
 }
+}
 
+if (!function_exists(__NAMESPACE__ . '\\path_is_descendant_of')) {
 /**
  * Indicates whether a candidate path is a descendant of an ancestor.
  *
@@ -437,7 +462,9 @@ function path_is_descendant_of($path, $ancestor): bool
     }
     return $path !== $ancestor;
 }
+}
 
+if (!function_exists(__NAMESPACE__ . '\\path_remainder_under')) {
 /**
  * Returns the remainder of $path underneath $prefix.
  *
@@ -459,7 +486,9 @@ function path_remainder_under(string $path, string $prefix): ?string
 
     return null;
 }
+}
 
+if (!function_exists(__NAMESPACE__ . '\\relative_path_under')) {
 /**
  * Returns a path relative to a slash-delimited root, or null when it is not
  * equal to or below that root.
@@ -495,7 +524,9 @@ function relative_path_under(string $path, string $root): ?string
     $remainder = path_remainder_under($path, $root);
     return $remainder === null ? null : ltrim($remainder, "/");
 }
+}
 
+if (!function_exists(__NAMESPACE__ . '\\assert_valid_path')) {
 /**
  * Validates that a path is a non-empty absolute string without NUL bytes
  * or dot-segments (. or ..).
@@ -528,7 +559,69 @@ function assert_valid_path(string $path, string $label = "path"): void
         }
     }
 }
+}
 
-} // !function_exists guard
+// ---------------------------------------------------------------------------
+// Vendored from wp-php-toolkit/filesystem.
+//
+// This is a copy of WordPress\Filesystem\wp_join_unix_paths(), kept in sync by
+// hand. Do not "fix" it by importing the original: reprint-server must require
+// nothing but PHP.
+//
+// Consumers vendor this package into Composer autoloaders that are not scoped
+// to one plugin — Jetpack's is the one that bites. It folds every installed
+// package's psr-4, classmap and files entries into site-global manifests that
+// arbitrate class and function names, by version, across every plugin on the
+// site. Requiring wp-php-toolkit/filesystem would publish WordPress\Filesystem
+// site-wide, where it would be arbitrated against the copy WordPress Importer
+// already ships through data-liberation. Two copies of one namespace in one
+// version-arbitrated manifest is what produced Automattic/jetpack#51027.
+//
+// WordPress core's path_join() is not a substitute. It takes two arguments
+// rather than being variadic, does not collapse duplicate slashes, and returns
+// the second argument alone when that is absolute, discarding the base. Its
+// path_is_absolute() check also calls realpath() plus a stream-wrapper lookup,
+// and class-file-index-processor.php calls this once per directory entry in
+// the file walk.
+// ---------------------------------------------------------------------------
+if (!function_exists(__NAMESPACE__ . '\\wp_join_unix_paths')) {
+/**
+ * Joins path segments into one Unix path, collapsing duplicate slashes.
+ *
+ * Empty segments are skipped. A leading slash on the first non-empty segment
+ * is preserved. Trailing slashes are left as the caller wrote them.
+ *
+ * Examples:
+ *
+ *     wp_join_unix_paths('/srv/site', 'wp-content'); // '/srv/site/wp-content'
+ *     wp_join_unix_paths('/srv/site/', '/uploads');  // '/srv/site/uploads'
+ *     wp_join_unix_paths('', 'wp-content', '');      // 'wp-content'
+ *
+ * @param string ...$path_segments Segments to join.
+ * @return string The joined path.
+ */
+function wp_join_unix_paths(...$path_segments)
+{
+    $input_starts_with_slash = null;
+
+    $paths = [];
+    foreach ($path_segments as $path_segment) {
+        if ($path_segment !== '') {
+            $paths[] = $path_segment;
+            if ($input_starts_with_slash === null) {
+                $input_starts_with_slash = strncmp($path_segment, '/', strlen('/')) === 0;
+            }
+        }
+    }
+    $path = implode('/', $paths);
+
+    $result = preg_replace('#/+#', '/', $path);
+    if ($input_starts_with_slash && strncmp($result, '/', strlen('/')) !== 0) {
+        $result = '/' . $result;
+    }
+
+    return $result;
+}
+}
 
 }
