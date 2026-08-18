@@ -314,23 +314,16 @@ jobs:
             exit "$files_pull_status"
           fi
 
-          if [ "${{ matrix.exporter_php }}" = "5.6" ]; then
-            echo "=== Importer db-pull ==="
-            db_pull_status=2
-            db_pull_attempt=0
-            while { [ "$db_pull_status" -eq 2 ] || [ "$db_pull_status" -eq 124 ]; } \
-                  && [ "$db_pull_attempt" -lt 6 ]; do
-              db_pull_attempt=$((db_pull_attempt + 1))
-              db_pull_output="$(timeout 90 "$IMPORTER_PHP" "$IMPORTER_PATH" db-pull "${BASE}&directory=${DIR}" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" 2>&1)" && db_pull_status=0 || db_pull_status=$?
-              echo "$db_pull_output" | head -50
-            done
-            if [ "$db_pull_status" -ne 0 ]; then
-              echo "EXIT: $db_pull_status (db-pull did not complete after ${db_pull_attempt} attempts)"
-              exit "$db_pull_status"
-            fi
-            test -s "$STATE_DIR/db.sql"
-            grep -F 'CREATE TABLE' "$STATE_DIR/db.sql" >/dev/null
-          fi
+      - name: Run full pull from PHP 5.6 site
+        if: matrix.exporter_php == '5.6'
+        env:
+          E2E_EXPECTED_EXPORTER_PHP_VERSION: ${{ matrix.exporter_php }}
+          E2E_WORDPRESS_VERSION: ${{ matrix.wordpress_version }}
+          E2E_WP_CLI_PHP_BINARY: php${{ matrix.importer_php }}
+          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
+          PHP_BINARY: php${{ matrix.importer_php }}
+        working-directory: tests/e2e
+        run: npx vitest run tests/import-46-pull-basic.test.js --test-timeout=180000
 
       - name: Run E2E tests
         if: matrix.exporter_php != '5.6' && matrix.exporter_php != '7.2'
