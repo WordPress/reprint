@@ -157,6 +157,9 @@
     },
     "open-basedir": {
       "port": 8131
+    },
+    "parent-wp-config": {
+      "port": 8132
     }
   }
 }

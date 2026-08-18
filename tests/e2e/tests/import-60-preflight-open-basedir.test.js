@@ -7,8 +7,9 @@
  */
 import { describe, it, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';
+import { execSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
     apiRequest,
     getSiteDir,
@@ -31,14 +32,28 @@ describe('Import: Preflight with an open_basedir boundary', () => {
 
     it('keeps the detected WordPress root when its parent cannot be inspected', async () => {
         const siteDir = getSiteDir(site);
-        const response = await apiRequest(site, 'preflight');
+        const expectedOpenBasedir = `${siteDir}:/tmp`;
+        let response;
+
+        // PHP-FPM can briefly miss a newly written .user.ini while the test
+        // sites are being provisioned in parallel. Retry until it is active.
+        for (let attempt = 1; attempt <= 5; attempt++) {
+            response = await apiRequest(site, 'preflight');
+            if (response.json?.limits?.open_basedir === expectedOpenBasedir) {
+                break;
+            }
+            if (attempt < 5) {
+                execSync(`sudo touch ${JSON.stringify(join(siteDir, '.user.ini'))}`);
+                await new Promise((resolve) => setTimeout(resolve, 500));
+            }
+        }
 
         assert.equal(
             response.status,
             200,
             `Expected HTTP 200, got ${response.status}: ${JSON.stringify(response.json || response.text)}`,
         );
-        assert.equal(response.json.limits.open_basedir, `${siteDir}:/tmp`);
+        assert.equal(response.json.limits.open_basedir, expectedOpenBasedir);
         assert.equal(response.json.ok, true, `Preflight failed: ${response.json.error}`);
         assert.ok(response.json.wp_detect.found, 'Expected WordPress to be found');
         assert.ok(
@@ -47,5 +62,6 @@ describe('Import: Preflight with an open_basedir boundary', () => {
             ),
             `Expected a detected WordPress root at ${siteDir}`,
         );
+        assert.deepEqual(response.json.wp_detect.searched, [siteDir, dirname(siteDir)]);
     });
 });
