@@ -80,6 +80,11 @@ function _site_export_is_push_endpoint(string $endpoint): bool {
     return strpos($endpoint, 'push_') === 0;
 }
 
+/** Returns whether this PHP runtime can serve push endpoints. */
+function _site_export_push_is_supported(): bool {
+    return PHP_VERSION_ID >= 70200;
+}
+
 /**
  * Resolve and load the server package runtime.
  *
@@ -450,6 +455,14 @@ function _site_export_handle_api_request(array $options = []): void {
         }
     } else {
         _site_export_default_authenticate();
+    }
+
+    if (!_site_export_push_is_supported() && _site_export_is_push_endpoint($endpoint)) {
+        _site_export_push_error(
+            503,
+            'push_disabled',
+            'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.'
+        );
     }
 
     // Authentication completes first. Every push operation requires current

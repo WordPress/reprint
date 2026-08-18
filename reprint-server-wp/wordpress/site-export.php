@@ -167,6 +167,16 @@ class Site_Export_Plugin {
             return;
         }
 
+        if (!_site_export_push_is_supported()) {
+            add_settings_error(
+                'site_export',
+                'push_access_unsupported',
+                'Push access requires PHP 7.2 or newer. Downloads remain available.',
+                'error'
+            );
+            return;
+        }
+
         if (_site_export_get_managed_push_enabled() !== null) {
             add_settings_error(
                 'site_export',
@@ -199,8 +209,9 @@ class Site_Export_Plugin {
         $api_url = home_url('?reprint-api');
         $is_configured = $effective_secret !== '';
         $has_file_override = _site_export_has_secret_file();
+        $push_supported = _site_export_push_is_supported();
         $managed_push_enabled = _site_export_get_managed_push_enabled();
-        $push_enabled = _site_export_is_push_authorized();
+        $push_enabled = $push_supported && _site_export_is_push_authorized();
 
         ?>
         <style>
@@ -406,7 +417,9 @@ class Site_Export_Plugin {
                 <h2>Push access</h2>
                 <p class="card-desc">You do not need push access when moving this site to another host.</p>
 
-                <?php if ($managed_push_enabled !== null): ?>
+                <?php if (!$push_supported): ?>
+                <p class="card-desc">Push access requires PHP 7.2 or newer. This site runs PHP <?php echo esc_html(PHP_VERSION); ?>. Downloads remain available.</p>
+                <?php elseif ($managed_push_enabled !== null): ?>
                 <label>
                     <input type="checkbox" name="site_export_push_enabled" value="1"<?php echo $push_enabled ? ' checked' : ''; ?> disabled />
                     <span>Allow push to change files on this site</span>

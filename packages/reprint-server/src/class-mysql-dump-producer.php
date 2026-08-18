@@ -678,7 +678,7 @@ class MySQLDumpProducer
         }
 
         /** Base64 output is always ceil(n/3)*4 bytes. */
-        $estimated_base64_length = 4 * intdiv($len + 2, 3);
+        $estimated_base64_length = 4 * integer_divide($len + 2, 3);
         // FROM_BASE64('<data>') => 15 bytes overhead + base64 length
         return 15 + $estimated_base64_length;
     }
