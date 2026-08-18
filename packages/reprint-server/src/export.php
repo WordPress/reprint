@@ -659,9 +659,47 @@ function detect_wp_roots(array $start_paths): array
             $seen[$current] = true;
             $wp_load_path = wp_join_unix_paths($current, "wp-load.php");
             $wp_config_path = wp_join_unix_paths($current, "wp-config.php");
-            $has_wp_load = file_exists($wp_load_path);
-            $has_wp_config = file_exists($wp_config_path);
-            $has_wp_content = is_dir(wp_join_unix_paths($current, "wp-content"));
+            $wp_content_path = wp_join_unix_paths($current, "wp-content");
+            $filesystem_probe_warning = false;
+            $reprint_error_handler = null;
+            // During preflight, Reprint's error handler turns a warning into HTTP 500.
+            // These checks move up to parent directories that open_basedir may block.
+            // Catch probe warnings here so we can stop only this walk. Send other error
+            // types to the previous handler, then restore that handler in finally below.
+            $reprint_error_handler = set_error_handler(
+                function ($errno, $errstr, $errfile, $errline) use (
+                    &$filesystem_probe_warning,
+                    &$reprint_error_handler
+                ) {
+                    if ($errno === E_WARNING) {
+                        $filesystem_probe_warning = true;
+                        return true;
+                    }
+                    if (!is_callable($reprint_error_handler)) {
+                        return false;
+                    }
+                    return call_user_func(
+                        $reprint_error_handler,
+                        $errno,
+                        $errstr,
+                        $errfile,
+                        $errline
+                    );
+                }
+            );
+            try {
+                $has_wp_load = file_exists($wp_load_path);
+                $has_wp_config = file_exists($wp_config_path);
+                $has_wp_content = is_dir($wp_content_path);
+            } finally {
+                restore_error_handler();
+            }
+            if ($filesystem_probe_warning) {
+                // WordPress root discovery is speculative. If this path cannot be
+                // inspected reliably, keep roots found by this walk and let
+                // preflight continue with the other start paths.
+                break;
+            }
             if ($has_wp_load || $has_wp_config) {
                 $roots[$current] = [
                     "path" => $current,
