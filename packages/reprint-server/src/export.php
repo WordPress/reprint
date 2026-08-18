@@ -937,9 +937,8 @@ function endpoint_sql_chunk(
             $sql_bytes_processed += strlen($sql);
 
             // Does this chunk end on a complete statement boundary?
-            // The producer terminates complete statements with ";" and
-            // intermediate INSERT rows with ",", so checking the last
-            // character is sufficient.
+            // A complete SQL statement ends with ";"; a fragment from an open
+            // INSERT does not.
             $trimmed = rtrim($sql);
             $query_complete = $trimmed !== "" && $trimmed[-1] === ";";
             if (!$query_complete || $cursor === null) {

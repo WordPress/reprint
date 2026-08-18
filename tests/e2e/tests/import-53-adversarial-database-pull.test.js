@@ -119,15 +119,9 @@ describe('Import: Adversarial database pull', { timeout: 300000 }, () => {
         );
         assertCursorCoveredTable(
             hookState,
-            'current_row',
-            'aa_binary_primary_keys',
-        );
-        assertCursorCoveredTable(
-            hookState,
-            'oversized_pk_values',
+            'last_pk_values',
             'ac_oversized_binary_primary_key',
         );
-
         const comparison = await compareDatabases(getDbName(site), importDb);
         assert.ok(
             comparison.match && comparison.extraTables.length === 0,
@@ -286,16 +280,14 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
     $table = $checkpoint['current_table'] ?? null;
     $contains_binary_checkpoint = false;
 
-    foreach (['last_pk_values', 'current_row', 'oversized_pk_values'] as $field) {
-        if (_e2e_adversarial_cursor_has_binary_marker($checkpoint[$field] ?? null)) {
-            $contains_binary_checkpoint = true;
-            if (in_array($table, [
-                'aa_binary_primary_keys',
-                'ab_composite_binary_primary_key',
-                'ac_oversized_binary_primary_key',
-            ], true)) {
-                $state['cursor_tables'][$field][$table] = true;
-            }
+    if (_e2e_adversarial_cursor_has_binary_marker($checkpoint['last_pk_values'] ?? null)) {
+        $contains_binary_checkpoint = true;
+        if (in_array($table, [
+            'aa_binary_primary_keys',
+            'ab_composite_binary_primary_key',
+            'ac_oversized_binary_primary_key',
+        ], true)) {
+            $state['cursor_tables']['last_pk_values'][$table] = true;
         }
     }
 

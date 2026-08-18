@@ -26,6 +26,7 @@ let
   # Filter sites by nginx type from registry
   standardSites = lib.filterAttrs (n: v: !(v ? nginx)) registry.sites;
   bufferedSites = lib.filterAttrs (n: v: (v.nginx or null) == "buffered") registry.sites;
+  cursorHeaderLimitSites = lib.filterAttrs (n: v: (v.nginx or null) == "cursor-header-limit") registry.sites;
   redirectSites = lib.filterAttrs (n: v: (v.nginx or null) == "redirect") registry.sites;
 
   # Generate Nginx virtualHost config for standard sites
@@ -45,6 +46,38 @@ let
         "~ \\.php$" = {
           extraConfig = ''
             fastcgi_pass unix:${fpmSocket};
+            fastcgi_index index.php;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            include ${pkgs.nginx}/conf/fastcgi_params;
+            fastcgi_param SITE_EXPORT_TEST_MODE "1";
+            fastcgi_read_timeout 120s;
+            fastcgi_send_timeout 120s;
+          '';
+        };
+      };
+    };
+  };
+
+  # Generate a vhost with the 8191-byte X-Export-Cursor threshold used by this test
+  makeCursorHeaderLimitVhost = name: cfg: {
+    name = "e2e-${name}";
+    value = {
+      listen = [{ addr = "127.0.0.1"; port = cfg.port; }];
+      root = "${siteRoot}/${name}";
+      extraConfig = ''
+        # Let nginx parse the request before applying the explicit cursor limit.
+        large_client_header_buffers 4 64k;
+        if ($http_x_export_cursor ~ "^.{8191,}$") {
+          return 431;
+        }
+      '';
+      locations = {
+        "/" = {
+          tryFiles = "$uri $uri/ /index.php?$query_string";
+        };
+        "~ \\.php$" = {
+          extraConfig = ''
+            fastcgi_pass unix:${config.services.phpfpm.pools.e2e.socket};
             fastcgi_index index.php;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
             include ${pkgs.nginx}/conf/fastcgi_params;
@@ -101,6 +134,7 @@ let
   allVhosts = builtins.listToAttrs (
     (lib.mapAttrsToList makeVhost standardSites)
     ++ (lib.mapAttrsToList makeBufferedVhost bufferedSites)
+    ++ (lib.mapAttrsToList makeCursorHeaderLimitVhost cursorHeaderLimitSites)
     ++ (lib.mapAttrsToList makeRedirectVhost redirectSites)
   );
 

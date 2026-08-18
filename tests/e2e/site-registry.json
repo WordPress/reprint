@@ -161,6 +161,10 @@
     },
     "parent-wp-config": {
       "port": 8132
+    },
+    "database-cursor-header-limit": {
+      "port": 8133,
+      "nginx": "cursor-header-limit"
     }
   }
 }

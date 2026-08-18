@@ -68,7 +68,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 300000 }, () => {
             '    $trimmed = rtrim($sql);',
             '    $large_incomplete_part = strlen($sql) > 512 * 1024',
             '        && $trimmed !== \'\'',
-            '        && substr($trimmed, -1) === \',\';',
+            '        && substr($trimmed, -1) !== \';\';',
             '    if (empty($state[\'crashed\']) && $large_incomplete_part) {',
             '        $state[\'incomplete_batch_emitted\'] = true;',
             '        $state[\'crash_before_batch\'] = true;',
