@@ -3,6 +3,7 @@
 namespace FileSyncProducerTests;
 
 use PHPUnit\Framework\TestCase;
+use WordPress\Reprint\Server\FileTreeProducer;
 
 require_once __DIR__ . '/../../packages/reprint-server/src/class-file-tree-producer.php';
 
@@ -165,7 +166,7 @@ abstract class FileSyncProducerTestBase extends TestCase
     /**
      * Process all chunks from sync producer
      */
-    protected function processAllChunks(\FileTreeProducer $sync): array
+    protected function processAllChunks(FileTreeProducer $sync): array
     {
         $chunks = [];
 

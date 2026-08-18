@@ -1,7 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
-use WordPress\DataLiberation\DatabaseRowsReader;
+use WordPress\Reprint\Server\DatabaseRowsReader;
 
 require_once __DIR__ . '/fixtures/DatabaseRowsReaderMetadataConnection.php';
 

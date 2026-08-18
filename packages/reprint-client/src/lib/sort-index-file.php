@@ -3,8 +3,8 @@
 namespace Reprint\Importer;
 
 use RuntimeException;
-use function WordPress\Reprint\Exporter\assert_valid_path;
-use function WordPress\Reprint\Exporter\parse_size;
+use function WordPress\Reprint\Server\assert_valid_path;
+use function WordPress\Reprint\Server\parse_size;
 
 require_once __DIR__ . '/external-merge-sort.php';
 

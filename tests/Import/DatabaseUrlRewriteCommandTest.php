@@ -331,7 +331,7 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
         );
 
         $database = $this->open_mysql_on_sqlite_database();
-        $reader = new \WordPress\DataLiberation\DatabaseRowsReader(
+        $reader = new \WordPress\Reprint\Server\DatabaseRowsReader(
             $database,
             ['batch_size' => 1]
         );

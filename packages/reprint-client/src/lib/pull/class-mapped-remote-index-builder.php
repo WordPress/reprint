@@ -1,9 +1,9 @@
 <?php
 
 use function Reprint\Importer\sort_index_file;
-use function WordPress\Reprint\Exporter\path_is_descendant_of;
-use function WordPress\Reprint\Exporter\path_remainder_under;
-use function WordPress\Reprint\Exporter\relative_path_under;
+use function WordPress\Reprint\Server\path_is_descendant_of;
+use function WordPress\Reprint\Server\path_remainder_under;
+use function WordPress\Reprint\Server\relative_path_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Filesystem paths are CLI values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.

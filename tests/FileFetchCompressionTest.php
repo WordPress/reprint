@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use WordPress\Reprint\Server\ResourceBudget;
 
 final class FileFetchCompressionTest extends TestCase
 {
@@ -393,7 +394,7 @@ final class FileFetchCompressionTest extends TestCase
 declare(strict_types=1);
 require_once %s;
 $config = json_decode(file_get_contents(%s), true, 512, JSON_THROW_ON_ERROR);
-$budget = new ResourceBudget(microtime(true), 10, 128 * 1024 * 1024, 0.9);
+$budget = new \WordPress\Reprint\Server\ResourceBudget(microtime(true), 10, 128 * 1024 * 1024, 0.9);
 endpoint_file_fetch($config, $budget);
 PHP,
                 var_export(dirname(__DIR__) . '/packages/reprint-server/src/export.php', true),

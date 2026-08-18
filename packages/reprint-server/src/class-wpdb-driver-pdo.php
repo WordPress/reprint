@@ -17,6 +17,10 @@
  * binary, while text primary key comparisons retain their stored collation.
  */
 
+namespace WordPress\Reprint\Server;
+
+use PDO;
+
 /**
  * Wraps a WordPress wpdb instance to look like a PDO connection.
  */

@@ -3,14 +3,24 @@
  * Unified export API for SQL and file operations.
  */
 
-use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Exporter\assert_valid_path;
-use function WordPress\Reprint\Exporter\build_pdo_dsn;
-use function WordPress\Reprint\Exporter\json_encode_or_throw;
-use function WordPress\Reprint\Exporter\parse_size;
-use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Exporter\trim_right_slash;
+use WordPress\Reprint\Server\FileIndexProcessor;
+use WordPress\Reprint\Server\FileTreeProducer;
+use WordPress\Reprint\Server\GzipOutputStream;
+use WordPress\Reprint\Server\MySQLDumpProducer;
+use WordPress\Reprint\Server\ResourceBudget;
+use WordPress\Reprint\Server\SqliteDriverPDO;
+use WordPress\Reprint\Server\WpdbDriverPDO;
 
+use function WordPress\Reprint\Server\assert_valid_path;
+use function WordPress\Reprint\Server\build_pdo_dsn;
+use function WordPress\Reprint\Server\json_encode_or_throw;
+use function WordPress\Reprint\Server\parse_size;
+use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Server\trim_right_slash;
+use function WordPress\Reprint\Server\wp_join_unix_paths;
+
+require_once __DIR__ . '/class-resource-budget.php';
+require_once __DIR__ . '/class-gzip-output-stream.php';
 require_once __DIR__ . '/class-file-index-processor.php';
 
 // Capture any accidental output before headers are set so we can discard it
@@ -42,54 +52,6 @@ define('STAT_TYPE_BLOCK',  0060000);
 define('STAT_TYPE_DIR',    0040000);
 define('STAT_TYPE_CHAR',   0020000);
 define('STAT_TYPE_FIFO',   0010000);
-
-/**
- * Tracks time and memory limits for a single API request.
- *
- * Every export endpoint runs under resource constraints — a maximum
- * execution time and a memory ceiling.  Rather than threading four
- * separate values through every function signature and every
- * should_continue() call, this class bundles them into a single
- * object with a simple has_remaining() check.
- */
-class ResourceBudget
-{
-    /** @var float */
-    public $start_time;
-    /** @var int */
-    public $max_time;
-    /** @var int */
-    public $max_memory;
-    /** @var float */
-    public $memory_threshold;
-
-    public function __construct(
-        float $start_time,
-        int $max_time,
-        int $max_memory,
-        float $memory_threshold
-    ) {
-        $this->start_time = $start_time;
-        $this->max_time = $max_time;
-        $this->max_memory = $max_memory;
-        $this->memory_threshold = $memory_threshold;
-    }
-
-    /** Returns false when the request should yield due to time or memory pressure. */
-    public function has_remaining(): bool
-    {
-        if (microtime(true) - $this->start_time >= $this->max_time) {
-            return false;
-        }
-
-        $memory_used = memory_get_usage(true);
-        if ($memory_used >= $this->max_memory * $this->memory_threshold) {
-            return false;
-        }
-
-        return true;
-    }
-}
 
 /**
  * Global streaming context. When set, the error handlers emit error chunks
@@ -420,7 +382,7 @@ function create_wpdb_pdo_adapter()
 // require_once does not resolve symlinks, so the same physical file can
 // be loaded twice through different paths, causing "Cannot redeclare"
 // fatal errors.
-if (!function_exists('WordPress\\Reprint\\Exporter\\build_pdo_dsn')) {
+if (!function_exists('WordPress\\Reprint\\Server\\build_pdo_dsn')) {
     require_once __DIR__ . "/utils.php";
 }
 if (!class_exists('Site_Export_HTTP_Server', false)) {
@@ -658,106 +620,6 @@ function prepare_streaming_response(): void
 }
 
 /**
- * Incremental gzip compressor that emits data as it arrives rather than
- * buffering the entire response.
- */
-class GzipOutputStream
-{
-    private $deflate_ctx;
-    /** @var bool */
-    private $enabled = true;
-
-    public function __construct(bool $enabled = true)
-    {
-        $this->enabled = $enabled;
-        if ($this->enabled) {
-            $this->deflate_ctx = deflate_init(ZLIB_ENCODING_GZIP, ["level" => 6]);
-            if ($this->deflate_ctx === false) {
-                throw new \RuntimeException(
-                    "deflate_init() failed — zlib may be misconfigured"
-                );
-            }
-            if (!headers_sent()) {
-                @header("Content-Encoding: gzip");
-            }
-        }
-    }
-
-    /**
-     * Writes data without forcing a sync point.
-     *
-     * Uses ZLIB_NO_FLUSH so the compressor can build back-references across
-     * multiple write() calls, producing significantly better compression
-     * ratios than ZLIB_SYNC_FLUSH on every call.  Data still flows out
-     * whenever zlib's internal buffer fills — the decompressor on the other
-     * end will decompress incrementally.
-     *
-     * Call sync() after each complete multipart part to guarantee the client
-     * can decompress everything emitted so far.
-     */
-    public function write(string $data): void
-    {
-        if (!$this->enabled) {
-            echo $data;
-            return;
-        }
-        $compressed = deflate_add(
-            $this->deflate_ctx,
-            $data,
-            ZLIB_NO_FLUSH
-        );
-        if ($compressed === false) {
-            throw new \RuntimeException("deflate_add() failed during gzip write");
-        }
-        if ($compressed !== "") {
-            echo $compressed;
-        }
-    }
-
-    /**
-     * Forces a sync flush so the client can decompress all data written so far.
-     */
-    public function sync(): void
-    {
-        if (!$this->enabled) {
-            flush();
-            return;
-        }
-        $compressed = deflate_add(
-            $this->deflate_ctx,
-            "",
-            ZLIB_SYNC_FLUSH
-        );
-        if ($compressed === false) {
-            throw new \RuntimeException("deflate_add() failed during gzip sync");
-        }
-        if ($compressed !== "") {
-            echo $compressed;
-        }
-        flush();
-    }
-
-    /**
-     * Finalizes the gzip stream with ZLIB_FINISH.
-     */
-    public function finish(): void
-    {
-        if (!$this->enabled) {
-            flush();
-            return;
-        }
-        $final = deflate_add($this->deflate_ctx, "", ZLIB_FINISH);
-        if ($final === false) {
-            throw new \RuntimeException("deflate_add() failed during gzip finish");
-        }
-        if ($final !== "") {
-            echo $final;
-        }
-        flush();
-    }
-}
-
-/**
  * Deduplicates and resolves a list of paths, discarding empty entries.
  */
 function normalize_path_list(array $paths): array
@@ -922,7 +784,7 @@ function endpoint_sql_chunk(
         $producer_options["cursor"] = $config["cursor"];
     }
 
-    $reader = new WordPress\DataLiberation\MySQLDumpProducer(
+    $reader = new MySQLDumpProducer(
         $mysql,
         $producer_options
     );
@@ -944,7 +806,7 @@ function endpoint_sql_chunk(
     if (!isset($config["cursor"])) {
         // Send the initial connection settings separately so the client can save
         // them outside db.sql for a later MySQL connection.
-        $session_setup = WordPress\DataLiberation\MySQLDumpProducer::get_session_setup_sql();
+        $session_setup = MySQLDumpProducer::get_session_setup_sql();
         $gz->write(
             "--{$boundary}\r\n" .
             "Content-Type: application/sql\r\n" .

@@ -2,7 +2,7 @@
 
 require_once __DIR__ . '/MySQLDumpProducerTestBase.php';
 
-use WordPress\DataLiberation\MySQLDumpProducer;
+use WordPress\Reprint\Server\MySQLDumpProducer;
 
 /**
  * Ferocious edge-case tests designed to break MySQLDumpProducer in every

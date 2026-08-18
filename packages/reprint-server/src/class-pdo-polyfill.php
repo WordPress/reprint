@@ -18,6 +18,27 @@
  * will see the polyfill and try to use it, fataling where it previously
  * skipped cleanly. This is acceptable for the exporter's deployment surface
  * but documented here so a reader can grep for it.
+ *
+ * The eval() below is load-bearing. Do not rewrite these as plain conditional
+ * class declarations, however much they want to be.
+ *
+ * This package declares a directory classmap ("classmap": ["src/"]). Composer's
+ * ClassMapGenerator strips strings before it tokenises for class declarations,
+ * so a class inside an eval()'d heredoc is invisible to it and never reaches
+ * the generated map. Jetpack's AutoloadGenerator calls the same generator, and
+ * its map is site-global — shared by every plugin using its autoloader. Declare
+ * these three names outside a string and PDO, PDOStatement and PDOException
+ * land in that map, where every other plugin's class_exists('PDO') resolves to
+ * this polyfill.
+ *
+ * exclude-from-classmap in composer.json covers Composer's own autoloader, and
+ * the test suite and the standalone plugin use it. It does not help on Jetpack:
+ * AutoloadGenerator::parseAutoloads() emits no exclude-from-classmap key, so
+ * AutoloadProcessor applies no exclusions. There, the eval() is the only thing
+ * keeping these names out.
+ *
+ * tests/PdoPolyfillTest.php tokenises this file and fails if it declares a
+ * class where a scanner can see one.
  */
 
 if (!class_exists('PDO', false)) {

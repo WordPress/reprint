@@ -1,7 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
-use WordPress\DataLiberation\MySQLDumpProducer;
+use WordPress\Reprint\Server\MySQLDumpProducer;
 
 /**
  * Base test class for MySQLDumpProducer tests.

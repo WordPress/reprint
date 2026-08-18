@@ -6,7 +6,7 @@ namespace Reprint\Importer;
 use Reprint\Importer\Database\DatabaseConnection;
 use RuntimeException;
 use SqlStatementRewriter;
-use WordPress\DataLiberation\DatabaseRowsReader;
+use WordPress\Reprint\Server\DatabaseRowsReader;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI errors contain database identifiers, never HTML.
 

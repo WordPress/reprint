@@ -12,7 +12,7 @@ require_once __DIR__ . '/../packages/reprint-server/src/class-file-tree-producer
 require_once __DIR__ . '/../packages/reprint-server/src/class-file-index-processor.php';
 
 // Local path-package installs can be stale until composer reinstall.
-if (!function_exists('build_pdo_dsn')) {
+if (!function_exists('WordPress\\Reprint\\Server\\build_pdo_dsn')) {
     require_once __DIR__ . '/../packages/reprint-server/src/utils.php';
 }
 

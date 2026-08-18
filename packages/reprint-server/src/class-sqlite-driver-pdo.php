@@ -14,6 +14,11 @@
  * MySQL queries, gets rows back, and produces valid MySQL SQL output.
  */
 
+namespace WordPress\Reprint\Server;
+
+use PDO;
+use PDOStatement;
+
 /**
  * Wraps a supported SQLite Database Integration driver as a PDO connection.
  *
