@@ -184,6 +184,27 @@ function normalize_path(string $path): string
 }
 
 /**
+ * Removes trailing slashes without changing the filesystem root into an empty path.
+ *
+ * Unlike rtrim($path, '/'), this returns `/` for both the filesystem root and
+ * an empty input. It only changes the lexical spelling; it does not validate
+ * the path or resolve dot segments and symlinks.
+ *
+ * Examples:
+ *
+ *     trim_right_slash('/srv/site///'); // '/srv/site'
+ *     trim_right_slash('/');            // '/'
+ *     trim_right_slash('');             // '/'
+ *
+ * @param string $path Path whose trailing slashes to remove.
+ * @return string A path without trailing slashes, or `/` for the filesystem root.
+ */
+function trim_right_slash(string $path): string
+{
+    return rtrim($path, '/') ?: '/';
+}
+
+/**
  * Canonicalizes an absolute path through the nearest ancestor realpath() can resolve.
  *
  * The final components need not exist. The function resolves a real ancestor,
@@ -509,20 +530,5 @@ function assert_valid_path(string $path, string $label = "path"): void
 }
 
 } // !function_exists guard
-
-// An older copy may have declared the original guard function before this
-// version loads. Keep helpers added later available in that mixed-version case.
-if (!function_exists(__NAMESPACE__ . '\\trim_right_slash')) {
-    /**
-     * Removes trailing slashes without changing the filesystem root into an empty path.
-     *
-     * @param string $path Path whose trailing slashes to remove.
-     * @return string A path without trailing slashes, or `/` for the filesystem root.
-     */
-    function trim_right_slash(string $path): string
-    {
-        return rtrim($path, '/') ?: '/';
-    }
-}
 
 }

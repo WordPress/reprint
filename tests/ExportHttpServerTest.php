@@ -6,39 +6,6 @@ use PHPUnit\Framework\TestCase;
 
 final class ExportHttpServerTest extends TestCase
 {
-    public function testNewUtilityLoadsAfterAnOlderUtilityCopy(): void
-    {
-        $utils_path = realpath(__DIR__ . '/../packages/reprint-server/src/utils.php');
-        $this->assertNotFalse($utils_path, 'utils.php must exist');
-
-        $script = <<<'PHP'
-namespace WordPress\Reprint\Exporter {
-    function build_pdo_dsn(string $db_host, string $db_name): string {
-        return '';
-    }
-}
-
-namespace {
-    require $argv[1];
-    echo \WordPress\Reprint\Exporter\trim_right_slash('/srv/site/');
-}
-PHP;
-        $process = proc_open(
-            [PHP_BINARY, '-r', $script, $utils_path],
-            [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
-            $pipes
-        );
-        $this->assertIsResource($process, 'Failed to start utility loader subprocess.');
-        fclose($pipes[0]);
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-
-        $this->assertSame(0, proc_close($process), $stderr ?: 'Utility loader subprocess failed.');
-        $this->assertSame('/srv/site', $stdout);
-    }
-
     public function testParsesJsonBodyAndCastsKnownTypes(): void
     {
         $server = new Site_Export_HTTP_Server();
