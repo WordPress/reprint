@@ -408,54 +408,17 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         $this->assertTrue($producer2->next_sql_fragment());
     }
 
-    public function testLegacyCursorEmitsItsRetainedRowOnce(): void
+    public function testCursorWithCurrentRowFieldIsRejectedBeforeStateRestoration(): void
     {
-        $this->pdo->exec("CREATE TABLE legacy_cursor (id INT PRIMARY KEY, data VARCHAR(50))");
-        $this->pdo->exec(
-            "INSERT INTO legacy_cursor VALUES (1, 'first'), (2, 'second'), (3, 'third')"
-        );
+        $cursorData = json_decode($this->createProducer()->get_reentrancy_cursor(), true);
+        $cursorData["current_row"] = null;
+        // This would fail first if the producer restored state before checking the cursor format.
+        $cursorData["rows_in_batch"] = ["invalid"];
 
-        $producer = $this->createProducer(["batch_size" => 250]);
-        $fragments = [];
-        while ($producer->next_sql_fragment()) {
-            $fragment = (string) $producer->get_sql_fragment();
-            $fragments[] = $fragment;
-            if (strpos($fragment, 'INSERT INTO `legacy_cursor`') === 0) {
-                $fragments[count($fragments) - 1] .= ',';
-                break;
-            }
-        }
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage("db-pull --abort");
 
-        $legacyCursor = json_decode($producer->get_reentrancy_cursor(), true);
-        unset($legacyCursor["current_column_names_hash"]);
-        $legacyCursor["last_pk_values"] = ["id" => 2];
-        $legacyCursor["current_row"] = [
-            "id" => 2,
-            "data" => ["__binary__" => base64_encode("second")],
-        ];
-        $legacyCursor["current_row_ends_query_batch"] = false;
-        $legacyCursor["current_column_names"] = ["id", "data"];
-
-        $producer = $this->createProducer([
-            "batch_size" => 250,
-            "cursor" => json_encode($legacyCursor),
-        ]);
-        $this->assertTrue($producer->next_sql_fragment());
-        $legacyRetainedRowFragment = (string) $producer->get_sql_fragment();
-        $this->assertStringStartsWith("(", $legacyRetainedRowFragment);
-        $this->assertStringContainsString(base64_encode("second"), $legacyRetainedRowFragment);
-        $cursorData = json_decode($producer->get_reentrancy_cursor(), true);
-        $this->assertArrayNotHasKey("current_row", $cursorData);
-        $this->assertSame(["id" => 2], $cursorData["last_pk_values"]);
-
-        $fragments[] = $legacyRetainedRowFragment;
-        $producer = $this->createProducer([
-            "batch_size" => 250,
-            "cursor" => json_encode($cursorData),
-        ]);
-        $fragments = array_merge($fragments, $this->collectAllFragments($producer));
-        $importPdo = $this->executeDumpInNewDatabase(implode("\n", $fragments));
-        $this->assertDatabasesEqual($this->pdo, $importPdo, ["legacy_cursor"]);
+        $this->createProducer(["cursor" => json_encode($cursorData)]);
     }
 
     /**
@@ -523,10 +486,7 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
     // Resume edge cases (from ResumeEdgeCasesTest)
     // ──────────────────────────────────────────────────
 
-    /**
-     * Test resuming when no more rows exist after pause.
-     * Should not leave a dangling comma.
-     */
+    /** Test resuming when no more rows exist after pause. */
     public function testResumeWithNoMoreRows(): void
     {
         $this->pdo->exec("
@@ -572,12 +532,7 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             }
         }
 
-        // Verify the complete SQL is valid
         $completeSQL = implode("\n", $fragments);
-
-        // Should not have any dangling commas
-        $this->assertStringNotContainsString(",\n\n", $completeSQL);
-        $this->assertStringNotContainsString(",\nCOMMIT", $completeSQL);
 
         // Resume closes the open INSERT without emitting a row deleted before resume.
         $importPdo = $this->executeDumpInNewDatabase($completeSQL);
@@ -867,15 +822,12 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             "current_pk_columns" => ["id"],
             "last_pk_values" => ["id" => 1],
             "current_offset" => 0,
+            "current_column_names_hash" => hash("sha256", serialize(["id", "data"])),
             "state" => "emit_oversized_update",
-            "current_row" => null,
             "rows_in_batch" => 0,
-            "current_column_names" => ["id", "data"],
             "oversized_queue" => [
                 ["column" => "data"],  // missing data_type, byte_offset, total_length
             ],
-            "oversized_pk_values" => ["id" => 1],
-            "state_after_oversized" => "start_insert",
             "current_statement_size" => 0,
         ]);
 
@@ -883,45 +835,6 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         $this->expectExceptionMessage("oversized_queue");
 
         $this->createProducer(["cursor" => $cursor]);
-    }
-
-    /**
-     * A cursor in STATE_EMIT_OVERSIZED_UPDATE with null state_after_oversized
-     * should throw rather than silently fall back to an arbitrary state.
-     */
-    public function testCorruptCursorNullStateAfterOversized(): void
-    {
-        $this->pdo->exec("
-            CREATE TABLE null_state_test (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                data LONGBLOB
-            )
-        ");
-        $stmt = $this->pdo->prepare("INSERT INTO null_state_test (data) VALUES (?)");
-        $stmt->execute([random_bytes(50 * 1024)]);
-
-        // Build a cursor that's in the oversized update state but has no
-        // state_after_oversized, simulating a corrupt or hand-edited cursor.
-        $cursor = json_encode([
-            "current_table" => "null_state_test",
-            "current_pk_columns" => ["id"],
-            "last_pk_values" => ["id" => 1],
-            "current_offset" => 0,
-            "state" => "emit_oversized_update",
-            "current_row" => null,
-            "rows_in_batch" => 0,
-            "current_column_names" => ["id", "data"],
-            "oversized_queue" => [],
-            "oversized_pk_values" => ["id" => 1],
-            "state_after_oversized" => null,
-            "current_statement_size" => 0,
-        ]);
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage("state_after_oversized");
-
-        $producer = $this->createProducer(["cursor" => $cursor]);
-        $producer->next_sql_fragment();
     }
 
     // ──────────────────────────────────────────────────

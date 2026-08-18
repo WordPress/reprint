@@ -149,8 +149,6 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
 
         $cursor = json_decode($producer->get_reentrancy_cursor(), true);
         $this->assertArrayNotHasKey('current_row', $cursor);
-        $this->assertArrayNotHasKey('current_row_ends_query_batch', $cursor);
-        $this->assertArrayNotHasKey('current_column_names', $cursor);
         $this->assertSame(['id' => 1], $cursor['last_pk_values']);
     }
 
@@ -452,9 +450,6 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
                 // Verify cursor is valid JSON
                 $decoded = json_decode($cursor, true);
                 $this->assertIsArray($decoded, "Cursor must be valid JSON");
-                $this->assertArrayNotHasKey('current_row', $decoded);
-                $this->assertArrayNotHasKey('current_row_ends_query_batch', $decoded);
-                $this->assertArrayNotHasKey('current_column_names', $decoded);
                 // Re-create producer from cursor
                 $options['cursor'] = $cursor;
                 $producer = $this->createProducer($options);
@@ -554,8 +549,6 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
         $cursor = $producer->get_reentrancy_cursor();
         $cursorData = json_decode($cursor, true);
         $this->assertArrayNotHasKey('current_row', $cursorData);
-        $this->assertArrayNotHasKey('current_row_ends_query_batch', $cursorData);
-        $this->assertArrayNotHasKey('current_column_names', $cursorData);
         $this->assertSame(['id' => 1], $cursorData['last_pk_values']);
 
         // Insert more rows after cursor was saved
@@ -693,13 +686,10 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
             'current_pk_columns' => ['id'],
             'last_pk_values' => ['id' => null],
             'current_offset' => 0,
+            'current_column_names_hash' => hash('sha256', serialize(['id', 'v'])),
             'state' => 'start_insert',
-            'current_row' => null,
             'rows_in_batch' => 0,
-            'current_column_names' => null,
             'oversized_queue' => [],
-            'oversized_pk_values' => null,
-            'state_after_oversized' => null,
             'current_statement_size' => 0,
         ]);
 

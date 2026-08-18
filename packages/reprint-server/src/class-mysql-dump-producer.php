@@ -100,14 +100,8 @@ class MySQLDumpProducer
     /** @var array|null */
     private $oversized_pk_values = null;
 
-    /** @var string|null */
-    private $state_after_oversized = null;
-
     /** @var int */
     private $current_statement_size = 0;
-
-    /** @var bool Whether the next emitted row must begin with a comma. */
-    private $current_row_needs_separator = true;
 
     /**
      * @param PDO $db Database connection — either a real PDO (MySQL) or a
@@ -237,11 +231,9 @@ class MySQLDumpProducer
      */
     private function emit_insert_header()
     {
-        if ($this->row_reader->get_current_record() === null) {
-            if (!$this->row_reader->next_record()) {
-                $this->state = self::STATE_NEXT_TABLE;
-                return false;
-            }
+        if (!$this->row_reader->next_record()) {
+            $this->state = self::STATE_NEXT_TABLE;
+            return false;
         }
 
         $column_list = implode(
@@ -277,7 +269,6 @@ class MySQLDumpProducer
             $sql = $header . $first_row_sql . $this->on_duplicate_key() . ';';
             $this->current_sql_fragment = $sql;
             $this->current_statement_size = 0;
-            $this->state_after_oversized = self::STATE_START_INSERT;
             $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
         } else {
             $sql = $header . $first_row_sql;
@@ -288,28 +279,19 @@ class MySQLDumpProducer
         return true;
     }
 
-    /**
-     * Emits one row with a leading comma, or closes the open INSERT when no row remains.
-     *
-     * Cursor restoration may supply a retained row whose preceding fragment
-     * already ended in a comma. That row is emitted without another separator.
-     */
+    /** Emits one row with a leading comma, or closes the open INSERT when no row remains. */
     private function emit_row()
     {
-        if ($this->row_reader->get_current_record() === null) {
-            if (!$this->row_reader->next_record()) {
-                $this->current_sql_fragment = $this->on_duplicate_key() . ';';
-                $this->current_statement_size = 0;
-                $this->state = self::STATE_NEXT_TABLE;
-                return true;
-            }
+        if (!$this->row_reader->next_record()) {
+            $this->current_sql_fragment = $this->on_duplicate_key() . ';';
+            $this->current_statement_size = 0;
+            $this->state = self::STATE_NEXT_TABLE;
+            return true;
         }
 
         $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
         $row_sql = $this->format_row_for_insert($this->row_reader->get_current_record());
         $this->current_statement_size += strlen($row_sql) + 2;
-        $row_separator = $this->current_row_needs_separator ? "," : "";
-        $this->current_row_needs_separator = true;
         $this->row_reader->clear_current_record();
         $this->rows_in_batch++;
 
@@ -319,17 +301,16 @@ class MySQLDumpProducer
             $current_record_ends_query_batch ||
             $this->rows_in_batch >= $this->row_reader->get_batch_size()
         ) {
-            $this->finish_insert_batch($row_separator . $row_sql, $has_oversized);
+            $this->finish_insert_batch("," . $row_sql, $has_oversized);
             return true;
         }
 
         if ($has_oversized) {
-            $this->current_sql_fragment = $row_separator . $row_sql . $this->on_duplicate_key() . ';';
+            $this->current_sql_fragment = "," . $row_sql . $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
-            $this->state_after_oversized = self::STATE_START_INSERT;
             $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
         } else {
-            $this->current_sql_fragment = $row_separator . $row_sql;
+            $this->current_sql_fragment = "," . $row_sql;
         }
 
         return true;
@@ -341,7 +322,6 @@ class MySQLDumpProducer
         $this->current_sql_fragment = $sql . $this->on_duplicate_key() . ';';
         $this->current_statement_size = 0;
         if ($has_oversized) {
-            $this->state_after_oversized = self::STATE_START_INSERT;
             $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
         } else {
             $this->state = self::STATE_START_INSERT;
@@ -486,9 +466,7 @@ class MySQLDumpProducer
             $this->rows_in_batch = 0;
             $this->oversized_queue = [];
             $this->oversized_pk_values = null;
-            $this->state_after_oversized = null;
             $this->current_statement_size = 0;
-            $this->current_row_needs_separator = true;
         }
         return $has_table;
     }
@@ -525,7 +503,6 @@ class MySQLDumpProducer
          * max_statement_size.
          */
         $cursor_data["oversized_queue"] = $this->encode_oversized_queue_for_cursor($this->oversized_queue);
-        $cursor_data["state_after_oversized"] = $this->state_after_oversized;
         $cursor_data["current_statement_size"] = $this->current_statement_size;
 
         $json = json_encode($cursor_data);
@@ -577,10 +554,9 @@ class MySQLDumpProducer
     /**
      * Restores internal state from a previously-serialized cursor.
      *
-     * The row reader reloads column types because the cursor does not store
-     * them. Missing ordered names are rebuilt from table metadata. A missing
-     * current table resets the producer to STATE_INIT. When the cursor contains
-     * an ordered-column hash, a mismatch during an open INSERT is rejected.
+     * The row reader reloads column types and ordered names from table metadata.
+     * A missing current table resets the producer to STATE_INIT. An active-table
+     * cursor must contain the ordered-column hash saved at its fragment boundary.
      */
     private function initialize_from_cursor($cursor)
     {
@@ -593,9 +569,14 @@ class MySQLDumpProducer
             );
         }
         if (is_array($cursor_data)) {
+            if (array_key_exists("current_row", $cursor_data)) {
+                throw new \InvalidArgumentException(
+                    "The saved database pull cursor uses an earlier format. " .
+                    "Run db-pull --abort and start again."
+                );
+            }
+
             $this->state = $cursor_data["state"] ?? self::STATE_INIT;
-            $has_legacy_retained_row = array_key_exists("current_row", $cursor_data)
-                && $cursor_data["current_row"] !== null;
             $this->rows_in_batch = $cursor_data["rows_in_batch"] ?? 0;
             if (!is_int($this->rows_in_batch) && !is_float($this->rows_in_batch)) {
                 throw new \InvalidArgumentException(
@@ -606,48 +587,28 @@ class MySQLDumpProducer
 
             $encoded_queue = $cursor_data["oversized_queue"] ?? [];
             $this->oversized_queue = $this->decode_oversized_queue_from_cursor($encoded_queue);
-            $encoded_oversized_pk_values = $cursor_data["oversized_pk_values"] ?? null;
-            if (
-                $encoded_oversized_pk_values === null &&
-                $this->state === self::STATE_EMIT_OVERSIZED_UPDATE
-            ) {
+            $this->oversized_pk_values = null;
+            if ($this->state === self::STATE_EMIT_OVERSIZED_UPDATE) {
                 // The last emitted primary key identifies the row whose
                 // oversized columns are still being appended.
-                $encoded_oversized_pk_values = $cursor_data["last_pk_values"] ?? null;
+                $this->oversized_pk_values = $this->row_reader->decode_database_values_from_cursor(
+                    $cursor_data["last_pk_values"] ?? null
+                );
             }
-            $this->oversized_pk_values = $this->row_reader->decode_database_values_from_cursor(
-                $encoded_oversized_pk_values
-            );
-            $this->state_after_oversized = $cursor_data["state_after_oversized"] ?? null;
             $this->current_statement_size = $cursor_data["current_statement_size"] ?? 0;
-
-            if ($this->state === self::STATE_EMIT_OVERSIZED_UPDATE && $has_legacy_retained_row) {
-                if (!isset($cursor_data["oversized_pk_values"])) {
-                    throw new \InvalidArgumentException(
-                        "Invalid cursor: an oversized update with a retained row must contain oversized_pk_values"
-                    );
-                }
-                // A retained lookahead advances last_pk_values past the row
-                // whose oversized UPDATEs are still pending. Restore that row's
-                // primary key before discarding the lookahead so resume queries
-                // the following row only after those UPDATEs finish.
-                $cursor_data["last_pk_values"] = $cursor_data["oversized_pk_values"];
-                $cursor_data["current_row"] = null;
-                $cursor_data["current_row_ends_query_batch"] = false;
-                $has_legacy_retained_row = false;
-            }
 
             if (!$this->row_reader->restore_cursor_state($cursor_data)) {
                 $this->state = self::STATE_INIT;
             } else {
-                if ($this->state === self::STATE_EMIT_ROW && $has_legacy_retained_row) {
-                    $this->current_row_needs_separator = false;
-                }
                 $expected_column_names_hash = $cursor_data["current_column_names_hash"] ?? null;
-                if (
-                    $expected_column_names_hash !== null &&
-                    $this->state !== self::STATE_NEXT_TABLE
-                ) {
+                $actual_column_names_hash = $this->get_current_column_names_hash();
+                if ($actual_column_names_hash !== null) {
+                    if ($expected_column_names_hash === null) {
+                        throw new \InvalidArgumentException(
+                            "Invalid cursor: an active table cursor must contain current_column_names_hash. " .
+                            "Run db-pull --abort and start again."
+                        );
+                    }
                     if (
                         !is_string($expected_column_names_hash) ||
                         !preg_match('/^[0-9a-f]{64}$/D', $expected_column_names_hash)
@@ -656,11 +617,7 @@ class MySQLDumpProducer
                             "Invalid cursor: current_column_names_hash must be a lowercase SHA-256 string"
                         );
                     }
-                    $actual_column_names_hash = $this->get_current_column_names_hash();
-                    if (
-                        $actual_column_names_hash === null ||
-                        !hash_equals($expected_column_names_hash, $actual_column_names_hash)
-                    ) {
+                    if (!hash_equals($expected_column_names_hash, $actual_column_names_hash)) {
                         // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Cursor errors are returned as plain API messages.
                         throw new \RuntimeException(
                             "Cannot restore the database row cursor because the ordered columns for table " .
@@ -940,21 +897,12 @@ class MySQLDumpProducer
      * This keeps the cursor tiny (byte offsets only) while still producing
      * the correct UPDATE statements.
      *
-     * Returns false when the queue is drained, which signals the state machine
-     * to transition back to the state saved in $state_after_oversized.
+     * Returns false when the queue is drained so the next INSERT can begin.
      */
     private function emit_oversized_update()
     {
         if (empty($this->oversized_queue)) {
-            if ($this->state_after_oversized === null) {
-                throw new \RuntimeException(
-                    "State machine bug: state_after_oversized is null when " .
-                    "exiting oversized update loop for table " .
-                    $this->row_reader->quote_identifier($this->row_reader->get_current_table())
-                );
-            }
-            $this->state = $this->state_after_oversized;
-            $this->state_after_oversized = null;
+            $this->state = self::STATE_START_INSERT;
             $this->oversized_pk_values = null;
             return false;
         }
