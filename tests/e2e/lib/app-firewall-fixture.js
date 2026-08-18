@@ -1,9 +1,9 @@
 /**
  * Local reverse proxy which models an application firewall around WordPress.
  *
- * Multipart file_fetch requests are accepted only when their Referer points to
- * the same origin's WordPress Media Library page. All accepted requests are
- * streamed to the real E2E WordPress site.
+ * Reprint requests are accepted only when their Referer points to the same
+ * origin's WordPress Media Library page. All accepted requests are streamed
+ * to the real E2E WordPress site.
  */
 import http from 'node:http';
 import { appendFileSync } from 'node:fs';
@@ -22,21 +22,21 @@ function writeRequestLog(record) {
 const server = http.createServer((request, response) => {
     const requestUrl = new URL(request.url, `http://${request.headers.host}`);
     const contentType = request.headers['content-type'] || '';
-    const isMultipartFileFetch =
-        request.method === 'POST' &&
-        requestUrl.searchParams.get('endpoint') === 'file_fetch' &&
-        contentType.startsWith('multipart/form-data;');
+    const isReprintRequest =
+        requestUrl.searchParams.has('reprint-api') ||
+        requestUrl.searchParams.has('site-export-api');
     const expectedReferer = `http://${request.headers.host}/wp-admin/upload.php`;
     const referer = request.headers.referer || '';
-    const allowed = !isMultipartFileFetch || referer === expectedReferer;
+    const allowed = !isReprintRequest || referer === expectedReferer;
 
     writeRequestLog({
         method: request.method,
         path: request.url,
         contentType,
+        endpoint: requestUrl.searchParams.get('endpoint') || '',
         referer,
         expectedReferer,
-        isMultipartFileFetch,
+        isReprintRequest,
         allowed,
         userAgent: request.headers['user-agent'] || '',
     });
