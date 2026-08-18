@@ -8,7 +8,9 @@ namespace WordPress\Reprint\Server;
 
 /**
  * Incremental gzip compressor that emits data as it arrives rather than
- * buffering the entire response.
+ * buffering the entire response. PHP-side gzip also gives outbound WAF rules
+ * that do not decode Content-Encoding the encoded byte stream; server-level
+ * compression can run after those rules inspect the body.
  */
 class GzipOutputStream
 {

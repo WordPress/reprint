@@ -165,6 +165,9 @@
     "database-cursor-header-limit": {
       "port": 8133,
       "nginx": "cursor-header-limit"
+    },
+    "outbound-application-firewall": {
+      "port": 8134
     }
   }
 }
