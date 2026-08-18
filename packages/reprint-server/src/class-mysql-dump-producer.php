@@ -291,8 +291,8 @@ class MySQLDumpProducer
     /**
      * Emits one row with a leading comma, or closes the open INSERT when no row remains.
      *
-     * Old cursors may contain a retained row whose preceding fragment already
-     * ended in a comma. That one row is emitted without another separator.
+     * A restored cursor may contain a retained row whose preceding fragment
+     * already ended in a comma. That row is emitted without another separator.
      */
     private function emit_row()
     {
@@ -609,8 +609,8 @@ class MySQLDumpProducer
                 $encoded_oversized_pk_values === null &&
                 $this->state === self::STATE_EMIT_OVERSIZED_UPDATE
             ) {
-                // New cursors use the last emitted primary key as the
-                // oversized UPDATE target instead of storing it twice.
+                // The last emitted primary key identifies the row whose
+                // oversized columns are still being appended.
                 $encoded_oversized_pk_values = $cursor_data["last_pk_values"] ?? null;
             }
             $this->oversized_pk_values = $this->row_reader->decode_database_values_from_cursor(
@@ -625,9 +625,10 @@ class MySQLDumpProducer
                         "Invalid cursor: an oversized update with a retained row must contain oversized_pk_values"
                     );
                 }
-                // Old producers fetched the following row before emitting the
-                // oversized row. Rewind to the emitted row before dropping that
-                // lookahead from the first new-format cursor.
+                // A retained lookahead advances last_pk_values past the row
+                // whose oversized UPDATEs are still pending. Restore that row's
+                // primary key before discarding the lookahead so resume queries
+                // the following row only after those UPDATEs finish.
                 $cursor_data["last_pk_values"] = $cursor_data["oversized_pk_values"];
                 $cursor_data["current_row"] = null;
                 $cursor_data["current_row_ends_query_batch"] = false;
