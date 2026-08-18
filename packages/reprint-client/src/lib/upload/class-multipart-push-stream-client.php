@@ -3,7 +3,6 @@
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
 use function Reprint\Importer\unsupported_media_type_error_detail;
-use function Reprint\Importer\wordpress_admin_referer;
 
 require_once __DIR__ . '/../import/functions.php';
 
@@ -71,8 +70,8 @@ class MultipartPushStreamClient
     /** @var string Remote Reprint API URL used for every signed request target. */
     private string $remote_reprint_api_url;
 
-    /** @var string|null Same-origin WordPress Media Library URL for remote Reprint requests. */
-    private ?string $remote_reprint_api_referer;
+    /** @var array<string,string> Request-context headers shared by pull and push. */
+    private array $request_context_headers;
 
     /** @var Site_Export_HMAC_Client Signs the exact method and URL before transfer. */
     private Site_Export_HMAC_Client $hmac_client;
@@ -176,6 +175,8 @@ class MultipartPushStreamClient
      *
      *     @type string $remote_reprint_api_url Required remote Reprint API URL. Must use HTTPS
      *         unless `allow_http` is true.
+     *     @type array<string,string> $request_context_headers Required non-empty
+     *         header-name-to-value map selected by ImportClient.
      *     @type Site_Export_HMAC_Client $hmac_client Required signer for the
      *         exact method and request URL.
      *     @type bool $allow_http Whether to permit an explicit HTTP remote Reprint API URL.
@@ -221,10 +222,14 @@ class MultipartPushStreamClient
         if (!$hmac_client instanceof Site_Export_HMAC_Client) {
             throw new InvalidArgumentException('MultipartPushStreamClient requires a Site_Export_HMAC_Client.');
         }
+        $request_context_headers = $options['request_context_headers'] ?? null;
+        if (!is_array($request_context_headers) || $request_context_headers === []) {
+            throw new InvalidArgumentException(
+                'MultipartPushStreamClient requires a non-empty request_context_headers map.'
+            );
+        }
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
-        $this->remote_reprint_api_referer = wordpress_admin_referer(
-            $this->remote_reprint_api_url
-        );
+        $this->request_context_headers = $request_context_headers;
         $this->hmac_client = $hmac_client;
         $this->request_sizer = $options['request_sizer'] ?? new PushRequestSizer();
         if (!$this->request_sizer instanceof PushRequestSizer) {
@@ -284,11 +289,11 @@ class MultipartPushStreamClient
         $this->response_too_large = false;
 
         $request_url = $this->endpoint_url('push_upload', ['push_session_id' => $push_session_id]);
-        $headers = $this->hmac_client->get_envelope_auth_headers('POST', $request_url);
-        $headers['Content-Type'] = 'multipart/mixed; boundary=' . $this->boundary;
-        if ($this->remote_reprint_api_referer !== null) {
-            $headers['Referer'] = $this->remote_reprint_api_referer;
+        $headers = $this->request_context_headers;
+        foreach ($this->hmac_client->get_envelope_auth_headers('POST', $request_url) as $name => $value) {
+            $headers[$name] = $value;
         }
+        $headers['Content-Type'] = 'multipart/mixed; boundary=' . $this->boundary;
         $header_lines = [];
         foreach ($headers as $name => $value) {
             $header_lines[] = $name . ': ' . $value;
@@ -824,11 +829,12 @@ class MultipartPushStreamClient
             throw new InvalidArgumentException('Push requests require one or more string success statuses.');
         }
         $url = $this->endpoint_url($endpoint, $parameters);
-        $headers = $this->hmac_client->get_envelope_auth_headers($method, $url);
-        $lines = ['Accept: application/json', 'Expect:'];
-        if ($this->remote_reprint_api_referer !== null) {
-            $lines[] = 'Referer: ' . $this->remote_reprint_api_referer;
+        $headers = $this->request_context_headers;
+        $headers['Accept'] = 'application/json';
+        foreach ($this->hmac_client->get_envelope_auth_headers($method, $url) as $name => $value) {
+            $headers[$name] = $value;
         }
+        $lines = ['Expect:'];
         foreach ($headers as $name => $value) {
             $lines[] = $name . ': ' . $value;
         }

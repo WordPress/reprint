@@ -310,6 +310,76 @@ final class FilesPushCommandTest extends TestCase
         $this->assertNoSenderState($remoteReprintApiUrl);
     }
 
+    public function testFilesPushUsesTheUserAgentSavedByPreflight(): void
+    {
+        if (PHP_VERSION_ID < 80100 || !function_exists('curl_init') || !function_exists('pcntl_fork')) {
+            $this->markTestSkipped('Raw files-push request coverage requires PHP 8.1+ with curl and pcntl.');
+        }
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        $this->assertIsResource($listener, (string) $error);
+        $address = stream_socket_get_name($listener, false);
+        $this->assertIsString($address);
+        $remoteReprintApiUrl = 'http://' . $address . '/?reprint-api=1';
+        $savedUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0';
+        $this->writePreflightState($remoteReprintApiUrl, '/', $savedUserAgent);
+        $requestPath = $this->root . '/push-create-request.txt';
+
+        $child = pcntl_fork();
+        $this->assertNotSame(-1, $child);
+        if ($child === 0) {
+            $connection = stream_socket_accept($listener, 5);
+            if ($connection === false) {
+                fclose($listener);
+                exit(2);
+            }
+            stream_set_timeout($connection, 5);
+            $request = '';
+            while (strpos($request, "\r\n\r\n") === false && !feof($connection)) {
+                $piece = fread($connection, 64 * 1024);
+                if (!is_string($piece) || $piece === '') {
+                    break;
+                }
+                $request .= $piece;
+            }
+            file_put_contents($requestPath, $request);
+            fwrite(
+                $connection,
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            fclose($connection);
+            fclose($listener);
+            exit(0);
+        }
+
+        $result = $this->runFilesPush(
+            $remoteReprintApiUrl,
+            ['--secret=token', '--force-http', '--progress=jsonl']
+        );
+        pcntl_waitpid($child, $status);
+        fclose($listener);
+
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $request = (string) file_get_contents($requestPath);
+        $this->assertStringStartsWith(
+            'POST /?reprint-api=1&endpoint=push_create&push_session_id=',
+            $request
+        );
+        $this->assertStringContainsString("User-Agent: {$savedUserAgent}\r\n", $request);
+        $this->assertStringContainsString("Accept-Language: en-US,en;q=0.9\r\n", $request);
+        $this->assertStringContainsString(
+            "Referer: http://{$address}/wp-admin/upload.php\r\n",
+            $request
+        );
+        $this->assertStringContainsString("Accept: application/json\r\n", $request);
+        $this->assertStringContainsString("X-Auth-Signature: ", $request);
+        $this->assertStringContainsString("X-Auth-Nonce: ", $request);
+        $this->assertStringContainsString("X-Auth-Timestamp: ", $request);
+        $this->assertStringNotContainsString("Content-Type: multipart/mixed", $request);
+        $this->assertStringNotContainsString("Expect: 100-continue", $request);
+    }
+
     public function testFilesPushMasksTheSharedSecretInOutputAndStateFiles(): void
     {
         $secret = 'shared-secret-' . bin2hex(random_bytes(6));
@@ -510,7 +580,8 @@ final class FilesPushCommandTest extends TestCase
 
     private function writePreflightState(
         string $remoteReprintApiUrl,
-        string $documentRoot = '/'
+        string $documentRoot = '/',
+        ?string $userAgent = null
     ): void {
         $pullStateFile = $this->pullStateFileForRemoteReprintApiUrl($remoteReprintApiUrl);
         $pullStateDirectory = dirname($pullStateFile);
@@ -518,6 +589,7 @@ final class FilesPushCommandTest extends TestCase
             mkdir($pullStateDirectory, 0700, true);
         }
         $pullState = new \PullState();
+        $pullState->user_agent = $userAgent;
         $pullState->set_preflight_record([
             'http_code' => 200,
             'data' => [

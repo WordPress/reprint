@@ -248,6 +248,11 @@ final class FilesPullLocalIndexTest extends TestCase
                 'push_state_directory' => $pushStateDirectory,
                 'remote_reprint_api_url' =>
                     $remoteReprintApiUrl,
+                'request_context_headers' => [
+                    'User-Agent' => 'Reprint/1.0',
+                    'Accept-Language' => 'en-US,en;q=0.9',
+                    'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
+                ],
                 'hmac_client' => new \Site_Export_HMAC_Client('secret'),
                 'allow_http' => true,
             ], $processLock);

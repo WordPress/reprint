@@ -1,9 +1,10 @@
 /**
  * Local reverse proxy which models an application firewall around WordPress.
  *
- * Reprint requests are accepted only when their Referer points to the same
- * origin's WordPress Media Library page. It injects the planned HTTP errors,
- * then streams later requests to the real E2E WordPress site.
+ * Reprint requests are accepted only when they send the expected Referer,
+ * User-Agent, and Accept-Language headers. It injects the planned potentially
+ * transient HTTP errors, then streams later requests to the real E2E
+ * WordPress site.
  */
 import http from 'node:http';
 import { appendFileSync } from 'node:fs';
@@ -38,7 +39,18 @@ const server = http.createServer((request, response) => {
         requestUrl.searchParams.has('site-export-api');
     const expectedReferer = `http://${request.headers.host}/wp-admin/upload.php`;
     const referer = request.headers.referer || '';
-    const allowed = !isReprintRequest || referer === expectedReferer;
+    const expectedUserAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
+        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    const userAgent = request.headers['user-agent'] || '';
+    const expectedAcceptLanguage = 'en-US,en;q=0.9';
+    const acceptLanguage = request.headers['accept-language'] || '';
+    const allowed =
+        !isReprintRequest ||
+        (
+            referer === expectedReferer &&
+            userAgent === expectedUserAgent &&
+            acceptLanguage === expectedAcceptLanguage
+        );
     const endpoint = requestUrl.searchParams.get('endpoint') || '';
     const injectedStatuses = injectedStatusesByEndpoint.get(endpoint) || [];
     const injectedResponseCount = injectedResponseCounts.get(endpoint) || 0;
@@ -62,11 +74,14 @@ const server = http.createServer((request, response) => {
         endpoint,
         referer,
         expectedReferer,
+        userAgent,
+        expectedUserAgent,
+        acceptLanguage,
+        expectedAcceptLanguage,
         isReprintRequest,
         allowed,
         action,
         injectedStatus,
-        userAgent: request.headers['user-agent'] || '',
     });
 
     if (!allowed) {
