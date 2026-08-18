@@ -138,7 +138,8 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
                     + 'PRIMARY KEY (`id`)) ENGINE=InnoDB'
                 );
                 await connection.query(
-                    `INSERT INTO \`${applyCursorTable}\` (id, value) VALUES (1, 'apply-row-1')`
+                    `INSERT INTO \`${applyCursorTable}\` (id, value) VALUES `
+                    + "(1, 'apply-row-1'), (2, 'apply-row-2'), (3, 'apply-row-3')"
                 );
 
                 await connection.query(
@@ -308,16 +309,26 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
 
     it("continues db.sql from MySQL's saved position with the saved session settings", async () => {
         fileTempDir = createTempDir('e2e-mysql-file-session-settings-resume');
+        writeHookState(site, {
+            apply_cursor_insert_open: false,
+            pause_injected: 0,
+        });
+        // The exporter may split one INSERT across requests. Add the pause only
+        // after its closing fragment so the downloaded SQL remains valid.
         writeTestHooks(site, [
             'function test_hook_before_sql_batch(&$sql, $cursor) {',
+            `    $state_file = '/srv/e2e-sites/.e2e-hook-state-${site}';`,
+            '    $state = json_decode(file_get_contents($state_file), true);',
+            "    $statement_complete = substr(rtrim($sql), -1) === ';';",
             `    if (strpos($sql, 'INSERT INTO \`${applyCursorTable}\`') !== false) {`,
-            '        for ($id = 2; $id <= 301; $id++) {',
-            `            $sql .= "\\nINSERT INTO \`${applyCursorTable}\` (\`id\`, \`value\`) VALUES (" . $id . ", FROM_BASE64('" . base64_encode("apply-row-" . $id) . "')) ON DUPLICATE KEY UPDATE \`id\` = \`id\`;\\nDO SLEEP(0.02) /* reprint_db_apply_cursor_rows */;\\n";`,
-            '        }',
+            "        $state['apply_cursor_insert_open'] = true;",
             '    }',
-            "    if (substr(rtrim($sql), -1) === ';') {",
-            "        $sql .= \"\\nDO SLEEP(0.03);\\n\";",
+            "    if (!empty($state['apply_cursor_insert_open']) && $statement_complete) {",
+            "        $sql .= \"\\nDO SLEEP(5) /* reprint_db_apply_cursor_rows */;\\n\";",
+            "        $state['apply_cursor_insert_open'] = false;",
+            "        $state['pause_injected'] = ($state['pause_injected'] ?? 0) + 1;",
             '    }',
+            '    file_put_contents($state_file, json_encode($state));',
             '}',
         ].join('\n'));
 
@@ -340,11 +351,17 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             ],
             wallTimeout: 240000,
         });
+        const hookState = readHookState(site);
         removeTestHooks(site);
         assert.equal(
             pulled.exitCode,
             0,
             `file db-pull failed:\n${pulled.stderr}\n${pulled.stdout}`,
+        );
+        assert.equal(
+            hookState?.pause_injected,
+            1,
+            'db-pull did not add one pause after the complete source INSERT',
         );
         assert.equal(
             existsSync(join(fileTempDir, 'db-session-setup.sql')),
@@ -381,7 +398,8 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
                 }
                 const [[running]] = await targetMonitor.query(
                     'SELECT COUNT(*) AS queryCount FROM INFORMATION_SCHEMA.PROCESSLIST '
-                    + "WHERE INFO LIKE '%reprint_db_apply_cursor_rows%' AND ID <> CONNECTION_ID()"
+                    + "WHERE STATE = 'User sleep' "
+                    + "AND INFO LIKE '%reprint_db_apply_cursor_rows%' AND ID <> CONNECTION_ID()"
                 );
                 if (Number(running.queryCount) > 0) {
                     const [[savedPosition]] = await targetMonitor.query(
@@ -418,9 +436,10 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             expectedFileByteOffset,
             'MySQL did not save the byte immediately after the matching db.sql marker',
         );
-        assert.ok(
-            rowsVisibleBeforeKill < 301,
-            `db-apply finished the final InnoDB table before it could be stopped (${rowsVisibleBeforeKill} rows)`,
+        assert.equal(
+            rowsVisibleBeforeKill,
+            0,
+            `source rows became visible before the interrupted SQL group committed (${rowsVisibleBeforeKill} rows)`,
         );
         assert.equal(first.childProcess.kill('SIGKILL'), true);
         const killed = await first.exit;
@@ -439,15 +458,25 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             `resumed db-apply failed:\n${resumed.stderr}\n${resumed.stdout}`,
         );
 
+        const sourceConnection = await createMysqlConnection(getDbName(site));
+        let sourceApplyCursorRows;
+        try {
+            [sourceApplyCursorRows] = await sourceConnection.query(
+                `SELECT id, value FROM \`${applyCursorTable}\` ORDER BY id`
+            );
+        } finally {
+            await sourceConnection.end();
+        }
+
         const targetConnection = await createMysqlConnection(targetDb);
         try {
-            const [[applyCursorRows]] = await targetConnection.query(
-                `SELECT COUNT(*) AS rowCount FROM \`${applyCursorTable}\``
+            const [targetApplyCursorRows] = await targetConnection.query(
+                `SELECT id, value FROM \`${applyCursorTable}\` ORDER BY id`
             );
-            assert.equal(
-                Number(applyCursorRows.rowCount),
-                301,
-                'db-apply skipped InnoDB rows which MySQL rolled back with the stopped connection',
+            assert.deepEqual(
+                targetApplyCursorRows.map(row => ({ id: Number(row.id), value: row.value })),
+                sourceApplyCursorRows.map(row => ({ id: Number(row.id), value: row.value })),
+                'db-apply did not replay the rolled-back source rows exactly',
             );
 
             const completedState = JSON.parse(readFileSync(
