@@ -45,6 +45,9 @@ let
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
             include ${pkgs.nginx}/conf/fastcgi_params;
             fastcgi_param SITE_EXPORT_TEST_MODE "1";
+            ${lib.optionalString (cfg.openBasedir or false) ''
+              fastcgi_param PHP_ADMIN_VALUE "open_basedir=${siteRoot}/${name}:/tmp";
+            ''}
             fastcgi_read_timeout 120s;
             fastcgi_send_timeout 120s;
           '';

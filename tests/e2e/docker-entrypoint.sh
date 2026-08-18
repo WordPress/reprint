@@ -89,7 +89,11 @@ rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
 
 # Standard sites — serve from WordPress root so that index.php
 # bootstraps WordPress and the site-export plugin handles the request.
-jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | "\(.key) \(.value.port)"' "$REGISTRY" | while read site port; do
+jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | [.key, .value.port, (.value.openBasedir // false)] | @tsv' "$REGISTRY" | while IFS=$'\t' read -r site port open_basedir; do
+    php_admin_value=""
+    if [ "$open_basedir" = "true" ]; then
+        php_admin_value="        fastcgi_param PHP_ADMIN_VALUE \"open_basedir=${SITE_ROOT}/${site}:/tmp\";"
+    fi
     cat > "/etc/nginx/conf.d/e2e-${site}.conf" <<VHOST
 server {
     listen 127.0.0.1:${port};
@@ -102,6 +106,7 @@ server {
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
         fastcgi_param SITE_EXPORT_TEST_MODE "1";
+${php_admin_value}
         fastcgi_read_timeout 120s;
         fastcgi_send_timeout 120s;
     }
