@@ -155,7 +155,9 @@ The ruleset has temporary exclusions for existing standards debt so cleanup can
 happen in focused passes instead of one giant formatting change. New or touched
 code should follow WPCS unless the ruleset explicitly excludes that sniff.
 
-Run `composer lint:php:compat` for the separate PHP 7.4+ compatibility check.
+Run `composer lint:php:compat` to check the typed exporter source on PHP 7.2+
+and the importer on PHP 7.4+. CI builds the exporter plugin ZIP and checks every
+PHP file in that generated artifact with PHP 5.6.
 
 ### Cutting a release
 

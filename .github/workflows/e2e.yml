@@ -28,15 +28,42 @@ jobs:
           name: importer-phar
           path: reprint.phar
 
+  build-exporter-plugin:
+    name: Build PHP 5.6 exporter plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+          coverage: none
+          tools: composer:2.9.7
+
+      - run: composer install --no-dev --no-interaction --prefer-dist --working-dir=tools/php56-build
+
+      - run: ./bin/build-exporter-plugin.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exporter-plugin
+          path: reprint-exporter-wp.zip
+
   e2e:
     name: E2E (exporter PHP ${{ matrix.exporter_php }}, importer PHP ${{ matrix.importer_php }})
-    needs: build-phar
+    needs: [build-phar, build-exporter-plugin]
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
+          - exporter_php: '5.6'
+            importer_php: '8.2'
+            wordpress_version: '6.2.9'
           - exporter_php: '7.2'
             importer_php: '8.2'
           - exporter_php: '7.4'
@@ -63,6 +90,20 @@ jobs:
         with:
           name: importer-phar
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: exporter-plugin
+          path: ${{ runner.temp }}/exporter-plugin-download
+
+      - name: Extract generated exporter plugin
+        run: |
+          artifact_root="$RUNNER_TEMP/generated-exporter-plugin"
+          mkdir -p "$artifact_root/reprint-server-wp"
+          unzip -q \
+            "$RUNNER_TEMP/exporter-plugin-download/reprint-exporter-wp.zip" \
+            -d "$artifact_root/reprint-server-wp"
+          echo "E2E_EXPORTER_PROJECT_ROOT=$artifact_root" >> "$GITHUB_ENV"
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -87,6 +128,14 @@ jobs:
       - name: Setup infrastructure
         run: tests/e2e/ci/setup-infrastructure.sh "${{ matrix.exporter_php }}"
 
+      - name: Restore importer PHP and Composer for CLI tools
+        if: matrix.importer_php != matrix.exporter_php
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.importer_php }}
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
+          coverage: none
+
       - name: Setup test sites
         run: tests/e2e/setup.sh
 
@@ -96,6 +145,8 @@ jobs:
 
       - name: Provision basic site and smoke-test API
         env:
+          E2E_WORDPRESS_VERSION: ${{ matrix.wordpress_version }}
+          E2E_WP_CLI_PHP_BINARY: php${{ matrix.importer_php }}
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
           IMPORTER_PHP: php${{ matrix.importer_php }}
         working-directory: tests/e2e
@@ -141,6 +192,14 @@ jobs:
           if [ "$warmup_ok" -ne 1 ]; then
             echo "Export endpoint did not respond within the warmup window"
             exit 1
+          fi
+
+          if [ "${{ matrix.exporter_php }}" = "5.6" ]; then
+            # API dispatch exits before index.php loads the plugin's WordPress
+            # admin-registration file. A regular page request covers that path
+            # with the PHP 5.6 FPM worker too.
+            echo "=== Loading WordPress with the exporter on PHP 5.6 ==="
+            curl -fsS -o /dev/null -m 30 "http://127.0.0.1:8081/"
           fi
 
           if [ "$IMPORTER_PHP" = "php7.4" ] || [ "$IMPORTER_PHP" = "php8.0" ]; then
@@ -199,6 +258,25 @@ jobs:
             exit "$preflight_status"
           fi
 
+          if [ "${{ matrix.exporter_php }}" = "5.6" ]; then
+            echo "=== Exporter push endpoint PHP version gate ==="
+            PUSH_STATE_DIR="/tmp/e2e-exporter-push-version-state"
+            PUSH_FS_ROOT="/tmp/e2e-exporter-push-version-files"
+            mkdir -p "$PUSH_FS_ROOT"
+            printf 'push must stay disabled on PHP 5.6\n' > "$PUSH_FS_ROOT/probe.txt"
+            "$IMPORTER_PHP" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="$PUSH_STATE_DIR" --fs-root="$PUSH_FS_ROOT" --secret="$SECRET" >/dev/null
+            set +e
+            exporter_push_output="$("$IMPORTER_PHP" "$IMPORTER_PATH" files-push "${BASE}&directory=${DIR}" --state-dir="$PUSH_STATE_DIR" --fs-root="$PUSH_FS_ROOT" --secret="$SECRET" --force-http 2>&1)"
+            exporter_push_status=$?
+            set -e
+            if [ "$exporter_push_status" -ne 1 ]; then
+              echo "$exporter_push_output"
+              echo "Expected the PHP 5.6 exporter to reject files-push; got ${exporter_push_status}"
+              exit 1
+            fi
+            echo "$exporter_push_output" | grep -F 'Push endpoints require PHP 7.2 or newer'
+          fi
+
           echo "=== Importer files-pull ==="
           # One files-pull invocation has no wall-clock self-limit on the CLI
           # (max_execution_time is 0), so on a slow runner it can still be
@@ -236,8 +314,26 @@ jobs:
             exit "$files_pull_status"
           fi
 
+          if [ "${{ matrix.exporter_php }}" = "5.6" ]; then
+            echo "=== Importer db-pull ==="
+            db_pull_status=2
+            db_pull_attempt=0
+            while { [ "$db_pull_status" -eq 2 ] || [ "$db_pull_status" -eq 124 ]; } \
+                  && [ "$db_pull_attempt" -lt 6 ]; do
+              db_pull_attempt=$((db_pull_attempt + 1))
+              db_pull_output="$(timeout 90 "$IMPORTER_PHP" "$IMPORTER_PATH" db-pull "${BASE}&directory=${DIR}" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" 2>&1)" && db_pull_status=0 || db_pull_status=$?
+              echo "$db_pull_output" | head -50
+            done
+            if [ "$db_pull_status" -ne 0 ]; then
+              echo "EXIT: $db_pull_status (db-pull did not complete after ${db_pull_attempt} attempts)"
+              exit "$db_pull_status"
+            fi
+            test -s "$STATE_DIR/db.sql"
+            grep -F 'CREATE TABLE' "$STATE_DIR/db.sql" >/dev/null
+          fi
+
       - name: Run E2E tests
-        if: matrix.exporter_php != '7.2'
+        if: matrix.exporter_php != '5.6' && matrix.exporter_php != '7.2'
         env:
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
         working-directory: tests/e2e
