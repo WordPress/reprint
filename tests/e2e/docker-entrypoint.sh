@@ -109,6 +109,35 @@ server {
 VHOST
 done
 
+# Database cursor header limit sites
+jq -r '.sites | to_entries[] | select(.value.nginx == "cursor-header-limit") | "\(.key) \(.value.port)"' "$REGISTRY" | while read site port; do
+    cat > "/etc/nginx/conf.d/e2e-${site}.conf" <<VHOST
+server {
+    listen 127.0.0.1:${port};
+    root ${SITE_ROOT}/${site};
+    index index.php;
+
+    # Parse the request first, then apply an 8190-byte cursor-value ceiling
+    # modeled after common shared Apache hosts so the test receives a 431.
+    large_client_header_buffers 4 64k;
+    if (\$http_x_export_cursor ~ "^.{8191,}\$") {
+        return 431;
+    }
+
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location ~ \.php\$ {
+        fastcgi_pass unix:${FPM_SOCKET};
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_param SITE_EXPORT_TEST_MODE "1";
+        fastcgi_read_timeout 120s;
+        fastcgi_send_timeout 120s;
+    }
+}
+VHOST
+done
+
 # Redirect sites
 jq -r '.sites | to_entries[] | select(.value.nginx == "redirect") | "\(.key) \(.value.port) \(.value.redirectTo)"' "$REGISTRY" | while read site port target; do
     cat > "/etc/nginx/conf.d/e2e-${site}.conf" <<VHOST
