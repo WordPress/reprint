@@ -301,7 +301,13 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
                             const decoded = JSON.parse(
                                 Buffer.from(savedSourceCursor, 'base64').toString('utf8')
                             );
-                            if (decoded.current_table === table) {
+                            // MyISAM rows can become visible before the importer saves
+                            // the cursor after their INSERT. A complete row count
+                            // alone does not confirm the finished-table position.
+                            if (
+                                decoded.current_table === table
+                                && (completedRowCount === null || decoded.state === 'next_table')
+                            ) {
                                 return { importedRowCount, savedSourceCursor, decoded };
                             }
                         }
@@ -316,7 +322,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
                     ) {
                         const result = await databasePull.exit;
                         assert.fail(
-                            `db-pull exited before MySQL saved partial work (${result.code}/${result.signal}):\n`
+                            `db-pull exited before MySQL saved the requested table position (${result.code}/${result.signal}):\n`
                             + databasePull.output.stderr + databasePull.output.stdout,
                         );
                     }
@@ -325,7 +331,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             } finally {
                 await interruptedTarget.end();
             }
-            assert.fail(`db-pull did not save a partial position for ${table}`);
+            assert.fail(`db-pull did not save the requested position for ${table}`);
         }
 
         const firstPosition = await waitForSavedTablePosition(sourceTable, first);
