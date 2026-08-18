@@ -33,7 +33,7 @@
         "test": "cd tests && phpunit --testdox --colors",
         "test:coverage": "cd tests && phpunit --coverage-html coverage/ --coverage-text",
         "build:phar": "./bin/build-reprint-phar.sh",
-        "build:server-plugin": "rm -f reprint-exporter-wp.zip && composer install --no-dev --working-dir=reprint-server-wp && cd reprint-server-wp && zip -r ../reprint-exporter-wp.zip . -x './secret.php'",
+        "build:server-plugin": "./bin/build-exporter-plugin.sh",
         "build:exporter-plugin": "@build:server-plugin",
         "analyze": "phpstan analyze --memory-limit=1G",
         "lint:php": "phpcs --standard=phpcs.xml.dist",

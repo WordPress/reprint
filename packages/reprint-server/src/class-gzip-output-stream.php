@@ -7,10 +7,15 @@
 namespace WordPress\Reprint\Server;
 
 /**
- * Incremental gzip compressor that emits data as it arrives rather than
- * buffering the entire response. PHP-side gzip also gives outbound WAF rules
- * that do not decode Content-Encoding the encoded byte stream; server-level
- * compression can run after those rules inspect the body.
+ * Incremental response writer.
+ *
+ * PHP 7.0 and newer can gzip each bounded write without buffering the whole
+ * response. PHP 5.6 lacks the incremental zlib API, so it sends the same
+ * multipart stream without a Content-Encoding header.
+ *
+ * PHP-side gzip also gives outbound WAF rules that do not decode
+ * Content-Encoding the encoded byte stream; server-level compression can run
+ * after those rules inspect the body.
  */
 class GzipOutputStream
 {
@@ -20,7 +25,9 @@ class GzipOutputStream
 
     public function __construct(bool $enabled = true)
     {
-        $this->enabled = $enabled;
+        $this->enabled = $enabled
+            && function_exists('deflate_init')
+            && function_exists('deflate_add');
         if ($this->enabled) {
             $this->deflate_ctx = deflate_init(ZLIB_ENCODING_GZIP, ["level" => 6]);
             if ($this->deflate_ctx === false) {

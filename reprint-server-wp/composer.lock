@@ -4,11 +4,11 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "648476139f09aef406475c1adbe2b8ae",
+    "content-hash": "8686a9b348ce7bca80631b264318c871",
     "packages": [
         {
             "name": "wp-php-toolkit/reprint-server",
-            "version": "dev-phase-a",
+            "version": "dev-codex/php56-exporter-plugin",
             "dist": {
                 "type": "path",
                 "url": "../packages/reprint-server",
@@ -56,7 +56,7 @@
     "prefer-stable": true,
     "prefer-lowest": false,
     "platform": {
-        "php": ">=7.4"
+        "php": ">=7.2"
     },
     "platform-dev": {},
     "plugin-api-version": "2.9.0"

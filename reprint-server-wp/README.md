@@ -4,6 +4,11 @@ When working from this monorepo checkout, run `composer install` in
 `reprint-server-wp/` to populate the bundled `vendor/` directory used by the
 plugin runtime. GitHub release ZIPs already include that vendor tree.
 
+The maintained source keeps its PHP 7.2 type declarations. The release build
+copies that source to a temporary directory and removes unsupported syntax from
+the copy. The resulting plugin ZIP supports pull endpoints on PHP 5.6.20 or
+newer. Push endpoints require PHP 7.2 or newer.
+
 ## API Routing
 
 Many shared hosts (SiteGround, GoDaddy, etc.) block direct PHP execution inside `wp-content/plugins/` at the web server level, returning a 403 before the request ever reaches PHP. To work around this, export API requests are routed through WordPress's front controller (`index.php` at the site root), which hosts never block.

@@ -100,7 +100,11 @@ and `wp-php-toolkit/reprint-importer`. Each renamed package replaces its
 predecessor at `self.version`, so the old and new names cannot be installed
 side by side; consumers migrate by changing the requirement name.
 
-Both packages depend on [`wp-php-toolkit/data-liberation`](https://packagist.org/packages/wp-php-toolkit/data-liberation) and [`wp-php-toolkit/html`](https://packagist.org/packages/wp-php-toolkit/html), which Composer pulls in automatically.
+The client package depends on
+[`wp-php-toolkit/data-liberation`](https://packagist.org/packages/wp-php-toolkit/data-liberation)
+and [`wp-php-toolkit/html`](https://packagist.org/packages/wp-php-toolkit/html),
+which Composer pulls in automatically. The server package has no package
+dependencies.
 
 ## Repository layout
 
@@ -117,11 +121,12 @@ Both packages depend on [`wp-php-toolkit/data-liberation`](https://packagist.org
 
 On the **migration source** side:
 
- - PHP 7.4+
+ - The release WordPress exporter plugin supports pull endpoints on PHP 5.6.20+; push endpoints require PHP 7.2+
+ - The typed `wp-php-toolkit/reprint-server` Composer package requires PHP 7.2+
  - ext-json — JSON encoding/decoding
  - ext-hash — hash_hmac, hash_equals
- - ext-zlib — deflate_init/deflate_add for gzip streaming
- - ext-pdo + ext-pdo_mysql — database access (already in composer.json)
+ - ext-zlib (optional) — PHP 7.0+ uses it for gzip streaming; otherwise the exporter streams the multipart response without compression
+ - ext-pdo + ext-pdo_mysql — recommended for MySQL exports; the plugin falls back to WordPress's wpdb layer when they are unavailable
 
 Hosts exposing the push endpoints must set `display_errors=Off` at PHP
 startup, through `php.ini`, `.user.ini`, or the PHP-FPM pool configuration.
