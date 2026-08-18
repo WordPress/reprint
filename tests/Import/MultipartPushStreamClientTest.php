@@ -557,6 +557,94 @@ final class MultipartPushStreamClientTest extends TestCase {
         }
     }
 
+    public function testPushControlRequestReportsHttp415AsPossibleFirewallGreylist(): void {
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
+            $this->markTestSkipped('HTTP 415 wire coverage requires PHP curl and pcntl.');
+        }
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        $this->assertNotFalse($listener, (string) $error);
+        $address = stream_socket_get_name($listener, false);
+        $response_body = (string) json_encode(['error' => 'Unsupported Media Type']);
+        $child = $this->fork_http_415_responder(
+            $listener,
+            'POST /?reprint-api=1&endpoint=push_create',
+            $response_body,
+            'application/json'
+        );
+
+        $client = new MultipartPushStreamClient([
+            'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
+            'allow_http' => true,
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'connect_timeout' => 2,
+            'response_timeout' => 2,
+        ]);
+        $result = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => str_repeat('5', 32),
+        ], ['created']);
+        pcntl_waitpid($child, $status);
+        fclose($listener);
+
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+        $this->assertSame('failed', $result['status']);
+        $this->assertSame('unsupported_media_type', $result['reason']);
+        $this->assertSame(0, $result['parts_sent']);
+        $this->assertSame(0, $result['body_bytes_sent']);
+        $this->assertNull($result['response']);
+        $this->assertStringContainsString('Unsupported Media Type', $result['detail']);
+        $this->assertStringContainsString('greylist', $result['detail']);
+        $this->assertStringContainsString('allowlist', $result['detail']);
+    }
+
+    public function testPushUploadReportsHttp415AsPossibleFirewallGreylist(): void {
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork') || PHP_VERSION_ID < 80100) {
+            $this->markTestSkipped('HTTP 415 upload coverage requires PHP curl, pcntl, and CURL_READFUNC_PAUSE support.');
+        }
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        $this->assertNotFalse($listener, (string) $error);
+        $address = stream_socket_get_name($listener, false);
+        $response_body = '<!doctype html><title>Unsupported Media Type</title>';
+        $child = $this->fork_http_415_responder(
+            $listener,
+            'POST /?reprint-api=1&endpoint=push_upload&push_session_id=',
+            $response_body,
+            'text/html',
+            true
+        );
+
+        $client = new MultipartPushStreamClient([
+            'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
+            'allow_http' => true,
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'connect_timeout' => 2,
+            'stall_timeout' => 2,
+            'response_timeout' => 2,
+        ]);
+        $this->assertTrue($client->start_upload_request(str_repeat('a', 32)));
+        $this->assertTrue($client->send_part([
+            'type' => 'file',
+            'path' => 'blocked.php',
+            'total_bytes' => 1,
+            'offset' => 0,
+            'payload' => 'x',
+        ]));
+        $result = $client->finish_request();
+        pcntl_waitpid($child, $status);
+        fclose($listener);
+
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+        $this->assertSame('failed', $result['status']);
+        $this->assertSame('unsupported_media_type', $result['reason']);
+        $this->assertSame(1, $result['parts_sent']);
+        $this->assertGreaterThan(0, $result['body_bytes_sent']);
+        $this->assertNull($result['response']);
+        $this->assertStringContainsString('Unsupported Media Type', $result['detail']);
+        $this->assertStringContainsString('greylist', $result['detail']);
+        $this->assertStringContainsString('allowlist', $result['detail']);
+    }
+
     public function testUploadRequestStopsReadingAnOversizedResponse(): void {
         if (!function_exists('curl_init') || !function_exists('pcntl_fork') || PHP_VERSION_ID < 80100) {
             $this->markTestSkipped('Raw upload-response coverage requires PHP curl, pcntl, and CURL_READFUNC_PAUSE support.');
@@ -967,6 +1055,66 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertGreaterThan(1.0, $elapsed);
         $this->assertTrue($sent, (string) json_encode($result));
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
+    }
+
+    /**
+     * @param resource $listener Open loopback listener.
+     */
+    private function fork_http_415_responder(
+        $listener,
+        string $request_line_prefix,
+        string $response_body,
+        string $response_content_type,
+        bool $read_complete_multipart_body = false
+    ): int {
+        $child = pcntl_fork();
+        $this->assertNotSame(-1, $child);
+        if ($child !== 0) {
+            return $child;
+        }
+
+        $connection = stream_socket_accept($listener, 3);
+        if ($connection === false) {
+            exit(2);
+        }
+        stream_set_timeout($connection, 3);
+        $request = '';
+        while (strpos($request, "\r\n\r\n") === false && !feof($connection)) {
+            $piece = fread($connection, 64 * 1024);
+            if (!is_string($piece) || $piece === '') {
+                exit(3);
+            }
+            $request .= $piece;
+        }
+        if (strpos($request, $request_line_prefix) !== 0) {
+            exit(4);
+        }
+
+        if ($read_complete_multipart_body) {
+            if (preg_match('/boundary=(reprint-[a-f0-9]+)/', $request, $matches) !== 1) {
+                exit(5);
+            }
+            $closing_boundary = '--' . $matches[1] . "--\r\n";
+            while (strpos($request, $closing_boundary) === false && !feof($connection)) {
+                $piece = fread($connection, 64 * 1024);
+                if (!is_string($piece) || $piece === '') {
+                    exit(6);
+                }
+                $request .= $piece;
+            }
+            if (strpos($request, $closing_boundary) === false) {
+                exit(7);
+            }
+        }
+
+        fwrite(
+            $connection,
+            "HTTP/1.1 415 Unsupported Media Type\r\nContent-Type: {$response_content_type}\r\nContent-Length: "
+                . strlen($response_body) . "\r\nConnection: close\r\n\r\n" . $response_body
+        );
+        fclose($connection);
+        fclose($listener);
+        exit(0);
     }
 
     private function read_available($connection): string {
