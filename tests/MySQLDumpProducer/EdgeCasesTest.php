@@ -148,7 +148,9 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
         } while (strpos($sql, 'INSERT INTO') !== 0);
 
         $cursor = json_decode($producer->get_reentrancy_cursor(), true);
-        $this->assertNull($cursor['current_row']);
+        $this->assertArrayNotHasKey('current_row', $cursor);
+        $this->assertArrayNotHasKey('current_row_ends_query_batch', $cursor);
+        $this->assertArrayNotHasKey('current_column_names', $cursor);
         $this->assertSame(['id' => 1], $cursor['last_pk_values']);
     }
 
@@ -408,7 +410,7 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
     }
 
     // ──────────────────────────────────────────────────
-    // Cursor round-trip with binary data in current_row
+    // Cursor round-trip with binary row data
     // ──────────────────────────────────────────────────
 
     /**
@@ -450,6 +452,9 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
                 // Verify cursor is valid JSON
                 $decoded = json_decode($cursor, true);
                 $this->assertIsArray($decoded, "Cursor must be valid JSON");
+                $this->assertArrayNotHasKey('current_row', $decoded);
+                $this->assertArrayNotHasKey('current_row_ends_query_batch', $decoded);
+                $this->assertArrayNotHasKey('current_column_names', $decoded);
                 // Re-create producer from cursor
                 $options['cursor'] = $cursor;
                 $producer = $this->createProducer($options);
@@ -547,6 +552,11 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
         }
 
         $cursor = $producer->get_reentrancy_cursor();
+        $cursorData = json_decode($cursor, true);
+        $this->assertArrayNotHasKey('current_row', $cursorData);
+        $this->assertArrayNotHasKey('current_row_ends_query_batch', $cursorData);
+        $this->assertArrayNotHasKey('current_column_names', $cursorData);
+        $this->assertSame(['id' => 1], $cursorData['last_pk_values']);
 
         // Insert more rows after cursor was saved
         for ($i = 6; $i <= 10; $i++) {
@@ -564,10 +574,7 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
 
         $sql = implode("\n", $fragments);
         $importPdo = $this->executeDumpInNewDatabase($sql);
-        $count = (int) $importPdo->query("SELECT COUNT(*) FROM t")->fetchColumn();
-
-        // Should have all 10 rows (or at least ≥ the cached row + new ones)
-        $this->assertGreaterThanOrEqual(10, $count);
+        $this->assertDatabasesEqual($this->pdo, $importPdo, ['t']);
     }
 
     // ──────────────────────────────────────────────────
@@ -932,12 +939,10 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
         }
 
         $producer = $this->createProducer(['batch_size' => 5]);
-        $fragments = [];
 
         // Process first batch
         while ($producer->next_sql_fragment()) {
             $frag = $producer->get_sql_fragment();
-            $fragments[] = $frag;
             if (strpos($frag, 'INSERT INTO `t`') === 0) {
                 break;
             }
@@ -948,23 +953,13 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
         // Add a column — the resumed producer will see a different schema
         $this->pdo->exec("ALTER TABLE t ADD COLUMN extra VARCHAR(10) DEFAULT 'new'");
 
-        // Resume — the current_column_names from cursor won't include 'extra'
-        // but the new query will. This tests whether the producer handles
-        // schema evolution gracefully.
-        $producer2 = $this->createProducer(['batch_size' => 5, 'cursor' => $cursor]);
-        while ($producer2->next_sql_fragment()) {
-            $frag = $producer2->get_sql_fragment();
-            if ($frag !== null) {
-                $fragments[] = $frag;
-            }
-        }
-
-        $sql = implode("\n", $fragments);
-
-        // The SQL should at least be syntactically valid and importable
-        // (even if the column count changes between INSERT batches)
-        $this->assertSQLContains('INSERT INTO', $sql);
-        $this->assertSQLContains('COMMIT', $sql);
+        // The open INSERT already declared its ordered columns. Continuing
+        // after that order changes could attach values to the wrong columns.
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage(
+            'ordered columns for table `t` changed. Run db-pull --abort and start again.'
+        );
+        $this->createProducer(['batch_size' => 5, 'cursor' => $cursor]);
     }
 
     // ──────────────────────────────────────────────────

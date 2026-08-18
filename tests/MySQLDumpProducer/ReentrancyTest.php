@@ -151,11 +151,7 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         $completeSQL = implode("\n", $allFragments);
         $importPdo = $this->executeDumpInNewDatabase($completeSQL);
 
-        // Verify row count
-        $count = $importPdo
-            ->query("SELECT COUNT(*) FROM no_pk_large")
-            ->fetchColumn();
-        $this->assertEquals(5000, $count);
+        $this->assertDatabasesEqual($this->pdo, $importPdo, ["no_pk_large"]);
     }
 
     /**
@@ -238,10 +234,8 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
                 $sql = $producer->get_sql_fragment();
                 if ($sql !== null) {
                     $allFragments[] = $sql;
-                    // Count row fragments (they start with opening parenthesis)
-                    $trimmed = ltrim($sql);
-                    if ($trimmed !== "" && $trimmed[0] === "(") {
-                        $rowsInIteration++;
+                    if ($this->isInsertRowFragment($sql)) {
+                        ++$rowsInIteration;
                     }
                 }
                 $fragmentCount++;
@@ -395,7 +389,13 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         $this->assertIsArray($cursorData);
         $this->assertArrayHasKey("current_table", $cursorData);
         $this->assertArrayHasKey("state", $cursorData);
-        $this->assertArrayHasKey("current_row", $cursorData);
+        $this->assertArrayNotHasKey("current_row", $cursorData);
+        $this->assertArrayNotHasKey("current_row_ends_query_batch", $cursorData);
+        $this->assertArrayNotHasKey("current_column_names", $cursorData);
+        $this->assertMatchesRegularExpression(
+            '/^[0-9a-f]{64}$/D',
+            $cursorData["current_column_names_hash"]
+        );
 
         // Resume from cursor
         $producer2 = $this->createProducer([
@@ -406,6 +406,56 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         // Should be able to continue
         $this->assertFalse($producer2->is_finished());
         $this->assertTrue($producer2->next_sql_fragment());
+    }
+
+    public function testLegacyCursorEmitsItsRetainedRowOnce(): void
+    {
+        $this->pdo->exec("CREATE TABLE legacy_cursor (id INT PRIMARY KEY, data VARCHAR(50))");
+        $this->pdo->exec(
+            "INSERT INTO legacy_cursor VALUES (1, 'first'), (2, 'second'), (3, 'third')"
+        );
+
+        $producer = $this->createProducer(["batch_size" => 250]);
+        $fragments = [];
+        while ($producer->next_sql_fragment()) {
+            $fragment = (string) $producer->get_sql_fragment();
+            $fragments[] = $fragment;
+            if (strpos($fragment, 'INSERT INTO `legacy_cursor`') === 0) {
+                $fragments[count($fragments) - 1] .= ',';
+                break;
+            }
+        }
+
+        $legacyCursor = json_decode($producer->get_reentrancy_cursor(), true);
+        unset($legacyCursor["current_column_names_hash"]);
+        $legacyCursor["last_pk_values"] = ["id" => 2];
+        $legacyCursor["current_row"] = [
+            "id" => 2,
+            "data" => ["__binary__" => base64_encode("second")],
+        ];
+        $legacyCursor["current_row_ends_query_batch"] = false;
+        $legacyCursor["current_column_names"] = ["id", "data"];
+
+        $producer = $this->createProducer([
+            "batch_size" => 250,
+            "cursor" => json_encode($legacyCursor),
+        ]);
+        $this->assertTrue($producer->next_sql_fragment());
+        $legacyRetainedRowFragment = (string) $producer->get_sql_fragment();
+        $this->assertStringStartsWith("(", $legacyRetainedRowFragment);
+        $this->assertStringContainsString(base64_encode("second"), $legacyRetainedRowFragment);
+        $cursorData = json_decode($producer->get_reentrancy_cursor(), true);
+        $this->assertArrayNotHasKey("current_row", $cursorData);
+        $this->assertSame(["id" => 2], $cursorData["last_pk_values"]);
+
+        $fragments[] = $legacyRetainedRowFragment;
+        $producer = $this->createProducer([
+            "batch_size" => 250,
+            "cursor" => json_encode($cursorData),
+        ]);
+        $fragments = array_merge($fragments, $this->collectAllFragments($producer));
+        $importPdo = $this->executeDumpInNewDatabase(implode("\n", $fragments));
+        $this->assertDatabasesEqual($this->pdo, $importPdo, ["legacy_cursor"]);
     }
 
     /**
@@ -486,7 +536,7 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             )
         ");
 
-        // Insert 10 rows
+        // Insert rows which can disappear after the first open INSERT part.
         for ($i = 1; $i <= 10; $i++) {
             $this->pdo->exec("INSERT INTO resume_test (data) VALUES ('row_{$i}')");
         }
@@ -499,17 +549,15 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             $sql = $producer->get_sql_fragment();
             $fragments[] = $sql;
 
-            // Stop after first INSERT batch (5 rows)
+            // Stop after the first row opens an INSERT statement.
             if (strpos($sql, 'INSERT INTO `resume_test`') === 0) {
                 break;
             }
         }
 
-        // Get cursor at the completed batch boundary after row 5.
+        // Save the last emitted row position, then remove every possible next row.
         $cursor = $producer->get_reentrancy_cursor();
-
-        // DELETE remaining rows - simulate data disappearing
-        $this->pdo->exec("DELETE FROM resume_test WHERE id > 5");
+        $this->pdo->exec("DELETE FROM resume_test WHERE id > 1");
 
         // Resume from cursor
         $producer2 = $this->createProducer([
@@ -532,11 +580,9 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         $this->assertStringNotContainsString(",\n\n", $completeSQL);
         $this->assertStringNotContainsString(",\nCOMMIT", $completeSQL);
 
-        // The producer does not prefetch beyond the completed batch boundary,
-        // so rows deleted before resume are not emitted from saved state.
+        // Resume closes the open INSERT without inventing a retained row.
         $importPdo = $this->executeDumpInNewDatabase($completeSQL);
-        $count = $importPdo->query("SELECT COUNT(*) FROM resume_test")->fetchColumn();
-        $this->assertEquals(5, $count);
+        $this->assertDatabasesEqual($this->pdo, $importPdo, ["resume_test"]);
     }
 
     /**
@@ -930,9 +976,8 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
                     $allFragments[] = $sql;
                     $fragmentsInIteration++;
 
-                    // Count rows in INSERT statements
-                    if (strpos($sql, "INSERT INTO") === 0) {
-                        $rowsInIteration += substr_count($sql, "(");
+                    if ($this->isInsertRowFragment($sql)) {
+                        ++$rowsInIteration;
                     }
                 }
 
@@ -962,5 +1007,14 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         );
 
         return $allFragments;
+    }
+
+    /** Returns whether one producer fragment emits one INSERT row. */
+    private function isInsertRowFragment(string $sql): bool
+    {
+        $trimmed = ltrim( $sql );
+        return strpos( $trimmed, "INSERT INTO" ) === 0 ||
+            ( $trimmed !== "" && $trimmed[0] === "(" ) ||
+            substr( $trimmed, 0, 2 ) === ",(";
     }
 }

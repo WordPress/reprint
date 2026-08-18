@@ -12,9 +12,9 @@ require_once __DIR__ . "/class-database-rows-reader.php";
  * This class exists because shared hosting environments kill long-running PHP processes.
  * A traditional mysqldump would time out on large databases. Instead, this producer
  * yields one SQL fragment at a time — a CREATE TABLE, a batched INSERT, or an UPDATE —
- * and exposes a JSON cursor that captures the full internal state. The caller can
+ * and exposes a compact JSON cursor after each emitted fragment. The caller can
  * serialize that cursor, end the HTTP request, and resume from exactly where it left
- * off in a subsequent request.
+ * off in a subsequent request without sending a retained database row back to the source.
  *
  * The producer is a finite state machine that walks through tables sequentially:
  *
@@ -105,6 +105,9 @@ class MySQLDumpProducer
 
     /** @var int */
     private $current_statement_size = 0;
+
+    /** @var bool Whether the next row fragment needs its leading comma. */
+    private $current_row_needs_separator = true;
 
     /**
      * @param PDO $db Database connection — either a real PDO (MySQL) or a
@@ -270,26 +273,14 @@ class MySQLDumpProducer
             return true;
         }
 
-        $has_next_row = $this->row_reader->next_record();
-
-        if (!$has_next_row) {
-            $sql = $header . $first_row_sql . $this->on_duplicate_key() . ';';
-            $this->current_sql_fragment = $sql;
-            $this->current_statement_size = 0;
-            if ($has_oversized) {
-                $this->state_after_oversized = self::STATE_NEXT_TABLE;
-                $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
-            } else {
-                $this->state = self::STATE_NEXT_TABLE;
-            }
-        } elseif ($has_oversized) {
+        if ($has_oversized) {
             $sql = $header . $first_row_sql . $this->on_duplicate_key() . ';';
             $this->current_sql_fragment = $sql;
             $this->current_statement_size = 0;
             $this->state_after_oversized = self::STATE_START_INSERT;
             $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
         } else {
-            $sql = $header . $first_row_sql . ",";
+            $sql = $header . $first_row_sql;
             $this->current_sql_fragment = $sql;
             $this->state = self::STATE_EMIT_ROW;
         }
@@ -298,19 +289,27 @@ class MySQLDumpProducer
     }
 
     /**
-     * Emits one row as a SQL fragment, terminated with "," (more rows follow)
-     * or ";" (INSERT statement complete).
+     * Emits one row with a leading comma, or closes the open INSERT when no row remains.
+     *
+     * Old cursors may contain a retained row whose preceding fragment already
+     * ended in a comma. That one row is emitted without another separator.
      */
     private function emit_row()
     {
         if ($this->row_reader->get_current_record() === null) {
-            $this->state = self::STATE_NEXT_TABLE;
-            return false;
+            if (!$this->row_reader->next_record()) {
+                $this->current_sql_fragment = $this->on_duplicate_key() . ';';
+                $this->current_statement_size = 0;
+                $this->state = self::STATE_NEXT_TABLE;
+                return true;
+            }
         }
 
         $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
         $row_sql = $this->format_row_for_insert($this->row_reader->get_current_record());
         $this->current_statement_size += strlen($row_sql) + 2;
+        $row_separator = $this->current_row_needs_separator ? "," : "";
+        $this->current_row_needs_separator = true;
         $this->row_reader->clear_current_record();
         $this->rows_in_batch++;
 
@@ -320,28 +319,17 @@ class MySQLDumpProducer
             $current_record_ends_query_batch ||
             $this->rows_in_batch >= $this->row_reader->get_batch_size()
         ) {
-            $this->finish_insert_batch($row_sql, $has_oversized);
+            $this->finish_insert_batch($row_separator . $row_sql, $has_oversized);
             return true;
         }
 
-        $has_next_row = $this->row_reader->next_record();
-
-        if (!$has_next_row) {
-            $this->current_sql_fragment = $row_sql . $this->on_duplicate_key() . ';';
-            $this->current_statement_size = 0;
-            if ($has_oversized) {
-                $this->state_after_oversized = self::STATE_NEXT_TABLE;
-                $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
-            } else {
-                $this->state = self::STATE_NEXT_TABLE;
-            }
-        } elseif ($has_oversized) {
-            $this->current_sql_fragment = $row_sql . $this->on_duplicate_key() . ';';
+        if ($has_oversized) {
+            $this->current_sql_fragment = $row_separator . $row_sql . $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
             $this->state_after_oversized = self::STATE_START_INSERT;
             $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
         } else {
-            $this->current_sql_fragment = $row_sql . ",";
+            $this->current_sql_fragment = $row_separator . $row_sql;
         }
 
         return true;
@@ -500,24 +488,34 @@ class MySQLDumpProducer
             $this->oversized_pk_values = null;
             $this->state_after_oversized = null;
             $this->current_statement_size = 0;
+            $this->current_row_needs_separator = true;
         }
         return $has_table;
     }
 
     /**
-     * Returns a JSON string that captures the producer's complete internal state.
+     * Returns the durable producer state needed to resume as a JSON string.
      *
      * The caller can pass this string back as the "cursor" option to a new
      * MySQLDumpProducer to resume exactly where this one left off. The JSON is
      * NOT base64-encoded — that's the HTTP layer's concern (export.php).
      *
-     * String values in the in-flight row and primary key checkpoints are
-     * wrapped in {"__binary__": "<base64>"} markers because raw database
-     * bytes can't survive JSON encoding.
+     * String values in primary key checkpoints are wrapped in
+     * {"__binary__": "<base64>"} markers because raw database bytes can't
+     * survive JSON encoding. Retained rows and ordered column names stay local.
      */
     public function get_reentrancy_cursor()
     {
         $cursor_data = $this->row_reader->get_cursor_state();
+        unset(
+            $cursor_data["current_row"],
+            $cursor_data["current_row_ends_query_batch"],
+            $cursor_data["current_column_names"]
+        );
+        $current_column_names_hash = $this->get_current_column_names_hash();
+        if ($current_column_names_hash !== null) {
+            $cursor_data["current_column_names_hash"] = $current_column_names_hash;
+        }
         $cursor_data["state"] = $this->state;
         $cursor_data["rows_in_batch"] = $this->rows_in_batch;
         /**
@@ -525,9 +523,6 @@ class MySQLDumpProducer
          * max_statement_size.
          */
         $cursor_data["oversized_queue"] = $this->encode_oversized_queue_for_cursor($this->oversized_queue);
-        $cursor_data["oversized_pk_values"] = $this->row_reader->encode_database_values_for_cursor(
-            $this->oversized_pk_values
-        );
         $cursor_data["state_after_oversized"] = $this->state_after_oversized;
         $cursor_data["current_statement_size"] = $this->current_statement_size;
 
@@ -597,6 +592,8 @@ class MySQLDumpProducer
         }
         if (is_array($cursor_data)) {
             $this->state = $cursor_data["state"] ?? self::STATE_INIT;
+            $has_legacy_retained_row = array_key_exists("current_row", $cursor_data)
+                && $cursor_data["current_row"] !== null;
             $this->rows_in_batch = $cursor_data["rows_in_batch"] ?? 0;
             if (!is_int($this->rows_in_batch) && !is_float($this->rows_in_batch)) {
                 throw new \InvalidArgumentException(
@@ -607,16 +604,87 @@ class MySQLDumpProducer
 
             $encoded_queue = $cursor_data["oversized_queue"] ?? [];
             $this->oversized_queue = $this->decode_oversized_queue_from_cursor($encoded_queue);
+            $encoded_oversized_pk_values = $cursor_data["oversized_pk_values"] ?? null;
+            if (
+                $encoded_oversized_pk_values === null &&
+                $this->state === self::STATE_EMIT_OVERSIZED_UPDATE
+            ) {
+                // New cursors use the last emitted primary key as the
+                // oversized UPDATE target instead of storing it twice.
+                $encoded_oversized_pk_values = $cursor_data["last_pk_values"] ?? null;
+            }
             $this->oversized_pk_values = $this->row_reader->decode_database_values_from_cursor(
-                $cursor_data["oversized_pk_values"] ?? null
+                $encoded_oversized_pk_values
             );
             $this->state_after_oversized = $cursor_data["state_after_oversized"] ?? null;
             $this->current_statement_size = $cursor_data["current_statement_size"] ?? 0;
 
+            if ($this->state === self::STATE_EMIT_OVERSIZED_UPDATE && $has_legacy_retained_row) {
+                if (!isset($cursor_data["oversized_pk_values"])) {
+                    throw new \InvalidArgumentException(
+                        "Invalid cursor: an oversized update with a retained row must contain oversized_pk_values"
+                    );
+                }
+                // Old producers fetched the following row before emitting the
+                // oversized row. Rewind to the emitted row before dropping that
+                // lookahead from the first new-format cursor.
+                $cursor_data["last_pk_values"] = $cursor_data["oversized_pk_values"];
+                $cursor_data["current_row"] = null;
+                $cursor_data["current_row_ends_query_batch"] = false;
+                $has_legacy_retained_row = false;
+            }
+
             if (!$this->row_reader->restore_cursor_state($cursor_data)) {
                 $this->state = self::STATE_INIT;
+            } else {
+                if ($this->state === self::STATE_EMIT_ROW && $has_legacy_retained_row) {
+                    $this->current_row_needs_separator = false;
+                }
+                $expected_column_names_hash = $cursor_data["current_column_names_hash"] ?? null;
+                if (
+                    $expected_column_names_hash !== null &&
+                    $this->state !== self::STATE_NEXT_TABLE
+                ) {
+                    if (
+                        !is_string($expected_column_names_hash) ||
+                        !preg_match('/^[0-9a-f]{64}$/D', $expected_column_names_hash)
+                    ) {
+                        throw new \InvalidArgumentException(
+                            "Invalid cursor: current_column_names_hash must be a lowercase SHA-256 string"
+                        );
+                    }
+                    $actual_column_names_hash = $this->get_current_column_names_hash();
+                    if (
+                        $actual_column_names_hash === null ||
+                        !hash_equals($expected_column_names_hash, $actual_column_names_hash)
+                    ) {
+                        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Cursor errors are returned as plain API messages.
+                        throw new \RuntimeException(
+                            "Cannot restore the database row cursor because the ordered columns for table " .
+                            $this->row_reader->quote_identifier($this->row_reader->get_current_table()) .
+                            " changed. Run db-pull --abort and start again."
+                        );
+                        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+                    }
+                }
             }
         }
+    }
+
+    /** Returns a bounded fingerprint of the current table's ordered column names. */
+    private function get_current_column_names_hash()
+    {
+        if (
+            $this->state === self::STATE_NEXT_TABLE ||
+            $this->row_reader->get_current_table() === null
+        ) {
+            return null;
+        }
+        $column_names = $this->row_reader->get_current_column_names();
+        if ($column_names === null) {
+            return null;
+        }
+        return hash("sha256", serialize(array_values($column_names)));
     }
 
     /**

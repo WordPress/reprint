@@ -262,7 +262,10 @@ class DatabaseRowsReader {
     }
 
     /**
-     * Returns the row reader fields stored in the producer cursor.
+     * Returns the row reader's complete resumable state.
+     *
+     * Consumers which have already processed the retained row may omit that
+     * row and its column names from their durable cursor.
      *
      * @return array {
      *     @type string|null $current_table       Current table name.
@@ -290,7 +293,7 @@ class DatabaseRowsReader {
     /**
      * Restores row reader fields from a producer cursor.
      *
-     * @param array $cursor_data Producer cursor fields returned by get_cursor_state().
+     * @param array $cursor_data Reader cursor fields returned by get_cursor_state().
      * @return bool Whether the cursor's current table still exists.
      */
     public function restore_cursor_state($cursor_data)
@@ -349,6 +352,9 @@ class DatabaseRowsReader {
                     "Table " . $this->quote_identifier($this->current_table) . " was dropped between export requests " .
                     "(no columns found in SHOW FULL COLUMNS)"
                 );
+            }
+            if ($this->current_column_names === null) {
+                $this->current_column_names = array_keys($this->current_column_types);
             }
         }
         return true;
@@ -565,7 +571,7 @@ class DatabaseRowsReader {
             $this->last_pk_values = null;
             $this->current_offset = 0;
             $this->current_column_types = $this->get_column_types($this->current_table);
-            $this->current_column_names = null;
+            $this->current_column_names = array_keys($this->current_column_types);
             $this->current_row = null;
             $this->current_row_ends_query_batch = false;
         }

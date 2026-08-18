@@ -168,7 +168,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $this->assertEquals($data3, $rows[2]['content']);
     }
 
-    public function testRetainedRowKeepsItsQueryBoundaryAcrossResume(): void
+    public function testResumeAfterOversizedRowKeepsItsQueryBoundary(): void
     {
         $this->pdo->exec(
             "CREATE TABLE retained_boundary (id INT PRIMARY KEY, content LONGBLOB)"
@@ -199,7 +199,9 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         );
 
         $cursor = json_decode($producer->get_reentrancy_cursor(), true);
-        $this->assertNull($cursor['current_row']);
+        $this->assertArrayNotHasKey('current_row', $cursor);
+        $this->assertArrayNotHasKey('current_row_ends_query_batch', $cursor);
+        $this->assertArrayNotHasKey('current_column_names', $cursor);
         $this->assertSame(['id' => 2], $cursor['last_pk_values']);
     }
 
@@ -224,8 +226,55 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         } while (strpos($fragment, base64_encode('third')) === false);
 
         $cursor = json_decode($producer->get_reentrancy_cursor(), true);
-        $this->assertNull($cursor['current_row']);
+        $this->assertArrayNotHasKey('current_row', $cursor);
+        $this->assertArrayNotHasKey('current_row_ends_query_batch', $cursor);
+        $this->assertArrayNotHasKey('current_column_names', $cursor);
         $this->assertSame(['id' => 3], $cursor['last_pk_values']);
+    }
+
+    public function testLegacyOversizedCursorRequeriesItsRetainedNextRow(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE legacy_oversized (id INT PRIMARY KEY, content LONGBLOB)"
+        );
+        $insert = $this->pdo->prepare("INSERT INTO legacy_oversized VALUES (?, ?)");
+        $insert->execute([1, str_repeat('x', 20 * 1024)]);
+        $insert->execute([2, 'second']);
+
+        $options = [
+            'batch_size' => 250,
+            'max_statement_size' => 8 * 1024,
+        ];
+        $producer = $this->createProducer($options);
+        $fragments = [];
+        do {
+            $this->assertTrue($producer->next_sql_fragment());
+            $fragment = (string) $producer->get_sql_fragment();
+            $fragments[] = $fragment;
+        } while (strpos($fragment, 'INSERT INTO `legacy_oversized`') !== 0);
+
+        $legacyCursor = json_decode($producer->get_reentrancy_cursor(), true);
+        unset($legacyCursor['current_column_names_hash']);
+        $legacyCursor['last_pk_values'] = ['id' => 2];
+        $legacyCursor['oversized_pk_values'] = ['id' => 1];
+        $legacyCursor['current_row'] = [
+            'id' => 2,
+            'content' => ['__binary__' => base64_encode('second')],
+        ];
+        $legacyCursor['current_row_ends_query_batch'] = false;
+        $legacyCursor['current_column_names'] = ['id', 'content'];
+
+        $options['cursor'] = json_encode($legacyCursor);
+        $producer = $this->createProducer($options);
+        $rewoundCursor = json_decode($producer->get_reentrancy_cursor(), true);
+        $this->assertSame(['id' => 1], $rewoundCursor['last_pk_values']);
+        $this->assertArrayNotHasKey('current_row', $rewoundCursor);
+
+        $options['cursor'] = json_encode($rewoundCursor);
+        $producer = $this->createProducer($options);
+        $fragments = array_merge($fragments, $this->collectAllFragments($producer));
+        $importPdo = $this->executeDumpInNewDatabase(implode("\n", $fragments));
+        $this->assertDatabasesEqual($this->pdo, $importPdo, ['legacy_oversized']);
     }
 
     /**
@@ -370,12 +419,13 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
             }
 
             $cursor_data = json_decode($cursor, true);
-            if ($cursor_data["oversized_pk_values"] !== null) {
+            if ($cursor_data["state"] === "emit_oversized_update") {
                 $saw_oversized_primary_key_checkpoint = true;
                 $this->assertSame(
                     base64_encode($id),
-                    $cursor_data["oversized_pk_values"]["id"]["__binary__"]
+                    $cursor_data["last_pk_values"]["id"]["__binary__"]
                 );
+                $this->assertArrayNotHasKey("oversized_pk_values", $cursor_data);
             }
 
             if (strpos($producer->get_sql_fragment(), 'UPDATE `reentrant_large_binary_key`') !== false) {
@@ -682,8 +732,8 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
     }
 
     /**
-     * Cursor must stay small regardless of how large the oversized columns are.
-     * The cursor stores byte offsets, not raw data, so it should never exceed 5KB.
+     * Cursor headers must stay small regardless of how large the next row is.
+     * The cursor stores positions and byte offsets, not raw row data.
      */
     public function testCursorSizeStaysSmallWithOversizedRows(): void
     {
@@ -696,19 +746,24 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
             )
         ");
 
-        // Insert a row with 3 large columns (50MB total)
+        // A small first row used to prefetch the large second row into its cursor.
+        $this->pdo->exec(
+            "INSERT INTO cursor_size_check (blob1, blob2, blob3) VALUES ('small', 'row', 'first')"
+        );
+
+        // Insert a second row large enough to exceed a shared-hosting header limit.
         $stmt = $this->pdo->prepare(
             "INSERT INTO cursor_size_check (blob1, blob2, blob3) VALUES (?, ?, ?)"
         );
         $stmt->execute([
-            random_bytes(20 * 1024 * 1024),
-            random_bytes(20 * 1024 * 1024),
-            random_bytes(10 * 1024 * 1024),
+            random_bytes(64 * 1024),
+            random_bytes(64 * 1024),
+            random_bytes(32 * 1024),
         ]);
 
         $options = [
-            'max_statement_size' => 10 * 1024 * 1024,
-            'batch_size' => 1,
+            'max_statement_size' => 32 * 1024,
+            'batch_size' => 250,
         ];
 
         $producer = $this->createProducer($options);
@@ -717,16 +772,18 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         // Walk through all fragments, checking cursor size at every step
         while ($producer->next_sql_fragment()) {
             $cursor = $producer->get_reentrancy_cursor();
-            $cursorSize = strlen($cursor);
+            // This is the value placed in X-Export-Cursor by export.php.
+            $cursorSize = strlen(base64_encode($cursor));
             if ($cursorSize > $maxCursorSize) {
                 $maxCursorSize = $cursorSize;
             }
         }
 
         $this->assertLessThanOrEqual(
-            5 * 1024,
+            8190,
             $maxCursorSize,
-            "Cursor must stay under 5KB even with 50MB of oversized data, " .
+            "Encoded cursor must stay within an 8190-byte header-value limit " .
+            "regardless of the retained row size, " .
             "got {$maxCursorSize} bytes"
         );
     }
