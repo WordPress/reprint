@@ -425,7 +425,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             await targetMonitor.end();
         }
 
-        assert.equal(pausedInsideUncommittedRows, true, 'db-apply did not reach the pause inside the final InnoDB table');
+        assert.equal(pausedInsideUncommittedRows, true, 'db-apply did not reach the pause inside the apply-cursor SQL group');
         const savedMarker = sqlGroupMarkers.find((marker) => marker[1] === cursorSavedBeforeKill);
         assert.ok(savedMarker, 'MySQL did not save an exporter cursor from db.sql before the process stopped');
         const expectedFileByteOffset = Buffer.byteLength(

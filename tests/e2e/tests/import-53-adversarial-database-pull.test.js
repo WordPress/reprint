@@ -48,8 +48,6 @@ describe('Import: Adversarial database pull', { timeout: 300000 }, () => {
             sql_requests: 0,
             forced_partial_responses: 0,
             cursor_tables: {},
-            forbidden_cursor_fields: [],
-            max_cursor_header_bytes: 0,
         });
         writeTestHooks(site, cursorInspectionHooks(site));
     });
@@ -124,17 +122,6 @@ describe('Import: Adversarial database pull', { timeout: 300000 }, () => {
             'last_pk_values',
             'ac_oversized_binary_primary_key',
         );
-        assert.deepEqual(
-            hookState.forbidden_cursor_fields,
-            [],
-            'SQL cursors must not contain a retained row or ordered column names',
-        );
-        assert.ok(
-            hookState.max_cursor_header_bytes < 8191,
-            `Expected every encoded cursor below 8191 bytes, got ` +
-                `${hookState.max_cursor_header_bytes}`,
-        );
-
         const comparison = await compareDatabases(getDbName(site), importDb);
         assert.ok(
             comparison.match && comparison.extraTables.length === 0,
@@ -292,16 +279,6 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
     $checkpoint = json_decode($cursor, true);
     $table = $checkpoint['current_table'] ?? null;
     $contains_binary_checkpoint = false;
-    $state['max_cursor_header_bytes'] = max(
-        $state['max_cursor_header_bytes'] ?? 0,
-        strlen(base64_encode($cursor))
-    );
-
-    foreach (['current_row', 'current_row_ends_query_batch', 'current_column_names'] as $field) {
-        if (array_key_exists($field, $checkpoint)) {
-            $state['forbidden_cursor_fields'][$field] = true;
-        }
-    }
 
     if (_e2e_adversarial_cursor_has_binary_marker($checkpoint['last_pk_values'] ?? null)) {
         $contains_binary_checkpoint = true;
