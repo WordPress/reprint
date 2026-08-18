@@ -12,9 +12,9 @@ require_once __DIR__ . "/class-database-rows-reader.php";
  * This class exists because shared hosting environments kill long-running PHP processes.
  * A traditional mysqldump would time out on large databases. Instead, this producer
  * yields one SQL fragment at a time — a CREATE TABLE, a batched INSERT, or an UPDATE —
- * and exposes a compact JSON cursor after each emitted fragment. The caller can
- * serialize that cursor, end the HTTP request, and resume from exactly where it left
- * off in a subsequent request without sending a retained database row back to the source.
+ * and exposes a JSON cursor after each emitted fragment. The caller can serialize that
+ * cursor, end the HTTP request, and resume at the same SQL-fragment boundary in a later
+ * request. The cursor records emitted SQL progress instead of fetched-but-unemitted rows.
  *
  * The producer is a finite state machine that walks through tables sequentially:
  *
@@ -106,7 +106,7 @@ class MySQLDumpProducer
     /** @var int */
     private $current_statement_size = 0;
 
-    /** @var bool Whether the next row fragment needs its leading comma. */
+    /** @var bool Whether the next emitted row must begin with a comma. */
     private $current_row_needs_separator = true;
 
     /**
@@ -291,7 +291,7 @@ class MySQLDumpProducer
     /**
      * Emits one row with a leading comma, or closes the open INSERT when no row remains.
      *
-     * A restored cursor may contain a retained row whose preceding fragment
+     * Cursor restoration may supply a retained row whose preceding fragment
      * already ended in a comma. That row is emitted without another separator.
      */
     private function emit_row()
@@ -494,15 +494,17 @@ class MySQLDumpProducer
     }
 
     /**
-     * Returns the durable producer state needed to resume as a JSON string.
+     * Returns the producer cursor as a JSON string.
      *
      * The caller can pass this string back as the "cursor" option to a new
-     * MySQLDumpProducer to resume exactly where this one left off. The JSON is
-     * NOT base64-encoded — that's the HTTP layer's concern (export.php).
+     * MySQLDumpProducer to resume at the current SQL-fragment boundary. The
+     * JSON is NOT base64-encoded — that's the HTTP layer's concern (export.php).
      *
      * String values in primary key checkpoints are wrapped in
      * {"__binary__": "<base64>"} markers because raw database bytes can't
-     * survive JSON encoding. Retained rows and ordered column names stay local.
+     * survive JSON encoding. Complete database rows are omitted. During an
+     * open INSERT, a fixed-size hash represents the ordered column names, which
+     * are reloaded from table metadata on resume.
      */
     public function get_reentrancy_cursor()
     {
@@ -575,10 +577,10 @@ class MySQLDumpProducer
     /**
      * Restores internal state from a previously-serialized cursor.
      *
-     * Re-queries INFORMATION_SCHEMA for column types (the cursor doesn't store
-     * them because schema can change between requests). If the current table
-     * was dropped between requests, resets to STATE_INIT so the producer
-     * gracefully skips forward rather than crashing.
+     * The row reader reloads column types because the cursor does not store
+     * them. Missing ordered names are rebuilt from table metadata. A missing
+     * current table resets the producer to STATE_INIT. When the cursor contains
+     * an ordered-column hash, a mismatch during an open INSERT is rejected.
      */
     private function initialize_from_cursor($cursor)
     {
@@ -672,7 +674,7 @@ class MySQLDumpProducer
         }
     }
 
-    /** Returns a bounded fingerprint of the current table's ordered column names. */
+    /** Returns a fixed-size SHA-256 hash of the current table's ordered column names. */
     private function get_current_column_names_hash()
     {
         if (

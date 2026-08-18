@@ -54,14 +54,14 @@ let
     };
   };
 
-  # Generate a vhost with an 8190-byte cursor-value ceiling modeled after common shared hosts
+  # Generate a vhost with the 8191-byte X-Export-Cursor threshold used by this test
   makeCursorHeaderLimitVhost = name: cfg: {
     name = "e2e-${name}";
     value = {
       listen = [{ addr = "127.0.0.1"; port = cfg.port; }];
       root = "${siteRoot}/${name}";
       extraConfig = ''
-        # Parse the request with a larger buffer, then return the status under test.
+        # Let nginx parse the request before applying the explicit cursor limit.
         large_client_header_buffers 4 64k;
         if ($http_x_export_cursor ~ "^.{8191,}$") {
           return 431;

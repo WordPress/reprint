@@ -1,6 +1,6 @@
 /**
- * A request boundary after row 1 must resume with row 2 without skipping or
- * repeating any imported row.
+ * A request boundary after row 1 must resume with row 2 and leave the keyed
+ * and unkeyed target tables matching the source.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';

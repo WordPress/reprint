@@ -1,7 +1,7 @@
 /**
- * A large row must not turn the next database resume cursor into an oversized
- * HTTP request header. The Nginx site returns 431 when X-Export-Cursor exceeds
- * the 8190-byte cursor-value ceiling modeled after common shared hosts.
+ * A large non-key column value must not be copied into the next database
+ * resume cursor. The test site deliberately returns 431 at its 8191-byte
+ * X-Export-Cursor threshold.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';

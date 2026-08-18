@@ -536,7 +536,6 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             )
         ");
 
-        // Insert rows which can disappear after the first open INSERT part.
         for ($i = 1; $i <= 10; $i++) {
             $this->pdo->exec("INSERT INTO resume_test (data) VALUES ('row_{$i}')");
         }
@@ -580,7 +579,7 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         $this->assertStringNotContainsString(",\n\n", $completeSQL);
         $this->assertStringNotContainsString(",\nCOMMIT", $completeSQL);
 
-        // Resume closes the open INSERT without inventing a retained row.
+        // Resume closes the open INSERT without emitting a row deleted before resume.
         $importPdo = $this->executeDumpInNewDatabase($completeSQL);
         $this->assertDatabasesEqual($this->pdo, $importPdo, ["resume_test"]);
     }
@@ -1009,7 +1008,6 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         return $allFragments;
     }
 
-    /** Returns whether one producer fragment emits one INSERT row. */
     private function isInsertRowFragment(string $sql): bool
     {
         $trimmed = ltrim( $sql );

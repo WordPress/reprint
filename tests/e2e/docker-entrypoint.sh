@@ -117,8 +117,8 @@ server {
     root ${SITE_ROOT}/${site};
     index index.php;
 
-    # Parse the request first, then apply an 8190-byte cursor-value ceiling
-    # modeled after common shared Apache hosts so the test receives a 431.
+    # Let nginx parse the request, then deliberately return 431 at the
+    # 8191-byte X-Export-Cursor threshold used by this test.
     large_client_header_buffers 4 64k;
     if (\$http_x_export_cursor ~ "^.{8191,}\$") {
         return 431;

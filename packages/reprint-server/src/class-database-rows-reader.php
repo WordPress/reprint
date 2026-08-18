@@ -262,10 +262,7 @@ class DatabaseRowsReader {
     }
 
     /**
-     * Returns the row reader's complete resumable state.
-     *
-     * Consumers which have already processed the retained row may omit that
-     * row and its column names from their durable cursor.
+     * Returns the row reader fields needed to resume at the current position.
      *
      * @return array {
      *     @type string|null $current_table       Current table name.
@@ -291,7 +288,7 @@ class DatabaseRowsReader {
     }
 
     /**
-     * Restores row reader fields from a producer cursor.
+     * Restores row reader fields from reader cursor data.
      *
      * @param array $cursor_data Reader cursor fields returned by get_cursor_state().
      * @return bool Whether the cursor's current table still exists.

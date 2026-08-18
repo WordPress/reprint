@@ -731,10 +731,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $this->getDumpSQL(['max_statement_size' => 10 * 1024]);
     }
 
-    /**
-     * Cursor headers must stay small regardless of how large the next row is.
-     * The cursor stores positions and byte offsets, not raw row data.
-     */
+    /** A large non-key row value must not be copied into the next cursor header. */
     public function testCursorSizeStaysSmallWithOversizedRows(): void
     {
         $this->pdo->exec("
@@ -746,12 +743,12 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
             )
         ");
 
-        // A small first row used to prefetch the large second row into its cursor.
+        // This small row creates a cursor boundary immediately before the large row.
         $this->pdo->exec(
             "INSERT INTO cursor_size_check (blob1, blob2, blob3) VALUES ('small', 'row', 'first')"
         );
 
-        // Insert a second row large enough to exceed a shared-hosting header limit.
+        // If copied into the cursor, these values exceed the test's 8190-byte limit.
         $stmt = $this->pdo->prepare(
             "INSERT INTO cursor_size_check (blob1, blob2, blob3) VALUES (?, ?, ?)"
         );
@@ -772,7 +769,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         // Walk through all fragments, checking cursor size at every step
         while ($producer->next_sql_fragment()) {
             $cursor = $producer->get_reentrancy_cursor();
-            // This is the value placed in X-Export-Cursor by export.php.
+            // The client sends this encoded value in X-Export-Cursor.
             $cursorSize = strlen(base64_encode($cursor));
             if ($cursorSize > $maxCursorSize) {
                 $maxCursorSize = $cursorSize;
@@ -782,8 +779,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $this->assertLessThanOrEqual(
             8190,
             $maxCursorSize,
-            "Encoded cursor must stay within an 8190-byte header-value limit " .
-            "regardless of the retained row size, " .
+            "Encoded cursor must stay within the test's 8190-byte header-value limit, " .
             "got {$maxCursorSize} bytes"
         );
     }
