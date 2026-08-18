@@ -68,6 +68,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         fclose($listener);
 
         $result = $client->finish_request();
+        $this->assertStringContainsString("Referer: http://{$address}/wp-admin/upload.php\r\n", $received);
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertSame(2, $result['parts_sent']);
         $this->assertFalse($client->has_sent_parts());
@@ -487,6 +488,73 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertSame('failed', $result['status']);
         $this->assertSame('response_too_large', $result['reason']);
         $this->assertSame('The target response exceeded 1048576 bytes.', $result['detail']);
+    }
+
+    public function testPushControlRequestsSendSameOriginWordPressAdminReferer(): void {
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
+            $this->markTestSkipped('Raw push-request coverage requires PHP curl and pcntl.');
+        }
+        foreach ([
+            ['GET', 'push_status', 'status'],
+            ['POST', 'push_create', 'created'],
+        ] as [$method, $endpoint, $response_status]) {
+            $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+            $this->assertNotFalse($listener, (string) $error);
+            $address = stream_socket_get_name($listener, false);
+            $child = pcntl_fork();
+            $this->assertNotSame(-1, $child);
+            if ($child === 0) {
+                $connection = stream_socket_accept($listener, 3);
+                if ($connection === false) {
+                    exit(2);
+                }
+                stream_set_timeout($connection, 3);
+                $request = '';
+                while (strpos($request, "\r\n\r\n") === false && !feof($connection)) {
+                    $piece = fread($connection, 64 * 1024);
+                    if (!is_string($piece) || $piece === '') {
+                        break;
+                    }
+                    $request .= $piece;
+                }
+                if (strpos($request, "Referer: http://{$address}/wp-admin/upload.php\r\n") === false) {
+                    fclose($connection);
+                    fclose($listener);
+                    exit(3);
+                }
+                if (strpos($request, "{$method} /?reprint-api=1&endpoint={$endpoint}&") !== 0) {
+                    fclose($connection);
+                    fclose($listener);
+                    exit(4);
+                }
+                $response = (string) json_encode(['status' => $response_status]);
+                fwrite(
+                    $connection,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen($response)
+                        . "\r\nConnection: close\r\n\r\n" . $response
+                );
+                fclose($connection);
+                fclose($listener);
+                exit(0);
+            }
+
+            $client = new MultipartPushStreamClient([
+                'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
+                'allow_http' => true,
+                'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+                'connect_timeout' => 2,
+                'response_timeout' => 2,
+            ]);
+            $result = $client->send_push_request($method, $endpoint, [
+                'push_session_id' => str_repeat('0', 32),
+            ], [$response_status]);
+            pcntl_waitpid($child, $status);
+            fclose($listener);
+
+            $this->assertTrue(pcntl_wifexited($status));
+            $this->assertSame(0, pcntl_wexitstatus($status));
+            $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        }
     }
 
     public function testUploadRequestStopsReadingAnOversizedResponse(): void {

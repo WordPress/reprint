@@ -36,6 +36,7 @@ use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
 use function Reprint\Importer\sort_index_file;
+use function Reprint\Importer\wordpress_admin_referer;
 use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function Reprint\Importer\write_local_index_entry;
 use function WordPress\Filesystem\wp_join_unix_paths;
@@ -219,8 +220,8 @@ class ImportClient
     /** @var string Remote Reprint API URL. */
     public $remote_reprint_api_url;
 
-    /** @var string|null Same-origin WordPress Media Library URL for file-fetch uploads. */
-    private $file_fetch_referer = null;
+    /** @var string|null Same-origin WordPress Media Library URL for remote Reprint requests. */
+    private $remote_reprint_api_referer = null;
 
     /** @var string Caller-selected state directory for this filesystem root. */
     public $state_dir;
@@ -511,23 +512,9 @@ class ImportClient
         }
 
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
-        $remote_url = parse_url( $this->remote_reprint_api_url );
-        if (
-            is_array( $remote_url ) &&
-            isset( $remote_url["scheme"], $remote_url["host"] )
-        ) {
-            $site_path = rtrim((string) ( $remote_url["path"] ?? "" ), "/");
-            if (substr( $site_path, -10 ) === "/index.php") {
-                $site_path = substr( $site_path, 0, -10 );
-            }
-
-            $this->file_fetch_referer =
-                $remote_url["scheme"] . "://" . $remote_url["host"];
-            if (isset( $remote_url["port"] )) {
-                $this->file_fetch_referer .= ":" . $remote_url["port"];
-            }
-            $this->file_fetch_referer .= "{$site_path}/wp-admin/upload.php";
-        }
+        $this->remote_reprint_api_referer = wordpress_admin_referer(
+            $this->remote_reprint_api_url
+        );
         $this->state_dir = trim_right_slash($state_dir);
         $this->filesystem_root = trim_right_slash($filesystem_root);
         $remote_state_directory = $selected_remote_state_directory === null
@@ -10907,7 +10894,7 @@ class ImportClient
     private function get_base_headers(string $accept): array
     {
         $ua = $this->get_state()->user_agent ?? self::USER_AGENTS[0];
-        return [
+        $headers = [
             "User-Agent: {$ua}",
             "Accept: {$accept}",
             "Accept-Language: en-US,en;q=0.9",
@@ -10916,6 +10903,11 @@ class ImportClient
             "Pragma: no-cache",
             "Connection: keep-alive",
         ];
+        if ($this->remote_reprint_api_referer !== null) {
+            $headers[] = "Referer: {$this->remote_reprint_api_referer}";
+        }
+
+        return $headers;
     }
 
     /**
@@ -11492,16 +11484,6 @@ class ImportClient
                 }
             }
             if ($has_file) {
-                if (
-                    $endpoint === "file_fetch" &&
-                    $this->file_fetch_referer !== null
-                ) {
-                    // Some application firewalls admit WordPress uploads
-                    // only after a same-site wp-admin Referer. The HMAC
-                    // remains the authentication check for file_fetch.
-                    $headers[] = "Referer: {$this->file_fetch_referer}";
-                }
-
                 // For CURLFile uploads, sign the raw file content — this
                 // is the logical payload the server will receive, even
                 // though curl wraps it in multipart framing.

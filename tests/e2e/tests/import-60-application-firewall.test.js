@@ -2,8 +2,8 @@
  * Test 60: Application firewall compatibility
  *
  * Runs a complete pull through a local HTTP reverse proxy which rejects
- * multipart file uploads unless they have a same-origin WordPress admin
- * Referer. The proxy streams every accepted request to the real E2E site.
+ * Reprint requests unless they have a same-origin WordPress admin Referer.
+ * The proxy streams every accepted request to the real E2E site.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -101,27 +101,45 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         await connection.end();
     });
 
-    it('sends a same-origin WordPress admin Referer with multipart file_fetch requests', () => {
+    it('sends a same-origin WordPress admin Referer with every Reprint request', () => {
         const requestRecords = readFileSync(requestLogPath, 'utf-8')
             .trim()
             .split('\n')
             .filter(Boolean)
-            .map(line => JSON.parse(line));
-        const multipartFileFetchRequests = requestRecords.filter(
-            record => record.isMultipartFileFetch,
-        );
+            .map(line => JSON.parse(line))
+            .filter(record => record.isReprintRequest);
         assert.ok(
-            multipartFileFetchRequests.length > 0,
-            `Expected pull to make a multipart file_fetch request\n` +
+            requestRecords.length > 0,
+            `Expected pull to make Reprint requests\n` +
             `stderr: ${pullResult.stderr}\nstdout: ${pullResult.stdout}`,
         );
         assert.ok(
-            multipartFileFetchRequests.every(
+            requestRecords.every(
                 record => record.referer === `${firewallOrigin}/wp-admin/upload.php`,
             ),
             `Expected Referer ${firewallOrigin}/wp-admin/upload.php, got ` +
-            multipartFileFetchRequests.map(record => JSON.stringify(record.referer)).join(', '),
+            requestRecords.map(record => JSON.stringify(record.referer)).join(', '),
         );
+        assert.ok(requestRecords.some(record => record.method === 'GET'));
+        assert.ok(requestRecords.some(record => record.method === 'POST'));
+        assert.ok(
+            requestRecords.some(
+                record =>
+                    record.method === 'POST' &&
+                    record.endpoint === 'file_fetch' &&
+                    record.contentType.startsWith('multipart/form-data;'),
+            ),
+        );
+        const endpoints = new Set(requestRecords.map(record => record.endpoint));
+        for (const endpoint of [
+            'preflight',
+            'file_index',
+            'file_fetch',
+            'db_index',
+            'sql_chunk',
+        ]) {
+            assert.ok(endpoints.has(endpoint), `Expected pull to request ${endpoint}`);
+        }
     });
 
     it('completes pull through the application firewall', () => {
@@ -140,20 +158,9 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         );
     });
 
-    it('rejects a multipart file upload without the Referer', async () => {
-        const form = new FormData();
-        form.append(
-            'file_list',
-            new Blob(['[]'], { type: 'application/json' }),
-            'file-list.json',
-        );
-
+    it('rejects a Reprint GET without the Referer', async () => {
         const response = await fetch(
-            `${firewallOrigin}/?reprint-api&endpoint=file_fetch`,
-            {
-                method: 'POST',
-                body: form,
-            },
+            `${firewallOrigin}/?reprint-api&endpoint=preflight`,
         );
 
         assert.equal(response.status, 403);
