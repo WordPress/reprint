@@ -2,6 +2,8 @@
 
 require_once __DIR__ . '/MySQLDumpProducerTestBase.php';
 
+use WordPress\Reprint\Server\MySQLDumpProducer;
+
 /**
  * Tests MySQL dump with rows larger than max_allowed_packet.
  *
@@ -133,6 +135,113 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $this->assertEquals($blob1, $row['blob1']);
         $this->assertEquals($blob2, $row['blob2']);
         $this->assertEquals('small value', $row['small_col']);
+    }
+
+    /** Combined values must fail before an over-limit fragment is formatted. */
+    public function testCombinedValuesAbovePartBodyLimitThrowBeforeFormatting(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE combined_fragment_limit (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                blob1 LONGBLOB,
+                blob2 LONGBLOB
+            )
+        ");
+
+        $blob1 = str_repeat('a', 13 * 512 * 1024);
+        $blob2 = str_repeat('b', 13 * 512 * 1024);
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO combined_fragment_limit (blob1, blob2) VALUES (?, ?)"
+        );
+        $stmt->execute([$blob1, $blob2]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('cannot fit the SQL size limits');
+        $this->expectExceptionMessage('SQL part body limit is 16777216 bytes');
+
+        $this->getDumpSQL(['max_statement_size' => 64 * 1024 * 1024]);
+    }
+
+    /** A text value skipped by the byte cap must not bypass the packet target. */
+    public function testMixedTextAndBlobDoNotExceedStatementLimit(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE mixed_fragment_limits (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                text_value LONGTEXT,
+                blob_value LONGBLOB
+            )
+        ");
+
+        $value = str_repeat('a', 13 * 512 * 1024);
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO mixed_fragment_limits (text_value, blob_value) VALUES (?, ?)"
+        );
+        $stmt->execute([$value, $value]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('cannot fit the SQL size limits');
+        $this->expectExceptionMessage('max_statement_size is 8388608 bytes');
+
+        $this->getDumpSQL(['max_statement_size' => 8 * 1024 * 1024]);
+    }
+
+    /** A multipart boundary may split one larger INSERT between row fragments. */
+    public function testUnkeyedInsertMayExceedPartBodyLimit(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE unkeyed_large_insert (
+                payload MEDIUMBLOB NOT NULL
+            )
+        ");
+        $payload = str_repeat('x', 80 * 1024);
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO unkeyed_large_insert (payload) VALUES (?)"
+        );
+        for ($row = 0; $row < 160; ++$row) {
+            $stmt->execute([$payload]);
+        }
+
+        $producer = $this->createProducer([
+            'max_statement_size' => 64 * 1024 * 1024,
+        ]);
+        $fragments = $this->collectAllFragments($producer);
+        $sql = implode('', $fragments);
+
+        $this->assertGreaterThan(
+            MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES,
+            strlen($sql)
+        );
+        foreach ($fragments as $fragment) {
+            $this->assertLessThan(
+                MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES,
+                strlen($fragment)
+            );
+        }
+
+        $importPdo = $this->executeDumpInNewDatabase($sql);
+        $rowCount = $importPdo->query(
+            "SELECT COUNT(*) FROM unkeyed_large_insert"
+        )->fetchColumn();
+        $this->assertSame(160, (int) $rowCount);
+    }
+
+    /** JSON size calculation includes the CONVERT(... USING utf8mb4) wrapper. */
+    public function testJsonFormattedSizeIsExact(): void
+    {
+        $producer = $this->createProducer();
+        $estimate_formatted_size = new ReflectionMethod(
+            $producer,
+            'estimate_formatted_size'
+        );
+        $estimate_formatted_size->setAccessible(true);
+        $value = '{"key":"value"}';
+        $formatted = "CONVERT(FROM_BASE64('" . base64_encode($value) . "') USING utf8mb4)";
+
+        $this->assertSame(
+            strlen($formatted),
+            $estimate_formatted_size->invoke($producer, $value, 'JSON')
+        );
     }
 
     /**

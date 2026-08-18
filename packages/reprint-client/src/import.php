@@ -8607,6 +8607,7 @@ class ImportClient
                 $url = $this->build_url("sql_chunk", $cursor, $params);
 
                 $context = new StreamingContext();
+                $remote_sql_error = null;
                 $context->on_chunk = function ($chunk) use (
                     $mode,
                     &$cursor,
@@ -8619,7 +8620,8 @@ class ImportClient
                     $context,
                     $query_stream,
                     &$sql_statements_counted,
-                    &$chunks_since_save
+                    &$chunks_since_save,
+                    &$remote_sql_error
                 ) {
                     // Check if shutdown was requested
                     if ($this->shutdown_requested) {
@@ -8811,6 +8813,12 @@ class ImportClient
                         );
                     } elseif ($chunk_type === "error") {
                         $this->handle_error_chunk($chunk, "sql", $context);
+                        $error_data = json_decode($chunk["body"] ?? "", true);
+                        $remote_sql_error = is_array($error_data) &&
+                            is_string($error_data["message"] ?? null) &&
+                            $error_data["message"] !== ""
+                                ? $error_data["message"]
+                                : "The source returned a database export error without a message.";
                     }
                 };
 
@@ -8819,6 +8827,11 @@ class ImportClient
                 try {
                     $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
                 } catch (TransientInterruptionException $e) {
+                    if ($remote_sql_error !== null) {
+                        throw new RuntimeException(
+                            "The source could not export the database: {$remote_sql_error}",
+                        );
+                    }
                     // The source may time out or crash after complete SQL parts
                     // but before its completion part. SQL multipart bodies are
                     // delivered only at a complete part boundary, so resume from
@@ -8835,6 +8848,11 @@ class ImportClient
                     }
                     $this->audit_log($retry_log, true);
                     continue;
+                }
+                if ($remote_sql_error !== null) {
+                    throw new RuntimeException(
+                        "The source could not export the database: {$remote_sql_error}",
+                    );
                 }
                 $this->get_state()->consecutive_interrupted_responses = 0;
                 $wall_time = microtime(true) - $request_start;
