@@ -29,7 +29,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
     );
     const applyCursorTable = 'zy_db_apply_cursor_rows';
     const sqlModeTable = 'zz_session_setup_sql_mode';
-    const progressTable = '__reprint_db_pull_progress_49acb118-a97a-45c7-814d-8e670db7f6b4';
+    const progressTable = '__reprint_db_pull_progress_725a0014-81eb-4827-acfb-5edb1b4f24d9';
     const targetDb = `${getDbName(site)}_import`;
     const projectRoot = join(import.meta.dirname, '..', '..', '..');
     const importerPath = process.env.IMPORTER_PATH
@@ -251,11 +251,13 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
                 const hookState = readHookState(site);
                 try {
                     const [[savedPosition]] = await targetMonitor.query(
-                        'SELECT source_cursor, file_byte_offset FROM `' + progressTable + '` WHERE id = 1'
+                        'SELECT source_cursor, file_byte_offset, statements_executed '
+                        + 'FROM `' + progressTable + '` WHERE id = 1'
                     );
                     savedCursor = savedPosition?.source_cursor ?? null;
                     if (savedPosition) {
                         assert.equal(savedPosition.file_byte_offset, null);
+                        assert.equal(savedPosition.statements_executed, null);
                     }
                 } catch (error) {
                     if (error?.code !== 'ER_NO_SUCH_TABLE') {
@@ -368,6 +370,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
         let rowsVisibleBeforeKill = null;
         let cursorSavedBeforeKill = null;
         let fileByteOffsetSavedBeforeKill = null;
+        let statementsExecutedSavedBeforeKill = null;
         const targetMonitor = await createMysqlConnection(targetDb);
 
         try {
@@ -389,10 +392,12 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
                     );
                     if (Number(savedPosition.positionCount) === 1) {
                         const [[savedCursor]] = await targetMonitor.query(
-                            'SELECT source_cursor, file_byte_offset FROM `' + progressTable + '` WHERE id = 1'
+                            'SELECT source_cursor, file_byte_offset, statements_executed '
+                            + 'FROM `' + progressTable + '` WHERE id = 1'
                         );
                         cursorSavedBeforeKill = savedCursor.source_cursor;
                         fileByteOffsetSavedBeforeKill = Number(savedCursor.file_byte_offset);
+                        statementsExecutedSavedBeforeKill = Number(savedCursor.statements_executed);
                         const [[visibleRows]] = await targetMonitor.query(
                             `SELECT COUNT(*) AS rowCount FROM \`${applyCursorTable}\``
                         );
@@ -417,6 +422,10 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             fileByteOffsetSavedBeforeKill,
             expectedFileByteOffset,
             'MySQL did not save the byte immediately after the matching db.sql marker',
+        );
+        assert.ok(
+            statementsExecutedSavedBeforeKill > 0,
+            'MySQL did not save the statement count with the db.sql position',
         );
         assert.ok(
             rowsVisibleBeforeKill < 301,
@@ -454,8 +463,8 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
                 join(pullStateDirectory(fileTempDir, importUrl()), 'state.json'),
                 'utf8',
             ));
-            assert.equal(completedState.apply.bytes_read, 0, 'db-apply copied the MySQL byte offset into local state');
-            assert.ok(completedState.apply.statements_executed > 0, 'db-apply did not save the statement count');
+            assert.equal('bytes_read' in completedState.apply, false, 'db-apply copied the MySQL byte offset into local state');
+            assert.equal('statements_executed' in completedState.apply, false, 'db-apply copied the statement count into local state');
             assert.equal(completedState.active_resumable_command.remote_cursor, null);
 
             const [[remainingProgressTable]] = await targetConnection.query(

@@ -9,12 +9,6 @@ namespace Reprint\Importer\State;
  */
 class DatabaseApplyCommandState {
 
-    /** @var int SQL statements successfully executed. */
-    public int $statements_executed = 0;
-
-    /** @var int Bytes read from db.sql. */
-    public int $bytes_read = 0;
-
     /** @var array<string,string>|null URL rewrite map selected for db-apply. */
     public ?array $rewrite_url = null;
 
@@ -46,8 +40,6 @@ class DatabaseApplyCommandState {
     {
         $state = new self();
         \reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
-        $state->statements_executed = $data['statements_executed'];
-        $state->bytes_read = $data['bytes_read'];
         $state->rewrite_url = $data['rewrite_url'];
         $state->target_engine = $data['target_engine'];
         $state->target_db = $data['target_db'];
@@ -63,8 +55,6 @@ class DatabaseApplyCommandState {
     public function to_array(): array
     {
         return [
-            'statements_executed' => $this->statements_executed,
-            'bytes_read' => $this->bytes_read,
             'rewrite_url' => $this->rewrite_url,
             'target_engine' => $this->target_engine,
             'target_db' => $this->target_db,
