@@ -662,6 +662,10 @@ function detect_wp_roots(array $start_paths): array
             $wp_content_path = wp_join_unix_paths($current, "wp-content");
             $filesystem_probe_warning = false;
             $reprint_error_handler = null;
+            // During preflight, Reprint's error handler turns a warning into HTTP 500.
+            // These checks move up to parent directories that open_basedir may block.
+            // Catch probe warnings here so we can stop only this walk. Send other error
+            // types to the previous handler, then restore that handler in finally below.
             $reprint_error_handler = set_error_handler(
                 function ($errno, $errstr, $errfile, $errline) use (
                     &$filesystem_probe_warning,
