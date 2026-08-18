@@ -7,9 +7,7 @@
         "wp-php-toolkit/reprint-exporter": "self.version"
     },
     "require": {
-        "php": ">=7.2",
-        "wp-php-toolkit/data-liberation": "^0.8.0",
-        "wp-php-toolkit/html": "^0.8.0"
+        "php": ">=7.2"
     },
     "suggest": {
         "ext-pdo": "Needed for the SQLite export path; recommended for MySQL exports (the wpdb fallback handles MySQL when absent).",

@@ -358,11 +358,11 @@
         },
         {
             "name": "wp-php-toolkit/reprint-client",
-            "version": "dev-adamziel/rename-reprint-server-client",
+            "version": "dev-self-contained-reprint-server",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-client",
-                "reference": "e5df507dc657f3e55b759576fa11185dc3167a60"
+                "reference": "7085155c6088b48608435f84cc490daa3d509ab8"
             },
             "require": {
                 "ext-pdo": "*",
@@ -389,16 +389,14 @@
         },
         {
             "name": "wp-php-toolkit/reprint-server",
-            "version": "dev-adamziel/rename-reprint-server-client",
+            "version": "dev-self-contained-reprint-server",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-server",
-                "reference": "57109228fef702ea4181db6cdfe266346457dead"
+                "reference": "ebe811d78c792a52697ffc5444407c0674cdaea3"
             },
             "require": {
-                "php": ">=7.2",
-                "wp-php-toolkit/data-liberation": "^0.8.0",
-                "wp-php-toolkit/html": "^0.8.0"
+                "php": ">=7.2"
             },
             "replace": {
                 "wp-php-toolkit/reprint-exporter": "self.version"
