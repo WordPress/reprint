@@ -1,7 +1,8 @@
 <?php
 
-use function WordPress\Reprint\Exporter\trim_right_slash;
-use function WordPress\Reprint\Exporter\wp_join_unix_paths;
+namespace WordPress\Reprint\Server;
+
+use InvalidArgumentException;
 
 /**
  * Streams a provided list of filesystem paths in sorted order with

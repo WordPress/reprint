@@ -2,6 +2,8 @@
 
 namespace FileSyncProducerTests;
 
+use WordPress\Reprint\Server\FileTreeProducer;
+
 require_once __DIR__ . '/FileSyncProducerTestBase.php';
 
 /**
@@ -16,7 +18,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
             'growing.txt' => $initialContent
         ]);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new FileTreeProducer($dir, [
             'chunk_size' => 2048,
             'paths' => $this->enumerateFiles($dir),
         ]);
@@ -51,7 +53,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
             'file3.txt' => str_repeat('B', 5000)
         ]);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new FileTreeProducer($dir, [
             'chunk_size' => 2048,
             'paths' => $this->enumerateFiles($dir),
         ]);

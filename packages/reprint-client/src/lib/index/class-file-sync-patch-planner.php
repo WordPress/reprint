@@ -2,8 +2,8 @@
 
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
-use function WordPress\Reprint\Exporter\path_is_descendant_of;
-use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Server\path_is_descendant_of;
+use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 
 require_once __DIR__ . '/class-file-index-diff-processor.php';
 

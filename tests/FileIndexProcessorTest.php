@@ -3,7 +3,8 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
-use function WordPress\Reprint\Exporter\relative_path_under;
+use WordPress\Reprint\Server\FileIndexProcessor;
+use function WordPress\Reprint\Server\relative_path_under;
 
 require_once dirname(__DIR__) . '/packages/reprint-server/src/class-file-index-processor.php';
 

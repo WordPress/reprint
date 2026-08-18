@@ -8,6 +8,26 @@ It replaces that package (`replace: self.version`), so the two names cannot be
 installed side by side. Consumers should require
 `wp-php-toolkit/reprint-server` directly.
 
+## Loading it
+
+The package autoloads normally. Composer's classmap covers every class in
+`src/`, and the `files` entry loads `src/utils.php` and the PDO polyfill.
+Install it and the classes resolve — there is nothing to call.
+
+`src/export.php` never autoloads, and that is deliberate. It declares functions
+rather than classes, so the classmap scan finds nothing in it to register. Keep
+it that way: requiring the file starts an output buffer and installs error,
+exception and shutdown handlers, all of which belong at dispatch time.
+`Site_Export_HTTP_Server::serve()` requires it at the right moment. Adding a
+class to `export.php` would make it autoloadable and break that.
+
+One thing not to change without reading it first: the `PDO`, `PDOStatement` and
+`PDOException` polyfills in `src/class-pdo-polyfill.php` are declared inside an
+`eval()`. That keeps them out of the generated classmap, which for a consumer
+like Jetpack is shared by every plugin on the site. The header comment on that
+file explains it, and `bin/check-reprint-server-isolation.php` fails the build
+if any of the three ever reaches the map.
+
 ## Development
 
 This repository is a read-only Composer package split from the Reprint monorepo. It is published so Composer can install `wp-php-toolkit/reprint-server` directly.

@@ -1,7 +1,12 @@
 <?php
 
-use function WordPress\Reprint\Exporter\parse_size;
+use WordPress\Reprint\Server\ResourceBudget;
 
+use function WordPress\Reprint\Server\parse_size;
+
+if (!class_exists('WordPress\\Reprint\\Server\\ResourceBudget', false)) {
+    require_once __DIR__ . '/class-resource-budget.php';
+}
 if (!class_exists('Site_Export_Push_Configuration_Exception', false)) {
     require_once __DIR__ . '/class-push-configuration-exception.php';
 }

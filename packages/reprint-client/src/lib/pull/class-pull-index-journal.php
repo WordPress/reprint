@@ -1,9 +1,11 @@
 <?php
 
+use WordPress\Reprint\Server\FileIndexProcessor;
+
 use function Reprint\Importer\merge_local_index_mutations;
 use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\write_local_index_update;
-use function WordPress\Reprint\Exporter\relative_path_under;
+use function WordPress\Reprint\Server\relative_path_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI filesystem paths, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.

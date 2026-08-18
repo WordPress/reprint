@@ -1,6 +1,6 @@
 <?php
 
-use function WordPress\Reprint\Exporter\relative_path_under;
+use function WordPress\Reprint\Server\relative_path_under;
 
 require_once __DIR__ . '/class-file-sync-patch-planner.php';
 

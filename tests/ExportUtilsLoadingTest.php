@@ -3,20 +3,21 @@
 use PHPUnit\Framework\TestCase;
 
 /**
- * Guards the per-function loading contract of the exporter utility file.
+ * Guards the per-function loading contract of the utility file.
  *
  * Two plugins on one WordPress.com site can each ship a copy of this package,
- * and the older one may load first. Every helper therefore carries its own
- * function_exists() guard, so an older copy only takes the helpers it actually
- * declares and this copy still supplies the rest. A single block-wide guard
- * would skip everything after the first sentinel and turn the first call to a
- * newer helper into a fatal.
+ * and one of them declares these functions first. Every helper therefore
+ * carries its own function_exists() guard, so the copy that loses the race
+ * still supplies whatever the winner did not declare. A single block-wide
+ * guard would skip everything after the first sentinel, which is fine only
+ * while both copies declare exactly the same set — the moment one ships a
+ * helper the other lacks, the first call to it is a fatal.
  */
 final class ExportUtilsLoadingTest extends TestCase
 {
     private const UTILS_RELATIVE_PATH = '/../packages/reprint-server/src/utils.php';
 
-    /** The guard an older copy of the package keys on. */
+    /** The function a block-wide guard would be keyed on. */
     private const SENTINEL_FUNCTION = 'build_pdo_dsn';
 
     private static function utilsPath(): string
@@ -28,7 +29,7 @@ final class ExportUtilsLoadingTest extends TestCase
     }
 
     /**
-     * Reads the helper names declared in the WordPress\Reprint\Exporter block.
+     * Reads the helper names declared in the WordPress\Reprint\Server block.
      *
      * @return list<string>
      */
@@ -37,7 +38,7 @@ final class ExportUtilsLoadingTest extends TestCase
         $source = file_get_contents(self::utilsPath());
         self::assertNotFalse($source, 'utils.php must be readable.');
 
-        $namespace_offset = strpos($source, 'namespace WordPress\\Reprint\\Exporter {');
+        $namespace_offset = strpos($source, 'namespace WordPress\\Reprint\\Server {');
         self::assertNotFalse($namespace_offset, 'utils.php must declare the exporter namespace block.');
 
         preg_match_all(
@@ -83,24 +84,24 @@ final class ExportUtilsLoadingTest extends TestCase
             $unguarded,
             'These helpers are missing their own function_exists() guard: '
             . implode(', ', $unguarded)
-            . '. A block-wide guard drops every helper an older co-resident copy does not declare.'
+            . '. A block-wide guard drops every helper a co-resident copy does not declare.'
         );
     }
 
-    public function testEveryHelperLoadsAfterAnOlderCopyDeclaredTheSentinel(): void
+    public function testEveryHelperLoadsAfterAnotherCopyDeclaredTheSentinel(): void
     {
         $helpers = self::declaredHelpers();
         $this->assertContains(
             self::SENTINEL_FUNCTION,
             $helpers,
-            'The sentinel an older copy declares must still exist here.'
+            'The function a co-resident copy would declare first must still exist here.'
         );
 
         $script = <<<'PHP'
-namespace WordPress\Reprint\Exporter {
-    // Stands in for an older copy of this package that loaded first.
+namespace WordPress\Reprint\Server {
+    // Stands in for a co-resident copy of this package that loaded first.
     function build_pdo_dsn(string $db_host, string $db_name): string {
-        return 'older-copy';
+        return 'first-copy';
     }
 }
 
@@ -109,28 +110,16 @@ namespace {
 
     $declared = [];
     foreach (explode(',', $argv[2]) as $name) {
-        $declared[$name] = function_exists('WordPress\\Reprint\\Exporter\\' . $name);
+        $declared[$name] = function_exists('WordPress\\Reprint\\Server\\' . $name);
     }
     echo json_encode($declared);
 }
 PHP;
 
-        $process = proc_open(
-            [PHP_BINARY, '-r', $script, self::utilsPath(), implode(',', $helpers)],
-            [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
-            $pipes
-        );
-        $this->assertIsResource($process, 'Failed to start the utility loader subprocess.');
-        fclose($pipes[0]);
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-
-        $this->assertSame(0, proc_close($process), $stderr ?: 'The utility loader subprocess failed.');
+        $stdout = $this->runUtilityLoader($script, [self::utilsPath(), implode(',', $helpers)]);
 
         $declared = json_decode($stdout, true);
-        $this->assertIsArray($declared, "Subprocess output was not JSON: {$stdout}{$stderr}");
+        $this->assertIsArray($declared, "Subprocess output was not JSON: {$stdout}");
 
         $missing = array_keys(array_filter($declared, static function ($is_declared) {
             return !$is_declared;
@@ -139,30 +128,98 @@ PHP;
         $this->assertSame(
             [],
             $missing,
-            'An older copy declaring ' . self::SENTINEL_FUNCTION
+            'A co-resident copy declaring ' . self::SENTINEL_FUNCTION
             . '() suppressed these helpers: ' . implode(', ', $missing) . '.'
         );
     }
 
-    public function testTheSentinelKeepsTheOlderCopysImplementation(): void
+    public function testTheFirstDeclarationOfASharedHelperWins(): void
     {
         $script = <<<'PHP'
-namespace WordPress\Reprint\Exporter {
+namespace WordPress\Reprint\Server {
     function build_pdo_dsn(string $db_host, string $db_name): string {
-        return 'older-copy';
+        return 'first-copy';
     }
 }
 
 namespace {
     require $argv[1];
-    echo \WordPress\Reprint\Exporter\build_pdo_dsn('localhost', 'wordpress');
+    echo \WordPress\Reprint\Server\build_pdo_dsn('localhost', 'wordpress');
     echo '|';
-    echo \WordPress\Reprint\Exporter\trim_right_slash('/srv/site/');
+    echo \WordPress\Reprint\Server\trim_right_slash('/srv/site/');
 }
 PHP;
 
+        $stdout = $this->runUtilityLoader($script, [self::utilsPath()]);
+        $this->assertSame('first-copy|/srv/site', $stdout);
+    }
+
+    public function testAPreV0100CopyCannotReachTheseHelpers(): void
+    {
+        $helpers = self::declaredHelpers();
+
+        // wpcomsh is pinned to reprint-exporter v0.1.47, which declares its
+        // helpers in WordPress\Reprint\Exporter. Nothing here uses that
+        // namespace any more, so its build_pdo_dsn(), parse_size(),
+        // json_encode_or_throw(), normalize_path() and assert_valid_path()
+        // cannot win any of these names. Before the rename they could, and
+        // this runtime would have called wpcomsh's implementations.
+        $script = <<<'PHP'
+namespace WordPress\Reprint\Exporter {
+    // Stands in for reprint-exporter v0.1.47, loaded first by another plugin.
+    function build_pdo_dsn(string $db_host, string $db_name): string { return 'v0.1.47'; }
+    function parse_size(string $value): int { return -1; }
+    function json_encode_or_throw($value, int $flags = 0): string { return 'v0.1.47'; }
+    function normalize_path(string $path): string { return 'v0.1.47'; }
+    function assert_valid_path(string $path, string $label = 'path'): void {}
+}
+
+namespace {
+    require $argv[1];
+
+    $declared = [];
+    foreach (explode(',', $argv[2]) as $name) {
+        $declared[$name] = function_exists('WordPress\\Reprint\\Server\\' . $name);
+    }
+    echo json_encode([
+        'declared' => $declared,
+        'dsn' => \WordPress\Reprint\Server\build_pdo_dsn('localhost', 'wordpress'),
+        'size' => \WordPress\Reprint\Server\parse_size('64M'),
+    ]);
+}
+PHP;
+
+        $stdout = $this->runUtilityLoader($script, [self::utilsPath(), implode(',', $helpers)]);
+        $report = json_decode($stdout, true);
+        $this->assertIsArray($report, "Subprocess output was not JSON: {$stdout}");
+
+        $missing = array_keys(array_filter($report['declared'], static function ($is_declared) {
+            return !$is_declared;
+        }));
+        $this->assertSame([], $missing, 'These helpers were not declared: ' . implode(', ', $missing) . '.');
+
+        $this->assertSame(
+            'mysql:host=localhost;dbname=wordpress;charset=utf8mb4',
+            $report['dsn'],
+            'A pre-v0.10.0 copy in WordPress\\Reprint\\Exporter won build_pdo_dsn().'
+        );
+        $this->assertSame(
+            64 * 1024 * 1024,
+            $report['size'],
+            'A pre-v0.10.0 copy in WordPress\\Reprint\\Exporter won parse_size().'
+        );
+    }
+
+    /**
+     * Runs a PHP snippet in a subprocess and returns its stdout.
+     *
+     * @param string $script PHP source, without the opening tag.
+     * @param list<string> $arguments Values the snippet reads from $argv.
+     */
+    private function runUtilityLoader(string $script, array $arguments): string
+    {
         $process = proc_open(
-            [PHP_BINARY, '-r', $script, self::utilsPath()],
+            array_merge([PHP_BINARY, '-r', $script], $arguments),
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
             $pipes
         );
@@ -174,6 +231,7 @@ PHP;
         fclose($pipes[2]);
 
         $this->assertSame(0, proc_close($process), $stderr ?: 'The utility loader subprocess failed.');
-        $this->assertSame('older-copy|/srv/site', $stdout);
+
+        return (string) $stdout;
     }
 }

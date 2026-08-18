@@ -2,6 +2,8 @@
 
 namespace FileSyncProducerTests;
 
+use WordPress\Reprint\Server\FileTreeProducer;
+
 require_once __DIR__ . '/FileSyncProducerTestBase.php';
 
 /**
@@ -20,7 +22,7 @@ class CursorResumptionTest extends FileSyncProducerTestBase
         $paths = $this->enumerateFiles($dir);
 
         // First sync - process 2 chunks then save cursor
-        $sync1 = new \FileTreeProducer($dir, [
+        $sync1 = new FileTreeProducer($dir, [
             'chunk_size' => 2048,
             'paths' => $paths,
         ]);
@@ -38,7 +40,7 @@ class CursorResumptionTest extends FileSyncProducerTestBase
         $this->assertNotEmpty($cursor, 'Cursor should not be empty');
 
         // Second sync - resume from cursor
-        $sync2 = new \FileTreeProducer($dir, [
+        $sync2 = new FileTreeProducer($dir, [
             'chunk_size' => 2048,
             'cursor' => $cursor,
             'paths' => $paths,
@@ -63,7 +65,7 @@ class CursorResumptionTest extends FileSyncProducerTestBase
         $paths = $this->enumerateFiles($dir);
         $cursorFile = $this->fixturesDir . '/test-cursor.json';
 
-        $sync1 = new \FileTreeProducer($dir, [
+        $sync1 = new FileTreeProducer($dir, [
             'chunk_size' => 1024,
             'paths' => $paths,
         ]);
@@ -78,13 +80,13 @@ class CursorResumptionTest extends FileSyncProducerTestBase
 
         // Load from file and resume
         $loadedCursor = file_get_contents($cursorFile);
-        $sync2 = new \FileTreeProducer($dir, [
+        $sync2 = new FileTreeProducer($dir, [
             'chunk_size' => 1024,
             'cursor' => $loadedCursor,
             'paths' => $paths,
         ]);
 
-        $this->assertInstanceOf(\FileTreeProducer::class, $sync2);
+        $this->assertInstanceOf(FileTreeProducer::class, $sync2);
 
         // Cleanup
         unlink($cursorFile);
@@ -114,7 +116,7 @@ class CursorResumptionTest extends FileSyncProducerTestBase
                 $options['cursor'] = $cursor;
             }
 
-            $sync = new \FileTreeProducer($dir, $options);
+            $sync = new FileTreeProducer($dir, $options);
 
             $iterations = 0;
             $hasMore = false;
@@ -146,7 +148,7 @@ class CursorResumptionTest extends FileSyncProducerTestBase
 
         $this->expectException(\InvalidArgumentException::class);
 
-        new \FileTreeProducer($dir, [
+        new FileTreeProducer($dir, [
             'cursor' => 'invalid-json-data',
             'paths' => $this->enumerateFiles($dir),
         ]);
@@ -164,7 +166,7 @@ class CursorResumptionTest extends FileSyncProducerTestBase
         $paths = $this->enumerateFiles($dir);
 
         // Start sync
-        $sync1 = new \FileTreeProducer($dir, [
+        $sync1 = new FileTreeProducer($dir, [
             'paths' => $paths,
         ]);
 
@@ -176,7 +178,7 @@ class CursorResumptionTest extends FileSyncProducerTestBase
         $cursor = $sync1->get_reentrancy_cursor();
 
         // Resume and complete
-        $sync2 = new \FileTreeProducer($dir, [
+        $sync2 = new FileTreeProducer($dir, [
             'cursor' => $cursor,
             'paths' => $paths,
         ]);

@@ -80,6 +80,7 @@
 		<properties>
 			<property name="prefixes" type="array">
 				<element value="reprint"/>
+				<element value="WordPress\Reprint"/>
 				<element value="site_export"/>
 				<element value="_site_export"/>
 			</property>

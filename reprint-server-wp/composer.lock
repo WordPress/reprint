@@ -8,11 +8,11 @@
     "packages": [
         {
             "name": "wp-php-toolkit/reprint-server",
-            "version": "dev-self-contained-reprint-server",
+            "version": "dev-phase-a",
             "dist": {
                 "type": "path",
                 "url": "../packages/reprint-server",
-                "reference": "f9ae94299683a4589ebc019fc621cd0b7ba68b0c"
+                "reference": "4d64a43e8bb6d4c748446c3c73fdf2bcac1cf326"
             },
             "require": {
                 "php": ">=7.2"
@@ -26,24 +26,11 @@
             },
             "type": "library",
             "autoload": {
-                "psr-4": {
-                    "WordPress\\DataLiberation\\": "src/"
-                },
                 "classmap": [
-                    "src/class-database-rows-reader.php",
-                    "src/class-mysql-dump-producer.php",
-                    "src/class-file-index-processor.php",
-                    "src/class-file-tree-producer.php",
-                    "src/class-hmac-client.php",
-                    "src/class-hmac-server.php",
-                    "src/class-http-server.php",
-                    "src/class-multipart-processor.php",
-                    "src/class-push-configuration-exception.php",
-                    "src/class-push-exception.php",
-                    "src/class-push-endpoints.php",
-                    "src/class-push-session.php",
-                    "src/class-sqlite-driver-pdo.php",
-                    "src/class-wpdb-driver-pdo.php"
+                    "src/"
+                ],
+                "exclude-from-classmap": [
+                    "/src/class-pdo-polyfill.php"
                 ],
                 "files": [
                     "src/utils.php",

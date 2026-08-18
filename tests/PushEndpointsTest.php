@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use WordPress\Reprint\Server\FileIndexProcessor;
 
 require_once __DIR__ . '/../packages/reprint-client/bin/reprint-client';
 require_once __DIR__ . '/../packages/reprint-client/src/lib/upload/class-multipart-push-stream-client.php';

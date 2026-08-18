@@ -2,7 +2,7 @@
 
 use PHPUnit\Framework\TestCase;
 
-use function WordPress\Reprint\Exporter\wp_join_unix_paths;
+use function WordPress\Reprint\Server\wp_join_unix_paths;
 
 /**
  * Drift tests for the copy of wp_join_unix_paths() in the exporter package.

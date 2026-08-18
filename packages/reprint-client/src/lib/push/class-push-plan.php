@@ -1,10 +1,12 @@
 <?php
 
+use WordPress\Reprint\Server\FileIndexProcessor;
+
 use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Exporter\relative_path_under;
-use function WordPress\Reprint\Exporter\trim_right_slash;
+use function WordPress\Reprint\Server\relative_path_under;
+use function WordPress\Reprint\Server\trim_right_slash;
 
 require_once __DIR__ . '/../index/class-file-sync-plan-runner.php';
 

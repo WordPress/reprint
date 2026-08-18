@@ -2,7 +2,7 @@
 
 require_once __DIR__ . '/MySQLDumpProducerTestBase.php';
 
-use WordPress\DataLiberation\DatabaseRowsReader;
+use WordPress\Reprint\Server\DatabaseRowsReader;
 
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
 class DatabaseRowsReaderTest extends MySQLDumpProducerTestBase {

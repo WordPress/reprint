@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
-use function WordPress\Reprint\Exporter\build_pdo_dsn;
+use function WordPress\Reprint\Server\build_pdo_dsn;
 
 class BuildPdoDsnTest extends TestCase
 {

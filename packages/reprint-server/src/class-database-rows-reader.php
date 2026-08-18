@@ -1,7 +1,6 @@
 <?php
 
-// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedNamespaceFound
-namespace WordPress\DataLiberation;
+namespace WordPress\Reprint\Server;
 
 use PDO;
 

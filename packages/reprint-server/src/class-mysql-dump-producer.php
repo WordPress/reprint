@@ -1,6 +1,6 @@
 <?php
 
-namespace WordPress\DataLiberation;
+namespace WordPress\Reprint\Server;
 
 use PDO;
 

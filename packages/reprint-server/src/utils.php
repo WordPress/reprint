@@ -4,11 +4,13 @@
  *
  * These helpers live in a namespace so they don't collide with global
  * functions of the same name declared by third-party plugins or
- * WordPress drop-ins. The package is loaded via Composer's "files"
- * autoload, which means every host that pulls in this library (e.g.
- * wpcomsh on WordPress.com) gets these symbols on every request —
- * generic names like parse_size() or normalize_path() are guaranteed
- * to clash sooner or later if they sit in the global namespace.
+ * WordPress drop-ins. Generic names like parse_size() or normalize_path()
+ * are guaranteed to clash sooner or later if they sit in the global
+ * namespace, and more than one plugin on a WordPress.com site loads this
+ * file.
+ *
+ * Composer's "files" autoload includes this file, so every host that installs
+ * the package gets these symbols on every request.
  *
  * The two str_* polyfills at the top stay global on purpose: they
  * backfill PHP 7.4 built-ins, so callers expect to reach them via
@@ -31,7 +33,7 @@ namespace {
     }
 }
 
-namespace WordPress\Reprint\Exporter {
+namespace WordPress\Reprint\Server {
 
 use InvalidArgumentException;
 use RuntimeException;
@@ -40,11 +42,23 @@ use RuntimeException;
 // guards are deliberately per-function rather than one block-wide check.
 //
 // Two plugins on the same site can each ship a copy of this package — wpcomsh
-// and Jetpack both do on WordPress.com — and the older copy may load first.
-// A single guard keyed on one sentinel function would then skip every other
-// declaration in this file, and the first call to a helper the older copy
-// does not have is a fatal. Per-function guards degrade to "the older copy
-// wins the functions it has, this copy supplies the rest" instead.
+// and Jetpack both do on WordPress.com — so one of them declares these
+// functions first and the other must not redeclare them. A single guard keyed
+// on one sentinel function would work only while both copies declare exactly
+// the same set: the moment one ships a helper the other lacks, the second copy
+// skips the whole block and the first call to that helper is a fatal.
+// Per-function guards degrade to "whoever loaded first wins the functions it
+// has, this copy supplies the rest" instead.
+//
+// Composer's "files" autoload dedupes by file identifier, so a single installed
+// copy is included once however many plugins depend on it, and these guards do
+// nothing in the common case. They earn their keep when two identifiers exist:
+// a monorepo checkout that loads both packages/reprint-server/src/utils.php and
+// the vendor/ mirror of it, or a site still carrying reprint-exporter v0.1.47
+// under its old package name. That older copy declares its helpers in
+// WordPress\Reprint\Exporter, a namespace nothing here uses any more, so it
+// cannot reach these names at all — but the guards cost nothing and they
+// document the hazard.
 //
 // Function bodies stay unindented inside their guards, matching how the
 // bracketed namespace blocks in this file are written.

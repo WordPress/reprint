@@ -28,6 +28,8 @@ use Reprint\Importer\StreamingContext;
 use Reprint\Importer\TransientInterruptionException;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 
+use WordPress\Reprint\Server\FileIndexProcessor;
+
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
 use function Reprint\Importer\register_sqlite_function;
@@ -38,15 +40,15 @@ use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function Reprint\Importer\write_local_index_entry;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
-use function WordPress\Reprint\Exporter\assert_valid_path;
-use function WordPress\Reprint\Exporter\normalize_path;
-use function WordPress\Reprint\Exporter\parse_size;
-use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Exporter\path_is_descendant_of;
-use function WordPress\Reprint\Exporter\path_remainder_under;
-use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
-use function WordPress\Reprint\Exporter\relative_path_under;
-use function WordPress\Reprint\Exporter\trim_right_slash;
+use function WordPress\Reprint\Server\assert_valid_path;
+use function WordPress\Reprint\Server\normalize_path;
+use function WordPress\Reprint\Server\parse_size;
+use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Server\path_is_descendant_of;
+use function WordPress\Reprint\Server\path_remainder_under;
+use function WordPress\Reprint\Server\realpath_with_missing_tail;
+use function WordPress\Reprint\Server\relative_path_under;
+use function WordPress\Reprint\Server\trim_right_slash;
 use function Reprint\Importer\merge_local_index_mutations;
 use function Reprint\Importer\write_local_index_update;
 

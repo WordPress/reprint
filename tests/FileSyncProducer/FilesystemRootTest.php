@@ -2,6 +2,8 @@
 
 namespace FileSyncProducerTests;
 
+use WordPress\Reprint\Server\FileTreeProducer;
+
 require_once __DIR__ . '/FileSyncProducerTestBase.php';
 
 /**
@@ -17,7 +19,7 @@ class FilesystemRootTest extends FileSyncProducerTestBase
             'file2.txt' => 'Content 2'
         ]);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -35,7 +37,7 @@ class FilesystemRootTest extends FileSyncProducerTestBase
         ]);
         $path = $dir . '/from-root.txt';
 
-        $sync = new \FileTreeProducer('/', [
+        $sync = new FileTreeProducer('/', [
             'paths' => [ltrim($path, '/')],
         ]);
         $chunks = $this->processAllChunks($sync);

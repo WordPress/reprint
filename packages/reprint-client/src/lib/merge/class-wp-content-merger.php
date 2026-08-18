@@ -1,9 +1,9 @@
 <?php
 
 use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Exporter\normalize_path;
-use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
+use function WordPress\Reprint\Server\normalize_path;
+use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Server\realpath_with_missing_tail;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Merge failures carry CLI filesystem paths, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.

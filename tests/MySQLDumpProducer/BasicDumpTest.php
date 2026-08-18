@@ -222,7 +222,7 @@ PHP;
         $this->pdo->exec('TRUNCATE TABLE unique_replay_rows');
         $this->pdo->exec("INSERT INTO unique_replay_rows VALUES (1, 1, 'first')");
         $this->pdo->exec('SET UNIQUE_CHECKS=0');
-        $this->pdo->exec(\WordPress\DataLiberation\MySQLDumpProducer::get_session_setup_sql());
+        $this->pdo->exec(\WordPress\Reprint\Server\MySQLDumpProducer::get_session_setup_sql());
         $this->assertSame(1, (int) $this->pdo->query('SELECT @@UNIQUE_CHECKS')->fetchColumn());
         $this->pdo->exec($matches[0]);
 
