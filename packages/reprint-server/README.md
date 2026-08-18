@@ -25,8 +25,8 @@ One thing not to change without reading it first: the `PDO`, `PDOStatement` and
 `PDOException` polyfills in `src/class-pdo-polyfill.php` are declared inside an
 `eval()`. That keeps them out of the generated classmap, which for a consumer
 like Jetpack is shared by every plugin on the site. The header comment on that
-file explains it, and `bin/check-reprint-server-isolation.php` fails the build
-if any of the three ever reaches the map.
+file explains it, and `tests/PdoPolyfillTest.php` fails the build if the
+declarations ever move somewhere a scanner can see them.
 
 ## Development
 

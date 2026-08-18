@@ -37,8 +37,8 @@
  * AutoloadProcessor applies no exclusions. There, the eval() is the only thing
  * keeping these names out.
  *
- * bin/check-reprint-server-isolation.php generates the classmap and fails if
- * any of the three appears in it.
+ * tests/PdoPolyfillTest.php tokenises this file and fails if it declares a
+ * class where a scanner can see one.
  */
 
 if (!class_exists('PDO', false)) {
