@@ -58,14 +58,15 @@ jobs:
           php-version: '8.2'
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
           ini-values: phar.readonly=0
+          tools: composer:2.9.7
 
       - run: composer install --no-dev --no-interaction --prefer-dist
 
-      - name: Install plugin runtime dependencies
-        run: composer install --no-dev --no-interaction --prefer-dist --working-dir=reprint-server-wp
-
       - name: Build reprint.phar
         run: ./bin/build-reprint-phar.sh
+
+      - name: Install exporter plugin build dependencies
+        run: composer install --no-dev --no-interaction --prefer-dist --working-dir=tools/php56-build
 
       - name: Stamp plugin version from git tag
         env:
@@ -78,11 +79,8 @@ jobs:
       # filename. Renaming it would install a second plugin beside the existing
       # reprint-exporter-wp/ instead of upgrading it. The source directory is
       # reprint-server-wp/; only the artifact keeps the legacy name.
-      # zip -r updates an existing archive in place, so remove any leftover
-      # first. The exclusion must be './secret.php': a '*/secret.php' pattern
-      # does not match the root-level entry this layout produces.
-      - name: Package reprint-exporter-wp.zip
-        run: rm -f reprint-exporter-wp.zip && cd reprint-server-wp && zip -r ../reprint-exporter-wp.zip . -x './secret.php'
+      - name: Build reprint-exporter-wp.zip
+        run: ./bin/build-exporter-plugin.sh
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3

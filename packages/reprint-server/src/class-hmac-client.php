@@ -1,5 +1,7 @@
 <?php
 
+use function WordPress\Reprint\Server\generate_random_bytes;
+
 /**
  * HMAC Client for the Site Export API.
  *
@@ -31,7 +33,7 @@ class Site_Export_HMAC_Client {
 
     /** @return string Hex-encoded 16-byte nonce. */
     public function generate_nonce(): string {
-        return bin2hex(random_bytes(16));
+        return bin2hex(generate_random_bytes(16));
     }
 
     /** @return string Microsecond-precision Unix timestamp. */

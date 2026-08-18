@@ -13,11 +13,11 @@
  * the package gets these symbols on every request.
  *
  * The two str_* polyfills at the top stay global on purpose: they
- * backfill PHP 7.4 built-ins, so callers expect to reach them via
+ * backfill functions unavailable before PHP 8.0, so callers reach them via
  * the global namespace without a use-statement.
  */
 
-// Polyfill for PHP 7.4 which lacks str_starts_with().
+// Polyfill for PHP versions before 8.0, which lack str_starts_with().
 namespace {
     if (!function_exists('str_starts_with')) {
         function str_starts_with(string $haystack, string $needle): bool {
@@ -25,7 +25,7 @@ namespace {
         }
     }
 
-    // Polyfill for PHP 7.4 which lacks str_contains().
+    // Polyfill for PHP versions before 8.0, which lack str_contains().
     if (!function_exists('str_contains')) {
         function str_contains(string $haystack, string $needle): bool {
             return $needle === '' || strpos($haystack, $needle) !== false;
@@ -62,6 +62,50 @@ use RuntimeException;
 //
 // Function bodies stay unindented inside their guards, matching how the
 // bracketed namespace blocks in this file are written.
+
+if (!function_exists(__NAMESPACE__ . '\\generate_random_bytes')) {
+/**
+ * Returns cryptographically secure random bytes on every supported PHP version.
+ *
+ * @param int $length Number of bytes to return.
+ * @return string Random bytes.
+ * @throws RuntimeException When the runtime has no secure random-byte source.
+ */
+function generate_random_bytes(int $length): string
+{
+    if (function_exists('random_bytes')) {
+        return random_bytes($length);
+    }
+
+    if (function_exists('openssl_random_pseudo_bytes')) {
+        $strong = false;
+        $bytes = openssl_random_pseudo_bytes($length, $strong);
+        if ($bytes !== false && $strong && strlen($bytes) === $length) {
+            return $bytes;
+        }
+    }
+
+    throw new RuntimeException('The PHP runtime has no cryptographically secure random-byte source.');
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\integer_divide')) {
+/**
+ * Divides two integers and rounds the result toward zero.
+ *
+ * @param int $dividend Number to divide.
+ * @param int $divisor Number to divide by.
+ * @return int Integer quotient.
+ */
+function integer_divide(int $dividend, int $divisor): int
+{
+    if (function_exists('intdiv')) {
+        return intdiv($dividend, $divisor);
+    }
+
+    return intval($dividend / $divisor);
+}
+}
 
 if (!function_exists(__NAMESPACE__ . '\\build_pdo_dsn')) {
 /**

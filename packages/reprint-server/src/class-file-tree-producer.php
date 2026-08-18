@@ -630,7 +630,7 @@ class FileTreeProducer
         $low = 0;
         $high = count($entries);
         while ($low < $high) {
-            $mid = intdiv($low + $high, 2);
+            $mid = integer_divide($low + $high, 2);
             if (strcmp($entries[$mid], $last) <= 0) {
                 $low = $mid + 1;
             } else {
