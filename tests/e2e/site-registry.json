@@ -158,6 +158,9 @@
     "database-cursor-header-limit": {
       "port": 8131,
       "nginx": "cursor-header-limit"
+    },
+    "database-cursor-continuation": {
+      "port": 8132
     }
   }
 }
