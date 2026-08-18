@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REGISTRY="${SCRIPT_DIR}/../site-registry.json"
 SITE_ROOT=$(jq -r '.siteRoot' "$REGISTRY")
 FPM_SOCKET="/run/php/e2e.sock"
+OPEN_BASEDIR_FPM_SOCKET="/run/php/e2e-open-basedir.sock"
 
 echo "=== Setting up infrastructure with PHP ${PHP_VERSION} ==="
 
@@ -97,6 +98,33 @@ php_admin_value[user_ini.cache_ttl] = 0
 php_admin_value[realpath_cache_ttl] = 0
 
 env[SITE_EXPORT_TEST_MODE] = 1
+
+; Keep open_basedir in its own worker pool. A request-level value can remain
+; active when the same worker handles a request for another test site.
+[e2e-open-basedir]
+user = nginx
+group = nginx
+listen = ${OPEN_BASEDIR_FPM_SOCKET}
+listen.owner = nginx
+listen.group = nginx
+listen.mode = 0660
+
+pm = ondemand
+pm.max_children = 4
+
+php_admin_value[memory_limit] = 512M
+php_admin_value[max_execution_time] = 120
+php_admin_value[upload_max_filesize] = 50M
+php_admin_value[post_max_size] = 50M
+php_admin_value[error_reporting] = E_ALL
+php_admin_value[display_errors] = Off
+php_admin_value[log_errors] = On
+php_admin_value[error_log] = /tmp/php-e2e-errors.log
+php_admin_value[user_ini.cache_ttl] = 0
+php_admin_value[realpath_cache_ttl] = 0
+php_admin_value[open_basedir] = ${SITE_ROOT}/open-basedir:/tmp
+
+env[SITE_EXPORT_TEST_MODE] = 1
 EOF
 
 # ---------- Nginx config ----------
@@ -131,7 +159,11 @@ sudo rm -f /etc/nginx/conf.d/default.conf
 
 # Read site definitions from registry (single source of truth)
 # Standard sites — each gets the same fastcgi template on its own port.
-jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | "\(.key) \(.value.port)"' "$REGISTRY" | while read site port; do
+jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | [.key, .value.port, (.value.openBasedir // false)] | @tsv' "$REGISTRY" | while IFS=$'\t' read -r site port open_basedir; do
+    site_fpm_socket="$FPM_SOCKET"
+    if [ "$open_basedir" = "true" ]; then
+        site_fpm_socket="$OPEN_BASEDIR_FPM_SOCKET"
+    fi
     cat <<VHOST | sudo tee "/etc/nginx/conf.d/e2e-${site}.conf" >/dev/null
 server {
     listen 127.0.0.1:${port};
@@ -143,7 +175,7 @@ server {
     }
 
     location ~ \\.php\$ {
-        fastcgi_pass unix:${FPM_SOCKET};
+        fastcgi_pass unix:${site_fpm_socket};
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;

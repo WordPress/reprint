@@ -219,6 +219,9 @@ class ImportClient
     /** @var string Remote Reprint API URL. */
     public $remote_reprint_api_url;
 
+    /** @var string|null Same-origin WordPress Media Library URL for file-fetch uploads. */
+    private $file_fetch_referer = null;
+
     /** @var string Caller-selected state directory for this filesystem root. */
     public $state_dir;
 
@@ -508,6 +511,23 @@ class ImportClient
         }
 
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
+        $remote_url = parse_url( $this->remote_reprint_api_url );
+        if (
+            is_array( $remote_url ) &&
+            isset( $remote_url["scheme"], $remote_url["host"] )
+        ) {
+            $site_path = rtrim((string) ( $remote_url["path"] ?? "" ), "/");
+            if (substr( $site_path, -10 ) === "/index.php") {
+                $site_path = substr( $site_path, 0, -10 );
+            }
+
+            $this->file_fetch_referer =
+                $remote_url["scheme"] . "://" . $remote_url["host"];
+            if (isset( $remote_url["port"] )) {
+                $this->file_fetch_referer .= ":" . $remote_url["port"];
+            }
+            $this->file_fetch_referer .= "{$site_path}/wp-admin/upload.php";
+        }
         $this->state_dir = trim_right_slash($state_dir);
         $this->filesystem_root = trim_right_slash($filesystem_root);
         $remote_state_directory = $selected_remote_state_directory === null
@@ -11472,6 +11492,16 @@ class ImportClient
                 }
             }
             if ($has_file) {
+                if (
+                    $endpoint === "file_fetch" &&
+                    $this->file_fetch_referer !== null
+                ) {
+                    // Some application firewalls admit WordPress uploads
+                    // only after a same-site wp-admin Referer. The HMAC
+                    // remains the authentication check for file_fetch.
+                    $headers[] = "Referer: {$this->file_fetch_referer}";
+                }
+
                 // For CURLFile uploads, sign the raw file content — this
                 // is the logical payload the server will receive, even
                 // though curl wraps it in multipart framing.

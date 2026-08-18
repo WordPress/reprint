@@ -30,7 +30,11 @@ let
   redirectSites = lib.filterAttrs (n: v: (v.nginx or null) == "redirect") registry.sites;
 
   # Generate Nginx virtualHost config for standard sites
-  makeVhost = name: cfg: {
+  makeVhost = name: cfg: let
+    fpmSocket = if (cfg.openBasedir or false)
+      then config.services.phpfpm.pools."e2e-open-basedir".socket
+      else config.services.phpfpm.pools.e2e.socket;
+  in {
     name = "e2e-${name}";
     value = {
       listen = [{ addr = "127.0.0.1"; port = cfg.port; }];
@@ -41,7 +45,7 @@ let
         };
         "~ \\.php$" = {
           extraConfig = ''
-            fastcgi_pass unix:${config.services.phpfpm.pools.e2e.socket};
+            fastcgi_pass unix:${fpmSocket};
             fastcgi_index index.php;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
             include ${pkgs.nginx}/conf/fastcgi_params;
@@ -186,6 +190,34 @@ in {
       "php_admin_value[error_log]" = "/tmp/php-e2e-errors.log";
       "php_admin_value[user_ini.cache_ttl]" = "0";
       "php_admin_value[realpath_cache_ttl]" = "0";
+    };
+    phpEnv = {
+      SITE_EXPORT_TEST_MODE = "1";
+    };
+  };
+
+  # Keep open_basedir in its own worker pool. A request-level value can remain
+  # active when the same worker handles a request for another test site.
+  services.phpfpm.pools."e2e-open-basedir" = {
+    user = "nginx";
+    group = "nginx";
+    phpPackage = phpPackage;
+    settings = {
+      "listen.owner" = "nginx";
+      "listen.group" = "nginx";
+      "pm" = "ondemand";
+      "pm.max_children" = 4;
+      "php_admin_value[memory_limit]" = "512M";
+      "php_admin_value[max_execution_time]" = "120";
+      "php_admin_value[upload_max_filesize]" = "50M";
+      "php_admin_value[post_max_size]" = "50M";
+      "php_admin_value[error_reporting]" = "E_ALL";
+      "php_admin_value[display_errors]" = "Off";
+      "php_admin_value[log_errors]" = "On";
+      "php_admin_value[error_log]" = "/tmp/php-e2e-errors.log";
+      "php_admin_value[user_ini.cache_ttl]" = "0";
+      "php_admin_value[realpath_cache_ttl]" = "0";
+      "php_admin_value[open_basedir]" = "${siteRoot}/open-basedir:/tmp";
     };
     phpEnv = {
       SITE_EXPORT_TEST_MODE = "1";
