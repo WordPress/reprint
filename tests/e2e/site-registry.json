@@ -154,6 +154,9 @@
     },
     "files-pull-mirror": {
       "port": 8130
+    },
+    "open-basedir": {
+      "port": 8131
     }
   }
 }

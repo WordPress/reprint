@@ -659,9 +659,24 @@ function detect_wp_roots(array $start_paths): array
             $seen[$current] = true;
             $wp_load_path = wp_join_unix_paths($current, "wp-load.php");
             $wp_config_path = wp_join_unix_paths($current, "wp-config.php");
-            $has_wp_load = file_exists($wp_load_path);
-            $has_wp_config = file_exists($wp_config_path);
-            $has_wp_content = is_dir(wp_join_unix_paths($current, "wp-content"));
+            $filesystem_probe_warning = false;
+            set_error_handler(function () use (&$filesystem_probe_warning) {
+                $filesystem_probe_warning = true;
+                return true;
+            });
+            try {
+                $has_wp_load = file_exists($wp_load_path);
+                $has_wp_config = file_exists($wp_config_path);
+                $has_wp_content = is_dir(wp_join_unix_paths($current, "wp-content"));
+            } finally {
+                restore_error_handler();
+            }
+            if ($filesystem_probe_warning) {
+                // WordPress root discovery is speculative. If this path cannot be
+                // inspected reliably, keep roots found by this walk and let
+                // preflight continue with the other start paths.
+                break;
+            }
             if ($has_wp_load || $has_wp_config) {
                 $roots[$current] = [
                     "path" => $current,
