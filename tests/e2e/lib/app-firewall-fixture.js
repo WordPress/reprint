@@ -1,10 +1,11 @@
 /**
  * Local reverse proxy which models an application firewall around WordPress.
  *
- * Reprint requests are accepted only when their Referer points to the same
+ * Reprint requests are accepted only when they send the expected Referer,
+ * User-Agent, and Accept-Language headers. The Referer must point to the same
  * origin's WordPress Media Library page. After preflight, path query values
- * must not expose absolute filesystem paths. It injects the planned HTTP
- * errors, then streams later requests to the real E2E WordPress site.
+ * must not expose absolute filesystem paths. It injects the planned potentially
+ * transient HTTP errors, then streams later requests to the real E2E WordPress site.
  */
 import http from 'node:http';
 import { appendFileSync } from 'node:fs';
@@ -39,12 +40,19 @@ const server = http.createServer((request, response) => {
         requestUrl.searchParams.has('site-export-api');
     const expectedReferer = `http://${request.headers.host}/wp-admin/upload.php`;
     const referer = request.headers.referer || '';
+    const expectedUserAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
+        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    const userAgent = request.headers['user-agent'] || '';
+    const expectedAcceptLanguage = 'en-US,en;q=0.9';
+    const acceptLanguage = request.headers['accept-language'] || '';
     const endpoint = requestUrl.searchParams.get('endpoint') || '';
     const rawPathParameter = ['directory', 'list_dir', 'pulled_before']
         .flatMap(parameter => requestUrl.searchParams.getAll(parameter))
         .find(value => value.startsWith('/')) || null;
     const allowed = !isReprintRequest || (
-        referer === expectedReferer && (
+        referer === expectedReferer &&
+        userAgent === expectedUserAgent &&
+        acceptLanguage === expectedAcceptLanguage && (
             endpoint === 'preflight' || rawPathParameter === null
         )
     );
@@ -71,11 +79,14 @@ const server = http.createServer((request, response) => {
         referer,
         expectedReferer,
         rawPathParameter,
+        userAgent,
+        expectedUserAgent,
+        acceptLanguage,
+        expectedAcceptLanguage,
         isReprintRequest,
         allowed,
         action,
         injectedStatus,
-        userAgent: request.headers['user-agent'] || '',
     });
 
     if (!allowed) {
