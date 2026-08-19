@@ -19,10 +19,13 @@ use function WordPress\Filesystem\wp_join_unix_paths;
  */
 class PhpBuiltinApplier implements RuntimeApplier
 {
+    public const DEFAULT_HOST = 'localhost';
+    public const DEFAULT_PORT = 8881;
+
     public function apply(RuntimeManifest $manifest, string $filesystem_root, string $output_dir, array $options = []): array
     {
-        $host = $options['host'] ?? 'localhost';
-        $port = (int) ($options['port'] ?? 8881);
+        $host = $options['host'] ?? self::DEFAULT_HOST;
+        $port = (int) ($options['port'] ?? self::DEFAULT_PORT);
 
         $summary = [];
 
