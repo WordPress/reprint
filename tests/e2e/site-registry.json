@@ -168,6 +168,18 @@
     },
     "outbound-application-firewall": {
       "port": 8134
+    },
+    "basic-no-pdo-mysql": {
+      "port": 8135,
+      "noPdoMysql": true
+    },
+    "sql-data-fidelity-no-pdo-mysql": {
+      "port": 8136,
+      "noPdoMysql": true
+    },
+    "adversarial-database-no-pdo-mysql": {
+      "port": 8137,
+      "noPdoMysql": true
     }
   }
 }

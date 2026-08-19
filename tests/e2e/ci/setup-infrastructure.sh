@@ -12,6 +12,7 @@ REGISTRY="${SCRIPT_DIR}/../site-registry.json"
 SITE_ROOT=$(jq -r '.siteRoot' "$REGISTRY")
 FPM_SOCKET="/run/php/e2e.sock"
 OPEN_BASEDIR_FPM_SOCKET="/run/php/e2e-open-basedir.sock"
+NO_PDO_MYSQL_FPM_SOCKET="/run/php/e2e-no-pdo-mysql.sock"
 
 echo "=== Setting up infrastructure with PHP ${PHP_VERSION} ==="
 
@@ -127,6 +128,73 @@ php_admin_value[open_basedir] = ${SITE_ROOT}/open-basedir:/tmp
 env[SITE_EXPORT_TEST_MODE] = 1
 EOF
 
+# ---------- PHP-FPM master without pdo_mysql ----------
+# Sites flagged noPdoMysql are served from here so they take
+# create_db_connection()'s PDO-less route and export through $wpdb. PHP loads
+# extensions per master rather than per pool, so this cannot be another pool.
+echo "=== Configuring PHP-FPM master without pdo_mysql ==="
+NO_PDO_MYSQL_CONF_D="/etc/php/${PHP_VERSION}/fpm-no-pdo-mysql-conf.d"
+sudo rm -rf "$NO_PDO_MYSQL_CONF_D"
+sudo cp -rL "/etc/php/${PHP_VERSION}/fpm/conf.d" "$NO_PDO_MYSQL_CONF_D"
+sudo rm -f "$NO_PDO_MYSQL_CONF_D"/*pdo_mysql.ini
+
+# The whole point of this master is that pdo_mysql is gone. If the ini were
+# named differently, or the extension were built in, every test on these sites
+# would quietly run on the ordinary PDO path and still pass.
+if ! sudo env PHP_INI_SCAN_DIR="$NO_PDO_MYSQL_CONF_D" "php${PHP_VERSION}" \
+    -r 'exit(extension_loaded("pdo_mysql") ? 1 : 0);'; then
+    echo "pdo_mysql is still loaded in ${NO_PDO_MYSQL_CONF_D}; the no-pdo-mysql sites would not test the wpdb path." >&2
+    exit 1
+fi
+
+cat <<EOF | sudo tee "/etc/php/${PHP_VERSION}/fpm/php-fpm-no-pdo-mysql.conf" >/dev/null
+[global]
+pid = /run/php/e2e-no-pdo-mysql.pid
+error_log = /tmp/php-e2e-no-pdo-mysql.log
+daemonize = no
+
+[e2e-no-pdo-mysql]
+user = nginx
+group = nginx
+listen = ${NO_PDO_MYSQL_FPM_SOCKET}
+listen.owner = nginx
+listen.group = nginx
+listen.mode = 0660
+
+pm = ondemand
+pm.max_children = 8
+
+php_admin_value[memory_limit] = 512M
+php_admin_value[max_execution_time] = 120
+php_admin_value[upload_max_filesize] = 50M
+php_admin_value[post_max_size] = 50M
+php_admin_value[error_reporting] = E_ALL
+php_admin_value[display_errors] = Off
+php_admin_value[log_errors] = On
+php_admin_value[error_log] = /tmp/php-e2e-errors.log
+php_admin_value[user_ini.cache_ttl] = 0
+php_admin_value[realpath_cache_ttl] = 0
+
+env[SITE_EXPORT_TEST_MODE] = 1
+EOF
+
+cat <<EOF | sudo tee /etc/systemd/system/php-e2e-no-pdo-mysql.service >/dev/null
+[Unit]
+Description=PHP-FPM master for E2E sites without pdo_mysql
+After=network.target
+
+[Service]
+Type=simple
+Environment=PHP_INI_SCAN_DIR=${NO_PDO_MYSQL_CONF_D}
+ExecStart=/usr/sbin/php-fpm${PHP_VERSION} --nodaemonize --fpm-config /etc/php/${PHP_VERSION}/fpm/php-fpm-no-pdo-mysql.conf
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+
 # ---------- Nginx config ----------
 echo "=== Configuring Nginx ==="
 sudo mkdir -p "${SITE_ROOT}"
@@ -159,10 +227,13 @@ sudo rm -f /etc/nginx/conf.d/default.conf
 
 # Read site definitions from registry (single source of truth)
 # Standard sites — each gets the same fastcgi template on its own port.
-jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | [.key, .value.port, (.value.openBasedir // false)] | @tsv' "$REGISTRY" | while IFS=$'\t' read -r site port open_basedir; do
+jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | [.key, .value.port, (.value.openBasedir // false), (.value.noPdoMysql // false)] | @tsv' "$REGISTRY" | while IFS=$'\t' read -r site port open_basedir no_pdo_mysql; do
     site_fpm_socket="$FPM_SOCKET"
     if [ "$open_basedir" = "true" ]; then
         site_fpm_socket="$OPEN_BASEDIR_FPM_SOCKET"
+    fi
+    if [ "$no_pdo_mysql" = "true" ]; then
+        site_fpm_socket="$NO_PDO_MYSQL_FPM_SOCKET"
     fi
     cat <<VHOST | sudo tee "/etc/nginx/conf.d/e2e-${site}.conf" >/dev/null
 server {
@@ -261,6 +332,7 @@ done
 # ---------- Start services ----------
 echo "=== Starting services ==="
 sudo systemctl restart "php${PHP_VERSION}-fpm"
+sudo systemctl restart php-e2e-no-pdo-mysql
 
 # Kill anything lingering on our ports before starting Nginx
 for port in $(jq -r '.sites[].port' "$REGISTRY"); do
@@ -275,6 +347,7 @@ sudo systemctl start nginx
 # ---------- Verify ----------
 echo "=== Verifying services ==="
 sudo systemctl is-active --quiet "php${PHP_VERSION}-fpm" && echo "php${PHP_VERSION}-fpm: active" || { echo "php${PHP_VERSION}-fpm: FAILED"; exit 1; }
+sudo systemctl is-active --quiet php-e2e-no-pdo-mysql && echo "php-e2e-no-pdo-mysql: active" || { echo "php-e2e-no-pdo-mysql: FAILED"; exit 1; }
 sudo systemctl is-active --quiet nginx        && echo "nginx: active"      || { echo "nginx: FAILED"; exit 1; }
 sudo systemctl is-active --quiet mariadb      && echo "mariadb: active"    || { echo "mariadb: FAILED"; exit 1; }
 

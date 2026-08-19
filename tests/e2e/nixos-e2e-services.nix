@@ -15,6 +15,20 @@ let
     all.ctype
   ]);
 
+  # Same PHP without pdo_mysql, for sites flagged noPdoMysql in the registry.
+  # They take create_db_connection()'s PDO-less route and export through $wpdb.
+  phpPackageNoPdoMysql = pkgs.php82.withExtensions ({ enabled, all }: enabled ++ [
+    all.pdo_sqlite
+    all.zlib
+    all.curl
+    all.mbstring
+    all.openssl
+    all.simplexml
+    all.tokenizer
+    all.filter
+    all.ctype
+  ]);
+
   # Read site definitions from registry (single source of truth)
   registry = builtins.fromJSON (builtins.readFile ./site-registry.json);
   siteRoot = registry.siteRoot;
@@ -31,7 +45,9 @@ let
 
   # Generate Nginx virtualHost config for standard sites
   makeVhost = name: cfg: let
-    fpmSocket = if (cfg.openBasedir or false)
+    fpmSocket = if (cfg.noPdoMysql or false)
+      then config.services.phpfpm.pools."e2e-no-pdo-mysql".socket
+      else if (cfg.openBasedir or false)
       then config.services.phpfpm.pools."e2e-open-basedir".socket
       else config.services.phpfpm.pools.e2e.socket;
   in {
@@ -180,6 +196,32 @@ in {
       "pm.start_servers" = 4;
       "pm.min_spare_servers" = 2;
       "pm.max_spare_servers" = 8;
+      "php_admin_value[memory_limit]" = "512M";
+      "php_admin_value[max_execution_time]" = "120";
+      "php_admin_value[upload_max_filesize]" = "50M";
+      "php_admin_value[post_max_size]" = "50M";
+      "php_admin_value[error_reporting]" = "E_ALL";
+      "php_admin_value[display_errors]" = "Off";
+      "php_admin_value[log_errors]" = "On";
+      "php_admin_value[error_log]" = "/tmp/php-e2e-errors.log";
+      "php_admin_value[user_ini.cache_ttl]" = "0";
+      "php_admin_value[realpath_cache_ttl]" = "0";
+    };
+    phpEnv = {
+      SITE_EXPORT_TEST_MODE = "1";
+    };
+  };
+
+  # Sites without pdo_mysql, so create_db_connection() exports through $wpdb.
+  services.phpfpm.pools."e2e-no-pdo-mysql" = {
+    user = "nginx";
+    group = "nginx";
+    phpPackage = phpPackageNoPdoMysql;
+    settings = {
+      "listen.owner" = "nginx";
+      "listen.group" = "nginx";
+      "pm" = "ondemand";
+      "pm.max_children" = 8;
       "php_admin_value[memory_limit]" = "512M";
       "php_admin_value[max_execution_time]" = "120";
       "php_admin_value[upload_max_filesize]" = "50M";

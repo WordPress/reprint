@@ -15,14 +15,18 @@ import {
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
-describe('Import: Resume SQL', { timeout: 120000 }, () => {
-    const site = 'basic';
+// Also runs on a site whose PHP-FPM master has no pdo_mysql, where the export
+// streams through WordPress's $wpdb. Resuming rebuilds the keyset WHERE clause
+// from primary key values, so both connections must quote them alike.
+describe.each([
+    ['basic', 'e2e_basic_import_09'],
+    ['basic-no-pdo-mysql', 'e2e_basic_no_pdo_mysql_import_09'],
+])('Import: Resume SQL (%s)', { timeout: 120000 }, (site, importDb) => {
     let tempDir;
-    const importDb = 'e2e_basic_import_09';
 
     beforeAll(async () => {
         await ensureSite(site);
-        tempDir = createTempDir('e2e-import-resume-sql');
+        tempDir = createTempDir(`e2e-import-resume-sql-${site}`);
         const conn = await createMysqlConnection();
         await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
         await conn.end();

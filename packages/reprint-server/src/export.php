@@ -1682,8 +1682,11 @@ function endpoint_preflight(array $config): array
     }
 
     if ($creds !== null) {
-        $required_ext = ($creds["db_engine"] ?? "mysql") === "sqlite" ? "pdo_sqlite" : "pdo_mysql";
-        if (!extension_loaded($required_ext)) {
+        $db_engine = $creds["db_engine"] ?? "mysql";
+        $required_ext = $db_engine === "sqlite" ? "pdo_sqlite" : "pdo_mysql";
+        $wpdb_available = $db_engine !== "sqlite" && isset($GLOBALS["wpdb"]) && is_object($GLOBALS["wpdb"]);
+
+        if (!extension_loaded($required_ext) && !$wpdb_available) {
             $db["error"] = "{$required_ext} extension not loaded";
         } else {
             try {

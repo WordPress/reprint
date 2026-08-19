@@ -128,6 +128,7 @@ class WpdbDriverPDOStatement
         $this->clear_last_error();
 
         $rows = $this->wpdb->get_results($sql, 'ARRAY_A');
+        $this->discard_query_log();
         $last_error = $this->get_last_error();
 
         if ($last_error !== '') {
@@ -199,6 +200,17 @@ class WpdbDriverPDOStatement
     private function clear_last_error(): void
     {
         $this->wpdb->last_error = '';
+    }
+
+    /**
+     * Drop the wpdb query log in case it's active.
+     * We don't want these stacking up and consuming memory.
+     */
+    private function discard_query_log(): void
+    {
+        if (isset($this->wpdb->queries) && is_array($this->wpdb->queries)) {
+            $this->wpdb->queries = [];
+        }
     }
 
     private function get_last_error(): string
