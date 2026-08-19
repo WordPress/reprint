@@ -42,7 +42,7 @@ if (!ob_get_level()) {
  * protocol (cursor encoding, multipart structure, header names, endpoint
  * parameters, response format) would break an older importer.
  */
-define('EXPORT_PROTOCOL_VERSION', 2);
+define('EXPORT_PROTOCOL_VERSION', 3);
 
 // File type mask + file type values (top bits of st_mode)
 define('STAT_TYPE_MASK',   0170000);
