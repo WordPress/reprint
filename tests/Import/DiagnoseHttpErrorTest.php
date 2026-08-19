@@ -32,6 +32,31 @@ class DiagnoseHttpErrorTest extends TestCase
         return $method->invoke($client, $http_code, $body, $redirect_url);
     }
 
+    private function isTransientHttpResponse(
+        int $http_code,
+        string $body,
+        bool $has_secret = true
+    ): bool {
+        $client = new \ImportClient(
+            'http://example.com',
+            sys_get_temp_dir(),
+            sys_get_temp_dir(),
+        );
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        if ($has_secret) {
+            $reflection->getProperty('hmac_client')->setValue(
+                $client,
+                new \stdClass(),
+            );
+        }
+
+        return $reflection->getMethod('is_transient_http_response')->invoke(
+            $client,
+            $http_code,
+            $body,
+        );
+    }
+
     // ── Redirects ────────────────────────────────────────────────
 
     public function testRedirectWithTargetUrl()
@@ -184,6 +209,38 @@ class DiagnoseHttpErrorTest extends TestCase
     {
         $result = $this->diagnose(502, '<html>Bad Gateway</html>');
         $this->assertSame('SERVER_ERROR', $result['code']);
+    }
+
+    public function testTransientHttpResponseClassification()
+    {
+        $this->assertTrue($this->isTransientHttpResponse(
+            418,
+            '<!doctype html><title>Temporary bot response</title>',
+        ));
+        $this->assertTrue($this->isTransientHttpResponse(
+            403,
+            '<!doctype html><title>Temporary firewall response</title>',
+        ));
+        $this->assertTrue($this->isTransientHttpResponse(
+            403,
+            '{"error":"Bot protection is temporarily unavailable"}',
+        ));
+        $this->assertTrue($this->isTransientHttpResponse(
+            503,
+            '{"error":"Upstream service is temporarily unavailable"}',
+        ));
+        $this->assertFalse($this->isTransientHttpResponse(
+            403,
+            '{"error":"HMAC signature verification failed"}',
+        ));
+        $this->assertFalse($this->isTransientHttpResponse(
+            503,
+            '{"error":"Export not configured"}',
+        ));
+        $this->assertFalse($this->isTransientHttpResponse(
+            415,
+            '<!doctype html><title>Unsupported Media Type</title>',
+        ));
     }
 
     // ── HTML response on any status ──────────────────────────────

@@ -180,6 +180,109 @@ class CurlTimeoutRecoveryTest extends TestCase
         );
     }
 
+    public function testSqlDownloadRetriesHttp418ThenCompletes()
+    {
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
+            $this->markTestSkipped('HTTP retry coverage requires PHP curl and pcntl.');
+        }
+
+        $cursor = base64_encode('{"table":"wp_posts","pk":42}');
+        $http418 = $this->httpResponse(
+            "418 I'm a teapot",
+            'text/html',
+            '<!doctype html><title>Temporary bot response</title>',
+        );
+        $boundary = 'http-retry-test';
+        $completion_body = "--{$boundary}\r\n"
+            . "Content-Type: application/octet-stream\r\n"
+            . "Content-Length: 0\r\n"
+            . "X-Chunk-Type: completion\r\n"
+            . "X-Status: complete\r\n"
+            . "\r\n"
+            . "\r\n"
+            . "--{$boundary}--\r\n";
+        $server = $this->startSqlResponseServer([
+            $http418,
+            $this->httpResponse(
+                '200 OK',
+                "multipart/mixed; boundary={$boundary}",
+                $completion_body,
+            ),
+        ], $cursor);
+        $wire_client = $this->prepareWireSqlClient(
+            $server['url'],
+            $cursor,
+        );
+        $client = $wire_client['client'];
+        $reflection = $wire_client['reflection'];
+
+        try {
+            $reflection->getMethod('fetch_sql')->invoke($client);
+        } finally {
+            pcntl_waitpid($server['child_pid'], $status);
+        }
+
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+        $this->assertSame(
+            0,
+            $client->get_state()->consecutive_interrupted_responses,
+        );
+        $this->assertNull(
+            $client->last_error_code,
+            'A successful repeated request must clear the earlier HTTP error code.',
+        );
+    }
+
+    public function testSqlDownloadPreservesHttp418AfterRetryLimit()
+    {
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
+            $this->markTestSkipped('HTTP retry coverage requires PHP curl and pcntl.');
+        }
+
+        $cursor = base64_encode('{"table":"wp_posts","pk":42}');
+        $http418 = $this->httpResponse(
+            "418 I'm a teapot",
+            'text/html',
+            '<!doctype html><title>Temporary bot response</title>',
+        );
+        $server = $this->startSqlResponseServer([
+            $http418,
+            $http418,
+            $http418,
+        ], $cursor);
+        $wire_client = $this->prepareWireSqlClient(
+            $server['url'],
+            $cursor,
+        );
+        $client = $wire_client['client'];
+        $reflection = $wire_client['reflection'];
+
+        $failure = null;
+        try {
+            $reflection->getMethod('fetch_sql')->invoke($client);
+            $this->fail('The third HTTP 418 response should stop the pull.');
+        } catch (\RuntimeException $error) {
+            $failure = $error;
+        } finally {
+            pcntl_waitpid($server['child_pid'], $status);
+        }
+
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+        $this->assertNotNull($failure);
+        $this->assertStringContainsString(
+            '3 consecutive times without cursor progress',
+            $failure->getMessage(),
+        );
+        $this->assertStringContainsString('HTTP 418', $failure->getMessage());
+        $this->assertSame('HTML_RESPONSE', $client->last_error_code);
+        $this->assertSame(
+            3,
+            $client->get_state()->consecutive_interrupted_responses,
+        );
+    }
+
     // ---------------------------------------------------------------
     // fetch_file_batch: timeout saves state and returns false
     // ---------------------------------------------------------------
@@ -684,6 +787,127 @@ PHP);
             $state["consecutive_interrupted_responses"],
             "Successful request should reset consecutive_interrupted_responses to 0"
         );
+    }
+
+    private function httpResponse(
+        string $status_line,
+        string $content_type,
+        string $body
+    ): string {
+        return "HTTP/1.1 {$status_line}\r\n"
+            . "Content-Type: {$content_type}\r\n"
+            . 'Content-Length: ' . strlen($body) . "\r\n"
+            . "Connection: close\r\n\r\n"
+            . $body;
+    }
+
+    /**
+     * Start a child server which returns one supplied response per SQL request.
+     *
+     * @param string[] $responses Complete HTTP responses in request order.
+     * @param string   $cursor    Expected SQL cursor on every request.
+     * @return array {
+     *     @type int    $child_pid Child process ID.
+     *     @type string $url       Remote Reprint API URL.
+     * }
+     */
+    private function startSqlResponseServer(array $responses, string $cursor): array
+    {
+        $listener = stream_socket_server(
+            'tcp://127.0.0.1:0',
+            $error_number,
+            $error_message,
+        );
+        $this->assertNotFalse($listener, $error_message);
+        $address = stream_socket_get_name($listener, false);
+        $this->assertIsString($address);
+
+        $child_pid = pcntl_fork();
+        $this->assertNotSame(-1, $child_pid);
+        if ($child_pid === 0) {
+            foreach ($responses as $response) {
+                $connection = stream_socket_accept($listener, 5);
+                if ($connection === false) {
+                    exit(2);
+                }
+                stream_set_timeout($connection, 5);
+                $request = '';
+                while (strpos($request, "\r\n\r\n") === false) {
+                    $piece = fread($connection, 8192);
+                    if ($piece === false || $piece === '') {
+                        fclose($connection);
+                        fclose($listener);
+                        exit(3);
+                    }
+                    $request .= $piece;
+                }
+                if (strpos($request, 'endpoint=sql_chunk') === false) {
+                    fclose($connection);
+                    fclose($listener);
+                    exit(4);
+                }
+                if (stripos($request, "X-Export-Cursor: {$cursor}\r\n") === false) {
+                    fclose($connection);
+                    fclose($listener);
+                    exit(5);
+                }
+                if (fwrite($connection, $response) !== strlen($response)) {
+                    fclose($connection);
+                    fclose($listener);
+                    exit(6);
+                }
+                fclose($connection);
+            }
+            fclose($listener);
+            exit(0);
+        }
+
+        fclose($listener);
+
+        return [
+            'child_pid' => $child_pid,
+            'url' => 'http://' . $address . '/?reprint-api=1',
+        ];
+    }
+
+    /**
+     * Prepare a real ImportClient for an SQL wire retry test.
+     *
+     * @return array {
+     *     @type \ImportClient     $client     Client with resumable SQL state.
+     *     @type \ReflectionClass $reflection Reflection for invoking fetch_sql().
+     * }
+     */
+    private function prepareWireSqlClient(
+        string $url,
+        string $cursor
+    ): array {
+        $client = new \ImportClient(
+            $url,
+            $this->stateDir,
+            $this->filesystem_root,
+        );
+        \write_current_pull_state($client, [
+            "preflight" => ["data" => ["ok" => true], "http_code" => 200],
+            "follow_symlinks" => false,
+            "fs_root_nonempty_behavior" => "preserve-local",
+            "active_resumable_command" => [
+                "command_name" => "db-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "sql",
+                "remote_cursor" => $cursor,
+            ],
+            "sql_bytes" => 0,
+        ]);
+
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection->getProperty('is_tty')->setValue($client, false);
+        $reflection->getProperty('sql_output_mode')->setValue($client, 'file');
+
+        return [
+            'client' => $client,
+            'reflection' => $reflection,
+        ];
     }
 
 }
