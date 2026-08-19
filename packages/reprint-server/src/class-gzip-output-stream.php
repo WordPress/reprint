@@ -12,6 +12,10 @@ namespace WordPress\Reprint\Server;
  * PHP 7.0 and newer can gzip each bounded write without buffering the whole
  * response. PHP 5.6 lacks the incremental zlib API, so it sends the same
  * multipart stream without a Content-Encoding header.
+ *
+ * PHP-side gzip also gives outbound WAF rules that do not decode
+ * Content-Encoding the encoded byte stream; server-level compression can run
+ * after those rules inspect the body.
  */
 class GzipOutputStream
 {
