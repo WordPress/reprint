@@ -6,6 +6,12 @@ on:
   workflow_run:
     workflows: ['Tag Release']
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (for example: v0.1.43)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -29,12 +35,19 @@ jobs:
 
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
             TAG="${GITHUB_REF_NAME}"
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
           else
             TAG="$(git tag --points-at "${{ github.event.workflow_run.head_sha }}" --list 'v*' --sort=-v:refname | head -1)"
             if [ -z "${TAG}" ]; then
               echo "::error::No v* tag found for workflow head SHA ${{ github.event.workflow_run.head_sha }}"
               exit 1
             fi
+          fi
+
+          if ! git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag ${TAG} does not exist"
+            exit 1
           fi
 
           git checkout "refs/tags/${TAG}"
