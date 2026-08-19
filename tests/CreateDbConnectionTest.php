@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 use WordPress\Reprint\Server\SqliteDriverPDO;
+use WordPress\Reprint\Server\WpdbDriverPDO;
 
 final class CreateDbConnectionTest extends TestCase {
     public function testMysqlSessionUsesStableCharsetAndCollation(): void
@@ -188,7 +189,7 @@ final class CreateDbConnectionTest extends TestCase {
         );
         $this->assertSame(
             [
-                'class' => 'WpdbDriverPDO',
+                'class' => WpdbDriverPDO::class,
                 'queries' => ['SET NAMES utf8mb4 COLLATE utf8mb4_bin'],
             ],
             json_decode($result['stdout'], true)
