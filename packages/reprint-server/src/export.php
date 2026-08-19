@@ -766,7 +766,7 @@ function endpoint_sql_chunk(
         "create_table_query" => $config["create_table_query"] ?? true,
     ];
 
-    // -- Cap statement size to the smaller of client and server max_allowed_packet --
+    // -- Cap statement size to packet limits --
     // If the client sent its max_allowed_packet, cap the producer's
     // max_statement_size so the dump stays importable on the client.
     // We query the server's own max_allowed_packet too and use the
@@ -871,7 +871,7 @@ function endpoint_sql_chunk(
 
     // -- Stream SQL fragments --
     // Pull SQL fragments from the producer in batches, writing each batch
-    // as a multipart chunk. Stop when the producer is exhausted or the
+    // as a multipart part. Stop when the producer is exhausted or the
     // resource budget (time/memory) runs out.
     $batches_processed = 0;
     $sql_bytes_processed = 0;
@@ -880,6 +880,8 @@ function endpoint_sql_chunk(
     $deferred_fragment = null;
     /** @var string|null $deferred_fragment_cursor */
     $deferred_fragment_cursor = null;
+    /** @var bool $deferred_fragment_must_be_its_own_part */
+    $deferred_fragment_must_be_its_own_part = false;
 
     $stream_failure = null;
     try {
@@ -887,19 +889,62 @@ function endpoint_sql_chunk(
             $budget->has_remaining()
         ) {
             $sql_fragments = [];
+            $sql_part_body_bytes = 0;
             $cursor = null;
+            /** @var string|null Cursor after the last fragment included in this part. */
+            $last_fragment_cursor = null;
             $sql_ends_with_complete_statement = false;
 
             $i = 0;
+            $part_must_end = false;
             if ($deferred_fragment !== null) {
                 $sql_fragments[] = $deferred_fragment;
+                $sql_part_body_bytes = strlen($deferred_fragment);
                 $cursor = $deferred_fragment_cursor;
-                $sql_ends_with_complete_statement = true;
+                $last_fragment_cursor = $deferred_fragment_cursor;
+                $trimmed_fragment = rtrim($deferred_fragment);
+                $sql_ends_with_complete_statement =
+                    $trimmed_fragment !== '' && substr($trimmed_fragment, -1) === ';';
+                $part_must_end = $deferred_fragment_must_be_its_own_part;
+                $i = 1;
                 $deferred_fragment = null;
                 $deferred_fragment_cursor = null;
-            } else {
+                $deferred_fragment_must_be_its_own_part = false;
+            }
+
+            if (
+                !$part_must_end &&
+                $i < $fragments_per_batch
+            ) {
                 while ($reader->next_sql_fragment()) {
                     $fragment = (string) $reader->get_sql_fragment();
+                    $fragment_bytes = strlen($fragment);
+
+                    if (
+                        $fragment_bytes > MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES
+                    ) {
+                        throw new RuntimeException(
+                            "The SQL producer returned a {$fragment_bytes}-byte fragment; " .
+                            "the decoded SQL part body limit is " .
+                            MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES .
+                            " bytes."
+                        );
+                    }
+                    $fragment_cursor = $reader->get_reentrancy_cursor();
+
+                    if (
+                        !empty($sql_fragments) &&
+                        $sql_part_body_bytes + $fragment_bytes >
+                            MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES
+                    ) {
+                        // The producer has already advanced. Retain this fragment
+                        // and its cursor while this part keeps its earlier cursor.
+                        $deferred_fragment = $fragment;
+                        $deferred_fragment_cursor = $fragment_cursor;
+                        $deferred_fragment_must_be_its_own_part =
+                            $reader->current_fragment_must_be_its_own_part();
+                        break;
+                    }
 
                     // The importer stores a cursor only after executing a complete part.
                     // Keep the SET header alone before row data. Do not put DROP/CREATE
@@ -913,18 +958,21 @@ function endpoint_sql_chunk(
                         $sql_ends_with_complete_statement
                     ) {
                         $deferred_fragment = $fragment;
-                        $deferred_fragment_cursor = $reader->get_reentrancy_cursor();
+                        $deferred_fragment_cursor = $fragment_cursor;
+                        $deferred_fragment_must_be_its_own_part = true;
                         break;
                     }
 
                     $sql_fragments[] = $fragment;
+                    $sql_part_body_bytes += $fragment_bytes;
+                    $last_fragment_cursor = $fragment_cursor;
                     $i++;
 
                     $trimmed_fragment = rtrim($fragment);
                     $sql_ends_with_complete_statement =
                         $trimmed_fragment !== '' && substr($trimmed_fragment, -1) === ';';
                     if ($sql_ends_with_complete_statement) {
-                        $cursor = $reader->get_reentrancy_cursor();
+                        $cursor = $fragment_cursor;
                     }
 
                     if ($reader->current_fragment_must_be_its_own_part()) {
@@ -947,15 +995,13 @@ function endpoint_sql_chunk(
             if ($sql === '') {
                 break;
             }
-            $sql_bytes_processed += strlen($sql);
-
             // Does this chunk end on a complete statement boundary?
             // A complete SQL statement ends with ";"; a fragment from an open
             // INSERT does not.
             $trimmed = rtrim($sql);
             $query_complete = $trimmed !== "" && substr($trimmed, -1) === ";";
             if (!$query_complete || $cursor === null) {
-                $cursor = $reader->get_reentrancy_cursor();
+                $cursor = $last_fragment_cursor;
             }
 
             // E2E test hook: before SQL batch is emitted
@@ -964,10 +1010,23 @@ function endpoint_sql_chunk(
                 _e2e_call_hook('test_hook_before_sql_batch', $hook_args);
             }
 
+            $sql_part_body_bytes = strlen($sql);
+            if (
+                $sql_part_body_bytes > MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES
+            ) {
+                throw new RuntimeException(
+                    "The decoded SQL part body is {$sql_part_body_bytes} bytes; " .
+                    "the limit is " .
+                    MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES .
+                    " bytes."
+                );
+            }
+            $sql_bytes_processed += $sql_part_body_bytes;
+
             $gz->write(
                 "--{$boundary}\r\n" .
                 "Content-Type: application/sql\r\n" .
-                "Content-Length: " . strlen($sql) . "\r\n" .
+                "Content-Length: " . $sql_part_body_bytes . "\r\n" .
                 "X-Chunk-Type: sql\r\n" .
                 "X-Query-Complete: " . ($query_complete ? "1" : "0") . "\r\n" .
                 "X-Cursor: " . base64_encode($cursor) . "\r\n" .

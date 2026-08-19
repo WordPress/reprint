@@ -27,9 +27,8 @@ require_once __DIR__ . "/class-database-rows-reader.php";
  * directly to the column's declared charset. JSON columns are a special case — MySQL
  * rejects binary charset input for JSON, so those get an extra CONVERT(... USING utf8mb4).
  *
- * Rows that would exceed MySQL's max_allowed_packet are handled by inserting the row
- * with large columns set to empty strings, then appending the real data via a series
- * of UPDATE ... SET col = CONCAT(col, chunk) statements.
+ * For keyed rows, eligible large columns can be inserted as empty strings and then
+ * filled via UPDATE ... SET col = CONCAT(col, chunk) statements.
  *
  * Known limitations:
  *
@@ -43,6 +42,16 @@ require_once __DIR__ . "/class-database-rows-reader.php";
  */
 class MySQLDumpProducer
 {
+    /**
+     * Maximum decoded SQL body bytes for one multipart part.
+     *
+     * The producer uses this limit to split or reject one oversized row
+     * fragment. The exporter uses the same limit to stop grouping fragments
+     * before the complete multipart part becomes oversized, then checks its
+     * final byte length before writing it.
+     */
+    public const MAX_SQL_PART_BODY_BYTES = 16 * 1024 * 1024;
+
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
     const STATE_NEXT_TABLE = "next_table";
@@ -247,7 +256,10 @@ class MySQLDumpProducer
         $this->current_statement_size = strlen($header) + strlen($this->on_duplicate_key()) + 1;
 
         $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
-        $first_row_sql = $this->format_row_for_insert($this->row_reader->get_current_record());
+        $first_row_sql = $this->format_row_for_insert(
+            $this->row_reader->get_current_record(),
+            $this->current_statement_size
+        );
         $this->current_statement_size += strlen($first_row_sql) + 1;
 
         $this->row_reader->clear_current_record();
@@ -290,7 +302,10 @@ class MySQLDumpProducer
         }
 
         $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
-        $row_sql = $this->format_row_for_insert($this->row_reader->get_current_record());
+        $row_sql = $this->format_row_for_insert(
+            $this->row_reader->get_current_record(),
+            strlen($this->on_duplicate_key())
+        );
         $this->current_statement_size += strlen($row_sql) + 2;
         $this->row_reader->clear_current_record();
         $this->rows_in_batch++;
@@ -707,8 +722,10 @@ class MySQLDumpProducer
 
         /** Base64 output is always ceil(n/3)*4 bytes. */
         $estimated_base64_length = 4 * integer_divide($len + 2, 3);
-        // FROM_BASE64('<data>') => 15 bytes overhead + base64 length
-        return 15 + $estimated_base64_length;
+        // FROM_BASE64('<data>') adds 15 bytes. JSON adds the surrounding
+        // CONVERT(... USING utf8mb4), for 38 wrapper bytes in total.
+        $wrapper_bytes = strtoupper($data_type) === "JSON" ? 38 : 15;
+        return $wrapper_bytes + $estimated_base64_length;
     }
 
     /** Auto-detects max_allowed_packet and uses 80% of it. Falls back to 1MB. */
@@ -731,16 +748,15 @@ class MySQLDumpProducer
      *
      * The approach is estimate-first: compute the approximate encoded size of
      * each column before doing the actual (expensive) base64 encoding. If the
-     * row fits within max_statement_size, encode everything. If it doesn't,
-     * replace the largest non-PK columns with '' and queue their real values
-     * as UPDATE ... CONCAT() chunks in $this->oversized_queue.
+     * row fits the statement and part-body limits, encode everything. If it
+     * doesn't, replace eligible large non-PK columns with '' and queue their
+     * real values as UPDATE ... CONCAT() chunks in $this->oversized_queue.
      *
-     * Tables without a primary key can't use the UPDATE fallback (there's no
-     * stable row identifier for the WHERE clause), so oversized rows in
-     * PK-less tables are emitted as-is — the import may fail, but that's
-     * better than silently dropping data.
+     * Tables without a primary key can't use the UPDATE fallback because
+     * there is no stable row identifier for the WHERE clause. Reject those
+     * rows before building an over-limit SQL fragment.
      */
-    private function format_row_for_insert($row)
+    private function format_row_for_insert($row, $sql_fragment_fixed_bytes)
     {
         $estimated_sizes = [];
         $raw_values = [];
@@ -754,9 +770,13 @@ class MySQLDumpProducer
 
         // Estimate the size of "(val1,val2,val3)," — values + commas between them + parens + terminator
         $row_size_est = array_sum($estimated_sizes) + count($estimated_sizes) + 3;
-        $projected_size = $this->current_statement_size + $row_size_est;
+        $projected_statement_size = $this->current_statement_size + $row_size_est;
+        $projected_fragment_size = $sql_fragment_fixed_bytes + $row_size_est;
 
-        if ($projected_size <= $this->max_statement_size) {
+        if (
+            $projected_statement_size <= $this->max_statement_size &&
+            $projected_fragment_size <= self::MAX_SQL_PART_BODY_BYTES
+        ) {
             $formatted_values = [];
             foreach ($this->row_reader->get_current_column_names() as $col) {
                 $data_type = $this->row_reader->get_data_type($col);
@@ -769,12 +789,17 @@ class MySQLDumpProducer
         // the receiving end.
 
         if (!$this->row_reader->get_current_primary_key_columns() || count($this->row_reader->get_current_primary_key_columns()) === 0) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error returned as authenticated API data, never HTML.
             throw new \RuntimeException(
                 "Row in table " . $this->row_reader->quote_identifier($this->row_reader->get_current_table()) .
-                " exceeds max_statement_size ({$this->max_statement_size} bytes)" .
+                " has an estimated current INSERT size of {$projected_statement_size} bytes and SQL fragment size of" .
+                " {$projected_fragment_size} bytes. The limits are max_statement_size" .
+                " ({$this->max_statement_size} bytes) and the SQL part body limit" .
+                " (" . self::MAX_SQL_PART_BODY_BYTES . " bytes)," .
                 " but the table has no primary key, so the oversized row" .
                 " cannot be split into UPDATE ... CONCAT() chunks."
             );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         }
 
         $this->oversized_pk_values = [];
@@ -795,7 +820,12 @@ class MySQLDumpProducer
         $this->oversized_queue = [];
         $chunked_columns = [];
 
-        $excess = $projected_size - $this->max_statement_size;
+        $excess = max(
+            $projected_statement_size - $this->max_statement_size,
+            $projected_fragment_size - self::MAX_SQL_PART_BODY_BYTES
+        );
+        $saved_bytes = 0;
+        $skipped_non_byte_bounded_value = false;
 
         foreach ($sorted_sizes as $col => $size) {
             if (in_array($col, $this->row_reader->get_current_primary_key_columns())) {
@@ -816,12 +846,30 @@ class MySQLDumpProducer
             }
 
             $data_type = $this->row_reader->get_data_type($col);
+            // SUBSTRING counts characters for text columns. Only binary
+            // columns have byte-bounded chunks, which the part limit needs.
+            $normalized_data_type = strtoupper($data_type);
+            $binary_type = false;
+            foreach (["BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB"] as $type) {
+                if (strpos($normalized_data_type, $type) === 0) {
+                    $binary_type = true;
+                    break;
+                }
+            }
+            if (
+                $projected_fragment_size - $saved_bytes > self::MAX_SQL_PART_BODY_BYTES &&
+                !$binary_type
+            ) {
+                $skipped_non_byte_bounded_value = true;
+                continue;
+            }
             $value_length = strlen($raw_value);
             $chunk_size = $this->compute_chunk_size($col);
 
             if ($value_length > $chunk_size) {
                 $chunked_columns[$col] = true;
-                $excess -= ($size - 2); // Saved bytes (size minus the '' replacement)
+                $saved_bytes += $size - 2; // Saved bytes (size minus the '' replacement)
+                $excess -= $size - 2;
 
                 $this->oversized_queue[] = [
                     'column' => $col,
@@ -830,6 +878,21 @@ class MySQLDumpProducer
                     'total_length' => $value_length,
                 ];
             }
+        }
+
+        if (
+            $projected_fragment_size - $saved_bytes >
+                self::MAX_SQL_PART_BODY_BYTES ||
+            ($skipped_non_byte_bounded_value && $excess > 0)
+        ) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error returned as authenticated API data, never HTML.
+            throw new \RuntimeException(
+                "Row in table " . $this->row_reader->quote_identifier($this->row_reader->get_current_table()) .
+                " cannot fit the SQL size limits with the available UPDATE chunking." .
+                " max_statement_size is {$this->max_statement_size}" .
+                " bytes and the SQL part body limit is " . self::MAX_SQL_PART_BODY_BYTES . " bytes."
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         }
 
         if (empty($chunked_columns)) {
@@ -852,7 +915,7 @@ class MySQLDumpProducer
     /**
      * Computes the maximum raw byte size of each chunk for the given column,
      * such that an UPDATE ... SET col = CONCAT(col, FROM_BASE64('...'))
-     * statement stays within max_statement_size.
+     * statement stays within both SQL size limits.
      */
     private function compute_chunk_size($column)
     {
@@ -862,7 +925,11 @@ class MySQLDumpProducer
         $where_clause_size = $this->estimate_pk_where_size();
         $total_overhead = $update_overhead + $where_clause_size + 100; // Extra margin
 
-        $max_chunk_raw_size = ($this->max_statement_size - $total_overhead);
+        $maximum_update_statement_size = min(
+            $this->max_statement_size,
+            self::MAX_SQL_PART_BODY_BYTES
+        );
+        $max_chunk_raw_size = ($maximum_update_statement_size - $total_overhead);
 
         // Base64 inflates by ~1.33x, plus FROM_BASE64('') wrapper overhead
         $max_chunk_raw_size = (int)(($max_chunk_raw_size - 20) / 1.34);
