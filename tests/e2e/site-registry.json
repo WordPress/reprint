@@ -141,10 +141,10 @@
       "port": 8125
     },
     "only-file-path": {
-      "port": 8131
+      "port": 8134
     },
     "only-symlinked-directory-root": {
-      "port": 8132
+      "port": 8135
     },
     "mysql-session-settings-resume": {
       "port": 8126
