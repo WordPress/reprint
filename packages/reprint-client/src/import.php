@@ -12402,6 +12402,8 @@ if (
         defined('IMPORTER_WRAPPER_ENTRY')
     )
 ) {
+    $argument_count = count($argv);
+
     // Handle --version before anything else.
     if (isset($argv[1]) && in_array($argv[1], ["--version", "-V"])) {
         echo get_importer_version() . "\n";
@@ -13728,7 +13730,7 @@ if (
     ];
 
     // Show main help when invoked with no arguments or just --help
-    if ($argc < 2 || (isset($argv[1]) && in_array($argv[1], ["--help", "-h", "help"]))) {
+    if ($argument_count < 2 || (isset($argv[1]) && in_array($argv[1], ["--help", "-h", "help"]))) {
         _cli_render_main_help($option_defs, $command_info);
         exit(1);
     }
@@ -13779,7 +13781,7 @@ if (
     $option_start_index = $reprint_has_remote_reprint_api_url ? 3 : 2;
 
     [$state_dir, $filesystem_root, $options] = _cli_parse_options(
-        $argv, $argc, $option_start_index, $option_defs
+        $argv, $argument_count, $option_start_index, $option_defs
     );
     $options["command"] = $command;
 
