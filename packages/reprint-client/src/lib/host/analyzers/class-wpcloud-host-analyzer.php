@@ -1,7 +1,7 @@
 <?php
 
 use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Exporter\trim_right_slash;
+use function WordPress\Reprint\Server\trim_right_slash;
 
 /**
  * Host analyzer for WP Cloud (wpcom) sites.

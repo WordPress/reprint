@@ -151,11 +151,7 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         $completeSQL = implode("\n", $allFragments);
         $importPdo = $this->executeDumpInNewDatabase($completeSQL);
 
-        // Verify row count
-        $count = $importPdo
-            ->query("SELECT COUNT(*) FROM no_pk_large")
-            ->fetchColumn();
-        $this->assertEquals(5000, $count);
+        $this->assertDatabasesEqual($this->pdo, $importPdo, ["no_pk_large"]);
     }
 
     /**
@@ -238,10 +234,8 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
                 $sql = $producer->get_sql_fragment();
                 if ($sql !== null) {
                     $allFragments[] = $sql;
-                    // Count row fragments (they start with opening parenthesis)
-                    $trimmed = ltrim($sql);
-                    if ($trimmed !== "" && $trimmed[0] === "(") {
-                        $rowsInIteration++;
+                    if ($this->isInsertRowFragment($sql)) {
+                        ++$rowsInIteration;
                     }
                 }
                 $fragmentCount++;
@@ -395,7 +389,13 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         $this->assertIsArray($cursorData);
         $this->assertArrayHasKey("current_table", $cursorData);
         $this->assertArrayHasKey("state", $cursorData);
-        $this->assertArrayHasKey("current_row", $cursorData);
+        $this->assertArrayNotHasKey("current_row", $cursorData);
+        $this->assertArrayNotHasKey("current_row_ends_query_batch", $cursorData);
+        $this->assertArrayNotHasKey("current_column_names", $cursorData);
+        $this->assertMatchesRegularExpression(
+            '/^[0-9a-f]{64}$/D',
+            $cursorData["current_column_names_hash"]
+        );
 
         // Resume from cursor
         $producer2 = $this->createProducer([
@@ -406,6 +406,19 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         // Should be able to continue
         $this->assertFalse($producer2->is_finished());
         $this->assertTrue($producer2->next_sql_fragment());
+    }
+
+    public function testCursorWithCurrentRowFieldIsRejectedBeforeStateRestoration(): void
+    {
+        $cursorData = json_decode($this->createProducer()->get_reentrancy_cursor(), true);
+        $cursorData["current_row"] = null;
+        // This would fail first if the producer restored state before checking the cursor format.
+        $cursorData["rows_in_batch"] = ["invalid"];
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage("db-pull --abort");
+
+        $this->createProducer(["cursor" => json_encode($cursorData)]);
     }
 
     /**
@@ -473,10 +486,7 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
     // Resume edge cases (from ResumeEdgeCasesTest)
     // ──────────────────────────────────────────────────
 
-    /**
-     * Test resuming when no more rows exist after pause.
-     * Should not leave a dangling comma.
-     */
+    /** Test resuming when no more rows exist after pause. */
     public function testResumeWithNoMoreRows(): void
     {
         $this->pdo->exec("
@@ -486,7 +496,6 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             )
         ");
 
-        // Insert 10 rows
         for ($i = 1; $i <= 10; $i++) {
             $this->pdo->exec("INSERT INTO resume_test (data) VALUES ('row_{$i}')");
         }
@@ -499,17 +508,15 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             $sql = $producer->get_sql_fragment();
             $fragments[] = $sql;
 
-            // Stop after first INSERT batch (5 rows)
+            // Stop after the first row opens an INSERT statement.
             if (strpos($sql, 'INSERT INTO `resume_test`') === 0) {
                 break;
             }
         }
 
-        // Get cursor at the completed batch boundary after row 5.
+        // Save the last emitted row position, then remove every possible next row.
         $cursor = $producer->get_reentrancy_cursor();
-
-        // DELETE remaining rows - simulate data disappearing
-        $this->pdo->exec("DELETE FROM resume_test WHERE id > 5");
+        $this->pdo->exec("DELETE FROM resume_test WHERE id > 1");
 
         // Resume from cursor
         $producer2 = $this->createProducer([
@@ -525,18 +532,11 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             }
         }
 
-        // Verify the complete SQL is valid
         $completeSQL = implode("\n", $fragments);
 
-        // Should not have any dangling commas
-        $this->assertStringNotContainsString(",\n\n", $completeSQL);
-        $this->assertStringNotContainsString(",\nCOMMIT", $completeSQL);
-
-        // The producer does not prefetch beyond the completed batch boundary,
-        // so rows deleted before resume are not emitted from saved state.
+        // Resume closes the open INSERT without emitting a row deleted before resume.
         $importPdo = $this->executeDumpInNewDatabase($completeSQL);
-        $count = $importPdo->query("SELECT COUNT(*) FROM resume_test")->fetchColumn();
-        $this->assertEquals(5, $count);
+        $this->assertDatabasesEqual($this->pdo, $importPdo, ["resume_test"]);
     }
 
     /**
@@ -822,15 +822,12 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             "current_pk_columns" => ["id"],
             "last_pk_values" => ["id" => 1],
             "current_offset" => 0,
+            "current_column_names_hash" => hash("sha256", serialize(["id", "data"])),
             "state" => "emit_oversized_update",
-            "current_row" => null,
             "rows_in_batch" => 0,
-            "current_column_names" => ["id", "data"],
             "oversized_queue" => [
                 ["column" => "data"],  // missing data_type, byte_offset, total_length
             ],
-            "oversized_pk_values" => ["id" => 1],
-            "state_after_oversized" => "start_insert",
             "current_statement_size" => 0,
         ]);
 
@@ -838,45 +835,6 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         $this->expectExceptionMessage("oversized_queue");
 
         $this->createProducer(["cursor" => $cursor]);
-    }
-
-    /**
-     * A cursor in STATE_EMIT_OVERSIZED_UPDATE with null state_after_oversized
-     * should throw rather than silently fall back to an arbitrary state.
-     */
-    public function testCorruptCursorNullStateAfterOversized(): void
-    {
-        $this->pdo->exec("
-            CREATE TABLE null_state_test (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                data LONGBLOB
-            )
-        ");
-        $stmt = $this->pdo->prepare("INSERT INTO null_state_test (data) VALUES (?)");
-        $stmt->execute([random_bytes(50 * 1024)]);
-
-        // Build a cursor that's in the oversized update state but has no
-        // state_after_oversized, simulating a corrupt or hand-edited cursor.
-        $cursor = json_encode([
-            "current_table" => "null_state_test",
-            "current_pk_columns" => ["id"],
-            "last_pk_values" => ["id" => 1],
-            "current_offset" => 0,
-            "state" => "emit_oversized_update",
-            "current_row" => null,
-            "rows_in_batch" => 0,
-            "current_column_names" => ["id", "data"],
-            "oversized_queue" => [],
-            "oversized_pk_values" => ["id" => 1],
-            "state_after_oversized" => null,
-            "current_statement_size" => 0,
-        ]);
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage("state_after_oversized");
-
-        $producer = $this->createProducer(["cursor" => $cursor]);
-        $producer->next_sql_fragment();
     }
 
     // ──────────────────────────────────────────────────
@@ -930,9 +888,8 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
                     $allFragments[] = $sql;
                     $fragmentsInIteration++;
 
-                    // Count rows in INSERT statements
-                    if (strpos($sql, "INSERT INTO") === 0) {
-                        $rowsInIteration += substr_count($sql, "(");
+                    if ($this->isInsertRowFragment($sql)) {
+                        ++$rowsInIteration;
                     }
                 }
 
@@ -962,5 +919,13 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         );
 
         return $allFragments;
+    }
+
+    private function isInsertRowFragment(string $sql): bool
+    {
+        $trimmed = ltrim( $sql );
+        return strpos( $trimmed, "INSERT INTO" ) === 0 ||
+            ( $trimmed !== "" && $trimmed[0] === "(" ) ||
+            substr( $trimmed, 0, 2 ) === ",(";
     }
 }

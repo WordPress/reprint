@@ -3,12 +3,12 @@
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped,WordPress.Security.EscapeOutput.OutputNotEscaped -- Authenticated protocol responses are JSON, never HTML output.
 // phpcs:disable WordPress.Security.ValidatedSanitizedInput -- Multipart parsing and request-body byte accounting require the request bytes unchanged.
 
-use function WordPress\Reprint\Exporter\assert_valid_path;
-use function WordPress\Reprint\Exporter\normalize_excluded_paths;
-use function WordPress\Reprint\Exporter\normalize_path;
-use function WordPress\Reprint\Exporter\parse_size;
-use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
+use function WordPress\Reprint\Server\assert_valid_path;
+use function WordPress\Reprint\Server\normalize_excluded_paths;
+use function WordPress\Reprint\Server\normalize_path;
+use function WordPress\Reprint\Server\parse_size;
+use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Server\realpath_with_missing_tail;
 
 /**
  * Exposes push-session operations through the exporter HTTP dispatcher.

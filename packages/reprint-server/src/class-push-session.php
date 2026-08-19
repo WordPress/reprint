@@ -2,13 +2,13 @@
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Push errors become authenticated API JSON, never HTML output.
 
-use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Exporter\assert_valid_relative_path;
-use function WordPress\Reprint\Exporter\normalize_excluded_paths;
-use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Exporter\path_remainder_under;
-use function WordPress\Reprint\Exporter\relative_path_under;
-use function WordPress\Reprint\Exporter\trim_right_slash;
+use function WordPress\Reprint\Server\assert_valid_relative_path;
+use function WordPress\Reprint\Server\normalize_excluded_paths;
+use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Server\path_remainder_under;
+use function WordPress\Reprint\Server\relative_path_under;
+use function WordPress\Reprint\Server\trim_right_slash;
+use function WordPress\Reprint\Server\wp_join_unix_paths;
 
 if (!class_exists('Site_Export_Multipart_Processor', false)) {
     require_once __DIR__ . '/class-multipart-processor.php';

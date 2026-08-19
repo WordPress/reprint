@@ -1,7 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
-use WordPress\DataLiberation\DatabaseRowsReader;
+use WordPress\Reprint\Server\DatabaseRowsReader;
 
 require_once __DIR__ . '/fixtures/DatabaseRowsReaderMetadataConnection.php';
 
@@ -61,9 +61,8 @@ final class DatabaseRowsReaderMetadataTest extends TestCase {
             'current_pk_columns' => ['id'],
             'last_pk_values' => ['id' => 1],
             'current_offset' => 0,
-            'current_row' => null,
-            'current_column_names' => ['id'],
         ]));
+        $this->assertSame(['id'], $reader->get_current_column_names());
 
         $this->assertTrue($reader->move_to_next_table());
         $this->assertSame('third', $reader->get_current_table());

@@ -3,7 +3,8 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
-use function WordPress\Reprint\Exporter\relative_path_under;
+use WordPress\Reprint\Server\FileIndexProcessor;
+use function WordPress\Reprint\Server\relative_path_under;
 
 require_once dirname(__DIR__) . '/packages/reprint-server/src/class-file-index-processor.php';
 
@@ -522,7 +523,7 @@ final class FileIndexProcessorTest extends TestCase {
             ? 'symlink'
             : ( is_dir($path) ? 'directory' : 'file' );
         return [
-            'requested_path' => \WordPress\Reprint\Exporter\normalize_path($path),
+            'requested_path' => \WordPress\Reprint\Server\normalize_path($path),
             'resolved_path' => $resolvedPath,
             'type' => $type,
         ];

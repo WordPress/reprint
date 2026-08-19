@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use WordPress\Reprint\Server\SqliteDriverPDO;
 
 require_once __DIR__ . '/../lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php';
 require_once __DIR__ . '/../packages/reprint-server/src/class-sqlite-driver-pdo.php';

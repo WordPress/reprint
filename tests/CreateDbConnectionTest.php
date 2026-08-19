@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use WordPress\Reprint\Server\SqliteDriverPDO;
 
 final class CreateDbConnectionTest extends TestCase {
     public function testMysqlSessionUsesStableCharsetAndCollation(): void
@@ -168,7 +169,7 @@ final class CreateDbConnectionTest extends TestCase {
         $driver = new WP_MySQL_On_SQLite(new PDO('sqlite::memory:'));
         $GLOBALS['wpdb'] = new SqliteThreeWordPressDatabaseTestDouble($driver);
         $connection = create_db_connection(['db_engine' => 'sqlite']);
-        if (!($connection instanceof SqliteDriverPDO)) {
+        if (!($connection instanceof \WordPress\Reprint\Server\SqliteDriverPDO)) {
             fwrite(STDERR, 'The active SQLite driver was not wrapped for export.');
             exit(2);
         }

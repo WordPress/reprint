@@ -30,6 +30,10 @@
             <file>FileIndexProcessorTest.php</file>
             <file>FileIndexFilePathRootTest.php</file>
             <file>FileIndexNamedRootTest.php</file>
+            <file>ExportLibraryLoadTest.php</file>
+            <file>ExportUtilsLoadingTest.php</file>
+            <file>PdoPolyfillTest.php</file>
+            <file>JoinUnixPathsTest.php</file>
             <file>HmacServerTest.php</file>
             <file>MultipartProcessorTest.php</file>
             <file>PushEndpointsTest.php</file>

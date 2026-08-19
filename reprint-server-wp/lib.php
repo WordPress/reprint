@@ -6,7 +6,7 @@
  * triggering any HTTP dispatch.
  */
 
-use function WordPress\Reprint\Exporter\relative_path_under;
+use function WordPress\Reprint\Server\relative_path_under;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -78,6 +78,11 @@ function _site_export_push_error(int $http_code, string $reason, string $detail)
  */
 function _site_export_is_push_endpoint(string $endpoint): bool {
     return strpos($endpoint, 'push_') === 0;
+}
+
+/** Returns whether this PHP runtime can serve push endpoints. */
+function _site_export_push_is_supported(): bool {
+    return PHP_VERSION_ID >= 70200;
 }
 
 /**
@@ -452,6 +457,14 @@ function _site_export_handle_api_request(array $options = []): void {
         _site_export_default_authenticate();
     }
 
+    if (!_site_export_push_is_supported() && _site_export_is_push_endpoint($endpoint)) {
+        _site_export_push_error(
+            503,
+            'push_disabled',
+            'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.'
+        );
+    }
+
     // Authentication completes first. Every push operation requires current
     // authorization except resuming commit from its durable checkpoint, which
     // must remain available so revocation cannot strand document-root changes.
@@ -508,7 +521,7 @@ function _site_export_handle_api_request(array $options = []): void {
                 );
             }
             $docroot = $canonical_docroot === '/' ? '/' : rtrim($canonical_docroot, '/\\');
-            $lexical_docroot = \WordPress\Reprint\Exporter\normalize_path(str_replace('\\', '/', $configured_docroot));
+            $lexical_docroot = \WordPress\Reprint\Server\normalize_path(str_replace('\\', '/', $configured_docroot));
             $reprint_directory = $options['reprint_directory'] ?? (
                 dirname($docroot) . '/.reprint-' . substr(hash('sha256', $docroot), 0, 12)
             );
@@ -525,7 +538,7 @@ function _site_export_handle_api_request(array $options = []): void {
                 // symlinked plugin into its outside target and omit protection.
                 $registered_plugin_file = str_replace('\\', '/', plugin_basename(SITE_EXPORT_PLUGIN_DIR . 'index.php'));
                 $registered_plugin_directory = dirname($registered_plugin_file);
-                $logical_plugin_directory = \WordPress\Reprint\Exporter\normalize_path(
+                $logical_plugin_directory = \WordPress\Reprint\Server\normalize_path(
                     str_replace('\\', '/', (string) WP_PLUGIN_DIR)
                     . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
                 );
@@ -547,7 +560,7 @@ function _site_export_handle_api_request(array $options = []): void {
                     // path survives a final symlink to the outside target.
                     $canonical_wordpress_plugin_directory = realpath( (string) WP_PLUGIN_DIR );
                     if ($canonical_wordpress_plugin_directory !== false) {
-                        $logical_plugin_directory_from_canonical_parent = \WordPress\Reprint\Exporter\normalize_path(
+                        $logical_plugin_directory_from_canonical_parent = \WordPress\Reprint\Server\normalize_path(
                             str_replace('\\', '/', $canonical_wordpress_plugin_directory)
                             . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
                         );

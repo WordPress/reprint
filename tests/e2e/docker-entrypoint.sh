@@ -4,6 +4,9 @@ set -euo pipefail
 
 PHP_VERSION="${PHP_VERSION:-8.2}"
 FPM_SOCKET="/run/php/e2e.sock"
+OPEN_BASEDIR_FPM_SOCKET="/run/php/e2e-open-basedir.sock"
+REGISTRY="/app/tests/e2e/site-registry.json"
+SITE_ROOT=$(jq -r '.siteRoot' "$REGISTRY")
 
 echo "=== Starting services ==="
 
@@ -51,19 +54,41 @@ php_admin_value[error_log] = /tmp/php-e2e-errors.log
 php_admin_value[user_ini.cache_ttl] = 0
 php_admin_value[realpath_cache_ttl] = 0
 env[SITE_EXPORT_TEST_MODE] = 1
+
+; Keep open_basedir in its own worker pool. A request-level value can remain
+; active when the same worker handles a request for another test site.
+[e2e-open-basedir]
+user = nginx
+group = nginx
+listen = ${OPEN_BASEDIR_FPM_SOCKET}
+listen.owner = nginx
+listen.group = nginx
+listen.mode = 0660
+pm = ondemand
+pm.max_children = 4
+php_admin_value[memory_limit] = 512M
+php_admin_value[max_execution_time] = 120
+php_admin_value[upload_max_filesize] = 50M
+php_admin_value[post_max_size] = 50M
+php_admin_value[error_reporting] = E_ALL
+php_admin_value[display_errors] = Off
+php_admin_value[log_errors] = On
+php_admin_value[error_log] = /tmp/php-e2e-errors.log
+php_admin_value[user_ini.cache_ttl] = 0
+php_admin_value[realpath_cache_ttl] = 0
+php_admin_value[open_basedir] = ${SITE_ROOT}/open-basedir:/tmp
+env[SITE_EXPORT_TEST_MODE] = 1
 EOF
 rm -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf"
 "php-fpm${PHP_VERSION}" --nodaemonize &
 
 # Wait for FPM socket
 for i in $(seq 1 30); do
-    if [ -S "$FPM_SOCKET" ]; then break; fi
+    if [ -S "$FPM_SOCKET" ] && [ -S "$OPEN_BASEDIR_FPM_SOCKET" ]; then break; fi
     sleep 0.5
 done
 
 # Nginx — generate configs from site-registry.json
-REGISTRY="/app/tests/e2e/site-registry.json"
-SITE_ROOT=$(jq -r '.siteRoot' "$REGISTRY")
 mkdir -p "$SITE_ROOT"
 chown nginx:nginx "$SITE_ROOT"
 
@@ -89,7 +114,11 @@ rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
 
 # Standard sites — serve from WordPress root so that index.php
 # bootstraps WordPress and the site-export plugin handles the request.
-jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | "\(.key) \(.value.port)"' "$REGISTRY" | while read site port; do
+jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | [.key, .value.port, (.value.openBasedir // false)] | @tsv' "$REGISTRY" | while IFS=$'\t' read -r site port open_basedir; do
+    site_fpm_socket="$FPM_SOCKET"
+    if [ "$open_basedir" = "true" ]; then
+        site_fpm_socket="$OPEN_BASEDIR_FPM_SOCKET"
+    fi
     cat > "/etc/nginx/conf.d/e2e-${site}.conf" <<VHOST
 server {
     listen 127.0.0.1:${port};
@@ -97,6 +126,35 @@ server {
     index index.php;
     location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     location ~ \\.php\$ {
+        fastcgi_pass unix:${site_fpm_socket};
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_param SITE_EXPORT_TEST_MODE "1";
+        fastcgi_read_timeout 120s;
+        fastcgi_send_timeout 120s;
+    }
+}
+VHOST
+done
+
+# Database cursor header limit sites
+jq -r '.sites | to_entries[] | select(.value.nginx == "cursor-header-limit") | "\(.key) \(.value.port)"' "$REGISTRY" | while read site port; do
+    cat > "/etc/nginx/conf.d/e2e-${site}.conf" <<VHOST
+server {
+    listen 127.0.0.1:${port};
+    root ${SITE_ROOT}/${site};
+    index index.php;
+
+    # Let nginx parse the request, then deliberately return 431 at the
+    # 8191-byte X-Export-Cursor threshold used by this test.
+    large_client_header_buffers 4 64k;
+    if (\$http_x_export_cursor ~ "^.{8191,}\$") {
+        return 431;
+    }
+
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location ~ \.php\$ {
         fastcgi_pass unix:${FPM_SOCKET};
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;

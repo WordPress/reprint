@@ -3,15 +3,26 @@
  * Unified export API for SQL and file operations.
  */
 
-use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Exporter\assert_valid_path;
-use function WordPress\Reprint\Exporter\build_pdo_dsn;
-use function WordPress\Reprint\Exporter\json_encode_or_throw;
-use function WordPress\Reprint\Exporter\normalize_path;
-use function WordPress\Reprint\Exporter\parse_size;
-use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Exporter\trim_right_slash;
+use WordPress\Reprint\Server\FileIndexProcessor;
+use WordPress\Reprint\Server\FileTreeProducer;
+use WordPress\Reprint\Server\GzipOutputStream;
+use WordPress\Reprint\Server\MySQLDumpProducer;
+use WordPress\Reprint\Server\ResourceBudget;
+use WordPress\Reprint\Server\SqliteDriverPDO;
+use WordPress\Reprint\Server\WpdbDriverPDO;
 
+use function WordPress\Reprint\Server\assert_valid_path;
+use function WordPress\Reprint\Server\build_pdo_dsn;
+use function WordPress\Reprint\Server\generate_random_bytes;
+use function WordPress\Reprint\Server\json_encode_or_throw;
+use function WordPress\Reprint\Server\normalize_path;
+use function WordPress\Reprint\Server\parse_size;
+use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Server\trim_right_slash;
+use function WordPress\Reprint\Server\wp_join_unix_paths;
+
+require_once __DIR__ . '/class-resource-budget.php';
+require_once __DIR__ . '/class-gzip-output-stream.php';
 require_once __DIR__ . '/class-file-index-processor.php';
 
 // Capture any accidental output before headers are set so we can discard it
@@ -45,57 +56,9 @@ define('STAT_TYPE_CHAR',   0020000);
 define('STAT_TYPE_FIFO',   0010000);
 
 /**
- * Tracks time and memory limits for a single API request.
- *
- * Every export endpoint runs under resource constraints — a maximum
- * execution time and a memory ceiling.  Rather than threading four
- * separate values through every function signature and every
- * should_continue() call, this class bundles them into a single
- * object with a simple has_remaining() check.
- */
-class ResourceBudget
-{
-    /** @var float */
-    public $start_time;
-    /** @var int */
-    public $max_time;
-    /** @var int */
-    public $max_memory;
-    /** @var float */
-    public $memory_threshold;
-
-    public function __construct(
-        float $start_time,
-        int $max_time,
-        int $max_memory,
-        float $memory_threshold
-    ) {
-        $this->start_time = $start_time;
-        $this->max_time = $max_time;
-        $this->max_memory = $max_memory;
-        $this->memory_threshold = $memory_threshold;
-    }
-
-    /** Returns false when the request should yield due to time or memory pressure. */
-    public function has_remaining(): bool
-    {
-        if (microtime(true) - $this->start_time >= $this->max_time) {
-            return false;
-        }
-
-        $memory_used = memory_get_usage(true);
-        if ($memory_used >= $this->max_memory * $this->memory_threshold) {
-            return false;
-        }
-
-        return true;
-    }
-}
-
-/**
  * Global streaming context. When set, the error handlers emit error chunks
- * into the active gzip multipart stream instead of sending plain JSON
- * (which would corrupt the compressed response).
+ * into the active multipart stream instead of sending plain JSON, which would
+ * corrupt either a compressed or uncompressed multipart response.
  *
  * Set by each streaming endpoint right after creating $gz and $boundary.
  * Keys: 'gz' => GzipOutputStream, 'boundary' => string
@@ -147,7 +110,7 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
      * Also, every chunk declares its Content-Length, so the client never needs
      * to search arbitrary body bytes for the boundary.
      */
-    $boundary = "boundary-" . bin2hex(random_bytes(16));
+    $boundary = "boundary-" . bin2hex(generate_random_bytes(16));
     $can_send_headers = !headers_sent();
 
     if ($require_headers && !$can_send_headers) {
@@ -421,7 +384,7 @@ function create_wpdb_pdo_adapter()
 // require_once does not resolve symlinks, so the same physical file can
 // be loaded twice through different paths, causing "Cannot redeclare"
 // fatal errors.
-if (!function_exists('WordPress\\Reprint\\Exporter\\build_pdo_dsn')) {
+if (!function_exists('WordPress\\Reprint\\Server\\build_pdo_dsn')) {
     require_once __DIR__ . "/utils.php";
 }
 if (!class_exists('Site_Export_HTTP_Server', false)) {
@@ -429,7 +392,7 @@ if (!class_exists('Site_Export_HTTP_Server', false)) {
 }
 
 /**
- * Emits an error chunk into a gzip multipart stream.
+ * Emits an error chunk into a multipart stream.
  */
 function emit_error_chunk($gz, string $boundary, string $message): void
 {
@@ -448,13 +411,20 @@ function emit_error_chunk($gz, string $boundary, string $message): void
         "X-Chunk-Type: error\r\n" .
         "\r\n" .
         $json . "\r\n";
+    $write_failed = false;
     try {
         $gz->write($chunk);
         $gz->sync();
+    } catch (\Exception $e) {
+        $write_failed = true;
     } catch (\Throwable $e) {
-        // Gzip stream is broken — fall back to raw output.
-        // The response is already partially gzipped so the client likely
-        // can't parse this, but it's better than silent failure.
+        $write_failed = true;
+    }
+
+    if ($write_failed) {
+        // The output stream is broken, so make one last raw write. If gzip was
+        // active, the client likely cannot parse it, but this is better than
+        // silent failure.
         echo $chunk;
         flush();
     }
@@ -552,8 +522,12 @@ register_shutdown_function(function () {
                 $streaming_context['boundary'],
                 $message
             );
+        } catch (Exception $ignored) {
+            // Stream is too broken to write to — nothing more we can do.
+            return;
         } catch (Throwable $ignored) {
             // Stream is too broken to write to — nothing more we can do.
+            return;
         }
         return;
     }
@@ -659,106 +633,6 @@ function prepare_streaming_response(): void
 }
 
 /**
- * Incremental gzip compressor that emits data as it arrives rather than
- * buffering the entire response.
- */
-class GzipOutputStream
-{
-    private $deflate_ctx;
-    /** @var bool */
-    private $enabled = true;
-
-    public function __construct(bool $enabled = true)
-    {
-        $this->enabled = $enabled;
-        if ($this->enabled) {
-            $this->deflate_ctx = deflate_init(ZLIB_ENCODING_GZIP, ["level" => 6]);
-            if ($this->deflate_ctx === false) {
-                throw new \RuntimeException(
-                    "deflate_init() failed — zlib may be misconfigured"
-                );
-            }
-            if (!headers_sent()) {
-                @header("Content-Encoding: gzip");
-            }
-        }
-    }
-
-    /**
-     * Writes data without forcing a sync point.
-     *
-     * Uses ZLIB_NO_FLUSH so the compressor can build back-references across
-     * multiple write() calls, producing significantly better compression
-     * ratios than ZLIB_SYNC_FLUSH on every call.  Data still flows out
-     * whenever zlib's internal buffer fills — the decompressor on the other
-     * end will decompress incrementally.
-     *
-     * Call sync() after each complete multipart part to guarantee the client
-     * can decompress everything emitted so far.
-     */
-    public function write(string $data): void
-    {
-        if (!$this->enabled) {
-            echo $data;
-            return;
-        }
-        $compressed = deflate_add(
-            $this->deflate_ctx,
-            $data,
-            ZLIB_NO_FLUSH
-        );
-        if ($compressed === false) {
-            throw new \RuntimeException("deflate_add() failed during gzip write");
-        }
-        if ($compressed !== "") {
-            echo $compressed;
-        }
-    }
-
-    /**
-     * Forces a sync flush so the client can decompress all data written so far.
-     */
-    public function sync(): void
-    {
-        if (!$this->enabled) {
-            flush();
-            return;
-        }
-        $compressed = deflate_add(
-            $this->deflate_ctx,
-            "",
-            ZLIB_SYNC_FLUSH
-        );
-        if ($compressed === false) {
-            throw new \RuntimeException("deflate_add() failed during gzip sync");
-        }
-        if ($compressed !== "") {
-            echo $compressed;
-        }
-        flush();
-    }
-
-    /**
-     * Finalizes the gzip stream with ZLIB_FINISH.
-     */
-    public function finish(): void
-    {
-        if (!$this->enabled) {
-            flush();
-            return;
-        }
-        $final = deflate_add($this->deflate_ctx, "", ZLIB_FINISH);
-        if ($final === false) {
-            throw new \RuntimeException("deflate_add() failed during gzip finish");
-        }
-        if ($final !== "") {
-            echo $final;
-        }
-        flush();
-    }
-}
-
-/**
  * Deduplicates and resolves a list of paths, discarding empty entries.
  */
 function normalize_path_list(array $paths): array
@@ -798,9 +672,47 @@ function detect_wp_roots(array $start_paths): array
             $seen[$current] = true;
             $wp_load_path = wp_join_unix_paths($current, "wp-load.php");
             $wp_config_path = wp_join_unix_paths($current, "wp-config.php");
-            $has_wp_load = file_exists($wp_load_path);
-            $has_wp_config = file_exists($wp_config_path);
-            $has_wp_content = is_dir(wp_join_unix_paths($current, "wp-content"));
+            $wp_content_path = wp_join_unix_paths($current, "wp-content");
+            $filesystem_probe_warning = false;
+            $reprint_error_handler = null;
+            // During preflight, Reprint's error handler turns a warning into HTTP 500.
+            // These checks move up to parent directories that open_basedir may block.
+            // Catch probe warnings here so we can stop only this walk. Send other error
+            // types to the previous handler, then restore that handler in finally below.
+            $reprint_error_handler = set_error_handler(
+                function ($errno, $errstr, $errfile, $errline) use (
+                    &$filesystem_probe_warning,
+                    &$reprint_error_handler
+                ) {
+                    if ($errno === E_WARNING) {
+                        $filesystem_probe_warning = true;
+                        return true;
+                    }
+                    if (!is_callable($reprint_error_handler)) {
+                        return false;
+                    }
+                    return call_user_func(
+                        $reprint_error_handler,
+                        $errno,
+                        $errstr,
+                        $errfile,
+                        $errline
+                    );
+                }
+            );
+            try {
+                $has_wp_load = file_exists($wp_load_path);
+                $has_wp_config = file_exists($wp_config_path);
+                $has_wp_content = is_dir($wp_content_path);
+            } finally {
+                restore_error_handler();
+            }
+            if ($filesystem_probe_warning) {
+                // WordPress root discovery is speculative. If this path cannot be
+                // inspected reliably, keep roots found by this walk and let
+                // preflight continue with the other start paths.
+                break;
+            }
             if ($has_wp_load || $has_wp_config) {
                 $roots[$current] = [
                     "path" => $current,
@@ -923,7 +835,7 @@ function endpoint_sql_chunk(
         $producer_options["cursor"] = $config["cursor"];
     }
 
-    $reader = new WordPress\DataLiberation\MySQLDumpProducer(
+    $reader = new MySQLDumpProducer(
         $mysql,
         $producer_options
     );
@@ -945,7 +857,7 @@ function endpoint_sql_chunk(
     if (!isset($config["cursor"])) {
         // Send the initial connection settings separately so the client can save
         // them outside db.sql for a later MySQL connection.
-        $session_setup = WordPress\DataLiberation\MySQLDumpProducer::get_session_setup_sql();
+        $session_setup = MySQLDumpProducer::get_session_setup_sql();
         $gz->write(
             "--{$boundary}\r\n" .
             "Content-Type: application/sql\r\n" .
@@ -970,6 +882,7 @@ function endpoint_sql_chunk(
     /** @var string|null $deferred_fragment_cursor */
     $deferred_fragment_cursor = null;
 
+    $stream_failure = null;
     try {
         while (
             $budget->has_remaining()
@@ -1010,7 +923,7 @@ function endpoint_sql_chunk(
 
                     $trimmed_fragment = rtrim($fragment);
                     $sql_ends_with_complete_statement =
-                        $trimmed_fragment !== '' && $trimmed_fragment[-1] === ';';
+                        $trimmed_fragment !== '' && substr($trimmed_fragment, -1) === ';';
                     if ($sql_ends_with_complete_statement) {
                         $cursor = $reader->get_reentrancy_cursor();
                     }
@@ -1038,11 +951,10 @@ function endpoint_sql_chunk(
             $sql_bytes_processed += strlen($sql);
 
             // Does this chunk end on a complete statement boundary?
-            // The producer terminates complete statements with ";" and
-            // intermediate INSERT rows with ",", so checking the last
-            // character is sufficient.
+            // A complete SQL statement ends with ";"; a fragment from an open
+            // INSERT does not.
             $trimmed = rtrim($sql);
-            $query_complete = $trimmed !== "" && $trimmed[-1] === ";";
+            $query_complete = $trimmed !== "" && substr($trimmed, -1) === ";";
             if (!$query_complete || $cursor === null) {
                 $cursor = $reader->get_reentrancy_cursor();
             }
@@ -1072,10 +984,16 @@ function endpoint_sql_chunk(
                 break;
             }
         }
+    } catch (Exception $e) {
+        $stream_failure = $e;
     } catch (Throwable $e) {
+        $stream_failure = $e;
+    }
+
+    if ($stream_failure !== null) {
         $aborted = true;
-        error_log("SQL streaming error: " . $e->getMessage());
-        emit_error_chunk($gz, $boundary, $e->getMessage());
+        error_log("SQL streaming error: " . $stream_failure->getMessage());
+        emit_error_chunk($gz, $boundary, $stream_failure->getMessage());
     }
 
     // Best-effort completion chunk — the client already has the data chunks.
@@ -1089,6 +1007,7 @@ function endpoint_sql_chunk(
         _e2e_call_hook('test_hook_before_completion', $hook_args);
     }
 
+    $completion_failure = null;
     try {
         $gz->write(
             "--{$boundary}\r\n" .
@@ -1106,8 +1025,13 @@ function endpoint_sql_chunk(
             "--{$boundary}--\r\n"
         );
         $gz->finish();
+    } catch (\Exception $e) {
+        $completion_failure = $e;
     } catch (\Throwable $e) {
-        error_log("Export: failed to write completion chunk: " . $e->getMessage());
+        $completion_failure = $e;
+    }
+    if ($completion_failure !== null) {
+        error_log("Export: failed to write completion chunk: " . $completion_failure->getMessage());
     }
 
     return [
@@ -1164,6 +1088,7 @@ function endpoint_db_index(
     $status = "partial";
     $aborted = false;
 
+    $stream_failure = null;
     try {
         while (
             $budget->has_remaining()
@@ -1236,11 +1161,22 @@ function endpoint_db_index(
                 break;
             }
         }
+    } catch (\Exception $e) {
+        $stream_failure = $e;
     } catch (\Throwable $e) {
-        $aborted = true;
-        emit_error_chunk($gz, $boundary, get_class($e) . ": " . $e->getMessage());
+        $stream_failure = $e;
     }
 
+    if ($stream_failure !== null) {
+        $aborted = true;
+        emit_error_chunk(
+            $gz,
+            $boundary,
+            get_class($stream_failure) . ": " . $stream_failure->getMessage()
+        );
+    }
+
+    $completion_failure = null;
     try {
         if (getenv('SITE_EXPORT_TEST_MODE')) {
             $hook_status = $aborted ? "partial" : $status;
@@ -1264,8 +1200,13 @@ function endpoint_db_index(
             "--{$boundary}--\r\n"
         );
         $gz->finish();
+    } catch (\Exception $e) {
+        $completion_failure = $e;
     } catch (\Throwable $e) {
-        error_log("Export: failed to write completion chunk: " . $e->getMessage());
+        $completion_failure = $e;
+    }
+    if ($completion_failure !== null) {
+        error_log("Export: failed to write completion chunk: " . $completion_failure->getMessage());
     }
 
     return [
@@ -2151,6 +2092,10 @@ function endpoint_preflight(array $config): array
                         $db["wp"]["wp_version"] = isset($wp_version) && is_string($wp_version)
                             ? $wp_version
                             : null;
+                    } catch (Exception $e) {
+                        if ($db["wp"]["error"] === null) {
+                            $db["wp"]["error"] = $e->getMessage();
+                        }
                     } catch (Throwable $e) {
                         if ($db["wp"]["error"] === null) {
                             $db["wp"]["error"] = $e->getMessage();
@@ -2349,6 +2294,18 @@ function endpoint_preflight(array $config): array
         $wp_content["roots"][] = $root_entry;
     }
 
+    $environment_variables = [];
+    if (PHP_VERSION_ID >= 70100) {
+        $all_environment_variables = getenv();
+        if (is_array($all_environment_variables)) {
+            $environment_variables = $all_environment_variables;
+        }
+    }
+    $environment_variable_names = array_values(array_unique(array_merge(
+        array_keys($_ENV),
+        array_keys($environment_variables)
+    )));
+
     // -- Assemble and return the preflight response --
     $ok =
         $preflight_error === null &&
@@ -2422,12 +2379,11 @@ function endpoint_preflight(array $config): array
             "document_root" => $_SERVER["DOCUMENT_ROOT"] ?? null,
             "script_filename" => $_SERVER["SCRIPT_FILENAME"] ?? null,
             "cwd" => getcwd() ?: null,
-            // Names of all defined environment variables (no values) so the
-            // importer can use their presence as a webhost detection signal.
-            "env_names" => array_values(array_unique(array_merge(
-                array_keys($_ENV),
-                array_keys(getenv())
-            ))),
+            // Names of environment variables exposed without their values so
+            // the importer can use their presence as a webhost detection
+            // signal. PHP 5.6 cannot list getenv(), so it contributes only
+            // names present in $_ENV.
+            "env_names" => $environment_variable_names,
             '$_SERVER_names' => array_keys($_SERVER),
         ],
         "filesystem" => [
@@ -2492,6 +2448,7 @@ function stream_file_producer(
     // and progress updates. Each chunk type is wrapped in a multipart part
     // with metadata headers (path, cursor, size, ctime). The loop runs
     // until the producer is exhausted or the resource budget runs out.
+    $stream_failure = null;
     try {
         $initial_progress = $producer->get_progress();
         $initial_progress_json = json_encode_or_throw($initial_progress);
@@ -2689,17 +2646,24 @@ function stream_file_producer(
                 $gz->sync();
             }
         }
+    } catch (Exception $e) {
+        $stream_failure = $e;
     } catch (Throwable $e) {
+        $stream_failure = $e;
+    }
+
+    if ($stream_failure !== null) {
         $aborted = true;
         $abort_payload = [
             "error_type" => "exception",
             "path" => "",
-            "message" => $e->getMessage(),
+            "message" => $stream_failure->getMessage(),
         ];
     }
 
     // Best-effort error and completion chunks — the client already has the
     // data chunks. If the stream is broken at this point, log and move on.
+    $completion_failure = null;
     try {
         // @TODO: If an exception is thrown right after the previous chunk header,
         //        it read the fixed Content-Length value and will consume this next
@@ -2751,8 +2715,13 @@ function stream_file_producer(
             "--{$boundary}--\r\n"
         );
         $gz->finish();
+    } catch (\Exception $e) {
+        $completion_failure = $e;
     } catch (\Throwable $e) {
-        error_log("Export: failed to write completion chunk: " . $e->getMessage());
+        $completion_failure = $e;
+    }
+    if ($completion_failure !== null) {
+        error_log("Export: failed to write completion chunk: " . $completion_failure->getMessage());
     }
 
     $status = $aborted ? "partial" : ($status ?? "partial");
@@ -2870,6 +2839,7 @@ function endpoint_file_index(
     $aborted = false;
     $abort_payload = null;
 
+    $stream_failure = null;
     try {
         $metadata = [
             "filesystem_root" => base64_encode($filesystem_root),
@@ -2939,13 +2909,19 @@ function endpoint_file_index(
                     break;
             }
         }
+    } catch (Exception $e) {
+        $stream_failure = $e;
     } catch (Throwable $e) {
+        $stream_failure = $e;
+    }
+
+    if ($stream_failure !== null) {
         $aborted = true;
         $current_directory = $file_index->get_current_directory();
         $abort_payload = [
             "error_type" => "exception",
             "path" => base64_encode($current_directory ?? $list_directory),
-            "message" => $e->getMessage(),
+            "message" => $stream_failure->getMessage(),
         ];
     }
 
@@ -2955,6 +2931,7 @@ function endpoint_file_index(
         $total_entries += count($batch_items);
     }
 
+    $completion_failure = null;
     try {
         if ($abort_payload !== null) {
             emit_file_index_error(
@@ -2990,10 +2967,15 @@ function endpoint_file_index(
             "--{$boundary}--\r\n"
         );
         $gz->finish();
+    } catch (Exception $e) {
+        $completion_failure = $e;
     } catch (Throwable $e) {
-        error_log("Export: failed to write completion chunk: " . $e->getMessage());
+        $completion_failure = $e;
     } finally {
         $file_index->close();
+    }
+    if ($completion_failure !== null) {
+        error_log("Export: failed to write completion chunk: " . $completion_failure->getMessage());
     }
 
     return [

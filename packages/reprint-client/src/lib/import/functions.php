@@ -6,6 +6,39 @@ use PDO;
 use RuntimeException;
 
 /**
+ * Build the fixed WordPress admin Referer for a remote Reprint API URL.
+ *
+ * @param string $remote_reprint_api_url Remote Reprint API URL.
+ * @return string|null Same-origin WordPress Media Library URL, or null when
+ *                     the remote URL has no scheme or host.
+ */
+function wordpress_admin_referer(string $remote_reprint_api_url): ?string
+{
+	// Some WAFs reject automated requests when Referer is absent. A fixed,
+	// query-free WordPress admin URL supplies request context only; this header
+	// does not authenticate the request.
+	$remote_url = parse_url($remote_reprint_api_url);
+	if (
+		! is_array($remote_url) ||
+		! isset($remote_url['scheme'], $remote_url['host'])
+	) {
+		return null;
+	}
+
+	$site_path = rtrim( (string) ( $remote_url['path'] ?? '' ), '/' );
+	if (substr($site_path, -10) === '/index.php') {
+		$site_path = substr($site_path, 0, -10);
+	}
+
+	$referer = $remote_url['scheme'] . '://' . $remote_url['host'];
+	if (isset($remote_url['port'])) {
+		$referer .= ':' . $remote_url['port'];
+	}
+
+	return $referer . $site_path . '/wp-admin/upload.php';
+}
+
+/**
  * If the ALL_PROXY environment variable is set, apply it to the cURL
  * handle via CURLOPT_PROXY.
  *

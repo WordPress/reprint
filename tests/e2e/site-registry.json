@@ -160,6 +160,17 @@
     },
     "files-pull-mirror": {
       "port": 8130
+    },
+    "open-basedir": {
+      "port": 8131,
+      "openBasedir": true
+    },
+    "parent-wp-config": {
+      "port": 8132
+    },
+    "database-cursor-header-limit": {
+      "port": 8133,
+      "nginx": "cursor-header-limit"
     }
   }
 }

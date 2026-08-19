@@ -3,13 +3,13 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use function WordPress\Reprint\Exporter\assert_valid_relative_path;
-use function WordPress\Reprint\Exporter\path_is_descendant_of;
-use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Exporter\path_remainder_under;
-use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
-use function WordPress\Reprint\Exporter\relative_path_under;
-use function WordPress\Reprint\Exporter\trim_right_slash;
+use function WordPress\Reprint\Server\assert_valid_relative_path;
+use function WordPress\Reprint\Server\path_is_descendant_of;
+use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Server\path_remainder_under;
+use function WordPress\Reprint\Server\realpath_with_missing_tail;
+use function WordPress\Reprint\Server\relative_path_under;
+use function WordPress\Reprint\Server\trim_right_slash;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 

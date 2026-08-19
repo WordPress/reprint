@@ -1,8 +1,10 @@
 <?php
 
-use function WordPress\Filesystem\wp_join_unix_paths;
+namespace WordPress\Reprint\Server;
 
-// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Exporter classes use unprefixed domain names.
+use InvalidArgumentException;
+use LogicException;
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Traversal failures become API or CLI values, never HTML output.
 
 /**
@@ -371,7 +373,7 @@ final class FileIndexProcessor {
         }
         if (
             $this->storage_path !== ""
-            && \WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of($path, $this->storage_path)
+            && \WordPress\Reprint\Server\path_is_same_as_or_descendant_of($path, $this->storage_path)
         ) {
             $this->step_status = self::STATUS_SKIPPED;
             return true;
@@ -399,7 +401,7 @@ final class FileIndexProcessor {
             $canonical_directory = realpath($path);
             if (
                 $canonical_directory === false
-                || !\WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of($this->configured_directories, $canonical_directory)
+                || !\WordPress\Reprint\Server\path_is_same_as_or_descendant_of($this->configured_directories, $canonical_directory)
             ) {
                 $this->directory_stack[] = [
                     "dir" => $path,
@@ -647,7 +649,7 @@ final class FileIndexProcessor {
         // boundary, then continue with the remaining stack.
         if (
             !$this->follow_symlinks
-            && !\WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of($canonical_directory, $this->configured_directories)
+            && !\WordPress\Reprint\Server\path_is_same_as_or_descendant_of($canonical_directory, $this->configured_directories)
         ) {
             array_pop($this->directory_stack);
             $this->directory_error = [
@@ -784,7 +786,7 @@ final class FileIndexProcessor {
         }
         if (
             $this->storage_path !== ""
-            && \WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of($path_root, $this->storage_path)
+            && \WordPress\Reprint\Server\path_is_same_as_or_descendant_of($path_root, $this->storage_path)
         ) {
             $this->step_status = self::STATUS_SKIPPED;
             return;
@@ -903,7 +905,7 @@ final class FileIndexProcessor {
         $requested_path = $root["requested_path"];
         if (
             $requested_path === ""
-            || \WordPress\Reprint\Exporter\normalize_path($requested_path) !== $requested_path
+            || \WordPress\Reprint\Server\normalize_path($requested_path) !== $requested_path
         ) {
             throw new InvalidArgumentException("File-index root requested_path must be normalized");
         }
@@ -1082,7 +1084,7 @@ final class FileIndexProcessor {
             }
             // Resolve only textual dot segments. realpath() would skip the
             // intermediate links that this walk must inspect.
-            $absolute_raw_target = \WordPress\Reprint\Exporter\normalize_path($raw_target);
+            $absolute_raw_target = \WordPress\Reprint\Server\normalize_path($raw_target);
             if (
                 $absolute_raw_target !== ""
                 && $absolute_raw_target[0] === "/"

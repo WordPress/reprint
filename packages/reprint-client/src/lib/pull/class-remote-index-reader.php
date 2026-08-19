@@ -1,6 +1,6 @@
 <?php
 
-use function WordPress\Reprint\Exporter\assert_valid_path;
+use function WordPress\Reprint\Server\assert_valid_path;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Index failures are CLI filesystem paths and values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.

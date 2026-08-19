@@ -1,7 +1,8 @@
 <?php
 
-use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Exporter\trim_right_slash;
+namespace WordPress\Reprint\Server;
+
+use InvalidArgumentException;
 
 /**
  * Streams a provided list of filesystem paths in sorted order with
@@ -629,7 +630,7 @@ class FileTreeProducer
         $low = 0;
         $high = count($entries);
         while ($low < $high) {
-            $mid = intdiv($low + $high, 2);
+            $mid = integer_divide($low + $high, 2);
             if (strcmp($entries[$mid], $last) <= 0) {
                 $low = $mid + 1;
             } else {

@@ -2,6 +2,8 @@
 
 namespace FileSyncProducerTests;
 
+use WordPress\Reprint\Server\FileTreeProducer;
+
 require_once __DIR__ . '/FileSyncProducerTestBase.php';
 
 /**
@@ -20,7 +22,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $linkPath = $dir . '/external';
         symlink('../../../some/external/path', $linkPath);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -50,7 +52,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $linkPath = $dir . '/absolute';
         symlink('/usr/local/bin/something', $linkPath);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -82,7 +84,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $link2Path = $dir . '/wp-load.php';
         symlink('__wp__/wp-load.php', $link2Path);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -117,7 +119,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $link1 = $dir . '/link1';
         symlink('link2', $link1);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -143,7 +145,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $linkPath = $dir . '/normal-link';
         symlink('target.txt', $linkPath);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -176,7 +178,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $link = $dir . '/mydir-link';
         symlink('mydir', $link);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -203,7 +205,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $linkDir = $dir . '/link-dir';
         symlink($targetDir, $linkDir);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -237,7 +239,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         symlink('target.txt', $link2);
         symlink('target.txt', $link3);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -269,7 +271,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         // Get actual ctime
         $expectedCtime = filectime($linkPath);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);

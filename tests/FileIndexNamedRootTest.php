@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use WordPress\Reprint\Server\FileIndexProcessor;
 
 require_once dirname(__DIR__) . '/packages/reprint-server/src/class-file-index-processor.php';
 

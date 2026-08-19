@@ -1,7 +1,12 @@
 <?php
 
-use function WordPress\Reprint\Exporter\parse_size;
+use WordPress\Reprint\Server\ResourceBudget;
 
+use function WordPress\Reprint\Server\parse_size;
+
+if (!class_exists('WordPress\\Reprint\\Server\\ResourceBudget', false)) {
+    require_once __DIR__ . '/class-resource-budget.php';
+}
 if (!class_exists('Site_Export_Push_Configuration_Exception', false)) {
     require_once __DIR__ . '/class-push-configuration-exception.php';
 }
@@ -314,7 +319,24 @@ final class Site_Export_HTTP_Server {
         }
 
         $handler = $this->handlers[$endpoint];
-        if ($endpoint === 'preflight' || self::is_push_endpoint($endpoint)) {
+        if (self::is_push_endpoint($endpoint)) {
+            if (PHP_VERSION_ID < 70200) {
+                http_response_code(503);
+                header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+                header('Pragma: no-cache');
+                header('Expires: 0');
+                header('Content-Type: application/json');
+                echo json_encode([
+                    'status' => 'rejected',
+                    'reason' => 'push_disabled',
+                    'detail' => 'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.',
+                ]);
+                return;
+            }
+            call_user_func($handler, $config);
+            return;
+        }
+        if ($endpoint === 'preflight') {
             call_user_func($handler, $config);
             return;
         }
@@ -327,7 +349,8 @@ final class Site_Export_HTTP_Server {
     }
 
     public static function is_push_endpoint(string $endpoint): bool {
-        return isset(self::PUSH_ENDPOINT_METHODS[$endpoint]);
+        $push_endpoint_methods = self::PUSH_ENDPOINT_METHODS;
+        return isset($push_endpoint_methods[$endpoint]);
     }
 
     /**

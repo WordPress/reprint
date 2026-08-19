@@ -5,8 +5,8 @@
  * Registry, detection logic, and shared preflight extraction helpers.
  */
 
-use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Exporter\trim_right_slash;
+use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Server\trim_right_slash;
 
 /**
  * All known host analyzers.

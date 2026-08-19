@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use WordPress\Reprint\Server\SqliteDriverPDO;
 
 require_once __DIR__ . '/fixtures/LegacySqliteMetadataDriver.php';
 

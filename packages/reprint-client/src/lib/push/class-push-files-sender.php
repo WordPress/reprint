@@ -1,8 +1,8 @@
 <?php
 
 use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Exporter\relative_path_under;
-use function WordPress\Reprint\Exporter\trim_right_slash;
+use function WordPress\Reprint\Server\relative_path_under;
+use function WordPress\Reprint\Server\trim_right_slash;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Sender failures are CLI/API values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.

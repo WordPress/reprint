@@ -2,8 +2,8 @@
 
 namespace Reprint\Importer;
 
-use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Exporter\relative_path_under;
+use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Server\relative_path_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exceptions contain CLI filesystem paths, never HTML output.
 

@@ -1,0 +1,22 @@
+{
+    "name": "wp-php-toolkit/reprint-php56-build",
+    "description": "Build-only PHP 5.6 downgrade tool for the exporter plugin",
+    "type": "project",
+    "license": "GPL-2.0-or-later",
+    "require": {
+        "php": ">=8.1",
+        "nikic/php-parser": "^5.8",
+        "rector/rector": "^2.6"
+    },
+    "autoload": {
+        "psr-4": {
+            "WordPress\\Reprint\\Build\\": "src/"
+        }
+    },
+    "scripts": {
+        "test": "php tests/run.php"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
