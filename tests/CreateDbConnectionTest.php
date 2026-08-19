@@ -81,13 +81,17 @@ final class CreateDbConnectionTest extends TestCase {
         }
         class WpdbSessionTestDouble {
             public $last_error = '';
+            public $executed = [];
+            // Retained unconditionally, the way a db.php drop-in may, rather
+            // than only under SAVEQUERIES the way core does.
             public $queries = [];
             public function suppress_errors($suppress = true) {
             }
             public function hide_errors() {
             }
             public function get_results($query, $output) {
-                $this->queries[] = [$query, $output];
+                $this->executed[] = [$query, $output];
+                $this->queries[] = [$query, 0.0, 'caller', 0.0, []];
                 return [];
             }
         }
@@ -104,7 +108,10 @@ final class CreateDbConnectionTest extends TestCase {
                 'db_password' => 'unused',
             ]
         );
-        fwrite(STDOUT, json_encode($wpdb->queries));
+        fwrite(STDOUT, json_encode([
+            'executed' => $wpdb->executed,
+            'retained_queries' => $wpdb->queries,
+        ]));
         PHP;
 
         $result = $this->runPhpProcess([
@@ -123,10 +130,16 @@ final class CreateDbConnectionTest extends TestCase {
         );
         $this->assertSame(
             [
-                [
-                    "SET NAMES utf8mb4 COLLATE utf8mb4_bin",
-                    'ARRAY_A',
+                'executed' => [
+                    [
+                        "SET NAMES utf8mb4 COLLATE utf8mb4_bin",
+                        'ARRAY_A',
+                    ],
                 ],
+                // An export runs one query per row batch and one per
+                // oversized-value chunk, so anything wpdb retains per query
+                // outgrows the request. The adapter drops the log after each.
+                'retained_queries' => [],
             ],
             json_decode($result['stdout'], true)
         );
@@ -145,13 +158,13 @@ final class CreateDbConnectionTest extends TestCase {
         $connection_script = <<<'PHP'
         class WpdbFallbackTestDouble {
             public $last_error = '';
-            public $queries = [];
+            public $executed = [];
             public function suppress_errors($suppress = true) {
             }
             public function hide_errors() {
             }
             public function get_results($query, $output) {
-                $this->queries[] = $query;
+                $this->executed[] = $query;
                 return [];
             }
         }
@@ -171,7 +184,7 @@ final class CreateDbConnectionTest extends TestCase {
         );
         fwrite(STDOUT, json_encode([
             'class' => get_class($connection),
-            'queries' => $wpdb->queries,
+            'executed' => $wpdb->executed,
         ]));
         PHP;
 
@@ -190,7 +203,7 @@ final class CreateDbConnectionTest extends TestCase {
         $this->assertSame(
             [
                 'class' => WpdbDriverPDO::class,
-                'queries' => ['SET NAMES utf8mb4 COLLATE utf8mb4_bin'],
+                'executed' => ['SET NAMES utf8mb4 COLLATE utf8mb4_bin'],
             ],
             json_decode($result['stdout'], true)
         );
