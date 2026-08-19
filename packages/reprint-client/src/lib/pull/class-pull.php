@@ -844,10 +844,10 @@ class Pull
     }
 
     /**
-     * Lower-level commands return with completion_state="partial" when a
-     * server timeout drops the connection. This loop retries automatically,
-     * resetting the completion state to "in_progress" so the handler enters
-     * its resume path on the next call.
+     * Lower-level commands return with completion_state="partial" after a
+     * temporary streaming failure. This loop retries automatically, resetting
+     * the completion state to "in_progress" so the handler enters its resume
+     * path on the next call.
      */
     private function run_until_complete(string $stage, callable $handler): void
     {

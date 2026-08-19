@@ -194,7 +194,7 @@ class ImportClient
     private const SQL_GROUP_MARKER = "-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 ";
 
     /**
-     * Maximum number of consecutive interrupted responses with no cursor
+     * Maximum number of consecutive temporary request failures with no cursor
      * progress before the importer gives up. This prevents endless resumption
      * when the source cannot complete a response.
      */
@@ -215,6 +215,18 @@ class ImportClient
         92, // CURLE_HTTP2_STREAM — HTTP/2 stream reset by the server (RST_STREAM)
         // HTTP/3 framing layer. Inert until something opts into h3
         95, // CURLE_HTTP3        — HTTP/3 layer error
+    ];
+
+    /** HTTP statuses which may indicate a transient HTTP error. */
+    private const POTENTIALLY_TRANSIENT_HTTP_STATUS_CODES = [
+        408, // Request Timeout
+        418, // Observed when an upstream bot filter replaced a Reprint response
+        425, // Too Early
+        429, // Too Many Requests
+        500, // Internal Server Error
+        502, // Bad Gateway
+        503, // Service Unavailable
+        504, // Gateway Timeout
     ];
 
     /** @var string Remote Reprint API URL. */
@@ -10889,12 +10901,13 @@ class ImportClient
     }
 
     /**
-     * Reset curl-related state at the start of each HTTP request.
+     * Reset request error state at the start of each HTTP request.
      */
-    private function reset_curl_state(): void
+    private function reset_request_error_state(): void
     {
         $this->last_curl_errno = null;
         $this->last_curl_timeout = false;
+        $this->last_error_code = null;
     }
 
     /**
@@ -11096,7 +11109,7 @@ class ImportClient
     }
 
     /**
-     * Track consecutive interrupted responses and decide whether to resume.
+     * Track consecutive temporary request failures and decide whether to resume.
      *
      * Compares the cursor before and after the request. A cursor advance means
      * the request produced another durable part, so the counter resets. If the
@@ -11106,7 +11119,7 @@ class ImportClient
      * @param string                           $phase         Human-readable phase name.
      * @param ?string                          $cursor_before Cursor at request start.
      * @param ?string                          $cursor_after  Last durable cursor.
-     * @param TransientInterruptionException   $exception     Response failure.
+     * @param TransientInterruptionException   $exception     Temporary request failure.
      */
     protected function assert_can_resume_after_interrupted_response(
         string $phase,
@@ -11123,7 +11136,7 @@ class ImportClient
         $count = $this->get_state()->consecutive_interrupted_responses;
 
         $this->audit_log(
-            "INTERRUPTED RESPONSE | {$phase} | " .
+            "TEMPORARY REQUEST FAILURE | {$phase} | " .
                 "consecutive_interrupted_responses={$count}/" .
                 self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES .
                 " | cursor_moved=" .
@@ -11133,11 +11146,13 @@ class ImportClient
         );
 
         if ($count >= self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The remote failure is rendered only as CLI text.
             throw new RuntimeException(
-                "The remote response ended before completion {$count} " .
-                "consecutive times without cursor progress during {$phase}. " .
-                "Giving up.",
+                "The remote request failed {$count} consecutive times " .
+                "without cursor progress during {$phase}. Last failure: " .
+                $exception->getMessage(),
             );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         }
     }
 
@@ -11330,7 +11345,7 @@ class ImportClient
      */
     private function fetch_json(string $url): array
     {
-        $this->reset_curl_state();
+        $this->reset_request_error_state();
 
         $this->audit_log("HTTP_REQUEST | GET | {$url}", false);
 
@@ -11440,7 +11455,7 @@ class ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
-        $this->reset_curl_state();
+        $this->reset_request_error_state();
 
         // Log HTTP request details
         $log_parts = ["HTTP_REQUEST", $post_data ? "POST" : "GET", $url];
@@ -11766,6 +11781,11 @@ class ImportClient
                 }
             }
 
+            if ($this->is_potentially_transient_http_error($http_code, $error_body)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This exception is rendered only as CLI text.
+                throw new TransientInterruptionException($error_msg);
+            }
+
             throw new RuntimeException($error_msg);
         }
 
@@ -11782,6 +11802,37 @@ class ImportClient
                 "Invalid response: missing completion chunk from server.",
             );
         }
+    }
+
+    /** Decide whether a streaming HTTP error is potentially transient. */
+    private function is_potentially_transient_http_error(int $http_code, string $body): bool
+    {
+        $decoded_body = json_decode($body, true);
+        $is_reprint_error = is_array($decoded_body)
+            && isset($decoded_body['code'])
+            && $decoded_body['code'] === $http_code;
+
+        // Reprint includes the HTTP code in its deliberate JSON failures.
+        // HTML, empty, and unmarked JSON bodies can come from an upstream
+        // server or firewall instead.
+        if ($is_reprint_error) {
+            return false;
+        }
+
+        if (
+            in_array(
+                $http_code,
+                self::POTENTIALLY_TRANSIENT_HTTP_STATUS_CODES,
+                true,
+            )
+        ) {
+            return true;
+        }
+
+        // An unmarked 401 or 403 after a signed request can be a temporary
+        // firewall response produced before the request reaches Reprint.
+        return ($http_code === 401 || $http_code === 403)
+            && $this->hmac_client !== null;
     }
 
     /**
