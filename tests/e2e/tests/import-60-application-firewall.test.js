@@ -3,7 +3,9 @@
  *
  * Runs a complete pull through a local HTTP reverse proxy which rejects
  * Reprint requests unless they have a same-origin WordPress admin Referer.
- * The proxy streams every accepted request to the real E2E site.
+ * Before forwarding each streaming endpoint, the proxy also returns two
+ * potentially transient HTTP errors. The third request reaches the real E2E
+ * site, so the pull must recover without hitting its three-failure limit.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -28,6 +30,7 @@ import {
     getSiteSecret,
     getSiteUrl,
     pullStateDirectory,
+    readAuditLog,
     runImporter,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -72,6 +75,7 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         pullResult = runImporter(importUrl, outputDirectory, 'pull', {
             secret: getSiteSecret(site),
             skipPreflight: true,
+            autoResume: false,
             timeout: 120000,
             wallTimeout: 240000,
             extraArgs: [
@@ -83,6 +87,14 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
             ],
         });
     }, 360000);
+
+    function readRequestRecords() {
+        return readFileSync(requestLogPath, 'utf-8')
+            .trim()
+            .split('\n')
+            .filter(Boolean)
+            .map(line => JSON.parse(line));
+    }
 
     afterAll(async () => {
         cleanupTempDir(outputDirectory);
@@ -102,11 +114,7 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
     });
 
     it('sends a same-origin WordPress admin Referer with every Reprint request', () => {
-        const requestRecords = readFileSync(requestLogPath, 'utf-8')
-            .trim()
-            .split('\n')
-            .filter(Boolean)
-            .map(line => JSON.parse(line))
+        const requestRecords = readRequestRecords()
             .filter(record => record.isReprintRequest);
         assert.ok(
             requestRecords.length > 0,
@@ -142,6 +150,63 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         }
     });
 
+    it('retries two potentially transient HTTP errors at every pull streaming endpoint', () => {
+        const expectedStatusesByEndpoint = new Map([
+            ['file_index', [408, 418]],
+            ['file_fetch', [425, 429]],
+            ['db_index', [500, 502]],
+            ['sql_chunk', [503, 504]],
+        ]);
+        const requestRecords = readRequestRecords();
+        const auditLog = readAuditLog(outputDirectory);
+
+        for (const [endpoint, expectedStatuses] of expectedStatusesByEndpoint) {
+            const endpointRecords = requestRecords.filter(
+                record => record.endpoint === endpoint,
+            );
+            assert.deepEqual(
+                endpointRecords.slice(0, 3).map(record => record.action),
+                ['http-error', 'http-error', 'proxy'],
+                `Expected two potentially transient HTTP errors and then a ` +
+                `proxied ${endpoint} request`,
+            );
+            assert.deepEqual(
+                endpointRecords
+                    .filter(record => record.action === 'http-error')
+                    .map(record => record.injectedStatus),
+                expectedStatuses,
+                `Expected the planned HTTP errors for ${endpoint}`,
+            );
+
+            const retryLines = auditLog
+                .split('\n')
+                .filter(line => line.includes(
+                    `TEMPORARY REQUEST FAILURE | ${endpoint} |`,
+                ));
+            for (let index = 0; index < expectedStatuses.length; index++) {
+                const expectedStatus = expectedStatuses[index];
+                const retryLine = retryLines.find(
+                    line => line.includes(`HTTP ${expectedStatus}`),
+                );
+                assert.ok(
+                    retryLine,
+                    `Expected ${endpoint} to record HTTP ${expectedStatus}`,
+                );
+                assert.ok(
+                    retryLine.includes(
+                        `consecutive_interrupted_responses=${index + 1}/3`,
+                    ),
+                    `Expected ${endpoint} HTTP ${expectedStatus} to record ` +
+                    `failure ${index + 1} of 3`,
+                );
+                assert.ok(
+                    retryLine.includes('cursor_moved=no'),
+                    `Expected ${endpoint} HTTP ${expectedStatus} to make no cursor progress`,
+                );
+            }
+        }
+    });
+
     it('completes pull through the application firewall', () => {
         assert.equal(
             pullResult.exitCode,
@@ -151,7 +216,13 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
 
         const stateFile = join(pullStateDirectory(outputDirectory, importUrl), 'state.json');
         assert.ok(existsSync(stateFile), 'Expected pull/state.json to exist');
-        assertPullPipelineComplete(JSON.parse(readFileSync(stateFile, 'utf-8')));
+        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        assertPullPipelineComplete(state);
+        assert.equal(
+            state.consecutive_interrupted_responses,
+            0,
+            'Expected a successful response to clear the potentially transient failure count',
+        );
         assert.ok(
             existsSync(join(fsRootDir(outputDirectory), getSiteDir(site), 'test-data', 'hello.txt')),
             'Expected pull to write a source file through the application firewall',
