@@ -234,10 +234,9 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
 
         const encodedCursor = firstInsertPart.headers['x-cursor'];
         assert.ok(encodedCursor, 'Expected a cursor on the bounded SQL part');
-        const cursor = Buffer.from(encodedCursor, 'base64').toString('utf8');
         const resumedResponse = await apiRequest(site, 'sql_chunk', {}, {
             method: 'POST',
-            body: JSON.stringify({ ...requestBody, cursor }),
+            body: JSON.stringify({ ...requestBody, cursor: encodedCursor }),
         });
         assert.equal(
             resumedResponse.status,
@@ -343,6 +342,7 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
             'function test_hook_before_completion($status, $gz, $boundary) {',
             "    if ($status !== 'partial') { return; }",
             `    file_put_contents('${hookState}', '{"completion_interrupted":true}');`,
+            '    $gz->finish();',
             '    exit(1);',
             '}',
         ].join('\n'));
