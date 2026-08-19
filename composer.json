@@ -39,7 +39,7 @@
         "lint:php": "phpcs --standard=phpcs.xml.dist",
         "lint:php:fix": "phpcbf --standard=phpcs.xml.dist",
         "lint:php:compat": [
-            "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.2- -ps packages/reprint-server/src reprint-server-wp/index.php reprint-server-wp/lib.php reprint-server-wp/wordpress",
+            "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.2- -ps packages/reprint-server/src reprint-server-wp",
             "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.4- -ps packages/reprint-client/src"
         ],
         "compat": "@lint:php:compat"

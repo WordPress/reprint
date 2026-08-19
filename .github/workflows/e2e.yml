@@ -53,6 +53,9 @@ jobs:
           path: reprint-exporter-wp.zip
 
   e2e:
+    # Keep the existing source E2E rows running if only the new exporter
+    # artifact build fails. The PHP 5.6 row will fail when its artifact is absent.
+    if: ${{ always() && !cancelled() && needs['build-phar'].result == 'success' }}
     name: E2E (exporter PHP ${{ matrix.exporter_php }}, importer PHP ${{ matrix.importer_php }})
     needs: [build-phar, build-exporter-plugin]
     runs-on: ubuntu-22.04
@@ -91,11 +94,13 @@ jobs:
           name: importer-phar
 
       - uses: actions/download-artifact@v4
+        if: matrix.exporter_php == '5.6'
         with:
           name: exporter-plugin
           path: ${{ runner.temp }}/exporter-plugin-download
 
       - name: Extract generated exporter plugin
+        if: matrix.exporter_php == '5.6'
         run: |
           artifact_root="$RUNNER_TEMP/generated-exporter-plugin"
           mkdir -p "$artifact_root/reprint-server-wp"
@@ -129,7 +134,7 @@ jobs:
         run: tests/e2e/ci/setup-infrastructure.sh "${{ matrix.exporter_php }}"
 
       - name: Restore importer PHP and Composer for CLI tools
-        if: matrix.importer_php != matrix.exporter_php
+        if: matrix.exporter_php == '5.6'
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.importer_php }}
@@ -146,7 +151,6 @@ jobs:
       - name: Provision basic site and smoke-test API
         env:
           E2E_WORDPRESS_VERSION: ${{ matrix.wordpress_version }}
-          E2E_WP_CLI_PHP_BINARY: php${{ matrix.importer_php }}
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
           IMPORTER_PHP: php${{ matrix.importer_php }}
         working-directory: tests/e2e

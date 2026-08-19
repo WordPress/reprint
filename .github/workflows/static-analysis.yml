@@ -42,6 +42,28 @@ jobs:
       # The generated plugin gets its real PHP 5.6 check in exporter-56 below.
       - run: composer lint:php:compat
 
+  syntax-72:
+    # PHPCompatibility 9.3.5 misses arrow functions and numeric separators, so
+    # a real PHP 7.2 parser is the authoritative check that the exporter (which
+    # runs on old shared hosting) contains no 7.3/7.4-only syntax.
+    name: PHP 7.2 syntax (exporter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "7.2"
+          coverage: none
+
+      - name: Lint exporter sources for PHP 7.2 parse errors
+        run: |
+          find packages/reprint-server/src reprint-server-wp \
+            -name '*.php' -not -path 'reprint-server-wp/wordpress/*' \
+            -print0 | xargs -0 -n1 php -l
+
   exporter-56:
     # PHPCompatibility 9.3.5 misses arrow functions and numeric separators, so
     # a real PHP 5.6 parser remains the authoritative syntax check. Parse the
