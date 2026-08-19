@@ -36,6 +36,7 @@ use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
 use function Reprint\Importer\sort_index_file;
+use function Reprint\Importer\unsupported_media_type_error_detail;
 use function Reprint\Importer\wordpress_admin_referer;
 use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function Reprint\Importer\write_local_index_entry;
@@ -11294,6 +11295,16 @@ class ImportClient
             $msg .= "\n\nRun `php reprint.phar install-server` for setup " .
                      "instructions.";
             return ['code' => 'NOT_FOUND', 'message' => $msg];
+        }
+
+        // An endpoint media-type rejection and a firewall greylist can both
+        // return 415.
+        if ($http_code === 415) {
+            $msg = unsupported_media_type_error_detail();
+            if ($server_msg !== null) {
+                $msg .= "\n\nThe target reported: {$server_msg}";
+            }
+            return ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => $msg];
         }
 
         // ── Server errors ────────────────────────────────────────

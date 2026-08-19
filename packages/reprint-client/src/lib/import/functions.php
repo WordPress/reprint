@@ -39,6 +39,24 @@ function wordpress_admin_referer(string $remote_reprint_api_url): ?string
 }
 
 /**
+ * Explain HTTP 415 without assuming it proves a firewall greylist.
+ *
+ * Imunify360 uses the same status for non-text requests from a greylisted
+ * source IP that an endpoint uses for a normal media-type rejection.
+ *
+ * @return string Actionable error detail for pull and push requests.
+ */
+function unsupported_media_type_error_detail(): string
+{
+	return 'The remote returned HTTP 415 Unsupported Media Type. This normally means the target rejected the ' .
+		'request\'s media type. Check the target\'s logs for a media-type rejection. Some web application ' .
+		'firewalls also return this status when the source IP address is greylisted and the request asks for a ' .
+		'non-text response. In that case, changing Reprint\'s Accept header to text/html would only replace this ' .
+		'response with a JavaScript challenge. Reprint cannot complete that challenge. If the firewall caused ' .
+		'it, ask the host to allowlist this machine\'s source IP address.';
+}
+
+/**
  * If the ALL_PROXY environment variable is set, apply it to the cURL
  * handle via CURLOPT_PROXY.
  *

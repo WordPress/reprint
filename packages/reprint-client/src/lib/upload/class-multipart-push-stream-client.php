@@ -2,6 +2,7 @@
 
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
+use function Reprint\Importer\unsupported_media_type_error_detail;
 use function Reprint\Importer\wordpress_admin_referer;
 
 require_once __DIR__ . '/../import/functions.php';
@@ -700,6 +701,16 @@ class MultipartPushStreamClient
                 'body_bytes_sent' => $this->body_bytes_sent,
             ];
         }
+        if ($http_code === 415) {
+            return [
+                'status' => 'failed',
+                'reason' => 'unsupported_media_type',
+                'detail' => unsupported_media_type_error_detail(),
+                'response' => null,
+                'parts_sent' => $this->parts_sent,
+                'body_bytes_sent' => $this->body_bytes_sent,
+            ];
+        }
         if (!is_array($decoded)) {
             if ($body !== '') {
                 return [
@@ -896,6 +907,16 @@ class MultipartPushStreamClient
         }
         $body = $response_body;
         $decoded = json_decode($body, true);
+        if ($http_code === 415) {
+            return [
+                'status' => 'failed',
+                'reason' => 'unsupported_media_type',
+                'detail' => unsupported_media_type_error_detail(),
+                'response' => null,
+                'parts_sent' => 0,
+                'body_bytes_sent' => 0,
+            ];
+        }
         if (!is_array($decoded)) {
             return [
                 'status' => 'failed',

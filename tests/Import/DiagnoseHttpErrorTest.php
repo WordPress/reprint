@@ -247,6 +247,68 @@ class DiagnoseHttpErrorTest extends TestCase
         ));
     }
 
+    public function testPullJsonRequestReportsHttp415AsPossibleFirewallGreylist()
+    {
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
+            $this->markTestSkipped('HTTP 415 wire coverage requires PHP curl and pcntl.');
+        }
+
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $error_number, $error_message);
+        $this->assertNotFalse($listener, $error_message);
+        $address = stream_socket_get_name($listener, false);
+        $this->assertIsString($address);
+
+        $child = pcntl_fork();
+        $this->assertNotSame(-1, $child);
+        if ($child === 0) {
+            $connection = stream_socket_accept($listener, 3);
+            if ($connection === false) {
+                exit(2);
+            }
+            stream_set_timeout($connection, 3);
+            $request = '';
+            while (strpos($request, "\r\n\r\n") === false && !feof($connection)) {
+                $piece = fread($connection, 64 * 1024);
+                if (!is_string($piece) || $piece === '') {
+                    break;
+                }
+                $request .= $piece;
+            }
+            if (strpos($request, 'GET /?reprint-api=1') !== 0) {
+                exit(3);
+            }
+            $body = '<!doctype html><title>Unsupported Media Type</title>';
+            fwrite(
+                $connection,
+                "HTTP/1.1 415 Unsupported Media Type\r\nContent-Type: text/html\r\nContent-Length: "
+                    . strlen($body) . "\r\nConnection: close\r\n\r\n" . $body
+            );
+            fclose($connection);
+            fclose($listener);
+            exit(0);
+        }
+
+        $client = new \ImportClient(
+            'http://' . $address . '/?reprint-api=1',
+            sys_get_temp_dir(),
+            sys_get_temp_dir(),
+        );
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $method = $reflection->getMethod('fetch_json');
+        $result = $method->invoke($client, 'http://' . $address . '/?reprint-api=1&endpoint=preflight');
+        pcntl_waitpid($child, $status);
+        fclose($listener);
+
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+        $this->assertSame(415, $result['http_code']);
+        $this->assertSame('UNSUPPORTED_MEDIA_TYPE', $result['error_code']);
+        $this->assertStringContainsString('Unsupported Media Type', $result['error']);
+        $this->assertStringContainsString('normally means', $result['error']);
+        $this->assertStringContainsString('greylist', $result['error']);
+        $this->assertStringContainsString('allowlist', $result['error']);
+    }
+
     // ── HTML response on any status ──────────────────────────────
 
     public function testHtmlResponseOn200()
