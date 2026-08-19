@@ -42,7 +42,14 @@ require_once __DIR__ . "/class-database-rows-reader.php";
  */
 class MySQLDumpProducer
 {
-    /** Maximum decoded SQL body bytes for one multipart part. */
+    /**
+     * Maximum decoded SQL body bytes for one multipart part.
+     *
+     * The producer uses this limit to split or reject one oversized row
+     * fragment. The exporter uses the same limit to stop grouping fragments
+     * before the complete multipart part becomes oversized, then checks its
+     * final byte length before writing it.
+     */
     public const MAX_SQL_PART_BODY_BYTES = 16 * 1024 * 1024;
 
     const STATE_INIT = "init";
