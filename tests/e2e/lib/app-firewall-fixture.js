@@ -2,8 +2,8 @@
  * Local reverse proxy which models an application firewall around WordPress.
  *
  * Reprint requests are accepted only when their Referer points to the same
- * origin's WordPress Media Library page. All accepted requests are streamed
- * to the real E2E WordPress site.
+ * origin's WordPress Media Library page. It injects the planned HTTP errors,
+ * then streams later requests to the real E2E WordPress site.
  */
 import http from 'node:http';
 import { appendFileSync } from 'node:fs';
@@ -14,6 +14,17 @@ if (!backendUrlString || !requestLogPath) {
 }
 
 const backendUrl = new URL(backendUrlString);
+
+// Return two different upstream errors before allowing each streaming endpoint
+// through. Together these cover every status in the importer's general
+// potentially transient list while staying below the three-failure limit.
+const injectedStatusesByEndpoint = new Map([
+    ['file_index', [408, 418]],
+    ['file_fetch', [425, 429]],
+    ['db_index', [500, 502]],
+    ['sql_chunk', [503, 504]],
+]);
+const injectedResponseCounts = new Map();
 
 function writeRequestLog(record) {
     appendFileSync(requestLogPath, `${JSON.stringify(record)}\n`);
@@ -28,16 +39,33 @@ const server = http.createServer((request, response) => {
     const expectedReferer = `http://${request.headers.host}/wp-admin/upload.php`;
     const referer = request.headers.referer || '';
     const allowed = !isReprintRequest || referer === expectedReferer;
+    const endpoint = requestUrl.searchParams.get('endpoint') || '';
+    const injectedStatuses = injectedStatusesByEndpoint.get(endpoint) || [];
+    const injectedResponseCount = injectedResponseCounts.get(endpoint) || 0;
+    const injectedStatus = allowed
+        ? injectedStatuses[injectedResponseCount] || null
+        : null;
+    const action = !allowed
+        ? 'blocked'
+        : injectedStatus === null
+            ? 'proxy'
+            : 'http-error';
+
+    if (injectedStatus !== null) {
+        injectedResponseCounts.set(endpoint, injectedResponseCount + 1);
+    }
 
     writeRequestLog({
         method: request.method,
         path: request.url,
         contentType,
-        endpoint: requestUrl.searchParams.get('endpoint') || '',
+        endpoint,
         referer,
         expectedReferer,
         isReprintRequest,
         allowed,
+        action,
+        injectedStatus,
         userAgent: request.headers['user-agent'] || '',
     });
 
@@ -48,6 +76,23 @@ const server = http.createServer((request, response) => {
             'X-App-Firewall': 'blocked',
         });
         response.end('<!doctype html><title>403 Forbidden</title><h1>Forbidden</h1>');
+        return;
+    }
+
+    if (injectedStatus !== null) {
+        // Drain uploads before responding so cURL observes the HTTP status
+        // instead of an upload-side socket error.
+        request.on('end', () => {
+            response.writeHead(injectedStatus, {
+                'Content-Type': 'text/html; charset=utf-8',
+                'X-App-Firewall': 'potentially-transient-error',
+            });
+            response.end(
+                `<!doctype html><title>HTTP ${injectedStatus}</title>` +
+                '<h1>Temporary upstream response</h1>',
+            );
+        });
+        request.resume();
         return;
     }
 
