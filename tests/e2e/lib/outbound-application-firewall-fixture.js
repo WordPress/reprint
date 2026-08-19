@@ -1,11 +1,27 @@
 /**
- * Local reverse proxy which models one reported CWAF response-body setup.
+ * Proxies Reprint requests to WordPress. For `file_fetch` and `sql_chunk`, it:
  *
- * Rule 214620 adds three points for PHP source-like text, rule 218140 adds two
- * points for MySQL error text, and rule 214940 replaces the response when the
- * total reaches four. This is not a complete CWAF engine. It applies that
- * reported score to the exact bytes emitted by WordPress, before the Reprint
- * client decodes Content-Encoding.
+ * - buffers at most 64 MiB of the upstream response;
+ * - scans those bytes without decoding Content-Encoding;
+ * - returns an HTML 403 when `fopen` or the test's MySQL error text is present;
+ * - otherwise forwards the original response and headers unchanged.
+ *
+ * Other proxied responses stream through without inspection. Two fixture-only
+ * routes send each clear-text marker through the same scanner.
+ *
+ * This models a reported CWAF failure. Public rules assign four points to the
+ * PHP match and five to the MySQL match, with an outgoing limit of four. Rule
+ * 214800 denies at that limit when point blocking is enabled; rule 214940 only
+ * logs it. The report does not identify which disruptive rule issued its 403,
+ * so this proxy models the threshold path to the same result.
+ *
+ * Reprint gzips export bodies inside PHP. Because this proxy does not decode
+ * gzip, it does not find the clear-text markers and the client receives the
+ * response. This is not a complete CWAF engine, and a firewall which decodes
+ * gzip can behave differently.
+ *
+ * Report: https://wordpress.org/support/topic/conflict-with-strict_mod_security/
+ * Rules: https://github.com/zcomtenten/cwaf/tree/f9a3f105768d72bb3ea1585fdc963176d1f41f73
  */
 import http from 'node:http';
 import { appendFileSync } from 'node:fs';
@@ -25,8 +41,8 @@ function inspectResponseBody(body) {
         'You have an error in your SQL syntax;',
     );
     const outboundPoints =
-        (phpSourceMatch ? 3 : 0) +
-        (mysqlLeakMatch ? 2 : 0);
+        (phpSourceMatch ? 4 : 0) +
+        (mysqlLeakMatch ? 5 : 0);
 
     return {
         phpSourceMatch,
@@ -67,15 +83,19 @@ function sendInspectedResponse(response, details) {
 }
 
 const server = http.createServer((request, response) => {
-    if (request.url === '/__outbound-firewall-clear-response') {
+    let clearResponseBody = null;
+    if (request.url === '/__outbound-firewall-clear-php-response') {
+        clearResponseBody = 'fopen';
+    } else if (request.url === '/__outbound-firewall-clear-mysql-response') {
+        clearResponseBody = 'You have an error in your SQL syntax;';
+    }
+    if (clearResponseBody !== null) {
         sendInspectedResponse(response, {
             endpoint: 'fixture_clear_response',
             statusCode: 200,
             statusMessage: 'OK',
             headers: { 'content-type': 'text/plain; charset=utf-8' },
-            body: Buffer.from(
-                'fopen: You have an error in your SQL syntax;',
-            ),
+            body: Buffer.from(clearResponseBody),
         });
         return;
     }

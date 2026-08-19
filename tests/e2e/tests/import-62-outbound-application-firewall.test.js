@@ -1,10 +1,11 @@
 /**
  * Test 62: Outbound application firewall compatibility
  *
- * Runs a complete pull through a local reverse proxy which applies the
- * reported CWAF 214620, 218140, and 214940 score to raw response bytes.
- * Relevant export bodies are compressed inside PHP before the proxy sees
- * them. The fixture is not a complete CWAF engine.
+ * Runs a complete pull through a local reverse proxy which models two reported
+ * CWAF response matches and the four-point blocking threshold. Clear PHP and
+ * MySQL markers become HTTP 403 responses. The same values survive a full pull
+ * because the relevant export bodies are compressed inside PHP before the
+ * proxy sees them. The fixture is not a complete CWAF engine.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -36,9 +37,7 @@ import { ensureSite } from '../lib/site-setup.js';
 describe('Import: Outbound application firewall compatibility', { timeout: 240000 }, () => {
     const site = 'outbound-application-firewall';
     const importDb = 'e2e_outbound_application_firewall_62';
-    const phpAndSqlMarker =
-        '<?php $stream = fopen("php://memory", "r"); // ' +
-        'You have an error in your SQL syntax;';
+    const phpMarker = '<?php $stream = fopen("php://memory", "r");';
     const sqlMarker = 'You have an error in your SQL syntax;';
     let firewallProcess;
     let firewallOrigin;
@@ -61,7 +60,7 @@ describe('Import: Outbound application firewall compatibility', { timeout: 24000
             afterCreate: async (siteDirectory) => {
                 writeFileSync(
                     join(siteDirectory, 'test-data', 'outbound-firewall.php'),
-                    phpAndSqlMarker,
+                    phpMarker,
                 );
             },
         });
@@ -127,16 +126,19 @@ describe('Import: Outbound application firewall compatibility', { timeout: 24000
         await connection.end();
     });
 
-    it('blocks clear responses containing both published CWAF patterns', async () => {
-        const response = await fetch(
-            `${firewallOrigin}/__outbound-firewall-clear-response`,
-        );
+    it('blocks each clear response pattern at the published CWAF threshold', async () => {
+        for (const marker of ['php', 'mysql']) {
+            const response = await fetch(
+                `${firewallOrigin}/__outbound-firewall-clear-${marker}-response`,
+            );
 
-        assert.equal(response.status, 403);
-        assert.equal(
-            response.headers.get('x-app-firewall'),
-            'outbound-response',
-        );
+            assert.equal(response.status, 403, marker);
+            assert.equal(
+                response.headers.get('x-app-firewall'),
+                'outbound-response',
+                marker,
+            );
+        }
     });
 
     it('keeps PHP and SQL patterns out of emitted export response bytes', () => {
@@ -209,7 +211,7 @@ describe('Import: Outbound application firewall compatibility', { timeout: 24000
                 ),
                 'utf-8',
             ),
-            phpAndSqlMarker,
+            phpMarker,
         );
 
         const connection = await createMysqlConnection(importDb);
