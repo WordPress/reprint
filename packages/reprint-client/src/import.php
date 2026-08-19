@@ -220,6 +220,7 @@ class ImportClient
 
     /** HTTP statuses which may indicate a transient HTTP error. */
     private const POTENTIALLY_TRANSIENT_HTTP_STATUS_CODES = [
+        400, // Bad Request
         408, // Request Timeout
         418, // Observed when an upstream bot filter replaced a Reprint response
         425, // Too Early

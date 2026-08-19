@@ -180,17 +180,17 @@ class CurlTimeoutRecoveryTest extends TestCase
         );
     }
 
-    public function testSqlDownloadRetriesHttp418ThenCompletes()
+    public function testSqlDownloadRetriesHttp400ThenCompletes()
     {
         if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
             $this->markTestSkipped('HTTP retry coverage requires PHP curl and pcntl.');
         }
 
         $cursor = base64_encode('{"table":"wp_posts","pk":42}');
-        $http418 = $this->httpResponse(
-            "418 I'm a teapot",
+        $http400 = $this->httpResponse(
+            '400 Bad Request',
             'text/html',
-            '<!doctype html><title>Temporary bot response</title>',
+            '<!doctype html><title>Temporary upstream response</title>',
         );
         $boundary = 'http-retry-test';
         $completion_body = "--{$boundary}\r\n"
@@ -202,7 +202,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             . "\r\n"
             . "--{$boundary}--\r\n";
         $server = $this->startSqlResponseServer([
-            $http418,
+            $http400,
             $this->httpResponse(
                 '200 OK',
                 "multipart/mixed; boundary={$boundary}",
