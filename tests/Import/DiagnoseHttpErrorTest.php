@@ -32,7 +32,7 @@ class DiagnoseHttpErrorTest extends TestCase
         return $method->invoke($client, $http_code, $body, $redirect_url);
     }
 
-    private function isTransientHttpResponse(
+    private function isPotentiallyTransientHttpError(
         int $http_code,
         string $body,
         bool $has_secret = true
@@ -50,7 +50,7 @@ class DiagnoseHttpErrorTest extends TestCase
             );
         }
 
-        return $reflection->getMethod('is_transient_http_response')->invoke(
+        return $reflection->getMethod('is_potentially_transient_http_error')->invoke(
             $client,
             $http_code,
             $body,
@@ -211,37 +211,37 @@ class DiagnoseHttpErrorTest extends TestCase
         $this->assertSame('SERVER_ERROR', $result['code']);
     }
 
-    public function testTransientHttpResponseClassification()
+    public function testPotentiallyTransientHttpErrorClassification()
     {
-        $this->assertTrue($this->isTransientHttpResponse(
+        $this->assertTrue($this->isPotentiallyTransientHttpError(
             418,
             '<!doctype html><title>Temporary bot response</title>',
         ));
-        $this->assertTrue($this->isTransientHttpResponse(
+        $this->assertTrue($this->isPotentiallyTransientHttpError(
             403,
             '<!doctype html><title>Temporary firewall response</title>',
         ));
-        $this->assertTrue($this->isTransientHttpResponse(
+        $this->assertTrue($this->isPotentiallyTransientHttpError(
             403,
             '{"error":"Bot protection is temporarily unavailable"}',
         ));
-        $this->assertTrue($this->isTransientHttpResponse(
+        $this->assertTrue($this->isPotentiallyTransientHttpError(
             503,
             '{"error":"Upstream service is temporarily unavailable"}',
         ));
-        $this->assertFalse($this->isTransientHttpResponse(
+        $this->assertFalse($this->isPotentiallyTransientHttpError(
             403,
             '{"error":"Invalid timestamp format","code":403}',
         ));
-        $this->assertFalse($this->isTransientHttpResponse(
+        $this->assertFalse($this->isPotentiallyTransientHttpError(
             503,
             '{"error":"Invalid secret.php configuration","code":503}',
         ));
-        $this->assertFalse($this->isTransientHttpResponse(
+        $this->assertFalse($this->isPotentiallyTransientHttpError(
             500,
             '{"error":"Reprint Server runtime is incomplete","code":500}',
         ));
-        $this->assertFalse($this->isTransientHttpResponse(
+        $this->assertFalse($this->isPotentiallyTransientHttpError(
             415,
             '<!doctype html><title>Unsupported Media Type</title>',
         ));

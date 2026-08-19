@@ -217,8 +217,8 @@ class ImportClient
         95, // CURLE_HTTP3        — HTTP/3 layer error
     ];
 
-    /** HTTP statuses for failures which can clear before the next request. */
-    private const TRANSIENT_HTTP_STATUS_CODES = [
+    /** HTTP statuses which may indicate a transient HTTP error. */
+    private const POTENTIALLY_TRANSIENT_HTTP_STATUS_CODES = [
         408, // Request Timeout
         418, // Observed when an upstream bot filter replaced a Reprint response
         425, // Too Early
@@ -11781,7 +11781,7 @@ class ImportClient
                 }
             }
 
-            if ($this->is_transient_http_response($http_code, $error_body)) {
+            if ($this->is_potentially_transient_http_error($http_code, $error_body)) {
                 // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This exception is rendered only as CLI text.
                 throw new TransientInterruptionException($error_msg);
             }
@@ -11804,10 +11804,8 @@ class ImportClient
         }
     }
 
-    /**
-     * Decide whether a streaming HTTP failure can clear before the next request.
-     */
-    private function is_transient_http_response(int $http_code, string $body): bool
+    /** Decide whether a streaming HTTP error is potentially transient. */
+    private function is_potentially_transient_http_error(int $http_code, string $body): bool
     {
         $decoded_body = json_decode($body, true);
         $is_reprint_error = is_array($decoded_body)
@@ -11821,7 +11819,13 @@ class ImportClient
             return false;
         }
 
-        if (in_array($http_code, self::TRANSIENT_HTTP_STATUS_CODES, true)) {
+        if (
+            in_array(
+                $http_code,
+                self::POTENTIALLY_TRANSIENT_HTTP_STATUS_CODES,
+                true,
+            )
+        ) {
             return true;
         }
 
