@@ -11810,17 +11810,14 @@ class ImportClient
     private function is_transient_http_response(int $http_code, string $body): bool
     {
         $decoded_body = json_decode($body, true);
-        $server_error = is_array($decoded_body)
-            && is_string($decoded_body['error'] ?? null)
-                ? $decoded_body['error']
-                : null;
+        $is_reprint_error = is_array($decoded_body)
+            && isset($decoded_body['code'])
+            && $decoded_body['code'] === $http_code;
 
-        // A structured 503 is Reprint's permanent setup error.
-        if (
-            $http_code === 503
-            && $server_error !== null
-            && str_contains($server_error, 'Export not configured')
-        ) {
+        // Reprint includes the HTTP code in its deliberate JSON failures.
+        // HTML, empty, and unmarked JSON bodies can come from an upstream
+        // server or firewall instead.
+        if ($is_reprint_error) {
             return false;
         }
 
@@ -11828,18 +11825,10 @@ class ImportClient
             return true;
         }
 
-        $is_known_reprint_authentication_error = $server_error !== null && (
-            str_contains($server_error, 'HMAC signature verification failed')
-            || str_contains($server_error, 'timestamp expired')
-            || str_contains($server_error, 'Content hash mismatch')
-            || str_contains($server_error, 'Missing X-Auth-')
-        );
-
-        // An unrecognized 401 or 403 after a signed request can be a temporary
+        // An unmarked 401 or 403 after a signed request can be a temporary
         // firewall response produced before the request reaches Reprint.
         return ($http_code === 401 || $http_code === 403)
-            && $this->hmac_client !== null
-            && !$is_known_reprint_authentication_error;
+            && $this->hmac_client !== null;
     }
 
     /**

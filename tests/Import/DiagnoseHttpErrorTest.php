@@ -231,11 +231,15 @@ class DiagnoseHttpErrorTest extends TestCase
         ));
         $this->assertFalse($this->isTransientHttpResponse(
             403,
-            '{"error":"HMAC signature verification failed"}',
+            '{"error":"Invalid timestamp format","code":403}',
         ));
         $this->assertFalse($this->isTransientHttpResponse(
             503,
-            '{"error":"Export not configured"}',
+            '{"error":"Invalid secret.php configuration","code":503}',
+        ));
+        $this->assertFalse($this->isTransientHttpResponse(
+            500,
+            '{"error":"Reprint Server runtime is incomplete","code":500}',
         ));
         $this->assertFalse($this->isTransientHttpResponse(
             415,
