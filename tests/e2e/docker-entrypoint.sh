@@ -5,6 +5,7 @@ set -euo pipefail
 PHP_VERSION="${PHP_VERSION:-8.2}"
 FPM_SOCKET="/run/php/e2e.sock"
 OPEN_BASEDIR_FPM_SOCKET="/run/php/e2e-open-basedir.sock"
+NO_PDO_MYSQL_FPM_SOCKET="/run/php/e2e-no-pdo-mysql.sock"
 REGISTRY="/app/tests/e2e/site-registry.json"
 SITE_ROOT=$(jq -r '.siteRoot' "$REGISTRY")
 
@@ -82,9 +83,61 @@ EOF
 rm -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf"
 "php-fpm${PHP_VERSION}" --nodaemonize &
 
+# A second PHP-FPM master with ext-pdo_mysql left out, so sites pointed at it
+# take create_db_connection()'s PDO-less route and export through $wpdb. PHP
+# loads extensions per master rather than per pool, which is why this cannot
+# be another pool alongside the ones above. WordPress itself is unaffected: it
+# connects over mysqli.
+NO_PDO_MYSQL_CONF_D="/etc/php/${PHP_VERSION}/fpm-no-pdo-mysql-conf.d"
+rm -rf "$NO_PDO_MYSQL_CONF_D"
+cp -rL "/etc/php/${PHP_VERSION}/fpm/conf.d" "$NO_PDO_MYSQL_CONF_D"
+rm -f "$NO_PDO_MYSQL_CONF_D"/*pdo_mysql.ini
+
+# The whole point of this master is that pdo_mysql is gone. If the ini were
+# named differently, or the extension were built in, every test on these sites
+# would quietly run on the ordinary PDO path and still pass.
+if ! PHP_INI_SCAN_DIR="$NO_PDO_MYSQL_CONF_D" "php${PHP_VERSION}" \
+    -r 'exit(extension_loaded("pdo_mysql") ? 1 : 0);'; then
+    echo "pdo_mysql is still loaded in ${NO_PDO_MYSQL_CONF_D}; the no-pdo-mysql sites would not test the wpdb path." >&2
+    exit 1
+fi
+
+cat > "/etc/php/${PHP_VERSION}/fpm/php-fpm-no-pdo-mysql.conf" <<EOF
+[global]
+pid = /run/php/e2e-no-pdo-mysql.pid
+error_log = /tmp/php-e2e-no-pdo-mysql.log
+daemonize = no
+
+[e2e-no-pdo-mysql]
+user = nginx
+group = nginx
+listen = ${NO_PDO_MYSQL_FPM_SOCKET}
+listen.owner = nginx
+listen.group = nginx
+listen.mode = 0660
+pm = ondemand
+pm.max_children = 8
+php_admin_value[memory_limit] = 512M
+php_admin_value[max_execution_time] = 120
+php_admin_value[upload_max_filesize] = 50M
+php_admin_value[post_max_size] = 50M
+php_admin_value[error_reporting] = E_ALL
+php_admin_value[display_errors] = Off
+php_admin_value[log_errors] = On
+php_admin_value[error_log] = /tmp/php-e2e-errors.log
+php_admin_value[user_ini.cache_ttl] = 0
+php_admin_value[realpath_cache_ttl] = 0
+env[SITE_EXPORT_TEST_MODE] = 1
+EOF
+
+PHP_INI_SCAN_DIR="$NO_PDO_MYSQL_CONF_D" "php-fpm${PHP_VERSION}" \
+    --nodaemonize \
+    --fpm-config "/etc/php/${PHP_VERSION}/fpm/php-fpm-no-pdo-mysql.conf" &
+
 # Wait for FPM socket
 for i in $(seq 1 30); do
-    if [ -S "$FPM_SOCKET" ] && [ -S "$OPEN_BASEDIR_FPM_SOCKET" ]; then break; fi
+    if [ -S "$FPM_SOCKET" ] && [ -S "$OPEN_BASEDIR_FPM_SOCKET" ] \
+       && [ -S "$NO_PDO_MYSQL_FPM_SOCKET" ]; then break; fi
     sleep 0.5
 done
 
@@ -114,10 +167,13 @@ rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
 
 # Standard sites — serve from WordPress root so that index.php
 # bootstraps WordPress and the site-export plugin handles the request.
-jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | [.key, .value.port, (.value.openBasedir // false)] | @tsv' "$REGISTRY" | while IFS=$'\t' read -r site port open_basedir; do
+jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | [.key, .value.port, (.value.openBasedir // false), (.value.noPdoMysql // false)] | @tsv' "$REGISTRY" | while IFS=$'\t' read -r site port open_basedir no_pdo_mysql; do
     site_fpm_socket="$FPM_SOCKET"
     if [ "$open_basedir" = "true" ]; then
         site_fpm_socket="$OPEN_BASEDIR_FPM_SOCKET"
+    fi
+    if [ "$no_pdo_mysql" = "true" ]; then
+        site_fpm_socket="$NO_PDO_MYSQL_FPM_SOCKET"
     fi
     cat > "/etc/nginx/conf.d/e2e-${site}.conf" <<VHOST
 server {

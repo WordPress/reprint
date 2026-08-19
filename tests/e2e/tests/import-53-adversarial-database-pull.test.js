@@ -20,9 +20,14 @@ import {
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
-describe('Import: Adversarial database pull', { timeout: 300000 }, () => {
-    const site = 'adversarial-database';
-    const importDb = 'e2e_adversarial_database_import_53';
+// Also runs on a site whose PHP-FPM master has no pdo_mysql, where the export
+// streams through WordPress's $wpdb. Arbitrary bytes in primary keys travel
+// through the connection's own quoting on every cursor, which is where the two
+// connections would diverge if they were going to.
+describe.each([
+    ['adversarial-database', 'e2e_adversarial_database_import_53'],
+    ['adversarial-database-no-pdo-mysql', 'e2e_adversarial_no_pdo_mysql_import_53'],
+])('Import: Adversarial database pull (%s)', { timeout: 300000 }, (site, importDb) => {
     const adversarialTables = [
         'aa_binary_primary_keys',
         'ab_composite_binary_primary_key',

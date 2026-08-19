@@ -12,13 +12,18 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    createMysqlConnection,
+    getDbName, createMysqlConnection,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
-describe('Import: SQL Data Fidelity', () => {
-    const site = 'http-errors';
-    const importDb = 'e2e_http_errors_import_23';
+// Also runs on a site whose PHP-FPM master has no pdo_mysql, where the export
+// streams through WordPress's $wpdb. Byte fidelity is the thing most likely to
+// differ between a PDO connection and a mysqli-backed one, so both produce the
+// dump and both are compared against the source.
+describe.each([
+    ['http-errors', 'e2e_http_errors_import_23'],
+    ['sql-data-fidelity-no-pdo-mysql', 'e2e_sql_data_fidelity_no_pdo_mysql_import_23'],
+])('Import: SQL Data Fidelity (%s)', (site, importDb) => {
     let tempDir;
 
     beforeAll(async () => {
@@ -225,7 +230,7 @@ CREATE TABLE wp_edge_cases (
     });
 
     it('row count matches between source and import', async () => {
-        const sourceConn = await createMysqlConnection('e2e_http_errors');
+        const sourceConn = await createMysqlConnection(getDbName(site));
         const importConn = await createMysqlConnection(importDb);
 
         const [[srcCount]] = await sourceConn.query('SELECT COUNT(*) as cnt FROM wp_edge_cases');
