@@ -134,7 +134,7 @@ require_once __DIR__ . '/lib/pull/class-pull-index-journal.php';
  * multipart structure, header names, endpoint parameters, response format)
  * would break an older export plugin.
  */
-define('PULL_PROTOCOL_VERSION', 2);
+define('PULL_PROTOCOL_VERSION', 3);
 
 register_shutdown_function(function () {
     $error = error_get_last();
