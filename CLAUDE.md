@@ -73,7 +73,7 @@ composer lint:php
 # Apply PHPCS auto-fixes from the ruleset
 composer lint:php:fix
 
-# Run PHP 7.4+ compatibility
+# Check typed exporter source on PHP 7.2 and importer source on PHP 7.4
 composer lint:php:compat
 ```
 

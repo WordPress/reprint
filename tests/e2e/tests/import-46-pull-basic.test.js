@@ -69,6 +69,15 @@ describe('Import: Pull Basic', { timeout: 180000 }, () => {
         assert.ok(existsSync(stateFile), 'Expected pull/state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assertPullPipelineComplete(state);
+
+        const expectedExporterPhpVersion = process.env.E2E_EXPECTED_EXPORTER_PHP_VERSION;
+        if (expectedExporterPhpVersion) {
+            const exporterPhpVersion = state.preflight?.data?.php?.version;
+            assert.ok(
+                exporterPhpVersion?.startsWith(`${expectedExporterPhpVersion}.`),
+                `Expected exporter PHP ${expectedExporterPhpVersion}.x, got ${exporterPhpVersion ?? 'missing'}`,
+            );
+        }
     });
 
     it('files match source', () => {

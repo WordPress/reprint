@@ -38,8 +38,8 @@ jobs:
 
       - run: composer install --no-interaction --prefer-dist
 
-      # Checks exporter compat at PHP 7.2 (shared hosting) and importer at 7.4,
-      # via two PHPCompatibility runs (see lint:php:compat in composer.json).
+      # Checks the typed exporter source at PHP 7.2 and importer at PHP 7.4.
+      # The generated plugin gets its real PHP 5.6 check in exporter-56 below.
       - run: composer lint:php:compat
 
   syntax-72:
@@ -63,3 +63,56 @@ jobs:
           find packages/reprint-server/src reprint-server-wp \
             -name '*.php' -not -path 'reprint-server-wp/wordpress/*' \
             -print0 | xargs -0 -n1 php -l
+
+  exporter-56:
+    # PHPCompatibility 9.3.5 misses arrow functions and numeric separators, so
+    # a real PHP 5.6 parser remains the authoritative syntax check. Parse the
+    # same plugin tree shipped in the release ZIP so the check covers the
+    # WordPress wrapper and the physical Composer vendor copy too.
+    name: PHP 5.6 exporter artifact
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      # Match the release job's artifact build before switching to the old
+      # runtime which must parse and run the result.
+      - name: Set up release build PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+          coverage: none
+          tools: composer:2.9.7
+
+      - name: Install exporter artifact build dependencies
+        run: composer install --no-dev --no-interaction --prefer-dist --working-dir=tools/php56-build
+
+      - name: Test PHP 5.6 downgrade rules
+        run: composer test --working-dir=tools/php56-build
+
+      - name: Build reprint-exporter-wp.zip
+        run: ./bin/build-exporter-plugin.sh
+
+      - name: Confirm the typed source was not rewritten
+        run: git diff --exit-code -- packages/reprint-server reprint-server-wp
+
+      - name: Set up PHP 5.6 parser
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "5.6"
+          coverage: none
+          tools: none
+
+      - name: Lint packaged PHP files with PHP 5.6
+        run: |
+          artifact_dir="$RUNNER_TEMP/reprint-exporter-wp"
+          rm -rf "$artifact_dir"
+          mkdir -p "$artifact_dir"
+          unzip -q reprint-exporter-wp.zip -d "$artifact_dir"
+          grep -F ' * Requires PHP: 5.6.20' "$artifact_dir/index.php"
+          while IFS= read -r -d '' php_file; do
+            php -l "$php_file"
+          done < <(find "$artifact_dir" -type f -name '*.php' -print0)
+          php tests/php56-exporter-smoke.php "$artifact_dir"

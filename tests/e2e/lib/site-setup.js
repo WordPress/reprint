@@ -22,7 +22,8 @@ const SITE_ROOT = REGISTRY.siteRoot;
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
 const DB_PASS = REGISTRY.dbPass;
-const WP_VERSION = REGISTRY.wpVersion;
+const WP_VERSION = process.env.E2E_WORDPRESS_VERSION || REGISTRY.wpVersion;
+const WP_CLI_PHP_BINARY = process.env.E2E_WP_CLI_PHP_BINARY || 'php';
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const EXPORTER_PROJECT_ROOT = process.env.E2E_EXPORTER_PROJECT_ROOT || PROJECT_ROOT;
 // E2E_EXPORTER_PROJECT_ROOT may point at a historical checkout that predates
@@ -117,7 +118,7 @@ require_once ABSPATH . 'wp-settings.php';
 function wpCoreInstall(siteDir, siteUrl, siteName) {
     const allowRoot = process.getuid?.() === 0 ? ' --allow-root' : '';
     execSync(
-        `php ${WP_CLI_PATH} core install` +
+        `${WP_CLI_PHP_BINARY} ${WP_CLI_PATH} core install` +
         ` --path=${JSON.stringify(siteDir)}` +
         ` --url=${JSON.stringify(siteUrl)}` +
         ` --title=${JSON.stringify('E2E: ' + siteName)}` +
@@ -136,7 +137,7 @@ function wpCoreInstall(siteDir, siteUrl, siteName) {
 function wpPluginActivate(siteDir, pluginSlug) {
     const allowRoot = process.getuid?.() === 0 ? ' --allow-root' : '';
     execSync(
-        `php ${WP_CLI_PATH} plugin activate ${pluginSlug}` +
+        `${WP_CLI_PHP_BINARY} ${WP_CLI_PATH} plugin activate ${pluginSlug}` +
         ` --path=${JSON.stringify(siteDir)}` +
         allowRoot,
         { timeout: 30000, stdio: 'pipe' }
