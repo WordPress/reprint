@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   tag:
@@ -90,15 +91,49 @@ jobs:
           git push origin "v${{ steps.version.outputs.value }}"
           echo "Tagged and pushed v${{ steps.version.outputs.value }}"
 
+      # The tag above is the release. This step only stamps the next -dev version
+      # on trunk, so continue-on-error keeps a stamping failure from failing the
+      # workflow: the Release and Publish workflows trigger on this one concluding
+      # success, and a red run here skips both of them.
+      #
+      # Trunk rejects direct pushes ("Changes must be made through a pull
+      # request"), so the stamp lands as a pull request. The trunk ruleset
+      # requires no approving reviews and no status checks, so the same run
+      # merges it immediately. GitHub computes mergeability asynchronously and
+      # reports UNKNOWN for the first moment after creation, hence the retry.
       - name: Bump trunk to next dev version
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+
           VERSION="${{ steps.version.outputs.value }}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
           NEXT_DEV="${MAJOR}.${MINOR}.$((PATCH + 1))-dev"
+          BRANCH="release/bump-$NEXT_DEV"
 
           git checkout trunk
+          git checkout -b "$BRANCH"
           ./bin/stamp-plugin-version.sh "$NEXT_DEV"
 
           git add reprint-server-wp/index.php reprint-server-wp/lib.php
           git commit -m "Bump plugin version to $NEXT_DEV after v$VERSION release"
-          git push origin trunk
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --base trunk \
+            --head "$BRANCH" \
+            --title "Bump plugin version to $NEXT_DEV after v$VERSION release" \
+            --body "Stamps the next development version into reprint-server-wp/ after the v$VERSION tag. Opened by the Tag Release workflow."
+
+          for attempt in 1 2 3 4 5; do
+            if gh pr merge "$BRANCH" --squash --delete-branch; then
+              exit 0
+            fi
+            echo "Merge attempt $attempt failed; retrying in 10s"
+            sleep 10
+          done
+
+          echo "::error::Could not merge $BRANCH. Merge it by hand to stamp $NEXT_DEV on trunk."
+          exit 1
