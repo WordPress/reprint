@@ -1270,21 +1270,30 @@ function resolve_directories(array $config): array
 }
 
 /**
- * Resolves the configured roots for the file-index endpoint.
+ * Builds file-index roots from the file_index request's `directory` parameter.
  *
- * `directory[]` is the established wire parameter name, but file_index treats
- * each value as a selected root: a directory, regular file, or symlink.
- * Keep resolve_directories() for preflight and file_fetch, whose callers need
- * actual directories.
+ * The `directory` parameter contains the selected paths. In spite of the
+ * parameter name, a selected path may name a directory, regular file, or
+ * symlink.
  *
- * requested_path retains the caller's normalized spelling. resolved_path is
- * the physical target used for walking and target de-duplication.
+ * Unlike resolve_directories(), this keeps one file-index root for every
+ * selected path. `requested_path` is the normalized spelling supplied by the
+ * client. `resolved_path` is its realpath() target.
+ *
+ * FileIndexProcessor adds a link entry at `requested_path` to the file index.
+ * It walks a followed directory target at `resolved_path`. It also uses
+ * `resolved_path` so aliases to the same target are indexed once.
+ *
+ * Example: for /site/theme -> /shared/theme, this returns a file-index root
+ * with `requested_path` /site/theme, `resolved_path` /shared/theme, and type
+ * symlink. With symlink following enabled, it adds the link entry at
+ * /site/theme and indexes the target tree at /shared/theme.
  *
  * @return array[] {
  *     File-index roots.
  *
- *     @type string      $requested_path Configured normalized root path.
- *     @type string|null $resolved_path  Physical root path, when available.
+ *     @type string      $requested_path Normalized path supplied by the client.
+ *     @type string|null $resolved_path  realpath() target, when available.
  *     @type string      $type           directory, file, symlink, or missing.
  * }
  */
@@ -1353,20 +1362,25 @@ function resolve_file_index_roots(array $config): array
 }
 
 /**
- * Resolves the root scheduled first for a file-index request.
+ * Returns the file-index root for the file_index request's `list_dir` parameter.
  *
- * A request normally starts from one of its selected roots. With symlink
- * following enabled, the client may instead start a separate request at a
- * physical directory reached from a selected link.
+ * `list_dir` normally names a path from `directory[]`. When following symlinks,
+ * it may instead name a resolved directory found through a link below one of
+ * those selected paths.
+ *
+ * Example: `directory[]` contains /site. If indexing /site finds a link from
+ * /site/theme to /shared/theme, the client later requests
+ * `list_dir=/shared/theme`. This function returns a file-index root for
+ * /shared/theme even though it is not in `directory[]`.
  *
  * @param array[] $roots           File-index roots returned by resolve_file_index_roots().
- * @param string  $list_directory  Requested root where this traversal begins.
- * @param bool    $follow_symlinks Whether a followed target may begin a traversal.
+ * @param string  $list_directory  Value sent as `list_dir`.
+ * @param bool    $follow_symlinks Whether `list_dir` may name a directory reached through a link.
  * @return array {
- *     Root scheduled first.
+ *     File-index root for `list_dir`.
  *
  *     @type string      $requested_path Requested normalized root path.
- *     @type string|null $resolved_path  Physical root path, when available.
+ *     @type string|null $resolved_path  Resolved root path, when available.
  *     @type string      $type           directory, file, symlink, or missing.
  * }
  */

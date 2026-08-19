@@ -7355,9 +7355,6 @@ class ImportClient
         }
 
         $params = $this->get_tuned_params("file_fetch");
-        // file_fetch retains its directory-only server contract. --only may
-        // name a file, so use the preflight directory roots rather than the
-        // scoped file-index roots used by fetch_next_remote_index().
         $fetch_directories = $this->get_root_directories_from_preflight();
         if (!empty($fetch_directories)) {
             $params["directory"] = $fetch_directories;
@@ -7915,6 +7912,8 @@ class ImportClient
                     if ($transition === "deleted") {
                         $remote_path_type =
                             $index_diff->get_path_type_in_old_index();
+                        // This getter is nullable for `added` transitions. A
+                        // null here means the diff contradicts `deleted`.
                         if ($remote_path_type === null) {
                             throw new LogicException(
                                 "Deleted remote index path is absent from the prior remote index: {$remote_absolute_path}"
@@ -9913,10 +9912,9 @@ class ImportClient
                     $included_path_prefix
                 );
                 if ($remainder === "") {
-                    // Directory roots have no row in a freshly indexed tree,
-                    // so their old row must survive a scoped delta. Named
-                    // file and link roots do have one; their confirmed absence
-                    // must remove the tracked local path.
+                    // A directory selection applies to entries beneath the
+                    // selected path. A file or link selection also applies to
+                    // its exact entry.
                     $selected = $path_type !== "dir";
                     break;
                 }
