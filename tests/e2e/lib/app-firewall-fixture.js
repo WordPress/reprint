@@ -16,8 +16,8 @@ if (!backendUrlString || !requestLogPath) {
 const backendUrl = new URL(backendUrlString);
 
 // Return two different upstream errors before allowing each streaming endpoint
-// through. Together these cover every status in the importer's general
-// potentially transient list while staying below the three-failure limit.
+// through. This exercises every endpoint while staying below the three-failure
+// limit. HTTP 400 has focused wire coverage.
 const injectedStatusesByEndpoint = new Map([
     ['file_index', [408, 418]],
     ['file_fetch', [425, 429]],

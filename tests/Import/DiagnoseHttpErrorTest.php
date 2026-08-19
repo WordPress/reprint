@@ -214,6 +214,10 @@ class DiagnoseHttpErrorTest extends TestCase
     public function testPotentiallyTransientHttpErrorClassification()
     {
         $this->assertTrue($this->isPotentiallyTransientHttpError(
+            400,
+            '<!doctype html><title>Temporary upstream response</title>',
+        ));
+        $this->assertTrue($this->isPotentiallyTransientHttpError(
             418,
             '<!doctype html><title>Temporary bot response</title>',
         ));
@@ -228,6 +232,10 @@ class DiagnoseHttpErrorTest extends TestCase
         $this->assertTrue($this->isPotentiallyTransientHttpError(
             503,
             '{"error":"Upstream service is temporarily unavailable"}',
+        ));
+        $this->assertFalse($this->isPotentiallyTransientHttpError(
+            400,
+            '{"error":"Invalid request","code":400}',
         ));
         $this->assertFalse($this->isPotentiallyTransientHttpError(
             403,
