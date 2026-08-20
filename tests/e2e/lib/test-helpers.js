@@ -553,7 +553,7 @@ export async function compareDatabases(sourceDb, importDb) {
  * Write a test-hooks.php file for a site.
  */
 export function writeTestHooks(siteName, phpCode) {
-    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'site-export', 'test-hooks.php');
+    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'reprint-server', 'test-hooks.php');
     const code = `<?php\n${phpCode}\n`;
     execSync(`sudo tee ${JSON.stringify(hookPath)} > /dev/null <<'HOOKEOF'\n${code}\nHOOKEOF`);
     execSync(`sudo chown nginx:nginx ${JSON.stringify(hookPath)}`);
@@ -563,7 +563,7 @@ export function writeTestHooks(siteName, phpCode) {
  * Remove test-hooks.php for a site.
  */
 export function removeTestHooks(siteName) {
-    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'site-export', 'test-hooks.php');
+    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'reprint-server', 'test-hooks.php');
     try {
         execSync(`sudo rm -f ${JSON.stringify(hookPath)}`);
     } catch {

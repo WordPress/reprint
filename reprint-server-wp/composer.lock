@@ -8,11 +8,11 @@
     "packages": [
         {
             "name": "wp-php-toolkit/reprint-server",
-            "version": "dev-codex/php56-exporter-plugin",
+            "version": "dev-dotcom-18255-clean-up-the-reprint-server-plugin-code-and-ui",
             "dist": {
                 "type": "path",
                 "url": "../packages/reprint-server",
-                "reference": "4d64a43e8bb6d4c748446c3c73fdf2bcac1cf326"
+                "reference": "89f740ae75716bf1ebe7b0482279e51fdde5df60"
             },
             "require": {
                 "php": ">=7.2"
@@ -34,7 +34,8 @@
                 ],
                 "files": [
                     "src/utils.php",
-                    "src/class-pdo-polyfill.php"
+                    "src/class-pdo-polyfill.php",
+                    "src/compat.php"
                 ]
             },
             "license": [

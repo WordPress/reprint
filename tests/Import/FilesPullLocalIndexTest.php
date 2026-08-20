@@ -1793,7 +1793,7 @@ PHP,
             $connection = @fsockopen('127.0.0.1', $port, $errorNumber, $errorMessage, 0.1);
             if (is_resource($connection)) {
                 fclose($connection);
-                return 'http://127.0.0.1:' . $port . '/export.php?site-export-api';
+                return 'http://127.0.0.1:' . $port . '/export.php?reprint-api';
             }
             usleep(100000);
         }

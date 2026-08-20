@@ -148,6 +148,30 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
     }
 
+    public function testLegacyQueryAliasStillRunsLegacyAndCanonicalConfigurationFilters(): void
+    {
+        $canonical_remote_reprint_api_url = $this->remote_reprint_api_url;
+        $this->remote_reprint_api_url = str_replace(
+            'reprint-api=1',
+            'site-export-api=1',
+            $canonical_remote_reprint_api_url
+        );
+
+        try {
+            $response = $this->requestPushEndpoint(
+                self::SECRET,
+                'POST',
+                'push_create',
+                str_repeat('a', 32)
+            );
+        } finally {
+            $this->remote_reprint_api_url = $canonical_remote_reprint_api_url;
+        }
+
+        $this->assertSame(200, $response['http_code'], $response['body']);
+        $this->assertSame('created', $response['response']['status']);
+    }
+
     public function testAuthorizedFuturePushEndpointUsesPushErrorContract(): void
     {
         $response = $this->requestPushEndpoint(
@@ -233,7 +257,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame(403, $managed_disabled['http_code'], $managed_disabled['body']);
         $this->assertSame('push_disabled', $managed_disabled['response']['reason']);
         $this->assertSame(
-            'Push access is disabled by the hosting provider through SITE_EXPORT_PUSH_ENABLED.',
+            'Push access is disabled by the hosting provider through REPRINT_SERVER_PUSH_ENABLED.',
             $managed_disabled['response']['detail']
         );
     }
@@ -922,7 +946,7 @@ final class PushEndpointsTest extends TestCase {
 
     public function testChunkedUploadDistinguishesEofTrailingDataAndRequestLimitAtTheFragmentBoundary(): void
     {
-        $maximum_request_body_bytes = Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES;
+        $maximum_request_body_bytes = \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES;
         $this->writeDocrootConfiguration([
             'document_root' => $this->docroot,
             'maximum_part_bytes' => $maximum_request_body_bytes,
@@ -1016,7 +1040,7 @@ final class PushEndpointsTest extends TestCase {
 
     public function testLogicExceptionUsesGenericServerFailureResponse(): void
     {
-        $endpoints = new Site_Export_Push_Endpoints([
+        $endpoints = new \WordPress\Reprint\Server\PushEndpoints([
             'reprint_directory' => $this->reprint_directory,
             'docroot' => $this->docroot,
             'excluded_paths' => [],
@@ -1039,7 +1063,7 @@ final class PushEndpointsTest extends TestCase {
 
     public function testFailureResponseDoesNotExposeInternalExceptionContext(): void
     {
-        $endpoints = new Site_Export_Push_Endpoints([
+        $endpoints = new \WordPress\Reprint\Server\PushEndpoints([
             'reprint_directory' => $this->reprint_directory,
             'docroot' => $this->docroot,
             'excluded_paths' => [],
@@ -1050,8 +1074,8 @@ final class PushEndpointsTest extends TestCase {
         ob_start();
         $respond_to_failure->invoke(
             $endpoints,
-            new Site_Export_Push_Exception(
-                Site_Export_Push_Session::ERROR_SAME_DEVICE,
+            new \WordPress\Reprint\Server\PushException(
+                \WordPress\Reprint\Server\PushSession::ERROR_SAME_DEVICE,
                 'The work and document-root filesystems differ.',
                 [
                     'status' => 'context-status',
@@ -1099,7 +1123,7 @@ final class PushEndpointsTest extends TestCase {
 
         foreach ($reprint_directories as $reprint_directory) {
             try {
-                new Site_Export_Push_Endpoints([
+                new \WordPress\Reprint\Server\PushEndpoints([
                     'reprint_directory' => $reprint_directory,
                     'docroot' => $this->docroot,
                     'excluded_paths' => [],

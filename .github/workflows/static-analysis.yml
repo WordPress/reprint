@@ -38,15 +38,15 @@ jobs:
 
       - run: composer install --no-interaction --prefer-dist
 
-      # Checks the typed exporter source at PHP 7.2 and importer at PHP 7.4.
-      # The generated plugin gets its real PHP 5.6 check in exporter-56 below.
+      # Checks the typed server source at PHP 7.2 and client at PHP 7.4.
+      # The generated plugin gets its real PHP 5.6 check in server-56 below.
       - run: composer lint:php:compat
 
   syntax-72:
     # PHPCompatibility 9.3.5 misses arrow functions and numeric separators, so
-    # a real PHP 7.2 parser is the authoritative check that the exporter (which
+    # a real PHP 7.2 parser is the authoritative check that the server (which
     # runs on old shared hosting) contains no 7.3/7.4-only syntax.
-    name: PHP 7.2 syntax (exporter)
+    name: PHP 7.2 syntax (Reprint Server)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -58,18 +58,18 @@ jobs:
           php-version: "7.2"
           coverage: none
 
-      - name: Lint exporter sources for PHP 7.2 parse errors
+      - name: Lint Reprint Server sources for PHP 7.2 parse errors
         run: |
           find packages/reprint-server/src reprint-server-wp \
             -name '*.php' -not -path 'reprint-server-wp/wordpress/*' \
             -print0 | xargs -0 -n1 php -l
 
-  exporter-56:
+  server-56:
     # PHPCompatibility 9.3.5 misses arrow functions and numeric separators, so
     # a real PHP 5.6 parser remains the authoritative syntax check. Parse the
     # same plugin tree shipped in the release ZIP so the check covers the
     # WordPress wrapper and the physical Composer vendor copy too.
-    name: PHP 5.6 exporter artifact
+    name: PHP 5.6 Reprint Server artifact
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
@@ -86,14 +86,14 @@ jobs:
           coverage: none
           tools: composer:2.9.7
 
-      - name: Install exporter artifact build dependencies
+      - name: Install Reprint Server artifact build dependencies
         run: composer install --no-dev --no-interaction --prefer-dist --working-dir=tools/php56-build
 
       - name: Test PHP 5.6 downgrade rules
         run: composer test --working-dir=tools/php56-build
 
       - name: Build reprint-exporter-wp.zip
-        run: ./bin/build-exporter-plugin.sh
+        run: ./bin/build-server-plugin.sh
 
       - name: Confirm the typed source was not rewritten
         run: git diff --exit-code -- packages/reprint-server reprint-server-wp
@@ -115,4 +115,4 @@ jobs:
           while IFS= read -r -d '' php_file; do
             php -l "$php_file"
           done < <(find "$artifact_dir" -type f -name '*.php' -print0)
-          php tests/php56-exporter-smoke.php "$artifact_dir"
+          php tests/php56-server-smoke.php "$artifact_dir"

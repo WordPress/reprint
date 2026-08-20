@@ -70,7 +70,7 @@ final class ExportLibraryLoadTest extends TestCase {
 
     public function testPluginRuntimeLoaderSkipsAutoloadAlreadyLoadedThroughSymlinkedPluginDirectory(): void
     {
-        $tmp_dir = sys_get_temp_dir() . '/export-runtime-loader-test-' . uniqid('', true);
+        $tmp_dir = sys_get_temp_dir() . '/reprint-server-runtime-loader-test-' . uniqid('', true);
         $physical_plugin_directory = $tmp_dir . '/physical-plugin';
         $linked_plugin_directory = $tmp_dir . '/linked-plugin';
         $autoload_path = $physical_plugin_directory . '/vendor/autoload.php';
@@ -99,9 +99,9 @@ final class ExportLibraryLoadTest extends TestCase {
             $php_code = '<?php' . "\n"
                 . 'require_once base64_decode(\'' . $linked_autoload_path_encoded . '\', true);' . "\n"
                 . 'define(\'ABSPATH\', __DIR__ . \'/\');' . "\n"
-                . 'define(\'SITE_EXPORT_PLUGIN_DIR\', base64_decode(\'' . $linked_plugin_directory_encoded . '\', true));' . "\n"
+                . 'define(\'WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR\', base64_decode(\'' . $linked_plugin_directory_encoded . '\', true));' . "\n"
                 . 'require base64_decode(\'' . $lib_path_encoded . '\', true);' . "\n"
-                . 'echo _site_export_load_exporter_runtime();' . "\n";
+                . 'echo \\WordPress\\Reprint\\Server\\Plugin\\load_server_runtime();' . "\n";
 
             $result = $this->runPhpCode($php_code);
 

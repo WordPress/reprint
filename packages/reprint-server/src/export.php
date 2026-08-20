@@ -6,6 +6,7 @@
 use WordPress\Reprint\Server\FileIndexProcessor;
 use WordPress\Reprint\Server\FileTreeProducer;
 use WordPress\Reprint\Server\GzipOutputStream;
+use WordPress\Reprint\Server\HTTPServer;
 use WordPress\Reprint\Server\MySQLDumpProducer;
 use WordPress\Reprint\Server\ResourceBudget;
 use WordPress\Reprint\Server\SqliteDriverPDO;
@@ -400,7 +401,7 @@ function create_wpdb_pdo_adapter()
 if (!function_exists('WordPress\\Reprint\\Server\\build_pdo_dsn')) {
     require_once __DIR__ . "/utils.php";
 }
-if (!class_exists('Site_Export_HTTP_Server', false)) {
+if (!class_exists(HTTPServer::class, false)) {
     require_once __DIR__ . "/class-http-server.php";
 }
 
@@ -558,11 +559,12 @@ register_shutdown_function(function () {
 });
 
 // ============================================================================
-// E2E Test Hook System (only active when SITE_EXPORT_TEST_MODE env var is set)
+// E2E Test Hook System (only active when REPRINT_SERVER_TEST_MODE is set;
+// SITE_EXPORT_TEST_MODE remains a compatibility alias).
 // We don't want anyone to interfere with the export process, which is why those
 // hooks are not registered in production.
 // ============================================================================
-if (getenv('SITE_EXPORT_TEST_MODE')) {
+if ((getenv('REPRINT_SERVER_TEST_MODE') || getenv('SITE_EXPORT_TEST_MODE'))) {
     /**
      * Load test hooks from a well-known path relative to the site root.
      * The hook file can define callback functions that are called at key
@@ -586,6 +588,10 @@ if (getenv('SITE_EXPORT_TEST_MODE')) {
         if (isset($config['directory'])) {
             $dirs = is_array($config['directory']) ? $config['directory'] : [$config['directory']];
             foreach ($dirs as $d) {
+                $candidates[] = wp_join_unix_paths(
+                    $d,
+                    'wp-content/plugins/reprint-server/test-hooks.php'
+                );
                 $candidates[] = wp_join_unix_paths(
                     $d,
                     'wp-content/plugins/site-export/test-hooks.php'
@@ -861,7 +867,7 @@ function endpoint_sql_chunk(
     ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(true);
 
     // E2E test hook: after gzip stream initialization
-    if (getenv('SITE_EXPORT_TEST_MODE')) {
+    if ((getenv('REPRINT_SERVER_TEST_MODE') || getenv('SITE_EXPORT_TEST_MODE'))) {
         _e2e_load_test_hooks_if_needed($config);
         $hook_args = [$gz, $boundary];
         _e2e_call_hook('test_hook_after_gzip_init', $hook_args);
@@ -1027,7 +1033,7 @@ function endpoint_sql_chunk(
             }
 
             // E2E test hook: before SQL batch is emitted
-            if (getenv('SITE_EXPORT_TEST_MODE')) {
+            if ((getenv('REPRINT_SERVER_TEST_MODE') || getenv('SITE_EXPORT_TEST_MODE'))) {
                 $hook_args = [&$sql, $cursor];
                 _e2e_call_hook('test_hook_before_sql_batch', $hook_args);
             }
@@ -1110,7 +1116,7 @@ function endpoint_sql_chunk(
         : ($reader->is_finished() && $deferred_fragment === null ? "complete" : "partial");
 
     // E2E test hook: before completion chunk
-    if (getenv('SITE_EXPORT_TEST_MODE')) {
+    if ((getenv('REPRINT_SERVER_TEST_MODE') || getenv('SITE_EXPORT_TEST_MODE'))) {
         $hook_args = [$status, $gz, $boundary];
         _e2e_call_hook('test_hook_before_completion', $hook_args);
     }
@@ -1164,7 +1170,7 @@ function endpoint_db_index(
 
     $creds = resolve_db_credentials();
 
-    if (getenv('SITE_EXPORT_TEST_MODE')) {
+    if ((getenv('REPRINT_SERVER_TEST_MODE') || getenv('SITE_EXPORT_TEST_MODE'))) {
         _e2e_load_test_hooks_if_needed($config);
     }
 
@@ -1286,7 +1292,7 @@ function endpoint_db_index(
 
     $completion_failure = null;
     try {
-        if (getenv('SITE_EXPORT_TEST_MODE')) {
+        if ((getenv('REPRINT_SERVER_TEST_MODE') || getenv('SITE_EXPORT_TEST_MODE'))) {
             $hook_status = $aborted ? "partial" : $status;
             $hook_args = [$hook_status, $gz, $boundary];
             _e2e_call_hook('test_hook_before_completion', $hook_args);
@@ -2548,7 +2554,7 @@ function stream_file_producer(
     ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(false, $gzip);
 
     // E2E test hook: after gzip stream initialization (file producer)
-    if (getenv('SITE_EXPORT_TEST_MODE')) {
+    if ((getenv('REPRINT_SERVER_TEST_MODE') || getenv('SITE_EXPORT_TEST_MODE'))) {
         _e2e_load_test_hooks_if_needed($config);
         $hook_args = [$gz, $boundary];
         _e2e_call_hook('test_hook_after_gzip_init', $hook_args);
@@ -2724,7 +2730,7 @@ function stream_file_producer(
                 $gz->sync();
             } else {
                 // E2E test hook: before file chunk is emitted
-                if (getenv('SITE_EXPORT_TEST_MODE')) {
+                if ((getenv('REPRINT_SERVER_TEST_MODE') || getenv('SITE_EXPORT_TEST_MODE'))) {
                     $hook_data = $chunk["data"];
                     $hook_args = [$chunk["path"], $chunk["offset"], &$hook_data];
                     _e2e_call_hook('test_hook_before_file_chunk', $hook_args);
@@ -2809,7 +2815,7 @@ function stream_file_producer(
         $status = $is_complete ? "complete" : "partial";
 
         // E2E test hook: before completion chunk (file producer)
-        if (getenv('SITE_EXPORT_TEST_MODE')) {
+        if ((getenv('REPRINT_SERVER_TEST_MODE') || getenv('SITE_EXPORT_TEST_MODE'))) {
             $hook_args = [$status, $gz, $boundary];
             _e2e_call_hook('test_hook_before_completion', $hook_args);
         }
@@ -2943,7 +2949,7 @@ function endpoint_file_index(
         );
     }
 
-    if (getenv('SITE_EXPORT_TEST_MODE')) {
+    if ((getenv('REPRINT_SERVER_TEST_MODE') || getenv('SITE_EXPORT_TEST_MODE'))) {
         _e2e_load_test_hooks_if_needed($config);
     }
 
@@ -3124,7 +3130,7 @@ function emit_file_index_batch(
     array &$batch_items,
     FileIndexProcessor $file_index
 ): void {
-    if (getenv('SITE_EXPORT_TEST_MODE')) {
+    if ((getenv('REPRINT_SERVER_TEST_MODE') || getenv('SITE_EXPORT_TEST_MODE'))) {
         $directory_stack = [];
         foreach ($file_index->get_cursor()["stack"] as $encoded_frame) {
             $directory_stack[] = [
@@ -3613,6 +3619,6 @@ function parse_http_config(): array
         $body = '';
     }
 
-    $server = new Site_Export_HTTP_Server();
+    $server = new HTTPServer();
     return $server->parse_http_config($_GET, $_POST, $_SERVER, $body);
 }

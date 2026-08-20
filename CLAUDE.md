@@ -6,7 +6,7 @@ AGENTS.md holds the working rules distilled from code review in this repo — wh
 
 ## Project Overview
 
-This is a WordPress site export/import system that enables resumable, cursor-based synchronization of both database content and filesystem data over HTTP. The system is designed to work on resource-constrained shared hosting environments by carefully managing memory and execution time.
+This is a WordPress synchronization system built from the Reprint client and Reprint Server. It enables resumable, cursor-based transfer of both database content and filesystem data over HTTP, and is designed for resource-constrained shared hosting environments through careful memory and execution-time management.
 
 ## Core Architecture
 
@@ -192,8 +192,9 @@ Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl` for that
   - src/lib/mysql-query-stream/: MySQL query stream parser for direct streaming
 - reprint-server-wp/: Self-contained WordPress plugin distribution directory
   - index.php: WordPress plugin entry point — intercepts `?reprint-api` requests (and the legacy `?site-export-api` alias) during plugin load, requires lib.php
-  - lib.php: Standalone library — constants, auth functions, and request handler. Can be required without index.php by projects that want to embed the export engine with their own URL routing and authentication (pass a custom `authenticate` callable in the `$options` array to `_site_export_handle_api_request()`)
-  - wordpress/: WordPress admin UI (site-export.php)
+  - lib.php: Standalone library — namespaced constants, authentication functions, and request handler. Can be required without index.php by projects that want to embed the server with their own URL routing and authentication (pass a custom `authenticate` callable in the `$options` array to `WordPress\Reprint\Server\Plugin\handle_api_request()`)
+  - compat.php: Legacy `SITE_EXPORT_*` constants and `_site_export_*()` wrappers
+  - wordpress/: WordPress admin UI (`reprint-server.php`, with `site-export.php` retained as a compatibility include)
 - docs/: Architecture documentation (read these for deep understanding) and project logos (docs/assets/)
 - tests/: PHPUnit test suite organized by component
 - tests/e2e/: End-to-end Docker-based integration tests

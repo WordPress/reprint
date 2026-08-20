@@ -132,8 +132,8 @@ final class PushCommitTest extends TestCase {
                 'body' => "later\0",
             ]]);
             $this->fail('An offset gap was accepted.');
-        } catch (Site_Export_Push_Exception $exception) {
-            $this->assertSame(Site_Export_Push_Session::ERROR_OFFSET_GAP, $exception->get_error_code());
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
+            $this->assertSame(\WordPress\Reprint\Server\PushSession::ERROR_OFFSET_GAP, $exception->get_error_code());
             $this->assertStringContainsString('offset 99', $exception->getMessage());
             $this->assertStringContainsString('6 bytes', $exception->getMessage());
         }
@@ -416,7 +416,7 @@ final class PushCommitTest extends TestCase {
         try {
             $this->commit_all($push_session);
             $this->fail('An explicit empty directory replaced a non-empty docroot directory.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('unexpected_docroot_mutation', $exception->get_error_code());
             $this->assertSame(['absent'], $exception->get_context()['expected_docroot_types']);
         }
@@ -425,7 +425,7 @@ final class PushCommitTest extends TestCase {
         try {
             $push_session->commit(1);
             $this->fail('A non-recoverable commit failure allowed a forced retry.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('unexpected_docroot_mutation', $exception->get_error_code());
         }
     }
@@ -449,7 +449,7 @@ final class PushCommitTest extends TestCase {
         try {
             $this->commit_all($push_session);
             $this->fail('A symlink ancestor was traversed.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('unexpected_docroot_mutation', $exception->get_error_code());
             $this->assertSame('parent/file.txt', base64_decode($exception->get_context()['path_b64'], true));
             $this->assertSame('parent', base64_decode($exception->get_context()['conflict_path_b64'], true));
@@ -562,7 +562,7 @@ final class PushCommitTest extends TestCase {
         try {
             $this->reopen($push_session)->commit(1);
             $this->fail('Interrupted installing_files followed a symlink ancestor.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('unexpected_docroot_mutation', $exception->get_error_code());
             $this->assertSame('parent/installed.txt', base64_decode($exception->get_context()['path_b64'], true));
             $this->assertSame('parent', base64_decode($exception->get_context()['conflict_path_b64'], true));
@@ -583,7 +583,7 @@ final class PushCommitTest extends TestCase {
         try {
             $this->reopen($push_session)->commit(1);
             $this->fail('Missing work and docroot entries were treated as installed.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('unexpected_docroot_mutation', $exception->get_error_code());
             $this->assertSame('absent', $exception->get_context()['observed_docroot_identity']['type']);
         }
@@ -603,7 +603,7 @@ final class PushCommitTest extends TestCase {
         try {
             $this->reopen($push_session)->commit(1);
             $this->fail('An incompatible docroot directory completed a file installing_files.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('unexpected_docroot_mutation', $exception->get_error_code());
             $this->assertSame('directory', $exception->get_context()['observed_docroot_identity']['type']);
         }
@@ -690,7 +690,7 @@ final class PushCommitTest extends TestCase {
         try {
             $this->commit_all($push_session);
             $this->fail('A work file replaced an incompatible docroot directory.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('unexpected_docroot_mutation', $exception->get_error_code());
             $this->assertSame(['absent', 'file', 'symlink'], $exception->get_context()['expected_docroot_types']);
         }
@@ -700,7 +700,7 @@ final class PushCommitTest extends TestCase {
         try {
             $push_session->commit(1);
             $this->fail('A non-recoverable commit failure allowed a forced retry.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('unexpected_docroot_mutation', $exception->get_error_code());
         }
     }
@@ -749,7 +749,7 @@ final class PushCommitTest extends TestCase {
         try {
             $push_session->commit(1000);
             $this->fail('Commit reported success while another request held the commit-state lock.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
         } finally {
             $this->assertSame(0, proc_close($process));
@@ -815,7 +815,7 @@ final class PushCommitTest extends TestCase {
         try {
             $push_session->commit(1000);
             $this->fail('Commit release was not blocked by valid commit-state lock contention.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
         } finally {
             $this->assertSame(0, proc_close($completion_process));
@@ -845,7 +845,7 @@ final class PushCommitTest extends TestCase {
         try {
             $push_session->remove_push_directory();
             $this->fail('Push removal reported success while the commit-state lock was held.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
         } finally {
             $this->assertSame(0, proc_close($remove_process));
@@ -859,8 +859,8 @@ final class PushCommitTest extends TestCase {
         $this->assertDirectoryDoesNotExist($tombstone);
     }
 
-    private function push_session(string $id): Site_Export_Push_Session {
-        return Site_Export_Push_Session::create(
+    private function push_session(string $id): \WordPress\Reprint\Server\PushSession {
+        return \WordPress\Reprint\Server\PushSession::create(
             $this->reprint_directory,
             $this->docroot,
             ['wp-content/plugins/reprint'],
@@ -868,8 +868,8 @@ final class PushCommitTest extends TestCase {
         );
     }
 
-    private function reopen(Site_Export_Push_Session $push_session): Site_Export_Push_Session {
-        return Site_Export_Push_Session::open(
+    private function reopen(\WordPress\Reprint\Server\PushSession $push_session): \WordPress\Reprint\Server\PushSession {
+        return \WordPress\Reprint\Server\PushSession::open(
             $this->reprint_directory,
             $this->docroot,
             $push_session->get_push_session_id(),
@@ -877,7 +877,7 @@ final class PushCommitTest extends TestCase {
         );
     }
 
-    private function push_file(Site_Export_Push_Session $push_session, string $path, string $contents): void {
+    private function push_file(\WordPress\Reprint\Server\PushSession $push_session, string $path, string $contents): void {
         $this->push_parts($push_session, [[
             'headers' => [
                 'X-Chunk-Type' => 'file',
@@ -890,7 +890,7 @@ final class PushCommitTest extends TestCase {
     }
 
     /** @return array<string,mixed> */
-    private function commit_state(Site_Export_Push_Session $push_session): array {
+    private function commit_state(\WordPress\Reprint\Server\PushSession $push_session): array {
         $commit_state = json_decode(
             (string) file_get_contents($push_session->get_push_directory() . '/commit.json'),
             true,
@@ -901,7 +901,7 @@ final class PushCommitTest extends TestCase {
         return $commit_state;
     }
 
-    private function set_current_work_files_descendant(Site_Export_Push_Session $push_session, string $path, string $type): void {
+    private function set_current_work_files_descendant(\WordPress\Reprint\Server\PushSession $push_session, string $path, string $type): void {
         $commit_state = $this->commit_state($push_session);
         $commit_state['current_work_files_descendant'] = ['path_b64' => base64_encode($path), 'expected_type' => $type];
         file_put_contents(
@@ -911,7 +911,7 @@ final class PushCommitTest extends TestCase {
     }
 
     /** @param array<int,array{headers:array<string,string>,body:string}> $parts */
-    private function push_parts(Site_Export_Push_Session $push_session, array $parts): void {
+    private function push_parts(\WordPress\Reprint\Server\PushSession $push_session, array $parts): void {
         $boundary = 'test-boundary';
         $body = '';
         foreach ($parts as $part) {
@@ -926,7 +926,7 @@ final class PushCommitTest extends TestCase {
         $input = fopen('php://temp', 'w+b');
         fwrite($input, $body);
         rewind($input);
-        $push_session->accept_upload($input, new Site_Export_Multipart_Processor($boundary));
+        $push_session->accept_upload($input, new \WordPress\Reprint\Server\MultipartProcessor($boundary));
         try {
             while ($push_session->next_change()) {
             }
@@ -936,7 +936,7 @@ final class PushCommitTest extends TestCase {
         }
     }
 
-    private function commit_all(Site_Export_Push_Session $push_session): void {
+    private function commit_all(\WordPress\Reprint\Server\PushSession $push_session): void {
         if (!$push_session->get_status()['work_deletes_complete']) {
             $this->complete_work_deletes($push_session);
         }
@@ -945,7 +945,7 @@ final class PushCommitTest extends TestCase {
         } while ($result['send_next_request']);
     }
 
-    private function complete_work_deletes(Site_Export_Push_Session $push_session): void {
+    private function complete_work_deletes(\WordPress\Reprint\Server\PushSession $push_session): void {
         $this->push_parts($push_session, [[
             'headers' => [
                 'X-Chunk-Type' => 'delete-list',

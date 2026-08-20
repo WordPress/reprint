@@ -130,7 +130,7 @@ PHP, var_export($requestsLog, true)));
             $socket = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.1);
             if ($socket) {
                 fclose($socket);
-                return "http://127.0.0.1:{$port}/export.php?site-export-api";
+                return "http://127.0.0.1:{$port}/export.php?reprint-api";
             }
             usleep(100000);
         }
@@ -200,13 +200,13 @@ PHP, var_export($requestsLog, true)));
         // Both forms fail later (unreachable host) but must not be rejected as
         // an unknown option.
         $equals = $this->runCli(array_merge(
-            array('files-pull', 'http://fake.invalid/?site-export-api', '--include=:wp-content:', '--include=:wp-uploads:/2025'),
+            array('files-pull', 'http://fake.invalid/?reprint-api', '--include=:wp-content:', '--include=:wp-uploads:/2025'),
             $tail
         ));
         $this->assertStringNotContainsString('Unknown option', $equals);
 
         $space = $this->runCli(array_merge(
-            array('files-pull', 'http://fake.invalid/?site-export-api', '--include', ':wp-content:', '--include', ':wp-uploads:/2025'),
+            array('files-pull', 'http://fake.invalid/?reprint-api', '--include', ':wp-content:', '--include', ':wp-uploads:/2025'),
             $tail
         ));
         $this->assertStringNotContainsString('Unknown option', $space);
@@ -221,13 +221,13 @@ PHP, var_export($requestsLog, true)));
         );
 
         $equals = $this->runCli(array_merge(
-            array('files-pull', 'http://fake.invalid/?site-export-api', '--only=:wp-content:', '--only=:wp-uploads:/2025'),
+            array('files-pull', 'http://fake.invalid/?reprint-api', '--only=:wp-content:', '--only=:wp-uploads:/2025'),
             $tail
         ));
         $this->assertStringNotContainsString('Unknown option', $equals);
 
         $space = $this->runCli(array_merge(
-            array('files-pull', 'http://fake.invalid/?site-export-api', '--only', ':wp-content:', '--only', ':wp-uploads:/2025'),
+            array('files-pull', 'http://fake.invalid/?reprint-api', '--only', ':wp-content:', '--only', ':wp-uploads:/2025'),
             $tail
         ));
         $this->assertStringNotContainsString('Unknown option', $space);
@@ -239,11 +239,11 @@ PHP, var_export($requestsLog, true)));
         // succeed because :wp-content: is resolvable. Preserving both values
         // forces resolution of :abspath:, which this preflight intentionally
         // omits.
-        $this->writePreflightState('http://fake.invalid/?site-export-api');
+        $this->writePreflightState('http://fake.invalid/?reprint-api');
 
         $output = $this->runCli(array(
             'files-pull',
-            'http://fake.invalid/?site-export-api',
+            'http://fake.invalid/?reprint-api',
             '--include',
             ':abspath:/wp-admin',
             '--include',
@@ -275,7 +275,7 @@ PHP, var_export($requestsLog, true)));
     {
         $output = $this->runCli(array(
             'pull',
-            'http://fake.invalid/?site-export-api',
+            'http://fake.invalid/?reprint-api',
             '--runtime=none',
             '--state-dir=' . $this->tempDir . '/state',
             '--fs-root=' . $this->tempDir . '/fs',
@@ -302,7 +302,7 @@ PHP, var_export($requestsLog, true)));
     {
         $output = $this->runCli(array(
             'pull-files',
-            'http://fake.invalid/?site-export-api',
+            'http://fake.invalid/?reprint-api',
             '--state-dir=' . $this->tempDir . '/state',
             '--fs-root=' . $this->tempDir . '/fs',
         ));
@@ -396,11 +396,11 @@ PHP, var_export($requestsLog, true)));
     {
         // --abort runs after --include resolution, avoiding a network request while
         // still proving the CLI did not split the SOURCE at the comma.
-        $this->writePreflightState('http://fake.invalid/?site-export-api');
+        $this->writePreflightState('http://fake.invalid/?reprint-api');
 
         $output = $this->runCli(array(
             'files-pull',
-            'http://fake.invalid/?site-export-api',
+            'http://fake.invalid/?reprint-api',
             '--include',
             ':wp-content:/plugins,custom',
             '--abort',

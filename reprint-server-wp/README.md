@@ -17,9 +17,9 @@ Many shared hosts (SiteGround, GoDaddy, etc.) block direct PHP execution inside 
 
 The plugin file (`index.php`) is `include`'d by WordPress during its plugin loading loop — this happens *before* the `plugins_loaded` hook fires, making it the earliest interception point available to a regular plugin.
 
-When a request arrives at `https://example.com/?reprint-api` (or the legacy `?site-export-api` alias, kept for backwards compatibility), the plugin:
+When a request arrives at `https://example.com/?reprint-api`, the plugin:
 
-1. Detects `$_GET['reprint-api']` or `$_GET['site-export-api']` during plugin file load
+1. Detects `$_GET['reprint-api']` during plugin file load
 2. Reverts WordPress error display settings (`display_errors`, `html_errors`) that `wp_debug_mode()` may have turned on
 3. Clears any output buffering WordPress started
 4. Sets up error handlers, HMAC auth, and runs the export endpoint
@@ -30,13 +30,13 @@ This gives us a clean execution environment while using WordPress's front contro
 ### Platform configuration
 
 The bundled WordPress entry point passes the result of the
-`site_export_api_options` filter to the export handler. A platform must
+`reprint_server_api_options` filter to the request handler. A platform must
 register this filter before the regular Reprint Server plugin file loads;
 registering it on `plugins_loaded` is too late. A must-use plugin is the usual
 place to register it:
 
 ```php
-add_filter('site_export_api_options', static function (array $options): array {
+add_filter('reprint_server_api_options', static function (array $options): array {
     $options['docroot'] = '/srv/www/public';
     $options['reprint_directory'] = '/srv/www/.reprint';
     return $options;
@@ -72,11 +72,12 @@ that token revokes the grant and requires fresh consent.
 Hosts can manage push access before active plugins load with an immutable boolean:
 
 ```php
-define('SITE_EXPORT_PUSH_ENABLED', true);
+define('WordPress\\Reprint\\Server\\Plugin\\PUSH_ENABLED', true);
 ```
 
-The `SITE_EXPORT_PUSH_ENABLED` environment variable accepts the same boolean
-policy. The constant wins when both are present. `true` enables push without a
+The `REPRINT_SERVER_PUSH_ENABLED` environment variable and global constant
+accept the same boolean policy. The namespaced constant wins when more than one
+surface is present. `true` enables push without a
 local grant; `false` hard-disables push even when a local grant exists. The sole
 recovery exception lets an authenticated caller finish a commit which already
 has a durable checkpoint, so revocation cannot strand a partially changed
@@ -90,6 +91,9 @@ gate.
 The export engine can be embedded in another PHP project without the WordPress plugin wrapper. Require `lib.php` instead of `index.php` — it defines constants and functions but does not handle any HTTP requests or check any URLs.
 
 ```php
+use function WordPress\Reprint\Server\Plugin\error;
+use function WordPress\Reprint\Server\Plugin\handle_api_request;
+
 // Your project must define ABSPATH before requiring lib.php.
 define('ABSPATH', '/path/to/wordpress/');
 
@@ -99,28 +103,37 @@ require_once '/path/to/reprint-server-wp/lib.php';
 if ($myRouter->matches('/export')) {
     // Use default HMAC authentication (reads secret.php when present,
     // otherwise falls back to the site option):
-    _site_export_handle_api_request();
+    handle_api_request();
 
     // Or supply your own authentication:
-    _site_export_handle_api_request([
+    handle_api_request([
         'authenticate' => function () {
             if (!my_auth_check()) {
-                _site_export_error(403, 'Unauthorized');
+                error(403, 'Unauthorized');
             }
         },
     ]);
 }
 ```
 
-`_site_export_handle_api_request()` accepts the same options documented under
+`WordPress\Reprint\Server\Plugin\handle_api_request()` accepts the same options documented under
 Platform configuration. Direct `lib.php` embedders pass them as the function's
 array argument and do not use the WordPress filter.
 
-`lib.php` defines these constants (using WordPress's `plugin_dir_path`):
+`lib.php` defines these constants in `WordPress\Reprint\Server\Plugin`
+(using WordPress's `plugin_dir_path`):
 
-- `SITE_EXPORT_VERSION` — plugin version string
-- `SITE_EXPORT_PLUGIN_DIR` — absolute path to the plugin directory
-- `SITE_EXPORT_SECRET_FILE` — optional path to a PHP file that overrides the stored HMAC shared secret
-- `SITE_EXPORT_SECRET_OPTION` — WordPress site option name used for the stored HMAC shared secret
-- `SITE_EXPORT_PUSH_AUTHORIZATION_OPTION` — WordPress site option containing the token fingerprint granted personal push access
-- `SITE_EXPORT_TIMESTAMP_TOLERANCE` — max request age in seconds (default 300)
+- `VERSION` — plugin version string
+- `PLUGIN_DIR` — absolute path to the plugin directory
+- `SECRET_FILE` — optional path to a PHP file that overrides the stored HMAC shared secret
+- `SECRET_OPTION` — WordPress site option name used for the stored HMAC shared secret
+- `PUSH_AUTHORIZATION_OPTION` — WordPress site option containing the token fingerprint granted personal push access
+- `TIMESTAMP_TOLERANCE` — max request age in seconds (default 300)
+
+For compatibility, the plugin still accepts `?site-export-api`, applies the
+legacy `site_export_api_options` filter before the canonical filter, reads and
+migrates the old `site_export_*` options, recognizes `SITE_EXPORT_PUSH_ENABLED`,
+and exposes the released `_site_export_*()` functions and `SITE_EXPORT_*`
+constants. New integrations should not use those names.
+All handling of these names is installed by `compat.php`; canonical request,
+library, and settings code uses only Reprint Server names and hooks.

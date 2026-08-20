@@ -2,7 +2,7 @@
 
 // This fixture supplies the WordPress functions and values the production
 // plugin entry point reads. API routing, authentication, and dispatch all run
-// through index.php and its site_export_api_options filter.
+// through index.php and its reprint_server_api_options filter.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound
 
@@ -62,7 +62,7 @@ if (is_string($reprint_push_test_docroot_configuration['wp_plugin_dir'] ?? null)
 
 $reprint_push_test_managed_state = trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_MANAGED_PUSH_CONFIG') ) );
 if ($reprint_push_test_managed_state !== '') {
-    define('SITE_EXPORT_PUSH_ENABLED', $reprint_push_test_managed_state === 'true');
+    define('REPRINT_SERVER_PUSH_ENABLED', $reprint_push_test_managed_state === 'true');
 }
 
 function plugin_dir_path(string $file): string {
@@ -73,17 +73,24 @@ function plugin_basename(string $file): string {
     global $reprint_push_test_docroot_configuration;
 
     $registered_plugin_basename = $reprint_push_test_docroot_configuration['plugin_basename'] ?? null;
-    if (defined('SITE_EXPORT_PLUGIN_DIR') && $file === SITE_EXPORT_PLUGIN_DIR . 'index.php' && is_string($registered_plugin_basename)) {
+    if (
+        defined('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR')
+        && $file === constant('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR') . 'index.php'
+        && is_string($registered_plugin_basename)
+    ) {
         return $registered_plugin_basename;
     }
     return basename($file);
 }
 
 function get_option(string $name, $fallback = false) {
-    if ($name === 'site_export_secret') {
+    if ($name === 'reprint_server_secret' || $name === 'site_export_secret') {
         return trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_SECRET_CONFIG') ) );
     }
-    if ($name === 'site_export_push_authorized_token_fingerprint') {
+    if (
+        $name === 'reprint_server_push_authorized_token_fingerprint'
+        || $name === 'site_export_push_authorized_token_fingerprint'
+    ) {
         return trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_AUTHORIZATION_CONFIG') ) );
     }
     return $fallback;
@@ -121,13 +128,61 @@ if ($reprint_push_test_directory !== '') {
     $reprint_push_test_options['reprint_directory'] = $reprint_push_test_directory;
 }
 
-function apply_filters(string $hook_name, $value) {
-    global $reprint_push_test_options;
-
-    if ($hook_name === 'site_export_api_options') {
-        return $reprint_push_test_options;
+$reprint_push_test_filters = [];
+function add_filter(string $hook_name, $callback, int $priority = 10, int $accepted_args = 1): void {
+    global $reprint_push_test_filters;
+    $reprint_push_test_filters[$hook_name][] = [
+        'callback' => $callback,
+        'priority' => $priority,
+        'accepted_args' => $accepted_args,
+    ];
+}
+function apply_filters(string $hook_name, $value, ...$extra_args) {
+    global $reprint_push_test_filters;
+    $filters = $reprint_push_test_filters[$hook_name] ?? [];
+    usort($filters, static function (array $left, array $right): int {
+        return $left['priority'] <=> $right['priority'];
+    });
+    foreach ($filters as $filter) {
+        $args = array_slice(array_merge([$value], $extra_args), 0, $filter['accepted_args']);
+        // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.DynamicHooknameFound -- Generic WordPress filter test stub.
+        $value = call_user_func_array($filter['callback'], $args);
     }
     return $value;
 }
+function add_action(string $hook_name, $callback, int $priority = 10, int $accepted_args = 1): void {
+    add_filter($hook_name, $callback, $priority, $accepted_args);
+}
+function do_action(string $hook_name, ...$args): void {
+    apply_filters($hook_name, null, ...$args);
+}
+function update_option(string $name, $value, $autoload = null): bool {
+    return true;
+}
+function admin_url(string $path = ''): string {
+    return $path;
+}
+function wp_safe_redirect(string $location): bool {
+    return true;
+}
+function get_transient(string $name) {
+    return false;
+}
+function set_transient(string $name, $value, int $expiration = 0): bool {
+    return true;
+}
+function delete_transient(string $name): bool {
+    return true;
+}
+
+add_filter('site_export_api_options', static function (): array {
+    return ['legacy_filter_ran' => true];
+});
+add_filter('reprint_server_api_options', static function ($value) use ($reprint_push_test_options) {
+    if (!is_array($value) || ( $value['legacy_filter_ran'] ?? false ) !== true) {
+        return null;
+    }
+    return array_merge($value, $reprint_push_test_options);
+});
 
 require_once dirname(__DIR__, 2) . '/reprint-server-wp/index.php';

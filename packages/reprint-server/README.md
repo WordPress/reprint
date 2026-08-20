@@ -11,15 +11,21 @@ installed side by side. Consumers should require
 ## Loading it
 
 The package autoloads normally. Composer's classmap covers every class in
-`src/`, and the `files` entry loads `src/utils.php` and the PDO polyfill.
+`src/`, and the `files` entry loads `src/utils.php`, the PDO polyfill, and the
+legacy-class compatibility loader.
 Install it and the classes resolve — there is nothing to call.
 
 `src/export.php` never autoloads, and that is deliberate. It declares functions
 rather than classes, so the classmap scan finds nothing in it to register. Keep
 it that way: requiring the file starts an output buffer and installs error,
 exception and shutdown handlers, all of which belong at dispatch time.
-`Site_Export_HTTP_Server::serve()` requires it at the right moment. Adding a
+`WordPress\Reprint\Server\HTTPServer::serve()` requires it at the right moment. Adding a
 class to `export.php` would make it autoloadable and break that.
+
+Server classes use the `WordPress\Reprint\Server` namespace. The released
+`Site_Export_*` server names remain autoloadable aliases. The global
+`Site_Export_HMAC_Client` name and file remain unchanged because the Reprint
+client package consumes that class directly.
 
 One thing not to change without reading it first: the `PDO`, `PDOStatement` and
 `PDOException` polyfills in `src/class-pdo-polyfill.php` are declared inside an

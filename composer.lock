@@ -358,7 +358,7 @@
         },
         {
             "name": "wp-php-toolkit/reprint-client",
-            "version": "dev-self-contained-reprint-server",
+            "version": "dev-dotcom-18255-clean-up-the-reprint-server-plugin-code-and-ui",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-client",
@@ -389,11 +389,11 @@
         },
         {
             "name": "wp-php-toolkit/reprint-server",
-            "version": "dev-self-contained-reprint-server",
+            "version": "dev-dotcom-18255-clean-up-the-reprint-server-plugin-code-and-ui",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-server",
-                "reference": "df14413cf7be55745e451474b4b562836cb721e1"
+                "reference": "48dd14aed57d4f4a0882e263b87ff6a33e6b397e"
             },
             "require": {
                 "php": ">=7.2"
@@ -415,7 +415,8 @@
                 ],
                 "files": [
                     "src/utils.php",
-                    "src/class-pdo-polyfill.php"
+                    "src/class-pdo-polyfill.php",
+                    "src/compat.php"
                 ]
             },
             "license": [

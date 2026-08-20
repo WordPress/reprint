@@ -3,10 +3,10 @@
 use function WordPress\Reprint\Server\generate_random_bytes;
 
 /**
- * HMAC Client for the Site Export API.
+ * HMAC client for the Reprint Server API.
  *
  * This class generates the required HMAC signatures for authenticating
- * requests to the Site Export API. The importing side uses this to sign
+ * requests to the Reprint Server API. The importing side uses this to sign
  * all outgoing requests.
  *
  * Usage:
@@ -20,7 +20,8 @@ class Site_Export_HMAC_Client {
     /**
      * Value of the X-Auth-Content-Hash header when the request body is
      * deliberately not signed: this literal string stands where a body hash
-     * would otherwise be. Must match Site_Export_HMAC_Server::UNSIGNED_PAYLOAD.
+     * would otherwise be. Must match
+     * WordPress\Reprint\Server\HMACServer::UNSIGNED_PAYLOAD.
      */
     public const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
 

@@ -1,7 +1,7 @@
 /**
  * Test 47: WordPress plugin authentication
  *
- * Installs the site-export plugin in a stock WordPress site — no custom
+ * Installs the reprint-server plugin in a stock WordPress site — no custom
  * setup, no afterCreate hooks — and verifies the default authentication
  * behaviour via HTTP.
  *

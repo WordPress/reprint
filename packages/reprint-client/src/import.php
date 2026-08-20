@@ -8445,7 +8445,7 @@ class ImportClient
             $remote_parent_components[] = $missing_remote_path_components[$component_index];
             $path_prefix = wp_join_unix_paths("/", ...$remote_parent_components);
             // A parent above every export directory proves nothing: the next remote
-            // index never covered it, so its absence is not evidence of deletion.
+            // index never covered it, so its absence does not confirm deletion.
             if (
                 $stop_at_export_directory
                 && !path_is_same_as_or_descendant_of($path_prefix, $export_directories)
@@ -11330,7 +11330,7 @@ class ImportClient
                         "No --secret was provided. The remote site requires " .
                         "authentication.\n\n" .
                         "Pass --secret=YOUR_SECRET using the same secret " .
-                        "configured in the Site Export plugin on the remote site.",
+                        "configured in the Reprint Server plugin on the remote site.",
                 ];
             }
 
@@ -11354,8 +11354,8 @@ class ImportClient
                     'code' => 'AUTH_SECRET_MISMATCH',
                     'message' =>
                         "Wrong shared secret. The --secret value does not match " .
-                        "the one configured in the Site Export plugin settings " .
-                        "(wp-admin → Site Export).",
+                        "the one configured in the Reprint Server plugin settings " .
+                        "(wp-admin → Reprint Server).",
                 ];
             }
 
@@ -13270,7 +13270,7 @@ if (
      * Shows the download URL for the Reprint Server plugin matching this
      * version of reprint, and step-by-step installation instructions.
      */
-    function _cli_render_install_exporter(): void
+    function _cli_render_install_server(): void
     {
         $version = get_importer_version();
         $is_dev = str_contains($version, '-trunk') || $version === 'v0.0.0';
@@ -13298,6 +13298,7 @@ if (
             echo "  {$dim}composer build:server-plugin{$reset}\n";
             echo "\n";
             echo "  Then upload reprint-exporter-wp.zip through wp-admin,\n";
+            echo "  (the legacy filename is retained so existing plugin installs upgrade),\n";
             echo "  or symlink reprint-server-wp/ into wp-content/plugins/.\n";
         } else {
             echo "  {$cyan}{$zip_url}{$reset}\n";
@@ -13308,7 +13309,7 @@ if (
         echo "\n";
         echo "  1. Log in to wp-admin\n";
         echo "  2. Go to Plugins → Add New Plugin → Upload Plugin\n";
-        echo "  3. Upload reprint-exporter-wp.zip and activate it\n";
+        echo "  3. Upload reprint-exporter-wp.zip and activate Reprint Server\n";
         echo "\n";
         echo "{$bold}Step 3: Configure the shared secret{$reset}\n";
         echo "\n";
@@ -13410,7 +13411,7 @@ if (
                 "interrupted, re-run the same command to resume from where it left off.\n" .
                 "Running pull again after completion performs a delta sync.\n" .
                 "\n" .
-                "The ?site-export-api query parameter is added automatically if missing,\n" .
+                "The ?reprint-api query parameter is added automatically if missing,\n" .
                 "so you can pass just the site URL.\n",
             "extra" =>
                 "Examples:\n" .
@@ -13871,7 +13872,7 @@ if (
     // install-server is a standalone guide — no URL, state-dir, or filesystem root needed.
     // Handle it before per-command --help so it always shows the full guide.
     if ($command === "install-server") {
-        _cli_render_install_exporter();
+        _cli_render_install_server();
         exit(0);
     }
 

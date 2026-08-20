@@ -18,7 +18,8 @@
         ],
         "files": [
             "src/utils.php",
-            "src/class-pdo-polyfill.php"
+            "src/class-pdo-polyfill.php",
+            "src/compat.php"
         ]
     },
     "suggest": {

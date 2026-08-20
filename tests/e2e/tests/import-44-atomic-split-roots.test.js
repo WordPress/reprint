@@ -55,32 +55,32 @@ describe('Import: Atomic-style split roots (__wp__ + document root)', () => {
                 writeFileSync(join(siteDir, 'wp-load.php'), '<?php /* stub */ ?>');
                 writeFileSync(join(siteDir, 'wp-config.php'), '<?php /* stub config */ ?>');
 
-                // index.php loads the exporter directly, bypassing WordPress.
-                // lib.php's _site_export_handle_api_request() authenticates
+                // index.php loads Reprint Server directly, bypassing WordPress.
+                // lib.php's namespaced request handler authenticates
                 // via HMAC and dispatches the request — same path as the
                 // WordPress plugin, just without WP bootstrapped.
                 writeFileSync(join(siteDir, 'index.php'), `<?php
 define('ABSPATH', __DIR__ . '/__wp__/');
-define('SITE_EXPORT_PLUGIN_DIR', __DIR__ . '/wp-content/plugins/site-export/');
-define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
+define('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR', __DIR__ . '/wp-content/plugins/reprint-server/');
+define('WordPress\\Reprint\\Server\\Plugin\\SECRET_FILE', constant('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR') . 'secret.php');
 if (!function_exists('plugin_dir_path')) {
     function plugin_dir_path(\$file) { return rtrim(dirname(\$file), '/') . '/'; }
 }
-require_once SITE_EXPORT_PLUGIN_DIR . 'lib.php';
-_site_export_handle_api_request();
+require_once constant('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR') . 'lib.php';
+\\WordPress\\Reprint\\Server\\Plugin\\handle_api_request();
 `);
 
                 // Create site's own wp-content
-                mkdirSync(join(siteDir, 'wp-content', 'plugins', 'site-export'), { recursive: true });
+                mkdirSync(join(siteDir, 'wp-content', 'plugins', 'reprint-server'), { recursive: true });
                 mkdirSync(join(siteDir, 'wp-content', 'themes'), { recursive: true });
 
                 // Copy server plugin
-                const pluginSrc = join(wpDir, 'wp-content', 'plugins', 'site-export');
+                const pluginSrc = join(wpDir, 'wp-content', 'plugins', 'reprint-server');
                 if (existsSync(pluginSrc)) {
-                    execSync(`cp -a "${pluginSrc}/." "${join(siteDir, 'wp-content', 'plugins', 'site-export')}/"`)
+                    execSync(`cp -a "${pluginSrc}/." "${join(siteDir, 'wp-content', 'plugins', 'reprint-server')}/"`)
                 }
                 writeFileSync(
-                    join(siteDir, 'wp-content', 'plugins', 'site-export', 'secret.php'),
+                    join(siteDir, 'wp-content', 'plugins', 'reprint-server', 'secret.php'),
                     `<?php return 'test-secret-${site}';\n`
                 );
 
