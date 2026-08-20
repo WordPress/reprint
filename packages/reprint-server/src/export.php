@@ -1318,7 +1318,7 @@ function resolve_file_index_roots(array $config): array
             $missing_roots = isset($config["missing_roots"]) && is_array($config["missing_roots"])
                 ? $config["missing_roots"]
                 : [];
-            if (in_array($requested_path, $missing_roots, true) && file_index_root_is_confirmed_absent($requested_path)) {
+            if (in_array($requested_path, $missing_roots, true)) {
                 $roots[] = [
                     "requested_path" => $requested_path,
                     "resolved_path" => null,
@@ -1414,14 +1414,6 @@ function resolve_file_index_start_root(
         "resolved_path" => $resolved_path,
         "type" => "directory",
     ];
-}
-
-/** Returns whether the parent can confirm that a selected name is absent. */
-function file_index_root_is_confirmed_absent(string $requested_path): bool
-{
-    $parent = dirname($requested_path);
-    $names = @scandir($parent, SCANDIR_SORT_NONE);
-    return is_array($names) && !in_array(basename($requested_path), $names, true);
 }
 
 /** Returns the first symlink in a requested root's parent path. */
