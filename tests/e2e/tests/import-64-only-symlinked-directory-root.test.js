@@ -1,4 +1,4 @@
-/** Test 63: `--only` preserves a selected symlinked directory. */
+/** Test 64: `--only` preserves a selected symlinked directory. */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
