@@ -140,6 +140,12 @@
     "db-index-interruption": {
       "port": 8125
     },
+    "only-file-path": {
+      "port": 8138
+    },
+    "only-symlinked-directory-root": {
+      "port": 8139
+    },
     "mysql-session-settings-resume": {
       "port": 8126
     },

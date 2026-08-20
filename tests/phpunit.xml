@@ -25,8 +25,12 @@
             <file>CreateDbConnectionTest.php</file>
             <file>PushCommitTest.php</file>
             <file>ExportHttpServerTest.php</file>
+            <file>ExportResolveDirectoriesTest.php</file>
             <file>FileIndexDedupTest.php</file>
             <file>FileIndexSkipDefaultsTest.php</file>
+            <file>FileIndexProcessorTest.php</file>
+            <file>FileIndexFilePathRootTest.php</file>
+            <file>FileIndexNamedRootTest.php</file>
             <file>ExportLibraryLoadTest.php</file>
             <file>ExportUtilsLoadingTest.php</file>
             <file>PdoPolyfillTest.php</file>

@@ -334,6 +334,12 @@ absolute source paths, and exclusions win when the prefixes overlap. Switching
 filters after a completed run starts a new filtered delta against the shared
 remote index; there is no separate skipped-file list or fetch stage.
 
+Symlinks are followed by default. With `--no-follow-symlinks`, a selected
+symlink is copied as a link without indexing its target. A selected path reached
+through a symlinked parent is rejected; use the default or
+`--follow-symlinks` so Reprint can preserve the requested link path and index
+the physical target.
+
 #### Pull only files.
 
 `pull-files` runs the file side of the high-level pull pipeline:

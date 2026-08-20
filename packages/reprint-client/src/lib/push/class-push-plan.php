@@ -158,9 +158,14 @@ class PushPlan
         if (!is_resource($plan->fresh_local_index_handle)) {
             throw new RuntimeException("Failed to open the fresh local index: {$plan->fresh_local_index_file}");
         }
+        $filesystem_root_record = [
+            "requested_path" => $plan->filesystem_root,
+            "resolved_path" => $plan->filesystem_root,
+            "type" => "directory",
+        ];
         $plan->file_index_processor = FileIndexProcessor::start(
-            [$plan->filesystem_root],
-            $plan->filesystem_root,
+            [$filesystem_root_record],
+            $filesystem_root_record,
             false,
             false,
             $plan->plan_directory
@@ -363,8 +368,13 @@ class PushPlan
         if (fseek($this->fresh_local_index_handle, $cursor["fresh_local_index_byte_offset"]) !== 0) {
             throw new RuntimeException("Failed to seek to the fresh local index byte offset.");
         }
+        $filesystem_root_record = [
+            "requested_path" => $this->filesystem_root,
+            "resolved_path" => $this->filesystem_root,
+            "type" => "directory",
+        ];
         $this->file_index_processor = FileIndexProcessor::resume(
-            [$this->filesystem_root],
+            [$filesystem_root_record],
             json_encode($cursor["file_index_cursor"], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
             false,
             false,

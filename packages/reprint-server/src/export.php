@@ -15,6 +15,7 @@ use function WordPress\Reprint\Server\assert_valid_path;
 use function WordPress\Reprint\Server\build_pdo_dsn;
 use function WordPress\Reprint\Server\generate_random_bytes;
 use function WordPress\Reprint\Server\json_encode_or_throw;
+use function WordPress\Reprint\Server\normalize_path;
 use function WordPress\Reprint\Server\parse_size;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\trim_right_slash;
@@ -1292,7 +1293,7 @@ function endpoint_db_index(
 }
 
 /**
- * Resolves directory paths from config.
+ * Resolves directory paths from config for operations which can walk only directories.
  */
 function resolve_directories(array $config): array
 {
@@ -1317,10 +1318,11 @@ function resolve_directories(array $config): array
         $directory = trim($directory);
         assert_valid_path($directory, "directory entry");
 
-        $real_directory = realpath($directory);
-        if ($real_directory === false) {
+        clearstatcache(true, $directory);
+        $real_directory = @realpath($directory);
+        if ($real_directory === false || !is_dir($real_directory)) {
             throw new InvalidArgumentException(
-                "directory does not exist or is not accessible: {$directory}\n" .
+                "directory entry is not an accessible directory: {$directory}\n" .
                     "Current working directory: " .
                     getcwd() .
                     "\n" .
@@ -1337,6 +1339,176 @@ function resolve_directories(array $config): array
     }
 
     return $directories;
+}
+
+/**
+ * Builds file-index roots from the file_index request's `directory` parameter.
+ *
+ * The `directory` parameter contains the selected paths. In spite of the
+ * parameter name, a selected path may name a directory, regular file, or
+ * symlink.
+ *
+ * Unlike resolve_directories(), this keeps one file-index root for every
+ * selected path. `requested_path` is the normalized spelling supplied by the
+ * client. `resolved_path` is its realpath() target.
+ *
+ * FileIndexProcessor adds a link entry at `requested_path` to the file index.
+ * It walks a followed directory target at `resolved_path`. It also uses
+ * `resolved_path` so aliases to the same target are indexed once.
+ *
+ * Example: for /site/theme -> /shared/theme, this returns a file-index root
+ * with `requested_path` /site/theme, `resolved_path` /shared/theme, and type
+ * symlink. With symlink following enabled, it adds the link entry at
+ * /site/theme and indexes the target tree at /shared/theme.
+ *
+ * @return array[] {
+ *     File-index roots.
+ *
+ *     @type string      $requested_path Normalized path supplied by the client.
+ *     @type string|null $resolved_path  realpath() target, when available.
+ *     @type string      $type           directory, file, symlink, or missing.
+ * }
+ */
+function resolve_file_index_roots(array $config): array
+{
+    $roots_input = $config["directory"] ?? null;
+    if (!$roots_input) {
+        throw new InvalidArgumentException("directory is required for files operation");
+    }
+
+    $roots = [];
+    foreach (is_array($roots_input) ? $roots_input : [$roots_input] as $root_input) {
+        if (!is_string($root_input)) {
+            throw new InvalidArgumentException("directory entries must be non-empty strings");
+        }
+        $root_input = trim($root_input);
+        assert_valid_path($root_input, "directory entry");
+        $requested_path = normalize_path($root_input);
+        clearstatcache(true, $requested_path);
+        $stat = @lstat($requested_path);
+        if ($stat === false) {
+            // The client sends `pulled_before` for selected paths an earlier pull
+            // already saw. Absence there means the source deleted the path, so it
+            // becomes a missing root instead of an error. Anything else absent is
+            // a bad path and still throws below.
+            $paths_pulled_before = isset($config["pulled_before"]) && is_array($config["pulled_before"])
+                ? $config["pulled_before"]
+                : [];
+            if (in_array($requested_path, $paths_pulled_before, true)) {
+                $roots[] = [
+                    "requested_path" => $requested_path,
+                    "resolved_path" => null,
+                    "type" => "missing",
+                ];
+                continue;
+            }
+            throw new InvalidArgumentException(
+                "Selected file-index root does not exist or is not accessible: {$requested_path}"
+            );
+        }
+
+        $mode = $stat["mode"] & STAT_TYPE_MASK;
+        $type = $mode === STAT_TYPE_LINK ? "symlink" : ( is_dir($requested_path) ? "directory" : "file" );
+        $resolved_path = @realpath($requested_path);
+        if ($type === "symlink" && $resolved_path === false) {
+            throw new InvalidArgumentException("Selected file-index root is a broken symlink: {$requested_path}");
+        }
+        if ($resolved_path === false) {
+            throw new InvalidArgumentException(
+                "Selected file-index root does not exist or is not accessible: {$requested_path}"
+            );
+        }
+        if (empty($config["follow_symlinks"])) {
+            $parent_link = file_index_parent_symlink($requested_path);
+            if ($parent_link !== null) {
+                throw new InvalidArgumentException(
+                    "Selected file-index root {$requested_path} is reached through parent symlink " .
+                    "{$parent_link["path"]} targeting {$parent_link["target"]}; use --follow-symlinks."
+                );
+            }
+        }
+        $roots[] = [
+            "requested_path" => $requested_path,
+            "resolved_path" => $resolved_path,
+            "type" => $type,
+        ];
+    }
+
+    return $roots;
+}
+
+/**
+ * Returns the file-index root for the file_index request's `list_dir` parameter.
+ *
+ * `list_dir` normally names a path from `directory[]`. When following symlinks,
+ * it may instead name a resolved directory found through a link below one of
+ * those selected paths.
+ *
+ * Example: `directory[]` contains /site. If indexing /site finds a link from
+ * /site/theme to /shared/theme, the client later requests
+ * `list_dir=/shared/theme`. This function returns a file-index root for
+ * /shared/theme even though it is not in `directory[]`.
+ *
+ * @param array[] $roots           File-index roots returned by resolve_file_index_roots().
+ * @param string  $list_directory  Value sent as `list_dir`.
+ * @param bool    $follow_symlinks Whether `list_dir` may name a directory reached through a link.
+ * @return array {
+ *     File-index root for `list_dir`.
+ *
+ *     @type string      $requested_path Requested normalized root path.
+ *     @type string|null $resolved_path  Resolved root path, when available.
+ *     @type string      $type           directory, file, symlink, or missing.
+ * }
+ */
+function resolve_file_index_start_root(
+    array $roots,
+    string $list_directory,
+    bool $follow_symlinks
+): array {
+    $requested_path = normalize_path($list_directory);
+    foreach ($roots as $root) {
+        if ($root["requested_path"] === $requested_path) {
+            return $root;
+        }
+    }
+
+    if (!$follow_symlinks) {
+        throw new InvalidArgumentException(
+            "list_dir must name a selected root unless follow_symlinks is enabled: {$requested_path}"
+        );
+    }
+
+    $resolved_path = @realpath($requested_path);
+    if ($resolved_path === false || !is_dir($resolved_path)) {
+        throw new InvalidArgumentException(
+            "Followed symlink target directory does not exist or is not accessible: {$requested_path}"
+        );
+    }
+
+    return [
+        "requested_path" => $requested_path,
+        "resolved_path" => $resolved_path,
+        "type" => "directory",
+    ];
+}
+
+/** Returns the first symlink in a requested root's parent path. */
+function file_index_parent_symlink(string $requested_path): ?array
+{
+    $current = "/";
+    $parts = explode("/", trim(dirname($requested_path), "/"));
+    foreach ($parts as $part) {
+        if ($part === "") {
+            continue;
+        }
+        $current = wp_join_unix_paths($current, $part);
+        if (!@is_link($current)) {
+            continue;
+        }
+        $target = @readlink($current);
+        return ["path" => $current, "target" => $target === false ? "(unreadable)" : $target];
+    }
+    return null;
 }
 
 /**
@@ -2695,7 +2867,7 @@ function endpoint_file_index(
     // requests so path type transitions (symlink/file/dir) are seen correctly.
     clearstatcache(true);
 
-    $directories = resolve_directories($config);
+    $file_index_roots = resolve_file_index_roots($config);
     $batch_size = require_int_range(
         "batch_size",
         (int) ($config["batch_size"] ?? 5000),
@@ -2710,7 +2882,7 @@ function endpoint_file_index(
 
     if (isset($config["cursor"])) {
         $file_index = FileIndexProcessor::resume(
-            $directories,
+            $file_index_roots,
             $config["cursor"],
             $follow_symlinks,
             $include_caches,
@@ -2721,9 +2893,14 @@ function endpoint_file_index(
         if (!is_string($list_directory) || $list_directory === "") {
             throw new InvalidArgumentException("list_dir is required for file_index");
         }
-        $file_index = FileIndexProcessor::start(
-            $directories,
+        $start_root = resolve_file_index_start_root(
+            $file_index_roots,
             $list_directory,
+            $follow_symlinks
+        );
+        $file_index = FileIndexProcessor::start(
+            $file_index_roots,
+            $start_root,
             $follow_symlinks,
             $include_caches,
             $storage_path
@@ -2735,7 +2912,7 @@ function endpoint_file_index(
     }
 
     $list_directory = $file_index->get_index_directory();
-    $filesystem_root = $directories[0] ?? "/";
+    $filesystem_root = $file_index_roots[0]["resolved_path"] ?? "/";
 
     prepare_streaming_response();
     ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream();

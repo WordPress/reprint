@@ -1,0 +1,149 @@
+<?php
+
+declare(strict_types=1);
+
+use PHPUnit\Framework\TestCase;
+
+require_once dirname(__DIR__) . '/packages/reprint-server/src/export.php';
+
+// Loading export.php installs handlers that would exit() on a later test.
+restore_error_handler();
+restore_exception_handler();
+
+final class ExportResolveDirectoriesTest extends TestCase {
+
+    private string $tempDir;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->tempDir = sys_get_temp_dir() . '/resolve-directories-' . uniqid();
+        mkdir($this->tempDir . '/site', 0755, true);
+        file_put_contents($this->tempDir . '/site/wp-config.php', '<?php');
+        symlink('wp-config.php', $this->tempDir . '/site/config-link.php');
+    }
+
+    protected function tearDown(): void
+    {
+        @unlink($this->tempDir . '/site/config-link.php');
+        @unlink($this->tempDir . '/site/wp-config.php');
+        @rmdir($this->tempDir . '/site');
+        @rmdir($this->tempDir);
+        parent::tearDown();
+    }
+
+    public function testDirectoryEntryStillResolves(): void
+    {
+        $resolved = resolve_directories(['directory' => [$this->tempDir . '/site']]);
+        $this->assertSame([realpath($this->tempDir . '/site')], $resolved);
+    }
+
+    public function testDirectoryResolverRejectsAFileEntry(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('not an accessible directory');
+
+        resolve_directories(['directory' => [$this->tempDir . '/site/wp-config.php']]);
+    }
+
+    public function testFileIndexResolverKeepsRequestedAndResolvedCoordinates(): void
+    {
+        $roots = resolve_file_index_roots([
+            'directory' => [$this->tempDir . '/site/config-link.php'],
+            'follow_symlinks' => true,
+        ]);
+        $this->assertSame(
+            [[
+                'requested_path' => $this->tempDir . '/site/config-link.php',
+                'resolved_path' => realpath($this->tempDir . '/site/wp-config.php'),
+                'type' => 'symlink',
+            ]],
+            $roots
+        );
+    }
+
+    public function testFileIndexStartRootUsesTheSelectedRootRecord(): void
+    {
+        $path = $this->tempDir . '/site/config-link.php';
+        $roots = resolve_file_index_roots([
+            'directory' => [$path],
+            'follow_symlinks' => true,
+        ]);
+
+        $this->assertSame(
+            $roots[0],
+            resolve_file_index_start_root($roots, $path, true)
+        );
+    }
+
+    public function testFileIndexStartRootAllowsAnExternalDirectoryOnlyWhenFollowingLinks(): void
+    {
+        $shared = $this->tempDir . '/shared';
+        mkdir($shared, 0755, true);
+        $roots = resolve_file_index_roots([
+            'directory' => [$this->tempDir . '/site'],
+            'follow_symlinks' => true,
+        ]);
+
+        $this->assertSame(
+            [
+                'requested_path' => $shared,
+                'resolved_path' => realpath($shared),
+                'type' => 'directory',
+            ],
+            resolve_file_index_start_root($roots, $shared, true)
+        );
+    }
+
+    public function testFileIndexStartRootRejectsAnUnselectedDirectoryWithoutFollowingLinks(): void
+    {
+        $shared = $this->tempDir . '/shared';
+        mkdir($shared, 0755, true);
+        $site = (string) realpath($this->tempDir . '/site');
+        $shared = (string) realpath($shared);
+        $roots = resolve_file_index_roots([
+            'directory' => [$site],
+        ]);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('must name a selected root unless follow_symlinks is enabled');
+
+        resolve_file_index_start_root($roots, $shared, false);
+    }
+
+    public function testMissingEntryNamesTheObservedPath(): void
+    {
+        $missing = $this->tempDir . '/site/absent.php';
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage($missing);
+
+        resolve_directories(['directory' => [$missing]]);
+    }
+
+    public function testFileIndexResolverRejectsBrokenSelectedSymlink(): void
+    {
+        $path = $this->tempDir . '/site/broken.php';
+        symlink('absent.php', $path);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('broken symlink');
+
+        resolve_file_index_roots(['directory' => [$path], 'follow_symlinks' => true]);
+    }
+
+    public function testFileIndexResolverRejectsParentSymlinkWithoutFollowing(): void
+    {
+        $releases = $this->tempDir . '/releases';
+        mkdir($releases, 0755, true);
+        file_put_contents($releases . '/wp-config.php', '<?php');
+        $current = (string) realpath($this->tempDir) . '/current';
+        symlink($releases, $current);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage($current);
+        $this->expectExceptionMessage('use --follow-symlinks');
+
+        resolve_file_index_roots(['directory' => [$current . '/wp-config.php']]);
+    }
+}

@@ -68,8 +68,8 @@ final class FileIndexProcessorTest extends TestCase {
         file_put_contents($docroot . '/a.txt', 'a');
         file_put_contents($docroot . '/b.txt', 'b');
 
-        $processor = FileIndexProcessor::start(
-            [realpath($docroot)],
+        $processor = $this->startProcessor(
+            [$docroot],
             $docroot,
             false,
             true,
@@ -98,8 +98,8 @@ final class FileIndexProcessorTest extends TestCase {
         $docroot = (string) realpath($docroot);
         $vanishingDirectory = (string) realpath($vanishingDirectory);
 
-        $processor = FileIndexProcessor::start(
-            [realpath($docroot)],
+        $processor = $this->startProcessor(
+            [$docroot],
             $docroot,
             false,
             true,
@@ -137,7 +137,7 @@ final class FileIndexProcessorTest extends TestCase {
         mkdir($docroot, 0755, true);
         file_put_contents($docroot . '/index.php', '<?php');
 
-        $processor = FileIndexProcessor::start(
+        $processor = $this->startProcessor(
             ['/'],
             $docroot,
             false,
@@ -160,8 +160,8 @@ final class FileIndexProcessorTest extends TestCase {
         symlink($this->tempDir . '/real', $alias);
         symlink('../alias/./target', $docroot . '/link');
 
-        $processor = FileIndexProcessor::start(
-            [ (string) realpath($docroot) ],
+        $processor = $this->startProcessor(
+            [$docroot],
             $docroot,
             true,
             true,
@@ -175,9 +175,12 @@ final class FileIndexProcessorTest extends TestCase {
         }
         $processor->close();
 
+        $physicalAlias = (string) realpath(dirname($alias)) . '/alias';
         $intermediate_entries = array_values(array_filter(
             $entries,
-            static fn(array $entry): bool => ( $entry['intermediate'] ?? false ) === true
+            static fn(array $entry): bool =>
+                ( $entry['intermediate'] ?? false ) === true
+                && $entry['path'] === $physicalAlias
         ));
         $this->assertCount(1, $intermediate_entries);
         $this->assertSame('link', $intermediate_entries[0]['type']);
@@ -197,8 +200,8 @@ final class FileIndexProcessorTest extends TestCase {
         $docroot = $this->tempDir . '/site';
         mkdir($docroot, 0755, true);
 
-        $processor = FileIndexProcessor::start(
-            [realpath($docroot)],
+        $processor = $this->startProcessor(
+            [$docroot],
             $docroot,
             false,
             true,
@@ -216,7 +219,7 @@ final class FileIndexProcessorTest extends TestCase {
         $processor->close();
 
         $resumed = FileIndexProcessor::resume(
-            [realpath($docroot)],
+            [$this->root($docroot)],
             $cursor,
             false,
             true,
@@ -230,8 +233,8 @@ final class FileIndexProcessorTest extends TestCase {
     {
         $docroot = $this->tempDir . '/site';
         mkdir($docroot, 0755, true);
-        $processor = FileIndexProcessor::start(
-            [realpath($docroot)],
+        $processor = $this->startProcessor(
+            [$docroot],
             $docroot,
             false,
             true,
@@ -242,6 +245,288 @@ final class FileIndexProcessorTest extends TestCase {
         $this->expectException(LogicException::class);
         $this->expectExceptionMessage('Cannot take a file-index step after close().');
         $processor->next_index_step();
+    }
+
+    public function testSingleFileRootIsIndexedWithoutTraversal(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        file_put_contents($docroot . '/wp-config.php', '<?php // config');
+        file_put_contents($docroot . '/other.php', '<?php // other');
+        $configPath = (string) realpath($docroot . '/wp-config.php');
+
+        $result = $this->collectEntries([$configPath], $configPath);
+
+        $this->assertCount(1, $result['entries']);
+        $this->assertSame($configPath, $result['entries'][0]['path']);
+        $this->assertSame('file', $result['entries'][0]['type']);
+        $this->assertSame(filesize($configPath), $result['entries'][0]['size']);
+    }
+
+    public function testFileRootAndDirectoryRootAreBothIndexed(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot . '/wp-content/plugins/hello', 0755, true);
+        file_put_contents($docroot . '/wp-config.php', '<?php // config');
+        file_put_contents($docroot . '/wp-content/plugins/hello/hello.php', '<?php // hello');
+        $configPath = (string) realpath($docroot . '/wp-config.php');
+        $pluginsPath = (string) realpath($docroot . '/wp-content/plugins');
+
+        $result = $this->collectEntries([$configPath, $pluginsPath], $configPath);
+
+        $paths = array_column($result['entries'], 'path');
+        $this->assertContains($configPath, $paths);
+        $this->assertContains($pluginsPath . '/hello/hello.php', $paths);
+    }
+
+    public function testFileSymlinkRootIsIndexedAsTheLinkItself(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        file_put_contents($docroot . '/target.php', '<?php // target');
+        symlink('target.php', $docroot . '/link.php');
+        $linkPath = (string) realpath($docroot) . '/link.php';
+
+        $result = $this->collectEntries([$linkPath], $linkPath);
+
+        $this->assertCount(1, $result['entries']);
+        $this->assertSame($linkPath, $result['entries'][0]['path']);
+        $this->assertSame('link', $result['entries'][0]['type']);
+        // Only a link ending at a directory carries a target; fetch supplies this one.
+        $this->assertArrayNotHasKey('target', $result['entries'][0]);
+    }
+
+    public function testRootRecordRejectsAnUnresolvedSymlink(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        symlink('absent.php', $docroot . '/broken.php');
+        $brokenPath = (string) realpath($docroot) . '/broken.php';
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("File-index root missing resolved_path: {$brokenPath}");
+
+        FileIndexProcessor::start([
+            [
+                'requested_path' => $brokenPath,
+                'resolved_path' => null,
+                'type' => 'symlink',
+            ],
+        ], [
+            'requested_path' => $brokenPath,
+            'resolved_path' => null,
+            'type' => 'symlink',
+        ], false, true, '');
+    }
+
+    public function testStartRootMustBeConfiguredOrADirectory(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        $unconfiguredPath = $docroot . '/unconfigured.php';
+        file_put_contents($unconfiguredPath, '<?php');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('File-index start root must be a configured root or a directory');
+
+        FileIndexProcessor::start(
+            [$this->root($docroot)],
+            $this->root($unconfiguredPath),
+            false,
+            false,
+            ''
+        );
+    }
+
+    public function testFileRootInsideASkippedDirectoryIsOmitted(): void
+    {
+        // A directory root here indexes nothing, so a file root must not either.
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot . '/wp-content/cache', 0755, true);
+        file_put_contents($docroot . '/wp-content/cache/keep.php', '<?php // keep');
+        $cachedPath = (string) realpath($docroot . '/wp-content/cache/keep.php');
+
+        $result = $this->collectEntries([$cachedPath], $cachedPath, false);
+
+        $this->assertSame([], $result['entries']);
+        $this->assertContains(FileIndexProcessor::STATUS_SKIPPED, $result['statuses']);
+    }
+
+    public function testFileRootInsideASkippedDirectoryIsIndexedWhenCachesAreIncluded(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot . '/wp-content/cache', 0755, true);
+        file_put_contents($docroot . '/wp-content/cache/keep.php', '<?php // keep');
+        $cachedPath = (string) realpath($docroot . '/wp-content/cache/keep.php');
+
+        $result = $this->collectEntries([$cachedPath], $cachedPath, true);
+
+        $this->assertCount(1, $result['entries']);
+        $this->assertSame($cachedPath, $result['entries'][0]['path']);
+    }
+
+    public function testFileRootInsideTheStoragePathIsNeverIndexed(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot . '/.reprint', 0755, true);
+        file_put_contents($docroot . '/.reprint/sender.json', '{"token":"secret"}');
+        $storagePath = (string) realpath($docroot . '/.reprint');
+        $senderPath = $storagePath . '/sender.json';
+
+        $processor = $this->startProcessor([$senderPath], $senderPath, false, true, $storagePath);
+        $entries = [];
+        while ($processor->next_index_step()) {
+            foreach ($processor->get_index_entries() as $entry) {
+                $entries[] = $entry;
+            }
+        }
+        $processor->close();
+
+        $this->assertSame([], $entries, 'Reprint storage must never be indexed, even when named');
+    }
+
+    public function testEachNamedPathIsOneStepAndSurvivesAResume(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        $roots = [];
+        for ($index = 0; $index < 5; $index++) {
+            $path = $docroot . '/file' . $index . '.php';
+            file_put_contents($path, '<?php // ' . $index);
+            $roots[] = (string) realpath($path);
+        }
+
+        $uninterrupted = $this->collectEntries($roots, $roots[0]);
+        $resumed = $this->collectEntries($roots, $roots[0], true, true);
+
+        $this->assertSame($roots, array_column($uninterrupted['entries'], 'path'));
+        $this->assertSame($roots, array_column($resumed['entries'], 'path'));
+        $this->assertSame(
+            5,
+            count(array_filter(
+                $uninterrupted['statuses'],
+                static fn(?string $status): bool => $status === FileIndexProcessor::STATUS_INDEXED
+            )),
+            'Each named path must be its own step, not one step returning all of them'
+        );
+    }
+
+    public function testResumingAfterTheFirstStepDoesNotRepeatFileRoots(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot . '/nested', 0755, true);
+        file_put_contents($docroot . '/wp-config.php', '<?php // config');
+        file_put_contents($docroot . '/nested/b.txt', 'b');
+        $configPath = (string) realpath($docroot . '/wp-config.php');
+        $nestedPath = (string) realpath($docroot . '/nested');
+        $roots = [$configPath, $nestedPath];
+
+        $uninterrupted = $this->collectEntries($roots, $configPath);
+        $resumed = $this->collectEntries($roots, $configPath, true, true);
+
+        $this->assertSame(
+            array_column($uninterrupted['entries'], 'path'),
+            array_column($resumed['entries'], 'path')
+        );
+        $this->assertSame(
+            1,
+            count(array_keys(array_column($resumed['entries'], 'path'), $configPath)),
+            'The named file must be indexed exactly once across a resume'
+        );
+    }
+
+    /**
+     * Runs a processor over explicit roots and collects every entry.
+     *
+     * @param string[] $roots                Configured roots, canonical.
+     * @param string   $indexDirectory       Root where traversal begins.
+     * @param bool     $includeCaches        Whether generated caches are included.
+     * @param bool     $resumeAfterEveryStep Whether to reopen from the cursor each step.
+     * @return array {
+     *     @type array[]  $entries  File-index entries.
+     *     @type string[] $statuses Status returned by every step.
+     * }
+     */
+    private function collectEntries(
+        array $roots,
+        string $indexDirectory,
+        bool $includeCaches = true,
+        bool $resumeAfterEveryStep = false
+    ): array {
+        $root_records = array_map([$this, 'root'], $roots);
+        $processor = FileIndexProcessor::start(
+            $root_records,
+            $this->root($indexDirectory),
+            false,
+            $includeCaches,
+            ''
+        );
+        $entries = [];
+        $statuses = [];
+        while ($processor->next_index_step()) {
+            $statuses[] = $processor->get_step_status();
+            foreach ($processor->get_index_entries() as $entry) {
+                $entries[] = $entry;
+            }
+            if ($resumeAfterEveryStep) {
+                $cursor = json_encode($processor->get_cursor(), JSON_THROW_ON_ERROR);
+                $processor->close();
+                $processor = FileIndexProcessor::resume(
+                    $root_records,
+                    $cursor,
+                    false,
+                    $includeCaches,
+                    ''
+                );
+            }
+        }
+        $processor->close();
+
+        return ['entries' => $entries, 'statuses' => $statuses];
+    }
+
+    /**
+     * @param string[] $roots File-index root paths.
+     */
+    private function startProcessor(
+        array $roots,
+        string $start,
+        bool $followSymlinks,
+        bool $includeCaches,
+        string $storagePath
+    ): FileIndexProcessor {
+        $rootRecords = array_map([$this, 'root'], $roots);
+        return FileIndexProcessor::start(
+            $rootRecords,
+            $this->root($start),
+            $followSymlinks,
+            $includeCaches,
+            $storagePath
+        );
+    }
+
+    /**
+     * @return array{requested_path:string,resolved_path:string,type:'directory'|'file'|'symlink'}
+     */
+    private function root(string $path): array
+    {
+        $stat = lstat($path);
+        if ($stat === false) {
+            throw new RuntimeException("Test root does not exist: {$path}");
+        }
+        $resolvedPath = realpath($path);
+        if ($resolvedPath === false) {
+            throw new RuntimeException("Test root does not resolve: {$path}");
+        }
+        $mode = $stat['mode'] & FileIndexProcessor::STAT_TYPE_MASK;
+        $type = $mode === FileIndexProcessor::STAT_TYPE_LINK
+            ? 'symlink'
+            : ( is_dir($path) ? 'directory' : 'file' );
+        return [
+            'requested_path' => \WordPress\Reprint\Server\normalize_path($path),
+            'resolved_path' => $resolvedPath,
+            'type' => $type,
+        ];
     }
 
     /**
@@ -256,9 +541,10 @@ final class FileIndexProcessorTest extends TestCase {
     private function runProcessor(string $docroot, bool $resumeAfterEveryStep): array
     {
         $canonicalDocroot = realpath($docroot);
+        $root = $this->root((string) $canonicalDocroot);
         $processor = FileIndexProcessor::start(
-            [$canonicalDocroot],
-            $canonicalDocroot,
+            [$root],
+            $root,
             false,
             false,
             ''
@@ -275,7 +561,7 @@ final class FileIndexProcessorTest extends TestCase {
                 $cursor = json_encode($processor->get_cursor(), JSON_THROW_ON_ERROR);
                 $processor->close();
                 $processor = FileIndexProcessor::resume(
-                    [$canonicalDocroot],
+                    [$root],
                     $cursor,
                     false,
                     false,
