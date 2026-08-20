@@ -171,7 +171,8 @@ final class PullIndexWalTest extends TestCase
                 $this->client(),
                 '/srv/site/gone/nested/file.txt',
                 '/srv/site/kept.txt',
-                null
+                null,
+                ['/srv/site']
             );
 
         $this->assertSame('/srv/site/gone', $remoteAbsolutePathToDelete);
@@ -186,7 +187,8 @@ final class PullIndexWalTest extends TestCase
                 $this->client(),
                 '/srv/site/kept/old.txt',
                 '/srv/site/kept/current.txt',
-                null
+                null,
+                ['/srv/site']
             );
 
         $this->assertSame('/srv/site/kept/old.txt', $remoteAbsolutePathToDelete);

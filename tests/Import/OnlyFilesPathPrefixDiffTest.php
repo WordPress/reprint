@@ -137,6 +137,83 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         return [$client, $r];
     }
 
+    /** Load state for an unscoped sync whose enumerated roots come from preflight. */
+    private function prepareCompleteSyncClient(array $preflightRoots): array
+    {
+        $roots = [];
+        foreach ($preflightRoots as $path) {
+            $roots[] = ["path" => $path];
+        }
+        [$client, $reflection] = $this->prepareClient([]);
+        $client->get_state()->set_preflight_record([
+            'data' => ['wp_detect' => ['roots' => $roots]],
+        ]);
+        $reflection->getProperty('audit_log_file')->setValue($client, $this->tempDir . '/audit.log');
+        return [$client, $reflection];
+    }
+
+    /**
+     * A complete sync is bounded too. When the whole source index comes back empty the
+     * deletion must stop at the enumerated root rather than climbing to /var.
+     */
+    public function testCompleteSyncWithAnEmptyIndexStopsAtTheEnumeratedRoot(): void
+    {
+        $this->writeIndex(
+            'remote-index.jsonl',
+            $this->indexLine('/var/www/html/wp-config.php', 1000, 10)
+        );
+        $this->writeIndex('remote-index.next.jsonl', '');
+        $inside = $this->seedLocalFile('/var/www/html/wp-config.php');
+        $outside = $this->seedLocalFile('/var/backups/keep.txt');
+
+        [$client, $reflection] = $this->prepareCompleteSyncClient(['/var/www/html']);
+        $this->assertSame(
+            ['/var/www/html'],
+            $reflection->getMethod('get_export_directories')->invoke($client),
+            'Test premise: preflight supplies the enumerated scope.'
+        );
+
+        $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
+        $reflection->getProperty('pull_index_journal')
+            ->getValue($client)
+            ->apply_pending_records();
+
+        $this->assertFileDoesNotExist($inside);
+        $this->assertFileExists($outside);
+    }
+
+    /**
+     * Following symlinks indexes targets outside every export directory. Bounding
+     * those would stop the climb collapsing a deleted target tree, leaving the
+     * emptied directories behind, so they keep the neighbor-only inference.
+     */
+    public function testDeletedFollowedTargetOutsideExportDirectoriesStillCollapses(): void
+    {
+        $this->writeIndex(
+            'remote-index.jsonl',
+            $this->indexLine('/shared/theme/style.css', 1000, 10)
+            . $this->indexLine('/shared/theme/sub/b.css', 1000, 10)
+            . $this->indexLine('/var/www/html/wp-config.php', 1000, 10)
+        );
+        $this->writeIndex(
+            'remote-index.next.jsonl',
+            $this->indexLine('/var/www/html/wp-config.php', 1000, 10)
+        );
+        $this->seedLocalFile('/shared/theme/style.css');
+        $this->seedLocalFile('/shared/theme/sub/b.css');
+        $kept = $this->seedLocalFile('/var/www/html/wp-config.php');
+
+        [$client, $reflection] = $this->prepareCompleteSyncClient(['/var/www/html']);
+        $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
+        $reflection->getProperty('pull_index_journal')->getValue($client)->apply_pending_records();
+
+        $this->assertDirectoryDoesNotExist(
+            $this->filesystem_root . '/shared/theme',
+            'The emptied followed-target tree must go, not just its files.'
+        );
+        $this->assertFileExists($kept);
+    }
+
     public function testOnlyFilesPrefixDiffKeepsUnselectedAndDeletesSelectedOrphan(): void
     {
         // Remote index (sorted): an unselected entry, a matched selected file,
@@ -344,6 +421,79 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 
         $this->assertSame(
             ['/wp-config.php'],
+            $reflection->getMethod('previously_indexed_selected_roots')->invoke($client)
+        );
+    }
+
+    /**
+     * A selected file that vanishes leaves the next remote index empty, so the
+     * deletion root deriver sees no neighboring entry on either side. It must not
+     * read that silence as permission to climb to the first path component.
+     */
+    public function testVanishedSelectedFileRootDeletesNothingAboveItself(): void
+    {
+        $this->writeIndex(
+            'remote-index.jsonl',
+            $this->indexLine('/var/www/html/wp-config.php', 1000, 10)
+        );
+        $this->writeIndex('remote-index.next.jsonl', '');
+        $selected = $this->seedLocalFile('/var/www/html/wp-config.php');
+        $unrelated = $this->seedLocalFile('/var/www/html/wp-content/themes/x/style.css');
+
+        [$client, $reflection] = $this->prepareClient(['/var/www/html/wp-config.php']);
+        $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
+        $reflection->getProperty('pull_index_journal')
+            ->getValue($client)
+            ->apply_pending_records();
+
+        $this->assertFileDoesNotExist($selected);
+        $this->assertFileExists($unrelated);
+        $this->assertDirectoryExists($this->filesystem_root . '/var/www/html');
+    }
+
+    /**
+     * The climb still collapses a wholly deleted selected directory into one
+     * deletion, since the selected root itself is the floor rather than the wall.
+     */
+    public function testVanishedSelectedDirectoryRootIsDeletedAsOnePath(): void
+    {
+        $this->writeIndex(
+            'remote-index.jsonl',
+            $this->indexLine('/var/www/html/wp-content/themes/x/style.css', 1000, 10)
+        );
+        $this->writeIndex('remote-index.next.jsonl', '');
+        $inside = $this->seedLocalFile('/var/www/html/wp-content/themes/x/style.css');
+        $outside = $this->seedLocalFile('/var/www/html/wp-config.php');
+
+        [$client, $reflection] = $this->prepareClient(['/var/www/html/wp-content']);
+        $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
+        $reflection->getProperty('pull_index_journal')
+            ->getValue($client)
+            ->apply_pending_records();
+
+        $this->assertFileDoesNotExist($inside);
+        $this->assertDirectoryDoesNotExist($this->filesystem_root . '/var/www/html/wp-content');
+        $this->assertFileExists($outside);
+    }
+
+    /**
+     * The index lists a directory root's contents, never the root entry, so a
+     * selected directory has to be recognised through what sits under it.
+     */
+    public function testSelectedDirectoryRootCountsAsPreviouslyIndexed(): void
+    {
+        $this->writeIndex(
+            'remote-index.jsonl',
+            $this->indexLine('/var/www/html/wp-content/themes/x/style.css', 1000, 10)
+        );
+
+        [$client, $reflection] = $this->prepareClient([
+            '/var/www/html/wp-content',
+            '/var/www/html/never-indexed',
+        ]);
+
+        $this->assertSame(
+            ['/var/www/html/wp-content'],
             $reflection->getMethod('previously_indexed_selected_roots')->invoke($client)
         );
     }

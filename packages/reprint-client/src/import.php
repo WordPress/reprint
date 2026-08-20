@@ -7896,6 +7896,7 @@ class ImportClient
                 );
             }
 
+            $export_directories = $this->get_export_directories();
             $has_path = $index_diff->next_path();
             while ($has_path) {
                 $paths_processed = 0;
@@ -7932,7 +7933,8 @@ class ImportClient
                                 $this->derive_remote_deletion_root_from_sparse_index(
                                     $remote_absolute_path,
                                     $index_diff->get_preceding_path_in_new_index(),
-                                    $index_diff->get_following_path_in_new_index()
+                                    $index_diff->get_following_path_in_new_index(),
+                                    $export_directories
                                 );
                             $local_absolute_path =
                                 $this->remove_remote_path_locally(
@@ -8369,6 +8371,7 @@ class ImportClient
      * * original missing path
      * * the nearest path before it in the new index, if any
      * * the nearest path after it in the new index, if any
+     * * the list of directories this pull asked the server to index
      *
      * For example:
      *
@@ -8395,16 +8398,29 @@ class ImportClient
      * The neighboring paths show that `/srv` and `/srv/site` still contain files,
      * but neither path is within `/srv/site/wp-content`.
      *
+     * However, a path can also be missing because this pull never asked about it.
+     * Run with `--only /srv/site/wp-config.php`, the pull sends that one path, so
+     * deleting the file leaves the new index empty and there are no neighbors to
+     * reason from. Nothing then shows that `/srv` and `/srv/site` still hold
+     * files, and the climb would return `/srv` and delete everything under it.
+     *
+     * $export_directories stops that. The climb never rises above the export
+     * directory holding the missing path, because the new index describes what
+     * lies under those directories and says nothing about their parents. An
+     * empty list stops nothing.
+     *
      * @param string      $missing_remote_path           Previously recorded path that is now missing.
      * @param string|null $nearest_existing_path_before  Nearest existing path before the missing path, if any.
      * @param string|null $nearest_existing_path_after   Nearest existing path after the missing path, if any.
+     * @param string[]    $export_directories            get_export_directories(): what this pull asked the server to index.
      *
      * @return string The shallowest missing parent, or the original path when every parent still contains an entry.
      */
     private function derive_remote_deletion_root_from_sparse_index(
         string $missing_remote_path,
         ?string $nearest_existing_path_before,
-        ?string $nearest_existing_path_after
+        ?string $nearest_existing_path_after,
+        array $export_directories
     ): string {
         // Use an invalid path that cannot match any validated remote path so
         // both comparisons below always receive strings.
@@ -8417,10 +8433,26 @@ class ImportClient
         $missing_remote_path_components = wp_unix_path_segments($missing_remote_path);
         $remote_parent_components = [];
         $remote_parent_component_count = count($missing_remote_path_components) - 1;
+        // With --follow-symlinks the pull also indexes wherever a link inside an
+        // export directory points, and that can be anywhere on the remote machine.
+        // No export directory sits above such a path, and nothing here can tell
+        // where its tree starts, so only a path that does sit under one stops early.
+        // Stopping the rest early would leave a deleted target tree half removed,
+        // its emptied directories still on disk.
+        $stop_at_export_directory = $export_directories !== []
+            && path_is_same_as_or_descendant_of($missing_remote_path, $export_directories);
         // Find the shallowest parent absent from both neighboring entries.
         for ($component_index = 0; $component_index < $remote_parent_component_count; ++$component_index) {
             $remote_parent_components[] = $missing_remote_path_components[$component_index];
             $path_prefix = wp_join_unix_paths("/", ...$remote_parent_components);
+            // A parent above every export directory proves nothing: the next remote
+            // index never covered it, so its absence is not evidence of deletion.
+            if (
+                $stop_at_export_directory
+                && !path_is_same_as_or_descendant_of($path_prefix, $export_directories)
+            ) {
+                continue;
+            }
             if (
                 !path_is_same_as_or_descendant_of(
                     $nearest_existing_path_before,
@@ -9832,7 +9864,10 @@ class ImportClient
      * when it can confirm their current absence. A newly typed missing path is
      * still rejected at the endpoint.
      *
-     * @return string[] Selected roots present in the prior remote index.
+     * A root counts as tracked when the prior index holds it or anything under
+     * it, because a directory root appears there only through its contents.
+     *
+     * @return string[] Selected roots the prior remote index covers.
      */
     private function previously_indexed_selected_roots(): array
     {
@@ -9855,8 +9890,16 @@ class ImportClient
                     continue;
                 }
                 $path = base64_decode($entry['path'], true);
-                if ($path !== false) {
-                    unset($remaining[$path]);
+                if ($path === false) {
+                    continue;
+                }
+                // The index lists a directory root's contents rather than the root
+                // entry, so an exact match would never track a selected directory
+                // and its later deletion would be rejected instead of synced.
+                foreach (array_keys($remaining) as $selected_root) {
+                    if (path_is_same_as_or_descendant_of($path, $selected_root)) {
+                        unset($remaining[$selected_root]);
+                    }
                 }
             }
         } finally {
