@@ -409,8 +409,8 @@ class ImportClient
      */
     private $pull_excluded_files_with_path_prefixes = [];
 
-    /** @var string[]|null Selected roots found in the current remote index. */
-    private $previously_indexed_selected_root_paths = null;
+    /** @var string[]|null Memoized get_selected_paths_pulled_before() result. */
+    private $selected_paths_pulled_before = null;
 
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
@@ -7664,9 +7664,9 @@ class ImportClient
         if (!empty($export_dirs)) {
             $params["directory"] = $export_dirs;
         }
-        $missing_roots = $this->previously_indexed_selected_roots();
-        if ($missing_roots !== []) {
-            $params["missing_roots"] = $missing_roots;
+        $paths_pulled_before = $this->get_selected_paths_pulled_before();
+        if ($paths_pulled_before !== []) {
+            $params["pulled_before"] = $paths_pulled_before;
         }
         $url = $this->build_url("file_index", $cursor, $params);
         $context = new StreamingContext();
@@ -9858,30 +9858,41 @@ class ImportClient
     }
 
     /**
-     * Returns selected roots that the prior remote index confirms as tracked.
+     * Returns the selected paths an earlier pull of this site already saw.
      *
-     * The server may represent only these roots as an empty selected result
-     * when it can confirm their current absence. A newly typed missing path is
-     * still rejected at the endpoint.
+     * The server rejects a path in the `file_index` request's `directory`
+     * parameter when that path does not exist, which is what should happen for a
+     * typo like `--only /var/www/htmll`. But a selected path can also be absent
+     * because the source deleted it, and the pull should then remove it locally
+     * rather than fail.
      *
-     * A root counts as tracked when the prior index holds it or anything under
-     * it, because a directory root appears there only through its contents.
+     * Those two cases look identical to the server, so the client adds this list
+     * to the same request as its `pulled_before` parameter. For a path named there
+     * the server neither raises an error nor emits any index entry: the response
+     * simply says nothing about it, and the diff reads that silence as a deletion.
+     * A path absent from the list still raises an error.
      *
-     * @return string[] Selected roots the prior remote index covers.
+     * The saved remote index holds the paths earlier pulls already accounted for.
+     * Matching a selection against it has to accept a descendant, not just the
+     * path itself: a directory with contents has no entry of its own there, since
+     * its descendants already imply it. Only an empty or unreadable directory is
+     * listed in its own right.
+     *
+     * @return string[] Selected paths present in the saved remote index.
      */
-    private function previously_indexed_selected_roots(): array
+    private function get_selected_paths_pulled_before(): array
     {
-        if ($this->previously_indexed_selected_root_paths !== null) {
-            return $this->previously_indexed_selected_root_paths;
+        if ($this->selected_paths_pulled_before !== null) {
+            return $this->selected_paths_pulled_before;
         }
         if ($this->pull_only_files_with_path_prefixes === [] || !is_file($this->remote_index_file)) {
-            $this->previously_indexed_selected_root_paths = [];
-            return $this->previously_indexed_selected_root_paths;
+            $this->selected_paths_pulled_before = [];
+            return $this->selected_paths_pulled_before;
         }
         $remaining = array_fill_keys($this->pull_only_files_with_path_prefixes, true);
         $handle = fopen($this->remote_index_file, 'r');
         if (!is_resource($handle)) {
-            throw new RuntimeException("Failed to open the current remote index for selected roots.");
+            throw new RuntimeException("Failed to open the saved remote index for selected paths.");
         }
         try {
             while ($remaining !== [] && ($line = fgets($handle)) !== false) {
@@ -9905,11 +9916,11 @@ class ImportClient
         } finally {
             fclose($handle);
         }
-        $this->previously_indexed_selected_root_paths = array_values(array_diff(
+        $this->selected_paths_pulled_before = array_values(array_diff(
             $this->pull_only_files_with_path_prefixes,
             array_keys($remaining)
         ));
-        return $this->previously_indexed_selected_root_paths;
+        return $this->selected_paths_pulled_before;
     }
 
     /**

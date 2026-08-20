@@ -407,7 +407,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $this->assertContains('/mnt/uploads', $this->readRemoteIndexEntryPaths());
     }
 
-    public function testOnlyPreviouslyIndexedRootsMayBeReportedMissing(): void
+    public function testOnlyPathsPulledBeforeMayBeReportedMissing(): void
     {
         $this->writeIndex(
             'remote-index.jsonl',
@@ -421,7 +421,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 
         $this->assertSame(
             ['/wp-config.php'],
-            $reflection->getMethod('previously_indexed_selected_roots')->invoke($client)
+            $reflection->getMethod('get_selected_paths_pulled_before')->invoke($client)
         );
     }
 
@@ -480,7 +480,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
      * The index lists a directory root's contents, never the root entry, so a
      * selected directory has to be recognised through what sits under it.
      */
-    public function testSelectedDirectoryRootCountsAsPreviouslyIndexed(): void
+    public function testSelectedDirectoryCountsWhenTheIndexHoldsItsContents(): void
     {
         $this->writeIndex(
             'remote-index.jsonl',
@@ -494,7 +494,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 
         $this->assertSame(
             ['/var/www/html/wp-content'],
-            $reflection->getMethod('previously_indexed_selected_roots')->invoke($client)
+            $reflection->getMethod('get_selected_paths_pulled_before')->invoke($client)
         );
     }
 }

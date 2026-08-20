@@ -1315,10 +1315,14 @@ function resolve_file_index_roots(array $config): array
         clearstatcache(true, $requested_path);
         $stat = @lstat($requested_path);
         if ($stat === false) {
-            $missing_roots = isset($config["missing_roots"]) && is_array($config["missing_roots"])
-                ? $config["missing_roots"]
+            // The client sends `pulled_before` for selected paths an earlier pull
+            // already saw. Absence there means the source deleted the path, so it
+            // becomes a missing root instead of an error. Anything else absent is
+            // a bad path and still throws below.
+            $paths_pulled_before = isset($config["pulled_before"]) && is_array($config["pulled_before"])
+                ? $config["pulled_before"]
                 : [];
-            if (in_array($requested_path, $missing_roots, true)) {
+            if (in_array($requested_path, $paths_pulled_before, true)) {
                 $roots[] = [
                     "requested_path" => $requested_path,
                     "resolved_path" => null,
