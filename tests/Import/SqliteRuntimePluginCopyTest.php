@@ -60,6 +60,14 @@ class SqliteRuntimePluginCopyTest extends TestCase
         $this->assertFileExists($database_dir . '/load.php');
     }
 
+    public function testCopyNormalizesTrailingOutputDirectorySlashes(): void
+    {
+        $copied = \copy_sqlite_plugin($this->pluginSource(), $this->tempDir . '///');
+
+        $this->assertSame($this->tempDir . '/sqlite-database-integration', $copied);
+        $this->assertFileExists($copied . '/wp-includes/database/version.php');
+    }
+
     public function testCopyRepairsExistingOutputMissingDatabaseDriver(): void
     {
         $target_database_dir = $this->tempDir . '/sqlite-database-integration/wp-includes/database';
@@ -80,6 +88,20 @@ class SqliteRuntimePluginCopyTest extends TestCase
             $this->tempDir . '/sqlite-database-integration',
             $copied,
         );
+        $this->assertFileExists($copied . '/wp-includes/database/version.php');
+    }
+
+    public function testDatabaseDriverSourceSupportsPharStreamPaths(): void
+    {
+        $archive_path = $this->tempDir . '/sqlite-plugin.tar';
+        $plugin_path = 'packages/plugin-sqlite-database-integration';
+        $archive = new \PharData($archive_path);
+        $archive[$plugin_path . '/wp-includes/database/version.php'] = '<?php';
+        unset($archive);
+
+        $source_dir = 'phar://' . $archive_path . '/' . $plugin_path;
+        $copied = \copy_sqlite_plugin($source_dir, $this->tempDir);
+
         $this->assertFileExists($copied . '/wp-includes/database/version.php');
     }
 }
