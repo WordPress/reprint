@@ -186,8 +186,20 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $this->getDumpSQL(['max_statement_size' => 8 * 1024 * 1024]);
     }
 
-    /** A multipart boundary may split one larger INSERT between row fragments. */
-    public function testUnkeyedInsertMayExceedPartBodyLimit(): void
+    /**
+     * A multi-row INSERT must close before its SQL exceeds one part body.
+     *
+     * The exporter limits each SQL multipart part to 16 MiB, but one INSERT
+     * may span several parts. A part ending inside that statement cannot close
+     * the client's current SQL group. Without a statement limit, many bounded
+     * parts can therefore become one SQL group which db-apply reads into one
+     * PHP string.
+     *
+     * Each row below fits comfortably in one part. Together, the formatted
+     * rows exceed one part body. The producer must start another INSERT, and
+     * the resulting dump must still restore all 160 rows.
+     */
+    public function testUnkeyedInsertDoesNotExceedPartBodyLimit(): void
     {
         $this->pdo->exec("
             CREATE TABLE unkeyed_large_insert (
@@ -208,16 +220,32 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $fragments = $this->collectAllFragments($producer);
         $sql = implode('', $fragments);
 
+        $insert_prefix = 'INSERT INTO `unkeyed_large_insert` ';
+        $current_insert_bytes = null;
+        $insert_statement_bytes = [];
+        foreach ($fragments as $fragment) {
+            if (strncmp($fragment, $insert_prefix, strlen($insert_prefix)) === 0) {
+                $current_insert_bytes = 0;
+            }
+            if ($current_insert_bytes !== null) {
+                $current_insert_bytes += strlen($fragment);
+                if (substr($fragment, -1) === ';') {
+                    $insert_statement_bytes[] = $current_insert_bytes;
+                    $current_insert_bytes = null;
+                }
+            }
+        }
+
         $this->assertGreaterThan(
             MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES,
-            strlen($sql)
+            array_sum($insert_statement_bytes),
+            'The formatted rows must exceed one part body for this regression test.'
         );
-        foreach ($fragments as $fragment) {
-            $this->assertLessThan(
-                MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES,
-                strlen($fragment)
-            );
-        }
+        $this->assertLessThanOrEqual(
+            MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES,
+            max($insert_statement_bytes),
+            'Every complete INSERT must fit within one SQL part body.'
+        );
 
         $importPdo = $this->executeDumpInNewDatabase($sql);
         $rowCount = $importPdo->query(
