@@ -45,10 +45,10 @@ class MySQLDumpProducer
     /**
      * Maximum decoded SQL body bytes for one multipart part.
      *
-     * The producer uses this limit to split or reject one oversized row
-     * fragment. The exporter uses the same limit to stop grouping fragments
-     * before the complete multipart part becomes oversized, then checks its
-     * final byte length before writing it.
+     * The producer closes a multi-row INSERT at this limit, or splits or
+     * rejects one oversized row fragment. The exporter uses the same limit to
+     * stop grouping fragments before the complete multipart part becomes
+     * oversized, then checks its final byte length before writing it.
      */
     public const MAX_SQL_PART_BODY_BYTES = 16 * 1024 * 1024;
 
@@ -111,6 +111,17 @@ class MySQLDumpProducer
 
     /** @var int */
     private $current_statement_size = 0;
+
+    /**
+     * Reader cursor from before a fetched row which must begin the next INSERT.
+     *
+     * The live producer retains that row in memory. A serialized producer
+     * cursor uses this earlier reader position so a new process fetches the
+     * row again instead of skipping it.
+     *
+     * @var array|null
+     */
+    private $reader_cursor_before_retained_record = null;
 
     /**
      * @param PDO $db Database connection — either a real PDO (MySQL) or a
@@ -240,9 +251,12 @@ class MySQLDumpProducer
      */
     private function emit_insert_header()
     {
-        if (!$this->row_reader->next_record()) {
-            $this->state = self::STATE_NEXT_TABLE;
-            return false;
+        $this->rows_in_batch = 0;
+        if ($this->row_reader->get_current_record() === null) {
+            if (!$this->row_reader->next_record()) {
+                $this->state = self::STATE_NEXT_TABLE;
+                return false;
+            }
         }
 
         $column_list = implode(
@@ -260,9 +274,10 @@ class MySQLDumpProducer
             $this->row_reader->get_current_record(),
             $this->current_statement_size
         );
-        $this->current_statement_size += strlen($first_row_sql) + 1;
+        $this->current_statement_size += strlen($first_row_sql);
 
         $this->row_reader->clear_current_record();
+        $this->reader_cursor_before_retained_record = null;
         $this->rows_in_batch = 1;
 
         // Oversized updates require closing this INSERT with a semicolon so the
@@ -294,6 +309,7 @@ class MySQLDumpProducer
     /** Emits one row with a leading comma, or closes the open INSERT when no row remains. */
     private function emit_row()
     {
+        $reader_cursor_before_current_record = $this->row_reader->get_cursor_state();
         if (!$this->row_reader->next_record()) {
             $this->current_sql_fragment = $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
@@ -301,12 +317,34 @@ class MySQLDumpProducer
             return true;
         }
 
+        $row_tuple_bytes = $this->estimate_formatted_row_tuple_bytes(
+            $this->row_reader->get_current_record()
+        );
+        $maximum_insert_statement_bytes = min(
+            $this->max_statement_size,
+            self::MAX_SQL_PART_BODY_BYTES
+        );
+        if (
+            $this->current_statement_size + 1 + $row_tuple_bytes >
+                $maximum_insert_statement_bytes
+        ) {
+            // This row fits as the first row of another INSERT, but not in the
+            // current one. Keep it in memory for the live producer. A resumed
+            // producer uses the earlier cursor and fetches it again.
+            $this->reader_cursor_before_retained_record = $reader_cursor_before_current_record;
+            $this->current_sql_fragment = $this->on_duplicate_key() . ';';
+            $this->current_statement_size = 0;
+            $this->rows_in_batch = 0;
+            $this->state = self::STATE_START_INSERT;
+            return true;
+        }
+
         $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
         $row_sql = $this->format_row_for_insert(
             $this->row_reader->get_current_record(),
-            strlen($this->on_duplicate_key())
+            strlen($this->on_duplicate_key()) + 1
         );
-        $this->current_statement_size += strlen($row_sql) + 2;
+        $this->current_statement_size += strlen($row_sql) + 1;
         $this->row_reader->clear_current_record();
         $this->rows_in_batch++;
 
@@ -482,6 +520,7 @@ class MySQLDumpProducer
             $this->oversized_queue = [];
             $this->oversized_pk_values = null;
             $this->current_statement_size = 0;
+            $this->reader_cursor_before_retained_record = null;
         }
         return $has_table;
     }
@@ -501,7 +540,8 @@ class MySQLDumpProducer
      */
     public function get_reentrancy_cursor()
     {
-        $cursor_data = $this->row_reader->get_cursor_state();
+        $cursor_data = $this->reader_cursor_before_retained_record ??
+            $this->row_reader->get_cursor_state();
         unset(
             $cursor_data["current_row"],
             $cursor_data["current_row_ends_query_batch"],
@@ -768,13 +808,19 @@ class MySQLDumpProducer
             $estimated_sizes[$col] = $this->estimate_formatted_size($value, $data_type);
         }
 
-        // Estimate the size of "(val1,val2,val3)," — values + commas between them + parens + terminator
-        $row_size_est = array_sum($estimated_sizes) + count($estimated_sizes) + 3;
-        $projected_statement_size = $this->current_statement_size + $row_size_est;
-        $projected_fragment_size = $sql_fragment_fixed_bytes + $row_size_est;
+        $row_tuple_bytes = $this->estimate_formatted_row_tuple_bytes($row);
+        $row_separator_bytes = $this->rows_in_batch > 0 ? 1 : 0;
+        $maximum_insert_statement_bytes = min(
+            $this->max_statement_size,
+            self::MAX_SQL_PART_BODY_BYTES
+        );
+        $projected_statement_size =
+            $this->current_statement_size + $row_separator_bytes + $row_tuple_bytes;
+        $projected_fragment_size =
+            $sql_fragment_fixed_bytes + $row_separator_bytes + $row_tuple_bytes;
 
         if (
-            $projected_statement_size <= $this->max_statement_size &&
+            $projected_statement_size <= $maximum_insert_statement_bytes &&
             $projected_fragment_size <= self::MAX_SQL_PART_BODY_BYTES
         ) {
             $formatted_values = [];
@@ -821,7 +867,7 @@ class MySQLDumpProducer
         $chunked_columns = [];
 
         $excess = max(
-            $projected_statement_size - $this->max_statement_size,
+            $projected_statement_size - $maximum_insert_statement_bytes,
             $projected_fragment_size - self::MAX_SQL_PART_BODY_BYTES
         );
         $saved_bytes = 0;
@@ -881,6 +927,8 @@ class MySQLDumpProducer
         }
 
         if (
+            $projected_statement_size - $saved_bytes >
+                $maximum_insert_statement_bytes ||
             $projected_fragment_size - $saved_bytes >
                 self::MAX_SQL_PART_BODY_BYTES ||
             ($skipped_non_byte_bounded_value && $excess > 0)
@@ -910,6 +958,24 @@ class MySQLDumpProducer
         }
 
         return "(" . implode(",", array_values($formatted_values)) . ")";
+    }
+
+    /** Returns the exact SQL bytes used by one formatted VALUES tuple. */
+    private function estimate_formatted_row_tuple_bytes($row)
+    {
+        $tuple_bytes = 2;
+        $column_index = 0;
+        foreach ($this->row_reader->get_current_column_names() as $column) {
+            if ($column_index > 0) {
+                ++$tuple_bytes;
+            }
+            $tuple_bytes += $this->estimate_formatted_size(
+                $row[$column] ?? null,
+                $this->row_reader->get_data_type($column)
+            );
+            ++$column_index;
+        }
+        return $tuple_bytes;
     }
 
     /**

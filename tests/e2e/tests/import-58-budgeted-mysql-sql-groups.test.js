@@ -1,6 +1,6 @@
 /**
- * Direct MySQL output keeps fragment and byte budgets while ending a SQL
- * group before the next table replacement starts.
+ * SQL groups expose every usable statement checkpoint while keeping both
+ * multipart bodies and the bytes between checkpoints bounded.
  */
 import { describe, it, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -33,7 +33,10 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
                     `CREATE TABLE \`${firstTable}\` (`
                     + '`id` INT NOT NULL PRIMARY KEY, `value` VARCHAR(64) NOT NULL) ENGINE=InnoDB'
                 );
-                const rows = Array.from({ length: 600 }, (_, index) => [
+                // One table comment plus three complete 250-row INSERTs uses
+                // 751 fragments. A 1,000-fragment batch then ends after 249
+                // rows of the fourth INSERT, leaving an unfinished suffix.
+                const rows = Array.from({ length: 1001 }, (_, index) => [
                     index + 1,
                     `row-${index + 1}`,
                 ]);
@@ -53,13 +56,13 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
                     `CREATE TABLE \`${boundedPayloadTable}\` (`
                     + '`id` INT NOT NULL PRIMARY KEY, `payload` MEDIUMBLOB NOT NULL) ENGINE=InnoDB'
                 );
-                // The reader closes its first INSERT after 250 rows. The next
-                // INSERT makes the grouped SQL body cross 16 MiB, so the body
-                // limit must end a part while that second INSERT is still open.
-                for (let id = 1; id <= 400; id++) {
+                // These 200 rows remain inside one 250-row query batch, but
+                // their formatted SQL is about 21 MiB. The producer must close
+                // the INSERT on bytes before the query batch ends.
+                for (let id = 1; id <= 200; id++) {
                     await connection.query(
                         `INSERT INTO \`${boundedPayloadTable}\` (id, payload) `
-                        + 'VALUES (?, REPEAT(CHAR(65 + MOD(?, 26)), 32 * 1024))',
+                        + 'VALUES (?, REPEAT(CHAR(65 + MOD(?, 26)), 80 * 1024))',
                         [id, id],
                     );
                 }
@@ -109,14 +112,18 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
         }
     }, 300000);
 
-    async function sqlParts(fragmentsPerBatch) {
+    async function sqlParts(fragmentsPerBatch, cursor = null) {
+        const request = {
+            directory: getSiteDir(site),
+            fragments_per_batch: fragmentsPerBatch,
+            skip_tables: skippedTables,
+        };
+        if (cursor !== null) {
+            request.cursor = cursor;
+        }
         const response = await apiRequest(site, 'sql_chunk', {}, {
             method: 'POST',
-            body: JSON.stringify({
-                directory: getSiteDir(site),
-                fragments_per_batch: fragmentsPerBatch,
-                skip_tables: skippedTables,
-            }),
+            body: JSON.stringify(request),
         });
         assert.equal(
             response.status,
@@ -162,8 +169,28 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
         }
     }
 
-    it('allows the existing fragment budget to group complete INSERT statements', async () => {
+    function assertBoundedBytesBetweenCheckpoints(parts) {
+        let bytesSinceCheckpoint = 0;
+        for (const part of parts) {
+            bytesSinceCheckpoint += Buffer.byteLength(part.body);
+            assert.ok(
+                bytesSinceCheckpoint <= 2 * maximumSqlPartBodyBytes,
+                `SQL group reached ${bytesSinceCheckpoint} bytes before its next checkpoint`,
+            );
+            if (part.headers['x-query-complete'] === '1') {
+                bytesSinceCheckpoint = 0;
+            }
+        }
+        assert.equal(
+            bytesSinceCheckpoint,
+            0,
+            'A complete SQL response must end at a statement checkpoint',
+        );
+    }
+
+    it('checkpoints a complete SQL prefix before its unfinished batch suffix', async () => {
         const parts = await sqlParts(1000);
+        assertBoundedBytesBetweenCheckpoints(parts);
         const firstTableInsertPart = parts.find(
             part => part.body.includes(`INSERT INTO \`${firstTable}\``)
         );
@@ -172,6 +199,36 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
             firstTableInsertPart.body.match(new RegExp('INSERT INTO `' + firstTable + '`', 'g'))?.length,
             3,
             'Expected the three producer INSERT statements in one budgeted SQL part',
+        );
+        assert.equal(
+            firstTableInsertPart.headers['x-query-complete'],
+            '1',
+            'The complete prefix should expose a cursor before the unfinished suffix',
+        );
+        const firstTableInsertPartIndex = parts.indexOf(firstTableInsertPart);
+        const incompleteSuffixPart = parts[firstTableInsertPartIndex + 1];
+        assert.equal(
+            incompleteSuffixPart?.headers['x-query-complete'],
+            '0',
+            'The unfinished INSERT suffix should follow the complete prefix',
+        );
+        assert.ok(
+            incompleteSuffixPart.body.includes(`INSERT INTO \`${firstTable}\``),
+            'The unfinished suffix should contain the next INSERT statement',
+        );
+        assert.ok(
+            !incompleteSuffixPart.body.includes(';'),
+            'The unfinished suffix must not retain a complete statement',
+        );
+        const resumedParts = await sqlParts(
+            1000,
+            firstTableInsertPart.headers['x-cursor'],
+        );
+        assertBoundedBytesBetweenCheckpoints(resumedParts);
+        assert.equal(
+            resumedParts.map(part => part.body).join(''),
+            parts.slice(firstTableInsertPartIndex + 1).map(part => part.body).join(''),
+            'The complete-prefix cursor must resume at the unfinished suffix',
         );
         assert.ok(
             !firstTableInsertPart.body.includes(`DROP TABLE IF EXISTS \`${secondTable}\``),
@@ -187,7 +244,7 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
         );
     });
 
-    it('bounds grouped SQL payloads and resumes before the deferred fragment', async () => {
+    it('bounds INSERT statements and resumes at their byte checkpoint', async () => {
         const requestBody = {
             directory: getSiteDir(site),
             fragments_per_batch: 1000,
@@ -208,6 +265,12 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
         const parts = response.chunks.filter(
             chunk => chunk.headers['x-chunk-type'] === 'sql'
         );
+        assert.ok(
+            parts.reduce((bytes, part) => bytes + Buffer.byteLength(part.body), 0)
+                > maximumSqlPartBodyBytes,
+            'The fixture must exceed one SQL part body',
+        );
+        assertBoundedBytesBetweenCheckpoints(parts);
         const completion = response.chunks.find(
             chunk => chunk.headers['x-chunk-type'] === 'completion'
         );
@@ -220,16 +283,16 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
         const firstInsertPart = parts[firstInsertPartIndex];
         assert.equal(
             firstInsertPart.headers['x-query-complete'],
-            '0',
-            'The byte boundary should split the INSERT before its final row',
+            '1',
+            'The INSERT byte limit should expose a checkpoint before the 250-row batch ends',
         );
         const expectedResumedSql = parts
             .slice(firstInsertPartIndex + 1)
             .map(part => part.body)
             .join('');
         assert.ok(
-            expectedResumedSql.includes('ON DUPLICATE KEY UPDATE'),
-            'Expected the rest of the INSERT in following SQL parts',
+            expectedResumedSql.includes(`INSERT INTO \`${boundedPayloadTable}\``),
+            'Rows after the byte checkpoint should begin another INSERT',
         );
 
         const encodedCursor = firstInsertPart.headers['x-cursor'];
@@ -253,10 +316,15 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
             .filter(chunk => chunk.headers['x-chunk-type'] === 'sql')
             .map(part => part.body)
             .join('');
+        assertBoundedBytesBetweenCheckpoints(
+            resumedResponse.chunks.filter(
+                chunk => chunk.headers['x-chunk-type'] === 'sql'
+            ),
+        );
         assert.equal(
             resumedSql,
             expectedResumedSql,
-            'Resume must begin with the fragment deferred by the byte boundary',
+            'Resume must begin with the unfinished INSERT suffix after the byte checkpoint',
         );
     }, 300000);
 

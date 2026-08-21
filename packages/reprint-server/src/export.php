@@ -883,9 +883,28 @@ function endpoint_sql_chunk(
         $gz->sync();
     }
 
+    $emit_sql_multipart_part = function (
+        string $sql,
+        bool $query_complete,
+        string $cursor
+    ) use ($gz, $boundary): void {
+        $gz->write(
+            "--{$boundary}\r\n" .
+            "Content-Type: application/sql\r\n" .
+            "Content-Length: " . strlen($sql) . "\r\n" .
+            "X-Chunk-Type: sql\r\n" .
+            "X-Query-Complete: " . ($query_complete ? "1" : "0") . "\r\n" .
+            "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+            "\r\n"
+        );
+        $gz->write($sql);
+        $gz->write("\r\n");
+        $gz->sync();
+    };
+
     // -- Stream SQL fragments --
     // Pull SQL fragments from the producer in batches, writing each batch
-    // as a multipart part. Stop when the producer is exhausted or the
+    // as one or two multipart parts. Stop when the producer is exhausted or the
     // resource budget (time/memory) runs out.
     $batches_processed = 0;
     $sql_bytes_processed = 0;
@@ -903,22 +922,31 @@ function endpoint_sql_chunk(
             $budget->has_remaining()
         ) {
             $sql_fragments = [];
-            $sql_part_body_bytes = 0;
+            $sql_batch_bytes = 0;
             $cursor = null;
-            /** @var string|null Cursor after the last fragment included in this part. */
+            /** @var string|null Cursor after the last fragment included in this batch. */
             $last_fragment_cursor = null;
             $sql_ends_with_complete_statement = false;
+            $complete_prefix_fragment_count = 0;
+            $complete_prefix_byte_length = 0;
+            /** @var string|null Cursor after the last complete statement in this batch. */
+            $complete_prefix_cursor = null;
 
             $i = 0;
             $part_must_end = false;
             if ($deferred_fragment !== null) {
                 $sql_fragments[] = $deferred_fragment;
-                $sql_part_body_bytes = strlen($deferred_fragment);
+                $sql_batch_bytes = strlen($deferred_fragment);
                 $cursor = $deferred_fragment_cursor;
                 $last_fragment_cursor = $deferred_fragment_cursor;
                 $trimmed_fragment = rtrim($deferred_fragment);
                 $sql_ends_with_complete_statement =
                     $trimmed_fragment !== '' && substr($trimmed_fragment, -1) === ';';
+                if ($sql_ends_with_complete_statement) {
+                    $complete_prefix_fragment_count = 1;
+                    $complete_prefix_byte_length = $sql_batch_bytes;
+                    $complete_prefix_cursor = $deferred_fragment_cursor;
+                }
                 $part_must_end = $deferred_fragment_must_be_its_own_part;
                 $i = 1;
                 $deferred_fragment = null;
@@ -948,11 +976,11 @@ function endpoint_sql_chunk(
 
                     if (
                         !empty($sql_fragments) &&
-                        $sql_part_body_bytes + $fragment_bytes >
+                        $sql_batch_bytes + $fragment_bytes >
                             MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES
                     ) {
                         // The producer has already advanced. Retain this fragment
-                        // and its cursor while this part keeps its earlier cursor.
+                        // and its cursor while this batch keeps its earlier cursor.
                         $deferred_fragment = $fragment;
                         $deferred_fragment_cursor = $fragment_cursor;
                         $deferred_fragment_must_be_its_own_part =
@@ -978,7 +1006,7 @@ function endpoint_sql_chunk(
                     }
 
                     $sql_fragments[] = $fragment;
-                    $sql_part_body_bytes += $fragment_bytes;
+                    $sql_batch_bytes += $fragment_bytes;
                     $last_fragment_cursor = $fragment_cursor;
                     $i++;
 
@@ -987,6 +1015,9 @@ function endpoint_sql_chunk(
                         $trimmed_fragment !== '' && substr($trimmed_fragment, -1) === ';';
                     if ($sql_ends_with_complete_statement) {
                         $cursor = $fragment_cursor;
+                        $complete_prefix_fragment_count = count($sql_fragments);
+                        $complete_prefix_byte_length = $sql_batch_bytes;
+                        $complete_prefix_cursor = $fragment_cursor;
                     }
 
                     if ($reader->current_fragment_must_be_its_own_part()) {
@@ -1005,50 +1036,76 @@ function endpoint_sql_chunk(
                 }
             }
 
-            $sql = implode("", $sql_fragments);
-            if ($sql === '') {
+            if (empty($sql_fragments) || $sql_batch_bytes === 0) {
                 break;
             }
-            // Does this chunk end on a complete statement boundary?
+            // Does this assembled SQL body end on a complete statement boundary?
             // A complete SQL statement ends with ";"; a fragment from an open
             // INSERT does not.
-            $trimmed = rtrim($sql);
-            $query_complete = $trimmed !== "" && substr($trimmed, -1) === ";";
+            $query_complete = $sql_ends_with_complete_statement;
             if (!$query_complete || $cursor === null) {
                 $cursor = $last_fragment_cursor;
             }
 
+            $test_sql = null;
             // E2E test hook: before SQL batch is emitted
             if (getenv('SITE_EXPORT_TEST_MODE')) {
-                $hook_args = [&$sql, $cursor];
+                $test_sql = implode("", $sql_fragments);
+                $hook_args = [&$test_sql, $cursor];
                 _e2e_call_hook('test_hook_before_sql_batch', $hook_args);
             }
 
-            $sql_part_body_bytes = strlen($sql);
+            if ($test_sql !== null) {
+                $sql_batch_bytes = strlen($test_sql);
+            }
             if (
-                $sql_part_body_bytes > MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES
+                $sql_batch_bytes > MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES
             ) {
                 throw new RuntimeException(
-                    "The decoded SQL part body is {$sql_part_body_bytes} bytes; " .
+                    "The decoded SQL part body is {$sql_batch_bytes} bytes; " .
                     "the limit is " .
                     MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES .
                     " bytes."
                 );
             }
-            $sql_bytes_processed += $sql_part_body_bytes;
+            $sql_bytes_processed += $sql_batch_bytes;
 
-            $gz->write(
-                "--{$boundary}\r\n" .
-                "Content-Type: application/sql\r\n" .
-                "Content-Length: " . $sql_part_body_bytes . "\r\n" .
-                "X-Chunk-Type: sql\r\n" .
-                "X-Query-Complete: " . ($query_complete ? "1" : "0") . "\r\n" .
-                "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                "\r\n"
+            if (
+                !$query_complete
+                && $complete_prefix_fragment_count > 0
+                && $complete_prefix_cursor !== null
+            ) {
+                // Expose the last complete statement boundary before the
+                // incomplete suffix. The importer can save that cursor instead
+                // of retaining earlier statements with the suffix.
+                $sql = $test_sql !== null
+                    ? substr($test_sql, 0, $complete_prefix_byte_length)
+                    : implode(
+                        "",
+                        array_slice($sql_fragments, 0, $complete_prefix_fragment_count)
+                    );
+                $emit_sql_multipart_part(
+                    $sql,
+                    true,
+                    $complete_prefix_cursor
+                );
+                unset($sql);
+
+                $sql = $test_sql !== null
+                    ? substr($test_sql, $complete_prefix_byte_length)
+                    : implode(
+                        "",
+                        array_slice($sql_fragments, $complete_prefix_fragment_count)
+                    );
+            } else {
+                $sql = $test_sql ?? implode("", $sql_fragments);
+            }
+
+            $emit_sql_multipart_part(
+                $sql,
+                $query_complete,
+                $cursor
             );
-            $gz->write($sql);
-            $gz->write("\r\n");
-            $gz->sync();
 
             $batches_processed++;
 

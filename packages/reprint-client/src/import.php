@@ -6889,36 +6889,6 @@ class ImportClient
     }
 
     /**
-     * Parses one exporter group and applies URL replacements to its statements.
-     *
-     * @return array { Rewritten SQL followed by the number of statements. }
-     */
-    private function prepare_mysql_sql_group(
-        string $sql,
-        ?SqlStatementRewriter $stmt_rewriter
-    ): array {
-        $query_stream = new \WP_MySQL_FastQueryStream();
-        $query_stream->append_sql($sql);
-        $query_stream->mark_input_complete();
-        $mysql_sql = "";
-        $statement_count = 0;
-        while ($query_stream->next_query()) {
-            $query = $query_stream->get_query();
-            if ($stmt_rewriter !== null) {
-                $query = $stmt_rewriter->rewrite($query);
-            }
-            $mysql_sql .= $query . "\n";
-            ++$statement_count;
-        }
-        if ($statement_count === 0) {
-            throw new RuntimeException(
-                "db.sql contains an SQL group with no complete statement. Run db-pull again.",
-            );
-        }
-        return [$mysql_sql, $statement_count];
-    }
-
-    /**
      * Executes one complete exporter group and saves its next position in the target.
      *
      * @param DatabaseConnection $connection Open target connection.
@@ -6935,11 +6905,26 @@ class ImportClient
         ?SqlStatementRewriter $stmt_rewriter = null
     ): int {
         if ($target_engine === 'mysql') {
-            [$mysql_sql, $statement_count] = $this->prepare_mysql_sql_group(
-                $sql,
-                $stmt_rewriter,
-            );
-            $connection->exec($mysql_sql);
+            $query_stream = new \WP_MySQL_FastQueryStream();
+            $query_stream->append_sql($sql);
+            $query_stream->mark_input_complete();
+            $statement_count = 0;
+            while ($query_stream->next_query()) {
+                $query = $query_stream->get_query();
+                if ($stmt_rewriter !== null) {
+                    $query = $stmt_rewriter->rewrite($query);
+                }
+                // The exporter applies its packet-size cap to each statement.
+                // Keep each MySQL command within that cap even when one
+                // resumable group contains several complete statements.
+                $connection->exec($query);
+                ++$statement_count;
+            }
+            if ($statement_count === 0) {
+                throw new RuntimeException(
+                    "db.sql contains an SQL group with no complete statement. Run db-pull again.",
+                );
+            }
             $this->save_database_import_position(
                 $connection,
                 $source_hash,
