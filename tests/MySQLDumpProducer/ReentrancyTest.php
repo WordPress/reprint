@@ -316,6 +316,84 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         $this->assertGreaterThan(0, count($insertFragments));
     }
 
+    /** A cursor at a byte-driven INSERT boundary must not skip the retained next row. */
+    public function testResumeAfterInsertByteLimitRetainsNextRow(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE byte_limited_resume (
+                id INT NOT NULL PRIMARY KEY,
+                payload MEDIUMBLOB NOT NULL
+            )
+        ");
+
+        $payloads = [];
+        $statement = $this->pdo->prepare(
+            "INSERT INTO byte_limited_resume (id, payload) VALUES (?, ?)"
+        );
+        for ($id = 1; $id <= 4; ++$id) {
+            $payloads[$id] = "payload-{$id}-" . str_repeat(chr(96 + $id), 700);
+            $statement->execute([$id, $payloads[$id]]);
+        }
+
+        // Two formatted rows fit below this limit. Fetching row 3 closes the
+        // current INSERT and retains that row for the next INSERT.
+        $options = [
+            "batch_size" => 250,
+            "max_statement_size" => 2500,
+        ];
+        $producer = $this->createProducer($options);
+        $fragments = [];
+        $insert_started = false;
+        while ($producer->next_sql_fragment()) {
+            $fragment = $producer->get_sql_fragment();
+            $fragments[] = $fragment;
+            if (strpos($fragment, "INSERT INTO `byte_limited_resume`") === 0) {
+                $insert_started = true;
+            }
+            if (
+                $insert_started &&
+                substr(rtrim($fragment), -1) === ";"
+            ) {
+                break;
+            }
+        }
+
+        $cursor = $producer->get_reentrancy_cursor();
+        $this->assertStringNotContainsString(
+            base64_encode($payloads[3]),
+            $cursor,
+            "The cursor must store the position before the retained row, not the row itself."
+        );
+
+        $options["cursor"] = $cursor;
+        $resumed_producer = $this->createProducer($options);
+        $fragments = array_merge(
+            $fragments,
+            $this->collectAllFragments($resumed_producer)
+        );
+        $sql = implode("", $fragments);
+
+        $this->assertSame(
+            2,
+            substr_count($sql, "INSERT INTO `byte_limited_resume`"),
+            "The byte limit must split these four rows into two INSERT statements."
+        );
+        foreach ($payloads as $payload) {
+            $this->assertSame(
+                1,
+                substr_count($sql, base64_encode($payload)),
+                "Every row must be emitted exactly once across the resume boundary."
+            );
+        }
+
+        $importPdo = $this->executeDumpInNewDatabase($sql);
+        $this->assertDatabasesEqual(
+            $this->pdo,
+            $importPdo,
+            ["byte_limited_resume"]
+        );
+    }
+
     /**
      * Test very small batch size with many iterations.
      */

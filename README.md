@@ -410,11 +410,19 @@ The three modes:
 |------|-------------|-------------|
 | `file` (default) | Writes SQL to `$STATE_DIR/db.sql` | `db.sql` |
 | `stdout` | Streams SQL to stdout, progress/status goes to stderr | none |
-| `mysql` | Connects via `mysqli::multi_query()` and executes statements as they arrive | none |
+| `mysql` | Connects through mysqli and executes complete statements one at a time | none |
 
 When a source response stops mid-stream, the same importer asks for the
-remaining SQL and keeps an unfinished statement in memory. Direct MySQL
-output stores the last committed cursor in the target table
+remaining SQL and keeps an unfinished statement in memory. Each decoded SQL
+multipart body is at most 16 MiB. Each INSERT statement is also at most 16 MiB.
+When a batch contains complete statements followed by an unfinished statement,
+the source sends the complete prefix first so the importer can save its cursor.
+That split can leave at most 16 MiB after the checkpoint, and finishing the
+current bounded INSERT can add at most another 16 MiB. The next complete
+checkpoint is therefore at most 32 MiB away. A `db.sql` group adds one
+separator newline before its cursor marker.
+
+Direct MySQL output stores the last committed group cursor in the target table
 `__reprint_db_pull_progress_<uuid>`. The UUID makes an accidental name clash
 unlikely and changes whenever the table schema changes. Reprint logs and excludes
 that internal name from the source dump.
@@ -425,18 +433,20 @@ group at a time and sends it through the same database importer for MySQL and
 SQLite. The target stores the exporter cursor and matching `db.sql` byte offset.
 A replacement process reads that row and seeks directly to the next group.
 
-Existing SQL statement-size, fragment, time, and memory budgets still decide
-how much SQL belongs to a group. For transactional target tables, the group and
-its next cursor are committed together. SQLite uses this transaction for every
-group. Table replacement and oversized-value updates remain separate groups. If
-a MySQL process stops, its replacement waits for the old target connection,
-reruns `db-session-setup.sql`, and continues from the cursor stored in MySQL. A
-repeated INSERT skips rows identified by a non-null unique key, so this also
-works for keyed MyISAM tables. Reprint cannot continue a nontransactional table
-without such a key, or while an oversized value is being appended in separate
-UPDATE statements; those cases require aborting and starting the database
-import again. After `db-apply` finishes, it removes its internal cursor table
-from the imported database.
+For direct MySQL output and later `db-apply`, the MySQL importer executes the
+statements in a complete group one at a time. It stores the group cursor only
+after every statement in that group succeeds.
+
+For transactional target tables, the group and its next cursor are committed
+together. SQLite uses this transaction for every group. Table replacement and
+oversized-value updates remain separate groups. If a MySQL process stops, its
+replacement waits for the old target connection, reruns `db-session-setup.sql`,
+and continues from the cursor stored in MySQL. A repeated INSERT skips rows
+identified by a non-null unique key, so this also works for keyed MyISAM tables.
+Reprint cannot continue a nontransactional table without such a key, or while
+an oversized value is being appended in separate UPDATE statements; those cases
+require aborting and starting the database import again. After `db-apply`
+finishes, it removes its internal cursor table from the imported database.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
