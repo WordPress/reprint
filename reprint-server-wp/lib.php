@@ -356,8 +356,10 @@ function _site_export_default_authenticate(): void {
 function _site_export_handle_api_request(array $options = []): void {
     // Revert WordPress error display settings (wp_debug_mode may
     // have enabled display_errors based on WP_DEBUG_DISPLAY).
-    @ini_set('display_errors', '0');
-    @ini_set('html_errors', '0');
+    if (function_exists('ini_set')) {
+        @ini_set('display_errors', '0');
+        @ini_set('html_errors', '0');
+    }
 
     // Clear any output buffering WordPress started.
     while (ob_get_level()) {
