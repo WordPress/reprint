@@ -1173,11 +1173,12 @@ class MySQLDumpProducer
         $value_expression = $character_string
             ? "SUBSTRING({$quoted_column}, {$start}, {$length})"
             : "SUBSTRING(CAST({$quoted_column} AS BINARY), {$start}, {$length})";
-        $sql = "SELECT CAST({$value_expression} AS BINARY), CHAR_LENGTH({$value_expression})"
+        $sql = "SELECT CAST({$value_expression} AS BINARY) AS value_chunk,"
+             . " CHAR_LENGTH({$value_expression}) AS value_length"
              . " FROM {$quoted_table} WHERE {$where_clause}";
         $stmt = $this->db->prepare($sql);
         $stmt->execute();
-        $result = $stmt->fetch(PDO::FETCH_NUM);
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if ($result === false) {
             throw new \RuntimeException(
@@ -1186,8 +1187,8 @@ class MySQLDumpProducer
         }
 
         return [
-            'value' => $result[0],
-            'value_length' => (int) $result[1],
+            'value' => $result['value_chunk'],
+            'value_length' => (int) $result['value_length'],
         ];
     }
 
