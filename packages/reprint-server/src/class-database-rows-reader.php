@@ -57,12 +57,15 @@ class DatabaseRowsReader {
 
     /**
      * Column metadata cached by table and column name. Each column contains
-     * data_type (for example, varchar) and column_type (for example,
-     * varchar(255)).
+     * data_type (for example, varchar), column_type (for example,
+     * varchar(255)), and its nullable collation name.
      *
-     * @var array<string,array<string,array<string,string>>>
+     * @var array<string,array<string,array{data_type:string,column_type:string,collation:?string}>>
      */
     private $column_type_cache = [];
+
+    /** @var array<string,int> Maximum character bytes cached by collation. */
+    private $maximum_character_bytes_by_collation = [];
 
 
     /** @var array|null */
@@ -501,7 +504,7 @@ class DatabaseRowsReader {
         if ($this->is_numeric_type($data_type) || $this->is_binary_type($data_type)) {
             return $qualified_column;
         }
-        if (in_array($data_type, ["CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT"], true)) {
+        if ($this->is_character_string_type($data_type)) {
             return $qualified_column;
         }
         return "CAST({$qualified_column} AS BINARY)";
@@ -630,6 +633,7 @@ class DatabaseRowsReader {
             $columns[$row["Field"]] = [
                 "data_type" => preg_replace('/[\s(].*$/', '', $column_type),
                 "column_type" => $column_type,
+                "collation" => $row["Collation"] ?? null,
             ];
             $row = $statement->fetch(PDO::FETCH_ASSOC);
         }
@@ -650,10 +654,22 @@ class DatabaseRowsReader {
     }
 
     /** Identifies binary columns which do not need a binary SELECT cast. */
-    private function is_binary_type($data_type)
+    public function is_binary_type($data_type)
     {
         $data_type = strtoupper($data_type);
         foreach (["BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB"] as $type) {
+            if (strpos($data_type, $type) === 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Identifies character strings whose SQL substring ranges count characters. */
+    public function is_character_string_type($data_type)
+    {
+        $data_type = strtoupper($data_type);
+        foreach (["CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT"] as $type) {
             if (strpos($data_type, $type) === 0) {
                 return true;
             }
@@ -672,6 +688,47 @@ class DatabaseRowsReader {
             );
         }
         return $this->current_column_types[$column]["data_type"];
+    }
+
+    /** Returns the declared character set's maximum bytes per character. */
+    public function get_maximum_character_bytes(string $column): int
+    {
+        if (!isset($this->current_column_types[$column])) {
+            throw new \RuntimeException(
+                "No column type info for '{$column}' in table " .
+                $this->quote_identifier($this->current_table) . "."
+            );
+        }
+
+        $collation = $this->current_column_types[$column]["collation"];
+        if ($collation === null) {
+            return 1;
+        }
+        if (isset($this->maximum_character_bytes_by_collation[$collation])) {
+            return $this->maximum_character_bytes_by_collation[$collation];
+        }
+
+        $statement = $this->db->prepare(
+            "SELECT character_sets.MAXLEN " .
+            "FROM information_schema.COLLATIONS AS collations " .
+            "JOIN information_schema.CHARACTER_SETS AS character_sets " .
+            "ON character_sets.CHARACTER_SET_NAME = collations.CHARACTER_SET_NAME " .
+            "WHERE collations.COLLATION_NAME = ?"
+        );
+        $statement->execute([$collation]);
+        $maximum_character_bytes = (int) $statement->fetchColumn();
+        if ($maximum_character_bytes < 1) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Database metadata errors are never HTML.
+            throw new \RuntimeException(
+                "Cannot determine the maximum character byte length for column " .
+                $this->quote_identifier($this->current_table) . "." .
+                $this->quote_identifier($column) . " with collation {$collation}."
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
+
+        $this->maximum_character_bytes_by_collation[$collation] = $maximum_character_bytes;
+        return $maximum_character_bytes;
     }
 
     /** Escapes backticks by doubling them: tricky`table becomes `tricky``table`. */

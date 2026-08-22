@@ -103,6 +103,227 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
     }
 
     /**
+     * @dataProvider oversizedCharacterColumnProvider
+     */
+    public function testLargeMultibyteCharacterColumnRoundTrips(
+        string $table,
+        string $column_type
+    ): void {
+        $this->pdo->exec("
+            CREATE TABLE `{$table}` (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                content {$column_type} CHARACTER SET utf8mb4
+            )
+        ");
+
+        $large_text = str_repeat("\xF0\x9F\x99\x82", 8000);
+        $statement = $this->pdo->prepare(
+            "INSERT INTO `{$table}` (content) VALUES (?)"
+        );
+        $statement->execute([$large_text]);
+
+        $max_statement_size = 10 * 1024;
+        $fragments = $this->collectFragmentsWithinSteps(
+            $this->createProducer(['max_statement_size' => $max_statement_size]),
+            100
+        );
+
+        $this->assertStringContainsString(
+            "UPDATE `{$table}` SET",
+            implode("\n", $fragments)
+        );
+        foreach ($fragments as $fragment) {
+            $this->assertLessThanOrEqual(
+                $max_statement_size,
+                strlen($fragment),
+                'Every emitted SQL fragment must fit max_statement_size.'
+            );
+        }
+
+        $import_pdo = $this->executeDumpInNewDatabase(implode("\n", $fragments));
+        $imported = $import_pdo
+            ->query("SELECT content FROM `{$table}` WHERE id = 1")
+            ->fetchColumn();
+        $this->assertSame($large_text, $imported);
+    }
+
+    public static function oversizedCharacterColumnProvider(): array
+    {
+        return [
+            'varchar' => ['oversized_varchar', 'VARCHAR(10000)'],
+            'text' => ['oversized_text', 'TEXT'],
+            'mediumtext' => ['oversized_mediumtext', 'MEDIUMTEXT'],
+            'longtext' => ['oversized_longtext', 'LONGTEXT'],
+        ];
+    }
+
+    public function testLargeMultibyteTextResumesAfterEveryFragment(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE resumed_multibyte_text (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                content LONGTEXT CHARACTER SET utf8mb4
+            )
+        ");
+
+        $large_text = str_repeat("A\xC3\xA9\xE6\xBC\xA2\xF0\x9F\x99\x82", 4000);
+        $statement = $this->pdo->prepare(
+            "INSERT INTO resumed_multibyte_text (content) VALUES (?)"
+        );
+        $statement->execute([$large_text]);
+
+        $options = [
+            'max_statement_size' => 10 * 1024,
+            'batch_size' => 1,
+        ];
+        $producer = $this->createProducer($options);
+        $fragments = [];
+        for ($step = 0; $step < 100; ++$step) {
+            if (!$producer->next_sql_fragment()) {
+                break;
+            }
+            $fragments[] = $producer->get_sql_fragment();
+            if (!$producer->is_finished()) {
+                $options['cursor'] = $producer->get_reentrancy_cursor();
+                $producer = $this->createProducer($options);
+            }
+        }
+
+        $this->assertTrue(
+            $producer->is_finished(),
+            'The resumed exporter must finish instead of requesting text past its final character.'
+        );
+        $import_pdo = $this->executeDumpInNewDatabase(implode("\n", $fragments));
+        $imported = $import_pdo
+            ->query("SELECT content FROM resumed_multibyte_text WHERE id = 1")
+            ->fetchColumn();
+        $this->assertSame($large_text, $imported);
+    }
+
+    public function testOldOversizedTextCursorWithProgressRequiresRestart(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE old_oversized_text_cursor (
+                id INT PRIMARY KEY,
+                content LONGTEXT
+            )
+        ");
+        $statement = $this->pdo->prepare(
+            "INSERT INTO old_oversized_text_cursor VALUES (1, ?)"
+        );
+        $statement->execute([str_repeat('a', 30 * 1024)]);
+
+        $options = ['max_statement_size' => 10 * 1024];
+        $producer = $this->createProducer($options);
+        do {
+            $this->assertTrue($producer->next_sql_fragment());
+        } while (strpos($producer->get_sql_fragment(), 'UPDATE `old_oversized_text_cursor`') !== 0);
+
+        $cursor = json_decode($producer->get_reentrancy_cursor(), true);
+        unset($cursor['oversized_queue'][0]['character_offset']);
+        $options['cursor'] = json_encode($cursor);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('earlier oversized text format');
+        $this->createProducer($options);
+    }
+
+    /**
+     * @dataProvider oversizedBinaryColumnProvider
+     */
+    public function testLargeBinaryColumnStillRoundTrips(
+        string $table,
+        string $column_type
+    ): void {
+        $this->pdo->exec("
+            CREATE TABLE `{$table}` (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                content {$column_type}
+            )
+        ");
+
+        $large_value = random_bytes(30 * 1024);
+        $statement = $this->pdo->prepare(
+            "INSERT INTO `{$table}` (content) VALUES (?)"
+        );
+        $statement->execute([$large_value]);
+
+        $sql = implode("\n", $this->collectFragmentsWithinSteps(
+            $this->createProducer(['max_statement_size' => 10 * 1024]),
+            100
+        ));
+        $import_pdo = $this->executeDumpInNewDatabase($sql);
+        $imported = $import_pdo
+            ->query("SELECT content FROM `{$table}` WHERE id = 1")
+            ->fetchColumn();
+        $this->assertSame($large_value, $imported);
+    }
+
+    public static function oversizedBinaryColumnProvider(): array
+    {
+        return [
+            'varbinary' => ['oversized_varbinary', 'VARBINARY(40000)'],
+            'blob' => ['oversized_blob', 'BLOB'],
+            'mediumblob' => ['oversized_mediumblob', 'MEDIUMBLOB'],
+            'longblob' => ['oversized_longblob', 'LONGBLOB'],
+        ];
+    }
+
+    public function testOversizedTextStopsWhenTheSourceValueShrinks(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE shrinking_oversized_text (
+                id INT PRIMARY KEY,
+                content LONGTEXT
+            )
+        ");
+        $statement = $this->pdo->prepare(
+            "INSERT INTO shrinking_oversized_text VALUES (1, ?)"
+        );
+        $statement->execute([str_repeat('a', 30 * 1024)]);
+
+        $producer = $this->createProducer(['max_statement_size' => 10 * 1024]);
+        do {
+            $this->assertTrue($producer->next_sql_fragment());
+            $fragment = $producer->get_sql_fragment();
+        } while (strpos($fragment, 'INSERT INTO `shrinking_oversized_text`') !== 0);
+
+        $this->pdo->exec(
+            "UPDATE shrinking_oversized_text SET content = '' WHERE id = 1"
+        );
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('returned an empty chunk at byte offset 0');
+        $producer->next_sql_fragment();
+    }
+
+    /** Geometry cannot be built from an empty value and partial byte strings. */
+    public function testOversizedGeometryIsRejectedBeforeInvalidSqlIsEmitted(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE oversized_geometry_value (
+                id INT PRIMARY KEY,
+                content GEOMETRY
+            )
+        ");
+        $points = [];
+        for ($point = 0; $point < 3000; ++$point) {
+            $points[] = $point . ' ' . $point;
+        }
+        $line_string = 'LINESTRING(' . implode(',', $points) . ')';
+        $statement = $this->pdo->prepare(
+            "INSERT INTO oversized_geometry_value VALUES (1, ST_GeomFromText(?))"
+        );
+        $statement->execute([$line_string]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage(
+            'cannot use UPDATE ... CONCAT() chunks for data type GEOMETRY'
+        );
+        $this->getDumpSQL(['max_statement_size' => 10 * 1024]);
+    }
+
+    /**
      * Test multiple large columns in the same row.
      */
     public function testMultipleLargeColumns(): void
@@ -162,8 +383,8 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $this->getDumpSQL(['max_statement_size' => 64 * 1024 * 1024]);
     }
 
-    /** A text value skipped by the byte cap must not bypass the packet target. */
-    public function testMixedTextAndBlobDoNotExceedStatementLimit(): void
+    /** Text and binary chunks must both stay below the packet target. */
+    public function testMixedTextAndBlobStayWithinStatementLimit(): void
     {
         $this->pdo->exec("
             CREATE TABLE mixed_fragment_limits (
@@ -179,11 +400,24 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         );
         $stmt->execute([$value, $value]);
 
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('cannot fit the SQL size limits');
-        $this->expectExceptionMessage('max_statement_size is 8388608 bytes');
+        $max_statement_size = 8 * 1024 * 1024;
+        $fragments = $this->collectAllFragments($this->createProducer([
+            'max_statement_size' => $max_statement_size,
+        ]));
+        foreach ($fragments as $fragment) {
+            $this->assertLessThanOrEqual(
+                $max_statement_size,
+                strlen($fragment),
+                'Every text and binary fragment must fit max_statement_size.'
+            );
+        }
 
-        $this->getDumpSQL(['max_statement_size' => 8 * 1024 * 1024]);
+        $import_pdo = $this->executeDumpInNewDatabase(implode("\n", $fragments));
+        $row = $import_pdo
+            ->query('SELECT text_value, blob_value FROM mixed_fragment_limits WHERE id = 1')
+            ->fetch();
+        $this->assertSame($value, $row['text_value']);
+        $this->assertSame($value, $row['blob_value']);
     }
 
     /**
@@ -870,5 +1104,24 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
             "Encoded cursor must stay within the test's 8190-byte header-value limit, " .
             "got {$maxCursorSize} bytes"
         );
+    }
+
+    /** Collects a dump without allowing a broken cursor to loop forever. */
+    private function collectFragmentsWithinSteps(
+        MySQLDumpProducer $producer,
+        int $maximum_steps
+    ): array {
+        $fragments = [];
+        for ($step = 0; $step < $maximum_steps; ++$step) {
+            if (!$producer->next_sql_fragment()) {
+                break;
+            }
+            $fragments[] = $producer->get_sql_fragment();
+        }
+        $this->assertTrue(
+            $producer->is_finished(),
+            "The exporter did not finish within {$maximum_steps} steps."
+        );
+        return $fragments;
     }
 }

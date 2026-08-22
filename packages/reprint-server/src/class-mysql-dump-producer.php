@@ -97,12 +97,13 @@ class MySQLDumpProducer
     /**
      * When a row is too large for a single INSERT, its big columns are split
      * into chunks and queued here. Each entry tracks the column name, its
-     * data type, the current byte offset into the value, and the total value
-     * length. The actual data is re-fetched from the database on demand via
-     * SUBSTRING queries, keeping cursors small (a few hundred bytes rather
-     * than megabytes of raw data).
+     * data type, the current byte offset into the value, and the total byte
+     * length. Character columns also track a character offset because MySQL's
+     * SUBSTRING() counts characters for those types. The actual data is
+     * re-fetched from the database on demand, keeping cursors small (a few
+     * hundred bytes rather than megabytes of raw data).
      *
-     * @var array Array of {column: string, data_type: string, byte_offset: int, total_length: int}
+     * @var array Array of {column: string, data_type: string, byte_offset: int, total_length: int, character_offset?: int}
      */
     private $oversized_queue = [];
 
@@ -596,12 +597,26 @@ class MySQLDumpProducer
                     "'column', 'data_type', 'byte_offset', and 'total_length' keys"
                 );
             }
-            $decoded[] = [
+            $decoded_item = [
                 'column' => $item['column'],
                 'data_type' => $item['data_type'],
                 'byte_offset' => (int) $item['byte_offset'],
                 'total_length' => (int) $item['total_length'],
             ];
+            if ($this->row_reader->is_character_string_type($item['data_type'])) {
+                if (!array_key_exists('character_offset', $item)) {
+                    if ((int) $item['byte_offset'] !== 0) {
+                        throw new \InvalidArgumentException(
+                            "The saved database pull cursor uses an earlier oversized text format. " .
+                            "Run db-pull --abort and start again."
+                        );
+                    }
+                    $decoded_item['character_offset'] = 0;
+                } else {
+                    $decoded_item['character_offset'] = (int) $item['character_offset'];
+                }
+            }
+            $decoded[] = $decoded_item;
         }
         return $decoded;
     }
@@ -871,7 +886,7 @@ class MySQLDumpProducer
             $projected_fragment_size - self::MAX_SQL_PART_BODY_BYTES
         );
         $saved_bytes = 0;
-        $skipped_non_byte_bounded_value = false;
+        $unchunkable_data_types = [];
 
         foreach ($sorted_sizes as $col => $size) {
             if (in_array($col, $this->row_reader->get_current_primary_key_columns())) {
@@ -892,21 +907,12 @@ class MySQLDumpProducer
             }
 
             $data_type = $this->row_reader->get_data_type($col);
-            // SUBSTRING counts characters for text columns. Only binary
-            // columns have byte-bounded chunks, which the part limit needs.
             $normalized_data_type = strtoupper($data_type);
-            $binary_type = false;
-            foreach (["BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB"] as $type) {
-                if (strpos($normalized_data_type, $type) === 0) {
-                    $binary_type = true;
-                    break;
-                }
-            }
             if (
-                $projected_fragment_size - $saved_bytes > self::MAX_SQL_PART_BODY_BYTES &&
-                !$binary_type
+                !$this->row_reader->is_binary_type($normalized_data_type) &&
+                !$this->row_reader->is_character_string_type($normalized_data_type)
             ) {
-                $skipped_non_byte_bounded_value = true;
+                $unchunkable_data_types[$normalized_data_type] = true;
                 continue;
             }
             $value_length = strlen($raw_value);
@@ -917,21 +923,34 @@ class MySQLDumpProducer
                 $saved_bytes += $size - 2; // Saved bytes (size minus the '' replacement)
                 $excess -= $size - 2;
 
-                $this->oversized_queue[] = [
+                $queue_item = [
                     'column' => $col,
                     'data_type' => $data_type,
                     'byte_offset' => 0,
                     'total_length' => $value_length,
                 ];
+                if ($this->row_reader->is_character_string_type($data_type)) {
+                    $queue_item['character_offset'] = 0;
+                }
+                $this->oversized_queue[] = $queue_item;
             }
+        }
+
+        if ($excess > 0 && !empty($unchunkable_data_types)) {
+            $unchunkable_data_type = key($unchunkable_data_types);
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error returned as authenticated API data, never HTML.
+            throw new \RuntimeException(
+                "Row in table " . $this->row_reader->quote_identifier($this->row_reader->get_current_table()) .
+                " cannot use UPDATE ... CONCAT() chunks for data type {$unchunkable_data_type}."
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         }
 
         if (
             $projected_statement_size - $saved_bytes >
                 $maximum_insert_statement_bytes ||
             $projected_fragment_size - $saved_bytes >
-                self::MAX_SQL_PART_BODY_BYTES ||
-            ($skipped_non_byte_bounded_value && $excess > 0)
+                self::MAX_SQL_PART_BODY_BYTES
         ) {
             // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error returned as authenticated API data, never HTML.
             throw new \RuntimeException(
@@ -1048,13 +1067,60 @@ class MySQLDumpProducer
 
         $chunk_size = $this->compute_chunk_size($column);
 
-        // Fetch just the chunk we need from the database using SUBSTRING.
-        // MySQL's SUBSTRING is 1-indexed, so add 1 to our 0-based offset.
-        $chunk = $this->fetch_value_substring_from_the_current_oversized_row(
+        // MySQL SUBSTRING() counts characters for character strings, while
+        // $chunk_size is a byte budget. Every requested character may use the
+        // column character set's maximum byte length, so a fixed amount of
+        // spare space would not bound the result. Divide the byte budget by
+        // that per-character maximum to keep the raw chunk within its limit
+        // without splitting a character. Binary strings continue in bytes.
+        $character_string = $this->row_reader->is_character_string_type($data_type);
+        if ($character_string) {
+            $value_offset = $current['character_offset'];
+            $value_length = max(
+                1,
+                integer_divide(
+                    $chunk_size,
+                    $this->row_reader->get_maximum_character_bytes($column)
+                )
+            );
+        } else {
+            $value_offset = $byte_offset;
+            $value_length = min($chunk_size, $total_length - $byte_offset);
+        }
+
+        $chunk_result = $this->fetch_value_substring_from_the_current_oversized_row(
             $column,
-            $byte_offset + 1,
-            $chunk_size
+            $value_offset + 1,
+            $value_length,
+            $character_string
         );
+        $chunk = $chunk_result['value'];
+        $chunk_bytes = strlen($chunk);
+
+        if ($chunk_bytes === 0 && $byte_offset < $total_length) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error returned as authenticated API data, never HTML.
+            throw new \RuntimeException(
+                "Oversized column " .
+                $this->row_reader->quote_identifier($this->row_reader->get_current_table()) . "." .
+                $this->row_reader->quote_identifier($column) .
+                " returned an empty chunk at byte offset {$byte_offset} before its saved" .
+                " {$total_length}-byte length. The source value changed during export;" .
+                " run db-pull --abort and start again."
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
+        if ($chunk_bytes > $total_length - $byte_offset) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error returned as authenticated API data, never HTML.
+            throw new \RuntimeException(
+                "Oversized column " .
+                $this->row_reader->quote_identifier($this->row_reader->get_current_table()) . "." .
+                $this->row_reader->quote_identifier($column) .
+                " returned {$chunk_bytes} bytes at byte offset {$byte_offset}, beyond its" .
+                " saved {$total_length}-byte length. The source value changed during export;" .
+                " run db-pull --abort and start again."
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
 
         $formatted_chunk = $this->format_value($chunk, $data_type);
 
@@ -1070,7 +1136,10 @@ class MySQLDumpProducer
 
         $this->current_sql_fragment = $sql;
 
-        $this->oversized_queue[0]['byte_offset'] += strlen($chunk);
+        $this->oversized_queue[0]['byte_offset'] += $chunk_bytes;
+        if ($character_string) {
+            $this->oversized_queue[0]['character_offset'] += $chunk_result['value_length'];
+        }
         if ($this->oversized_queue[0]['byte_offset'] >= $total_length) {
             array_shift($this->oversized_queue);
         }
@@ -1082,11 +1151,23 @@ class MySQLDumpProducer
      * Fetches a substring of a column value from the current table using
      * the oversized row's primary key values.
      *
-     * Uses CAST(SUBSTRING(...) AS BINARY) to get raw bytes without charset
-     * re-encoding — matching the same CAST approach used in the main SELECT.
+     * Character strings use character ranges so a chunk never cuts a
+     * multibyte character. Binary strings cast before SUBSTRING so their
+     * ranges count bytes. Both return raw bytes for base64 encoding.
+     *
+     * @return array {
+     *     Fetched substring details.
+     *
+     *     @type string $value        Raw substring bytes.
+     *     @type int    $value_length Length in characters or bytes, matching the requested range.
+     * }
      */
-    private function fetch_value_substring_from_the_current_oversized_row(string $column, int $start, int $length): string
-    {
+    private function fetch_value_substring_from_the_current_oversized_row(
+        string $column,
+        int $start,
+        int $length,
+        bool $character_string
+    ): array {
         $quoted_table = $this->row_reader->quote_identifier($this->row_reader->get_current_table());
         $quoted_column = $this->row_reader->quote_identifier($column);
 
@@ -1096,11 +1177,15 @@ class MySQLDumpProducer
         }
         $where_clause = implode(" AND ", $where_parts);
 
-        $sql = "SELECT CAST(SUBSTRING({$quoted_column}, {$start}, {$length}) AS BINARY)"
+        $value_expression = $character_string
+            ? "SUBSTRING({$quoted_column}, {$start}, {$length})"
+            : "SUBSTRING(CAST({$quoted_column} AS BINARY), {$start}, {$length})";
+        $sql = "SELECT CAST({$value_expression} AS BINARY) AS value_chunk,"
+             . " CHAR_LENGTH({$value_expression}) AS value_length"
              . " FROM {$quoted_table} WHERE {$where_clause}";
         $stmt = $this->db->prepare($sql);
         $stmt->execute();
-        $result = $stmt->fetchColumn();
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if ($result === false) {
             throw new \RuntimeException(
@@ -1108,7 +1193,10 @@ class MySQLDumpProducer
             );
         }
 
-        return $result;
+        return [
+            'value' => $result['value_chunk'],
+            'value_length' => (int) $result['value_length'],
+        ];
     }
 
     /** @return bool */
