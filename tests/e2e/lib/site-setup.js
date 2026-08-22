@@ -241,13 +241,13 @@ export async function ensureSite(name, options = {}) {
     // Copy the built plugin bundle, including its bundled Composer vendor tree.
     cpSync(
         PLUGIN_SRC,
-        join(siteDir, 'wp-content', 'plugins', 'site-export'),
+        join(siteDir, 'wp-content', 'plugins', 'reprint-server'),
         { recursive: true }
     );
 
     // Write secret.php after copying the plugin bundle so the target directory exists.
     writeFileSync(
-        join(siteDir, 'wp-content', 'plugins', 'site-export', 'secret.php'),
+        join(siteDir, 'wp-content', 'plugins', 'reprint-server', 'secret.php'),
         `<?php return '${secret}';\n`
     );
     log('Files copied');
@@ -268,8 +268,8 @@ export async function ensureSite(name, options = {}) {
         wpCoreInstall(siteDir, siteUrl, name);
         log('wp core install done');
 
-        // Activate the site-export plugin so WordPress loads index.php on requests.
-        wpPluginActivate(siteDir, 'site-export');
+        // Activate the reprint-server plugin so WordPress loads index.php on requests.
+        wpPluginActivate(siteDir, 'reprint-server');
 
         // Run customDb hook to add extra tables on top of real WP
         if (options.customDb) {

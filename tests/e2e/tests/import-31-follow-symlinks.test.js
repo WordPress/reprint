@@ -84,7 +84,7 @@ describe('Import: Follow Symlinks', () => {
             // Start a PHP built-in server for this site as a fallback.
         }
 
-        const fsRoot = join(getSiteDir(site), 'wp-content', 'plugins', 'site-export');
+        const fsRoot = join(getSiteDir(site), 'wp-content', 'plugins', 'reprint-server');
         fallbackApiServer = spawn('php', ['-S', '127.0.0.1:8101', '-t', fsRoot], {
             stdio: 'ignore',
         });

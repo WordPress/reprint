@@ -98,7 +98,7 @@ php_admin_value[error_log] = /tmp/php-e2e-errors.log
 php_admin_value[user_ini.cache_ttl] = 0
 php_admin_value[realpath_cache_ttl] = 0
 
-env[SITE_EXPORT_TEST_MODE] = 1
+env[REPRINT_SERVER_TEST_MODE] = 1
 
 ; Keep open_basedir in its own worker pool. A request-level value can remain
 ; active when the same worker handles a request for another test site.
@@ -125,7 +125,7 @@ php_admin_value[user_ini.cache_ttl] = 0
 php_admin_value[realpath_cache_ttl] = 0
 php_admin_value[open_basedir] = ${SITE_ROOT}/open-basedir:/tmp
 
-env[SITE_EXPORT_TEST_MODE] = 1
+env[REPRINT_SERVER_TEST_MODE] = 1
 EOF
 
 # ---------- PHP-FPM master without pdo_mysql ----------
@@ -175,7 +175,7 @@ php_admin_value[error_log] = /tmp/php-e2e-errors.log
 php_admin_value[user_ini.cache_ttl] = 0
 php_admin_value[realpath_cache_ttl] = 0
 
-env[SITE_EXPORT_TEST_MODE] = 1
+env[REPRINT_SERVER_TEST_MODE] = 1
 EOF
 
 cat <<EOF | sudo tee /etc/systemd/system/php-e2e-no-pdo-mysql.service >/dev/null
@@ -250,7 +250,7 @@ server {
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
-        fastcgi_param SITE_EXPORT_TEST_MODE "1";
+        fastcgi_param REPRINT_SERVER_TEST_MODE "1";
         fastcgi_read_timeout 120s;
         fastcgi_send_timeout 120s;
     }
@@ -282,7 +282,7 @@ server {
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
-        fastcgi_param SITE_EXPORT_TEST_MODE "1";
+        fastcgi_param REPRINT_SERVER_TEST_MODE "1";
         fastcgi_read_timeout 120s;
         fastcgi_send_timeout 120s;
     }
@@ -319,7 +319,7 @@ server {
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
-        fastcgi_param SITE_EXPORT_TEST_MODE "1";
+        fastcgi_param REPRINT_SERVER_TEST_MODE "1";
         fastcgi_read_timeout 120s;
         fastcgi_buffering on;
         fastcgi_buffer_size 128k;

@@ -65,7 +65,7 @@ let
             fastcgi_index index.php;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
             include ${pkgs.nginx}/conf/fastcgi_params;
-            fastcgi_param SITE_EXPORT_TEST_MODE "1";
+            fastcgi_param REPRINT_SERVER_TEST_MODE "1";
             fastcgi_read_timeout 120s;
             fastcgi_send_timeout 120s;
           '';
@@ -97,7 +97,7 @@ let
             fastcgi_index index.php;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
             include ${pkgs.nginx}/conf/fastcgi_params;
-            fastcgi_param SITE_EXPORT_TEST_MODE "1";
+            fastcgi_param REPRINT_SERVER_TEST_MODE "1";
             fastcgi_read_timeout 120s;
             fastcgi_send_timeout 120s;
           '';
@@ -122,7 +122,7 @@ let
             fastcgi_index index.php;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
             include ${pkgs.nginx}/conf/fastcgi_params;
-            fastcgi_param SITE_EXPORT_TEST_MODE "1";
+            fastcgi_param REPRINT_SERVER_TEST_MODE "1";
             fastcgi_read_timeout 120s;
             # Enable proxy buffering to simulate Apache-like buffering
             fastcgi_buffering on;
@@ -208,7 +208,7 @@ in {
       "php_admin_value[realpath_cache_ttl]" = "0";
     };
     phpEnv = {
-      SITE_EXPORT_TEST_MODE = "1";
+      REPRINT_SERVER_TEST_MODE = "1";
     };
   };
 
@@ -234,7 +234,7 @@ in {
       "php_admin_value[realpath_cache_ttl]" = "0";
     };
     phpEnv = {
-      SITE_EXPORT_TEST_MODE = "1";
+      REPRINT_SERVER_TEST_MODE = "1";
     };
   };
 
@@ -262,7 +262,7 @@ in {
       "php_admin_value[open_basedir]" = "${siteRoot}/open-basedir:/tmp";
     };
     phpEnv = {
-      SITE_EXPORT_TEST_MODE = "1";
+      REPRINT_SERVER_TEST_MODE = "1";
     };
   };
 

@@ -686,7 +686,8 @@ final class FileIndexProcessor {
 
         // Tests may change the scanned names to exercise traversal boundaries.
         // Production traversal has no hook and uses scandir() results directly.
-        if (getenv("SITE_EXPORT_TEST_MODE") && function_exists("_e2e_call_hook")) {
+        $test_mode_enabled = getenv("REPRINT_SERVER_TEST_MODE") || getenv("SITE_EXPORT_TEST_MODE");
+        if ($test_mode_enabled && function_exists("_e2e_call_hook")) {
             $hook_arguments = [$canonical_directory, &$directory_names];
             _e2e_call_hook("test_hook_during_dir_scan", $hook_arguments);
         }

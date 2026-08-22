@@ -179,8 +179,8 @@ describe('Import: SiteGround plugin stripping', () => {
             );
             // Confirm non-SG plugins survived.
             assert.ok(
-                raw.includes('site-export'),
-                `active_plugins should still contain site-export, got: ${raw}`,
+                raw.includes('reprint-server'),
+                `active_plugins should still contain reprint-server, got: ${raw}`,
             );
         });
 
@@ -241,8 +241,8 @@ describe('Import: SiteGround plugin stripping', () => {
         it('unrelated plugins are preserved on disk', () => {
             const flatDir = join(tempDir, 'flattened');
             assert.ok(
-                existsSync(join(flatDir, 'wp-content', 'plugins', 'site-export')),
-                'site-export plugin should still exist after apply-runtime',
+                existsSync(join(flatDir, 'wp-content', 'plugins', 'reprint-server')),
+                'reprint-server plugin should still exist after apply-runtime',
             );
         });
     });

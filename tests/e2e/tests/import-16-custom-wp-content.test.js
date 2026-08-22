@@ -22,8 +22,8 @@ describe('Import: Custom WP Content', () => {
     beforeAll(async () => {
         await ensureSite(site, {
             afterCreate: async (siteDir) => {
-                const customPlugin = join(siteDir, 'custom-content', 'plugins', 'site-export');
-                const srcPlugin = join(siteDir, 'wp-content', 'plugins', 'site-export');
+                const customPlugin = join(siteDir, 'custom-content', 'plugins', 'reprint-server');
+                const srcPlugin = join(siteDir, 'wp-content', 'plugins', 'reprint-server');
                 mkdirSync(join(siteDir, 'custom-content', 'plugins'), { recursive: true });
                 cpSync(srcPlugin, customPlugin, { recursive: true });
             },

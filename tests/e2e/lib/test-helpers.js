@@ -560,7 +560,7 @@ export async function compareDatabases(sourceDb, importDb) {
  * Write a test-hooks.php file for a site.
  */
 export function writeTestHooks(siteName, phpCode) {
-    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'site-export', 'test-hooks.php');
+    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'reprint-server', 'test-hooks.php');
     const code = `<?php
 // PHP hooks and Node assertions can touch this file at the same time. Write
 // the complete next JSON value beside the old one, then replace it in one
@@ -592,7 +592,7 @@ ${phpCode}
  * Remove test-hooks.php for a site.
  */
 export function removeTestHooks(siteName) {
-    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'site-export', 'test-hooks.php');
+    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'reprint-server', 'test-hooks.php');
     try {
         execSync(`sudo rm -f ${JSON.stringify(hookPath)}`);
     } catch {

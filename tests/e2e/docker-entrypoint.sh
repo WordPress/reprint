@@ -54,7 +54,7 @@ php_admin_value[log_errors] = On
 php_admin_value[error_log] = /tmp/php-e2e-errors.log
 php_admin_value[user_ini.cache_ttl] = 0
 php_admin_value[realpath_cache_ttl] = 0
-env[SITE_EXPORT_TEST_MODE] = 1
+env[REPRINT_SERVER_TEST_MODE] = 1
 
 ; Keep open_basedir in its own worker pool. A request-level value can remain
 ; active when the same worker handles a request for another test site.
@@ -78,7 +78,7 @@ php_admin_value[error_log] = /tmp/php-e2e-errors.log
 php_admin_value[user_ini.cache_ttl] = 0
 php_admin_value[realpath_cache_ttl] = 0
 php_admin_value[open_basedir] = ${SITE_ROOT}/open-basedir:/tmp
-env[SITE_EXPORT_TEST_MODE] = 1
+env[REPRINT_SERVER_TEST_MODE] = 1
 EOF
 rm -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf"
 "php-fpm${PHP_VERSION}" --nodaemonize &
@@ -127,7 +127,7 @@ php_admin_value[log_errors] = On
 php_admin_value[error_log] = /tmp/php-e2e-errors.log
 php_admin_value[user_ini.cache_ttl] = 0
 php_admin_value[realpath_cache_ttl] = 0
-env[SITE_EXPORT_TEST_MODE] = 1
+env[REPRINT_SERVER_TEST_MODE] = 1
 EOF
 
 PHP_INI_SCAN_DIR="$NO_PDO_MYSQL_CONF_D" "php-fpm${PHP_VERSION}" \
@@ -166,7 +166,7 @@ NGINXCONF
 rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
 
 # Standard sites — serve from WordPress root so that index.php
-# bootstraps WordPress and the site-export plugin handles the request.
+# bootstraps WordPress and the Reprint Server plugin handles the request.
 jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | [.key, .value.port, (.value.openBasedir // false), (.value.noPdoMysql // false)] | @tsv' "$REGISTRY" | while IFS=$'\t' read -r site port open_basedir no_pdo_mysql; do
     site_fpm_socket="$FPM_SOCKET"
     if [ "$open_basedir" = "true" ]; then
@@ -186,7 +186,7 @@ server {
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
-        fastcgi_param SITE_EXPORT_TEST_MODE "1";
+        fastcgi_param REPRINT_SERVER_TEST_MODE "1";
         fastcgi_read_timeout 120s;
         fastcgi_send_timeout 120s;
     }
@@ -215,7 +215,7 @@ server {
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
-        fastcgi_param SITE_EXPORT_TEST_MODE "1";
+        fastcgi_param REPRINT_SERVER_TEST_MODE "1";
         fastcgi_read_timeout 120s;
         fastcgi_send_timeout 120s;
     }
@@ -246,7 +246,7 @@ server {
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
-        fastcgi_param SITE_EXPORT_TEST_MODE "1";
+        fastcgi_param REPRINT_SERVER_TEST_MODE "1";
         fastcgi_read_timeout 120s;
         fastcgi_buffering on;
         fastcgi_buffer_size 128k;
