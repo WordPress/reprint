@@ -21,7 +21,7 @@ final class PushSessionTest extends TestCase {
     }
 
     public function testClassifiedExceptionKeepsProtocolReasonAndContextSeparateFromThrowableCode(): void {
-        $exception = new Site_Export_Push_Exception('lock_acquisition_failure', 'The session is busy.', ['operation' => 'receive']);
+        $exception = new \WordPress\Reprint\Server\PushException('lock_acquisition_failure', 'The session is busy.', ['operation' => 'receive']);
 
         $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
         $this->assertSame(0, $exception->getCode());
@@ -54,7 +54,7 @@ final class PushSessionTest extends TestCase {
 
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('at most 100 excluded paths; received 101');
-        Site_Export_Push_Session::create(
+        \WordPress\Reprint\Server\PushSession::create(
             $this->reprint_directory,
             $this->docroot,
             $excluded_paths,
@@ -94,7 +94,7 @@ final class PushSessionTest extends TestCase {
                     'body' => 'x',
                 ]]);
                 $this->fail('An in-flight file accepted cursor ' . $offset . ' while its data file contained 3 bytes.');
-            } catch (Site_Export_Push_Exception $exception) {
+            } catch (\WordPress\Reprint\Server\PushException $exception) {
                 $this->assertSame('offset_gap', $exception->get_error_code());
             }
             $this->assertSame('old', file_get_contents($push_session->get_push_directory() . '/work/inflight.data'));
@@ -183,7 +183,7 @@ final class PushSessionTest extends TestCase {
         fwrite($input, $body);
         rewind($input);
 
-        $push_session->accept_upload($input, new Site_Export_Multipart_Processor($boundary));
+        $push_session->accept_upload($input, new \WordPress\Reprint\Server\MultipartProcessor($boundary));
         try {
             $this->assertNull($push_session->get_current_change());
             $expected_changes = [
@@ -216,7 +216,7 @@ final class PushSessionTest extends TestCase {
             . '--' . $boundary . "--\r\n"
         );
         rewind($input);
-        $push_session->accept_upload($input, new Site_Export_Multipart_Processor($boundary));
+        $push_session->accept_upload($input, new \WordPress\Reprint\Server\MultipartProcessor($boundary));
         try {
             $this->assertTrue($push_session->next_change());
             $this->assertNotNull($push_session->get_current_change());
@@ -242,11 +242,11 @@ final class PushSessionTest extends TestCase {
         $input = fopen('php://temp', 'w+b');
         fwrite($input, $body);
         rewind($input);
-        $push_session->accept_upload($input, new Site_Export_Multipart_Processor($boundary));
+        $push_session->accept_upload($input, new \WordPress\Reprint\Server\MultipartProcessor($boundary));
         try {
             $push_session->next_change();
             $this->fail('An offset gap was accepted.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('offset_gap', $exception->get_error_code());
             $this->assertStringContainsString('Start at offset 0', $exception->getMessage());
             $this->assertNull($push_session->get_current_change());
@@ -269,7 +269,7 @@ final class PushSessionTest extends TestCase {
                 'body' => "gone\0",
             ]]);
             $this->fail('A delete offset gap was accepted.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('offset_gap', $exception->get_error_code());
             $this->assertStringContainsString('work delete stream has stored 0 bytes', $exception->getMessage());
         }
@@ -337,7 +337,7 @@ final class PushSessionTest extends TestCase {
 
     public function testReprintDirectoryBelowDocumentRootIsExcludedAndRootCanBeReopened(): void {
         $reprint_directory = $this->docroot . '/private-work';
-        $push_session = Site_Export_Push_Session::create($reprint_directory, $this->docroot, [], str_repeat('a', 32));
+        $push_session = \WordPress\Reprint\Server\PushSession::create($reprint_directory, $this->docroot, [], str_repeat('a', 32));
         try {
             $this->push_parts($push_session, [[
                 'headers' => [
@@ -356,14 +356,14 @@ final class PushSessionTest extends TestCase {
         $this->push_file($push_session, 'private-workshop/allowed.php', 'safe');
         $this->assertSame('complete', $push_session->get_status('private-workshop/allowed.php')['path']['state']);
 
-        $root_session = Site_Export_Push_Session::create($this->reprint_directory, '/', [], str_repeat('b', 32));
-        $reopened = Site_Export_Push_Session::open($this->reprint_directory, '/', $root_session->get_push_session_id(), []);
+        $root_session = \WordPress\Reprint\Server\PushSession::create($this->reprint_directory, '/', [], str_repeat('b', 32));
+        $reopened = \WordPress\Reprint\Server\PushSession::open($this->reprint_directory, '/', $root_session->get_push_session_id(), []);
         $this->assertSame($root_session->get_push_directory(), $reopened->get_push_directory());
     }
 
     public function testRootReprintDirectoryKeepsPushSessionPathsAbsolute(): void {
         $push_session_id = str_repeat('c', 32);
-        $push_session = Site_Export_Push_Session::open(
+        $push_session = \WordPress\Reprint\Server\PushSession::open(
             '/',
             $this->docroot,
             $push_session_id,
@@ -457,7 +457,7 @@ final class PushSessionTest extends TestCase {
         try {
             $push_session->commit(1);
             $this->fail('A foreign maintenance marker was replaced.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
         }
         $this->assertFileDoesNotExist($this->docroot . '/pending.txt');
@@ -496,7 +496,7 @@ final class PushSessionTest extends TestCase {
         try {
             $push_session->remove_push_directory();
             $this->fail('An active direct commit was removed.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('commit_required', $exception->get_error_code());
         }
 
@@ -506,24 +506,24 @@ final class PushSessionTest extends TestCase {
 
     public function testPushSessionLockExcludesOtherOperationsUntilUploadFinishes(): void {
         $push_session = $this->push_session('66666666666666666666666666666666');
-        $reopened = Site_Export_Push_Session::open(
+        $reopened = \WordPress\Reprint\Server\PushSession::open(
             $this->reprint_directory,
             $this->docroot,
             $push_session->get_push_session_id(),
             ['wp-content/plugins/reprint']
         );
         $input = fopen('php://temp', 'w+b');
-        $push_session->accept_upload($input, new Site_Export_Multipart_Processor('test-boundary'));
+        $push_session->accept_upload($input, new \WordPress\Reprint\Server\MultipartProcessor('test-boundary'));
 
         try {
             $reopened->get_status();
             $this->fail('Status observed a session while an upload held its lock.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
         }
 
         try {
-            $push_session->accept_upload($input, new Site_Export_Multipart_Processor('test-boundary'));
+            $push_session->accept_upload($input, new \WordPress\Reprint\Server\MultipartProcessor('test-boundary'));
             $this->fail('One session object accepted two simultaneous uploads.');
         } catch (LogicException $exception) {
             $this->assertStringContainsString('already open', $exception->getMessage());
@@ -547,9 +547,9 @@ final class PushSessionTest extends TestCase {
         ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
         $script = '$configuration = json_decode(base64_decode($argv[1], true), true, 512, JSON_THROW_ON_ERROR);'
             . 'require $configuration["bootstrap_path"];'
-            . '$push_session = Site_Export_Push_Session::open($configuration["reprint_directory"], $configuration["docroot"], $configuration["push_session_id"], ["wp-content/plugins/reprint"]);'
+            . '$push_session = \WordPress\Reprint\Server\PushSession::open($configuration["reprint_directory"], $configuration["docroot"], $configuration["push_session_id"], ["wp-content/plugins/reprint"]);'
             . '$input = fopen("php://temp", "w+b");'
-            . '$push_session->accept_upload($input, new Site_Export_Multipart_Processor("dead-owner-boundary"));'
+            . '$push_session->accept_upload($input, new \WordPress\Reprint\Server\MultipartProcessor("dead-owner-boundary"));'
             . 'file_put_contents($configuration["ready_path"], "ready");'
             . 'sleep(30);';
         $process = proc_open(
@@ -572,7 +572,7 @@ final class PushSessionTest extends TestCase {
             try {
                 $push_session->get_status();
                 $this->fail('Status acquired the push lock while another process held an upload open.');
-            } catch (Site_Export_Push_Exception $exception) {
+            } catch (\WordPress\Reprint\Server\PushException $exception) {
                 $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
             }
 
@@ -600,7 +600,7 @@ final class PushSessionTest extends TestCase {
             . "X-File-Size: 5\r\nX-Chunk-Offset: 0\r\nContent-Length: 5\r\n\r\nabc"
         );
         rewind($input);
-        $push_session->accept_upload($input, new Site_Export_Multipart_Processor($boundary));
+        $push_session->accept_upload($input, new \WordPress\Reprint\Server\MultipartProcessor($boundary));
         try {
             $push_session->next_change();
             $this->fail('A truncated multipart body was accepted as a complete change.');
@@ -611,7 +611,7 @@ final class PushSessionTest extends TestCase {
             fclose($input);
         }
 
-        $reopened = Site_Export_Push_Session::open(
+        $reopened = \WordPress\Reprint\Server\PushSession::open(
             $this->reprint_directory,
             $this->docroot,
             $push_session->get_push_session_id(),
@@ -630,9 +630,9 @@ final class PushSessionTest extends TestCase {
 
         $push_session->accept_upload(
             $input,
-            new Site_Export_Multipart_Processor($boundary),
+            new \WordPress\Reprint\Server\MultipartProcessor($boundary),
             PHP_INT_MAX,
-            Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES
+            \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES
         );
         try {
             $this->assertTrue($push_session->next_change());
@@ -652,23 +652,23 @@ final class PushSessionTest extends TestCase {
 
         $push_session->accept_upload(
             $input,
-            new Site_Export_Multipart_Processor($boundary),
+            new \WordPress\Reprint\Server\MultipartProcessor($boundary),
             PHP_INT_MAX,
-            Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES
+            \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES
         );
         try {
             $this->assertTrue($push_session->next_change());
             try {
                 $push_session->next_change();
                 $this->fail('A byte beyond the decoded request-body limit was ignored after the closing boundary.');
-            } catch (Site_Export_Push_Exception $exception) {
+            } catch (\WordPress\Reprint\Server\PushException $exception) {
                 $this->assertSame('request_too_large', $exception->get_error_code());
                 $this->assertSame(
-                    ['observed_request_body_bytes' => Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES + 1],
+                    ['observed_request_body_bytes' => \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES + 1],
                     $exception->get_context()
                 );
                 $this->assertStringContainsString(
-                    (string) ( Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES + 1 ) . ' bytes',
+                    (string) ( \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES + 1 ) . ' bytes',
                     $exception->getMessage()
                 );
             }
@@ -687,9 +687,9 @@ final class PushSessionTest extends TestCase {
 
         $push_session->accept_upload(
             $input,
-            new Site_Export_Multipart_Processor($boundary),
+            new \WordPress\Reprint\Server\MultipartProcessor($boundary),
             PHP_INT_MAX,
-            Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES + 1
+            \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES + 1
         );
         try {
             $this->assertTrue($push_session->next_change());
@@ -791,7 +791,7 @@ final class PushSessionTest extends TestCase {
         $input = fopen('php://temp', 'w+b');
         fwrite($input, $body);
         rewind($input);
-        $push_session->accept_upload($input, new Site_Export_Multipart_Processor($boundary), 1);
+        $push_session->accept_upload($input, new \WordPress\Reprint\Server\MultipartProcessor($boundary), 1);
         try {
             $push_session->next_change();
             $this->fail('A part above the configured byte ceiling was accepted.');
@@ -810,7 +810,7 @@ final class PushSessionTest extends TestCase {
         try {
             $push_metadata_session->get_status();
             $this->fail('Malformed push metadata was accepted.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('corrupted_push_state', $exception->get_error_code());
         }
 
@@ -822,7 +822,7 @@ final class PushSessionTest extends TestCase {
         try {
             $shape_session->get_status();
             $this->fail('Push metadata with a scalar excluded-path list was accepted.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('corrupted_push_state', $exception->get_error_code());
             $this->assertStringContainsString('excluded paths', $exception->getMessage());
         }
@@ -834,7 +834,7 @@ final class PushSessionTest extends TestCase {
         try {
             $symlink_session->get_status();
             $this->fail('A symlink replaced the private completed-files directory.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('corrupted_push_state', $exception->get_error_code());
             $this->assertStringContainsString('not real', $exception->getMessage());
         }
@@ -846,7 +846,7 @@ final class PushSessionTest extends TestCase {
         try {
             $malformed_session->get_status();
             $this->fail('Malformed in-flight JSON was accepted.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('corrupted_push_state', $exception->get_error_code());
             $this->assertStringContainsString('does not contain a JSON object', $exception->getMessage());
         }
@@ -856,7 +856,7 @@ final class PushSessionTest extends TestCase {
         try {
             $oversized_session->get_status();
             $this->fail('Oversized in-flight JSON was accepted.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('corrupted_push_state', $exception->get_error_code());
             $this->assertStringContainsString('not a bounded regular file', $exception->getMessage());
         }
@@ -866,7 +866,7 @@ final class PushSessionTest extends TestCase {
         try {
             $wrong_type_session->get_status();
             $this->fail('A directory was accepted as in-flight file data.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('corrupted_push_state', $exception->get_error_code());
             $this->assertStringContainsString('unsupported type', $exception->getMessage());
         }
@@ -887,13 +887,13 @@ final class PushSessionTest extends TestCase {
         $push_session = $this->push_session('45674567456745674567456745674567');
         $other_docroot = $this->root . '/other-docroot';
         mkdir($other_docroot, 0700);
-        $changed_docroot = Site_Export_Push_Session::open(
+        $changed_docroot = \WordPress\Reprint\Server\PushSession::open(
             $this->reprint_directory,
             $other_docroot,
             $push_session->get_push_session_id(),
             ['wp-content/plugins/reprint']
         );
-        $changed_protection = Site_Export_Push_Session::open(
+        $changed_protection = \WordPress\Reprint\Server\PushSession::open(
             $this->reprint_directory,
             $this->docroot,
             $push_session->get_push_session_id(),
@@ -904,7 +904,7 @@ final class PushSessionTest extends TestCase {
             try {
                 $reopened->get_status();
                 $this->fail('A session reopened with different immutable configuration.');
-            } catch (Site_Export_Push_Exception $exception) {
+            } catch (\WordPress\Reprint\Server\PushException $exception) {
                 $this->assertSame('corrupted_push_state', $exception->get_error_code());
                 $this->assertStringContainsString('does not match', $exception->getMessage());
             }
@@ -915,14 +915,14 @@ final class PushSessionTest extends TestCase {
         $push_session = $this->push_session('45674567456745674567456745674568');
 
         try {
-            Site_Export_Push_Session::create(
+            \WordPress\Reprint\Server\PushSession::create(
                 $this->reprint_directory,
                 $this->docroot,
                 ['wp-content/plugins/reprint', 'wp-config.php'],
                 $push_session->get_push_session_id()
             );
             $this->fail('Repeated create accepted different immutable excluded paths.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('corrupted_push_state', $exception->get_error_code());
             $this->assertStringContainsString('does not match', $exception->getMessage());
         }
@@ -1066,7 +1066,7 @@ final class PushSessionTest extends TestCase {
                 'body' => 'c',
             ]]);
             $this->fail('A completed file accepted a stale replay cursor.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('offset_gap', $exception->get_error_code());
         }
     }
@@ -1097,7 +1097,7 @@ final class PushSessionTest extends TestCase {
             try {
                 $this->push_parts($push_session, [['headers' => $headers, 'body' => '']]);
                 $this->fail('An in-flight file became the parent of a completed ' . $type . '.');
-            } catch (Site_Export_Push_Exception $exception) {
+            } catch (\WordPress\Reprint\Server\PushException $exception) {
                 $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
             }
             $this->assertSame('a', file_get_contents($push_session->get_push_directory() . '/work/inflight.data'));
@@ -1143,7 +1143,7 @@ final class PushSessionTest extends TestCase {
             try {
                 $this->push_parts($push_session, [['headers' => $headers, 'body' => $body]]);
                 $this->fail('A completed ' . $type . ' hid an in-flight descendant.');
-            } catch (Site_Export_Push_Exception $exception) {
+            } catch (\WordPress\Reprint\Server\PushException $exception) {
                 $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
             }
             $this->assertSame('a', file_get_contents($push_session->get_push_directory() . '/work/inflight.data'));
@@ -1174,7 +1174,7 @@ final class PushSessionTest extends TestCase {
                 ],
             ]);
             $this->fail('A different path replaced in-flight work in the same request.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
         }
 
@@ -1453,7 +1453,7 @@ final class PushSessionTest extends TestCase {
         try {
             $second->commit(1);
             $this->fail('A second push session committed while the document root was claimed.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
         }
         $this->assertFileDoesNotExist($this->docroot . '/second.txt');
@@ -1491,13 +1491,13 @@ final class PushSessionTest extends TestCase {
         $failure = null;
         try {
             $push_session->remove_push_directory();
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $failure = $exception;
         } finally {
             $this->stop_lock_process($lock_process);
         }
 
-        $this->assertInstanceOf(Site_Export_Push_Exception::class, $failure);
+        $this->assertInstanceOf(\WordPress\Reprint\Server\PushException::class, $failure);
         $this->assertSame('lock_acquisition_failure', $failure->get_error_code());
         $this->assertDirectoryExists($push_directory);
         $this->assertFileDoesNotExist(dirname($push_directory) . '/.removing-' . $push_session->get_push_session_id());
@@ -1528,7 +1528,7 @@ final class PushSessionTest extends TestCase {
         try {
             $this->push_session($push_session_id);
             $this->fail('A push session was recreated while its removal tombstone remained.');
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
         }
         $this->assertDirectoryDoesNotExist($push_directory);
@@ -1537,12 +1537,12 @@ final class PushSessionTest extends TestCase {
         $failure = null;
         try {
             $push_session->remove_push_directory();
-        } catch (Site_Export_Push_Exception $exception) {
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
             $failure = $exception;
         } finally {
             $this->stop_lock_process($lock_process);
         }
-        $this->assertInstanceOf(Site_Export_Push_Exception::class, $failure);
+        $this->assertInstanceOf(\WordPress\Reprint\Server\PushException::class, $failure);
         $this->assertSame('lock_acquisition_failure', $failure->get_error_code());
         $this->assertDirectoryExists($tombstone);
 
@@ -1568,14 +1568,14 @@ final class PushSessionTest extends TestCase {
      * production method wrote before the failed call, without rewriting private
      * push-session files in the test.
      *
-     * @param Site_Export_Push_Session $push_session Push session to reopen in the child process.
+     * @param \WordPress\Reprint\Server\PushSession $push_session Push session to reopen in the child process.
      * @param array<int,array{headers:array<string,string>,body:string}> $parts Multipart parts to upload.
      * @param string $operation One of unlink, mkdir, or symlink.
      * @param string $path_suffix Absolute-path suffix whose operation must fail.
      * @return array{class:string,reason:string|null,message:string} Classified child-process exception.
      */
     private function run_upload_with_filesystem_fault(
-        Site_Export_Push_Session $push_session,
+        \WordPress\Reprint\Server\PushSession $push_session,
         array $parts,
         string $operation,
         string $path_suffix
@@ -1658,13 +1658,13 @@ final class PushSessionTest extends TestCase {
         $exit_code = proc_close($process);
         $this->assertSame(73, $exit_code, "The requested filesystem call did not fail.\nstdout: " . $stdout . "\nstderr: " . $stderr);
         $failure = json_decode($stdout, true, 512, JSON_THROW_ON_ERROR);
-        $this->assertSame(Site_Export_Push_Exception::class, $failure['class']);
+        $this->assertSame(\WordPress\Reprint\Server\PushException::class, $failure['class']);
         $this->assertSame('filesystem_error', $failure['reason']);
         return $failure;
     }
 
-    private function push_session(string $id): Site_Export_Push_Session {
-        return Site_Export_Push_Session::create(
+    private function push_session(string $id): \WordPress\Reprint\Server\PushSession {
+        return \WordPress\Reprint\Server\PushSession::create(
             $this->reprint_directory,
             $this->docroot,
             ['wp-content/plugins/reprint'],
@@ -1677,7 +1677,7 @@ final class PushSessionTest extends TestCase {
         $boundary = 'fragment-limit-boundary';
         $path = 'fragment-limit.bin';
         $suffix = "\r\n--" . $boundary . "--\r\n";
-        $payload_bytes = Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES;
+        $payload_bytes = \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES;
         do {
             $previous_payload_bytes = $payload_bytes;
             $prefix = '--' . $boundary . "\r\n"
@@ -1686,13 +1686,13 @@ final class PushSessionTest extends TestCase {
                 . 'X-File-Size: ' . $payload_bytes . "\r\n"
                 . "X-Chunk-Offset: 0\r\n"
                 . 'Content-Length: ' . $payload_bytes . "\r\n\r\n";
-            $payload_bytes = Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES
+            $payload_bytes = \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES
                 - strlen($prefix)
                 - strlen($suffix);
         } while ($payload_bytes !== $previous_payload_bytes);
 
         $body = $prefix . str_repeat('x', $payload_bytes) . $suffix;
-        $this->assertSame(Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES, strlen($body));
+        $this->assertSame(\WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES, strlen($body));
         return [$boundary, $body];
     }
 
@@ -1727,7 +1727,7 @@ final class PushSessionTest extends TestCase {
         proc_close($process);
     }
 
-    private function push_file(Site_Export_Push_Session $push_session, string $path, string $contents): void {
+    private function push_file(\WordPress\Reprint\Server\PushSession $push_session, string $path, string $contents): void {
         $this->push_parts($push_session, [[
             'headers' => [
                 'X-Chunk-Type' => 'file',
@@ -1740,7 +1740,7 @@ final class PushSessionTest extends TestCase {
     }
 
     /** @param array<int,array{headers:array<string,string>,body:string}> $parts */
-    private function push_parts(Site_Export_Push_Session $push_session, array $parts): void {
+    private function push_parts(\WordPress\Reprint\Server\PushSession $push_session, array $parts): void {
         $boundary = 'test-boundary';
         $body = '';
         foreach ($parts as $part) {
@@ -1754,7 +1754,7 @@ final class PushSessionTest extends TestCase {
         $input = fopen('php://temp', 'w+b');
         fwrite($input, $body);
         rewind($input);
-        $push_session->accept_upload($input, new Site_Export_Multipart_Processor($boundary));
+        $push_session->accept_upload($input, new \WordPress\Reprint\Server\MultipartProcessor($boundary));
         try {
             while ($push_session->next_change()) {
             }
@@ -1764,7 +1764,7 @@ final class PushSessionTest extends TestCase {
         }
     }
 
-    private function commit_all(Site_Export_Push_Session $push_session): void {
+    private function commit_all(\WordPress\Reprint\Server\PushSession $push_session): void {
         if (!$push_session->get_status()['work_deletes_complete']) {
             $this->complete_work_deletes($push_session);
         }
@@ -1773,7 +1773,7 @@ final class PushSessionTest extends TestCase {
         } while ($result['send_next_request']);
     }
 
-    private function complete_work_deletes(Site_Export_Push_Session $push_session): void {
+    private function complete_work_deletes(\WordPress\Reprint\Server\PushSession $push_session): void {
         $this->push_parts($push_session, [[
             'headers' => [
                 'X-Chunk-Type' => 'delete-list',

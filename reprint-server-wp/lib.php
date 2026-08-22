@@ -6,6 +6,10 @@
  * triggering any HTTP dispatch.
  */
 
+use WordPress\Reprint\Server\HMACServer;
+use WordPress\Reprint\Server\HTTPServer;
+use WordPress\Reprint\Server\PushConfigurationException;
+
 use function WordPress\Reprint\Server\relative_path_under;
 
 if (!defined('ABSPATH')) {
@@ -121,26 +125,34 @@ function _site_export_load_exporter_runtime(): ?string {
     $candidates = [
         [
             'autoload' => SITE_EXPORT_PLUGIN_DIR . 'vendor/autoload.php',
+            'compat' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-server/src/compat.php',
             'export' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-server/src/export.php',
         ],
         [
             'autoload' => $repo_root . '/vendor/autoload.php',
+            'compat' => $repo_root . '/vendor/wp-php-toolkit/reprint-server/src/compat.php',
             'export' => $repo_root . '/vendor/wp-php-toolkit/reprint-server/src/export.php',
         ],
     ];
 
     foreach ($candidates as $candidate) {
-        if (!file_exists($candidate['autoload']) || !file_exists($candidate['export'])) {
+        if (
+            !file_exists($candidate['autoload'])
+            || !file_exists($candidate['compat'])
+            || !file_exists($candidate['export'])
+        ) {
             continue;
         }
 
         $autoload_path = realpath($candidate['autoload']);
+        $compat_path = realpath($candidate['compat']);
         $export_path = realpath($candidate['export']);
-        if ($autoload_path === false || $export_path === false) {
+        if ($autoload_path === false || $compat_path === false || $export_path === false) {
             continue;
         }
 
         require_once $autoload_path;
+        require_once $compat_path;
         $loaded_export_path = $export_path;
         return $export_path;
     }
@@ -291,15 +303,15 @@ function _site_export_update_push_authorization(bool $enabled): bool {
  * matches AND that the HMAC is valid.
  */
 function _site_export_verify_hmac(string $secret): ?string {
-    if (!class_exists('Site_Export_HMAC_Server', false)) {
+    if (!class_exists(HMACServer::class, false)) {
         _site_export_load_exporter_runtime();
     }
 
-    if (!class_exists('Site_Export_HMAC_Server')) {
+    if (!class_exists(HMACServer::class)) {
         return 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.';
     }
 
-    $server = new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
+    $server = new HMACServer($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
     return $server->verify_globals();
 }
 
@@ -388,10 +400,10 @@ function _site_export_handle_api_request(array $options = []): void {
     // credentials, so we must not require auth before CORS passes.
     // The class is loaded by the Composer autoloader on demand, but
     // load it eagerly in case the autoloader hasn't been required yet.
-    if (!class_exists('Site_Export_HTTP_Server', false)) {
+    if (!class_exists(HTTPServer::class, false)) {
         _site_export_load_exporter_runtime();
     }
-    Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options('*');
+    HTTPServer::handle_cors_headers_and_terminate_on_options('*');
 
     // Buffer output so stray warnings don't corrupt the JSON response.
     ob_start();
@@ -455,10 +467,10 @@ function _site_export_handle_api_request(array $options = []): void {
         if (empty($secret) || !is_string($secret)) {
             _site_export_push_error(503, 'not_configured', 'Configure the shared secret in WordPress admin under Tools > Reprint Server.');
         }
-        if (!class_exists('Site_Export_HMAC_Server', false)) {
+        if (!class_exists(HMACServer::class, false)) {
             _site_export_load_exporter_runtime();
         }
-        if (!class_exists('Site_Export_HMAC_Server')) {
+        if (!class_exists(HMACServer::class)) {
             _site_export_push_error(500, 'filesystem_error', 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.');
         }
         // These exact request-line values are covered by the HMAC; WordPress
@@ -467,7 +479,7 @@ function _site_export_handle_api_request(array $options = []): void {
         $request_method = (string) ( $_SERVER['REQUEST_METHOD'] ?? '' );
         // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
         $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
-        $hmac_server = new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
+        $hmac_server = new HMACServer($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
         $auth_error = $hmac_server->verify_envelope($_SERVER, $request_method, $request_target);
         if ($auth_error !== null) {
             _site_export_push_error(403, 'auth_failed', $auth_error);
@@ -504,7 +516,7 @@ function _site_export_handle_api_request(array $options = []): void {
         );
     }
 
-    // Ensure the Composer autoloader is loaded so Site_Export_HTTP_Server
+    // Ensure the Composer autoloader is loaded so HTTPServer
     // is resolvable. The class itself will require export.php on demand
     // via serve() below.
     if (_site_export_load_exporter_runtime() === null) {
@@ -517,7 +529,7 @@ function _site_export_handle_api_request(array $options = []): void {
     // -- Dispatch --
     try {
         $server_options = ['default_directory' => ABSPATH];
-        if (Site_Export_HTTP_Server::is_push_endpoint($endpoint)) {
+        if (HTTPServer::is_push_endpoint($endpoint)) {
             // Push changes the web server's document root. ABSPATH remains the
             // pull default because it may point at a separate shared core tree.
             if (array_key_exists('docroot', $options)) {
@@ -527,14 +539,14 @@ function _site_export_handle_api_request(array $options = []): void {
                 $configured_docroot = $_SERVER['DOCUMENT_ROOT'] ?? null;
             }
             if (!is_string($configured_docroot) || $configured_docroot === '') {
-                throw new Site_Export_Push_Configuration_Exception(
+                throw new PushConfigurationException(
                     'Push endpoints require docroot or DOCUMENT_ROOT to name an existing directory; observed '
                     . json_encode($configured_docroot) . '.'
                 );
             }
             $canonical_docroot = realpath($configured_docroot);
             if ($canonical_docroot === false || !is_dir($canonical_docroot)) {
-                throw new Site_Export_Push_Configuration_Exception(
+                throw new PushConfigurationException(
                     'Push endpoints require docroot or DOCUMENT_ROOT to name an existing directory; observed '
                     . json_encode($configured_docroot) . '.'
                 );
@@ -546,7 +558,7 @@ function _site_export_handle_api_request(array $options = []): void {
             );
             $excluded_paths = $options['excluded_paths'] ?? [];
             if (!is_array($excluded_paths)) {
-                throw new Site_Export_Push_Configuration_Exception('excluded_paths must be an array.');
+                throw new PushConfigurationException('excluded_paths must be an array.');
             }
             $canonical_plugin_directory = realpath(SITE_EXPORT_PLUGIN_DIR);
             $plugin_directory = rtrim($canonical_plugin_directory === false ? SITE_EXPORT_PLUGIN_DIR : $canonical_plugin_directory, '/\\');
@@ -600,7 +612,7 @@ function _site_export_handle_api_request(array $options = []): void {
                         || $canonical_plugin_directory === false
                         || rtrim($resolved_logical_plugin_directory, '/\\') !== $plugin_directory
                     ) {
-                        throw new Site_Export_Push_Configuration_Exception(
+                        throw new PushConfigurationException(
                             'WordPress reports the Reprint Server plugin inside the document root at '
                             . json_encode($logical_plugin_directory_to_verify)
                             . ', but that path does not resolve to SITE_EXPORT_PLUGIN_DIR '
@@ -638,10 +650,10 @@ function _site_export_handle_api_request(array $options = []): void {
             }
             $server_options['push'] = $push_options;
         }
-        Site_Export_HTTP_Server::serve($server_options);
+        HTTPServer::serve($server_options);
     } catch (Exception $e) {
         if (_site_export_is_push_endpoint($endpoint)) {
-            if ($e instanceof Site_Export_Push_Configuration_Exception) {
+            if ($e instanceof PushConfigurationException) {
                 _site_export_push_error(503, 'not_configured', $e->getMessage());
             }
             if ($e instanceof InvalidArgumentException) {

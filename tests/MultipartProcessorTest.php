@@ -40,7 +40,7 @@ final class MultipartProcessorTest extends TestCase {
             'headers' => ['X-Chunk-Type' => 'file'],
             'body' => $body,
         ]]);
-        $processor = new Site_Export_Multipart_Processor($boundary);
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor($boundary);
         $body_bytes = 0;
         $body_tokens = 0;
         $largest_token = 0;
@@ -48,7 +48,7 @@ final class MultipartProcessorTest extends TestCase {
         for ($offset = 0; $offset < $message_bytes; $offset += 8192) {
             $processor->append_bytes(substr($message, $offset, 8192));
             while ($processor->next_token()) {
-                if ($processor->get_token_type() !== Site_Export_Multipart_Processor::TOKEN_BODY) {
+                if ($processor->get_token_type() !== \WordPress\Reprint\Server\MultipartProcessor::TOKEN_BODY) {
                     continue;
                 }
                 $piece = $processor->get_current_body_piece();
@@ -62,7 +62,7 @@ final class MultipartProcessorTest extends TestCase {
         $this->assertSame(strlen($body), $body_bytes);
         $this->assertGreaterThan(1, $body_tokens);
         $this->assertLessThanOrEqual(
-            Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES,
+            \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES,
             $largest_token
         );
     }
@@ -84,7 +84,7 @@ final class MultipartProcessorTest extends TestCase {
     }
 
     public function testClosingBoundaryWithoutPartsIsComplete(): void {
-        $processor = new Site_Export_Multipart_Processor('empty');
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor('empty');
         $processor->append_bytes("--empty--\r\n");
 
         $this->assertFalse($processor->next_token());
@@ -94,7 +94,7 @@ final class MultipartProcessorTest extends TestCase {
     }
 
     public function testPauseAndResumeStatesDistinguishIncompleteInputFromCompletion(): void {
-        $processor = new Site_Export_Multipart_Processor('pause');
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor('pause');
         $processor->append_bytes('--pau');
 
         $this->assertFalse($processor->next_token());
@@ -110,19 +110,19 @@ final class MultipartProcessorTest extends TestCase {
     public function testParsesOnlyValidatedMultipartMixedContentTypes(): void {
         $this->assertSame(
             'plain-boundary',
-            Site_Export_Multipart_Processor::boundary_from_content_type(
+            \WordPress\Reprint\Server\MultipartProcessor::boundary_from_content_type(
                 'multipart/mixed; boundary=plain-boundary'
             )
         );
         $this->assertSame(
             'quoted-boundary',
-            Site_Export_Multipart_Processor::boundary_from_content_type(
+            \WordPress\Reprint\Server\MultipartProcessor::boundary_from_content_type(
                 'Multipart/Mixed; charset=binary; boundary="quoted-boundary"'
             )
         );
 
         try {
-            Site_Export_Multipart_Processor::boundary_from_content_type('multipart/form-data; boundary=x');
+            \WordPress\Reprint\Server\MultipartProcessor::boundary_from_content_type('multipart/form-data; boundary=x');
             $this->fail('A non-multipart/mixed media type was accepted.');
         } catch (InvalidArgumentException $exception) {
             $this->assertStringContainsString('Expected Content-Type multipart/mixed', $exception->getMessage());
@@ -130,7 +130,7 @@ final class MultipartProcessorTest extends TestCase {
 
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('more than one boundary');
-        Site_Export_Multipart_Processor::boundary_from_content_type(
+        \WordPress\Reprint\Server\MultipartProcessor::boundary_from_content_type(
             'multipart/mixed; boundary=one; boundary=two'
         );
     }
@@ -149,7 +149,7 @@ final class MultipartProcessorTest extends TestCase {
     public function testRejectsInvalidMultipartMixedBoundaries(string $content_type, string $expected_message): void {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage($expected_message);
-        Site_Export_Multipart_Processor::boundary_from_content_type($content_type);
+        \WordPress\Reprint\Server\MultipartProcessor::boundary_from_content_type($content_type);
     }
 
     /** @return array<string,array{0:string,1:string}> */
@@ -172,7 +172,7 @@ final class MultipartProcessorTest extends TestCase {
 
     #[DataProvider('invalid_grammar')]
     public function testRejectsFormsOutsideTheReprintGrammar(string $message, string $expected_message): void {
-        $processor = new Site_Export_Multipart_Processor('x');
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor('x');
         $processor->append_bytes($message);
 
         $this->expectException(InvalidArgumentException::class);
@@ -195,7 +195,7 @@ final class MultipartProcessorTest extends TestCase {
 
     #[DataProvider('truncated_messages')]
     public function testFinishInputRejectsEveryIncompleteState(string $message, string $expected_message): void {
-        $processor = new Site_Export_Multipart_Processor('x');
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor('x');
         $processor->append_bytes($message);
         while ($processor->next_token()) {
             $processor->get_token_type();
@@ -207,7 +207,7 @@ final class MultipartProcessorTest extends TestCase {
     }
 
     public function testRejectsAContinuationBeforeAHeaderAndBoundsTheAggregate(): void {
-        $processor = new Site_Export_Multipart_Processor('x');
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor('x');
         $processor->append_bytes("--x\r\n orphan\r\nContent-Length: 0\r\n\r\n");
         try {
             while ($processor->next_token()) {
@@ -218,7 +218,7 @@ final class MultipartProcessorTest extends TestCase {
             $this->assertStringContainsString('continuation', $exception->getMessage());
         }
 
-        $processor = new Site_Export_Multipart_Processor('x');
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor('x');
         $message = "--x\r\nX-Large: " . str_repeat('a', 8100) . "\r\n"
             . str_repeat(' ' . str_repeat('b', 8100) . "\r\n", 4)
             . "Content-Length: 0\r\n\r\n";
@@ -265,7 +265,7 @@ final class MultipartProcessorTest extends TestCase {
         ]])]);
         $this->assertCount(32, $parts[0]['headers']);
 
-        $processor = new Site_Export_Multipart_Processor('x');
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor('x');
         $processor->append_bytes(
             "--x\r\n" . $maximum_line . "a\r\nContent-Length: 0\r\n\r\n"
         );
@@ -278,7 +278,7 @@ final class MultipartProcessorTest extends TestCase {
             $this->assertStringContainsString('exceeds 8192 bytes', $exception->getMessage());
         }
 
-        $processor = new Site_Export_Multipart_Processor('x');
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor('x');
         $processor->append_bytes(
             "--x\r\n" . str_replace(str_repeat('d', 8162), str_repeat('d', 8163), $maximum_aggregate_headers)
         );
@@ -301,7 +301,7 @@ final class MultipartProcessorTest extends TestCase {
     }
 
     public function testRequiresEachAppendedFragmentToBeDrainedAndBounded(): void {
-        $processor = new Site_Export_Multipart_Processor('x');
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor('x');
         $processor->append_bytes('--x');
         try {
             $processor->append_bytes("--\r\n");
@@ -310,37 +310,37 @@ final class MultipartProcessorTest extends TestCase {
             $this->assertStringContainsString('next_token', $exception->getMessage());
         }
 
-        $processor = new Site_Export_Multipart_Processor('x');
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor('x');
         $processor->append_bytes(
             "--x\r\nContent-Length: "
-            . Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES
+            . \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES
             . "\r\n\r\n"
         );
         $this->assertTrue($processor->next_token());
-        $this->assertSame(Site_Export_Multipart_Processor::TOKEN_PART_START, $processor->get_token_type());
+        $this->assertSame(\WordPress\Reprint\Server\MultipartProcessor::TOKEN_PART_START, $processor->get_token_type());
         $this->assertFalse($processor->next_token());
-        $processor->append_bytes(str_repeat('a', Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES));
+        $processor->append_bytes(str_repeat('a', \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES));
         $this->assertTrue($processor->next_token());
         $this->assertSame(
-            Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES,
+            \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES,
             strlen($processor->get_current_body_piece())
         );
         $this->assertTrue($processor->next_token());
-        $this->assertSame(Site_Export_Multipart_Processor::TOKEN_PART_END, $processor->get_token_type());
+        $this->assertSame(\WordPress\Reprint\Server\MultipartProcessor::TOKEN_PART_END, $processor->get_token_type());
         $this->assertFalse($processor->next_token());
         $processor->append_bytes("\r\n--x--\r\n");
         $this->assertFalse($processor->next_token());
         $processor->finish_input();
 
-        $processor = new Site_Export_Multipart_Processor('x');
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor('x');
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage( (string) Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES);
-        $processor->append_bytes(str_repeat('a', Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES + 1));
+        $this->expectExceptionMessage( (string) \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES);
+        $processor->append_bytes(str_repeat('a', \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES + 1));
     }
 
     public function testRejectsContentLengthOutsideTheRuntimeIntegerRange(): void {
         $too_large = (string) PHP_INT_MAX . '0';
-        $processor = new Site_Export_Multipart_Processor('x');
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor('x');
         $processor->append_bytes("--x\r\nContent-Length: {$too_large}\r\n\r\n");
 
         $this->expectException(InvalidArgumentException::class);
@@ -357,21 +357,21 @@ final class MultipartProcessorTest extends TestCase {
      * @return array<int,array{headers:array<string,string>,body:string}>
      */
     private function collect_parts(string $boundary, array $fragments): array {
-        $processor = new Site_Export_Multipart_Processor($boundary);
+        $processor = new \WordPress\Reprint\Server\MultipartProcessor($boundary);
         $parts = [];
         $current = null;
         foreach ($fragments as $fragment) {
             $processor->append_bytes($fragment);
             while ($processor->next_token()) {
                 $token_type = $processor->get_token_type();
-                if ($token_type === Site_Export_Multipart_Processor::TOKEN_PART_START) {
+                if ($token_type === \WordPress\Reprint\Server\MultipartProcessor::TOKEN_PART_START) {
                     $current = [
                         'headers' => $processor->get_current_headers(),
                         'body' => '',
                     ];
-                } elseif ($token_type === Site_Export_Multipart_Processor::TOKEN_BODY) {
+                } elseif ($token_type === \WordPress\Reprint\Server\MultipartProcessor::TOKEN_BODY) {
                     $current['body'] .= $processor->get_current_body_piece();
-                } elseif ($token_type === Site_Export_Multipart_Processor::TOKEN_PART_END) {
+                } elseif ($token_type === \WordPress\Reprint\Server\MultipartProcessor::TOKEN_PART_END) {
                     $parts[] = $current;
                     $current = null;
                 }

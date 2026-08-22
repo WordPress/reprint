@@ -1,5 +1,9 @@
 <?php
 
+namespace WordPress\Reprint\Server;
+
+use RuntimeException;
+
 /**
  * HMAC verifier for Reprint API requests.
  *
@@ -7,7 +11,7 @@
  * the required X-Auth-* headers and checks request freshness before hashing a
  * received body.
  */
-final class Site_Export_HMAC_Server {
+final class HMACServer {
 
     /**
      * Value of the X-Auth-Content-Hash header when the request body is
@@ -262,4 +266,8 @@ final class Site_Export_HMAC_Server {
             throw new RuntimeException('Cannot hash uploaded file.');
         }
     }
+}
+
+if (!class_exists('Site_Export_HMAC_Server', false)) {
+    class_alias(HMACServer::class, 'Site_Export_HMAC_Server');
 }
