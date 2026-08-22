@@ -28,8 +28,8 @@ jobs:
           name: importer-phar
           path: reprint.phar
 
-  build-exporter-plugin:
-    name: Build PHP 5.6 exporter plugin
+  build-server-plugin:
+    name: Build PHP 5.6 Reprint Server plugin
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -45,19 +45,19 @@ jobs:
 
       - run: composer install --no-dev --no-interaction --prefer-dist --working-dir=tools/php56-build
 
-      - run: ./bin/build-exporter-plugin.sh
+      - run: ./bin/build-server-plugin.sh
 
       - uses: actions/upload-artifact@v4
         with:
-          name: exporter-plugin
+          name: server-plugin
           path: reprint-exporter-wp.zip
 
   e2e:
-    # Keep the existing source E2E rows running if only the new exporter
+    # Keep the existing source E2E rows running if only the Reprint Server
     # artifact build fails. The PHP 5.6 row will fail when its artifact is absent.
     if: ${{ always() && !cancelled() && needs['build-phar'].result == 'success' }}
     name: E2E (exporter PHP ${{ matrix.exporter_php }}, importer PHP ${{ matrix.importer_php }})
-    needs: [build-phar, build-exporter-plugin]
+    needs: [build-phar, build-server-plugin]
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     strategy:
@@ -96,16 +96,16 @@ jobs:
       - uses: actions/download-artifact@v4
         if: matrix.exporter_php == '5.6'
         with:
-          name: exporter-plugin
-          path: ${{ runner.temp }}/exporter-plugin-download
+          name: server-plugin
+          path: ${{ runner.temp }}/server-plugin-download
 
-      - name: Extract generated exporter plugin
+      - name: Extract generated Reprint Server plugin
         if: matrix.exporter_php == '5.6'
         run: |
-          artifact_root="$RUNNER_TEMP/generated-exporter-plugin"
+          artifact_root="$RUNNER_TEMP/generated-server-plugin"
           mkdir -p "$artifact_root/reprint-server-wp"
           unzip -q \
-            "$RUNNER_TEMP/exporter-plugin-download/reprint-exporter-wp.zip" \
+            "$RUNNER_TEMP/server-plugin-download/reprint-exporter-wp.zip" \
             -d "$artifact_root/reprint-server-wp"
           echo "E2E_EXPORTER_PROJECT_ROOT=$artifact_root" >> "$GITHUB_ENV"
 
