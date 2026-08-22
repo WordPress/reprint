@@ -85,7 +85,7 @@ final class FilesPullDiffCheckpointTest extends TestCase
     private string $pullStateDirectory;
     private string $filesystemRoot;
     private string $remoteReprintApiUrl =
-        'https://example.com/?site-export-api';
+        'https://example.com/?reprint-api';
 
     protected function setUp(): void
     {

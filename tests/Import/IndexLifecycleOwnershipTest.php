@@ -15,7 +15,7 @@ final class IndexLifecycleOwnershipTest extends TestCase
     private string $stateDirectory;
     private string $filesystemRoot;
     private string $remoteReprintApiUrl =
-        'https://example.test/export.php?site-export-api';
+        'https://example.test/export.php?reprint-api';
 
     protected function setUp(): void
     {
