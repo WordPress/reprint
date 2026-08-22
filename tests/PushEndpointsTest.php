@@ -148,6 +148,30 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
     }
 
+    public function testLegacyQueryAliasStillRunsLegacyAndCanonicalConfigurationFilters(): void
+    {
+        $canonical_remote_reprint_api_url = $this->remote_reprint_api_url;
+        $this->remote_reprint_api_url = str_replace(
+            'reprint-api=1',
+            'site-export-api=1',
+            $canonical_remote_reprint_api_url
+        );
+
+        try {
+            $response = $this->requestPushEndpoint(
+                self::SECRET,
+                'POST',
+                'push_create',
+                str_repeat('a', 32)
+            );
+        } finally {
+            $this->remote_reprint_api_url = $canonical_remote_reprint_api_url;
+        }
+
+        $this->assertSame(200, $response['http_code'], $response['body']);
+        $this->assertSame('created', $response['response']['status']);
+    }
+
     public function testAuthorizedFuturePushEndpointUsesPushErrorContract(): void
     {
         $response = $this->requestPushEndpoint(

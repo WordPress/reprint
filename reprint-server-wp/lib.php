@@ -1,11 +1,16 @@
 <?php
+
+namespace WordPress\Reprint\Server\Plugin;
+
 /**
  * Reprint Server library – constants and function declarations, no request handling.
  *
- * Require this file to get access to the export API functions without
+ * Require this file to get access to the Reprint Server API functions without
  * triggering any HTTP dispatch.
  */
 
+use Exception;
+use InvalidArgumentException;
 use WordPress\Reprint\Server\HMACServer;
 use WordPress\Reprint\Server\HTTPServer;
 use WordPress\Reprint\Server\PushConfigurationException;
@@ -16,30 +21,35 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-if (!defined('SITE_EXPORT_VERSION')) {
-    define('SITE_EXPORT_VERSION', '0.10.7-dev');
+require_once __DIR__ . '/compat.php';
+\reprint_server_bootstrap_compatibility(false);
+
+if (!defined(__NAMESPACE__ . '\\VERSION')) {
+    define(__NAMESPACE__ . '\\VERSION', '0.10.7-dev');
 }
-if (!defined('SITE_EXPORT_PLUGIN_DIR')) {
-    define('SITE_EXPORT_PLUGIN_DIR', plugin_dir_path(__FILE__));
+if (!defined(__NAMESPACE__ . '\\PLUGIN_DIR')) {
+    define(__NAMESPACE__ . '\\PLUGIN_DIR', plugin_dir_path(__FILE__));
 }
-if (!defined('SITE_EXPORT_SECRET_FILE')) {
-    define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
+if (!defined(__NAMESPACE__ . '\\SECRET_FILE')) {
+    define(__NAMESPACE__ . '\\SECRET_FILE', PLUGIN_DIR . 'secret.php');
 }
-if (!defined('SITE_EXPORT_SECRET_OPTION')) {
-    define('SITE_EXPORT_SECRET_OPTION', 'site_export_secret');
+if (!defined(__NAMESPACE__ . '\\SECRET_OPTION')) {
+    define(__NAMESPACE__ . '\\SECRET_OPTION', 'site_export_secret');
 }
-if (!defined('SITE_EXPORT_PUSH_AUTHORIZATION_OPTION')) {
-    define('SITE_EXPORT_PUSH_AUTHORIZATION_OPTION', 'site_export_push_authorized_token_fingerprint');
+if (!defined(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION')) {
+    define(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION', 'site_export_push_authorized_token_fingerprint');
 }
 
 /**
  * Maximum age of a request timestamp in seconds.
  * Requests older than this are rejected to prevent replay attacks.
  */
-define('SITE_EXPORT_TIMESTAMP_TOLERANCE', 300);
+if (!defined(__NAMESPACE__ . '\\TIMESTAMP_TOLERANCE')) {
+    define(__NAMESPACE__ . '\\TIMESTAMP_TOLERANCE', 300);
+}
 
 /** Sends a JSON error response and terminates. */
-function _site_export_error(int $code, string $message): void {
+function error(int $code, string $message): void {
     http_response_code($code);
     header('Content-Type: application/json');
     echo json_encode(['error' => $message, 'code' => $code]);
@@ -59,7 +69,7 @@ function _site_export_error(int $code, string $message): void {
  * @param string $reason Machine-readable push failure reason.
  * @param string $detail Human-readable violated condition.
  */
-function _site_export_push_error(int $http_code, string $reason, string $detail): void {
+function push_error(int $http_code, string $reason, string $detail): void {
     http_response_code($http_code);
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     header('Pragma: no-cache');
@@ -80,12 +90,12 @@ function _site_export_push_error(int $http_code, string $reason, string $detail)
  * @param string $endpoint Exact endpoint query value.
  * @return bool Whether this is in the push endpoint namespace.
  */
-function _site_export_is_push_endpoint(string $endpoint): bool {
+function is_push_endpoint(string $endpoint): bool {
     return strpos($endpoint, 'push_') === 0;
 }
 
 /** Returns whether this PHP runtime can serve push endpoints. */
-function _site_export_push_is_supported(): bool {
+function push_is_supported(): bool {
     return PHP_VERSION_ID >= 70200;
 }
 
@@ -114,19 +124,19 @@ function _site_export_normalize_path(string $path): string {
  *
  * @return string|null Absolute path to export.php, or null when the runtime is missing.
  */
-function _site_export_load_exporter_runtime(): ?string {
+function load_server_runtime(): ?string {
     static $loaded_export_path = null;
 
     if ($loaded_export_path !== null) {
         return $loaded_export_path;
     }
 
-    $repo_root = dirname(SITE_EXPORT_PLUGIN_DIR);
+    $repo_root = dirname(PLUGIN_DIR);
     $candidates = [
         [
-            'autoload' => SITE_EXPORT_PLUGIN_DIR . 'vendor/autoload.php',
-            'compat' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-server/src/compat.php',
-            'export' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-server/src/export.php',
+            'autoload' => PLUGIN_DIR . 'vendor/autoload.php',
+            'compat' => PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-server/src/compat.php',
+            'export' => PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-server/src/export.php',
         ],
         [
             'autoload' => $repo_root . '/vendor/autoload.php',
@@ -161,8 +171,8 @@ function _site_export_load_exporter_runtime(): ?string {
 }
 
 /** Returns whether the legacy secret.php override exists. */
-function _site_export_has_secret_file(): bool {
-    return file_exists(SITE_EXPORT_SECRET_FILE);
+function has_secret_file(): bool {
+    return file_exists(SECRET_FILE);
 }
 
 /**
@@ -170,22 +180,22 @@ function _site_export_has_secret_file(): bool {
  *
  * @return string|null String secret when the file is valid, otherwise null.
  */
-function _site_export_get_file_secret(): ?string {
-    if (!_site_export_has_secret_file()) {
+function get_file_secret(): ?string {
+    if (!has_secret_file()) {
         return null;
     }
 
-    $secret = require SITE_EXPORT_SECRET_FILE;
+    $secret = require SECRET_FILE;
     return is_string($secret) ? $secret : null;
 }
 
 /** Reads the option-backed shared secret. */
-function _site_export_get_option_secret(): string {
+function get_option_secret(): string {
     if (!function_exists('get_option')) {
         return '';
     }
 
-    $secret = get_option(SITE_EXPORT_SECRET_OPTION, '');
+    $secret = get_option(SECRET_OPTION, '');
     return is_string($secret) ? $secret : '';
 }
 
@@ -195,24 +205,24 @@ function _site_export_get_option_secret(): string {
  * The legacy secret.php file takes precedence when present; otherwise the
  * site option is used.
  */
-function _site_export_get_shared_secret(): ?string {
-    if (_site_export_has_secret_file()) {
-        return _site_export_get_file_secret();
+function get_shared_secret(): ?string {
+    if (has_secret_file()) {
+        return get_file_secret();
     }
 
-    $secret = _site_export_get_option_secret();
+    $secret = get_option_secret();
     return $secret === '' ? null : $secret;
 }
 
 /**
  * Updates only the option-backed shared secret used by the settings UI and REST API.
  */
-function _site_export_update_shared_secret(string $secret): bool {
+function update_shared_secret(string $secret): bool {
     if (!function_exists('update_option')) {
         return false;
     }
 
-    return (bool) update_option(SITE_EXPORT_SECRET_OPTION, $secret, false);
+    return (bool) update_option(SECRET_OPTION, $secret, false);
 }
 
 /**
@@ -221,7 +231,7 @@ function _site_export_update_shared_secret(string $secret): bool {
  * An early boolean SITE_EXPORT_PUSH_ENABLED constant takes precedence over the
  * environment variable of the same name. Any unrecognized value fails closed.
  */
-function _site_export_get_managed_push_enabled(): ?bool {
+function get_managed_push_enabled(): ?bool {
     if (defined('SITE_EXPORT_PUSH_ENABLED')) {
         return SITE_EXPORT_PUSH_ENABLED === true;
     }
@@ -236,25 +246,25 @@ function _site_export_get_managed_push_enabled(): ?bool {
 }
 
 /** Returns whether the current connection token is authorized for push. */
-function _site_export_is_push_authorized(): bool {
-    return _site_export_get_push_authorization_error() === null;
+function is_push_authorized(): bool {
+    return get_push_authorization_error() === null;
 }
 
 /** Returns the exact push authorization failure, or null when push may start new work. */
-function _site_export_get_push_authorization_error(): ?string {
-    $managed_enabled = _site_export_get_managed_push_enabled();
+function get_push_authorization_error(): ?string {
+    $managed_enabled = get_managed_push_enabled();
     if ($managed_enabled !== null) {
         return $managed_enabled
             ? null
             : 'Push access is disabled by the hosting provider through SITE_EXPORT_PUSH_ENABLED.';
     }
 
-    $secret = _site_export_get_shared_secret();
+    $secret = get_shared_secret();
     if ($secret === null || !function_exists('get_option')) {
         return 'Push access is disabled for the current connection token.';
     }
 
-    $authorized_fingerprint = get_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, '');
+    $authorized_fingerprint = get_option(PUSH_AUTHORIZATION_OPTION, '');
     $authorized = is_string($authorized_fingerprint)
         && $authorized_fingerprint !== ''
         && hash_equals(hash('sha256', $secret), $authorized_fingerprint);
@@ -267,12 +277,12 @@ function _site_export_get_push_authorization_error(): ?string {
  * The stored fingerprint is the only local authorization state. A different
  * current token therefore cannot inherit the prior token's write authority.
  */
-function _site_export_update_push_authorization(bool $enabled): bool {
+function update_push_authorization(bool $enabled): bool {
     if (!function_exists('update_option')) {
         return false;
     }
 
-    $secret = _site_export_get_shared_secret();
+    $secret = get_shared_secret();
     if ($enabled && $secret === null) {
         return false;
     }
@@ -281,11 +291,11 @@ function _site_export_update_push_authorization(bool $enabled): bool {
     if ($enabled) {
         $fingerprint = hash('sha256', $secret);
     }
-    if (function_exists('get_option') && get_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, '') === $fingerprint) {
+    if (function_exists('get_option') && get_option(PUSH_AUTHORIZATION_OPTION, '') === $fingerprint) {
         return true;
     }
 
-    return (bool) update_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, $fingerprint, false);
+    return (bool) update_option(PUSH_AUTHORIZATION_OPTION, $fingerprint, false);
 }
 
 /**
@@ -302,16 +312,16 @@ function _site_export_update_push_authorization(bool $enabled): bool {
  * independently hashes what it received and checks both that the hash
  * matches AND that the HMAC is valid.
  */
-function _site_export_verify_hmac(string $secret): ?string {
+function verify_hmac(string $secret): ?string {
     if (!class_exists(HMACServer::class, false)) {
-        _site_export_load_exporter_runtime();
+        load_server_runtime();
     }
 
     if (!class_exists(HMACServer::class)) {
         return 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.';
     }
 
-    $server = new HMACServer($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
+    $server = new HMACServer($secret, TIMESTAMP_TOLERANCE);
     return $server->verify_globals();
 }
 
@@ -320,25 +330,25 @@ function _site_export_verify_hmac(string $secret): ?string {
  *
  * Reads the shared secret from secret.php when present, otherwise from the
  * site option, and verifies the request's HMAC signature.
- * Calls _site_export_error() on failure.
+ * Calls error() on failure.
  */
-function _site_export_default_authenticate(): void {
-    if (_site_export_has_secret_file()) {
-        $secret = _site_export_get_file_secret();
+function default_authenticate(): void {
+    if (has_secret_file()) {
+        $secret = get_file_secret();
         if (empty($secret)) {
-            _site_export_error(503, 'Invalid secret.php configuration. Please remove it or replace it with a valid shared secret.');
+            error(503, 'Invalid secret.php configuration. Please remove it or replace it with a valid shared secret.');
         }
     } else {
-        $secret = _site_export_get_option_secret();
+        $secret = get_option_secret();
     }
 
     if (empty($secret) || !is_string($secret)) {
-        _site_export_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Reprint Server.');
+        error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Reprint Server.');
     }
 
-    $auth_error = _site_export_verify_hmac($secret);
+    $auth_error = verify_hmac($secret);
     if ($auth_error !== null) {
-        _site_export_error(403, $auth_error);
+        error(403, $auth_error);
     }
 }
 
@@ -349,14 +359,14 @@ function _site_export_default_authenticate(): void {
  * and the database layer (including the SQLite db.php drop-in when present)
  * are all available.
  *
- * The bundled plugin passes the `site_export_api_options` filter result here.
+ * The bundled plugin passes the `reprint_server_api_options` filter result here.
  * A direct library embedder supplies the same trusted options array itself.
  *
  * @param array $options {
  *     Optional endpoint configuration overrides.
  *
  *     @type callable $authenticate Optional. Authenticates the request.
- *                                  Defaults to _site_export_default_authenticate().
+ *                                  Defaults to default_authenticate().
  *     @type string $docroot Optional. Document root for push. Defaults
  *                           to the server's DOCUMENT_ROOT. The configured path
  *                           must resolve to an existing directory.
@@ -382,7 +392,7 @@ function _site_export_default_authenticate(): void {
  *     maximum_commit_entries?:int
  * } $options
  */
-function _site_export_handle_api_request(array $options = []): void {
+function handle_api_request(array $options = []): void {
     // Revert WordPress error display settings (wp_debug_mode may
     // have enabled display_errors based on WP_DEBUG_DISPLAY).
     if (function_exists('ini_set')) {
@@ -401,7 +411,7 @@ function _site_export_handle_api_request(array $options = []): void {
     // The class is loaded by the Composer autoloader on demand, but
     // load it eagerly in case the autoloader hasn't been required yet.
     if (!class_exists(HTTPServer::class, false)) {
-        _site_export_load_exporter_runtime();
+        load_server_runtime();
     }
     HTTPServer::handle_cors_headers_and_terminate_on_options('*');
 
@@ -455,23 +465,23 @@ function _site_export_handle_api_request(array $options = []): void {
     $authenticate = $options['authenticate'] ?? null;
     if ($authenticate !== null) {
         $authenticate();
-    } elseif (_site_export_is_push_endpoint($endpoint)) {
-        if (_site_export_has_secret_file()) {
-            $secret = _site_export_get_file_secret();
+    } elseif (is_push_endpoint($endpoint)) {
+        if (has_secret_file()) {
+            $secret = get_file_secret();
             if (empty($secret)) {
-                _site_export_push_error(503, 'not_configured', 'Invalid secret.php configuration. Remove it or replace it with a valid shared secret.');
+                push_error(503, 'not_configured', 'Invalid secret.php configuration. Remove it or replace it with a valid shared secret.');
             }
         } else {
-            $secret = _site_export_get_option_secret();
+            $secret = get_option_secret();
         }
         if (empty($secret) || !is_string($secret)) {
-            _site_export_push_error(503, 'not_configured', 'Configure the shared secret in WordPress admin under Tools > Reprint Server.');
+            push_error(503, 'not_configured', 'Configure the shared secret in WordPress admin under Tools > Reprint Server.');
         }
         if (!class_exists(HMACServer::class, false)) {
-            _site_export_load_exporter_runtime();
+            load_server_runtime();
         }
         if (!class_exists(HMACServer::class)) {
-            _site_export_push_error(500, 'filesystem_error', 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.');
+            push_error(500, 'filesystem_error', 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.');
         }
         // These exact request-line values are covered by the HMAC; WordPress
         // slashing or sanitization would verify a different target.
@@ -479,17 +489,17 @@ function _site_export_handle_api_request(array $options = []): void {
         $request_method = (string) ( $_SERVER['REQUEST_METHOD'] ?? '' );
         // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
         $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
-        $hmac_server = new HMACServer($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
+        $hmac_server = new HMACServer($secret, TIMESTAMP_TOLERANCE);
         $auth_error = $hmac_server->verify_envelope($_SERVER, $request_method, $request_target);
         if ($auth_error !== null) {
-            _site_export_push_error(403, 'auth_failed', $auth_error);
+            push_error(403, 'auth_failed', $auth_error);
         }
     } else {
-        _site_export_default_authenticate();
+        default_authenticate();
     }
 
-    if (!_site_export_push_is_supported() && _site_export_is_push_endpoint($endpoint)) {
-        _site_export_push_error(
+    if (!push_is_supported() && is_push_endpoint($endpoint)) {
+        push_error(
             503,
             'push_disabled',
             'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.'
@@ -502,14 +512,14 @@ function _site_export_handle_api_request(array $options = []): void {
     // Push endpoint parameters travel in the query string, so the dispatcher
     // does not need to read php://input after this gate.
     $push_authorization_error = null;
-    if (_site_export_is_push_endpoint($endpoint)) {
-        $push_authorization_error = _site_export_get_push_authorization_error();
+    if (is_push_endpoint($endpoint)) {
+        $push_authorization_error = get_push_authorization_error();
     }
     if (
         $push_authorization_error !== null
         && $endpoint !== 'push_commit'
     ) {
-        _site_export_push_error(
+        push_error(
             403,
             'push_disabled',
             $push_authorization_error
@@ -519,8 +529,8 @@ function _site_export_handle_api_request(array $options = []): void {
     // Ensure the Composer autoloader is loaded so HTTPServer
     // is resolvable. The class itself will require export.php on demand
     // via serve() below.
-    if (_site_export_load_exporter_runtime() === null) {
-        _site_export_error(
+    if (load_server_runtime() === null) {
+        error(
             500,
             'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.'
         );
@@ -560,14 +570,14 @@ function _site_export_handle_api_request(array $options = []): void {
             if (!is_array($excluded_paths)) {
                 throw new PushConfigurationException('excluded_paths must be an array.');
             }
-            $canonical_plugin_directory = realpath(SITE_EXPORT_PLUGIN_DIR);
-            $plugin_directory = rtrim($canonical_plugin_directory === false ? SITE_EXPORT_PLUGIN_DIR : $canonical_plugin_directory, '/\\');
+            $canonical_plugin_directory = realpath(PLUGIN_DIR);
+            $plugin_directory = rtrim($canonical_plugin_directory === false ? PLUGIN_DIR : $canonical_plugin_directory, '/\\');
             $logical_plugin_path_added = false;
             if (defined('WP_PLUGIN_DIR') && function_exists('plugin_basename')) {
                 // Keep the registered installation path lexical until its
                 // document-root-relative name is known. realpath() would turn a
                 // symlinked plugin into its outside target and omit protection.
-                $registered_plugin_file = str_replace('\\', '/', plugin_basename(SITE_EXPORT_PLUGIN_DIR . 'index.php'));
+                $registered_plugin_file = str_replace('\\', '/', plugin_basename(PLUGIN_DIR . 'index.php'));
                 $registered_plugin_directory = dirname($registered_plugin_file);
                 $logical_plugin_directory = _site_export_normalize_path(
                     str_replace('\\', '/', (string) WP_PLUGIN_DIR)
@@ -615,8 +625,8 @@ function _site_export_handle_api_request(array $options = []): void {
                         throw new PushConfigurationException(
                             'WordPress reports the Reprint Server plugin inside the document root at '
                             . json_encode($logical_plugin_directory_to_verify)
-                            . ', but that path does not resolve to SITE_EXPORT_PLUGIN_DIR '
-                            . json_encode(SITE_EXPORT_PLUGIN_DIR) . '.'
+                            . ', but that path does not resolve to PLUGIN_DIR '
+                            . json_encode(PLUGIN_DIR) . '.'
                         );
                     }
                     $excluded_paths[] = $logical_plugin_relative_path;
@@ -652,14 +662,14 @@ function _site_export_handle_api_request(array $options = []): void {
         }
         HTTPServer::serve($server_options);
     } catch (Exception $e) {
-        if (_site_export_is_push_endpoint($endpoint)) {
+        if (is_push_endpoint($endpoint)) {
             if ($e instanceof PushConfigurationException) {
-                _site_export_push_error(503, 'not_configured', $e->getMessage());
+                push_error(503, 'not_configured', $e->getMessage());
             }
             if ($e instanceof InvalidArgumentException) {
-                _site_export_push_error(400, 'invalid_request', $e->getMessage());
+                push_error(400, 'invalid_request', $e->getMessage());
             }
-            _site_export_push_error(
+            push_error(
                 500,
                 'filesystem_error',
                 'The push endpoint failed while processing the request.'
@@ -675,3 +685,9 @@ function _site_export_handle_api_request(array $options = []): void {
         ]);
     }
 }
+
+if (function_exists('do_action')) {
+    /** Fires after the canonical Reprint Server library has loaded. */
+    do_action('reprint_server_library_loaded');
+}
+\reprint_server_bootstrap_compatibility(false);

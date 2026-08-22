@@ -70,7 +70,7 @@ final class ExportLibraryLoadTest extends TestCase {
 
     public function testPluginRuntimeLoaderSkipsAutoloadAlreadyLoadedThroughSymlinkedPluginDirectory(): void
     {
-        $tmp_dir = sys_get_temp_dir() . '/export-runtime-loader-test-' . uniqid('', true);
+        $tmp_dir = sys_get_temp_dir() . '/reprint-server-runtime-loader-test-' . uniqid('', true);
         $physical_plugin_directory = $tmp_dir . '/physical-plugin';
         $linked_plugin_directory = $tmp_dir . '/linked-plugin';
         $autoload_path = $physical_plugin_directory . '/vendor/autoload.php';
@@ -101,9 +101,9 @@ final class ExportLibraryLoadTest extends TestCase {
             $php_code = '<?php' . "\n"
                 . 'require_once base64_decode(\'' . $linked_autoload_path_encoded . '\', true);' . "\n"
                 . 'define(\'ABSPATH\', __DIR__ . \'/\');' . "\n"
-                . 'define(\'SITE_EXPORT_PLUGIN_DIR\', base64_decode(\'' . $linked_plugin_directory_encoded . '\', true));' . "\n"
+                . 'define(\'WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR\', base64_decode(\'' . $linked_plugin_directory_encoded . '\', true));' . "\n"
                 . 'require base64_decode(\'' . $lib_path_encoded . '\', true);' . "\n"
-                . 'echo _site_export_load_exporter_runtime();' . "\n";
+                . 'echo \\WordPress\\Reprint\\Server\\Plugin\\load_server_runtime();' . "\n";
 
             $result = $this->runPhpCode($php_code);
 
@@ -112,6 +112,37 @@ final class ExportLibraryLoadTest extends TestCase {
         } finally {
             $this->removePath($tmp_dir);
         }
+    }
+
+    public function testDirectPluginLibraryLoadKeepsCanonicalAndReleasedSymbols(): void
+    {
+        $lib_path = realpath(__DIR__ . '/../reprint-server-wp/lib.php');
+        $this->assertNotFalse($lib_path, 'lib.php must exist');
+        $plugin_directory = dirname($lib_path) . '/';
+        $php_code = '<?php' . "\n"
+            . 'function plugin_dir_path(string $file): string {' . "\n"
+            . '    return base64_decode(\'' . base64_encode($plugin_directory) . '\', true);' . "\n"
+            . '}' . "\n"
+            . 'define(\'ABSPATH\', __DIR__ . \'/\');' . "\n"
+            . '$_GET[\'site-export-api\'] = true;' . "\n"
+            . 'require base64_decode(\'' . base64_encode($lib_path) . '\', true);' . "\n"
+            . 'echo json_encode([' . "\n"
+            . '    \'canonical_function\' => function_exists(\'WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\handle_api_request\'),' . "\n"
+            . '    \'released_function\' => function_exists(\'_site_export_handle_api_request\'),' . "\n"
+            . '    \'canonical_option\' => constant(\'WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\SECRET_OPTION\'),' . "\n"
+            . '    \'released_option\' => constant(\'SITE_EXPORT_SECRET_OPTION\'),' . "\n"
+            . '    \'canonical_query_added\' => isset($_GET[\'reprint-api\']),' . "\n"
+            . '], JSON_THROW_ON_ERROR);' . "\n";
+
+        $result = $this->runPhpCode($php_code);
+
+        $this->assertSame(0, $result['status'], $result['output']);
+        $symbols = json_decode(trim($result['output']), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertTrue($symbols['canonical_function']);
+        $this->assertTrue($symbols['released_function']);
+        $this->assertSame('site_export_secret', $symbols['canonical_option']);
+        $this->assertSame($symbols['canonical_option'], $symbols['released_option']);
+        $this->assertFalse($symbols['canonical_query_added']);
     }
 
     /**

@@ -20,6 +20,7 @@ $GLOBALS['site_export_test_options'] = [];
 $GLOBALS['site_export_registered_settings'] = [];
 $GLOBALS['site_export_settings_errors'] = [];
 $GLOBALS['site_export_test_actions'] = [];
+$GLOBALS['site_export_test_filters'] = [];
 
 if (!function_exists('plugin_dir_path')) {
     function plugin_dir_path(string $file): string {
@@ -73,13 +74,49 @@ if (!function_exists('add_action')) {
     function add_action(string $hook_name, $callback, int $priority = 10, int $accepted_args = 1): void {
         $GLOBALS['site_export_test_actions'][$hook_name][] = [
             'callback' => $callback,
+            'priority' => $priority,
             'accepted_args' => $accepted_args,
         ];
     }
 }
 
 if (!function_exists('add_filter')) {
-    function add_filter(...$args): void {}
+    function add_filter(string $hook_name, $callback, int $priority = 10, int $accepted_args = 1): void {
+        $GLOBALS['site_export_test_filters'][$hook_name][] = [
+            'callback' => $callback,
+            'priority' => $priority,
+            'accepted_args' => $accepted_args,
+        ];
+    }
+}
+
+if (!function_exists('apply_filters')) {
+    function apply_filters(string $hook_name, $value, ...$extra_args) {
+        $filters = $GLOBALS['site_export_test_filters'][$hook_name] ?? [];
+        usort($filters, static function (array $left, array $right): int {
+            return $left['priority'] <=> $right['priority'];
+        });
+        foreach ($filters as $filter) {
+            $args = array_slice(array_merge([$value], $extra_args), 0, $filter['accepted_args']);
+            $value = call_user_func_array($filter['callback'], $args);
+        }
+        return $value;
+    }
+}
+
+if (!function_exists('do_action')) {
+    function do_action(string $hook_name, ...$args): void {
+        $actions = $GLOBALS['site_export_test_actions'][$hook_name] ?? [];
+        usort($actions, static function (array $left, array $right): int {
+            return $left['priority'] <=> $right['priority'];
+        });
+        foreach ($actions as $action) {
+            call_user_func_array(
+                $action['callback'],
+                array_slice($args, 0, $action['accepted_args'])
+            );
+        }
+    }
 }
 
 if (!function_exists('plugin_basename')) {
@@ -257,6 +294,26 @@ final class SiteExportSecretTest extends TestCase
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'option-secret';
 
         $this->assertSame('option-secret', _site_export_get_shared_secret());
+    }
+
+    public function testCanonicalPluginSymbolsAndReleasedCompatibilityNamesRemainAvailable(): void
+    {
+        $this->assertTrue(defined('WordPress\\Reprint\\Server\\Plugin\\VERSION'));
+        $this->assertTrue(defined('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION'));
+        $this->assertSame(
+            'site_export_secret',
+            constant('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION')
+        );
+        $this->assertSame(
+            constant('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION'),
+            SITE_EXPORT_SECRET_OPTION
+        );
+        $this->assertTrue(function_exists('WordPress\\Reprint\\Server\\Plugin\\handle_api_request'));
+        $this->assertTrue(function_exists('WordPress\\Reprint\\Server\\Plugin\\get_shared_secret'));
+        $this->assertTrue(function_exists('_site_export_handle_api_request'));
+        $this->assertTrue(function_exists('_site_export_get_shared_secret'));
+        $this->assertTrue(class_exists('Site_Export_Plugin'));
+        $this->assertFalse(class_exists('WordPress\\Reprint\\Server\\Plugin\\SettingsPage'));
     }
 
     public function testSecretFileOverridesSiteOptionWhenPresent(): void
