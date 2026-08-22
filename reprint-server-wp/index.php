@@ -42,4 +42,4 @@ if (isset($_GET['reprint-api'])) {
 }
 
 // Register the settings page.
-require_once __DIR__ . '/wordpress/site-export.php';
+require_once __DIR__ . '/wordpress/reprint-server.php';

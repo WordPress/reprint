@@ -79,6 +79,18 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
         -PHP_INT_MAX
     );
 
+    spl_autoload_register(
+        static function ($requested_class) {
+            if (
+                $requested_class === 'Site_Export_Plugin'
+                && class_exists('WordPress\\Reprint\\Server\\Plugin\\SettingsPage')
+                && !class_exists($requested_class, false)
+            ) {
+                class_alias('WordPress\\Reprint\\Server\\Plugin\\SettingsPage', $requested_class);
+            }
+        }
+    );
+
     add_action(
         'reprint_server_library_loaded',
         static function (): void {
@@ -194,18 +206,80 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
                     $legacy_push_authorization_option
                 ): void {
                     $legacy_connection_token = get_option($legacy_secret_option, null);
-                    if (
-                        is_string($legacy_connection_token)
-                        && get_option($connection_token_option, null) === $legacy_connection_token
-                    ) {
+                    $legacy_fingerprint = get_option($legacy_push_authorization_option, null);
+                    $migrate_connection_token = is_string($legacy_connection_token)
+                        && get_option($connection_token_option, null) === $legacy_connection_token;
+                    $migrate_fingerprint = is_string($legacy_fingerprint)
+                        && get_option($push_authorization_option, null) === $legacy_fingerprint;
+
+                    if ($migrate_connection_token) {
                         update_option($connection_token_option, $legacy_connection_token, false);
                     }
-                    $legacy_fingerprint = get_option($legacy_push_authorization_option, null);
-                    if (
-                        is_string($legacy_fingerprint)
-                        && get_option($push_authorization_option, null) === $legacy_fingerprint
-                    ) {
+                    if ($migrate_fingerprint) {
                         update_option($push_authorization_option, $legacy_fingerprint, false);
+                    }
+                },
+                -PHP_INT_MAX
+            );
+
+            add_filter(
+                'reprint_server_settings_nonce_action',
+                static function ($action) {
+                    // The canonical settings handler verifies this nonce immediately after the filter.
+                    // phpcs:disable WordPress.Security.NonceVerification.Missing
+                    if (
+                        isset($_POST['site_export_save_settings'])
+                        || isset($_POST['site_export_save_push_access'])
+                    ) {
+                        return 'site_export_settings';
+                    }
+                    // phpcs:enable WordPress.Security.NonceVerification.Missing
+                    return $action;
+                }
+            );
+
+            add_action(
+                'admin_init',
+                static function (): void {
+                    // The canonical settings handler verifies the selected nonce and sanitizes mapped values.
+                    // phpcs:disable WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput
+                    if (isset($_POST['site_export_save_settings'])) {
+                        $_POST['reprint_server_save_settings'] = $_POST['site_export_save_settings'];
+                    }
+                    if (isset($_POST['site_export_save_push_access'])) {
+                        $_POST['reprint_server_save_push_access'] = $_POST['site_export_save_push_access'];
+                    }
+                    if (isset($_POST['site_export_secret']) && !isset($_POST['reprint_server_secret'])) {
+                        $_POST['reprint_server_secret'] = $_POST['site_export_secret'];
+                    }
+                    if (
+                        isset($_POST['site_export_push_enabled'])
+                        && !isset($_POST['reprint_server_push_enabled'])
+                    ) {
+                        $_POST['reprint_server_push_enabled'] = $_POST['site_export_push_enabled'];
+                    }
+                    // phpcs:enable WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput
+
+                    // This only redirects a read-only settings URL.
+                    // phpcs:disable WordPress.Security.NonceVerification.Recommended
+                    if (
+                        isset($_GET['page'])
+                        && $_GET['page'] === 'site-export'
+                        && function_exists('wp_safe_redirect')
+                        && function_exists('admin_url')
+                    ) {
+                        wp_safe_redirect(admin_url('admin.php?page=reprint-server'));
+                        exit;
+                    }
+                    // phpcs:enable WordPress.Security.NonceVerification.Recommended
+                    if (
+                        function_exists('get_transient')
+                        && function_exists('set_transient')
+                        && function_exists('delete_transient')
+                        && get_transient('site_export_activated')
+                    ) {
+                        set_transient('reprint_server_activated', 1, 30);
+                        delete_transient('site_export_activated');
                     }
                 },
                 -PHP_INT_MAX

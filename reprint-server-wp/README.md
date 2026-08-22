@@ -134,6 +134,6 @@ For compatibility, the plugin still accepts `?site-export-api`, applies the
 legacy `site_export_api_options` filter before the canonical filter, reads and
 migrates the old `site_export_*` options, recognizes `SITE_EXPORT_PUSH_ENABLED`,
 and exposes the released `_site_export_*()` functions and `SITE_EXPORT_*`
-constants. New integrations should use the Reprint Server names. `compat.php`
-owns the compatibility names; canonical request and library code use only the
-Reprint Server runtime API.
+constants. New integrations should not use those names.
+All handling of these names is installed by `compat.php`; canonical request,
+library, and settings code uses only Reprint Server names and hooks.

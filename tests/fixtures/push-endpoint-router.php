@@ -160,6 +160,25 @@ function do_action(string $hook_name, ...$args): void {
 function update_option(string $name, $value, $autoload = null): bool {
     return true;
 }
+function admin_url(string $path = ''): string {
+    return $path;
+}
+// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- WordPress test stub signature.
+function wp_safe_redirect(string $location): bool {
+    return true;
+}
+// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- WordPress test stub signature.
+function get_transient(string $name) {
+    return false;
+}
+// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- WordPress test stub signature.
+function set_transient(string $name, $value, int $expiration = 0): bool {
+    return true;
+}
+// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- WordPress test stub signature.
+function delete_transient(string $name): bool {
+    return true;
+}
 
 add_filter('site_export_api_options', static function (): array {
     return ['legacy_filter_ran' => true];
