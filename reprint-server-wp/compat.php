@@ -67,6 +67,25 @@ function reprint_server_compat_expose_legacy_names(): void {
         },
         -PHP_INT_MAX
     );
+
+    // TODO: This filter should be deleted after September 2026, as it should no longer be relevant by then.
+    add_filter(
+        'reprint_server_managed_push_enabled',
+        static function ($enabled) {
+            if ($enabled !== null) {
+                return $enabled;
+            }
+            if (defined('SITE_EXPORT_PUSH_ENABLED')) {
+                return constant('SITE_EXPORT_PUSH_ENABLED') === true;
+            }
+            $environment_value = getenv('SITE_EXPORT_PUSH_ENABLED');
+            if ($environment_value === false) {
+                return null;
+            }
+            return filter_var($environment_value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) === true;
+        },
+        -PHP_INT_MAX
+    );
 }
 
 /**
@@ -121,7 +140,12 @@ function reprint_server_compat_migrate_legacy_options(): void {
             continue;
         }
 
-        if (get_option($canonical_name, $missing_option) === $missing_option) {
+        // An empty canonical value counts as missing: writing the connection
+        // token fires the settings listener which revokes push authorization,
+        // and that stores an empty fingerprint before the entry below moves
+        // the granted one.
+        $canonical_value = get_option($canonical_name, $missing_option);
+        if ($canonical_value === $missing_option || $canonical_value === '') {
             update_option($canonical_name, $legacy_value, false);
         }
         delete_option($legacy_name);

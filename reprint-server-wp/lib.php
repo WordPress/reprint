@@ -228,21 +228,32 @@ function update_shared_secret(string $secret): bool {
 /**
  * Returns the hosting provider's push policy, or null when the site controls it.
  *
- * An early boolean SITE_EXPORT_PUSH_ENABLED constant takes precedence over the
- * environment variable of the same name. Any unrecognized value fails closed.
+ * A canonical constant takes precedence over global configuration. Any
+ * unrecognized environment value fails closed.
  */
 function get_managed_push_enabled(): ?bool {
-    if (defined('SITE_EXPORT_PUSH_ENABLED')) {
-        return SITE_EXPORT_PUSH_ENABLED === true;
+    if (defined(__NAMESPACE__ . '\\PUSH_ENABLED')) {
+        return constant(__NAMESPACE__ . '\\PUSH_ENABLED') === true;
+    }
+    if (defined('REPRINT_SERVER_PUSH_ENABLED')) {
+        return constant('REPRINT_SERVER_PUSH_ENABLED') === true;
+    }
+    $environment_value = getenv('REPRINT_SERVER_PUSH_ENABLED');
+    if ($environment_value !== false) {
+        $enabled = filter_var($environment_value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+        return $enabled === true;
     }
 
-    $environment_value = getenv('SITE_EXPORT_PUSH_ENABLED');
-    if ($environment_value === false) {
-        return null;
+    if (function_exists('apply_filters')) {
+        /**
+         * Filters the managed push policy when canonical configuration is absent.
+         *
+         * @param bool|null $enabled Whether push is managed and enabled, or null when site-controlled.
+         */
+        $enabled = apply_filters('reprint_server_managed_push_enabled', null);
+        return $enabled === true ? true : ( $enabled === null ? null : false );
     }
-
-    $enabled = filter_var($environment_value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
-    return $enabled === true;
+    return null;
 }
 
 /** Returns whether the current connection token is authorized for push. */
@@ -256,7 +267,7 @@ function get_push_authorization_error(): ?string {
     if ($managed_enabled !== null) {
         return $managed_enabled
             ? null
-            : 'Push access is disabled by the hosting provider through SITE_EXPORT_PUSH_ENABLED.';
+            : 'Push access is disabled by the hosting provider through REPRINT_SERVER_PUSH_ENABLED.';
     }
 
     $secret = get_shared_secret();
@@ -291,7 +302,7 @@ function update_push_authorization(bool $enabled): bool {
     if ($enabled) {
         $fingerprint = hash('sha256', $secret);
     }
-    if (function_exists('get_option') && get_option(PUSH_AUTHORIZATION_OPTION, '') === $fingerprint) {
+    if (function_exists('get_option') && get_option(PUSH_AUTHORIZATION_OPTION, null) === $fingerprint) {
         return true;
     }
 

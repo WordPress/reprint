@@ -72,11 +72,12 @@ that token revokes the grant and requires fresh consent.
 Hosts can manage push access before active plugins load with an immutable boolean:
 
 ```php
-define('SITE_EXPORT_PUSH_ENABLED', true);
+define('WordPress\\Reprint\\Server\\Plugin\\PUSH_ENABLED', true);
 ```
 
-The `SITE_EXPORT_PUSH_ENABLED` environment variable accepts the same boolean
-policy. The constant wins when both are present. `true` enables push without a
+The `REPRINT_SERVER_PUSH_ENABLED` environment variable and global constant
+accept the same boolean policy. The namespaced constant wins when more than one
+surface is present. `true` enables push without a
 local grant; `false` hard-disables push even when a local grant exists. The sole
 recovery exception lets an authenticated caller finish a commit which already
 has a durable checkpoint, so revocation cannot strand a partially changed
@@ -130,8 +131,9 @@ array argument and do not use the WordPress filter.
 - `TIMESTAMP_TOLERANCE` — max request age in seconds (default 300)
 
 For compatibility, the plugin still accepts `?site-export-api`, applies the
-legacy `site_export_api_options` filter before the canonical filter, and
-exposes the released `_site_export_*()` functions and `SITE_EXPORT_*`
+legacy `site_export_api_options` filter before the canonical filter, migrates
+the old `site_export_*` options, recognizes `SITE_EXPORT_PUSH_ENABLED`,
+and exposes the released `_site_export_*()` functions and `SITE_EXPORT_*`
 constants. New integrations should use the Reprint Server names. `compat.php`
 owns the compatibility names; canonical request and library code use only the
 Reprint Server runtime API.
