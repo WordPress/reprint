@@ -1066,6 +1066,13 @@ class MySQLDumpProducer
         $total_length = $current['total_length'];
 
         $chunk_size = $this->compute_chunk_size($column);
+
+        // MySQL SUBSTRING() counts characters for character strings, while
+        // $chunk_size is a byte budget. Every requested character may use the
+        // column character set's maximum byte length, so a fixed amount of
+        // spare space would not bound the result. Divide the byte budget by
+        // that per-character maximum to keep the raw chunk within its limit
+        // without splitting a character. Binary strings continue in bytes.
         $character_string = $this->row_reader->is_character_string_type($data_type);
         if ($character_string) {
             $value_offset = $current['character_offset'];
