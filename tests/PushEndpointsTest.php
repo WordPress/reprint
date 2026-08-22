@@ -257,7 +257,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame(403, $managed_disabled['http_code'], $managed_disabled['body']);
         $this->assertSame('push_disabled', $managed_disabled['response']['reason']);
         $this->assertSame(
-            'Push access is disabled by the hosting provider through SITE_EXPORT_PUSH_ENABLED.',
+            'Push access is disabled by the hosting provider through REPRINT_SERVER_PUSH_ENABLED.',
             $managed_disabled['response']['detail']
         );
     }

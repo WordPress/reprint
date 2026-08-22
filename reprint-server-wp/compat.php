@@ -61,10 +61,153 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
         -PHP_INT_MAX
     );
 
+    add_filter(
+        'reprint_server_managed_push_enabled',
+        static function ($enabled) {
+            if ($enabled !== null) {
+                return $enabled;
+            }
+            if (defined('SITE_EXPORT_PUSH_ENABLED')) {
+                return constant('SITE_EXPORT_PUSH_ENABLED') === true;
+            }
+            $environment_value = getenv('SITE_EXPORT_PUSH_ENABLED');
+            if ($environment_value === false) {
+                return null;
+            }
+            return filter_var($environment_value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) === true;
+        },
+        -PHP_INT_MAX
+    );
+
     add_action(
         'reprint_server_library_loaded',
         static function (): void {
             reprint_server_bootstrap_compatibility(false);
+
+            if (!function_exists('get_option') || !function_exists('update_option')) {
+                return;
+            }
+
+            static $options_bootstrapped = false;
+            if ($options_bootstrapped) {
+                return;
+            }
+            $options_bootstrapped = true;
+
+            $secret_option = constant('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION');
+            $push_authorization_option = constant(
+                'WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION'
+            );
+            $legacy_secret_option = 'site_export_secret';
+            $legacy_push_authorization_option = 'site_export_push_authorized_token_fingerprint';
+
+            if ($secret_option !== $legacy_secret_option) {
+                add_filter(
+                    'default_option_' . $secret_option,
+                    static function ($default_value) use ($legacy_secret_option) {
+                        return get_option($legacy_secret_option, $default_value);
+                    }
+                );
+                add_action(
+                    'update_option_' . $secret_option,
+                    static function ($old_value, $new_value) use ($legacy_secret_option): void {
+                        update_option($legacy_secret_option, $new_value, false);
+                    },
+                    10,
+                    2
+                );
+                add_action(
+                    'add_option_' . $secret_option,
+                    static function ($option_name, $value) use ($legacy_secret_option): void {
+                        update_option($legacy_secret_option, $value, false);
+                    },
+                    10,
+                    2
+                );
+                add_action(
+                    'update_option_' . $legacy_secret_option,
+                    static function ($old_value, $new_value) use ($secret_option): void {
+                        update_option($secret_option, $new_value, false);
+                    },
+                    10,
+                    2
+                );
+                add_action(
+                    'add_option_' . $legacy_secret_option,
+                    static function ($option_name, $value) use ($secret_option): void {
+                        update_option($secret_option, $value, false);
+                    },
+                    10,
+                    2
+                );
+            }
+
+            if ($push_authorization_option !== $legacy_push_authorization_option) {
+                add_filter(
+                    'default_option_' . $push_authorization_option,
+                    static function ($default_value) use ($legacy_push_authorization_option) {
+                        return get_option($legacy_push_authorization_option, $default_value);
+                    }
+                );
+                add_action(
+                    'update_option_' . $push_authorization_option,
+                    static function ($old_value, $new_value) use ($legacy_push_authorization_option): void {
+                        update_option($legacy_push_authorization_option, $new_value, false);
+                    },
+                    10,
+                    2
+                );
+                add_action(
+                    'add_option_' . $push_authorization_option,
+                    static function ($option_name, $value) use ($legacy_push_authorization_option): void {
+                        update_option($legacy_push_authorization_option, $value, false);
+                    },
+                    10,
+                    2
+                );
+                add_action(
+                    'update_option_' . $legacy_push_authorization_option,
+                    static function ($old_value, $new_value) use ($push_authorization_option): void {
+                        update_option($push_authorization_option, $new_value, false);
+                    },
+                    10,
+                    2
+                );
+                add_action(
+                    'add_option_' . $legacy_push_authorization_option,
+                    static function ($option_name, $value) use ($push_authorization_option): void {
+                        update_option($push_authorization_option, $value, false);
+                    },
+                    10,
+                    2
+                );
+            }
+
+            add_action(
+                'plugins_loaded',
+                static function () use (
+                    $secret_option,
+                    $push_authorization_option,
+                    $legacy_secret_option,
+                    $legacy_push_authorization_option
+                ): void {
+                    $legacy_secret = get_option($legacy_secret_option, null);
+                    if (
+                        is_string($legacy_secret)
+                        && get_option($secret_option, null) === $legacy_secret
+                    ) {
+                        update_option($secret_option, $legacy_secret, false);
+                    }
+                    $legacy_fingerprint = get_option($legacy_push_authorization_option, null);
+                    if (
+                        is_string($legacy_fingerprint)
+                        && get_option($push_authorization_option, null) === $legacy_fingerprint
+                    ) {
+                        update_option($push_authorization_option, $legacy_fingerprint, false);
+                    }
+                },
+                -PHP_INT_MAX
+            );
         },
         -PHP_INT_MAX
     );
