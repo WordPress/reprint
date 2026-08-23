@@ -61,7 +61,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 300000 }, () => {
             '    if (!empty($state[\'crash_before_batch\'])) {',
             '        $state[\'crash_before_batch\'] = false;',
             '        $state[\'crashed\'] = true;',
-            '        file_put_contents($state_file, json_encode($state));',
+            '        e2e_write_hook_state($state_file, $state);',
             '        exit(1);',
             '    }',
             '',
@@ -73,7 +73,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 300000 }, () => {
             '        $state[\'incomplete_batch_emitted\'] = true;',
             '        $state[\'crash_before_batch\'] = true;',
             '    }',
-            '    file_put_contents($state_file, json_encode($state));',
+            '    e2e_write_hook_state($state_file, $state);',
             '}',
         ].join('\n'));
     });

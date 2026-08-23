@@ -409,7 +409,7 @@ describe('Import: budgeted MySQL SQL groups', { timeout: 120000 }, () => {
         writeTestHooks(site, [
             'function test_hook_before_completion($status, $gz, $boundary) {',
             "    if ($status !== 'partial') { return; }",
-            `    file_put_contents('${hookState}', '{"completion_interrupted":true}');`,
+            `    e2e_write_hook_state('${hookState}', array('completion_interrupted' => true));`,
             '    $gz->finish();',
             '    exit(1);',
             '}',

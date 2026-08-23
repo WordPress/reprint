@@ -95,7 +95,7 @@ describe('Import: Error Chunks', () => {
                 '        touch($path);',
                 '        clearstatcache(true, $path);',
                 '        $state[\'file_changed_fired\'] = true;',
-                '        file_put_contents($state_file, json_encode($state));',
+                '        e2e_write_hook_state($state_file, $state);',
                 '    }',
                 '}',
             ].join('\n'));
@@ -165,7 +165,7 @@ describe('Import: Error Chunks', () => {
                 '        unlink($path);',
                 '        clearstatcache(true, $path);',
                 '        $state[\'file_missing_fired\'] = true;',
-                '        file_put_contents($state_file, json_encode($state));',
+                '        e2e_write_hook_state($state_file, $state);',
                 '    }',
                 '}',
             ].join('\n'));

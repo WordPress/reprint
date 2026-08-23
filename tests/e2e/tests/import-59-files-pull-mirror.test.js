@@ -356,7 +356,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
             "    $state = file_exists($state_file) ? json_decode(file_get_contents($state_file), true) : [];",
             "    $count = ($state['scan_count'] ?? 0) + 1;",
             "    $state['scan_count'] = $count;",
-            '    file_put_contents($state_file, json_encode($state));',
+            '    e2e_write_hook_state($state_file, $state);',
             '    if ($count === 5) {',
             '        exit(1);',
             '    }',

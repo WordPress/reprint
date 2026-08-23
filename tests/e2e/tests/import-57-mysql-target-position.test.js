@@ -146,7 +146,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             '        $state[\'pauseNextBatch\'] = false;',
             '        $state[\'paused\'] = true;',
             '        $state[\'stopAfterBatch\'] = true;',
-            '        file_put_contents($state_file, json_encode($state));',
+            '        e2e_write_hook_state($state_file, $state);',
             '        usleep(10000000);',
             '        return;',
             '    }',
@@ -156,7 +156,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             '        && substr(rtrim($sql), -1) === \';\') {',
             '        $state[\'pauseNextBatch\'] = true;',
             '    }',
-            '    file_put_contents($state_file, json_encode($state));',
+            '    e2e_write_hook_state($state_file, $state);',
             '}',
         ].join('\n'));
 

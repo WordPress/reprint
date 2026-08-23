@@ -55,7 +55,7 @@ describe('Import: Concurrent Errors', { timeout: 180000 }, () => {
             '        touch($path);',
             '        clearstatcache(true, $path);',
             '        $state[\'volatile_fired\'] = true;',
-            '        file_put_contents($state_file, json_encode($state));',
+            '        e2e_write_hook_state($state_file, $state);',
             '    }',
             '',
             '    // Delete concurrent-deletable.bin on first chunk to trigger file_missing',
@@ -63,7 +63,7 @@ describe('Import: Concurrent Errors', { timeout: 180000 }, () => {
             '        unlink($path);',
             '        clearstatcache(true, $path);',
             '        $state[\'delete_fired\'] = true;',
-            '        file_put_contents($state_file, json_encode($state));',
+            '        e2e_write_hook_state($state_file, $state);',
             '    }',
             '}',
         ].join('\n'));

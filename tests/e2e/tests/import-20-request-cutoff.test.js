@@ -36,7 +36,7 @@ describe('Import: Request Cutoff', () => {
             '    $state = file_exists($state_file) ? json_decode(file_get_contents($state_file), true) : [];',
             '    $count = ($state[\'scan_count\'] ?? 0) + 1;',
             '    $state[\'scan_count\'] = $count;',
-            '    file_put_contents($state_file, json_encode($state));',
+            '    e2e_write_hook_state($state_file, $state);',
             '',
             '    // Kill PHP on the 5th directory scan to simulate a crash',
             '    if ($count === 5) {',
