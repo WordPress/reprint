@@ -17,7 +17,7 @@ import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import {
     existsSync, readFileSync, readlinkSync,
-    mkdirSync, writeFileSync, symlinkSync, lstatSync,
+    mkdirSync, writeFileSync, symlinkSync, lstatSync, renameSync,
 } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -63,8 +63,7 @@ describe('Import: Flat Document Root (WP Cloud-like layout)', () => {
                 symlinkSync('__wp__/wp-includes', join(siteDir, 'wp-includes'));
 
                 // Move wp-content to separate location
-                execSync(`cp -a "${join(siteDir, 'wp-content')}" "${CONTENT_DIR}/wp-content"`);
-                execSync(`rm -rf "${join(siteDir, 'wp-content')}"`);
+                renameSync(join(siteDir, 'wp-content'), `${CONTENT_DIR}/wp-content`);
                 symlinkSync(CONTENT_DIR + '/wp-content', join(siteDir, 'wp-content'));
 
                 // Rewrite wp-config.php to define WP_CONTENT_DIR
