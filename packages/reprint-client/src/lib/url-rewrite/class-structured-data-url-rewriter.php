@@ -31,7 +31,7 @@ class StructuredDataUrlRewriter
     const BLOCK_MARKUP = 'block_markup';
     const PLAIN_TEXT = 'plain_text';
     private const STRUCTURED_REWRITE_CACHE_MAX = 4096;
-    private const REWRITE_RESULT_CACHE_MAX = 4096;
+    private const MAPPING_INDEX_CACHE_MAX = 4096;
 
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
@@ -43,9 +43,9 @@ class StructuredDataUrlRewriter
      * Pre-parsed url_mapping: each entry is
      *   [ 'from_url' => <parsed URL>, 'to_url' => <parsed URL> ]
      * where <parsed URL> is whatever WPURL::parse() returns (declared as
-     * mixed here because is_child_url_of() and WPURL::replace_base_url()
-     * both accept either a string or the parsed object form — we pass the
-     * object form for performance).
+     * mixed here because is_child_url_of() and the structured block processor
+     * both accept either a string or the parsed object form — we pass the object
+     * form for performance).
      *
      * Parsing is pure, deterministic work that used to happen inside
      * rewrite_urls() on every leaf-value call. With N mappings and L leaves
@@ -61,9 +61,6 @@ class StructuredDataUrlRewriter
     /** @var string Default base_url used by the URL processors (first from-url). */
     private string $base_url;
 
-    /** @var string Cache namespace for this rewriter's URL mapping. */
-    private string $mapping_cache_key;
-
     /** @var array<string, array{content_type: string, input: string, output: string}> */
     private array $structured_rewrite_cache = [];
 
@@ -72,13 +69,20 @@ class StructuredDataUrlRewriter
 
     private int $structured_rewrite_cache_next = 0;
 
-    /** @var array<string, false|array{raw_url: string, parsed_url: mixed}> */
-    private array $rewrite_result_cache = [];
+    /**
+     * Mapping index by parsed URL, or false when no source base matches.
+     *
+     * Only selection is cached. Each occurrence still performs its own base
+     * replacement because equal parsed URLs may have different source spelling.
+     *
+     * @var array<string, false|int>
+     */
+    private array $mapping_index_cache = [];
 
     /** @var string[] */
-    private array $rewrite_result_cache_ring = [];
+    private array $mapping_index_cache_ring = [];
 
-    private int $rewrite_result_cache_next = 0;
+    private int $mapping_index_cache_next = 0;
 
     /**
      * @param array<string, string> $url_mapping Source URL => target URL mapping.
@@ -107,8 +111,6 @@ class StructuredDataUrlRewriter
                 'to_url'   => WPURL::parse($to_url_string),
             ];
         }
-        $this->mapping_cache_key = sha1(json_encode($url_mapping, JSON_UNESCAPED_SLASHES));
-
         // Default base_url: first from-url in the mapping. Preserves the
         // behaviour of the previous per-call default so outputs are unchanged.
         $from_urls = array_keys($url_mapping);
@@ -364,37 +366,31 @@ class StructuredDataUrlRewriter
         return false;
     }
 
-    private function get_cached_rewrite_result(string $cache_key)
+    private function get_cached_mapping_index(string $cache_key)
     {
-        return array_key_exists($cache_key, $this->rewrite_result_cache)
-            ? $this->rewrite_result_cache[$cache_key]
+        return array_key_exists($cache_key, $this->mapping_index_cache)
+            ? $this->mapping_index_cache[$cache_key]
             : null;
     }
 
     /**
-     * @param array|false $value {
-     *     Cached rewrite result, or false for an uncacheable value.
-     *
-     *     @type string $raw_url    Raw URL value.
-     *     @type mixed  $parsed_url Parsed URL value.
-     * }
-     * @phpstan-param false|array{raw_url: string, parsed_url: mixed} $value
+     * @param int|false $value Mapping index, or false when no source base matches.
      */
-    private function set_cached_rewrite_result(string $cache_key, $value): void
+    private function set_cached_mapping_index(string $cache_key, $value): void
     {
-        if (!array_key_exists($cache_key, $this->rewrite_result_cache)) {
-            if (count($this->rewrite_result_cache_ring) < self::REWRITE_RESULT_CACHE_MAX) {
-                $this->rewrite_result_cache_ring[] = $cache_key;
+        if (!array_key_exists($cache_key, $this->mapping_index_cache)) {
+            if (count($this->mapping_index_cache_ring) < self::MAPPING_INDEX_CACHE_MAX) {
+                $this->mapping_index_cache_ring[] = $cache_key;
             } else {
-                $evicted_key = $this->rewrite_result_cache_ring[$this->rewrite_result_cache_next];
-                unset($this->rewrite_result_cache[$evicted_key]);
-                $this->rewrite_result_cache_ring[$this->rewrite_result_cache_next] = $cache_key;
+                $evicted_key = $this->mapping_index_cache_ring[$this->mapping_index_cache_next];
+                unset($this->mapping_index_cache[$evicted_key]);
+                $this->mapping_index_cache_ring[$this->mapping_index_cache_next] = $cache_key;
             }
 
-            $this->rewrite_result_cache_next = ($this->rewrite_result_cache_next + 1) % self::REWRITE_RESULT_CACHE_MAX;
+            $this->mapping_index_cache_next = ($this->mapping_index_cache_next + 1) % self::MAPPING_INDEX_CACHE_MAX;
         }
 
-        $this->rewrite_result_cache[$cache_key] = $value;
+        $this->mapping_index_cache[$cache_key] = $value;
     }
 
     /**
@@ -440,44 +436,25 @@ class StructuredDataUrlRewriter
             case self::BLOCK_MARKUP:
                 $p = new StructuredBlockMarkupUrlProcessor( $content, $base_url );
                 while ( $p->next_token() ) {
-                    $token_type = $p->get_token_type() ?? '';
                     while ( $p->next_url_in_current_token() ) {
-                        $raw_url = $p->get_raw_url();
-                        $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
-                        $cached = $this->get_cached_rewrite_result($cache_key);
-                        if ($cached !== null) {
-                            if ($cached !== false) {
-                                $p->set_url($cached['raw_url'], $cached['parsed_url']);
-                            }
-                            continue;
-                        }
-
                         $parsed_url = $p->get_parsed_url();
-                        $converted = false;
-                        foreach ( $parsed_mapping as $mapping ) {
-                            if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
-                                $converted = WPURL::replace_base_url(
-                                    $parsed_url,
-                                    array(
-                                        'old_base_url' => $base_url,
-                                        'new_base_url' => $mapping['to_url'],
-                                        'raw_url'      => $raw_url,
-                                        'is_relative'  => ! WPURL::can_parse($raw_url),
-                                    )
-                                );
-                                break;
+                        $cache_key = $parsed_url->toString();
+                        $cached = $this->get_cached_mapping_index($cache_key);
+                        if ($cached === null) {
+                            $cached = false;
+                            foreach ( $parsed_mapping as $mapping_index => $mapping ) {
+                                if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
+                                    $cached = $mapping_index;
+                                    break;
+                                }
                             }
+                            $this->set_cached_mapping_index($cache_key, $cached);
                         }
 
-                        $cache_value = false;
-                        if ($converted !== false) {
-                            $cache_value = [
-                                'raw_url'    => (string) $converted,
-                                'parsed_url' => $converted->new_url,
-                            ];
-                            $p->set_url($cache_value['raw_url'], $cache_value['parsed_url']);
+                        if ($cached !== false) {
+                            $mapping = $parsed_mapping[$cached];
+                            $p->replace_base_url($mapping['to_url'], $mapping['from_url']);
                         }
-                        $this->set_cached_rewrite_result($cache_key, $cache_value);
                     }
                     $p->replace_url_bases_in_current_token( $this->cautious_url_base_rewrite_mapping );
                 }
