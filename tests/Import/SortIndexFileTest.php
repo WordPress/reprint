@@ -126,6 +126,27 @@ final class SortIndexFileTest extends TestCase
         $this->assertSame(['/apple', '/banana', '/zebra'], $this->index_paths($path));
     }
 
+    public function testUsesACallerProvidedSortKey(): void
+    {
+        $path = $this->write_unsorted_index();
+
+        $this->assertTrue(sort_index_file(
+            $path,
+            function (string $line): ?string {
+                $index_path = $this->index_path_from_line($line);
+                if ($index_path === null) {
+                    return null;
+                }
+                $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+                return $index_path . '/' . $entry['ctime'];
+            }
+        ));
+        $this->assertSame(
+            ['/apple', '/banana', '/zebra', '/zebra'],
+            $this->index_paths($path)
+        );
+    }
+
     public function testReturnsFalseForAMissingIndexFile(): void
     {
         $this->assertFalse(sort_index_file($this->temporary_directory . '/missing.jsonl'));
