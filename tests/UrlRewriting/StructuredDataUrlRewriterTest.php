@@ -1062,6 +1062,49 @@ class StructuredDataUrlRewriterTest extends TestCase
         ];
     }
 
+    #[DataProvider('wpbakeryEncodedShortcodeProvider')]
+    public function testRewritesUrlsInWPBakeryEncodedShortcodes(
+        string $input,
+        string $expected
+    ): void {
+        $rewriter = $this->createRewriter();
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    /**
+     * @return array<string, array{0:string, 1:string}>
+     */
+    public static function wpbakeryEncodedShortcodeProvider(): array
+    {
+        $old_html = '<a href="https://old-site.com/manual.pdf">Manual</a>';
+        $new_html = '<a href="https://new-site.com/manual.pdf">Manual</a>';
+
+        return [
+            'Easy Tables percent-encoded HTML cell' => [
+                '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22https%3A%2F%2Fold-site.com%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
+                '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22https%3A%2F%2Fnew-site.com%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
+            ],
+            'Raw HTML Base64 body' => [
+                '[vc_raw_html]' . base64_encode($old_html) . '[/vc_raw_html]',
+                '[vc_raw_html]' . base64_encode($new_html) . '[/vc_raw_html]',
+            ],
+            'Raw HTML URL-encoded Base64 body' => [
+                '[vc_raw_html]' . base64_encode(rawurlencode($old_html)) . '[/vc_raw_html]',
+                '[vc_raw_html]' . base64_encode(rawurlencode($new_html)) . '[/vc_raw_html]',
+            ],
+        ];
+    }
+
+    public function testRewritesLiteralHtmlInsideAWPBakeryShortcodeAttributeWithoutChangingItsQuotes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '[vc_custom_heading text="<a href=\'https://old-site.com/manual.pdf\'>Download</a>" font_container="tag:h2"]';
+        $expected = '[vc_custom_heading text="<a href=\'https://new-site.com/manual.pdf\'>Download</a>" font_container="tag:h2"]';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
     /**
      * @param array<string, string> $mapping
      */
