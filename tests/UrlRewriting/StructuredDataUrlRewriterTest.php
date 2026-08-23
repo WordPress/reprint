@@ -1111,6 +1111,45 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
     }
 
+    public function testRewritesLiteralHtmlInsideAGenericShortcodeAttributeWithoutChangingItsQuotes(): void
+    {
+        $rewriter = $this->createRewriter([
+            'http://127.0.0.1:8108' => 'https://target.example.com',
+        ]);
+        $input = '<!-- wp:shortcode -->[builder_heading text="<a href=\'http://127.0.0.1:8108/manual.pdf\'>Download</a>" layout="wide"]<!-- /wp:shortcode -->';
+        $expected = '<!-- wp:shortcode -->[builder_heading text="<a href=\'https://target.example.com/manual.pdf\'>Download</a>" layout="wide"]<!-- /wp:shortcode -->';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    public function testLeavesUnknownEncodedShortcodeBodiesOpaque(): void
+    {
+        $rewriter = $this->createRewriter();
+        $encodedHtml = '%3Ca%20href%3D%22https%3A%2F%2Fold-site.com%2Fmanual.pdf%22%3ELink%3C%2Fa%3E';
+        $base64Html = base64_encode('<a href="https://old-site.com/manual.pdf">Link</a>');
+        $input = '[builder_table]' . $encodedHtml . '[/builder_table]'
+            . '[builder_raw_html]' . $base64Html . '[/builder_raw_html]';
+
+        $this->assertSame($input, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    public function testLeavesAnUnclosedKnownEncodedShortcodeBodyOpaque(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '[vc_table allow_html="1"]%3Ca%20href%3D%22https%3A%2F%2Fold-site.com%2Fmanual.pdf%22%3ELink%3C%2Fa%3E';
+
+        $this->assertSame($input, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    public function testGenericShortcodeParserKeepsBracketsInsideAttributeValues(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '[builder_card label="Keep ] here" image="https://old-site.com/card.jpg"]';
+        $expected = '[builder_card label="Keep ] here" image="https://new-site.com/card.jpg"]';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
     /**
      * @param array<string, string> $mapping
      */

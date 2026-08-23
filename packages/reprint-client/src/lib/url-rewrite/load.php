@@ -18,6 +18,11 @@ require_once __DIR__ . '/class-sqlite-prepared-insert-builder.php';
 require_once __DIR__ . '/class-cautious-url-base-rewrite-mapping.php';
 require_once __DIR__ . '/class-cautious-url-base-processor-in-text-with-mixed-unknown-escape-rules.php';
 
+// Use the php-toolkit implementation when the installed version provides it.
+if (!class_exists(\WordPress\DataLiberation\Shortcode\ShortcodeProcessor::class)) {
+    require_once __DIR__ . '/class-shortcode-processor.php';
+}
+
 // Scans structured block markup and uses the cautious processor for opaque tokens.
 require_once __DIR__ . '/class-structured-block-markup-url-processor.php';
 

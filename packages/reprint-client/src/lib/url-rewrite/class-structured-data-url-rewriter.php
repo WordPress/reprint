@@ -1,6 +1,7 @@
 <?php
 
 use WordPress\DataLiberation\URL\WPURL;
+use WordPress\DataLiberation\Shortcode\ShortcodeProcessor;
 
 use function WordPress\DataLiberation\URL\is_child_url_of;
 /**
@@ -17,7 +18,9 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
  * 3. Base64 → decode, recurse on decoded content, re-encode if changed
- * 4. Leaf text → StructuredBlockMarkupUrlProcessor (block_markup hint)
+ * 4. Shortcode markup → ShortcodeProcessor (block_markup hint), including
+ *    builder-specific body codecs selected by shortcode tag
+ * 5. Leaf text → StructuredBlockMarkupUrlProcessor (block_markup hint)
  *    or CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules (default)
  *
  * Top-level HTML is never auto-detected — the caller must explicitly pass
@@ -70,6 +73,9 @@ class StructuredDataUrlRewriter
     /** @var string Cache namespace for this rewriter's URL mapping. */
     private string $mapping_cache_key;
 
+    /** @var array<string, callable(string): string> Shortcode tag => encoded-body rewriter. */
+    private array $shortcode_body_rewriters;
+
     /**
      * Rewrites keyed by an entire value; hits only on an exact repeat.
      *
@@ -91,6 +97,10 @@ class StructuredDataUrlRewriter
     public function __construct(array $url_mapping)
     {
         $this->cautious_url_base_rewrite_mapping = new CautiousURLBaseRewriteMapping($url_mapping);
+        $this->shortcode_body_rewriters = array(
+            'vc_table'    => array($this, 'rewrite_wpbakery_table_body'),
+            'vc_raw_html' => array($this, 'rewrite_wpbakery_raw_html_body'),
+        );
 
         // Extract unique source domains for the quick-reject check.
         $domains = [];
@@ -210,7 +220,7 @@ class StructuredDataUrlRewriter
 
         $original_value = $value;
         if ($content_type === self::BLOCK_MARKUP) {
-            $value = $this->rewrite_wpbakery_encoded_shortcode_bodies($value);
+            $value = $this->rewrite_shortcode_markup($value);
         }
 
         $rewritten_value = $this->rewrite_urls($value, $content_type);
@@ -222,39 +232,206 @@ class StructuredDataUrlRewriter
     }
 
     /**
-     * Rewrite the encoded bodies whose codecs are fixed by WPBakery.
+     * Rewrite shortcode attributes and bodies without parsing their bytes as HTML.
      *
-     * Easy Tables URL-encodes each cell while leaving `,` and `|` as table
-     * delimiters. Raw HTML stores either Base64 HTML or, for values saved by
-     * its editor control, Base64 URL-encoded HTML. Unknown shortcode bodies
-     * remain opaque.
+     * Attribute values receive the generic cautious URL-base replacement. Body
+     * decoding is selected separately from the shortcode tag, so an unknown
+     * builder's body remains opaque until its storage format is known.
+     * Rewriting attributes before HTML tokenization also keeps literal HTML in
+     * an attribute from being serialized as tags with different quote bytes.
      */
-    private function rewrite_wpbakery_encoded_shortcode_bodies(string $value): string
+    private function rewrite_shortcode_markup(string $value): string
     {
-        $opening_tag_tail = '(?:[^\]"\']+|"[^"]*"|\'[^\']*\')*\]';
-        foreach (array('vc_table', 'vc_raw_html') as $shortcode_name) {
-            $pattern = '~(?<!\[)(?<opener>\[' . $shortcode_name . '(?=[\s/\]])'
-                . $opening_tag_tail
-                . ')(?<body>.*?)(?<closer>\[/' . $shortcode_name . '\])(?!\])~s';
-            $rewritten_value = preg_replace_callback(
-                $pattern,
-                function (array $shortcode_match) use ($shortcode_name): string {
-                    $rewritten_body = $shortcode_name === 'vc_table'
-                        ? $this->rewrite_wpbakery_table_body($shortcode_match['body'])
-                        : $this->rewrite_wpbakery_raw_html_body($shortcode_match['body']);
+        if (strpos($value, '[') === false) {
+            return $value;
+        }
 
-                    return $shortcode_match['opener'] . $rewritten_body . $shortcode_match['closer'];
-                },
-                $value
-            );
-            if ($rewritten_value !== null) {
-                $value = $rewritten_value;
+        $known_body_tokens = $this->maybe_contains_known_shortcode_body($value)
+            ? $this->find_known_shortcode_body_tokens($value)
+            : array();
+        $shortcodes = new ShortcodeProcessor($value);
+
+        while ($shortcodes->next_token()) {
+            if ($shortcodes->get_token_type() === ShortcodeProcessor::TOKEN_TEXT) {
+                $token_start = $shortcodes->get_token_start();
+                if ($token_start === null || !isset($known_body_tokens[$token_start])) {
+                    continue;
+                }
+
+                $body = $shortcodes->get_modifiable_text();
+                if ($body === null) {
+                    continue;
+                }
+                $rewritten_body = $this->rewrite_known_shortcode_body(
+                    $known_body_tokens[$token_start],
+                    $body
+                );
+                if ($rewritten_body !== $body) {
+                    $shortcodes->set_modifiable_text($rewritten_body);
+                }
+                continue;
+            }
+
+            if ($shortcodes->is_escaped()) {
+                continue;
+            }
+
+            $shortcode_tag = $shortcodes->get_tag();
+            if ($shortcode_tag === null) {
+                continue;
+            }
+
+            if ($shortcodes->is_tag_closer()) {
+                continue;
+            }
+
+            while ($shortcodes->next_attribute()) {
+                $attribute_value = $shortcodes->get_attribute_value();
+                if ($attribute_value === null) {
+                    continue;
+                }
+
+                $rewritten_attribute_value = $this->rewrite_urls(
+                    $attribute_value,
+                    self::PLAIN_TEXT
+                );
+                if ($rewritten_attribute_value !== $attribute_value) {
+                    $shortcodes->set_attribute_value($rewritten_attribute_value);
+                }
             }
         }
 
-        return $value;
+        return $shortcodes->get_updated_text();
     }
 
+    private function maybe_contains_known_shortcode_body(string $value): bool
+    {
+        foreach (array_keys($this->shortcode_body_rewriters) as $shortcode_tag) {
+            if (stripos($value, '[' . $shortcode_tag) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Find single text tokens enclosed by a matched known shortcode pair.
+     *
+     * A known encoded body containing nested shortcode tokens stays opaque.
+     * This keeps the body codec from receiving only part of its stored value.
+     *
+     * @return array<int, string> Text token byte offset => enclosing tag.
+     */
+    private function find_known_shortcode_body_tokens(string $value): array
+    {
+        $shortcodes = new ShortcodeProcessor($value);
+        $open_shortcodes = array();
+        $known_body_tokens = array();
+
+        while ($shortcodes->next_token()) {
+            if ($shortcodes->get_token_type() === ShortcodeProcessor::TOKEN_TEXT) {
+                if ($open_shortcodes === array()) {
+                    continue;
+                }
+
+                $index = count($open_shortcodes) - 1;
+                if (!$open_shortcodes[$index]['has_known_body_codec']) {
+                    continue;
+                }
+                if ($open_shortcodes[$index]['body_token_start'] !== null) {
+                    $open_shortcodes[$index]['body_is_complete'] = false;
+                    continue;
+                }
+
+                $open_shortcodes[$index]['body_token_start'] = $shortcodes->get_token_start();
+                continue;
+            }
+
+            if ($shortcodes->is_escaped()) {
+                if ($open_shortcodes !== array()) {
+                    $open_shortcodes[count($open_shortcodes) - 1]['body_is_complete'] = false;
+                }
+                continue;
+            }
+
+            $shortcode_tag = $shortcodes->get_tag();
+            if ($shortcode_tag === null) {
+                continue;
+            }
+
+            if ($shortcodes->is_tag_closer()) {
+                $matching_index = null;
+                for ($index = count($open_shortcodes) - 1; $index >= 0; $index--) {
+                    if ($open_shortcodes[$index]['tag'] !== $shortcode_tag) {
+                        continue;
+                    }
+
+                    $matching_index = $index;
+                    break;
+                }
+                if ($matching_index === null) {
+                    if ($open_shortcodes !== array()) {
+                        $open_shortcodes[count($open_shortcodes) - 1]['body_is_complete'] = false;
+                    }
+                    continue;
+                }
+
+                $closed_shortcode = $open_shortcodes[$matching_index];
+                array_splice($open_shortcodes, $matching_index);
+                if (
+                    $closed_shortcode['has_known_body_codec']
+                    && $closed_shortcode['body_is_complete']
+                    && $closed_shortcode['body_token_start'] !== null
+                ) {
+                    $known_body_tokens[$closed_shortcode['body_token_start']] = $shortcode_tag;
+                }
+                continue;
+            }
+
+            if ($open_shortcodes !== array()) {
+                $open_shortcodes[count($open_shortcodes) - 1]['body_is_complete'] = false;
+            }
+            if ($shortcodes->has_self_closing_flag()) {
+                continue;
+            }
+
+            $open_shortcodes[] = array(
+                'tag'                  => $shortcode_tag,
+                'has_known_body_codec' => $this->has_known_shortcode_body_codec($shortcode_tag),
+                'body_token_start'     => null,
+                'body_is_complete'     => true,
+            );
+        }
+
+        return $known_body_tokens;
+    }
+
+    private function has_known_shortcode_body_codec(string $shortcode_tag): bool
+    {
+        return isset($this->shortcode_body_rewriters[strtolower($shortcode_tag)]);
+    }
+
+    /**
+     * Rewrite a body only when its site builder defines the body's codec.
+     */
+    private function rewrite_known_shortcode_body(string $shortcode_tag, string $body): string
+    {
+        $shortcode_tag = strtolower($shortcode_tag);
+        if (!isset($this->shortcode_body_rewriters[$shortcode_tag])) {
+            return $body;
+        }
+
+        return ($this->shortcode_body_rewriters[$shortcode_tag])($body);
+    }
+
+    /**
+     * Rewrite WPBakery Easy Tables cells without changing table delimiters.
+     *
+     * Easy Tables URL-encodes each cell while leaving `,` and `|` as table
+     * delimiters. Optional leading cell-style markers stay outside the encoded
+     * value and must be copied unchanged.
+     */
     private function rewrite_wpbakery_table_body(string $body): string
     {
         $parts = preg_split('/([,|])/', $body, -1, PREG_SPLIT_DELIM_CAPTURE);
@@ -289,6 +466,12 @@ class StructuredDataUrlRewriter
         return implode('', $parts);
     }
 
+    /**
+     * Rewrite either form of a WPBakery Raw HTML body.
+     *
+     * Raw HTML stores Base64 HTML. Values saved by its editor control add URL
+     * encoding inside the Base64 layer. The rewritten body uses the same form.
+     */
     private function rewrite_wpbakery_raw_html_body(string $body): string
     {
         $decoded_body = base64_decode($body, true);
@@ -555,11 +738,6 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
-                $wpbakery_shortcode_openers = array();
-                $content = $this->mask_wpbakery_shortcode_openers(
-                    $content,
-                    $wpbakery_shortcode_openers
-                );
                 $p = new StructuredBlockMarkupUrlProcessor(
                     $content,
                     $resolve_relative_urls ? $base_url : null
@@ -647,7 +825,7 @@ class StructuredDataUrlRewriter
                     }
                 }
 
-                return strtr($p->get_updated_html(), $wpbakery_shortcode_openers);
+                return $p->get_updated_html();
 
             case self::PLAIN_TEXT:
                 if ( ! $this->maybe_contains_rewritable_urls( $content ) ) {
@@ -669,7 +847,6 @@ class StructuredDataUrlRewriter
                 return $content;
         }
     }
-
     /**
      * Rewrite every string in a block attribute array.
      *
@@ -802,41 +979,6 @@ class StructuredDataUrlRewriter
         // 5. Unknown strings receive only the cautious plain-text scan.
         return $this->rewrite( $value, self::PLAIN_TEXT );
     }
-
-    /**
-     * Hide WPBakery opening tags which contain literal HTML from the HTML
-     * tokenizer. Their URL bases are rewritten first while the original quote
-     * spelling is still available.
-     *
-     * @param array<string, string> $shortcode_openers Placeholder => opening tag.
-     */
-    private function mask_wpbakery_shortcode_openers(
-        string $content,
-        array &$shortcode_openers
-    ): string {
-        $placeholder_prefix = '__REPRINT_WPBAKERY_' . sha1($content) . '_';
-        while (strpos($content, $placeholder_prefix) !== false) {
-            $placeholder_prefix .= '_';
-        }
-        $pattern = '~(?<!\[)\[vc_[A-Za-z0-9_-]+(?=[\s/\]])'
-            . '(?:[^\]"\']+|"[^"]*"|\'[^\']*\')*\]~s';
-        $masked_content = preg_replace_callback(
-            $pattern,
-            function (array $shortcode_match) use (&$shortcode_openers, $placeholder_prefix): string {
-                $opener = $shortcode_match[0];
-                if (strpos($opener, '<') === false) {
-                    return $opener;
-                }
-
-                $placeholder = $placeholder_prefix . count($shortcode_openers) . '__';
-                $shortcode_openers[$placeholder] = $this->rewrite($opener, self::PLAIN_TEXT);
-                return $placeholder;
-            },
-            $content
-        );
-
-         return $masked_content ?? $content;
-     }
 
     /**
      * Store one entry, then evict oldest until the cache is within budget.
