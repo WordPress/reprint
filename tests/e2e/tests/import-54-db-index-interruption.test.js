@@ -42,7 +42,7 @@ describe('Import: Database Index Response Interruption', () => {
         writeTestHooks(site, [
             'function test_hook_before_completion($status, $gz, $boundary) {',
             `    if (file_exists('${hookState}')) { return; }`,
-            `    file_put_contents('${hookState}', '{"fired":true}');`,
+            `    e2e_write_hook_state('${hookState}', array('fired' => true));`,
             '    exit(1);',
             '}',
         ].join('\n'));

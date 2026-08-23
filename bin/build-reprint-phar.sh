@@ -61,8 +61,13 @@ fi
 BOX_PHAR="$PROJECT_ROOT/box.phar"
 if ! [ -f "$BOX_PHAR" ]; then
     echo "Downloading box.phar …"
-    curl -sL "https://github.com/box-project/box/releases/latest/download/box.phar" \
-        -o "$BOX_PHAR"
+    BOX_PHAR_DOWNLOAD="$BOX_PHAR.download"
+    rm -f "$BOX_PHAR_DOWNLOAD"
+    curl --fail --silent --show-error --location \
+        --retry 5 --retry-delay 1 --retry-all-errors --connect-timeout 15 \
+        "https://github.com/box-project/box/releases/latest/download/box.phar" \
+        -o "$BOX_PHAR_DOWNLOAD"
+    mv "$BOX_PHAR_DOWNLOAD" "$BOX_PHAR"
     chmod +x "$BOX_PHAR"
 fi
 

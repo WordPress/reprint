@@ -80,7 +80,7 @@ function _e2e_cursor_header_limit_state() {
 function test_hook_after_gzip_init($gz, $boundary) {
     list($state_file, $state) = _e2e_cursor_header_limit_state();
     $state['sql_requests'] = ($state['sql_requests'] ?? 0) + 1;
-    file_put_contents($state_file, json_encode($state));
+    e2e_write_hook_state($state_file, $state);
 }
 
 function test_hook_before_sql_batch(&$sql, $cursor) {
@@ -92,12 +92,12 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
         ) {
             $state['forced_boundaries'][$table] = true;
             $state['boundary_cursor_header_bytes'][$table] = strlen(base64_encode($cursor));
-            file_put_contents($state_file, json_encode($state));
+            e2e_write_hook_state($state_file, $state);
             usleep(1100000);
             return;
         }
     }
-    file_put_contents($state_file, json_encode($state));
+    e2e_write_hook_state($state_file, $state);
 }
 `);
     });

@@ -3,7 +3,7 @@
  */
 import assert from 'node:assert/strict';
 import { execSync, execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, readdirSync, existsSync, mkdirSync, lstatSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -554,7 +554,29 @@ export async function compareDatabases(sourceDb, importDb) {
  */
 export function writeTestHooks(siteName, phpCode) {
     const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'site-export', 'test-hooks.php');
-    const code = `<?php\n${phpCode}\n`;
+    const code = `<?php
+// PHP hooks and Node assertions can touch this file at the same time. Write
+// the complete next JSON value beside the old one, then replace it in one
+// rename so readers always see either the old value or the new value.
+function e2e_write_hook_state($state_file, $state) {
+    $temporary_state_file = tempnam(dirname($state_file), '.e2e-hook-state-');
+    if ($temporary_state_file === false) {
+        throw new RuntimeException('Could not create a temporary test hook state file.');
+    }
+
+    $json = json_encode($state);
+    if ($json === false || file_put_contents($temporary_state_file, $json) === false) {
+        @unlink($temporary_state_file);
+        throw new RuntimeException('Could not write the temporary test hook state file.');
+    }
+    if (!chmod($temporary_state_file, 0666) || !rename($temporary_state_file, $state_file)) {
+        @unlink($temporary_state_file);
+        throw new RuntimeException('Could not replace the test hook state file.');
+    }
+}
+
+${phpCode}
+`;
     execSync(`sudo tee ${JSON.stringify(hookPath)} > /dev/null <<'HOOKEOF'\n${code}\nHOOKEOF`);
     execSync(`sudo chown nginx:nginx ${JSON.stringify(hookPath)}`);
 }
@@ -581,12 +603,23 @@ function hookStatePath(siteName) {
 }
 
 /**
- * Write a state file that test hooks can read/write.
+ * Replace a state file that test hooks can read/write without exposing a
+ * partial JSON value to a concurrent PHP request.
  */
 export function writeHookState(siteName, data) {
     const statePath = hookStatePath(siteName);
-    execSync(`sudo tee ${JSON.stringify(statePath)} > /dev/null <<'STATEEOF'\n${JSON.stringify(data)}\nSTATEEOF`);
-    execSync(`sudo chmod 666 ${JSON.stringify(statePath)}`);
+    const temporaryStatePath = `${statePath}.${randomUUID()}.tmp`;
+    try {
+        execSync(`sudo tee ${JSON.stringify(temporaryStatePath)} > /dev/null <<'STATEEOF'\n${JSON.stringify(data)}\nSTATEEOF`);
+        execSync(`sudo chmod 666 ${JSON.stringify(temporaryStatePath)}`);
+        execSync(`sudo mv -f ${JSON.stringify(temporaryStatePath)} ${JSON.stringify(statePath)}`);
+    } finally {
+        try {
+            execSync(`sudo rm -f ${JSON.stringify(temporaryStatePath)}`);
+        } catch {
+            // Ignore
+        }
+    }
 }
 
 /**
