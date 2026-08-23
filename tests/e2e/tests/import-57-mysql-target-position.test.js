@@ -278,13 +278,18 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
                 const targetDeadline = Date.now() + 60000;
                 while (Date.now() < targetDeadline) {
                     try {
-                        const [[importedRows]] = await interruptedTarget.query(
-                            `SELECT COUNT(*) AS rowCount FROM \`${table}\``
-                        );
+                        // Read both values in one statement. Separate reads may
+                        // straddle an import commit and pair the previous row
+                        // count with the next saved source cursor.
                         const [[savedPosition]] = await interruptedTarget.query(
-                            `SELECT source_cursor, file_byte_offset FROM \`${progressTable}\` WHERE id = 1`
+                            `SELECT
+                                (SELECT COUNT(*) FROM \`${table}\`) AS rowCount,
+                                source_cursor,
+                                file_byte_offset
+                            FROM \`${progressTable}\`
+                            WHERE id = 1`
                         );
-                        importedRowCount = Number(importedRows.rowCount);
+                        importedRowCount = Number(savedPosition?.rowCount ?? 0);
                         savedSourceCursor = savedPosition?.source_cursor ?? null;
                         if (savedPosition) {
                             assert.equal(savedPosition.file_byte_offset, null);
