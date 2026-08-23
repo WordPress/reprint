@@ -1085,6 +1085,10 @@ class StructuredDataUrlRewriterTest extends TestCase
                 '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22https%3A%2F%2Fold-site.com%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
                 '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22https%3A%2F%2Fnew-site.com%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
             ],
+            'Easy Tables rows and cell styles stay intact' => [
+                '[vc_table allow_html="1"][bg#fff]Name,[bg#fff]%3Ca%20href%3D%22https%3A%2F%2Fold-site.com%2Fmanual.pdf%22%3ELink%3C%2Fa%3E|Other,%3Cstrong%3EKeep%3C%2Fstrong%3E[/vc_table]',
+                '[vc_table allow_html="1"][bg#fff]Name,[bg#fff]%3Ca%20href%3D%22https%3A%2F%2Fnew-site.com%2Fmanual.pdf%22%3ELink%3C%2Fa%3E|Other,%3Cstrong%3EKeep%3C%2Fstrong%3E[/vc_table]',
+            ],
             'Raw HTML Base64 body' => [
                 '[vc_raw_html]' . base64_encode($old_html) . '[/vc_raw_html]',
                 '[vc_raw_html]' . base64_encode($new_html) . '[/vc_raw_html]',
@@ -1098,9 +1102,11 @@ class StructuredDataUrlRewriterTest extends TestCase
 
     public function testRewritesLiteralHtmlInsideAWPBakeryShortcodeAttributeWithoutChangingItsQuotes(): void
     {
-        $rewriter = $this->createRewriter();
-        $input = '[vc_custom_heading text="<a href=\'https://old-site.com/manual.pdf\'>Download</a>" font_container="tag:h2"]';
-        $expected = '[vc_custom_heading text="<a href=\'https://new-site.com/manual.pdf\'>Download</a>" font_container="tag:h2"]';
+        $rewriter = $this->createRewriter([
+            'http://127.0.0.1:8108' => 'https://target.example.com',
+        ]);
+        $input = '<!-- wp:shortcode -->[vc_custom_heading text="<a href=\'http://127.0.0.1:8108/manual.pdf\'>Download</a>" font_container="tag:h2"]<!-- /wp:shortcode -->';
+        $expected = '<!-- wp:shortcode -->[vc_custom_heading text="<a href=\'https://target.example.com/manual.pdf\'>Download</a>" font_container="tag:h2"]<!-- /wp:shortcode -->';
 
         $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
     }

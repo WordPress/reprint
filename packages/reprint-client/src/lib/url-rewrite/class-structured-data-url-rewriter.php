@@ -208,12 +208,120 @@ class StructuredDataUrlRewriter
         // Base64ValueScanner in SqlStatementRewriter — this block
         // was for base64-within-base64 nesting which is rare in practice.
 
+        $original_value = $value;
+        if ($content_type === self::BLOCK_MARKUP) {
+            $value = $this->rewrite_wpbakery_encoded_shortcode_bodies($value);
+        }
+
         $rewritten_value = $this->rewrite_urls($value, $content_type);
         if ($cache_key !== null) {
-            $this->set_cached_value_rewrite($cache_key, $content_type, $value, $rewritten_value);
+            $this->set_cached_value_rewrite($cache_key, $content_type, $original_value, $rewritten_value);
         }
 
         return $rewritten_value;
+    }
+
+    /**
+     * Rewrite the encoded bodies whose codecs are fixed by WPBakery.
+     *
+     * Easy Tables URL-encodes each cell while leaving `,` and `|` as table
+     * delimiters. Raw HTML stores either Base64 HTML or, for values saved by
+     * its editor control, Base64 URL-encoded HTML. Unknown shortcode bodies
+     * remain opaque.
+     */
+    private function rewrite_wpbakery_encoded_shortcode_bodies(string $value): string
+    {
+        $opening_tag_tail = '(?:[^\]"\']+|"[^"]*"|\'[^\']*\')*\]';
+        foreach (array('vc_table', 'vc_raw_html') as $shortcode_name) {
+            $pattern = '~(?<!\[)(?<opener>\[' . $shortcode_name . '(?=[\s/\]])'
+                . $opening_tag_tail
+                . ')(?<body>.*?)(?<closer>\[/' . $shortcode_name . '\])(?!\])~s';
+            $rewritten_value = preg_replace_callback(
+                $pattern,
+                function (array $shortcode_match) use ($shortcode_name): string {
+                    $rewritten_body = $shortcode_name === 'vc_table'
+                        ? $this->rewrite_wpbakery_table_body($shortcode_match['body'])
+                        : $this->rewrite_wpbakery_raw_html_body($shortcode_match['body']);
+
+                    return $shortcode_match['opener'] . $rewritten_body . $shortcode_match['closer'];
+                },
+                $value
+            );
+            if ($rewritten_value !== null) {
+                $value = $rewritten_value;
+            }
+        }
+
+        return $value;
+    }
+
+    private function rewrite_wpbakery_table_body(string $body): string
+    {
+        $parts = preg_split('/([,|])/', $body, -1, PREG_SPLIT_DELIM_CAPTURE);
+        if ($parts === false) {
+            return $body;
+        }
+
+        foreach ($parts as $index => $cell) {
+            if ($cell === ',' || $cell === '|') {
+                continue;
+            }
+
+            $prefix_length = 0;
+            if (preg_match('/\A(?:\[[^\]\r\n]*\])*/', $cell, $matches) === 1) {
+                $prefix_length = strlen($matches[0]);
+            }
+            $encoded_content = substr($cell, $prefix_length);
+            if (preg_match('/%[0-9A-Fa-f]{2}/', $encoded_content) !== 1) {
+                continue;
+            }
+
+            $decoded_content = rawurldecode($encoded_content);
+            $rewritten_content = $this->rewrite($decoded_content, self::BLOCK_MARKUP);
+            if ($rewritten_content === $decoded_content) {
+                continue;
+            }
+
+            $parts[$index] = substr($cell, 0, $prefix_length)
+                . $this->encode_wpbakery_url_component($rewritten_content);
+        }
+
+        return implode('', $parts);
+    }
+
+    private function rewrite_wpbakery_raw_html_body(string $body): string
+    {
+        $decoded_body = base64_decode($body, true);
+        if ($decoded_body === false || base64_encode($decoded_body) !== $body) {
+            return $body;
+        }
+
+        $uses_url_encoding = preg_match(
+            '/%(?:3c|3e|5b|5d)|https?%3a%2f%2f/i',
+            $decoded_body
+        ) === 1;
+        $decoded_content = $uses_url_encoding
+            ? rawurldecode($decoded_body)
+            : $decoded_body;
+        $rewritten_content = $this->rewrite($decoded_content, self::BLOCK_MARKUP);
+        if ($rewritten_content === $decoded_content) {
+            return $body;
+        }
+
+        if ($uses_url_encoding) {
+            $rewritten_content = $this->encode_wpbakery_url_component($rewritten_content);
+        }
+
+        return base64_encode($rewritten_content);
+    }
+
+    private function encode_wpbakery_url_component(string $value): string
+    {
+        return str_replace(
+            array('%21', '%27', '%28', '%29', '%2A'),
+            array('!', "'", '(', ')', '*'),
+            rawurlencode($value)
+        );
     }
 
     /**
@@ -447,6 +555,11 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
+                $wpbakery_shortcode_openers = array();
+                $content = $this->mask_wpbakery_shortcode_openers(
+                    $content,
+                    $wpbakery_shortcode_openers
+                );
                 $p = new StructuredBlockMarkupUrlProcessor(
                     $content,
                     $resolve_relative_urls ? $base_url : null
@@ -534,7 +647,7 @@ class StructuredDataUrlRewriter
                     }
                 }
 
-                return $p->get_updated_html();
+                return strtr($p->get_updated_html(), $wpbakery_shortcode_openers);
 
             case self::PLAIN_TEXT:
                 if ( ! $this->maybe_contains_rewritable_urls( $content ) ) {
@@ -689,6 +802,41 @@ class StructuredDataUrlRewriter
         // 5. Unknown strings receive only the cautious plain-text scan.
         return $this->rewrite( $value, self::PLAIN_TEXT );
     }
+
+    /**
+     * Hide WPBakery opening tags which contain literal HTML from the HTML
+     * tokenizer. Their URL bases are rewritten first while the original quote
+     * spelling is still available.
+     *
+     * @param array<string, string> $shortcode_openers Placeholder => opening tag.
+     */
+    private function mask_wpbakery_shortcode_openers(
+        string $content,
+        array &$shortcode_openers
+    ): string {
+        $placeholder_prefix = '__REPRINT_WPBAKERY_' . sha1($content) . '_';
+        while (strpos($content, $placeholder_prefix) !== false) {
+            $placeholder_prefix .= '_';
+        }
+        $pattern = '~(?<!\[)\[vc_[A-Za-z0-9_-]+(?=[\s/\]])'
+            . '(?:[^\]"\']+|"[^"]*"|\'[^\']*\')*\]~s';
+        $masked_content = preg_replace_callback(
+            $pattern,
+            function (array $shortcode_match) use (&$shortcode_openers, $placeholder_prefix): string {
+                $opener = $shortcode_match[0];
+                if (strpos($opener, '<') === false) {
+                    return $opener;
+                }
+
+                $placeholder = $placeholder_prefix . count($shortcode_openers) . '__';
+                $shortcode_openers[$placeholder] = $this->rewrite($opener, self::PLAIN_TEXT);
+                return $placeholder;
+            },
+            $content
+        );
+
+         return $masked_content ?? $content;
+     }
 
     /**
      * Store one entry, then evict oldest until the cache is within budget.

@@ -84,26 +84,26 @@ describe('Import: URL Rewriting', () => {
             expected: '[vc_column_text]<input type="hidden" value="{&quot;url&quot;:&quot;https:\\/\\/target.example.com\\/hero.jpg&quot;}">[/vc_column_text]',
             rendered: '<div data-e2e-shortcode="vc_column_text"><input type="hidden" value="{&quot;url&quot;:&quot;https:\\/\\/target.example.com\\/hero.jpg&quot;}"></div>',
         },
+        {
+            name: 'WPBakery table with percent-encoded HTML and URL',
+            slug: 'url-rewrite-wpbakery-percent-encoded-table',
+            input: '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22http%3A%2F%2F127.0.0.1%3A8108%2Fwp-content%2Fuploads%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
+            expected: '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22https%3A%2F%2Ftarget.example.com%2Fwp-content%2Fuploads%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
+            rendered: '<div data-e2e-shortcode="vc_table">Download,<a href="https://target.example.com/wp-content/uploads/manual.pdf">Link</a></div>',
+        },
+        {
+            name: 'WPBakery raw HTML with a Base64-encoded link',
+            slug: 'url-rewrite-wpbakery-base64-html',
+            input: '[vc_raw_html]PGEgaHJlZj0iaHR0cDovLzEyNy4wLjAuMTo4MTA4L21hbnVhbC5wZGYiPk1hbnVhbDwvYT4=[/vc_raw_html]',
+            expected: '[vc_raw_html]PGEgaHJlZj0iaHR0cHM6Ly90YXJnZXQuZXhhbXBsZS5jb20vbWFudWFsLnBkZiI+TWFudWFsPC9hPg==[/vc_raw_html]',
+            rendered: '<a href="https://target.example.com/manual.pdf">Manual</a>',
+        },
     ];
 
     // These are useful failures, not descriptions of current behavior. A
     // migration user would reasonably expect each URL to move, but the URL is
     // hidden behind an encoding layer the cautious processor does not decode.
     const SITE_BUILDER_EXPECTED_FAILURES = [
-        {
-            name: 'WPBakery table with percent-encoded HTML and URL',
-            slug: 'url-rewrite-wpbakery-percent-encoded-table',
-            input: '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22http%3A%2F%2F127.0.0.1%3A8108%2Fwp-content%2Fuploads%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
-            expected: '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22http%3A%2F%2Ftarget.example.com%2Fwp-content%2Fuploads%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
-            rendered: '<div data-e2e-shortcode="vc_table">Download,<a href="http://target.example.com/wp-content/uploads/manual.pdf">Link</a></div>',
-        },
-        {
-            name: 'WPBakery raw HTML with a Base64-encoded link',
-            slug: 'url-rewrite-wpbakery-base64-html',
-            input: '[vc_raw_html]PGEgaHJlZj0iaHR0cDovLzEyNy4wLjAuMTo4MTA4L21hbnVhbC5wZGYiPk1hbnVhbDwvYT4=[/vc_raw_html]',
-            expected: '[vc_raw_html]PGEgaHJlZj0iaHR0cDovL3RhcmdldC5leGFtcGxlLmNvbS9tYW51YWwucGRmIj5NYW51YWw8L2E+[/vc_raw_html]',
-            rendered: '<a href="http://target.example.com/manual.pdf">Manual</a>',
-        },
         {
             name: 'percent-encoded redirect URL in a shortcode attribute',
             slug: 'url-rewrite-percent-encoded-query-url',
@@ -149,7 +149,7 @@ function reprint_e2e_table_shortcode($attributes, $content = null) {
 }
 
 function reprint_e2e_raw_html_shortcode($attributes, $content = null) {
-    return (string) base64_decode((string) $content, true);
+    return rawurldecode((string) base64_decode((string) $content, true));
 }
 
 foreach (['vc_row', 'vc_column', 'vc_column_text', 'et_pb_section'] as $shortcode) {
