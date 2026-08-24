@@ -140,7 +140,7 @@ final class ExportLibraryLoadTest extends TestCase {
         $symbols = json_decode(trim($result['output']), true, 512, JSON_THROW_ON_ERROR);
         $this->assertTrue($symbols['canonical_function']);
         $this->assertTrue($symbols['released_function']);
-        $this->assertSame('site_export_secret', $symbols['canonical_option']);
+        $this->assertSame('reprint_server_secret', $symbols['canonical_option']);
         $this->assertSame($symbols['canonical_option'], $symbols['released_option']);
         $this->assertFalse($symbols['canonical_query_added']);
     }

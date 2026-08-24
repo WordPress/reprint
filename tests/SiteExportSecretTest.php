@@ -20,7 +20,6 @@ $GLOBALS['site_export_test_options'] = [];
 $GLOBALS['site_export_registered_settings'] = [];
 $GLOBALS['site_export_settings_errors'] = [];
 $GLOBALS['site_export_test_actions'] = [];
-$GLOBALS['site_export_test_filters'] = [];
 
 if (!function_exists('plugin_dir_path')) {
     function plugin_dir_path(string $file): string {
@@ -84,25 +83,11 @@ if (!function_exists('add_action')) {
 
 if (!function_exists('add_filter')) {
     function add_filter(string $hook_name, $callback, int $priority = 10, int $accepted_args = 1): void {
-        $GLOBALS['site_export_test_filters'][$hook_name][] = [
+        $GLOBALS['reprint_test_filters'][$hook_name][] = [
             'callback' => $callback,
             'priority' => $priority,
             'accepted_args' => $accepted_args,
         ];
-    }
-}
-
-if (!function_exists('apply_filters')) {
-    function apply_filters(string $hook_name, $value, ...$extra_args) {
-        $filters = $GLOBALS['site_export_test_filters'][$hook_name] ?? [];
-        usort($filters, static function (array $left, array $right): int {
-            return $left['priority'] <=> $right['priority'];
-        });
-        foreach ($filters as $filter) {
-            $args = array_slice(array_merge([$value], $extra_args), 0, $filter['accepted_args']);
-            $value = call_user_func_array($filter['callback'], $args);
-        }
-        return $value;
     }
 }
 
