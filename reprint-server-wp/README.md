@@ -86,9 +86,17 @@ push is authorized again. Managed sites show the effective state as read-only
 in WordPress admin. Custom authentication does not bypass this authorization
 gate.
 
+The bundled settings page is available at **Tools > Reprint Server**. It uses
+the WordPress Settings API for the connection token and a separate authenticated
+administrator action for push access. The page is an adapter over the shared
+configuration functions; it does not own the token or push-authorization rules.
+
 ## Using as a library
 
-The export engine can be embedded in another PHP project without the WordPress plugin wrapper. Require `lib.php` instead of `index.php` — it defines constants and functions but does not handle any HTTP requests or check any URLs.
+The export engine can be embedded in another PHP project or WordPress plugin
+without the bundled plugin wrapper. Require `lib.php` instead of `index.php`.
+It defines constants and functions but does not handle requests, check URLs,
+register WordPress hooks, add administrator pages, or install activation hooks.
 
 ```php
 use function WordPress\Reprint\Server\Plugin\error;
@@ -119,6 +127,24 @@ if ($myRouter->matches('/export')) {
 `WordPress\Reprint\Server\Plugin\handle_api_request()` accepts the same options documented under
 Platform configuration. Direct `lib.php` embedders pass them as the function's
 array argument and do not use the WordPress filter.
+
+An embedding WordPress plugin which wants the option-backed connection token
+and its push-authorization revocation hooks may opt into that integration
+without loading the bundled administrator:
+
+```php
+require_once '/path/to/reprint-server-wp/lib.php';
+require_once '/path/to/reprint-server-wp/wordpress/configuration.php';
+
+_site_export_register_wordpress_configuration();
+```
+
+The embedding plugin may render its own administrator surface with
+`_site_export_get_configuration_state()`, apply connection-token changes with
+`_site_export_change_connection_token()`, and apply push-access changes with
+`_site_export_change_push_access()`. It should not require
+`wordpress/site-export.php` unless it explicitly wants the bundled
+**Tools > Reprint Server** page.
 
 `lib.php` defines these constants in `WordPress\Reprint\Server\Plugin`
 (using WordPress's `plugin_dir_path`):

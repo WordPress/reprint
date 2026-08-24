@@ -41,5 +41,7 @@ if (isset($_GET['reprint-api'])) {
     exit;
 }
 
-// Register the settings page.
+// Register the bundled WordPress configuration and settings page.
+require_once __DIR__ . '/wordpress/configuration.php';
+_site_export_register_wordpress_configuration();
 require_once __DIR__ . '/wordpress/site-export.php';

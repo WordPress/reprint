@@ -11509,7 +11509,7 @@ class ImportClient
                         "No --secret was provided. The remote site requires " .
                         "authentication.\n\n" .
                         "Pass --secret=YOUR_SECRET using the same secret " .
-                        "configured in the Reprint Server plugin on the remote site.",
+                        "configured under Tools > Reprint Server on the remote site.",
                 ];
             }
 
@@ -11533,8 +11533,7 @@ class ImportClient
                     'code' => 'AUTH_SECRET_MISMATCH',
                     'message' =>
                         "Wrong shared secret. The --secret value does not match " .
-                        "the one configured in the Reprint Server plugin settings " .
-                        "(wp-admin → Reprint Server).",
+                        "the one configured under Tools > Reprint Server in wp-admin.",
                 ];
             }
 
@@ -13490,11 +13489,11 @@ if (
         echo "  2. Go to Plugins → Add New Plugin → Upload Plugin\n";
         echo "  3. Upload reprint-exporter-wp.zip and activate Reprint Server\n";
         echo "\n";
-        echo "{$bold}Step 3: Configure the shared secret{$reset}\n";
+        echo "{$bold}Step 3: Configure the connection token{$reset}\n";
         echo "\n";
-        echo "  1. In wp-admin, go to Reprint Server (in the sidebar)\n";
-        echo "  2. Enter a shared secret and save\n";
-        echo "  3. Use the same secret with reprint:\n";
+        echo "  1. In wp-admin, go to Tools → Reprint Server\n";
+        echo "  2. Enter a connection token and save\n";
+        echo "  3. Pass the same token to reprint with --secret:\n";
         echo "\n";
         echo "     {$dim}php reprint.phar preflight https://your-site.com \\\n";
         echo "       --secret=YOUR_SECRET \\\n";

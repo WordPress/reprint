@@ -1,20 +1,12 @@
 <?php
-/**
- * Admin interface for Reprint Server plugin.
- *
- * This plugin provides a WordPress admin UI for configuring the export API.
- * The export API is triggered via `?reprint-api` (or the legacy
- * `?site-export-api` alias) during plugin load,
- * before WordPress finishes booting. It reads the secret from a site option,
- * with secret.php supported only as an override when present.
- *
- * Authentication uses HMAC signatures: the importing side generates a secret,
- * the user enters it here, and all requests must include a valid signature
- * computed from the nonce, timestamp, and request content hash.
- */
+/** Bundled WordPress administrator adapter for Reprint Server. */
+
 class Site_Export_Plugin {
 
     private static $instance = null;
+
+    /** @var string|false Page hook returned by add_management_page(). */
+    private $page_hook = false;
 
     public static function get_instance() {
         if (self::$instance === null) {
@@ -24,466 +16,343 @@ class Site_Export_Plugin {
     }
 
     private function __construct() {
-        add_action('init', [$this, 'register_settings']);
-        add_action(
-            'update_option_' . SITE_EXPORT_SECRET_OPTION,
-            [$this, 'revoke_push_authorization_after_connection_token_change'],
-            10,
-            2
-        );
-        add_action(
-            'add_option_' . SITE_EXPORT_SECRET_OPTION,
-            [$this, 'revoke_push_authorization_after_connection_token_added'],
-            10,
-            0
-        );
         add_action('admin_menu', [$this, 'add_admin_menu']);
-        add_action('admin_init', [$this, 'handle_settings_save']);
-        add_filter('plugin_action_links_' . plugin_basename(SITE_EXPORT_PLUGIN_DIR . 'index.php'), [$this, 'add_settings_link']);
-        add_action('admin_bar_menu', [$this, 'add_admin_bar_node'], 100);
-    }
-
-    /** Register the option so core's /wp/v2/settings endpoint can update it. */
-    public function register_settings() {
-        register_setting(
-            'general',
-            SITE_EXPORT_SECRET_OPTION,
-            [
-                'type' => 'string',
-                'sanitize_callback' => 'sanitize_text_field',
-                'default' => '',
-                'show_in_rest' => true,
-            ]
+        add_action('admin_init', [$this, 'register_settings_fields']);
+        add_action('admin_post_site_export_save_push_access', [$this, 'handle_push_access_save']);
+        add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
+        add_filter(
+            'plugin_action_links_' . plugin_basename(SITE_EXPORT_PLUGIN_DIR . 'index.php'),
+            [$this, 'add_settings_link']
         );
     }
 
-    /**
-     * Revoke local push authorization when the effective connection token changes.
-     *
-     * The secret.php override keeps the option from becoming the effective token.
-     *
-     * @param mixed $old_value Previous option value.
-     * @param mixed $new_value New option value.
-     */
-    public function revoke_push_authorization_after_connection_token_change($old_value, $new_value) {
-        if (_site_export_has_secret_file()) {
-            return;
-        }
-
-        $old_connection_token = is_string($old_value) && $old_value !== '' ? $old_value : null;
-        $new_connection_token = is_string($new_value) && $new_value !== '' ? $new_value : null;
-        if ($old_connection_token !== $new_connection_token) {
-            _site_export_update_push_authorization(false);
-        }
+    /** Add the bundled page beneath Tools. */
+    public function add_admin_menu(): void {
+        $this->page_hook = add_management_page(
+            __('Reprint Server', 'reprint'),
+            __('Reprint Server', 'reprint'),
+            'manage_options',
+            'site-export',
+            [$this, 'render_admin_page']
+        );
     }
 
-    /**
-     * Revoke stale local push authorization when the connection-token option is added.
-     *
-     * WordPress uses add_option() when update_option() receives a missing option,
-     * so that path does not emit the update hook above. A secret.php override
-     * still keeps the option from becoming the effective token.
-     *
-     */
-    public function revoke_push_authorization_after_connection_token_added() {
-        if (!_site_export_has_secret_file()) {
-            _site_export_update_push_authorization(false);
-        }
+    /** Register the connection-token section rendered by the Settings API. */
+    public function register_settings_fields(): void {
+        add_settings_section(
+            'site_export_connection',
+            __('Connection token', 'reprint'),
+            [$this, 'render_connection_section'],
+            'site-export'
+        );
+        add_settings_field(
+            SITE_EXPORT_SECRET_OPTION,
+            __('Connection token', 'reprint'),
+            [$this, 'render_connection_token_field'],
+            'site-export',
+            'site_export_connection',
+            ['label_for' => SITE_EXPORT_SECRET_OPTION]
+        );
     }
 
-    /**
-     * Add "Settings" link to the plugin row on the Plugins page.
-     */
+    /** Add the Settings link to the plugin row. */
     public function add_settings_link(array $links): array {
-        $url = admin_url('admin.php?page=site-export');
-        array_unshift($links, '<a href="' . esc_url($url) . '">Settings</a>');
+        $url = admin_url('tools.php?page=site-export');
+        array_unshift(
+            $links,
+            '<a href="' . esc_url($url) . '">' . esc_html__('Settings', 'reprint') . '</a>'
+        );
         return $links;
     }
 
-    /**
-     * Add top-level admin menu page.
-     */
-    public function add_admin_menu() {
-        add_menu_page(
-            'Reprint Server',
-            'Reprint Server',
-            'manage_options',
-            'site-export',
-            [$this, 'render_admin_page'],
-            'dashicons-cloud-upload'
+    /** Enqueue browser-only behavior on the bundled page. */
+    public function enqueue_assets(string $hook_suffix): void {
+        if ($this->page_hook === false || $hook_suffix !== $this->page_hook) {
+            return;
+        }
+
+        wp_enqueue_script(
+            'site-export-admin',
+            plugins_url('wordpress/site-export.js', SITE_EXPORT_PLUGIN_DIR . 'index.php'),
+            ['wp-a11y'],
+            SITE_EXPORT_VERSION,
+            true
         );
     }
 
-    /**
-     * Add "Reprint Server" link to the admin bar.
-     */
-    public function add_admin_bar_node($wp_admin_bar) {
-        if (!current_user_can('manage_options')) {
-            return;
-        }
-
-        $wp_admin_bar->add_node([
-            'id'    => 'site-export',
-            'title' => 'Reprint Server',
-            'href'  => admin_url('admin.php?page=site-export'),
-            'meta'  => ['title' => 'Reprint Server'],
-        ]);
+    /** Explain where the connection token comes from. */
+    public function render_connection_section(): void {
+        echo '<p>' . esc_html__(
+            'Paste the connection token supplied by the tool which will connect to this site.',
+            'reprint'
+        ) . '</p>';
     }
 
-    /**
-     * Handle settings form submission.
-     */
-    public function handle_settings_save() {
-        $saving_connection_token = isset($_POST['site_export_save_settings']);
-        $saving_push_access = isset($_POST['site_export_save_push_access']);
-        if (!$saving_connection_token && !$saving_push_access) {
-            return;
-        }
-
-        if (!current_user_can('manage_options')) {
-            return;
-        }
-
-        check_admin_referer('site_export_settings');
-
-        if ($saving_connection_token) {
-            $secret = isset($_POST['site_export_secret'])
-                ? sanitize_text_field(wp_unslash($_POST['site_export_secret']))
-                : '';
-            $updated = _site_export_update_shared_secret($secret);
-            $saved = $updated || _site_export_get_option_secret() === $secret;
-
-            if (!$saved) {
-                add_settings_error('site_export', 'save_failed', 'Failed to save secret.', 'error');
-                return;
-            }
-
-            add_settings_error(
-                'site_export',
-                'save_success',
-                'Settings saved successfully.',
-                'success'
-            );
-            return;
-        }
-
-        if (!_site_export_push_is_supported()) {
-            add_settings_error(
-                'site_export',
-                'push_access_unsupported',
-                'Push access requires PHP 7.2 or newer. Downloads remain available.',
-                'error'
-            );
-            return;
-        }
-
-        if (_site_export_get_managed_push_enabled() !== null) {
-            add_settings_error(
-                'site_export',
-                'push_access_managed',
-                'Push access is managed by your hosting provider.',
-                'info'
-            );
-            return;
-        }
-
-        $push_enabled = isset($_POST['site_export_push_enabled']);
-        if (!_site_export_update_push_authorization($push_enabled)) {
-            add_settings_error('site_export', 'push_access_save_failed', 'Failed to save push access.', 'error');
-            return;
-        }
-
-        add_settings_error('site_export', 'push_access_saved', 'Push access updated.', 'success');
-    }
-
-    /**
-     * Render the admin page.
-     */
-    public function render_admin_page() {
-        if (!current_user_can('manage_options')) {
-            return;
-        }
-
-        $stored_secret = _site_export_get_option_secret();
-        $effective_secret = _site_export_get_shared_secret() ?? '';
-        $api_url = home_url('?reprint-api');
-        $is_configured = $effective_secret !== '';
-        $has_file_override = _site_export_has_secret_file();
-        $push_supported = _site_export_push_is_supported();
-        $managed_push_enabled = _site_export_get_managed_push_enabled();
-        $push_enabled = $push_supported && _site_export_is_push_authorized();
-
+    /** Render the option-backed connection-token field. */
+    public function render_connection_token_field(): void {
+        $configuration = _site_export_get_configuration_state();
         ?>
-        <style>
-            .site-export-wrap {
-                max-width: 680px;
-                margin: 40px auto 0;
-                font-size: 14px;
-            }
-            .site-export-wrap h1 {
-                font-size: 28px;
-                font-weight: 600;
-                margin-bottom: 4px;
-            }
-            .site-export-wrap .subtitle {
-                color: #646970;
-                font-size: 14px;
-                margin: 0 0 30px;
-            }
-            .site-export-card {
-                background: #fff;
-                border: 1px solid #ddd;
-                border-radius: 8px;
-                padding: 28px 32px;
-                margin-bottom: 24px;
-            }
-            .site-export-card h2 {
-                font-size: 16px;
-                font-weight: 600;
-                margin: 0 0 6px;
-                padding: 0;
-            }
-            .site-export-card .card-desc {
-                color: #646970;
-                margin: 0 0 20px;
-            }
-            .site-export-push-access {
-                padding: 20px 24px;
-            }
-            .site-export-push-access label {
-                display: flex;
-                gap: 8px;
-                align-items: flex-start;
-                font-weight: 600;
-            }
-            .site-export-push-access input[type="checkbox"] {
-                margin-top: 1px;
-            }
-            .site-export-push-disclosure {
-                color: #646970;
-                font-size: 13px;
-                margin: 10px 0 16px 24px;
-            }
-            .site-export-managed-copy {
-                color: #646970;
-                margin: 12px 0 0 24px;
-            }
-            .site-export-secret-field {
-                display: flex;
-                gap: 8px;
-                align-items: start;
-            }
-            .site-export-secret-field input[type="password"],
-            .site-export-secret-field input[type="text"] {
-                flex: 1;
-                font-family: monospace;
-                font-size: 14px;
-                padding: 8px 12px;
-                border-radius: 4px;
-            }
-            .site-export-secret-field .button {
-                flex-shrink: 0;
-                height: 38px;
-            }
-            .site-export-toggle-btn {
-                background: none;
-                border: 1px solid #8c8f94;
-                border-radius: 4px;
-                cursor: pointer;
-                padding: 6px 10px;
-                color: #50575e;
-                height: 38px;
-                display: inline-flex;
-                align-items: center;
-            }
-            .site-export-toggle-btn:hover {
-                border-color: #2271b1;
-                color: #2271b1;
-            }
-            .site-export-status {
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                padding: 14px 18px;
-                border-radius: 6px;
-                margin-bottom: 20px;
-                font-size: 14px;
-            }
-            .site-export-status.is-ready {
-                background: #edfaef;
-                border: 1px solid #b8e6be;
-                color: #1e4620;
-            }
-            .site-export-status.is-pending {
-                background: #fef8ee;
-                border: 1px solid #f0d9a8;
-                color: #6e4e00;
-            }
-            .site-export-status .dashicons {
-                font-size: 20px;
-                width: 20px;
-                height: 20px;
-            }
-            .site-export-endpoint {
-                background: #f6f7f7;
-                border: 1px solid #ddd;
-                border-radius: 6px;
-                padding: 14px 18px;
-                display: flex;
-                align-items: center;
-                gap: 10px;
-            }
-            .site-export-endpoint code {
-                flex: 1;
-                font-size: 13px;
-                word-break: break-all;
-                background: none;
-                padding: 0;
-            }
-            .site-export-copy-btn {
-                background: none;
-                border: 1px solid #8c8f94;
-                border-radius: 4px;
-                cursor: pointer;
-                padding: 4px 10px;
-                color: #50575e;
-                font-size: 12px;
-                white-space: nowrap;
-            }
-            .site-export-copy-btn:hover {
-                border-color: #2271b1;
-                color: #2271b1;
-            }
-        </style>
+        <input type="password"
+               class="regular-text code"
+               id="site_export_secret"
+               name="<?php echo esc_attr(SITE_EXPORT_SECRET_OPTION); ?>"
+               value="<?php echo esc_attr($configuration['stored_connection_token']); ?>"
+               autocomplete="off" />
+        <button type="button"
+                class="button site-export-toggle-token"
+                aria-controls="site_export_secret"
+                aria-pressed="false"
+                aria-label="<?php echo esc_attr__('Show connection token', 'reprint'); ?>"
+                data-show-label="<?php echo esc_attr__('Show connection token', 'reprint'); ?>"
+                data-hide-label="<?php echo esc_attr__('Hide connection token', 'reprint'); ?>">
+            <span class="dashicons dashicons-visibility" aria-hidden="true"></span>
+        </button>
+        <?php
+    }
 
-        <div class="site-export-wrap">
-            <h1>Reprint Server</h1>
-            <p class="subtitle">Allow an external tool to download your site's database and files.</p>
+    /** Apply one push-access change and redirect back to the bundled page. */
+    public function handle_push_access_save(): void {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('You are not allowed to manage Reprint Server.', 'reprint'));
+        }
 
-            <?php settings_errors('site_export'); ?>
+        check_admin_referer('site_export_save_push_access');
+        $enabled = isset($_POST['site_export_push_enabled']);
+        $result = _site_export_change_push_access($enabled);
+        $redirect_url = add_query_arg(
+            'site_export_notice',
+            $result,
+            admin_url('tools.php?page=site-export')
+        );
+        wp_safe_redirect($redirect_url);
+        exit;
+    }
 
-            <?php if ($has_file_override): ?>
-            <div class="site-export-status is-pending">
-                <span class="dashicons dashicons-lock"></span>
-                <span><strong><code>secret.php</code> override is active.</strong> This screen and the REST API update only the site option. Remove <code>secret.php</code> to use the stored option value.</span>
-            </div>
-            <?php endif; ?>
+    /** Render the bundled Tools page. */
+    public function render_admin_page(): void {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
 
-            <?php if ($is_configured): ?>
-            <div class="site-export-status is-ready">
-                <span class="dashicons dashicons-yes-alt"></span>
-                <?php if ($push_enabled): ?>
-                <span><strong>Connected for downloads and push.</strong> The current connection token can change files on this site.</span>
-                <?php else: ?>
-                <span><strong>Connected for downloads.</strong> The connection token cannot change files on this site.</span>
-                <?php endif; ?>
-            </div>
-            <?php else: ?>
-            <div class="site-export-status is-pending">
-                <span class="dashicons dashicons-warning"></span>
-                <span><strong>Not configured yet.</strong> Paste the connection token from your import tool below to get started.</span>
-            </div>
-            <?php endif; ?>
+        $configuration = _site_export_get_configuration_state();
+        $remote_reprint_api_url = home_url('?reprint-api');
+        ?>
+        <div class="wrap">
+            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
+            <p>
+            <?php
+            echo esc_html__(
+                'Allow an external tool to download your site\'s database and files.',
+                'reprint'
+            );
+            ?>
+            </p>
 
-            <div class="site-export-card">
-                <h2>Connection Token</h2>
-                <p class="card-desc">
-                    Your import tool will give you a token. Paste it here to authorize the connection.
+            <?php
+            ob_start();
+            settings_errors();
+            $settings_errors_markup = ob_get_clean();
+            if (is_string($settings_errors_markup)) {
+                // Core bolds each complete message and moves non-inline notices after load.
+                // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- settings_errors() returns escaped core markup.
+                echo str_replace(
+                    ['settings-error is-dismissible', '<strong>', '</strong>'],
+                    ['settings-error is-dismissible inline', '', ''],
+                    $settings_errors_markup
+                );
+            }
+            ?>
+            <?php $this->render_push_access_notice(); ?>
+            <?php $this->render_configuration_status($configuration); ?>
+
+            <form method="post" action="options.php">
+                <?php settings_fields('site_export'); ?>
+                <?php do_settings_sections('site-export'); ?>
+                <?php submit_button(); ?>
+            </form>
+
+            <?php if ($configuration['is_configured']): ?>
+                <hr />
+                <h2><?php echo esc_html__('Push access', 'reprint'); ?></h2>
+                <p>
+                <?php
+                echo esc_html__(
+                    'You do not need push access when moving this site to another host.',
+                    'reprint'
+                );
+                ?>
                 </p>
+                <?php $this->render_push_access_form($configuration); ?>
 
-                <form method="post" action="">
-                    <?php wp_nonce_field('site_export_settings'); ?>
-
-                    <div class="site-export-secret-field">
-                        <input type="password"
-                               id="site_export_secret"
-                               name="site_export_secret"
-                               value="<?php echo esc_attr($stored_secret); ?>"
-                               placeholder="Paste your token here"
-                               autocomplete="off" />
-                        <button type="button" class="site-export-toggle-btn" onclick="siteExportToggleSecret()" title="Show / hide token">
-                            <span class="dashicons dashicons-visibility"></span>
-                        </button>
-                        <input type="submit"
-                               name="site_export_save_settings"
-                               class="button button-primary"
-                               value="Save" />
-                    </div>
-                </form>
-            </div>
-
-            <?php if ($is_configured): ?>
-            <div class="site-export-card site-export-push-access">
-                <h2>Push access</h2>
-                <p class="card-desc">You do not need push access when moving this site to another host.</p>
-
-                <?php if (!$push_supported): ?>
-                <p class="card-desc">Push access requires PHP 7.2 or newer. This site runs PHP <?php echo esc_html(PHP_VERSION); ?>. Downloads remain available.</p>
-                <?php elseif ($managed_push_enabled !== null): ?>
-                <label>
-                    <input type="checkbox" name="site_export_push_enabled" value="1"<?php echo $push_enabled ? ' checked' : ''; ?> disabled />
-                    <span>Allow push to change files on this site</span>
-                </label>
-                <p class="site-export-push-disclosure">While enabled, anyone with the connection token can upload, replace, and delete files in this site's document root, except excluded paths.</p>
-                <p class="site-export-managed-copy">Push access is managed by your hosting provider.</p>
-                <?php else: ?>
-                <form method="post" action="">
-                    <?php wp_nonce_field('site_export_settings'); ?>
-                    <label>
-                        <input type="checkbox" name="site_export_push_enabled" value="1"<?php echo $push_enabled ? ' checked' : ''; ?> />
-                        <span>Allow push to change files on this site</span>
-                    </label>
-                    <p class="site-export-push-disclosure">While enabled, anyone with the connection token can upload, replace, and delete files in this site's document root, except excluded paths.</p>
-                    <input type="submit"
-                           name="site_export_save_push_access"
-                           class="button button-secondary"
-                           value="Save push access" />
-                </form>
-                <?php endif; ?>
-            </div>
-            <?php endif; ?>
-
-            <?php if ($is_configured): ?>
-            <div class="site-export-card">
-                <h2>API Endpoint</h2>
-                <p class="card-desc">
-                    If your import tool asks for an endpoint URL, copy this:
+                <hr />
+                <h2><?php echo esc_html__('Remote Reprint API URL', 'reprint'); ?></h2>
+                <p>
+                <?php
+                echo esc_html__(
+                    'Use this URL when another tool asks for the remote Reprint API URL.',
+                    'reprint'
+                );
+                ?>
                 </p>
-                <div class="site-export-endpoint">
-                    <code id="site-export-api-url"><?php echo esc_html($api_url); ?></code>
-                    <button type="button" class="site-export-copy-btn" onclick="siteExportCopyUrl()">Copy</button>
-                </div>
-            </div>
+                <input type="text"
+                       class="regular-text code"
+                       id="site-export-api-url"
+                       value="<?php echo esc_attr($remote_reprint_api_url); ?>"
+                       readonly />
+                <button type="button"
+                        class="button site-export-copy-url"
+                        data-copied-message="<?php echo esc_attr__('Remote Reprint API URL copied.', 'reprint'); ?>">
+                    <?php echo esc_html__('Copy', 'reprint'); ?>
+                </button>
             <?php endif; ?>
         </div>
-
-        <script>
-        function siteExportToggleSecret() {
-            var input = document.getElementById('site_export_secret');
-            input.type = input.type === 'password' ? 'text' : 'password';
-        }
-        function siteExportCopyUrl() {
-            var url = document.getElementById('site-export-api-url').textContent.trim();
-            navigator.clipboard.writeText(url).then(function() {
-                var btn = document.querySelector('.site-export-copy-btn');
-                var original = btn.textContent;
-                btn.textContent = 'Copied!';
-                setTimeout(function() { btn.textContent = original; }, 1500);
-            });
-        }
-        </script>
         <?php
+    }
+
+    /**
+     * Render current configuration status and notices which require attention.
+     *
+     * @param array $configuration Configuration returned by _site_export_get_configuration_state().
+     */
+    private function render_configuration_status(array $configuration): void {
+        if ($configuration['has_secret_file']) {
+            echo '<div class="notice notice-warning inline"><p><strong><code>secret.php</code> '
+                . esc_html__('override is active.', 'reprint')
+                . '</strong> '
+                . esc_html__(
+                    'This page and the REST API update only the site option. Remove secret.php to use the stored option value.',
+                    'reprint'
+                )
+                . '</p></div>';
+        }
+
+        if (!$configuration['is_configured']) {
+            echo '<div class="notice notice-warning inline"><p><strong>'
+                . esc_html__('Not configured yet.', 'reprint')
+                . '</strong> '
+                . esc_html__('Enter a connection token to get started.', 'reprint')
+                . '</p></div>';
+            return;
+        }
+
+        echo '<div class="notice notice-info inline"><p>';
+        if ($configuration['push_enabled']) {
+            echo '<strong>' . esc_html__('Connected for downloads and push.', 'reprint') . '</strong> '
+                . esc_html__('The current connection token can change files on this site.', 'reprint');
+        } else {
+            echo '<strong>' . esc_html__('Connected for downloads.', 'reprint') . '</strong> '
+                . esc_html__('The connection token cannot change files on this site.', 'reprint');
+        }
+        echo '</p></div>';
+    }
+
+    /** Render the push-access form or its read-only state. */
+    private function render_push_access_form(array $configuration): void {
+        if (!$configuration['push_supported']) {
+            $unsupported_message = sprintf(
+                /* translators: %s: Current PHP version. */
+                __(
+                'Push access requires PHP 7.2 or newer. This site runs PHP %s. Downloads remain available.',
+                'reprint'
+                ),
+                PHP_VERSION
+            );
+            echo '<div class="notice notice-warning inline"><p>'
+                . esc_html($unsupported_message)
+                . '</p></div>';
+            return;
+        }
+
+        if ($configuration['managed_push_enabled'] !== null) {
+            ?>
+            <label>
+                <input type="checkbox"
+                       value="1"<?php checked($configuration['push_enabled']); ?><?php disabled(true); ?> />
+                <?php echo esc_html__('Allow push to change files on this site', 'reprint'); ?>
+            </label>
+            <p class="description">
+            <?php
+            echo esc_html__(
+                'While enabled, anyone with the connection token can upload, replace, and delete files in this site\'s document root, except excluded paths.',
+                'reprint'
+            );
+            ?>
+            </p>
+            <p class="description">
+            <?php
+            echo esc_html__(
+                'Push access is managed by your hosting provider.',
+                'reprint'
+            );
+            ?>
+            </p>
+            <?php
+            return;
+        }
+
+        ?>
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+            <input type="hidden" name="action" value="site_export_save_push_access" />
+            <?php wp_nonce_field('site_export_save_push_access'); ?>
+            <label>
+                <input type="checkbox"
+                       name="site_export_push_enabled"
+                       value="1"<?php checked($configuration['push_enabled']); ?> />
+                <?php echo esc_html__('Allow push to change files on this site', 'reprint'); ?>
+            </label>
+            <p class="description">
+            <?php
+            echo esc_html__(
+                'While enabled, anyone with the connection token can upload, replace, and delete files in this site\'s document root, except excluded paths.',
+                'reprint'
+            );
+            ?>
+            </p>
+            <p class="submit">
+                <?php submit_button(__('Save push access', 'reprint'), 'secondary', 'submit', false); ?>
+            </p>
+        </form>
+        <?php
+    }
+
+    /** Render a fixed native notice for the admin-post result. */
+    private function render_push_access_notice(): void {
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- A newer Settings API result supersedes the stale push result.
+        if (isset($_GET['settings-updated'])) {
+            return;
+        }
+
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The fixed query value selects a read-only notice.
+        if (!isset($_GET['site_export_notice']) || !is_string($_GET['site_export_notice'])) {
+            return;
+        }
+
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The fixed query value selects a read-only notice.
+        $result = sanitize_key(wp_unslash($_GET['site_export_notice']));
+        $notices = [
+            'saved' => ['success', __('Push access updated.', 'reprint')],
+            'unchanged' => ['success', __('Push access was already up to date.', 'reprint')],
+            'unsupported' => ['error', __('Push access requires PHP 7.2 or newer. Downloads remain available.', 'reprint')],
+            'managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
+            'not_configured' => ['error', __('Configure a connection token before enabling push access.', 'reprint')],
+            'storage_failure' => ['error', __('Failed to save push access.', 'reprint')],
+        ];
+        if (!isset($notices[$result])) {
+            return;
+        }
+
+        $notice_classes = 'notice notice-' . $notices[$result][0] . ' is-dismissible inline';
+        echo '<div class="' . esc_attr($notice_classes) . '"><p>'
+            . esc_html($notices[$result][1])
+            . '</p></div>';
     }
 }
 
-// Initialize
 add_action('plugins_loaded', function() {
     Site_Export_Plugin::get_instance();
 });
 
-// On activation: set a transient so we can redirect on the next admin page load.
 register_activation_hook(SITE_EXPORT_PLUGIN_DIR . 'index.php', function() {
-    // Only redirect when activated through the admin UI (not via WP-CLI or bulk).
     if (!wp_doing_ajax() && is_admin()) {
         set_transient('site_export_activated', 1, 30);
     }
@@ -494,12 +363,12 @@ register_activation_hook(SITE_EXPORT_PLUGIN_DIR . 'index.php', function() {
     }
 });
 
-// Redirect to settings page after activation.
 add_action('admin_init', function() {
     if (get_transient('site_export_activated')) {
         delete_transient('site_export_activated');
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- This only suppresses activation redirects for bulk activation.
         if (!isset($_GET['activate-multi'])) {
-            wp_safe_redirect(admin_url('admin.php?page=site-export'));
+            wp_safe_redirect(admin_url('tools.php?page=site-export'));
             exit;
         }
     }

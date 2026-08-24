@@ -19,8 +19,16 @@ if (!defined('SITE_EXPORT_SECRET_FILE')) {
 $GLOBALS['site_export_test_options'] = [];
 $GLOBALS['site_export_registered_settings'] = [];
 $GLOBALS['site_export_settings_errors'] = [];
+$GLOBALS['site_export_settings_error_requests'] = [];
+$GLOBALS['site_export_settings_errors_markup'] = '';
 $GLOBALS['site_export_test_actions'] = [];
+$GLOBALS['site_export_test_menu'] = null;
+$GLOBALS['site_export_test_sections'] = [];
+$GLOBALS['site_export_test_fields'] = [];
+$GLOBALS['site_export_test_scripts'] = [];
+$GLOBALS['site_export_fail_option_updates'] = [];
 
+// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound,Generic.CodeAnalysis.UnusedFunctionParameter.Found,Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed,Universal.NamingConventions.NoReservedKeywordParameterNames.defaultFound,WordPress.Security.EscapeOutput.OutputNotEscaped -- WordPress test stubs.
 if (!function_exists('plugin_dir_path')) {
     function plugin_dir_path(string $file): string {
         return SITE_EXPORT_PLUGIN_DIR;
@@ -39,6 +47,10 @@ if (!function_exists('get_option')) {
 
 if (!function_exists('update_option')) {
     function update_option(string $name, $value, $autoload = null): bool {
+        if (in_array($name, $GLOBALS['site_export_fail_option_updates'], true)) {
+            return false;
+        }
+
         if (!array_key_exists($name, $GLOBALS['site_export_test_options'])) {
             $GLOBALS['site_export_test_options'][$name] = $value;
             foreach ($GLOBALS['site_export_test_actions']['add_option_' . $name] ?? [] as $action) {
@@ -77,6 +89,32 @@ if (!function_exists('register_setting')) {
     function register_setting(string $group, string $name, array $args = []): void {
         $GLOBALS['site_export_registered_settings'][$name] = [
             'group' => $group,
+            'args' => $args,
+        ];
+    }
+}
+
+if (!function_exists('add_settings_section')) {
+    function add_settings_section(string $id, string $title, $callback, string $page): void {
+        $GLOBALS['site_export_test_sections'][$page][$id] = [
+            'title' => $title,
+            'callback' => $callback,
+        ];
+    }
+}
+
+if (!function_exists('add_settings_field')) {
+    function add_settings_field(
+        string $id,
+        string $title,
+        $callback,
+        string $page,
+        string $section,
+        array $args = []
+    ): void {
+        $GLOBALS['site_export_test_fields'][$page][$section][$id] = [
+            'title' => $title,
+            'callback' => $callback,
             'args' => $args,
         ];
     }
@@ -123,6 +161,19 @@ if (!function_exists('plugin_basename')) {
     }
 }
 
+if (!function_exists('add_management_page')) {
+    function add_management_page($page_title, $menu_title, $capability, $menu_slug, $callback): string {
+        $GLOBALS['site_export_test_menu'] = [
+            'page_title' => $page_title,
+            'menu_title' => $menu_title,
+            'capability' => $capability,
+            'menu_slug' => $menu_slug,
+            'callback' => $callback,
+        ];
+        return 'tools_page_' . $menu_slug;
+    }
+}
+
 if (!function_exists('register_activation_hook')) {
     function register_activation_hook(...$args): void {}
 }
@@ -157,7 +208,24 @@ if (!function_exists('wp_safe_redirect')) {
     function wp_safe_redirect(...$args): void {}
 }
 
-// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- WordPress test stubs.
+if (!function_exists('__')) {
+    function __(string $text, string $domain = 'default'): string {
+        return $text;
+    }
+}
+
+if (!function_exists('esc_html__')) {
+    function esc_html__(string $text, string $domain = 'default'): string {
+        return esc_html($text);
+    }
+}
+
+if (!function_exists('esc_attr__')) {
+    function esc_attr__(string $text, string $domain = 'default'): string {
+        return esc_attr($text);
+    }
+}
+
 if (!function_exists('current_user_can')) {
     function current_user_can(string $capability): bool {
         return $capability === 'manage_options';
@@ -192,12 +260,105 @@ if (!function_exists('add_settings_error')) {
 }
 
 if (!function_exists('settings_errors')) {
-    function settings_errors(string $setting): void {}
+    function settings_errors(string $setting = ''): void {
+        $GLOBALS['site_export_settings_error_requests'][] = $setting;
+        echo $GLOBALS['site_export_settings_errors_markup'];
+    }
+}
+
+if (!function_exists('settings_fields')) {
+    function settings_fields(string $group): void {
+        echo '<input type="hidden" name="option_page" value="' . esc_attr($group) . '" />';
+    }
+}
+
+if (!function_exists('do_settings_sections')) {
+    function do_settings_sections(string $page): void {
+        foreach ($GLOBALS['site_export_test_sections'][$page] ?? [] as $section_id => $section) {
+            echo '<h2>' . esc_html($section['title']) . '</h2>';
+            call_user_func($section['callback']);
+            echo '<table class="form-table">';
+            foreach ($GLOBALS['site_export_test_fields'][$page][$section_id] ?? [] as $field) {
+                echo '<tr><th>' . esc_html($field['title']) . '</th><td>';
+                call_user_func($field['callback'], $field['args']);
+                echo '</td></tr>';
+            }
+            echo '</table>';
+        }
+    }
+}
+
+if (!function_exists('submit_button')) {
+    function submit_button(
+        string $text = 'Save Changes',
+        string $type = 'primary',
+        string $name = 'submit',
+        bool $wrap = true
+    ): void {
+        $button = '<input type="submit" name="' . esc_attr($name) . '" class="button button-'
+            . esc_attr($type) . '" value="' . esc_attr($text) . '" />';
+        echo $wrap ? '<p class="submit">' . $button . '</p>' : $button;
+    }
 }
 
 if (!function_exists('home_url')) {
     function home_url(string $path = ''): string {
         return 'https://example.test/' . ltrim($path, '/');
+    }
+}
+
+if (!function_exists('admin_url')) {
+    function admin_url(string $path = ''): string {
+        return 'https://example.test/wp-admin/' . ltrim($path, '/');
+    }
+}
+
+if (!function_exists('get_admin_page_title')) {
+    function get_admin_page_title(): string {
+        return 'Reprint Server';
+    }
+}
+
+if (!function_exists('checked')) {
+    function checked($checked, $current = true, bool $display = true): string {
+        $result = $checked == $current ? ' checked="checked"' : '';
+        if ($display) {
+            echo $result;
+        }
+        return $result;
+    }
+}
+
+if (!function_exists('disabled')) {
+    function disabled($disabled, $current = true, bool $display = true): string {
+        $result = $disabled == $current ? ' disabled="disabled"' : '';
+        if ($display) {
+            echo $result;
+        }
+        return $result;
+    }
+}
+
+if (!function_exists('plugins_url')) {
+    function plugins_url(string $path = '', string $plugin = ''): string {
+        return 'https://example.test/wp-content/plugins/site-export/' . ltrim($path, '/');
+    }
+}
+
+if (!function_exists('wp_enqueue_script')) {
+    function wp_enqueue_script($handle, $src, $dependencies, $version, $in_footer): void {
+        $GLOBALS['site_export_test_scripts'][$handle] = compact(
+            'src',
+            'dependencies',
+            'version',
+            'in_footer'
+        );
+    }
+}
+
+if (!function_exists('sanitize_key')) {
+    function sanitize_key(string $key): string {
+        return preg_replace('/[^a-z0-9_\-]/', '', strtolower($key)) ?? '';
     }
 }
 
@@ -218,9 +379,17 @@ if (!function_exists('esc_html')) {
         return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
     }
 }
+
+if (!function_exists('esc_url')) {
+    function esc_url(string $value): string {
+        return esc_attr($value);
+    }
+}
 // phpcs:enable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound
 
 require_once __DIR__ . '/../reprint-server-wp/lib.php';
+require_once __DIR__ . '/../reprint-server-wp/wordpress/configuration.php';
+_site_export_register_wordpress_configuration();
 require_once __DIR__ . '/../reprint-server-wp/wordpress/site-export.php';
 
 final class SiteExportSecretTest extends TestCase
@@ -233,6 +402,9 @@ final class SiteExportSecretTest extends TestCase
 
     /** @var array<string, mixed> */
     private $original_post = [];
+
+    /** @var array<string, mixed> */
+    private $original_get = [];
 
     /** @var string|false */
     private $original_push_enabled_environment;
@@ -252,16 +424,25 @@ final class SiteExportSecretTest extends TestCase
         $this->original_files = $_FILES;
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Test resets request globals.
         $this->original_post = $_POST;
+        $this->original_get = $_GET;
         $this->original_push_enabled_environment = getenv('SITE_EXPORT_PUSH_ENABLED');
         $this->original_reprint_server_push_enabled_environment = getenv('REPRINT_SERVER_PUSH_ENABLED');
 
         $GLOBALS['site_export_test_options'] = [];
         $GLOBALS['site_export_registered_settings'] = [];
         $GLOBALS['site_export_settings_errors'] = [];
+        $GLOBALS['site_export_settings_error_requests'] = [];
+        $GLOBALS['site_export_settings_errors_markup'] = '';
+        $GLOBALS['site_export_test_menu'] = null;
+        $GLOBALS['site_export_test_sections'] = [];
+        $GLOBALS['site_export_test_fields'] = [];
+        $GLOBALS['site_export_test_scripts'] = [];
+        $GLOBALS['site_export_fail_option_updates'] = [];
         $_SERVER = [];
         $_FILES = [];
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Test resets request globals.
         $_POST = [];
+        $_GET = [];
         putenv('SITE_EXPORT_PUSH_ENABLED');
         putenv('REPRINT_SERVER_PUSH_ENABLED');
 
@@ -283,6 +464,7 @@ final class SiteExportSecretTest extends TestCase
         $_SERVER = $this->original_server;
         $_FILES = $this->original_files;
         $_POST = $this->original_post;
+        $_GET = $this->original_get;
         if ($this->original_push_enabled_environment === false) {
             putenv('SITE_EXPORT_PUSH_ENABLED');
         } else {
@@ -429,16 +611,45 @@ final class SiteExportSecretTest extends TestCase
         $this->assertFileDoesNotExist(SITE_EXPORT_SECRET_FILE);
     }
 
+    public function testSharedConnectionTokenOperationReturnsExplicitOutcomes(): void
+    {
+        $this->assertSame('saved', _site_export_change_connection_token('new-token'));
+        $this->assertSame('unchanged', _site_export_change_connection_token('new-token'));
+
+        $GLOBALS['site_export_fail_option_updates'][] = SITE_EXPORT_SECRET_OPTION;
+        $this->assertSame('storage_failure', _site_export_change_connection_token('other-token'));
+    }
+
     public function testPluginRegistersConnectionTokenOptionForCoreSettingsRestEndpoint(): void
     {
-        Site_Export_Plugin::get_instance()->register_settings();
+        _site_export_register_shared_secret_setting();
 
         $setting = $GLOBALS['site_export_registered_settings'][SITE_EXPORT_SECRET_OPTION] ?? null;
         $this->assertNotNull($setting);
-        $this->assertSame('general', $setting['group']);
+        $this->assertSame('site_export', $setting['group']);
         $this->assertTrue($setting['args']['show_in_rest']);
         $this->assertSame('string', $setting['args']['type']);
         $this->assertSame('', $setting['args']['default']);
+    }
+
+    public function testConfigurationIntegrationRegistersOutsideTheAdministratorAdapter(): void
+    {
+        $rest_hooks = $GLOBALS['site_export_test_actions']['rest_api_init'] ?? [];
+        $update_hooks = $GLOBALS['site_export_test_actions']['update_option_' . SITE_EXPORT_SECRET_OPTION] ?? [];
+        $add_hooks = $GLOBALS['site_export_test_actions']['add_option_' . SITE_EXPORT_SECRET_OPTION] ?? [];
+
+        $this->assertNotEmpty($rest_hooks);
+        $this->assertSame('_site_export_register_shared_secret_setting', $rest_hooks[0]['callback']);
+        $this->assertNotEmpty($update_hooks);
+        $this->assertSame(
+            '_site_export_revoke_push_authorization_after_connection_token_change',
+            $update_hooks[0]['callback']
+        );
+        $this->assertNotEmpty($add_hooks);
+        $this->assertSame(
+            '_site_export_revoke_push_authorization_after_connection_token_added',
+            $add_hooks[0]['callback']
+        );
     }
 
     public function testPluginHmacVerifierDelegatesToPackageServer(): void
@@ -533,16 +744,12 @@ final class SiteExportSecretTest extends TestCase
         );
     }
 
-    public function testSavingRotatedConnectionTokenRevokesPriorConsent(): void
+    public function testSettingsApiTokenRotationRevokesPriorConsent(): void
     {
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
         $this->assertTrue(_site_export_update_push_authorization(true));
 
-        $_POST = [
-            'site_export_save_settings' => '1',
-            'site_export_secret' => 'rotated-token',
-        ];
-        Site_Export_Plugin::get_instance()->handle_settings_save();
+        update_option(SITE_EXPORT_SECRET_OPTION, 'rotated-token');
 
         $this->assertSame('', $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]);
         $this->assertFalse(_site_export_is_push_authorized());
@@ -552,7 +759,6 @@ final class SiteExportSecretTest extends TestCase
     {
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'token-a';
         $this->assertTrue(_site_export_update_push_authorization(true));
-        Site_Export_Plugin::get_instance()->register_settings();
 
         update_option(SITE_EXPORT_SECRET_OPTION, 'token-b');
         update_option(SITE_EXPORT_SECRET_OPTION, 'token-a');
@@ -565,7 +771,6 @@ final class SiteExportSecretTest extends TestCase
     {
         file_put_contents(SITE_EXPORT_SECRET_FILE, "<?php return 'token-a';\n");
         $this->assertTrue(_site_export_update_push_authorization(true));
-        Site_Export_Plugin::get_instance()->register_settings();
 
         unlink(SITE_EXPORT_SECRET_FILE);
         $this->assertFalse(_site_export_is_push_authorized());
@@ -580,7 +785,6 @@ final class SiteExportSecretTest extends TestCase
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'option-token-a';
         file_put_contents(SITE_EXPORT_SECRET_FILE, "<?php return 'file-token';\n");
         $this->assertTrue(_site_export_update_push_authorization(true));
-        Site_Export_Plugin::get_instance()->register_settings();
 
         update_option(SITE_EXPORT_SECRET_OPTION, 'option-token-b');
 
@@ -591,21 +795,88 @@ final class SiteExportSecretTest extends TestCase
         $this->assertTrue(_site_export_is_push_authorized());
     }
 
-    public function testPushAccessFormAuthorizesTheCurrentConnectionToken(): void
+    public function testSharedPushAccessOperationAuthorizesTheCurrentConnectionToken(): void
     {
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
-        $_POST = [
-            'site_export_save_push_access' => '1',
-            'site_export_push_enabled' => '1',
-        ];
 
-        Site_Export_Plugin::get_instance()->handle_settings_save();
-
+        $this->assertSame('saved', _site_export_change_push_access(true));
         $this->assertSame(
             hash('sha256', 'current-token'),
             $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]
         );
         $this->assertTrue(_site_export_is_push_authorized());
+    }
+
+    public function testSharedPushAccessOperationReturnsExplicitOutcomes(): void
+    {
+        $this->assertSame('not_configured', _site_export_change_push_access(true));
+
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $this->assertSame('saved', _site_export_change_push_access(true));
+        $this->assertSame('unchanged', _site_export_change_push_access(true));
+
+        putenv('SITE_EXPORT_PUSH_ENABLED=false');
+        $this->assertSame('managed', _site_export_change_push_access(false));
+    }
+
+    public function testSharedPushAccessOperationReportsStorageFailure(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['site_export_fail_option_updates'][] = SITE_EXPORT_PUSH_AUTHORIZATION_OPTION;
+
+        $this->assertSame('storage_failure', _site_export_change_push_access(true));
+        $this->assertFalse(_site_export_is_push_authorized());
+    }
+
+    public function testConfigurationStateDescribesTheEffectiveConnection(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+
+        $configuration = _site_export_get_configuration_state();
+
+        $this->assertSame('current-token', $configuration['stored_connection_token']);
+        $this->assertTrue($configuration['is_configured']);
+        $this->assertFalse($configuration['has_secret_file']);
+        $this->assertTrue($configuration['push_supported']);
+        $this->assertNull($configuration['managed_push_enabled']);
+        $this->assertFalse($configuration['push_enabled']);
+    }
+
+    public function testBundledAdministratorRegistersUnderTools(): void
+    {
+        $plugin = Site_Export_Plugin::get_instance();
+        $plugin->add_admin_menu();
+
+        $this->assertSame('site-export', $GLOBALS['site_export_test_menu']['menu_slug']);
+        $this->assertSame('manage_options', $GLOBALS['site_export_test_menu']['capability']);
+
+        $links = $plugin->add_settings_link([]);
+        $this->assertStringContainsString('tools.php?page=site-export', $links[0]);
+
+        $admin_post_hooks = $GLOBALS['site_export_test_actions']['admin_post_site_export_save_push_access'] ?? [];
+        $this->assertNotEmpty($admin_post_hooks);
+        $this->assertSame([$plugin, 'handle_push_access_save'], $admin_post_hooks[0]['callback']);
+        $this->assertEmpty($GLOBALS['site_export_test_actions']['admin_bar_menu'] ?? []);
+
+        $plugin->enqueue_assets('tools_page_other');
+        $this->assertSame([], $GLOBALS['site_export_test_scripts']);
+
+        $plugin->enqueue_assets('tools_page_site-export');
+        $this->assertSame(
+            ['wp-a11y'],
+            $GLOBALS['site_export_test_scripts']['site-export-admin']['dependencies']
+        );
+    }
+
+    public function testUnconfiguredAdminShowsOnlyConnectionTokenSetup(): void
+    {
+        $html = $this->renderAdminPage();
+
+        $this->assertStringContainsString('<strong>Not configured yet.</strong>', $html);
+        $this->assertStringContainsString('Enter a connection token to get started.', $html);
+        $this->assertStringContainsString('name="' . SITE_EXPORT_SECRET_OPTION . '"', $html);
+        $this->assertStringNotContainsString('<h2>Push access</h2>', $html);
+        $this->assertStringNotContainsString('id="site-export-api-url"', $html);
     }
 
     public function testDownloadOnlyAdminCopyAndPushAccessForm(): void
@@ -614,12 +885,41 @@ final class SiteExportSecretTest extends TestCase
 
         $html = $this->renderAdminPage();
 
+        $this->assertStringContainsString('notice notice-info inline', $html);
         $this->assertStringContainsString('<strong>Connected for downloads.</strong>', $html);
         $this->assertStringContainsString('The connection token cannot change files on this site.', $html);
+        $this->assertStringNotContainsString('notice notice-success inline', $html);
         $this->assertStringContainsString('You do not need push access when moving this site to another host.', $html);
         $this->assertStringContainsString('Allow push to change files on this site', $html);
         $this->assertStringContainsString('except excluded paths.', $html);
-        $this->assertStringNotContainsString('name="site_export_push_enabled" value="1" checked', $html);
+        $this->assertStringContainsString('<form method="post" action="options.php">', $html);
+        $this->assertStringContainsString('name="option_page" value="site_export"', $html);
+        $this->assertStringContainsString('action="https://example.test/wp-admin/admin-post.php"', $html);
+        $this->assertSame(2, substr_count($html, '<p class="submit">'));
+        $this->assertSame([''], $GLOBALS['site_export_settings_error_requests']);
+        $this->assertStringNotContainsString('checked="checked"', $html);
+        $this->assertStringNotContainsString('<style>', $html);
+        $this->assertStringNotContainsString('<script>', $html);
+    }
+
+    public function testCoreSettingsNoticeIsInlineAtItsRenderedPosition(): void
+    {
+        $GLOBALS['site_export_settings_errors_markup'] =
+            '<div class="notice notice-success settings-error is-dismissible"><p><strong>'
+            . 'Settings saved.</strong></p></div>';
+
+        $html = $this->renderAdminPage();
+
+        $this->assertStringContainsString(
+            'notice notice-success settings-error is-dismissible inline',
+            $html
+        );
+        $this->assertStringNotContainsString(
+            'notice notice-success settings-error is-dismissible"',
+            $html
+        );
+        $this->assertStringContainsString('<p>Settings saved.</p>', $html);
+        $this->assertStringNotContainsString('<strong>Settings saved.</strong>', $html);
     }
 
     public function testOptedInAdminCopyShowsCurrentConnectionTokenCanPush(): void
@@ -630,7 +930,10 @@ final class SiteExportSecretTest extends TestCase
         $html = $this->renderAdminPage();
 
         $this->assertStringContainsString('<strong>Connected for downloads and push.</strong>', $html);
-        $this->assertStringContainsString('name="site_export_push_enabled" value="1" checked', $html);
+        $this->assertStringContainsString('notice notice-info inline', $html);
+        $this->assertStringNotContainsString('notice notice-success inline', $html);
+        $this->assertStringContainsString('name="site_export_push_enabled"', $html);
+        $this->assertStringContainsString('checked="checked"', $html);
     }
 
     public function testManagedAdminCopyIsReadOnlyAndShowsEffectiveState(): void
@@ -641,12 +944,101 @@ final class SiteExportSecretTest extends TestCase
         $html = $this->renderAdminPage();
 
         $this->assertStringContainsString('Push access is managed by your hosting provider.', $html);
-        $this->assertStringContainsString('name="site_export_push_enabled" value="1" checked disabled', $html);
-        $this->assertStringNotContainsString('name="site_export_save_push_access"', $html);
+        $this->assertStringContainsString('checked="checked" disabled="disabled"', $html);
+        $this->assertStringNotContainsString('action="site_export_save_push_access"', $html);
+    }
+
+    public function testManagedDisabledAdminCopyIsReadOnlyAndUnchecked(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        putenv('SITE_EXPORT_PUSH_ENABLED=false');
+
+        $html = $this->renderAdminPage();
+
+        $this->assertStringContainsString('Push access is managed by your hosting provider.', $html);
+        $this->assertStringContainsString('value="1" disabled="disabled"', $html);
+        $this->assertStringNotContainsString('checked="checked"', $html);
+        $this->assertStringNotContainsString('action="site_export_save_push_access"', $html);
+    }
+
+    public function testSecretFileOverrideShowsStoredOptionAndWarning(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'stored-token';
+        file_put_contents(SITE_EXPORT_SECRET_FILE, "<?php return 'file-token';\n");
+
+        $html = $this->renderAdminPage();
+
+        $this->assertStringContainsString('<code>secret.php</code> override is active.', $html);
+        $this->assertStringContainsString('value="stored-token"', $html);
+        $this->assertStringContainsString('Remove secret.php to use the stored option value.', $html);
+    }
+
+    public function testUnsupportedPushStateUsesANativeNoticeWithoutAForm(): void
+    {
+        $configuration = [
+            'stored_connection_token' => 'current-token',
+            'is_configured' => true,
+            'has_secret_file' => false,
+            'push_supported' => false,
+            'managed_push_enabled' => null,
+            'push_enabled' => false,
+        ];
+        $method = new ReflectionMethod(Site_Export_Plugin::class, 'render_push_access_form');
+
+        ob_start();
+        $method->invoke(Site_Export_Plugin::get_instance(), $configuration);
+        $html = (string) ob_get_clean();
+
+        $this->assertStringContainsString('notice notice-warning inline', $html);
+        $this->assertStringContainsString('Push access requires PHP 7.2 or newer.', $html);
+        $this->assertStringNotContainsString('<form', $html);
+    }
+
+    public function testAdministratorMapsEveryPushAccessResultToANativeNotice(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $expected_notices = [
+            'saved' => ['notice-success', 'Push access updated.'],
+            'unchanged' => ['notice-success', 'Push access was already up to date.'],
+            'unsupported' => ['notice-error', 'Push access requires PHP 7.2 or newer.'],
+            'managed' => ['notice-info', 'Push access is managed by your hosting provider.'],
+            'not_configured' => ['notice-error', 'Configure a connection token before enabling push access.'],
+            'storage_failure' => ['notice-error', 'Failed to save push access.'],
+        ];
+
+        foreach ($expected_notices as $result => [$notice_class, $message]) {
+            $_GET['site_export_notice'] = $result;
+            $html = $this->renderAdminPage();
+
+            $this->assertStringContainsString($notice_class, $html, $result);
+            $this->assertStringContainsString($message, $html, $result);
+            $this->assertStringContainsString(
+                $notice_class . ' is-dismissible inline',
+                $html,
+                $result
+            );
+        }
+    }
+
+    public function testSettingsSaveSupersedesAStalePushAccessNotice(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['site_export_settings_errors_markup'] =
+            '<div class="notice notice-success settings-error is-dismissible"><p><strong>'
+            . 'Settings saved.</strong></p></div>';
+        $_GET['settings-updated'] = 'true';
+        $_GET['site_export_notice'] = 'saved';
+
+        $html = $this->renderAdminPage();
+
+        $this->assertStringContainsString('Settings saved.', $html);
+        $this->assertStringNotContainsString('<strong>Settings saved.</strong>', $html);
+        $this->assertStringNotContainsString('Push access updated.', $html);
     }
 
     private function renderAdminPage(): string
     {
+        Site_Export_Plugin::get_instance()->register_settings_fields();
         ob_start();
         Site_Export_Plugin::get_instance()->render_admin_page();
         return (string) ob_get_clean();
