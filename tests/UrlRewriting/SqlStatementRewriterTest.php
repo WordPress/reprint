@@ -209,6 +209,36 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $values[0]);
     }
 
+    public function testPostContentRewritesUrlHiddenInRegisteredShortcodeBody(): void
+    {
+        $rewriter = $this->createRewriter();
+        $old_html = '<a href="https://old-site.com/manual.pdf">Manual</a>';
+        $new_html = '<a href="https://new-site.com/manual.pdf">Manual</a>';
+        for ($alignment = 0; $alignment < 3; $alignment++) {
+            $prefix = str_repeat('x', $alignment);
+            $content = $prefix . '[vc_raw_html]' . base64_encode($old_html) . '[/vc_raw_html]';
+            $sql = sprintf(
+                "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('%s'));",
+                base64_encode($content)
+            );
+
+            $result = $rewriter->rewrite($sql);
+
+            $this->assertSame(
+                $prefix . '[vc_raw_html]' . base64_encode($new_html) . '[/vc_raw_html]',
+                $this->collectValues($result)[0],
+                'Shortcode prefix at Base64 alignment ' . $alignment
+            );
+
+            $prepared = $rewriter->build_sqlite_prepared_insert($sql);
+            $this->assertNotNull($prepared);
+            $this->assertSame(
+                $prefix . '[vc_raw_html]' . base64_encode($new_html) . '[/vc_raw_html]',
+                $prepared['params'][1]
+            );
+        }
+    }
+
     public function testUnknownColumnUsesPlainTextUrlScanning(): void
     {
         $rewriter = $this->createRewriter();

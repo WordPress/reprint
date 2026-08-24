@@ -76,6 +76,9 @@ class StructuredDataUrlRewriter
     /** @var array<string, callable(string): string> Shortcode tag => encoded-body rewriter. */
     private array $shortcode_body_rewriters;
 
+    /** @var string[] Base64 fragments that signal a registered shortcode body. */
+    private array $encoded_shortcode_body_signals;
+
     /**
      * Rewrites keyed by an entire value; hits only on an exact repeat.
      *
@@ -101,6 +104,22 @@ class StructuredDataUrlRewriter
             'vc_table'    => array($this, 'rewrite_wpbakery_table_body'),
             'vc_raw_html' => array($this, 'rewrite_wpbakery_raw_html_body'),
         );
+        $this->encoded_shortcode_body_signals = array();
+        foreach (array_keys($this->shortcode_body_rewriters) as $shortcode_tag) {
+            $shortcode_prefix = '[' . $shortcode_tag;
+            for ($alignment = 0; $alignment < 3; $alignment++) {
+                $skip = $alignment === 0 ? 0 : 3 - $alignment;
+                $signal_length = strlen($shortcode_prefix) - $skip;
+                $signal_length -= $signal_length % 3;
+                if ($signal_length < 3) {
+                    continue;
+                }
+
+                $this->encoded_shortcode_body_signals[] = base64_encode(
+                    substr($shortcode_prefix, $skip, $signal_length)
+                );
+            }
+        }
 
         // Extract unique source domains for the quick-reject check.
         $domains = [];
@@ -246,7 +265,7 @@ class StructuredDataUrlRewriter
             return $value;
         }
 
-        $known_body_tokens = $this->maybe_contains_known_shortcode_body($value)
+        $known_body_tokens = $this->value_might_contain_known_shortcode_body($value)
             ? $this->find_known_shortcode_body_tokens($value)
             : array();
         $shortcodes = new ShortcodeProcessor($value);
@@ -304,10 +323,29 @@ class StructuredDataUrlRewriter
         return $shortcodes->get_updated_text();
     }
 
-    private function maybe_contains_known_shortcode_body(string $value): bool
+    public function value_might_contain_known_shortcode_body(string $value): bool
     {
         foreach (array_keys($this->shortcode_body_rewriters) as $shortcode_tag) {
             if (stripos($value, '[' . $shortcode_tag) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Return whether Base64 text may decode to a registered shortcode body.
+     *
+     * Each signal contains only complete three-byte groups from the shortcode
+     * prefix. This makes one signal stable for each possible byte alignment of
+     * the prefix inside the decoded value. A match may be incidental, but a
+     * real registered prefix cannot be rejected before Base64 decoding.
+     */
+    public function encoded_text_might_contain_known_shortcode_body(string $encoded_text): bool
+    {
+        foreach ($this->encoded_shortcode_body_signals as $signal) {
+            if (strpos($encoded_text, $signal) !== false) {
                 return true;
             }
         }

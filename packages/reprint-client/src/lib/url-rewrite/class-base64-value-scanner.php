@@ -141,6 +141,12 @@ class Base64ValueScanner
         return self::encoded_payload_could_decode_to_http_scheme($this->entries[$this->cursor]['encoded_value']);
     }
 
+    /** Return the Base64 payload at the current cursor without decoding it. */
+    public function get_encoded_payload(): string
+    {
+        return $this->entries[$this->cursor]['encoded_value'];
+    }
+
     /**
      * Replace the decoded value at the current cursor position.
      * The new value will be base64-encoded when get_result() rebuilds the SQL.
