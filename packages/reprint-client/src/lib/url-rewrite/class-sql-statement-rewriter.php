@@ -83,8 +83,9 @@ class SqlStatementRewriter
      * Rewrite URLs in a SQL statement.
      *
      * NOTE: base64-encoded values that contain neither the string "http" nor
-     * a registered shortcode body are skipped entirely. Column resolution and
-     * the StructuredDataUrlRewriter pipeline are never run for those values.
+     * a shortcode codec which may hide URLs are skipped entirely. Column
+     * resolution and the StructuredDataUrlRewriter pipeline are never run for
+     * those values.
      *
      * @param string $sql The SQL statement.
      * @return string The modified SQL statement.
@@ -96,9 +97,9 @@ class SqlStatementRewriter
             return $sql;
         }
 
-        // Quick check: if none of the base64 encodings of "http" or a
-        // registered shortcode body appear in the statement, no value can
-        // carry a rewritable URL known to this rewriter.
+        // Quick check: if none of the base64 encodings of "http" or a shortcode
+        // codec which may hide URLs appear in the statement, no value can carry
+        // a rewritable URL known to this rewriter.
         //
         // base64 encodes 3 source bytes into 4 output chars, so the encoding
         // of "http://" or "https://" depends on which byte boundary the
@@ -119,10 +120,11 @@ class SqlStatementRewriter
         // 15 MB dump). On URL-heavy dumps the four strpos calls hit on the
         // first match and stay within measurement noise.
         //
-        // Registered shortcode bodies are the exception: their codec may hide
-        // the URL one layer deeper. StructuredDataUrlRewriter derives matching
-        // Base64 signals from the same body-codec registry, so adding another
-        // body codec does not require a second list in this SQL layer.
+        // Some shortcode codecs are the exception: a body or attribute codec
+        // may hide the URL under one or more encoding layers.
+        // StructuredDataUrlRewriter derives matching Base64 signals from the
+        // same codec registry, so adding another hidden codec does not require
+        // a second list in this SQL layer.
         //
         // False positives are tolerable — they cost an extra rewrite pass
         // that finds nothing. False negatives would silently leave URLs
@@ -133,7 +135,7 @@ class SqlStatementRewriter
             && strpos($sql, 'dHA6') === false
             && strpos($sql, 'dHBz') === false
             && strpos($sql, 'dHRw') === false
-            && !$this->url_rewriter->encoded_text_might_contain_known_shortcode_body($sql)
+            && !$this->url_rewriter->encoded_text_might_contain_hidden_shortcode_url($sql)
         ) {
             return $sql;
         }
@@ -195,17 +197,10 @@ class SqlStatementRewriter
         $content_type = $column !== null
             ? $this->get_content_type($table, $column)
             : null;
-        $might_contain_known_shortcode_body = $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
-            && $this->url_rewriter->value_might_contain_known_shortcode_body($value);
+        $might_contain_hidden_shortcode_url = $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
+            && $this->url_rewriter->value_might_contain_hidden_shortcode_url($value);
 
-        if (strpos($value, 'http') === false && !$might_contain_known_shortcode_body) {
-            return $value;
-        }
-
-        if (
-            !$this->url_rewriter->value_might_contain_source_domain($value)
-            && !$might_contain_known_shortcode_body
-        ) {
+        if (strpos($value, 'http') === false && !$might_contain_hidden_shortcode_url) {
             return $value;
         }
 
@@ -246,14 +241,14 @@ class SqlStatementRewriter
             $content_type = $column_name !== null
                 ? $this->get_content_type($value_to_column_map['table'], $column_name)
                 : null;
-            $encoded_payload_might_contain_known_shortcode_body =
+            $encoded_payload_might_contain_hidden_shortcode_url =
                 $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
-                && $this->url_rewriter->encoded_text_might_contain_known_shortcode_body(
+                && $this->url_rewriter->encoded_text_might_contain_hidden_shortcode_url(
                     $scanner->get_encoded_payload()
                 );
             if (
                 !$scanner->encoded_payload_could_contain_http_scheme()
-                && !$encoded_payload_might_contain_known_shortcode_body
+                && !$encoded_payload_might_contain_hidden_shortcode_url
             ) {
                 continue;
             }

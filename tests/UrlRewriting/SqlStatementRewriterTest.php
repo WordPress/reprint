@@ -209,33 +209,54 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $values[0]);
     }
 
-    public function testPostContentRewritesUrlHiddenInRegisteredShortcodeBody(): void
+    public function testPostContentRewritesUrlsThroughRegisteredWPBakeryCodecs(): void
     {
         $rewriter = $this->createRewriter();
         $old_html = '<a href="https://old-site.com/manual.pdf">Manual</a>';
         $new_html = '<a href="https://new-site.com/manual.pdf">Manual</a>';
-        for ($alignment = 0; $alignment < 3; $alignment++) {
-            $prefix = str_repeat('x', $alignment);
-            $content = $prefix . '[vc_raw_html]' . base64_encode($old_html) . '[/vc_raw_html]';
-            $sql = sprintf(
-                "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('%s'));",
-                base64_encode($content)
-            );
+        $old_map = '<iframe src="https://old-site.com/map"></iframe>';
+        $new_map = '<iframe src="https://new-site.com/map"></iframe>';
+        $old_javascript = '<script>window.reprintUrl="https://old-site.com/app.js";</script>';
+        $new_javascript = '<script>window.reprintUrl="https://new-site.com/app.js";</script>';
+        $cases = [
+            'Raw HTML' => [
+                '[vc_raw_html]' . base64_encode($old_html) . '[/vc_raw_html]',
+                '[vc_raw_html]' . base64_encode($new_html) . '[/vc_raw_html]',
+            ],
+            'Raw JS' => [
+                '[vc_raw_js]' . base64_encode(rawurlencode($old_javascript)) . '[/vc_raw_js]',
+                '[vc_raw_js]' . base64_encode(rawurlencode($new_javascript)) . '[/vc_raw_js]',
+            ],
+            'Google Maps' => [
+                '[vc_gmaps link="#E-8_' . base64_encode(rawurlencode($old_map)) . '"]',
+                '[vc_gmaps link="#E-8_' . base64_encode(rawurlencode($new_map)) . '"]',
+            ],
+            'Button link' => [
+                '[vc_btn link="url:https%3A%2F%2Fold-site.com%2Fmanual.pdf|title:Manual|"]',
+                '[vc_btn link="url:https%3A%2F%2Fnew-site.com%2Fmanual.pdf|title:Manual|"]',
+            ],
+        ];
 
-            $result = $rewriter->rewrite($sql);
+        foreach ($cases as $case_name => [$content, $expected]) {
+            for ($alignment = 0; $alignment < 3; $alignment++) {
+                $prefix = str_repeat('x', $alignment);
+                $sql = sprintf(
+                    "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('%s'));",
+                    base64_encode($prefix . $content)
+                );
 
-            $this->assertSame(
-                $prefix . '[vc_raw_html]' . base64_encode($new_html) . '[/vc_raw_html]',
-                $this->collectValues($result)[0],
-                'Shortcode prefix at Base64 alignment ' . $alignment
-            );
+                $result = $rewriter->rewrite($sql);
 
-            $prepared = $rewriter->build_sqlite_prepared_insert($sql);
-            $this->assertNotNull($prepared);
-            $this->assertSame(
-                $prefix . '[vc_raw_html]' . base64_encode($new_html) . '[/vc_raw_html]',
-                $prepared['params'][1]
-            );
+                $this->assertSame(
+                    $prefix . $expected,
+                    $this->collectValues($result)[0],
+                    $case_name . ' at Base64 alignment ' . $alignment
+                );
+
+                $prepared = $rewriter->build_sqlite_prepared_insert($sql);
+                $this->assertNotNull($prepared);
+                $this->assertSame($prefix . $expected, $prepared['params'][1]);
+            }
         }
     }
 

@@ -76,8 +76,11 @@ class StructuredDataUrlRewriter
     /** @var array<string, callable(string): string> Shortcode tag => encoded-body rewriter. */
     private array $shortcode_body_rewriters;
 
-    /** @var string[] Base64 fragments that signal a registered shortcode body. */
-    private array $encoded_shortcode_body_signals;
+    /** @var array<string, array<string, array{rewrite: callable(string): string, hides_url: bool}>> */
+    private array $shortcode_attribute_rewriters;
+
+    /** @var string[] Base64 fragments that signal a shortcode codec which may hide URLs. */
+    private array $encoded_shortcode_signals;
 
     /**
      * Rewrites keyed by an entire value; hits only on an exact repeat.
@@ -102,10 +105,79 @@ class StructuredDataUrlRewriter
         $this->cautious_url_base_rewrite_mapping = new CautiousURLBaseRewriteMapping($url_mapping);
         $this->shortcode_body_rewriters = array(
             'vc_table'    => array($this, 'rewrite_wpbakery_table_body'),
-            'vc_raw_html' => array($this, 'rewrite_wpbakery_raw_html_body'),
+            'vc_raw_html' => array($this, 'rewrite_wpbakery_raw_code_body'),
+            'vc_raw_js'   => array($this, 'rewrite_wpbakery_raw_code_body'),
         );
-        $this->encoded_shortcode_body_signals = array();
-        foreach (array_keys($this->shortcode_body_rewriters) as $shortcode_tag) {
+        $wpbakery_link_attribute_rewriter = array(
+            'rewrite'   => array($this, 'rewrite_wpbakery_link_attribute'),
+            'hides_url' => false,
+        );
+        $wpbakery_safe_attribute_rewriter = array(
+            'rewrite'   => array($this, 'rewrite_wpbakery_safe_attribute'),
+            'hides_url' => true,
+        );
+        $this->shortcode_attribute_rewriters = array(
+            'vc_btn'            => array(
+                'link' => $wpbakery_link_attribute_rewriter,
+                'url'  => $wpbakery_link_attribute_rewriter,
+            ),
+            'vc_button2'        => array(
+                'link' => $wpbakery_link_attribute_rewriter,
+                'url'  => $wpbakery_link_attribute_rewriter,
+            ),
+            'vc_cta_button2'    => array(
+                'link' => $wpbakery_link_attribute_rewriter,
+            ),
+            'vc_custom_heading' => array(
+                'link' => $wpbakery_link_attribute_rewriter,
+                'url'  => $wpbakery_link_attribute_rewriter,
+            ),
+            'vc_gallery'        => array(
+                'custom_links' => $wpbakery_safe_attribute_rewriter,
+                'custom_srcs'  => $wpbakery_safe_attribute_rewriter,
+            ),
+            'vc_gmaps'          => array(
+                'link' => $wpbakery_safe_attribute_rewriter,
+            ),
+            'vc_gitem_image'    => array(
+                'url' => $wpbakery_link_attribute_rewriter,
+            ),
+            'vc_gitem_zone'     => array(
+                'url' => $wpbakery_link_attribute_rewriter,
+            ),
+            'vc_gitem_zone_a'   => array(
+                'url' => $wpbakery_link_attribute_rewriter,
+            ),
+            'vc_gitem_zone_b'   => array(
+                'url' => $wpbakery_link_attribute_rewriter,
+            ),
+            'vc_icon'           => array(
+                'link' => $wpbakery_link_attribute_rewriter,
+                'url'  => $wpbakery_link_attribute_rewriter,
+            ),
+            'vc_images_carousel' => array(
+                'custom_links' => $wpbakery_safe_attribute_rewriter,
+            ),
+            'vc_posts_slider'   => array(
+                'custom_links' => $wpbakery_safe_attribute_rewriter,
+            ),
+            'vc_single_image'   => array(
+                'url' => $wpbakery_link_attribute_rewriter,
+            ),
+        );
+        $this->encoded_shortcode_signals = array();
+        $shortcode_tags_with_hidden_urls = array_fill_keys(
+            array_keys($this->shortcode_body_rewriters),
+            true
+        );
+        foreach ($this->shortcode_attribute_rewriters as $shortcode_tag => $attribute_rewriters) {
+            foreach ($attribute_rewriters as $attribute_rewriter) {
+                if ($attribute_rewriter['hides_url']) {
+                    $shortcode_tags_with_hidden_urls[$shortcode_tag] = true;
+                }
+            }
+        }
+        foreach (array_keys($shortcode_tags_with_hidden_urls) as $shortcode_tag) {
             $shortcode_prefix = '[' . $shortcode_tag;
             for ($alignment = 0; $alignment < 3; $alignment++) {
                 $skip = $alignment === 0 ? 0 : 3 - $alignment;
@@ -115,7 +187,7 @@ class StructuredDataUrlRewriter
                     continue;
                 }
 
-                $this->encoded_shortcode_body_signals[] = base64_encode(
+                $this->encoded_shortcode_signals[] = base64_encode(
                     substr($shortcode_prefix, $skip, $signal_length)
                 );
             }
@@ -182,9 +254,15 @@ class StructuredDataUrlRewriter
         }
 
         // Quick-reject values without an HTML URL attribute, a literal source
-        // domain, or an encoding marker which may hide a source-domain byte.
-        // This avoids constructing the structured parsers for most values.
-        if (!$this->maybe_contains_rewritable_urls($value)) {
+        // domain, an encoding marker which may hide a source-domain byte, or a
+        // registered shortcode codec which may hide a complete URL. This avoids
+        // constructing the structured parsers for most values.
+        $block_markup_may_hide_shortcode_url = self::BLOCK_MARKUP === $content_type
+            && $this->value_might_contain_hidden_shortcode_url($value);
+        if (
+            !$block_markup_may_hide_shortcode_url
+            && !$this->maybe_contains_rewritable_urls($value)
+        ) {
             return $value;
         }
 
@@ -310,10 +388,24 @@ class StructuredDataUrlRewriter
                     continue;
                 }
 
-                $rewritten_attribute_value = $this->rewrite_urls(
-                    $attribute_value,
-                    self::PLAIN_TEXT
-                );
+                $attribute_name = $shortcodes->get_attribute_name();
+                $shortcode_tag_key = strtolower($shortcode_tag);
+                $attribute_name_key = $attribute_name !== null
+                    ? strtolower($attribute_name)
+                    : null;
+                if (
+                    $attribute_name_key !== null
+                    && isset($this->shortcode_attribute_rewriters[$shortcode_tag_key][$attribute_name_key])
+                ) {
+                    $rewritten_attribute_value = (
+                        $this->shortcode_attribute_rewriters[$shortcode_tag_key][$attribute_name_key]['rewrite']
+                    )($attribute_value);
+                } else {
+                    $rewritten_attribute_value = $this->rewrite_urls(
+                        $attribute_value,
+                        self::PLAIN_TEXT
+                    );
+                }
                 if ($rewritten_attribute_value !== $attribute_value) {
                     $shortcodes->set_attribute_value($rewritten_attribute_value);
                 }
@@ -323,7 +415,23 @@ class StructuredDataUrlRewriter
         return $shortcodes->get_updated_text();
     }
 
-    public function value_might_contain_known_shortcode_body(string $value): bool
+    public function value_might_contain_hidden_shortcode_url(string $value): bool
+    {
+        foreach ($this->shortcode_attribute_rewriters as $shortcode_tag => $attribute_rewriters) {
+            foreach ($attribute_rewriters as $attribute_rewriter) {
+                if (
+                    $attribute_rewriter['hides_url']
+                    && stripos($value, '[' . $shortcode_tag) !== false
+                ) {
+                    return true;
+                }
+            }
+        }
+
+        return $this->value_might_contain_known_shortcode_body($value);
+    }
+
+    private function value_might_contain_known_shortcode_body(string $value): bool
     {
         foreach (array_keys($this->shortcode_body_rewriters) as $shortcode_tag) {
             if (stripos($value, '[' . $shortcode_tag) !== false) {
@@ -342,9 +450,9 @@ class StructuredDataUrlRewriter
      * the prefix inside the decoded value. A match may be incidental, but a
      * real registered prefix cannot be rejected before Base64 decoding.
      */
-    public function encoded_text_might_contain_known_shortcode_body(string $encoded_text): bool
+    public function encoded_text_might_contain_hidden_shortcode_url(string $encoded_text): bool
     {
-        foreach ($this->encoded_shortcode_body_signals as $signal) {
+        foreach ($this->encoded_shortcode_signals as $signal) {
             if (strpos($encoded_text, $signal) !== false) {
                 return true;
             }
@@ -460,7 +568,7 @@ class StructuredDataUrlRewriter
             return $body;
         }
 
-        return ($this->shortcode_body_rewriters[$shortcode_tag])($body);
+        return ( $this->shortcode_body_rewriters[$shortcode_tag] )( $body );
     }
 
     /**
@@ -505,12 +613,13 @@ class StructuredDataUrlRewriter
     }
 
     /**
-     * Rewrite either form of a WPBakery Raw HTML body.
+     * Rewrite either form of a WPBakery Raw HTML or Raw JS body.
      *
-     * Raw HTML stores Base64 HTML. Values saved by its editor control add URL
-     * encoding inside the Base64 layer. The rewritten body uses the same form.
+     * Both elements use textarea_raw_html, which stores Base64 content. Values
+     * saved by its editor control add URL encoding inside the Base64 layer. The
+     * rewritten body uses the same form.
      */
-    private function rewrite_wpbakery_raw_html_body(string $body): string
+    private function rewrite_wpbakery_raw_code_body(string $body): string
     {
         $decoded_body = base64_decode($body, true);
         if ($decoded_body === false || base64_encode($decoded_body) !== $body) {
@@ -534,6 +643,61 @@ class StructuredDataUrlRewriter
         }
 
         return base64_encode($rewritten_content);
+    }
+
+    /**
+     * Rewrite a WPBakery textarea_safe or exploded_textarea_safe attribute.
+     *
+     * These controls store `#E-8_`, followed by Base64-encoded, URL-encoded
+     * content. The rewritten value keeps that wrapper and encoding order.
+     */
+    private function rewrite_wpbakery_safe_attribute(string $value): string
+    {
+        $prefix = '#E-8_';
+        if (strncmp($value, $prefix, strlen($prefix)) !== 0) {
+            return $value;
+        }
+
+        $encoded_content = substr($value, strlen($prefix));
+        $decoded_content = base64_decode($encoded_content, true);
+        if ($decoded_content === false || base64_encode($decoded_content) !== $encoded_content) {
+            return $value;
+        }
+
+        $decoded_content = rawurldecode($decoded_content);
+        $rewritten_content = $this->rewrite($decoded_content, self::BLOCK_MARKUP);
+        if ($rewritten_content === $decoded_content) {
+            return $value;
+        }
+
+        return $prefix . base64_encode($this->encode_wpbakery_url_component($rewritten_content));
+    }
+
+    /**
+     * Rewrite the URL field in a WPBakery vc_link attribute.
+     *
+     * The control stores URL-encoded fields separated by pipes, for example
+     * `url:https%3A%2F%2Fexample.com|title:Read|target:%20_blank|`.
+     */
+    private function rewrite_wpbakery_link_attribute(string $value): string
+    {
+        $fields = explode('|', $value);
+        foreach ($fields as $index => $field) {
+            if (strncmp($field, 'url:', 4) !== 0) {
+                continue;
+            }
+
+            $encoded_url = substr($field, 4);
+            $decoded_url = rawurldecode($encoded_url);
+            $rewritten_url = $this->rewrite_urls($decoded_url, self::PLAIN_TEXT);
+            if ($rewritten_url === $decoded_url) {
+                continue;
+            }
+
+            $fields[$index] = 'url:' . $this->encode_wpbakery_url_component($rewritten_url);
+        }
+
+        return implode('|', $fields);
     }
 
     private function encode_wpbakery_url_component(string $value): string
@@ -782,15 +946,18 @@ class StructuredDataUrlRewriter
                 );
                 while ( $p->next_token() ) {
                     $parsed_nested_block_attributes = false;
-                    $block_comment_may_contain_source_domain = false;
+                    $block_comment_may_hide_rewritable_url = false;
                     $block_comment_text = '';
                     if ( '#block-comment' === $p->get_token_type() ) {
                         $block_comment_text = $p->get_modifiable_text();
-                        $block_comment_may_contain_source_domain = $this->value_might_contain_source_domain( $block_comment_text );
+                        $block_comment_may_hide_rewritable_url =
+                            $this->value_might_contain_source_domain( $block_comment_text )
+                            || $this->value_might_contain_hidden_shortcode_url( $block_comment_text );
                     }
-                    if ( $block_comment_may_contain_source_domain ) {
-                        // The fast check includes supported encoding markers;
-                        // the parsed string leaves decide whether a URL exists.
+                    if ( $block_comment_may_hide_rewritable_url ) {
+                        // The fast check includes supported encoding markers
+                        // and registered shortcode signals. Parsed string
+                        // leaves still decide whether a URL exists.
                         $block_attributes = $p->get_block_attributes();
                         // A Unicode-escaped quote leaves an alphanumeric byte
                         // immediately before a raw URL. The cautious scanner
@@ -939,17 +1106,21 @@ class StructuredDataUrlRewriter
      * in HTML, CSS, JSON, shortcodes, and plain text. Parsing those values
      * again only changes their encoding and makes Divi imports slower.
      *
-     * Parsing is still needed when an escape or character reference may hide
-     * part of the host, or when serialized PHP length fields must be updated.
-     * A JSON value may contain serialized PHP at a deeper level, so its raw
-     * text is also checked for a serialization token. Non-ASCII values keep
-     * the structured path because the cautious raw-token pass supports ASCII
-     * and punycode domains, but not literal Unicode domains.
+     * Parsing is still needed when an escape, character reference, or registered
+     * shortcode codec may hide part or all of the URL, or when serialized PHP
+     * length fields must be updated. A JSON value may contain serialized PHP at
+     * a deeper level, so its raw text is also checked for a serialization token.
+     * Non-ASCII values keep the structured path because the cautious raw-token
+     * pass supports ASCII and punycode domains, but not literal Unicode domains.
      *
      * These are coarse signals, not proof of a content type. The format
      * hierarchy below still validates PHP serialization and JSON before use.
      */
     private function nested_block_string_needs_format_inference( string $value ): bool {
+        if ( $this->value_might_contain_hidden_shortcode_url( $value ) ) {
+            return true;
+        }
+
         if ( ! $this->maybe_contains_rewritable_urls( $value ) ) {
             return false;
         }
@@ -999,7 +1170,15 @@ class StructuredDataUrlRewriter
             return $this->rewrite_urls( $value, self::BLOCK_MARKUP, false );
         }
 
-        // 3. The coarse existing JSON gate checks only whether the first
+        // 3. A shortcode and a JSON array can both begin with `[`. Keep a
+        // valid JSON array for the JSON parser unless shortcode rewriting
+        // actually changes it.
+        $rewritten_shortcode_markup = $this->rewrite_shortcode_markup( $value );
+        if ( $rewritten_shortcode_markup !== $value ) {
+            return $this->rewrite( $rewritten_shortcode_markup, self::PLAIN_TEXT );
+        }
+
+        // 4. The coarse existing JSON gate checks only whether the first
         // non-whitespace byte is `{`, `[`, or `"`. JsonStringIterator then
         // validates the complete value before rewriting nested strings.
         $could_be_json_with_strings = $this->could_be_json_with_strings( $value );
@@ -1007,14 +1186,14 @@ class StructuredDataUrlRewriter
             return $this->rewrite( $value, self::PLAIN_TEXT );
         }
 
-        // 4. `url(` can occur in prose or code which is not CSS. Keep this
+        // 5. `url(` can occur in prose or code which is not CSS. Keep this
         // broad, naive hint after the complete PHP, HTML, and JSON shapes.
         $contains_css_url_function = false !== stripos( $value, 'url(' );
         if ( $contains_css_url_function ) {
             return $this->rewrite_urls( $value, self::BLOCK_MARKUP, false );
         }
 
-        // 5. Unknown strings receive only the cautious plain-text scan.
+        // 6. Unknown strings receive the cautious plain-text scan.
         return $this->rewrite( $value, self::PLAIN_TEXT );
     }
 

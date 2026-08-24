@@ -705,6 +705,29 @@ class StructuredDataUrlRewriterTest extends TestCase
         );
     }
 
+    public function testWPBakeryEncodedShortcodeInsideNamespacedBlockAttribute(): void
+    {
+        $rewriter = $this->createRewriter();
+        $old_html = '<a href="https://old-site.com/manual.pdf">Manual</a>';
+        $new_html = '<a href="https://new-site.com/manual.pdf">Manual</a>';
+        $attributes = [
+            'module' => [
+                'content' => [
+                    'value' => '[vc_raw_html]' . base64_encode($old_html) . '[/vc_raw_html]',
+                ],
+            ],
+        ];
+        $input = '<!-- wp:divi/code ' . json_encode($attributes) . ' /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+
+        $rewritten_attributes = $this->getBlockAttributes($result, 'wp:divi/code');
+        $this->assertSame(
+            '[vc_raw_html]' . base64_encode($new_html) . '[/vc_raw_html]',
+            $rewritten_attributes['module']['content']['value']
+        );
+    }
+
     /**
      * Extensions may put one structured string inside another. Re-enter the
      * existing JSON and serialized-PHP parsers at every level instead of
@@ -1079,8 +1102,25 @@ class StructuredDataUrlRewriterTest extends TestCase
     {
         $old_html = '<a href="https://old-site.com/manual.pdf">Manual</a>';
         $new_html = '<a href="https://new-site.com/manual.pdf">Manual</a>';
+        $old_json_html = '<script type="application/ld+json">{"url":"https://old-site.com/manual.pdf"}</script>';
+        $new_json_html = '<script type="application/ld+json">{"url":"https://new-site.com/manual.pdf"}</script>';
+        $old_json_with_html = '{"markup":"<a href=\"https://old-site.com/manual.pdf\">Manual<\/a>"}';
+        $new_json_with_html = '{"markup":"<a href=\"https://new-site.com/manual.pdf\">Manual</a>"}';
+        $old_javascript = '<script>fetch("https://old-site.com/api");</script>';
+        $new_javascript = '<script>fetch("https://new-site.com/api");</script>';
+        $old_map = '<iframe src="https://old-site.com/map"></iframe>';
+        $new_map = '<iframe src="https://new-site.com/map"></iframe>';
+        $old_link_list = 'https://old-site.com/first.jpg,https://old-site.com/second.jpg?size=large';
+        $new_link_list = 'https://new-site.com/first.jpg,https://new-site.com/second.jpg?size=large';
+        $encode_wpbakery = static function (string $value): string {
+            return str_replace(
+                ['%21', '%27', '%28', '%29', '%2A'],
+                ['!', "'", '(', ')', '*'],
+                rawurlencode($value)
+            );
+        };
 
-        return [
+        $cases = [
             'Easy Tables percent-encoded HTML cell' => [
                 '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22https%3A%2F%2Fold-site.com%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
                 '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22https%3A%2F%2Fnew-site.com%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
@@ -1097,7 +1137,55 @@ class StructuredDataUrlRewriterTest extends TestCase
                 '[vc_raw_html]' . base64_encode(rawurlencode($old_html)) . '[/vc_raw_html]',
                 '[vc_raw_html]' . base64_encode(rawurlencode($new_html)) . '[/vc_raw_html]',
             ],
+            'Raw HTML Base64 body containing JSON script data' => [
+                '[vc_raw_html]' . base64_encode(rawurlencode($old_json_html)) . '[/vc_raw_html]',
+                '[vc_raw_html]' . base64_encode(rawurlencode($new_json_html)) . '[/vc_raw_html]',
+            ],
+            'Raw HTML Base64 body containing JSON with HTML' => [
+                '[vc_raw_html]' . base64_encode(rawurlencode($old_json_with_html)) . '[/vc_raw_html]',
+                '[vc_raw_html]' . base64_encode(rawurlencode($new_json_with_html)) . '[/vc_raw_html]',
+            ],
+            'Raw JS URL-encoded Base64 body' => [
+                '[vc_raw_js]' . base64_encode($encode_wpbakery($old_javascript)) . '[/vc_raw_js]',
+                '[vc_raw_js]' . base64_encode($encode_wpbakery($new_javascript)) . '[/vc_raw_js]',
+            ],
+            'Google Maps safe iframe attribute' => [
+                '[vc_gmaps link="#E-8_' . base64_encode(rawurlencode($old_map)) . '"]',
+                '[vc_gmaps link="#E-8_' . base64_encode(rawurlencode($new_map)) . '"]',
+            ],
+            'Gallery safe external image list' => [
+                '[vc_gallery type="image_grid" source="external_link" custom_srcs="#E-8_' . base64_encode(rawurlencode($old_link_list)) . '" img_size="thumbnail"]',
+                '[vc_gallery type="image_grid" source="external_link" custom_srcs="#E-8_' . base64_encode(rawurlencode($new_link_list)) . '" img_size="thumbnail"]',
+            ],
+            'Gallery safe custom link list' => [
+                '[vc_gallery type="flexslider_slide" onclick="custom_link" custom_links="#E-8_' . base64_encode(rawurlencode($old_link_list)) . '"]',
+                '[vc_gallery type="flexslider_slide" onclick="custom_link" custom_links="#E-8_' . base64_encode(rawurlencode($new_link_list)) . '"]',
+            ],
+            'Image Carousel safe custom link list' => [
+                '[vc_images_carousel images="10,11" onclick="custom_link" custom_links="#E-8_' . base64_encode(rawurlencode($old_link_list)) . '" wrap="yes"]',
+                '[vc_images_carousel images="10,11" onclick="custom_link" custom_links="#E-8_' . base64_encode(rawurlencode($new_link_list)) . '" wrap="yes"]',
+            ],
+            'Posts Slider safe custom link list' => [
+                '[vc_posts_slider count="3" link="custom_link" custom_links="#E-8_' . base64_encode(rawurlencode($old_link_list)) . '" posttypes="post"]',
+                '[vc_posts_slider count="3" link="custom_link" custom_links="#E-8_' . base64_encode(rawurlencode($new_link_list)) . '" posttypes="post"]',
+            ],
         ];
+
+        foreach (['vc_btn', 'vc_button2', 'vc_cta_button2', 'vc_custom_heading', 'vc_icon'] as $shortcode_tag) {
+            $cases[$shortcode_tag . ' pipe-delimited link attribute'] = [
+                '[' . $shortcode_tag . ' link="url:https%3A%2F%2Fold-site.com%2Fmanual.pdf|title:Read%20it|target:%20_blank|"]',
+                '[' . $shortcode_tag . ' link="url:https%3A%2F%2Fnew-site.com%2Fmanual.pdf|title:Read%20it|target:%20_blank|"]',
+            ];
+        }
+
+        foreach (['vc_btn', 'vc_button2', 'vc_custom_heading', 'vc_gitem_image', 'vc_gitem_zone', 'vc_gitem_zone_a', 'vc_gitem_zone_b', 'vc_icon', 'vc_single_image'] as $shortcode_tag) {
+            $cases[$shortcode_tag . ' grid-item pipe-delimited URL attribute'] = [
+                '[' . $shortcode_tag . ' link="custom" url="url:https%3A%2F%2Fold-site.com%2Fmanual.pdf|title:Read%20it|target:%20_blank|"]',
+                '[' . $shortcode_tag . ' link="custom" url="url:https%3A%2F%2Fnew-site.com%2Fmanual.pdf|title:Read%20it|target:%20_blank|"]',
+            ];
+        }
+
+        return $cases;
     }
 
     public function testRewritesLiteralHtmlInsideAWPBakeryShortcodeAttributeWithoutChangingItsQuotes(): void
