@@ -8,11 +8,11 @@
     "packages": [
         {
             "name": "wp-php-toolkit/reprint-server",
-            "version": "dev-codex/php56-exporter-plugin",
+            "version": "dev-fix/remove-pdo-polyfill",
             "dist": {
                 "type": "path",
                 "url": "../packages/reprint-server",
-                "reference": "4d64a43e8bb6d4c748446c3c73fdf2bcac1cf326"
+                "reference": "111b06d1c519dcdf5a401baee240400d59dba7f1"
             },
             "require": {
                 "php": ">=7.2"
@@ -29,12 +29,8 @@
                 "classmap": [
                     "src/"
                 ],
-                "exclude-from-classmap": [
-                    "/src/class-pdo-polyfill.php"
-                ],
                 "files": [
-                    "src/utils.php",
-                    "src/class-pdo-polyfill.php"
+                    "src/utils.php"
                 ]
             },
             "license": [

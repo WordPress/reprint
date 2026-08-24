@@ -64,6 +64,23 @@ jobs:
             -name '*.php' -not -path 'reprint-server-wp/wordpress/*' \
             -print0 | xargs -0 -n1 php -l
 
+  no-pdo-wpdb-fallback:
+    name: PDO-less wpdb fallback
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+
+      - run: composer install --no-interaction --prefer-dist
+      - run: php -n tests/no-pdo-wpdb-fallback.php
+
   exporter-56:
     # PHPCompatibility 9.3.5 misses arrow functions and numeric separators, so
     # a real PHP 5.6 parser remains the authoritative syntax check. Parse the

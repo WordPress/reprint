@@ -33,7 +33,7 @@
             <file>FileIndexNamedRootTest.php</file>
             <file>ExportLibraryLoadTest.php</file>
             <file>ExportUtilsLoadingTest.php</file>
-            <file>PdoPolyfillTest.php</file>
+            <file>PdoConstantsTest.php</file>
             <file>JoinUnixPathsTest.php</file>
             <file>HmacServerTest.php</file>
             <file>MultipartProcessorTest.php</file>

@@ -2,8 +2,6 @@
 
 namespace WordPress\Reprint\Server;
 
-use PDO;
-
 require_once __DIR__ . "/class-database-rows-reader.php";
 
 /**
@@ -125,7 +123,7 @@ class MySQLDumpProducer
     private $reader_cursor_before_retained_record = null;
 
     /**
-     * @param PDO $db Database connection — either a real PDO (MySQL) or a
+     * @param object $db Database connection — either a real PDO (MySQL) or a
      *        PDO-compatible adapter (SQLite sites). No type hint because the
      *        adapter isn't a PDO subclass and PHP 7.4 lacks union types.
      */
@@ -410,8 +408,8 @@ class MySQLDumpProducer
         try {
             $query = "SHOW CREATE TABLE {$quoted_table}";
             $result = $this->db->query($query);
-            $row = $result->fetch(PDO::FETCH_ASSOC);
-        } catch (\PDOException $e) {
+            $row = $result->fetch(PdoConstants::fetch_assoc());
+        } catch (\Exception $e) {
             throw new \RuntimeException(
                 "Failed to get CREATE TABLE for {$quoted_table}: " . $e->getMessage() . " Query: {$query}"
             );
@@ -788,11 +786,11 @@ class MySQLDumpProducer
     {
         try {
             $result = $this->db->query("SELECT @@max_allowed_packet as max_allowed_packet");
-            $row = $result->fetch(PDO::FETCH_ASSOC);
+            $row = $result->fetch(PdoConstants::fetch_assoc());
             if ($row && isset($row['max_allowed_packet'])) {
                 return (int)($row['max_allowed_packet'] * 0.8);
             }
-        } catch (\PDOException $e) {
+        } catch (\Exception $e) {
         }
 
         return 1024 * 1024;
@@ -1185,7 +1183,7 @@ class MySQLDumpProducer
              . " FROM {$quoted_table} WHERE {$where_clause}";
         $stmt = $this->db->prepare($sql);
         $stmt->execute();
-        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        $result = $stmt->fetch(PdoConstants::fetch_assoc());
 
         if ($result === false) {
             throw new \RuntimeException(

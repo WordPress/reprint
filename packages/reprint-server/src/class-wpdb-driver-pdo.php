@@ -19,8 +19,6 @@
 
 namespace WordPress\Reprint\Server;
 
-use PDO;
-
 /**
  * Wraps a WordPress wpdb instance to look like a PDO connection.
  */
@@ -67,7 +65,7 @@ class WpdbDriverPDO
      * visibility. Calling it directly keeps the adapter free of any global
      * function dependency and HyperDB / LudicrousDB / SQLite-drop-in safe.
      */
-    public function quote(string $value, int $type = PDO::PARAM_STR): string
+    public function quote(string $value, $type = null): string
     {
         return "'" . $this->wpdb->_real_escape($value) . "'";
     }
@@ -114,7 +112,7 @@ class WpdbDriverPDOStatement
      * $wpdb->last_error (which can survive from queries that ran before the
      * exporter took over the request), runs $wpdb->get_results($sql,
      * ARRAY_A), and disambiguates the null return: null + non-empty
-     * last_error -> \PDOException; null + empty last_error -> empty result
+     * last_error -> RuntimeException; null + empty last_error -> empty result
      * set.
      *
      * @param array|null $params Positional or named parameters.
@@ -124,7 +122,7 @@ class WpdbDriverPDOStatement
         $sql = $this->substitute_placeholders($this->sql, $params ?? $this->bound_params);
 
         // Clear sticky last_error so the post-dispatch check below can't
-        // throw a phantom PDOException from a prior query.
+        // throw a phantom query error from a prior query.
         $this->clear_last_error();
 
         $rows = $this->wpdb->get_results($sql, 'ARRAY_A');
@@ -132,7 +130,7 @@ class WpdbDriverPDOStatement
         $last_error = $this->get_last_error();
 
         if ($last_error !== '') {
-            throw new \PDOException($last_error);
+            throw new \RuntimeException($last_error);
         }
 
         $this->rows = is_array($rows) ? $rows : [];
@@ -144,7 +142,7 @@ class WpdbDriverPDOStatement
      * $mode is accepted for PDO compatibility but only FETCH_ASSOC is honored.
      * MySQLDumpProducer never asks for any other mode.
      */
-    public function fetch(int $mode = PDO::FETCH_ASSOC)
+    public function fetch($mode = null)
     {
         if ($this->position >= count($this->rows)) {
             return false;
@@ -156,12 +154,13 @@ class WpdbDriverPDOStatement
      * Honors FETCH_ASSOC (default) and FETCH_COLUMN. Other PDO modes are
      * unsupported — MySQLDumpProducer never asks for any other mode.
      */
-    public function fetchAll(int $mode = PDO::FETCH_ASSOC): array
+    public function fetchAll($mode = null): array
     {
+        $mode = $mode ?? PdoConstants::fetch_assoc();
         $remaining = array_slice($this->rows, $this->position);
         $this->position = count($this->rows);
 
-        if ($mode === PDO::FETCH_COLUMN) {
+        if ($mode === PdoConstants::fetch_column()) {
             return array_map(static function ($row) {
                 return reset($row);
             }, $remaining);
@@ -180,7 +179,7 @@ class WpdbDriverPDOStatement
         return $values[$column_number] ?? false;
     }
 
-    public function bindValue($parameter, $value, int $type = PDO::PARAM_STR): bool
+    public function bindValue($parameter, $value, $type = null): bool
     {
         $this->bound_params[$parameter] = $value;
         return true;
