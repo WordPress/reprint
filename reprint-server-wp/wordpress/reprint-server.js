@@ -1,8 +1,8 @@
 ( function() {
 	'use strict';
 
-	var token = document.getElementById( 'site_export_secret' );
-	var toggle = document.querySelector( '.site-export-toggle-token' );
+	var token = document.getElementById( 'reprint_server_secret' );
+	var toggle = document.querySelector( '.reprint-server-toggle-token' );
 	if ( token && toggle ) {
 		toggle.addEventListener( 'click', function() {
 			var showing = token.type === 'text';
@@ -15,8 +15,8 @@
 		} );
 	}
 
-	var remoteReprintApiUrl = document.getElementById( 'site-export-api-url' );
-	var copy = document.querySelector( '.site-export-copy-url' );
+	var remoteReprintApiUrl = document.getElementById( 'reprint-server-api-url' );
+	var copy = document.querySelector( '.reprint-server-copy-url' );
 	if ( remoteReprintApiUrl && copy ) {
 		copy.addEventListener( 'click', function() {
 			var copied;

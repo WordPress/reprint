@@ -241,7 +241,9 @@ final class ExportLibraryLoadTest extends TestCase {
             'hooks' => $registered_hooks,
             'handler' => function_exists('_site_export_handle_api_request'),
             'canonical_handler' => function_exists('WordPress\\Reprint\\Server\\Plugin\\handle_api_request'),
-            'configuration' => function_exists('_site_export_get_configuration_state'),
+            'configuration' => function_exists(
+                'WordPress\\Reprint\\Server\\Plugin\\get_configuration_state'
+            ),
         ]);
         PHP;
 

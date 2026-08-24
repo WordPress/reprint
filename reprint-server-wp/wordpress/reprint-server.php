@@ -1,7 +1,10 @@
 <?php
+
+namespace WordPress\Reprint\Server\Plugin;
+
 /** Bundled WordPress administrator adapter for Reprint Server. */
 
-class Site_Export_Plugin {
+class SettingsPage {
 
     private static $instance = null;
 
@@ -18,10 +21,10 @@ class Site_Export_Plugin {
     private function __construct() {
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'register_settings_fields']);
-        add_action('admin_post_site_export_save_push_access', [$this, 'handle_push_access_save']);
+        add_action('admin_post_reprint_server_save_push_access', [$this, 'handle_push_access_save']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
         add_filter(
-            'plugin_action_links_' . plugin_basename(SITE_EXPORT_PLUGIN_DIR . 'index.php'),
+            'plugin_action_links_' . plugin_basename(\SITE_EXPORT_PLUGIN_DIR . 'index.php'),
             [$this, 'add_settings_link']
         );
     }
@@ -32,7 +35,7 @@ class Site_Export_Plugin {
             __('Reprint Server', 'reprint'),
             __('Reprint Server', 'reprint'),
             'manage_options',
-            'site-export',
+            'reprint-server',
             [$this, 'render_admin_page']
         );
     }
@@ -40,24 +43,24 @@ class Site_Export_Plugin {
     /** Register the connection-token section rendered by the Settings API. */
     public function register_settings_fields(): void {
         add_settings_section(
-            'site_export_connection',
+            'reprint_server_connection',
             __('Connection token', 'reprint'),
             [$this, 'render_connection_section'],
-            'site-export'
+            'reprint-server'
         );
         add_settings_field(
-            SITE_EXPORT_SECRET_OPTION,
+            \SITE_EXPORT_SECRET_OPTION,
             __('Connection token', 'reprint'),
             [$this, 'render_connection_token_field'],
-            'site-export',
-            'site_export_connection',
-            ['label_for' => SITE_EXPORT_SECRET_OPTION]
+            'reprint-server',
+            'reprint_server_connection',
+            ['label_for' => \SITE_EXPORT_SECRET_OPTION]
         );
     }
 
     /** Add the Settings link to the plugin row. */
     public function add_settings_link(array $links): array {
-        $url = admin_url('tools.php?page=site-export');
+        $url = admin_url('tools.php?page=reprint-server');
         array_unshift(
             $links,
             '<a href="' . esc_url($url) . '">' . esc_html__('Settings', 'reprint') . '</a>'
@@ -72,10 +75,10 @@ class Site_Export_Plugin {
         }
 
         wp_enqueue_script(
-            'site-export-admin',
-            plugins_url('wordpress/site-export.js', SITE_EXPORT_PLUGIN_DIR . 'index.php'),
+            'reprint-server-admin',
+            plugins_url('wordpress/reprint-server.js', \SITE_EXPORT_PLUGIN_DIR . 'index.php'),
             ['wp-a11y'],
-            SITE_EXPORT_VERSION,
+            \SITE_EXPORT_VERSION,
             true
         );
     }
@@ -90,17 +93,17 @@ class Site_Export_Plugin {
 
     /** Render the option-backed connection-token field. */
     public function render_connection_token_field(): void {
-        $configuration = _site_export_get_configuration_state();
+        $configuration = get_configuration_state();
         ?>
         <input type="password"
                class="regular-text code"
-               id="site_export_secret"
-               name="<?php echo esc_attr(SITE_EXPORT_SECRET_OPTION); ?>"
+               id="reprint_server_secret"
+               name="<?php echo esc_attr(\SITE_EXPORT_SECRET_OPTION); ?>"
                value="<?php echo esc_attr($configuration['stored_connection_token']); ?>"
                autocomplete="off" />
         <button type="button"
-                class="button site-export-toggle-token"
-                aria-controls="site_export_secret"
+                class="button reprint-server-toggle-token"
+                aria-controls="reprint_server_secret"
                 aria-pressed="false"
                 aria-label="<?php echo esc_attr__('Show connection token', 'reprint'); ?>"
                 data-show-label="<?php echo esc_attr__('Show connection token', 'reprint'); ?>"
@@ -116,13 +119,13 @@ class Site_Export_Plugin {
             wp_die(esc_html__('You are not allowed to manage Reprint Server.', 'reprint'));
         }
 
-        check_admin_referer('site_export_save_push_access');
-        $enabled = isset($_POST['site_export_push_enabled']);
-        $result = _site_export_change_push_access($enabled);
+        check_admin_referer('reprint_server_save_push_access');
+        $enabled = isset($_POST['reprint_server_push_enabled']);
+        $result = change_push_access($enabled);
         $redirect_url = add_query_arg(
-            'site_export_notice',
+            'reprint_server_notice',
             $result,
-            admin_url('tools.php?page=site-export')
+            admin_url('tools.php?page=reprint-server')
         );
         wp_safe_redirect($redirect_url);
         exit;
@@ -134,7 +137,7 @@ class Site_Export_Plugin {
             return;
         }
 
-        $configuration = _site_export_get_configuration_state();
+        $configuration = get_configuration_state();
         $remote_reprint_api_url = home_url('?reprint-api');
         ?>
         <div class="wrap">
@@ -166,8 +169,8 @@ class Site_Export_Plugin {
             <?php $this->render_configuration_status($configuration); ?>
 
             <form method="post" action="options.php">
-                <?php settings_fields('site_export'); ?>
-                <?php do_settings_sections('site-export'); ?>
+                <?php settings_fields('reprint_server'); ?>
+                <?php do_settings_sections('reprint-server'); ?>
                 <?php submit_button(); ?>
             </form>
 
@@ -196,11 +199,11 @@ class Site_Export_Plugin {
                 </p>
                 <input type="text"
                        class="regular-text code"
-                       id="site-export-api-url"
+                       id="reprint-server-api-url"
                        value="<?php echo esc_attr($remote_reprint_api_url); ?>"
                        readonly />
                 <button type="button"
-                        class="button site-export-copy-url"
+                        class="button reprint-server-copy-url"
                         data-copied-message="<?php echo esc_attr__('Remote Reprint API URL copied.', 'reprint'); ?>">
                     <?php echo esc_html__('Copy', 'reprint'); ?>
                 </button>
@@ -212,7 +215,7 @@ class Site_Export_Plugin {
     /**
      * Render current configuration status and notices which require attention.
      *
-     * @param array $configuration Configuration returned by _site_export_get_configuration_state().
+     * @param array $configuration Configuration returned by get_configuration_state().
      */
     private function render_configuration_status(array $configuration): void {
         if ($configuration['has_secret_file']) {
@@ -292,11 +295,11 @@ class Site_Export_Plugin {
 
         ?>
         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-            <input type="hidden" name="action" value="site_export_save_push_access" />
-            <?php wp_nonce_field('site_export_save_push_access'); ?>
+            <input type="hidden" name="action" value="reprint_server_save_push_access" />
+            <?php wp_nonce_field('reprint_server_save_push_access'); ?>
             <label>
                 <input type="checkbox"
-                       name="site_export_push_enabled"
+                       name="reprint_server_push_enabled"
                        value="1"<?php checked($configuration['push_enabled']); ?> />
                 <?php echo esc_html__('Allow push to change files on this site', 'reprint'); ?>
             </label>
@@ -323,12 +326,12 @@ class Site_Export_Plugin {
         }
 
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The fixed query value selects a read-only notice.
-        if (!isset($_GET['site_export_notice']) || !is_string($_GET['site_export_notice'])) {
+        if (!isset($_GET['reprint_server_notice']) || !is_string($_GET['reprint_server_notice'])) {
             return;
         }
 
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The fixed query value selects a read-only notice.
-        $result = sanitize_key(wp_unslash($_GET['site_export_notice']));
+        $result = sanitize_key(wp_unslash($_GET['reprint_server_notice']));
         $notices = [
             'saved' => ['success', __('Push access updated.', 'reprint')],
             'unchanged' => ['success', __('Push access was already up to date.', 'reprint')],
@@ -349,26 +352,26 @@ class Site_Export_Plugin {
 }
 
 add_action('plugins_loaded', function() {
-    Site_Export_Plugin::get_instance();
+    SettingsPage::get_instance();
 });
 
-register_activation_hook(SITE_EXPORT_PLUGIN_DIR . 'index.php', function() {
+register_activation_hook(\SITE_EXPORT_PLUGIN_DIR . 'index.php', function() {
     if (!wp_doing_ajax() && is_admin()) {
-        set_transient('site_export_activated', 1, 30);
+        set_transient('reprint_server_activated', 1, 30);
     }
 
-    $gitignore = SITE_EXPORT_PLUGIN_DIR . '.gitignore';
+    $gitignore = \SITE_EXPORT_PLUGIN_DIR . '.gitignore';
     if (!file_exists($gitignore)) {
         file_put_contents($gitignore, "secret.php\n");
     }
 });
 
 add_action('admin_init', function() {
-    if (get_transient('site_export_activated')) {
-        delete_transient('site_export_activated');
+    if (get_transient('reprint_server_activated')) {
+        delete_transient('reprint_server_activated');
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- This only suppresses activation redirects for bulk activation.
         if (!isset($_GET['activate-multi'])) {
-            wp_safe_redirect(admin_url('tools.php?page=site-export'));
+            wp_safe_redirect(admin_url('tools.php?page=reprint-server'));
             exit;
         }
     }

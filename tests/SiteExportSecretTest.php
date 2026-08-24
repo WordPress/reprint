@@ -3,6 +3,13 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use WordPress\Reprint\Server\Plugin\SettingsPage;
+
+use function WordPress\Reprint\Server\Plugin\change_connection_token;
+use function WordPress\Reprint\Server\Plugin\change_push_access;
+use function WordPress\Reprint\Server\Plugin\get_configuration_state;
+use function WordPress\Reprint\Server\Plugin\register_shared_secret_setting;
+use function WordPress\Reprint\Server\Plugin\register_wordpress_configuration;
 
 if (!defined('ABSPATH')) {
     define('ABSPATH', __DIR__ . '/');
@@ -389,8 +396,8 @@ if (!function_exists('esc_url')) {
 
 require_once __DIR__ . '/../reprint-server-wp/lib.php';
 require_once __DIR__ . '/../reprint-server-wp/wordpress/configuration.php';
-_site_export_register_wordpress_configuration();
-require_once __DIR__ . '/../reprint-server-wp/wordpress/site-export.php';
+register_wordpress_configuration();
+require_once __DIR__ . '/../reprint-server-wp/wordpress/reprint-server.php';
 
 final class SiteExportSecretTest extends TestCase
 {
@@ -500,7 +507,7 @@ final class SiteExportSecretTest extends TestCase
         // lib.php later in the request, where the listener revoking
         // authorization for the appearing connection token runs during the
         // migration.
-        Site_Export_Plugin::get_instance();
+        \WordPress\Reprint\Server\Plugin\SettingsPage::get_instance();
         $GLOBALS['site_export_test_options']['site_export_secret'] = 'legacy-token';
         $GLOBALS['site_export_test_options']['site_export_push_authorized_token_fingerprint'] =
             hash('sha256', 'legacy-token');
@@ -542,8 +549,8 @@ final class SiteExportSecretTest extends TestCase
         $this->assertFalse(function_exists('WordPress\\Reprint\\Server\\Plugin\\get_shared_secret'));
         $this->assertTrue(function_exists('_site_export_handle_api_request'));
         $this->assertTrue(function_exists('_site_export_get_shared_secret'));
-        $this->assertTrue(class_exists('Site_Export_Plugin'));
-        $this->assertFalse(class_exists('WordPress\\Reprint\\Server\\Plugin\\SettingsPage'));
+        $this->assertFalse(class_exists('Site_Export_Plugin'));
+        $this->assertTrue(class_exists('WordPress\\Reprint\\Server\\Plugin\\SettingsPage'));
     }
 
     public function testLegacyOptionsMigrateWithoutChangingTheirValues(): void
@@ -613,20 +620,20 @@ final class SiteExportSecretTest extends TestCase
 
     public function testSharedConnectionTokenOperationReturnsExplicitOutcomes(): void
     {
-        $this->assertSame('saved', _site_export_change_connection_token('new-token'));
-        $this->assertSame('unchanged', _site_export_change_connection_token('new-token'));
+        $this->assertSame('saved', change_connection_token('new-token'));
+        $this->assertSame('unchanged', change_connection_token('new-token'));
 
         $GLOBALS['site_export_fail_option_updates'][] = SITE_EXPORT_SECRET_OPTION;
-        $this->assertSame('storage_failure', _site_export_change_connection_token('other-token'));
+        $this->assertSame('storage_failure', change_connection_token('other-token'));
     }
 
     public function testPluginRegistersConnectionTokenOptionForCoreSettingsRestEndpoint(): void
     {
-        _site_export_register_shared_secret_setting();
+        register_shared_secret_setting();
 
         $setting = $GLOBALS['site_export_registered_settings'][SITE_EXPORT_SECRET_OPTION] ?? null;
         $this->assertNotNull($setting);
-        $this->assertSame('site_export', $setting['group']);
+        $this->assertSame('reprint_server', $setting['group']);
         $this->assertTrue($setting['args']['show_in_rest']);
         $this->assertSame('string', $setting['args']['type']);
         $this->assertSame('', $setting['args']['default']);
@@ -639,15 +646,18 @@ final class SiteExportSecretTest extends TestCase
         $add_hooks = $GLOBALS['site_export_test_actions']['add_option_' . SITE_EXPORT_SECRET_OPTION] ?? [];
 
         $this->assertNotEmpty($rest_hooks);
-        $this->assertSame('_site_export_register_shared_secret_setting', $rest_hooks[0]['callback']);
+        $this->assertSame(
+            'WordPress\\Reprint\\Server\\Plugin\\register_shared_secret_setting',
+            $rest_hooks[0]['callback']
+        );
         $this->assertNotEmpty($update_hooks);
         $this->assertSame(
-            '_site_export_revoke_push_authorization_after_connection_token_change',
+            'WordPress\\Reprint\\Server\\Plugin\\revoke_push_authorization_after_connection_token_change',
             $update_hooks[0]['callback']
         );
         $this->assertNotEmpty($add_hooks);
         $this->assertSame(
-            '_site_export_revoke_push_authorization_after_connection_token_added',
+            'WordPress\\Reprint\\Server\\Plugin\\revoke_push_authorization_after_connection_token_added',
             $add_hooks[0]['callback']
         );
     }
@@ -799,7 +809,7 @@ final class SiteExportSecretTest extends TestCase
     {
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
 
-        $this->assertSame('saved', _site_export_change_push_access(true));
+        $this->assertSame('saved', change_push_access(true));
         $this->assertSame(
             hash('sha256', 'current-token'),
             $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]
@@ -809,14 +819,14 @@ final class SiteExportSecretTest extends TestCase
 
     public function testSharedPushAccessOperationReturnsExplicitOutcomes(): void
     {
-        $this->assertSame('not_configured', _site_export_change_push_access(true));
+        $this->assertSame('not_configured', change_push_access(true));
 
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
-        $this->assertSame('saved', _site_export_change_push_access(true));
-        $this->assertSame('unchanged', _site_export_change_push_access(true));
+        $this->assertSame('saved', change_push_access(true));
+        $this->assertSame('unchanged', change_push_access(true));
 
         putenv('SITE_EXPORT_PUSH_ENABLED=false');
-        $this->assertSame('managed', _site_export_change_push_access(false));
+        $this->assertSame('managed', change_push_access(false));
     }
 
     public function testSharedPushAccessOperationReportsStorageFailure(): void
@@ -824,7 +834,7 @@ final class SiteExportSecretTest extends TestCase
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
         $GLOBALS['site_export_fail_option_updates'][] = SITE_EXPORT_PUSH_AUTHORIZATION_OPTION;
 
-        $this->assertSame('storage_failure', _site_export_change_push_access(true));
+        $this->assertSame('storage_failure', change_push_access(true));
         $this->assertFalse(_site_export_is_push_authorized());
     }
 
@@ -832,7 +842,7 @@ final class SiteExportSecretTest extends TestCase
     {
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
 
-        $configuration = _site_export_get_configuration_state();
+        $configuration = get_configuration_state();
 
         $this->assertSame('current-token', $configuration['stored_connection_token']);
         $this->assertTrue($configuration['is_configured']);
@@ -844,16 +854,21 @@ final class SiteExportSecretTest extends TestCase
 
     public function testBundledAdministratorRegistersUnderTools(): void
     {
-        $plugin = Site_Export_Plugin::get_instance();
+        $plugin = SettingsPage::get_instance();
         $plugin->add_admin_menu();
 
-        $this->assertSame('site-export', $GLOBALS['site_export_test_menu']['menu_slug']);
+        $this->assertSame('reprint-server', $GLOBALS['site_export_test_menu']['menu_slug']);
         $this->assertSame('manage_options', $GLOBALS['site_export_test_menu']['capability']);
+        $this->assertSame(
+            'WordPress\\Reprint\\Server\\Plugin\\SettingsPage',
+            SettingsPage::class
+        );
+        $this->assertFalse(class_exists('Site_Export_Plugin', false));
 
         $links = $plugin->add_settings_link([]);
-        $this->assertStringContainsString('tools.php?page=site-export', $links[0]);
+        $this->assertStringContainsString('tools.php?page=reprint-server', $links[0]);
 
-        $admin_post_hooks = $GLOBALS['site_export_test_actions']['admin_post_site_export_save_push_access'] ?? [];
+        $admin_post_hooks = $GLOBALS['site_export_test_actions']['admin_post_reprint_server_save_push_access'] ?? [];
         $this->assertNotEmpty($admin_post_hooks);
         $this->assertSame([$plugin, 'handle_push_access_save'], $admin_post_hooks[0]['callback']);
         $this->assertEmpty($GLOBALS['site_export_test_actions']['admin_bar_menu'] ?? []);
@@ -861,11 +876,42 @@ final class SiteExportSecretTest extends TestCase
         $plugin->enqueue_assets('tools_page_other');
         $this->assertSame([], $GLOBALS['site_export_test_scripts']);
 
-        $plugin->enqueue_assets('tools_page_site-export');
+        $plugin->enqueue_assets('tools_page_reprint-server');
         $this->assertSame(
             ['wp-a11y'],
-            $GLOBALS['site_export_test_scripts']['site-export-admin']['dependencies']
+            $GLOBALS['site_export_test_scripts']['reprint-server-admin']['dependencies']
         );
+    }
+
+    public function testNewWordPressAdapterDeclaresOnlyCurrentNamespacedSymbols(): void
+    {
+        $configuration_source = file_get_contents(
+            __DIR__ . '/../reprint-server-wp/wordpress/configuration.php'
+        );
+        $administrator_source = file_get_contents(
+            __DIR__ . '/../reprint-server-wp/wordpress/reprint-server.php'
+        );
+        $administrator_script = file_get_contents(
+            __DIR__ . '/../reprint-server-wp/wordpress/reprint-server.js'
+        );
+        $this->assertIsString($configuration_source);
+        $this->assertIsString($administrator_source);
+        $this->assertIsString($administrator_script);
+        $this->assertStringContainsString(
+            'namespace WordPress\\Reprint\\Server\\Plugin;',
+            $configuration_source
+        );
+        $this->assertDoesNotMatchRegularExpression('/function\\s+_site_export/', $configuration_source);
+        $this->assertStringContainsString(
+            'namespace WordPress\\Reprint\\Server\\Plugin;',
+            $administrator_source
+        );
+        $this->assertStringContainsString('class SettingsPage', $administrator_source);
+        $this->assertStringNotContainsString('class Site_Export', $administrator_source);
+        $this->assertStringNotContainsString('site-export', $administrator_source);
+        $this->assertStringNotContainsString('site_export', $administrator_source);
+        $this->assertStringNotContainsString('site-export', $administrator_script);
+        $this->assertStringNotContainsString('site_export', $administrator_script);
     }
 
     public function testUnconfiguredAdminShowsOnlyConnectionTokenSetup(): void
@@ -876,7 +922,7 @@ final class SiteExportSecretTest extends TestCase
         $this->assertStringContainsString('Enter a connection token to get started.', $html);
         $this->assertStringContainsString('name="' . SITE_EXPORT_SECRET_OPTION . '"', $html);
         $this->assertStringNotContainsString('<h2>Push access</h2>', $html);
-        $this->assertStringNotContainsString('id="site-export-api-url"', $html);
+        $this->assertStringNotContainsString('id="reprint-server-api-url"', $html);
     }
 
     public function testDownloadOnlyAdminCopyAndPushAccessForm(): void
@@ -893,7 +939,7 @@ final class SiteExportSecretTest extends TestCase
         $this->assertStringContainsString('Allow push to change files on this site', $html);
         $this->assertStringContainsString('except excluded paths.', $html);
         $this->assertStringContainsString('<form method="post" action="options.php">', $html);
-        $this->assertStringContainsString('name="option_page" value="site_export"', $html);
+        $this->assertStringContainsString('name="option_page" value="reprint_server"', $html);
         $this->assertStringContainsString('action="https://example.test/wp-admin/admin-post.php"', $html);
         $this->assertSame(2, substr_count($html, '<p class="submit">'));
         $this->assertSame([''], $GLOBALS['site_export_settings_error_requests']);
@@ -932,7 +978,7 @@ final class SiteExportSecretTest extends TestCase
         $this->assertStringContainsString('<strong>Connected for downloads and push.</strong>', $html);
         $this->assertStringContainsString('notice notice-info inline', $html);
         $this->assertStringNotContainsString('notice notice-success inline', $html);
-        $this->assertStringContainsString('name="site_export_push_enabled"', $html);
+        $this->assertStringContainsString('name="reprint_server_push_enabled"', $html);
         $this->assertStringContainsString('checked="checked"', $html);
     }
 
@@ -945,7 +991,7 @@ final class SiteExportSecretTest extends TestCase
 
         $this->assertStringContainsString('Push access is managed by your hosting provider.', $html);
         $this->assertStringContainsString('checked="checked" disabled="disabled"', $html);
-        $this->assertStringNotContainsString('action="site_export_save_push_access"', $html);
+        $this->assertStringNotContainsString('action="reprint_server_save_push_access"', $html);
     }
 
     public function testManagedDisabledAdminCopyIsReadOnlyAndUnchecked(): void
@@ -958,7 +1004,7 @@ final class SiteExportSecretTest extends TestCase
         $this->assertStringContainsString('Push access is managed by your hosting provider.', $html);
         $this->assertStringContainsString('value="1" disabled="disabled"', $html);
         $this->assertStringNotContainsString('checked="checked"', $html);
-        $this->assertStringNotContainsString('action="site_export_save_push_access"', $html);
+        $this->assertStringNotContainsString('action="reprint_server_save_push_access"', $html);
     }
 
     public function testSecretFileOverrideShowsStoredOptionAndWarning(): void
@@ -983,10 +1029,10 @@ final class SiteExportSecretTest extends TestCase
             'managed_push_enabled' => null,
             'push_enabled' => false,
         ];
-        $method = new ReflectionMethod(Site_Export_Plugin::class, 'render_push_access_form');
+        $method = new ReflectionMethod(SettingsPage::class, 'render_push_access_form');
 
         ob_start();
-        $method->invoke(Site_Export_Plugin::get_instance(), $configuration);
+        $method->invoke(SettingsPage::get_instance(), $configuration);
         $html = (string) ob_get_clean();
 
         $this->assertStringContainsString('notice notice-warning inline', $html);
@@ -1007,7 +1053,7 @@ final class SiteExportSecretTest extends TestCase
         ];
 
         foreach ($expected_notices as $result => [$notice_class, $message]) {
-            $_GET['site_export_notice'] = $result;
+            $_GET['reprint_server_notice'] = $result;
             $html = $this->renderAdminPage();
 
             $this->assertStringContainsString($notice_class, $html, $result);
@@ -1027,7 +1073,7 @@ final class SiteExportSecretTest extends TestCase
             '<div class="notice notice-success settings-error is-dismissible"><p><strong>'
             . 'Settings saved.</strong></p></div>';
         $_GET['settings-updated'] = 'true';
-        $_GET['site_export_notice'] = 'saved';
+        $_GET['reprint_server_notice'] = 'saved';
 
         $html = $this->renderAdminPage();
 
@@ -1038,9 +1084,9 @@ final class SiteExportSecretTest extends TestCase
 
     private function renderAdminPage(): string
     {
-        Site_Export_Plugin::get_instance()->register_settings_fields();
+        SettingsPage::get_instance()->register_settings_fields();
         ob_start();
-        Site_Export_Plugin::get_instance()->render_admin_page();
+        SettingsPage::get_instance()->render_admin_page();
         return (string) ob_get_clean();
     }
 }

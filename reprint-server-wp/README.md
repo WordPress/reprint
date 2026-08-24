@@ -133,17 +133,18 @@ and its push-authorization revocation hooks may opt into that integration
 without loading the bundled administrator:
 
 ```php
+use function WordPress\Reprint\Server\Plugin\register_wordpress_configuration;
+
 require_once '/path/to/reprint-server-wp/lib.php';
 require_once '/path/to/reprint-server-wp/wordpress/configuration.php';
 
-_site_export_register_wordpress_configuration();
+register_wordpress_configuration();
 ```
 
-The embedding plugin may render its own administrator surface with
-`_site_export_get_configuration_state()`, apply connection-token changes with
-`_site_export_change_connection_token()`, and apply push-access changes with
-`_site_export_change_push_access()`. It should not require
-`wordpress/site-export.php` unless it explicitly wants the bundled
+The embedding plugin may use the namespaced `get_configuration_state()`,
+`change_connection_token()`, and `change_push_access()` operations to render
+and process its own administrator surface. It should not require
+`wordpress/reprint-server.php` unless it explicitly wants the bundled
 **Tools > Reprint Server** page.
 
 `lib.php` defines these constants in `WordPress\Reprint\Server\Plugin`
