@@ -52,6 +52,24 @@ final class ExportUtilsLoadingTest extends TestCase
         return $matches[1];
     }
 
+    // Reprint ships with Jetpack, so Composer executes these entries on every Jetpack request.
+    public function testComposerFilesAutoloadIsLimitedToTheUtilityFile(): void
+    {
+        $composer_path = __DIR__ . '/../packages/reprint-server/composer.json';
+        $composer_json = file_get_contents($composer_path);
+        $this->assertNotFalse($composer_json, 'reprint-server composer.json must be readable.');
+
+        $composer = json_decode($composer_json, true);
+        $this->assertIsArray($composer, 'reprint-server composer.json must contain valid JSON.');
+
+        $this->assertSame(
+            ['src/utils.php'],
+            $composer['autoload']['files'] ?? [],
+            'Composer executes every autoload.files entry on each consumer request. '
+            . 'Keep this eager-load surface limited to utils.php.'
+        );
+    }
+
     public function testEveryHelperCarriesItsOwnFunctionExistsGuard(): void
     {
         $lines = file(self::utilsPath(), FILE_IGNORE_NEW_LINES);
