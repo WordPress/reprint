@@ -10,7 +10,10 @@
  * file.
  *
  * Composer's "files" autoload includes this file, so every host that installs
- * the package gets these symbols on every request.
+ * the package gets these symbols on every request. Keep this file limited to
+ * guarded function declarations: do not add I/O, hooks, mutable global state,
+ * or eager class definitions here. Changes to this eager-load surface require
+ * security-sensitive review.
  *
  * The two str_* polyfills at the top stay global on purpose: they
  * backfill functions unavailable before PHP 8.0, so callers reach them via
