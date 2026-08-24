@@ -3,6 +3,23 @@
 // Load Composer autoloader
 require_once __DIR__ . '/../vendor/autoload.php';
 
+$GLOBALS['reprint_test_filters'] = [];
+
+if (!function_exists('apply_filters')) {
+    // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Shared WordPress test stub.
+    function apply_filters(string $hook_name, $value, ...$extra_args) {
+        $filters = $GLOBALS['reprint_test_filters'][$hook_name] ?? [];
+        usort($filters, static function (array $left, array $right): int {
+            return $left['priority'] <=> $right['priority'];
+        });
+        foreach ($filters as $filter) {
+            $args = array_slice(array_merge([$value], $extra_args), 0, $filter['accepted_args']);
+            $value = call_user_func_array($filter['callback'], $args);
+        }
+        return $value;
+    }
+}
+
 // Load the MySQLDumpProducer class
 require_once __DIR__ . '/../packages/reprint-server/src/class-mysql-dump-producer.php';
 
