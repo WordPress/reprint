@@ -2,8 +2,6 @@
 
 namespace WordPress\Reprint\Server;
 
-use PDO;
-
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Database cursor errors are never HTML.
 
 /**
@@ -154,7 +152,7 @@ class DatabaseRowsReader {
             $query = $this->build_select_query();
             try {
                 $this->current_result_set = $this->db->query($query);
-            } catch (\PDOException $e) {
+            } catch (\Exception $e) {
                 throw new \RuntimeException(
                     "Database query `{$query}` failed for table " . $this->quote_identifier($this->current_table) . ": " . $e->getMessage()
                 );
@@ -162,7 +160,7 @@ class DatabaseRowsReader {
             $this->rows_fetched_from_current_query = 0;
         }
 
-        $record = $this->current_result_set->fetch(PDO::FETCH_ASSOC);
+        $record = $this->current_result_set->fetch(PdoConstants::fetch_assoc());
         if (!$record) {
             $this->current_result_set = null;
             if ($this->rows_fetched_from_current_query === 0) {
@@ -208,9 +206,9 @@ class DatabaseRowsReader {
         if ($this->current_result_set === null) {
             return;
         }
-        $record = $this->current_result_set->fetch(PDO::FETCH_ASSOC);
+        $record = $this->current_result_set->fetch(PdoConstants::fetch_assoc());
         while ($record !== false) {
-            $record = $this->current_result_set->fetch(PDO::FETCH_ASSOC);
+            $record = $this->current_result_set->fetch(PdoConstants::fetch_assoc());
         }
         $this->current_result_set = null;
     }
@@ -519,15 +517,15 @@ class DatabaseRowsReader {
         $query = "SHOW INDEX FROM " . $this->quote_identifier($table);
         try {
             $statement = $this->db->query($query);
-        } catch (\PDOException $e) {
+        } catch (\Exception $e) {
             throw new \RuntimeException(
                 "Failed to get primary key columns for " . $this->quote_identifier($table) . ": " . $e->getMessage() . " Query: {$query}"
             );
         }
-        $row = $statement->fetch(PDO::FETCH_ASSOC);
+        $row = $statement->fetch(PdoConstants::fetch_assoc());
         while ($row !== false) {
             if (!isset($row["Key_name"]) || strcasecmp($row["Key_name"], "PRIMARY") !== 0) {
-                $row = $statement->fetch(PDO::FETCH_ASSOC);
+                $row = $statement->fetch(PdoConstants::fetch_assoc());
                 continue;
             }
 
@@ -546,7 +544,7 @@ class DatabaseRowsReader {
             } else {
                 $columns_by_position[$position] = $column;
             }
-            $row = $statement->fetch(PDO::FETCH_ASSOC);
+            $row = $statement->fetch(PdoConstants::fetch_assoc());
         }
 
         if (!$has_usable_positions) {
@@ -587,7 +585,7 @@ class DatabaseRowsReader {
     {
         $this->tables_to_process = [];
         $statement = $this->db->query("SHOW FULL TABLES");
-        $row = $statement->fetch(PDO::FETCH_ASSOC);
+        $row = $statement->fetch(PdoConstants::fetch_assoc());
         while ($row !== false) {
             $values = array_values($row);
             $excluded = isset($values[0]) && stripos(
@@ -607,7 +605,7 @@ class DatabaseRowsReader {
             ) {
                 $this->tables_to_process[] = $values[0];
             }
-            $row = $statement->fetch(PDO::FETCH_ASSOC);
+            $row = $statement->fetch(PdoConstants::fetch_assoc());
         }
     }
 
@@ -621,13 +619,13 @@ class DatabaseRowsReader {
             $statement = $this->db->query(
                 "SHOW FULL COLUMNS FROM " . $this->quote_identifier($table_name)
             );
-        } catch (\PDOException $e) {
+        } catch (\Exception $e) {
             throw new \RuntimeException(
                 "Failed to get column types for " . $this->quote_identifier($table_name) . ": " . $e->getMessage()
             );
         }
         $columns = [];
-        $row = $statement->fetch(PDO::FETCH_ASSOC);
+        $row = $statement->fetch(PdoConstants::fetch_assoc());
         while ($row !== false) {
             $column_type = $row["Type"];
             $columns[$row["Field"]] = [
@@ -635,7 +633,7 @@ class DatabaseRowsReader {
                 "column_type" => $column_type,
                 "collation" => $row["Collation"] ?? null,
             ];
-            $row = $statement->fetch(PDO::FETCH_ASSOC);
+            $row = $statement->fetch(PdoConstants::fetch_assoc());
         }
         $this->column_type_cache[$table_name] = $columns;
         return $columns;

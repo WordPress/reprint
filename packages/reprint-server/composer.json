@@ -13,12 +13,8 @@
         "classmap": [
             "src/"
         ],
-        "exclude-from-classmap": [
-            "/src/class-pdo-polyfill.php"
-        ],
         "files": [
-            "src/utils.php",
-            "src/class-pdo-polyfill.php"
+            "src/utils.php"
         ]
     },
     "suggest": {

@@ -7,6 +7,7 @@ use WordPress\Reprint\Server\FileIndexProcessor;
 use WordPress\Reprint\Server\FileTreeProducer;
 use WordPress\Reprint\Server\GzipOutputStream;
 use WordPress\Reprint\Server\MySQLDumpProducer;
+use WordPress\Reprint\Server\PdoConstants;
 use WordPress\Reprint\Server\ResourceBudget;
 use WordPress\Reprint\Server\SqliteDriverPDO;
 use WordPress\Reprint\Server\WpdbDriverPDO;
@@ -306,6 +307,10 @@ function create_sqlite_pdo_adapter()
      * Minimum supported sqlite-database-integration version.
      */
     $min_version = '2.1.0';
+
+    if (!class_exists('PDO', false)) {
+        throw new RuntimeException('SQLite export requires the PDO extension.');
+    }
 
     require_once __DIR__ . "/class-sqlite-driver-pdo.php";
 
@@ -771,7 +776,7 @@ function endpoint_sql_chunk(
     );
 
     $pdo_options = [];
-    if (!empty($config["db_unbuffered"])) {
+    if (!empty($config["db_unbuffered"]) && extension_loaded('pdo_mysql')) {
         $pdo_options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = false;
     }
     $mysql = create_db_connection($creds, $pdo_options);
@@ -793,7 +798,7 @@ function endpoint_sql_chunk(
             try {
                 $row = $mysql
                     ->query("SELECT @@max_allowed_packet AS v")
-                    ->fetch(PDO::FETCH_ASSOC);
+                    ->fetch(PdoConstants::fetch_assoc());
                 if ($row && isset($row["v"])) {
                     $server_statement_size = (int) ((int) $row["v"] * 0.8);
                 }
@@ -1207,9 +1212,9 @@ function endpoint_db_index(
                 "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME > :last " .
                 "ORDER BY TABLE_NAME ASC LIMIT {$tables_per_batch}";
             $stmt = $mysql->prepare($sql);
-            $stmt->bindValue(":last", $last_table, PDO::PARAM_STR);
+            $stmt->bindValue(":last", $last_table, PdoConstants::param_str());
             $stmt->execute();
-            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $rows = $stmt->fetchAll(PdoConstants::fetch_assoc());
 
             if (!$rows) {
                 $status = "complete";
@@ -1915,7 +1920,7 @@ function endpoint_preflight(array $config): array
                                 "LIMIT 5"
                         );
                         if ($stmt !== false) {
-                            $names = $stmt->fetchAll(PDO::FETCH_COLUMN);
+                            $names = $stmt->fetchAll(PdoConstants::fetch_column());
                             foreach ($names as $name) {
                                 if (!is_string($name)) {
                                     continue;
@@ -2250,7 +2255,7 @@ function endpoint_preflight(array $config): array
                                 "@@sql_mode AS sql_mode, " .
                                 "@@lower_case_table_names AS lower_case_table_names"
                         )
-                        ->fetch(PDO::FETCH_ASSOC);
+                        ->fetch(PdoConstants::fetch_assoc());
                     if (is_array($vars)) {
                         $db["db_charset"] = $vars["db_charset"] ?? null;
                         $db["db_collation"] = $vars["db_collation"] ?? null;

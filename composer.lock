@@ -389,11 +389,11 @@
         },
         {
             "name": "wp-php-toolkit/reprint-server",
-            "version": "dev-self-contained-reprint-server",
+            "version": "dev-fix/remove-pdo-polyfill",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-server",
-                "reference": "df14413cf7be55745e451474b4b562836cb721e1"
+                "reference": "4c6c6ef2d34593de5c0dfe787e81260755fc7af5"
             },
             "require": {
                 "php": ">=7.2"
@@ -410,12 +410,8 @@
                 "classmap": [
                     "src/"
                 ],
-                "exclude-from-classmap": [
-                    "/src/class-pdo-polyfill.php"
-                ],
                 "files": [
-                    "src/utils.php",
-                    "src/class-pdo-polyfill.php"
+                    "src/utils.php"
                 ]
             },
             "license": [
