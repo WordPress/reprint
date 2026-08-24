@@ -30,6 +30,7 @@ foreach (['PDO', 'PDOStatement', 'PDOException'] as $class_name) {
 class NoPdoWpdbTestDouble {
     public $last_error = '';
     public $queries = [];
+    public $executed = [];
 
     public function suppress_errors($suppress = true)
     {
@@ -46,6 +47,7 @@ class NoPdoWpdbTestDouble {
 
     public function get_results($query, $output)
     {
+        $this->executed[] = [$query, $output];
         $this->queries[] = [$query, $output];
         if ($query === 'FAIL') {
             $this->last_error = 'wpdb query failed';
@@ -87,7 +89,7 @@ $statement = $connection->prepare('SELECT :name');
 $statement->bindValue(':name', "O'Reilly");
 $statement->execute();
 no_pdo_assert(
-    strpos($GLOBALS['wpdb']->queries[2][0], "'O\\'Reilly'") !== false,
+    strpos($GLOBALS['wpdb']->executed[2][0], "'O\\'Reilly'") !== false,
     'bindValue() must substitute escaped named parameters.'
 );
 
