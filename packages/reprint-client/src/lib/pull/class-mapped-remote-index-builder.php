@@ -116,9 +116,6 @@ final class MappedRemoteIndexBuilder
                         $remote_entry["path"],
                         $excluded_remote_absolute_path_prefixes
                     )
-                    // Recreated separately after fetching. See
-                    // ImportClient::recreate_intermediate_symlinks().
-                    && empty($remote_entry["intermediate"])
                 ) {
                     self::write_mapped_entry(
                         $mapped_index_handle,
@@ -169,8 +166,9 @@ final class MappedRemoteIndexBuilder
      *     @type int    $ctime            Always zero; clocks are not compared.
      *     @type int    $size             Remote size.
      *     @type string $copy_source_path Remote absolute path.
+     *     @type true   $intermediate     Present for intermediate symlinks only.
      * }
-     * @phpstan-return array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,copy_source_path:string}
+     * @phpstan-return array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,copy_source_path:string,intermediate?:true}
      */
     public static function decode_index_line(string $line): array
     {
@@ -196,13 +194,17 @@ final class MappedRemoteIndexBuilder
         ) {
             throw new RuntimeException("Invalid mapped remote-index entry.");
         }
-        return [
+        $mapped_entry = [
             "path" => $local_relative_path,
             "type" => $type,
             "ctime" => 0,
             "size" => (int) ( $entry["size"] ?? 0 ),
             "copy_source_path" => $remote_absolute_path,
         ];
+        if (!empty($entry["intermediate"])) {
+            $mapped_entry["intermediate"] = true;
+        }
+        return $mapped_entry;
     }
 
     /** @param resource $mapped_index_handle */
@@ -223,7 +225,12 @@ final class MappedRemoteIndexBuilder
             );
         }
         if ($local_relative_path === "") {
-            if ($remote_entry["type"] !== "dir") {
+            // An intermediate symlink mapped onto the root stands for the root
+            // directory itself, which always exists.
+            if (
+                $remote_entry["type"] !== "dir"
+                && empty($remote_entry["intermediate"])
+            ) {
                 throw new RuntimeException(
                     "A remote path cannot replace the filesystem root: {$remote_absolute_path}."
                 );
@@ -234,13 +241,17 @@ final class MappedRemoteIndexBuilder
         $mapped_key = bin2hex($local_relative_path)
             . "/"
             . bin2hex($remote_absolute_path);
+        $mapped_record = [
+            "path" => base64_encode($mapped_key),
+            "ctime" => 0,
+            "size" => $remote_entry["size"],
+            "type" => $remote_entry["type"],
+        ];
+        if (!empty($remote_entry["intermediate"])) {
+            $mapped_record["intermediate"] = true;
+        }
         $line = json_encode(
-            [
-                "path" => base64_encode($mapped_key),
-                "ctime" => 0,
-                "size" => $remote_entry["size"],
-                "type" => $remote_entry["type"],
-            ],
+            $mapped_record,
             JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
         ) . "\n";
         if (fwrite($mapped_index_handle, $line) !== strlen($line)) {
@@ -248,7 +259,14 @@ final class MappedRemoteIndexBuilder
         }
     }
 
-    /** Rejects remote paths which map to the same local path or below one. */
+    /**
+     * Rejects remote paths which map to the same local path or below one.
+     *
+     * Intermediate symlinks are the one exception to the second rule: their
+     * paths legitimately map to a parent of resolved content, so entries below
+     * one are permitted. They remain subject to the same-local-path rule, since
+     * two remote paths on one local path collide whatever their kind.
+     */
     private static function assert_no_path_collisions(
         string $mapped_remote_index_file
     ): void {
@@ -267,13 +285,15 @@ final class MappedRemoteIndexBuilder
             );
         }
         $preceding_local_path = null;
-        /** @var array{path:string,record_offset:int,previous_record_offset:int|null}|null $active_mapped_path */
+        /** @var array{path:string,intermediate:bool,record_offset:int,previous_record_offset:int|null}|null $active_mapped_path */
         $active_mapped_path = null;
         $collision_stack_byte_offset = 0;
         try {
             $line = fgets($mapped_index_handle);
             while ($line !== false) {
-                $local_path = self::decode_index_line($line)["path"];
+                $mapped_entry = self::decode_index_line($line);
+                $local_path = $mapped_entry["path"];
+                $path_is_intermediate = !empty($mapped_entry["intermediate"]);
                 if ($local_path === $preceding_local_path) {
                     throw new RuntimeException(
                         "Remote paths map to the same local path: {$local_path}."
@@ -282,10 +302,15 @@ final class MappedRemoteIndexBuilder
                 while ($active_mapped_path !== null) {
                     $mapped_path = $active_mapped_path["path"];
                     if (path_is_descendant_of($local_path, $mapped_path)) {
-                        throw new RuntimeException(
-                            "A remote path maps below another remote path: "
-                            . "{$local_path} is below {$mapped_path}."
-                        );
+                        if (!$active_mapped_path["intermediate"]) {
+                            throw new RuntimeException(
+                                "A remote path maps below another remote path: "
+                                . "{$local_path} is below {$mapped_path}."
+                            );
+                        }
+                        // Resolved content below an intermediate symlink. Keep
+                        // that symlink active for the entries which follow.
+                        break;
                     }
                     if (strcmp($local_path, $mapped_path . "/") <= 0) {
                         break;
@@ -317,6 +342,7 @@ final class MappedRemoteIndexBuilder
                     }
                     $active_mapped_path = [
                         "path" => $stack_path,
+                        "intermediate" => !empty($stack_record["intermediate"]),
                         "record_offset" => $previous_record_offset,
                         "previous_record_offset" =>
                             $stack_record["previous_record_offset"] ?? null,
@@ -325,6 +351,7 @@ final class MappedRemoteIndexBuilder
                 $stack_line = json_encode(
                     [
                         "path_b64" => base64_encode($local_path),
+                        "intermediate" => $path_is_intermediate,
                         "previous_record_offset" =>
                             $active_mapped_path["record_offset"] ?? null,
                     ],
@@ -341,6 +368,7 @@ final class MappedRemoteIndexBuilder
                 }
                 $active_mapped_path = [
                     "path" => $local_path,
+                    "intermediate" => $path_is_intermediate,
                     "record_offset" => $collision_stack_byte_offset,
                     "previous_record_offset" =>
                         $active_mapped_path["record_offset"] ?? null,

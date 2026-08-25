@@ -25,12 +25,15 @@ use function WordPress\Reprint\Server\assert_valid_path;
  *         "type"  => "file",
  *     ]
  *
- * The `intermediate` marker is retained for consumers that must omit
- * path-component symlinks from content comparisons. Other raw-record fields,
- * such as `target`, are deliberately omitted. Callers which need a symlink
- * target read the raw symlink records instead. This reader also does not read
- * `local_index.jsonl`: that relative-path format has an optional `empty`
- * field and remains owned by PushPlan and the local-index merge helpers.
+ * The `intermediate` marker is retained for consumers that must treat
+ * intermediate symlinks apart from content. Only `remote-index.next.jsonl`
+ * carries it: the pull journal rebuilds the retained `remote-index.jsonl` from
+ * path, ctime, size, and type alone, so entries read from that file never
+ * report the marker. Other raw-record fields, such as `target`, are
+ * deliberately omitted. Callers which need a symlink target read the raw
+ * symlink records instead. This reader also does not read `local_index.jsonl`:
+ * that relative-path format has an optional `empty` field and remains owned by
+ * PushPlan and the local-index merge helpers.
  *
  * ## Lifecycle and resume
  *
@@ -148,7 +151,7 @@ class RemoteIndexReader
      *     @type int    $ctime Change time reported by the exporter.
      *     @type int    $size  Size in bytes.
      *     @type string $type  `file`, `dir`, or `link`.
-     *     @type true   $intermediate Present for path-component symlinks only.
+     *     @type true   $intermediate Present for intermediate symlinks; next index only.
      * }
      * @throws RuntimeException When a non-blank line is not a decodable index
      *                          entry.
@@ -241,7 +244,7 @@ class RemoteIndexReader
      *     @type int    $ctime Change time reported by the exporter.
      *     @type int    $size  Size in bytes.
      *     @type string $type  `file`, `dir`, or `link`.
-     *     @type true   $intermediate Present for path-component symlinks only.
+     *     @type true   $intermediate Present for intermediate symlinks; next index only.
      * }
      * @throws RuntimeException When the line or base64 path is malformed.
      * @throws InvalidArgumentException When the decoded path is not a valid

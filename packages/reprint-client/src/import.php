@@ -3632,6 +3632,12 @@ class ImportClient
                 $remote_entry = $changed_path_diff->get_entry_in_new_index();
                 if ($remote_entry !== null) {
                     /** @var array{copy_source_path:string,type:string} $remote_entry */
+                    // Intermediate symlinks are neither fetched nor removed
+                    // here. recreate_intermediate_symlinks() owns them, and
+                    // deleting one would break the chain until it runs.
+                    if (!empty($remote_entry["intermediate"])) {
+                        continue;
+                    }
                     if (
                         !$this->is_selected_for_pulling(
                             $remote_entry["copy_source_path"],
@@ -7951,15 +7957,23 @@ class ImportClient
                             }
                         }
                     } elseif ($transition !== "unchanged") {
-                        $remote_path_type =
-                            $index_diff->get_path_type_in_new_index();
+                        // `$next_remote_entry` is the entry for
+                        // `$remote_absolute_path`, so its `type` and
+                        // `intermediate` fields describe that path.
+                        $next_remote_entry =
+                            $index_diff->get_entry_in_new_index();
+                        $remote_path_type = $next_remote_entry["type"] ?? null;
                         if ($remote_path_type === null) {
                             throw new LogicException(
                                 "Remote index path is absent from the next remote index: {$remote_absolute_path}"
                             );
                         }
+                        // Intermediate symlinks are recreated from the next
+                        // remote index once fetching finishes, never fetched as
+                        // symlink chunks. See recreate_intermediate_symlinks().
                         if (
-                            $this->is_selected_for_pulling(
+                            empty($next_remote_entry["intermediate"])
+                            && $this->is_selected_for_pulling(
                                 $remote_absolute_path,
                                 true,
                                 $remote_path_type
