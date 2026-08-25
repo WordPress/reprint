@@ -156,6 +156,53 @@ final class MappedRemoteIndexBuilderTest extends TestCase
         );
     }
 
+    public function testOmitsIntermediateSymlinksBeforeCollisionValidation(): void
+    {
+        $remoteIndex = $this->root . '/remote.jsonl';
+        $mappedIndex = $this->root . '/mapped.jsonl';
+        file_put_contents($remoteIndex, implode("\n", [
+            json_encode([
+                'path' => base64_encode('/srv/wordpress'),
+                'ctime' => 1,
+                'size' => 0,
+                'type' => 'link',
+                'intermediate' => true,
+            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+            json_encode([
+                'path' => base64_encode('/wordpress/core/latest'),
+                'ctime' => 1,
+                'size' => 0,
+                'type' => 'link',
+            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+        ]) . "\n");
+
+        \MappedRemoteIndexBuilder::build([
+            'remote_index_file' => $remoteIndex,
+            'mapped_remote_index_file' => $mappedIndex,
+            'filesystem_root' => $this->root . '/files',
+            'path_mapper' => new \RemoteToLocalPathMapper(
+                $this->root . '/files',
+                ['/srv'],
+                [
+                    '/wordpress' => $this->root . '/files/srv/wordpress',
+                ]
+            ),
+        ]);
+
+        $lines = file(
+            $mappedIndex,
+            FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES
+        );
+        $this->assertIsArray($lines);
+        $this->assertCount(1, $lines);
+        $this->assertSame(
+            '/wordpress/core/latest',
+            \MappedRemoteIndexBuilder::decode_index_line(
+                $lines[0]
+            )['copy_source_path']
+        );
+    }
+
     /** @param list<string> $remotePaths */
     private function writeRemoteIndex(string $path, array $remotePaths): void
     {

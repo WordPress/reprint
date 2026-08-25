@@ -116,6 +116,9 @@ final class MappedRemoteIndexBuilder
                         $remote_entry["path"],
                         $excluded_remote_absolute_path_prefixes
                     )
+                    // Intermediate symlinks only recreate the source layout
+                    // after fetching; their resolved targets carry the content.
+                    && empty($remote_entry["intermediate"])
                 ) {
                     self::write_mapped_entry(
                         $mapped_index_handle,

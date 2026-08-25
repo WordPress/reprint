@@ -319,4 +319,54 @@ class FollowedSymlinksRootTest extends TestCase
         $this->assertStringContainsString('.followed-symlinks-root/opt/data', readlink($link),
             'target is repointed to the local followed symlinks root, not the raw source spelling');
     }
+
+    public function testMirrorReplacesAStaleDirectoryWithAnIntermediateSymlink(): void
+    {
+        $c = $this->newClient();
+        $rc = new \ReflectionClass($c);
+        $rc->getProperty('files_pull_mode')->setValue($c, 'mirror');
+        $rc->getProperty('next_remote_index_prefix_cache')->setValue($c, ['/wordpress' => true]);
+
+        mkdir($this->root . '/wordpress', 0755, true);
+        mkdir($this->root . '/srv/wordpress', 0755, true);
+        file_put_contents($this->root . '/srv/wordpress/stale.txt', 'stale');
+        $entry = json_encode([
+            'path' => base64_encode('/srv/wordpress'),
+            'target' => base64_encode('../wordpress'),
+            'type' => 'link',
+            'intermediate' => true,
+        ]);
+        file_put_contents($c->pull_state_directory . '/remote-index.next.jsonl', $entry . "\n");
+
+        $rc->getMethod('recreate_intermediate_symlinks')->invoke($c);
+
+        $link = $this->root . '/srv/wordpress';
+        $this->assertTrue(is_link($link));
+        $this->assertSame('../wordpress', readlink($link));
+        $this->assertFileDoesNotExist($link . '/stale.txt');
+    }
+
+    public function testCatchUpPreservesAStaleDirectoryAtAnIntermediateSymlinkPath(): void
+    {
+        $c = $this->newClient();
+        $rc = new \ReflectionClass($c);
+        $rc->getProperty('next_remote_index_prefix_cache')->setValue($c, ['/wordpress' => true]);
+
+        mkdir($this->root . '/wordpress', 0755, true);
+        mkdir($this->root . '/srv/wordpress', 0755, true);
+        file_put_contents($this->root . '/srv/wordpress/stale.txt', 'stale');
+        $entry = json_encode([
+            'path' => base64_encode('/srv/wordpress'),
+            'target' => base64_encode('../wordpress'),
+            'type' => 'link',
+            'intermediate' => true,
+        ]);
+        file_put_contents($c->pull_state_directory . '/remote-index.next.jsonl', $entry . "\n");
+
+        $rc->getMethod('recreate_intermediate_symlinks')->invoke($c);
+
+        $path = $this->root . '/srv/wordpress';
+        $this->assertFalse(is_link($path));
+        $this->assertFileExists($path . '/stale.txt');
+    }
 }
