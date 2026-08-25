@@ -25,9 +25,10 @@ use function WordPress\Reprint\Server\assert_valid_path;
  *         "type"  => "file",
  *     ]
  *
- * Extra raw-record fields such as `target` and `intermediate` are deliberately
- * omitted from the returned entry. Callers which need those fields read the
- * raw symlink records instead. This reader also does not read
+ * The `intermediate` marker is retained for consumers that must omit
+ * path-component symlinks from content comparisons. Other raw-record fields,
+ * such as `target`, are deliberately omitted. Callers which need a symlink
+ * target read the raw symlink records instead. This reader also does not read
  * `local_index.jsonl`: that relative-path format has an optional `empty`
  * field and remains owned by PushPlan and the local-index merge helpers.
  *
@@ -147,6 +148,7 @@ class RemoteIndexReader
      *     @type int    $ctime Change time reported by the exporter.
      *     @type int    $size  Size in bytes.
      *     @type string $type  `file`, `dir`, or `link`.
+     *     @type true   $intermediate Present for path-component symlinks only.
      * }
      * @throws RuntimeException When a non-blank line is not a decodable index
      *                          entry.
@@ -239,6 +241,7 @@ class RemoteIndexReader
      *     @type int    $ctime Change time reported by the exporter.
      *     @type int    $size  Size in bytes.
      *     @type string $type  `file`, `dir`, or `link`.
+     *     @type true   $intermediate Present for path-component symlinks only.
      * }
      * @throws RuntimeException When the line or base64 path is malformed.
      * @throws InvalidArgumentException When the decoded path is not a valid
@@ -260,11 +263,15 @@ class RemoteIndexReader
             throw new RuntimeException("Invalid index path (base64 decode failed)");
         }
         assert_valid_path($path, "index path");
-        return [
+        $entry = [
             "path" => $path,
             "ctime" => (int) ( $data["ctime"] ?? 0 ),
             "size" => (int) ( $data["size"] ?? 0 ),
             "type" => (string) ( $data["type"] ?? "file" ),
         ];
+        if (!empty($data["intermediate"])) {
+            $entry["intermediate"] = true;
+        }
+        return $entry;
     }
 }

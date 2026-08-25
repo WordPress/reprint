@@ -116,6 +116,9 @@ final class MappedRemoteIndexBuilder
                         $remote_entry["path"],
                         $excluded_remote_absolute_path_prefixes
                     )
+                    // Recreated separately after fetching. See
+                    // ImportClient::recreate_intermediate_symlinks().
+                    && empty($remote_entry["intermediate"])
                 ) {
                     self::write_mapped_entry(
                         $mapped_index_handle,
