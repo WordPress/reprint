@@ -3,7 +3,7 @@
  * Plugin Name: Reprint Server
  * Plugin URI: https://github.com/WordPress/playground-tools
  * Description: Reprint Server – exposes a site export API with HMAC-authenticated endpoints for database and file synchronization.
- * Version: 0.10.4-dev
+ * Version: 0.10.5-dev
  * Requires PHP: 7.2
  * PHP 5.6 support: release builds downgrade a copy of this PHP 7.2 source and set its requirement to 5.6.20.
  * Author: WordPress Contributors
