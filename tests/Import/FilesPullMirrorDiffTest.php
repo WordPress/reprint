@@ -140,6 +140,52 @@ final class FilesPullMirrorDiffTest extends TestCase
         );
     }
 
+    public function testKeepsDriftedIntermediateSymlinksOutOfMirrorDeletions(): void
+    {
+        $client = $this->client();
+        $intermediate = $client->filesystem_root . '/srv/wordpress';
+        mkdir(dirname($intermediate), 0755, true);
+        $this->assertTrue(symlink('/wordpress', $intermediate));
+        $intermediateStat = lstat($intermediate);
+        $this->assertIsArray($intermediateStat);
+
+        // A drifted ctime puts the symlink in the changed local paths.
+        $this->writeIndex($this->path($client, 'local_index_file'), [[
+            'path' => 'srv/wordpress',
+            'ctime' => $intermediateStat['ctime'] - 1,
+            'size' => $intermediateStat['size'],
+            'type' => 'link',
+        ]]);
+        $this->writeMappedIndex($client, [
+            ['srv/wordpress', '/srv/wordpress', 'link', 0, true],
+        ]);
+        $this->writeFetchList($client, []);
+
+        ( new \ReflectionMethod(
+            \ImportClient::class,
+            'build_files_pull_mirror_local_changes'
+        ) )->invoke($client);
+        ( new \ReflectionMethod(
+            \ImportClient::class,
+            'build_files_pull_mirror_fetch_list'
+        ) )->invoke($client);
+        $journal = ( new \ReflectionProperty(
+            \ImportClient::class,
+            'pull_index_journal'
+        ) )->getValue($client);
+        $journal->flush();
+
+        // recreate_intermediate_symlinks() owns this path: the mirror stage
+        // neither removes it nor refetches it as a symlink chunk.
+        $this->assertTrue(is_link($intermediate));
+        $this->assertSame([], $this->readFetchList($client));
+        $walPath = $this->path($client, 'pull_index_wal_path');
+        $this->assertSame(
+            [],
+            file_exists($walPath) ? $this->readJsonLines($walPath) : []
+        );
+    }
+
     private function client(): \ImportClient
     {
         return new \ImportClient(
@@ -160,19 +206,27 @@ final class FilesPullMirrorDiffTest extends TestCase
         fclose($handle);
     }
 
-    /** @param list<array{0:string,1:string,2:string,3:int}> $entries */
+    /** @param list<array{0:string,1:string,2:string,3:int,4?:bool}> $entries */
     private function writeMappedIndex(\ImportClient $client, array $entries): void
     {
         $lines = '';
-        foreach ($entries as [$localPath, $remotePath, $type, $size]) {
-            $lines .= json_encode([
+        foreach ($entries as $entry) {
+            [$localPath, $remotePath, $type, $size] = $entry;
+            $record = [
                 'path' => base64_encode(
                     bin2hex($localPath) . '/' . bin2hex($remotePath)
                 ),
                 'ctime' => 0,
                 'size' => $size,
                 'type' => $type,
-            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+            ];
+            if (!empty($entry[4])) {
+                $record['intermediate'] = true;
+            }
+            $lines .= json_encode(
+                $record,
+                JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+            ) . "\n";
         }
         $path = $this->path($client, 'mapped_remote_index_file');
         file_put_contents($path, $lines);
