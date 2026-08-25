@@ -4159,6 +4159,22 @@ class ImportClient
                 continue;
             }
 
+            // Validate before replacing any local path in mirror mode.
+            $root = $this->filesystem_root;
+            try {
+                $this->assert_symlink_target_within_root(
+                    dirname($local_absolute_path),
+                    $symlink_target,
+                    $root
+                );
+            } catch (RuntimeException $e) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: " . $e->getMessage(),
+                    true,
+                );
+                continue;
+            }
+
             // Create parent directory
             $parent = dirname($local_absolute_path);
             if (!is_dir($parent)) {
@@ -4179,31 +4195,29 @@ class ImportClient
                 @unlink($local_absolute_path);
             }
 
-            // Don't overwrite a real directory — that shouldn't exist for
-            // an intermediate symlink path, and if it does something else
-            // is wrong.
+            // A real path here is stale local layout. Mirror mode owns the
+            // filesystem tree, so replace it with the authoritative link.
+            // Catch-up deliberately preserves untracked local paths.
             if (file_exists($local_absolute_path)) {
-                $this->audit_log(
-                    "INTERMEDIATE SYMLINK SKIP: {$remote_absolute_path} already exists as a real file/dir",
-                    true,
-                );
-                continue;
-            }
-
-            // Validate that the symlink target doesn't escape the filesystem root.
-            $root = $this->filesystem_root;
-            try {
-                $this->assert_symlink_target_within_root(
-                    dirname($local_absolute_path),
-                    $symlink_target,
-                    $root
-                );
-            } catch (RuntimeException $e) {
-                $this->audit_log(
-                    "INTERMEDIATE SYMLINK SKIP: " . $e->getMessage(),
-                    true,
-                );
-                continue;
+                if ($this->files_pull_mode === "mirror") {
+                    if (
+                        !$this->remove_local_absolute_path_without_following_symlinks(
+                            $local_absolute_path
+                        )
+                    ) {
+                        $this->audit_log(
+                            "INTERMEDIATE SYMLINK SKIP: failed to remove stale path {$remote_absolute_path}",
+                            true,
+                        );
+                        continue;
+                    }
+                } else {
+                    $this->audit_log(
+                        "INTERMEDIATE SYMLINK SKIP: {$remote_absolute_path} already exists as a real file/dir",
+                        true,
+                    );
+                    continue;
+                }
             }
 
             if (@symlink($symlink_target, $local_absolute_path)) {
