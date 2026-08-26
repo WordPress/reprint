@@ -280,6 +280,22 @@ export function runImporter(url, outputDir, command, options = {}) {
         }
     }
 
+    function runPreflight(extraArgs = []) {
+        let preflightResult;
+        let preflightAttempts = 0;
+        do {
+            preflightResult = runImporterOnce('preflight', extraArgs);
+            preflightAttempts += 1;
+            // Preflight is read-only. Retry only when cURL received no HTTP
+            // response, which is the transient PHP-FPM stall seen in CI.
+        } while (
+            preflightResult.exitCode !== 0 &&
+            preflightAttempts < 3 &&
+            preflightResult.stdout.includes('"http_code":0')
+        );
+        return preflightResult;
+    }
+
     // Non-preflight commands require a prior preflight run.
     // Automatically run one if the state file doesn't already have preflight data.
     if (command !== 'preflight' && command !== 'preflight-assert' && options.skipPreflight !== true) {
@@ -294,18 +310,7 @@ export function runImporter(url, outputDir, command, options = {}) {
             // No state file or invalid JSON — need preflight
         }
         if (needsPreflight) {
-            let preflightResult;
-            let preflightAttempts = 0;
-            do {
-                preflightResult = runImporterOnce('preflight');
-                preflightAttempts += 1;
-                // Preflight is read-only. Retry only when cURL received no HTTP
-                // response, which is the transient PHP-FPM stall seen in CI.
-            } while (
-                preflightResult.exitCode !== 0 &&
-                preflightAttempts < 3 &&
-                preflightResult.stdout.includes('"http_code":0')
-            );
+            const preflightResult = runPreflight();
             if (preflightResult.exitCode !== 0) {
                 return preflightResult;
             }
@@ -317,7 +322,9 @@ export function runImporter(url, outputDir, command, options = {}) {
     // WASM PHP invocations (~12s startup each) plus their actual work.
     const wallTimeout = options.wallTimeout || 240000;
     const wallStart = Date.now();
-    let result = runImporterOnce(command, commandExtraArgs);
+    let result = command === 'preflight'
+        ? runPreflight(commandExtraArgs)
+        : runImporterOnce(command, commandExtraArgs);
     if (
         runWithResume &&
         command !== 'preflight' &&
