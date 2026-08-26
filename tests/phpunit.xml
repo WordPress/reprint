@@ -38,7 +38,7 @@
             <file>HmacServerTest.php</file>
             <file>MultipartProcessorTest.php</file>
             <file>PushEndpointsTest.php</file>
-            <file>SiteExportSecretTest.php</file>
+            <file>ReprintServerPluginTest.php</file>
             <file>PushSessionTest.php</file>
         </testsuite>
         <testsuite name="Query Stream Tests">

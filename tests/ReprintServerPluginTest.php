@@ -15,24 +15,24 @@ if (!defined('ABSPATH')) {
     define('ABSPATH', __DIR__ . '/');
 }
 
-$site_export_test_plugin_dir = sys_get_temp_dir() . '/site-export-secret-test-' . getmypid() . '/';
+$reprint_server_test_plugin_dir = sys_get_temp_dir() . '/reprint-server-plugin-test-' . getmypid() . '/';
 if (!defined('SITE_EXPORT_PLUGIN_DIR')) {
-    define('SITE_EXPORT_PLUGIN_DIR', $site_export_test_plugin_dir);
+    define('SITE_EXPORT_PLUGIN_DIR', $reprint_server_test_plugin_dir);
 }
 if (!defined('SITE_EXPORT_SECRET_FILE')) {
     define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
 }
 
-$GLOBALS['site_export_test_options'] = [];
-$GLOBALS['site_export_registered_settings'] = [];
-$GLOBALS['site_export_settings_errors'] = [];
-$GLOBALS['site_export_settings_error_requests'] = [];
-$GLOBALS['site_export_test_actions'] = [];
-$GLOBALS['site_export_test_menu'] = null;
-$GLOBALS['site_export_test_sections'] = [];
-$GLOBALS['site_export_test_fields'] = [];
-$GLOBALS['site_export_test_scripts'] = [];
-$GLOBALS['site_export_fail_option_updates'] = [];
+$GLOBALS['reprint_server_test_options'] = [];
+$GLOBALS['reprint_server_registered_settings'] = [];
+$GLOBALS['reprint_server_settings_errors'] = [];
+$GLOBALS['reprint_server_settings_error_requests'] = [];
+$GLOBALS['reprint_server_test_actions'] = [];
+$GLOBALS['reprint_server_test_menu'] = null;
+$GLOBALS['reprint_server_test_sections'] = [];
+$GLOBALS['reprint_server_test_fields'] = [];
+$GLOBALS['reprint_server_test_scripts'] = [];
+$GLOBALS['reprint_server_fail_option_updates'] = [];
 
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound,Generic.CodeAnalysis.UnusedFunctionParameter.Found,Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed,Universal.NamingConventions.NoReservedKeywordParameterNames.defaultFound,WordPress.Security.EscapeOutput.OutputNotEscaped -- WordPress test stubs.
 if (!function_exists('plugin_dir_path')) {
@@ -43,8 +43,8 @@ if (!function_exists('plugin_dir_path')) {
 
 if (!function_exists('get_option')) {
     function get_option(string $name, $default = false) {
-        if (array_key_exists($name, $GLOBALS['site_export_test_options'])) {
-            return $GLOBALS['site_export_test_options'][$name];
+        if (array_key_exists($name, $GLOBALS['reprint_server_test_options'])) {
+            return $GLOBALS['reprint_server_test_options'][$name];
         }
         // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Generic WordPress option test stub.
         return apply_filters('default_option_' . $name, $default, $name, true);
@@ -53,13 +53,13 @@ if (!function_exists('get_option')) {
 
 if (!function_exists('update_option')) {
     function update_option(string $name, $value, $autoload = null): bool {
-        if (in_array($name, $GLOBALS['site_export_fail_option_updates'], true)) {
+        if (in_array($name, $GLOBALS['reprint_server_fail_option_updates'], true)) {
             return false;
         }
 
-        if (!array_key_exists($name, $GLOBALS['site_export_test_options'])) {
-            $GLOBALS['site_export_test_options'][$name] = $value;
-            foreach ($GLOBALS['site_export_test_actions']['add_option_' . $name] ?? [] as $action) {
+        if (!array_key_exists($name, $GLOBALS['reprint_server_test_options'])) {
+            $GLOBALS['reprint_server_test_options'][$name] = $value;
+            foreach ($GLOBALS['reprint_server_test_actions']['add_option_' . $name] ?? [] as $action) {
                 $args = array_slice([$name, $value], 0, $action['accepted_args']);
                 call_user_func_array($action['callback'], $args);
             }
@@ -67,10 +67,10 @@ if (!function_exists('update_option')) {
         }
 
         $old_value = get_option($name);
-        $GLOBALS['site_export_test_options'][$name] = $value;
+        $GLOBALS['reprint_server_test_options'][$name] = $value;
 
         if ($old_value !== $value) {
-            foreach ($GLOBALS['site_export_test_actions']['update_option_' . $name] ?? [] as $action) {
+            foreach ($GLOBALS['reprint_server_test_actions']['update_option_' . $name] ?? [] as $action) {
                 $args = array_slice([$old_value, $value, $name], 0, $action['accepted_args']);
                 call_user_func_array($action['callback'], $args);
             }
@@ -82,18 +82,18 @@ if (!function_exists('update_option')) {
 
 if (!function_exists('delete_option')) {
     function delete_option(string $name): bool {
-        if (!array_key_exists($name, $GLOBALS['site_export_test_options'])) {
+        if (!array_key_exists($name, $GLOBALS['reprint_server_test_options'])) {
             return false;
         }
 
-        unset($GLOBALS['site_export_test_options'][$name]);
+        unset($GLOBALS['reprint_server_test_options'][$name]);
         return true;
     }
 }
 
 if (!function_exists('register_setting')) {
     function register_setting(string $group, string $name, array $args = []): void {
-        $GLOBALS['site_export_registered_settings'][$name] = [
+        $GLOBALS['reprint_server_registered_settings'][$name] = [
             'group' => $group,
             'args' => $args,
         ];
@@ -102,7 +102,7 @@ if (!function_exists('register_setting')) {
 
 if (!function_exists('add_settings_section')) {
     function add_settings_section(string $id, string $title, $callback, string $page): void {
-        $GLOBALS['site_export_test_sections'][$page][$id] = [
+        $GLOBALS['reprint_server_test_sections'][$page][$id] = [
             'title' => $title,
             'callback' => $callback,
         ];
@@ -118,7 +118,7 @@ if (!function_exists('add_settings_field')) {
         string $section,
         array $args = []
     ): void {
-        $GLOBALS['site_export_test_fields'][$page][$section][$id] = [
+        $GLOBALS['reprint_server_test_fields'][$page][$section][$id] = [
             'title' => $title,
             'callback' => $callback,
             'args' => $args,
@@ -128,7 +128,7 @@ if (!function_exists('add_settings_field')) {
 
 if (!function_exists('add_action')) {
     function add_action(string $hook_name, $callback, int $priority = 10, int $accepted_args = 1): void {
-        $GLOBALS['site_export_test_actions'][$hook_name][] = [
+        $GLOBALS['reprint_server_test_actions'][$hook_name][] = [
             'callback' => $callback,
             'priority' => $priority,
             'accepted_args' => $accepted_args,
@@ -148,7 +148,7 @@ if (!function_exists('add_filter')) {
 
 if (!function_exists('do_action')) {
     function do_action(string $hook_name, ...$args): void {
-        $actions = $GLOBALS['site_export_test_actions'][$hook_name] ?? [];
+        $actions = $GLOBALS['reprint_server_test_actions'][$hook_name] ?? [];
         usort($actions, static function (array $left, array $right): int {
             return $left['priority'] <=> $right['priority'];
         });
@@ -169,7 +169,7 @@ if (!function_exists('plugin_basename')) {
 
 if (!function_exists('add_management_page')) {
     function add_management_page($page_title, $menu_title, $capability, $menu_slug, $callback): string {
-        $GLOBALS['site_export_test_menu'] = [
+        $GLOBALS['reprint_server_test_menu'] = [
             'page_title' => $page_title,
             'menu_title' => $menu_title,
             'capability' => $capability,
@@ -256,7 +256,7 @@ if (!function_exists('wp_unslash')) {
 
 if (!function_exists('add_settings_error')) {
     function add_settings_error(string $setting, string $code, string $message, string $type): void {
-        $GLOBALS['site_export_settings_errors'][] = [
+        $GLOBALS['reprint_server_settings_errors'][] = [
             'setting' => $setting,
             'code' => $code,
             'message' => $message,
@@ -267,14 +267,14 @@ if (!function_exists('add_settings_error')) {
 
 if (!function_exists('get_settings_errors')) {
     function get_settings_errors(string $setting = '', bool $sanitize = false): array {
-        $GLOBALS['site_export_settings_error_requests'][] = $setting;
+        $GLOBALS['reprint_server_settings_error_requests'][] = $setting;
         if ($setting === '') {
-            return $GLOBALS['site_export_settings_errors'];
+            return $GLOBALS['reprint_server_settings_errors'];
         }
 
         return array_values(
             array_filter(
-                $GLOBALS['site_export_settings_errors'],
+                $GLOBALS['reprint_server_settings_errors'],
                 static function(array $notice) use ($setting): bool {
                     return $notice['setting'] === $setting;
                 }
@@ -291,11 +291,11 @@ if (!function_exists('settings_fields')) {
 
 if (!function_exists('do_settings_sections')) {
     function do_settings_sections(string $page): void {
-        foreach ($GLOBALS['site_export_test_sections'][$page] ?? [] as $section_id => $section) {
+        foreach ($GLOBALS['reprint_server_test_sections'][$page] ?? [] as $section_id => $section) {
             echo '<h2>' . esc_html($section['title']) . '</h2>';
             call_user_func($section['callback']);
             echo '<table class="form-table">';
-            foreach ($GLOBALS['site_export_test_fields'][$page][$section_id] ?? [] as $field) {
+            foreach ($GLOBALS['reprint_server_test_fields'][$page][$section_id] ?? [] as $field) {
                 echo '<tr><th>' . esc_html($field['title']) . '</th><td>';
                 call_user_func($field['callback'], $field['args']);
                 echo '</td></tr>';
@@ -358,13 +358,13 @@ if (!function_exists('disabled')) {
 
 if (!function_exists('plugins_url')) {
     function plugins_url(string $path = '', string $plugin = ''): string {
-        return 'https://example.test/wp-content/plugins/site-export/' . ltrim($path, '/');
+        return 'https://example.test/wp-content/plugins/reprint-server/' . ltrim($path, '/');
     }
 }
 
 if (!function_exists('wp_enqueue_script')) {
     function wp_enqueue_script($handle, $src, $dependencies, $version, $in_footer): void {
-        $GLOBALS['site_export_test_scripts'][$handle] = compact(
+        $GLOBALS['reprint_server_test_scripts'][$handle] = compact(
             'src',
             'dependencies',
             'version',
@@ -415,7 +415,7 @@ require_once __DIR__ . '/../reprint-server-wp/wordpress/configuration.php';
 register_wordpress_configuration();
 require_once __DIR__ . '/../reprint-server-wp/wordpress/reprint-server.php';
 
-final class SiteExportSecretTest extends TestCase
+final class ReprintServerPluginTest extends TestCase
 {
     /** @var array<string, mixed> */
     private $original_server = [];
@@ -451,15 +451,15 @@ final class SiteExportSecretTest extends TestCase
         $this->original_push_enabled_environment = getenv('SITE_EXPORT_PUSH_ENABLED');
         $this->original_reprint_server_push_enabled_environment = getenv('REPRINT_SERVER_PUSH_ENABLED');
 
-        $GLOBALS['site_export_test_options'] = [];
-        $GLOBALS['site_export_registered_settings'] = [];
-        $GLOBALS['site_export_settings_errors'] = [];
-        $GLOBALS['site_export_settings_error_requests'] = [];
-        $GLOBALS['site_export_test_menu'] = null;
-        $GLOBALS['site_export_test_sections'] = [];
-        $GLOBALS['site_export_test_fields'] = [];
-        $GLOBALS['site_export_test_scripts'] = [];
-        $GLOBALS['site_export_fail_option_updates'] = [];
+        $GLOBALS['reprint_server_test_options'] = [];
+        $GLOBALS['reprint_server_registered_settings'] = [];
+        $GLOBALS['reprint_server_settings_errors'] = [];
+        $GLOBALS['reprint_server_settings_error_requests'] = [];
+        $GLOBALS['reprint_server_test_menu'] = null;
+        $GLOBALS['reprint_server_test_sections'] = [];
+        $GLOBALS['reprint_server_test_fields'] = [];
+        $GLOBALS['reprint_server_test_scripts'] = [];
+        $GLOBALS['reprint_server_fail_option_updates'] = [];
         $_SERVER = [];
         $_FILES = [];
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Test resets request globals.
@@ -503,16 +503,16 @@ final class SiteExportSecretTest extends TestCase
 
     public function testConnectionTokenFallsBackToOptionWhenSecretFileMissing(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'option-secret';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'option-token';
 
-        $this->assertSame('option-secret', _site_export_get_shared_secret());
+        $this->assertSame('option-token', _site_export_get_shared_secret());
     }
 
     public function testMigrationCreatesNoOptionsWhenNoLegacyOptionExists(): void
     {
         reprint_server_compat_migrate_legacy_options();
 
-        $this->assertSame([], $GLOBALS['site_export_test_options']);
+        $this->assertSame([], $GLOBALS['reprint_server_test_options']);
     }
 
     public function testMigrationKeepsPushAuthorizationGrantedUnderTheLegacyOptionNames(): void
@@ -523,19 +523,19 @@ final class SiteExportSecretTest extends TestCase
         // authorization for the appearing connection token runs during the
         // migration.
         \WordPress\Reprint\Server\Plugin\SettingsPage::get_instance();
-        $GLOBALS['site_export_test_options']['site_export_secret'] = 'legacy-token';
-        $GLOBALS['site_export_test_options']['site_export_push_authorized_token_fingerprint'] =
+        $GLOBALS['reprint_server_test_options']['site_export_secret'] = 'legacy-token';
+        $GLOBALS['reprint_server_test_options']['site_export_push_authorized_token_fingerprint'] =
             hash('sha256', 'legacy-token');
 
         reprint_server_compat_migrate_legacy_options();
 
         $this->assertSame(
             hash('sha256', 'legacy-token'),
-            $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]
+            $GLOBALS['reprint_server_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]
         );
         $this->assertArrayNotHasKey(
             'site_export_push_authorized_token_fingerprint',
-            $GLOBALS['site_export_test_options']
+            $GLOBALS['reprint_server_test_options']
         );
         $this->assertTrue(_site_export_is_push_authorized());
     }
@@ -570,66 +570,66 @@ final class SiteExportSecretTest extends TestCase
 
     public function testLegacyOptionsMigrateWithoutChangingTheirValues(): void
     {
-        $GLOBALS['site_export_test_options']['site_export_secret'] = 'legacy-token';
-        $GLOBALS['site_export_test_options']['site_export_push_authorized_token_fingerprint'] =
+        $GLOBALS['reprint_server_test_options']['site_export_secret'] = 'legacy-token';
+        $GLOBALS['reprint_server_test_options']['site_export_push_authorized_token_fingerprint'] =
             'legacy-fingerprint';
 
         reprint_server_compat_migrate_legacy_options();
 
         $this->assertSame(
             'legacy-token',
-            $GLOBALS['site_export_test_options']['reprint_server_connection_token']
+            $GLOBALS['reprint_server_test_options']['reprint_server_connection_token']
         );
         $this->assertSame(
             'legacy-fingerprint',
-            $GLOBALS['site_export_test_options']['reprint_server_push_authorized_token_fingerprint']
+            $GLOBALS['reprint_server_test_options']['reprint_server_push_authorized_token_fingerprint']
         );
-        $this->assertArrayNotHasKey('site_export_secret', $GLOBALS['site_export_test_options']);
+        $this->assertArrayNotHasKey('site_export_secret', $GLOBALS['reprint_server_test_options']);
         $this->assertArrayNotHasKey(
             'site_export_push_authorized_token_fingerprint',
-            $GLOBALS['site_export_test_options']
+            $GLOBALS['reprint_server_test_options']
         );
         $this->assertSame('legacy-token', _site_export_get_shared_secret());
     }
 
     public function testCanonicalOptionsTakePrecedenceDuringLegacyMigration(): void
     {
-        $GLOBALS['site_export_test_options']['site_export_secret'] = 'legacy-token';
-        $GLOBALS['site_export_test_options']['reprint_server_connection_token'] = 'canonical-token';
-        $GLOBALS['site_export_test_options']['site_export_push_authorized_token_fingerprint'] =
+        $GLOBALS['reprint_server_test_options']['site_export_secret'] = 'legacy-token';
+        $GLOBALS['reprint_server_test_options']['reprint_server_connection_token'] = 'canonical-token';
+        $GLOBALS['reprint_server_test_options']['site_export_push_authorized_token_fingerprint'] =
             'legacy-fingerprint';
-        $GLOBALS['site_export_test_options']['reprint_server_push_authorized_token_fingerprint'] =
+        $GLOBALS['reprint_server_test_options']['reprint_server_push_authorized_token_fingerprint'] =
             'canonical-fingerprint';
 
         reprint_server_compat_migrate_legacy_options();
 
         $this->assertSame(
             'canonical-token',
-            $GLOBALS['site_export_test_options']['reprint_server_connection_token']
+            $GLOBALS['reprint_server_test_options']['reprint_server_connection_token']
         );
         $this->assertSame(
             'canonical-fingerprint',
-            $GLOBALS['site_export_test_options']['reprint_server_push_authorized_token_fingerprint']
+            $GLOBALS['reprint_server_test_options']['reprint_server_push_authorized_token_fingerprint']
         );
-        $this->assertArrayNotHasKey('site_export_secret', $GLOBALS['site_export_test_options']);
+        $this->assertArrayNotHasKey('site_export_secret', $GLOBALS['reprint_server_test_options']);
         $this->assertArrayNotHasKey(
             'site_export_push_authorized_token_fingerprint',
-            $GLOBALS['site_export_test_options']
+            $GLOBALS['reprint_server_test_options']
         );
     }
 
     public function testSecretFileConnectionTokenOverridesSiteOptionWhenPresent(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'option-secret';
-        file_put_contents(SITE_EXPORT_SECRET_FILE, "<?php return 'file-secret';\n");
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'option-token';
+        file_put_contents(SITE_EXPORT_SECRET_FILE, "<?php return 'file-token';\n");
 
-        $this->assertSame('file-secret', _site_export_get_shared_secret());
+        $this->assertSame('file-token', _site_export_get_shared_secret());
     }
 
     public function testUpdatingConnectionTokenOnlyTouchesTheSiteOption(): void
     {
-        $this->assertTrue(_site_export_update_shared_secret('new-secret'));
-        $this->assertSame('new-secret', $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION]);
+        $this->assertTrue(_site_export_update_shared_secret('new-token'));
+        $this->assertSame('new-token', $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION]);
         $this->assertFileDoesNotExist(SITE_EXPORT_SECRET_FILE);
     }
 
@@ -638,7 +638,7 @@ final class SiteExportSecretTest extends TestCase
         $this->assertSame('saved', change_connection_token('new-token'));
         $this->assertSame('unchanged', change_connection_token('new-token'));
 
-        $GLOBALS['site_export_fail_option_updates'][] = SITE_EXPORT_SECRET_OPTION;
+        $GLOBALS['reprint_server_fail_option_updates'][] = SITE_EXPORT_SECRET_OPTION;
         $this->assertSame('storage_failure', change_connection_token('other-token'));
     }
 
@@ -646,7 +646,7 @@ final class SiteExportSecretTest extends TestCase
     {
         register_connection_token_setting();
 
-        $setting = $GLOBALS['site_export_registered_settings'][SITE_EXPORT_SECRET_OPTION] ?? null;
+        $setting = $GLOBALS['reprint_server_registered_settings'][SITE_EXPORT_SECRET_OPTION] ?? null;
         $this->assertNotNull($setting);
         $this->assertSame('reprint_server', $setting['group']);
         $this->assertTrue($setting['args']['show_in_rest']);
@@ -656,9 +656,9 @@ final class SiteExportSecretTest extends TestCase
 
     public function testConfigurationIntegrationRegistersOutsideTheAdministratorAdapter(): void
     {
-        $rest_hooks = $GLOBALS['site_export_test_actions']['rest_api_init'] ?? [];
-        $update_hooks = $GLOBALS['site_export_test_actions']['update_option_' . SITE_EXPORT_SECRET_OPTION] ?? [];
-        $add_hooks = $GLOBALS['site_export_test_actions']['add_option_' . SITE_EXPORT_SECRET_OPTION] ?? [];
+        $rest_hooks = $GLOBALS['reprint_server_test_actions']['rest_api_init'] ?? [];
+        $update_hooks = $GLOBALS['reprint_server_test_actions']['update_option_' . SITE_EXPORT_SECRET_OPTION] ?? [];
+        $add_hooks = $GLOBALS['reprint_server_test_actions']['add_option_' . SITE_EXPORT_SECRET_OPTION] ?? [];
 
         $this->assertNotEmpty($rest_hooks);
         $this->assertSame(
@@ -679,9 +679,9 @@ final class SiteExportSecretTest extends TestCase
 
     public function testPluginHmacVerifierDelegatesToPackageServer(): void
     {
-        $secret = 'delegated-secret';
+        $connection_token = 'delegated-token';
         $nonce = '0123456789abcdef0123456789abcdef';
-        $client = new Site_Export_HMAC_Client($secret);
+        $client = new Site_Export_HMAC_Client($connection_token);
         $timestamp = $client->get_timestamp();
         $content_hash = hash('sha256', '');
 
@@ -690,28 +690,28 @@ final class SiteExportSecretTest extends TestCase
         $_SERVER['HTTP_X_AUTH_TIMESTAMP'] = $timestamp;
         $_SERVER['HTTP_X_AUTH_CONTENT_HASH'] = $content_hash;
 
-        $this->assertNull(_site_export_verify_hmac($secret));
+        $this->assertNull(_site_export_verify_hmac($connection_token));
     }
 
     public function testPushAuthorizationMatchesOnlyTheCurrentConnectionToken(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
         $this->assertFalse(_site_export_is_push_authorized());
 
         $this->assertTrue(_site_export_update_push_authorization(true));
         $this->assertTrue(_site_export_is_push_authorized());
         $this->assertSame(
             hash('sha256', 'current-token'),
-            $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]
+            $GLOBALS['reprint_server_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]
         );
 
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'rotated-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'rotated-token';
         $this->assertFalse(_site_export_is_push_authorized());
     }
 
     public function testManagedEnvironmentOverridesLocalPushAuthorization(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
 
         putenv('SITE_EXPORT_PUSH_ENABLED=true');
         $this->assertTrue(_site_export_is_push_authorized());
@@ -756,7 +756,7 @@ final class SiteExportSecretTest extends TestCase
 
     public function testPresentEmptyManagedEnvironmentFailsClosed(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
         $this->assertTrue(_site_export_update_push_authorization(true));
 
         putenv('SITE_EXPORT_PUSH_ENABLED=');
@@ -771,24 +771,24 @@ final class SiteExportSecretTest extends TestCase
 
     public function testSettingsApiTokenRotationRevokesPriorConsent(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
         $this->assertTrue(_site_export_update_push_authorization(true));
 
         update_option(SITE_EXPORT_SECRET_OPTION, 'rotated-token');
 
-        $this->assertSame('', $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]);
+        $this->assertSame('', $GLOBALS['reprint_server_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]);
         $this->assertFalse(_site_export_is_push_authorized());
     }
 
     public function testRestSettingsConnectionTokenRotationPermanentlyRevokesPushAuthorization(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'token-a';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'token-a';
         $this->assertTrue(_site_export_update_push_authorization(true));
 
         update_option(SITE_EXPORT_SECRET_OPTION, 'token-b');
         update_option(SITE_EXPORT_SECRET_OPTION, 'token-a');
 
-        $this->assertSame('', $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]);
+        $this->assertSame('', $GLOBALS['reprint_server_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]);
         $this->assertFalse(_site_export_is_push_authorized());
     }
 
@@ -801,13 +801,13 @@ final class SiteExportSecretTest extends TestCase
         $this->assertFalse(_site_export_is_push_authorized());
         update_option(SITE_EXPORT_SECRET_OPTION, 'token-a');
 
-        $this->assertSame('', $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]);
+        $this->assertSame('', $GLOBALS['reprint_server_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]);
         $this->assertFalse(_site_export_is_push_authorized());
     }
 
     public function testRestSettingsOptionChangePreservesAuthorizationForSecretFileConnectionToken(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'option-token-a';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'option-token-a';
         file_put_contents(SITE_EXPORT_SECRET_FILE, "<?php return 'file-token';\n");
         $this->assertTrue(_site_export_update_push_authorization(true));
 
@@ -815,19 +815,19 @@ final class SiteExportSecretTest extends TestCase
 
         $this->assertSame(
             hash('sha256', 'file-token'),
-            $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]
+            $GLOBALS['reprint_server_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]
         );
         $this->assertTrue(_site_export_is_push_authorized());
     }
 
     public function testPushAccessOperationAuthorizesTheCurrentConnectionToken(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
 
         $this->assertSame('saved', change_push_access(true));
         $this->assertSame(
             hash('sha256', 'current-token'),
-            $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]
+            $GLOBALS['reprint_server_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]
         );
         $this->assertTrue(_site_export_is_push_authorized());
     }
@@ -836,7 +836,7 @@ final class SiteExportSecretTest extends TestCase
     {
         $this->assertSame('not_configured', change_push_access(true));
 
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
         $this->assertSame('saved', change_push_access(true));
         $this->assertSame('unchanged', change_push_access(true));
 
@@ -846,8 +846,8 @@ final class SiteExportSecretTest extends TestCase
 
     public function testPushAccessOperationReportsStorageFailure(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
-        $GLOBALS['site_export_fail_option_updates'][] = SITE_EXPORT_PUSH_AUTHORIZATION_OPTION;
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_fail_option_updates'][] = SITE_EXPORT_PUSH_AUTHORIZATION_OPTION;
 
         $this->assertSame('storage_failure', change_push_access(true));
         $this->assertFalse(_site_export_is_push_authorized());
@@ -855,7 +855,7 @@ final class SiteExportSecretTest extends TestCase
 
     public function testConfigurationStateDescribesTheEffectiveConnection(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
 
         $configuration = get_configuration_state();
 
@@ -872,8 +872,8 @@ final class SiteExportSecretTest extends TestCase
         $plugin = SettingsPage::get_instance();
         $plugin->add_admin_menu();
 
-        $this->assertSame('reprint-server', $GLOBALS['site_export_test_menu']['menu_slug']);
-        $this->assertSame('manage_options', $GLOBALS['site_export_test_menu']['capability']);
+        $this->assertSame('reprint-server', $GLOBALS['reprint_server_test_menu']['menu_slug']);
+        $this->assertSame('manage_options', $GLOBALS['reprint_server_test_menu']['capability']);
         $this->assertSame(
             'WordPress\\Reprint\\Server\\Plugin\\SettingsPage',
             SettingsPage::class
@@ -883,18 +883,18 @@ final class SiteExportSecretTest extends TestCase
         $links = $plugin->add_settings_link([]);
         $this->assertStringContainsString('tools.php?page=reprint-server', $links[0]);
 
-        $admin_post_hooks = $GLOBALS['site_export_test_actions']['admin_post_reprint_server_save_push_access'] ?? [];
+        $admin_post_hooks = $GLOBALS['reprint_server_test_actions']['admin_post_reprint_server_save_push_access'] ?? [];
         $this->assertNotEmpty($admin_post_hooks);
         $this->assertSame([$plugin, 'handle_push_access_save'], $admin_post_hooks[0]['callback']);
-        $this->assertEmpty($GLOBALS['site_export_test_actions']['admin_bar_menu'] ?? []);
+        $this->assertEmpty($GLOBALS['reprint_server_test_actions']['admin_bar_menu'] ?? []);
 
         $plugin->enqueue_assets('tools_page_other');
-        $this->assertSame([], $GLOBALS['site_export_test_scripts']);
+        $this->assertSame([], $GLOBALS['reprint_server_test_scripts']);
 
         $plugin->enqueue_assets('tools_page_reprint-server');
         $this->assertSame(
             ['wp-a11y'],
-            $GLOBALS['site_export_test_scripts']['reprint-server-admin']['dependencies']
+            $GLOBALS['reprint_server_test_scripts']['reprint-server-admin']['dependencies']
         );
     }
 
@@ -947,7 +947,7 @@ final class SiteExportSecretTest extends TestCase
 
     public function testDownloadOnlyAdminCopyAndPushAccessForm(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
 
         $html = $this->renderAdminPage();
 
@@ -962,7 +962,7 @@ final class SiteExportSecretTest extends TestCase
         $this->assertStringContainsString('name="option_page" value="reprint_server"', $html);
         $this->assertStringContainsString('action="https://example.test/wp-admin/admin-post.php"', $html);
         $this->assertSame(2, substr_count($html, '<p class="submit">'));
-        $this->assertSame([''], $GLOBALS['site_export_settings_error_requests']);
+        $this->assertSame([''], $GLOBALS['reprint_server_settings_error_requests']);
         $this->assertStringNotContainsString('checked="checked"', $html);
         $this->assertStringNotContainsString('<style>', $html);
         $this->assertStringNotContainsString('<script>', $html);
@@ -970,7 +970,7 @@ final class SiteExportSecretTest extends TestCase
 
     public function testCoreSettingsNoticeIsInlineAtItsRenderedPosition(): void
     {
-        $GLOBALS['site_export_settings_errors'][] = [
+        $GLOBALS['reprint_server_settings_errors'][] = [
             'setting' => 'general',
             'code' => 'settings_updated',
             'message' => 'Settings saved.',
@@ -994,7 +994,7 @@ final class SiteExportSecretTest extends TestCase
 
     public function testCoreSettingsNoticeFallsBackToErrorForAnUnknownType(): void
     {
-        $GLOBALS['site_export_settings_errors'][] = [
+        $GLOBALS['reprint_server_settings_errors'][] = [
             'setting' => 'general',
             'code' => 'unexpected_type',
             'message' => 'Something needs attention.',
@@ -1012,7 +1012,7 @@ final class SiteExportSecretTest extends TestCase
 
     public function testOptedInAdminCopyShowsCurrentConnectionTokenCanPush(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
         $this->assertTrue(_site_export_update_push_authorization(true));
 
         $html = $this->renderAdminPage();
@@ -1026,7 +1026,7 @@ final class SiteExportSecretTest extends TestCase
 
     public function testManagedAdminCopyIsReadOnlyAndShowsEffectiveState(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
         putenv('SITE_EXPORT_PUSH_ENABLED=true');
 
         $html = $this->renderAdminPage();
@@ -1038,7 +1038,7 @@ final class SiteExportSecretTest extends TestCase
 
     public function testManagedDisabledAdminCopyIsReadOnlyAndUnchecked(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
         putenv('SITE_EXPORT_PUSH_ENABLED=false');
 
         $html = $this->renderAdminPage();
@@ -1051,7 +1051,7 @@ final class SiteExportSecretTest extends TestCase
 
     public function testSecretFileOverrideShowsStoredOptionAndWarning(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'stored-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'stored-token';
         file_put_contents(SITE_EXPORT_SECRET_FILE, "<?php return 'file-token';\n");
 
         $html = $this->renderAdminPage();
@@ -1084,7 +1084,7 @@ final class SiteExportSecretTest extends TestCase
 
     public function testAdministratorMapsEveryPushAccessResultToANativeNotice(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
         $expected_notices = [
             'saved' => ['notice-success', 'Push access updated.'],
             'unchanged' => ['notice-success', 'Push access was already up to date.'],
@@ -1110,8 +1110,8 @@ final class SiteExportSecretTest extends TestCase
 
     public function testSettingsSaveSupersedesAStalePushAccessNotice(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
-        $GLOBALS['site_export_settings_errors'][] = [
+        $GLOBALS['reprint_server_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_settings_errors'][] = [
             'setting' => 'general',
             'code' => 'settings_updated',
             'message' => 'Settings saved.',
