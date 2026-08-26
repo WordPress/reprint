@@ -315,7 +315,7 @@ function update_push_authorization(bool $enabled): bool {
  * multipart boundaries internally so the client can't predict the exact
  * byte stream — but it CAN hash the logical content before encoding.
  *
- * Signature = HMAC-SHA256(nonce + timestamp + SHA256(body), secret)
+ * Signature = HMAC-SHA256(nonce + timestamp + SHA256(body), connection token)
  *
  * The client sends X-Auth-Content-Hash = SHA256(body).  The server
  * independently hashes what it received and checks both that the hash

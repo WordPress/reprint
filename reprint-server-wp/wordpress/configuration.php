@@ -13,8 +13,8 @@ function register_wordpress_configuration(): void {
     }
     $registered = true;
 
-    add_action('admin_init', __NAMESPACE__ . '\\register_shared_secret_setting');
-    add_action('rest_api_init', __NAMESPACE__ . '\\register_shared_secret_setting');
+    add_action('admin_init', __NAMESPACE__ . '\\register_connection_token_setting');
+    add_action('rest_api_init', __NAMESPACE__ . '\\register_connection_token_setting');
     add_action(
         'update_option_' . \SITE_EXPORT_SECRET_OPTION,
         __NAMESPACE__ . '\\revoke_push_authorization_after_connection_token_change',
@@ -30,7 +30,7 @@ function register_wordpress_configuration(): void {
 }
 
 /** Register the connection token for the Settings and REST APIs. */
-function register_shared_secret_setting(): void {
+function register_connection_token_setting(): void {
     register_setting(
         'reprint_server',
         \SITE_EXPORT_SECRET_OPTION,

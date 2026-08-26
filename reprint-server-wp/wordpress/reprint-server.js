@@ -1,7 +1,7 @@
 ( function() {
 	'use strict';
 
-	var token = document.getElementById( 'reprint_server_secret' );
+	var token = document.getElementById( 'reprint_server_connection_token' );
 	var toggle = document.querySelector( '.reprint-server-toggle-token' );
 	if ( token && toggle ) {
 		toggle.addEventListener( 'click', function() {

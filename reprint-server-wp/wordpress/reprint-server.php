@@ -97,13 +97,13 @@ class SettingsPage {
         ?>
         <input type="password"
                class="regular-text code"
-               id="reprint_server_secret"
+               id="reprint_server_connection_token"
                name="<?php echo esc_attr(\SITE_EXPORT_SECRET_OPTION); ?>"
                value="<?php echo esc_attr($configuration['stored_connection_token']); ?>"
                autocomplete="off" />
         <button type="button"
                 class="button reprint-server-toggle-token"
-                aria-controls="reprint_server_secret"
+                aria-controls="reprint_server_connection_token"
                 aria-pressed="false"
                 aria-label="<?php echo esc_attr__('Show connection token', 'reprint'); ?>"
                 data-show-label="<?php echo esc_attr__('Show connection token', 'reprint'); ?>"

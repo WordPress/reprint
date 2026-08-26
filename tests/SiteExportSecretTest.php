@@ -8,7 +8,7 @@ use WordPress\Reprint\Server\Plugin\SettingsPage;
 use function WordPress\Reprint\Server\Plugin\change_connection_token;
 use function WordPress\Reprint\Server\Plugin\change_push_access;
 use function WordPress\Reprint\Server\Plugin\get_configuration_state;
-use function WordPress\Reprint\Server\Plugin\register_shared_secret_setting;
+use function WordPress\Reprint\Server\Plugin\register_connection_token_setting;
 use function WordPress\Reprint\Server\Plugin\register_wordpress_configuration;
 
 if (!defined('ABSPATH')) {
@@ -618,7 +618,7 @@ final class SiteExportSecretTest extends TestCase
         $this->assertFileDoesNotExist(SITE_EXPORT_SECRET_FILE);
     }
 
-    public function testSharedConnectionTokenOperationReturnsExplicitOutcomes(): void
+    public function testConnectionTokenOperationReturnsExplicitOutcomes(): void
     {
         $this->assertSame('saved', change_connection_token('new-token'));
         $this->assertSame('unchanged', change_connection_token('new-token'));
@@ -629,7 +629,7 @@ final class SiteExportSecretTest extends TestCase
 
     public function testPluginRegistersConnectionTokenOptionForCoreSettingsRestEndpoint(): void
     {
-        register_shared_secret_setting();
+        register_connection_token_setting();
 
         $setting = $GLOBALS['site_export_registered_settings'][SITE_EXPORT_SECRET_OPTION] ?? null;
         $this->assertNotNull($setting);
@@ -647,7 +647,7 @@ final class SiteExportSecretTest extends TestCase
 
         $this->assertNotEmpty($rest_hooks);
         $this->assertSame(
-            'WordPress\\Reprint\\Server\\Plugin\\register_shared_secret_setting',
+            'WordPress\\Reprint\\Server\\Plugin\\register_connection_token_setting',
             $rest_hooks[0]['callback']
         );
         $this->assertNotEmpty($update_hooks);
@@ -805,7 +805,7 @@ final class SiteExportSecretTest extends TestCase
         $this->assertTrue(_site_export_is_push_authorized());
     }
 
-    public function testSharedPushAccessOperationAuthorizesTheCurrentConnectionToken(): void
+    public function testPushAccessOperationAuthorizesTheCurrentConnectionToken(): void
     {
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
 
@@ -817,7 +817,7 @@ final class SiteExportSecretTest extends TestCase
         $this->assertTrue(_site_export_is_push_authorized());
     }
 
-    public function testSharedPushAccessOperationReturnsExplicitOutcomes(): void
+    public function testPushAccessOperationReturnsExplicitOutcomes(): void
     {
         $this->assertSame('not_configured', change_push_access(true));
 
@@ -829,7 +829,7 @@ final class SiteExportSecretTest extends TestCase
         $this->assertSame('managed', change_push_access(false));
     }
 
-    public function testSharedPushAccessOperationReportsStorageFailure(): void
+    public function testPushAccessOperationReportsStorageFailure(): void
     {
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
         $GLOBALS['site_export_fail_option_updates'][] = SITE_EXPORT_PUSH_AUTHORIZATION_OPTION;
@@ -920,6 +920,7 @@ final class SiteExportSecretTest extends TestCase
 
         $this->assertStringContainsString('<strong>Not configured yet.</strong>', $html);
         $this->assertStringContainsString('Enter a connection token to get started.', $html);
+        $this->assertStringContainsString('id="reprint_server_connection_token"', $html);
         $this->assertStringContainsString('name="' . SITE_EXPORT_SECRET_OPTION . '"', $html);
         $this->assertStringNotContainsString('<h2>Push access</h2>', $html);
         $this->assertStringNotContainsString('id="reprint-server-api-url"', $html);

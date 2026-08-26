@@ -109,7 +109,7 @@ require_once '/path/to/reprint-server-wp/lib.php';
 
 // Route however you like — lib.php doesn't check URLs.
 if ($myRouter->matches('/export')) {
-    // Use default HMAC authentication (reads secret.php when present,
+    // Use default HMAC authentication (reads the connection token from secret.php when present,
     // otherwise falls back to the site option):
     handle_api_request();
 
