@@ -125,9 +125,9 @@ array argument and do not use the WordPress filter.
 
 - `VERSION` — plugin version string
 - `PLUGIN_DIR` — absolute path to the plugin directory
-- `SECRET_FILE` — optional path to a PHP file that overrides the stored HMAC shared secret
-- `SECRET_OPTION` — WordPress site option name used for the stored HMAC shared secret
-- `PUSH_AUTHORIZATION_OPTION` — WordPress site option containing the token fingerprint granted personal push access
+- `CONNECTION_TOKEN_FILE` — optional path to a PHP file that overrides the stored connection token
+- `CONNECTION_TOKEN_OPTION` — WordPress site option name used for the stored connection token
+- `PUSH_AUTHORIZATION_OPTION` — WordPress site option containing the connection-token fingerprint granted personal push access
 - `TIMESTAMP_TOLERANCE` — max request age in seconds (default 300)
 
 For compatibility, the plugin still accepts `?site-export-api`, applies the

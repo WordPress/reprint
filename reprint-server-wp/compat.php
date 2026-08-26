@@ -9,8 +9,8 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
     $constant_aliases = [
         'SITE_EXPORT_VERSION' => 'WordPress\\Reprint\\Server\\Plugin\\VERSION',
         'SITE_EXPORT_PLUGIN_DIR' => 'WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR',
-        'SITE_EXPORT_SECRET_FILE' => 'WordPress\\Reprint\\Server\\Plugin\\SECRET_FILE',
-        'SITE_EXPORT_SECRET_OPTION' => 'WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION',
+        'SITE_EXPORT_SECRET_FILE' => 'WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE',
+        'SITE_EXPORT_SECRET_OPTION' => 'WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_OPTION',
         'SITE_EXPORT_PUSH_AUTHORIZATION_OPTION' =>
             'WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION',
         'SITE_EXPORT_TIMESTAMP_TOLERANCE' => 'WordPress\\Reprint\\Server\\Plugin\\TIMESTAMP_TOLERANCE',
@@ -94,22 +94,24 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
             }
             $options_bootstrapped = true;
 
-            $secret_option = constant('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION');
+            $connection_token_option = constant(
+                'WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_OPTION'
+            );
             $push_authorization_option = constant(
                 'WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION'
             );
             $legacy_secret_option = 'site_export_secret';
             $legacy_push_authorization_option = 'site_export_push_authorized_token_fingerprint';
 
-            if ($secret_option !== $legacy_secret_option) {
+            if ($connection_token_option !== $legacy_secret_option) {
                 add_filter(
-                    'default_option_' . $secret_option,
+                    'default_option_' . $connection_token_option,
                     static function ($default_value) use ($legacy_secret_option) {
                         return get_option($legacy_secret_option, $default_value);
                     }
                 );
                 add_action(
-                    'update_option_' . $secret_option,
+                    'update_option_' . $connection_token_option,
                     static function ($old_value, $new_value) use ($legacy_secret_option): void {
                         update_option($legacy_secret_option, $new_value, false);
                     },
@@ -117,7 +119,7 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
                     2
                 );
                 add_action(
-                    'add_option_' . $secret_option,
+                    'add_option_' . $connection_token_option,
                     static function ($option_name, $value) use ($legacy_secret_option): void {
                         update_option($legacy_secret_option, $value, false);
                     },
@@ -126,16 +128,16 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
                 );
                 add_action(
                     'update_option_' . $legacy_secret_option,
-                    static function ($old_value, $new_value) use ($secret_option): void {
-                        update_option($secret_option, $new_value, false);
+                    static function ($old_value, $new_value) use ($connection_token_option): void {
+                        update_option($connection_token_option, $new_value, false);
                     },
                     10,
                     2
                 );
                 add_action(
                     'add_option_' . $legacy_secret_option,
-                    static function ($option_name, $value) use ($secret_option): void {
-                        update_option($secret_option, $value, false);
+                    static function ($option_name, $value) use ($connection_token_option): void {
+                        update_option($connection_token_option, $value, false);
                     },
                     10,
                     2
@@ -186,17 +188,17 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
             add_action(
                 'plugins_loaded',
                 static function () use (
-                    $secret_option,
+                    $connection_token_option,
                     $push_authorization_option,
                     $legacy_secret_option,
                     $legacy_push_authorization_option
                 ): void {
-                    $legacy_secret = get_option($legacy_secret_option, null);
+                    $legacy_connection_token = get_option($legacy_secret_option, null);
                     if (
-                        is_string($legacy_secret)
-                        && get_option($secret_option, null) === $legacy_secret
+                        is_string($legacy_connection_token)
+                        && get_option($connection_token_option, null) === $legacy_connection_token
                     ) {
-                        update_option($secret_option, $legacy_secret, false);
+                        update_option($connection_token_option, $legacy_connection_token, false);
                     }
                     $legacy_fingerprint = get_option($legacy_push_authorization_option, null);
                     if (
@@ -234,23 +236,23 @@ function _site_export_load_exporter_runtime(): ?string {
 }
 
 function _site_export_has_secret_file(): bool {
-    return \WordPress\Reprint\Server\Plugin\has_secret_file();
+    return \WordPress\Reprint\Server\Plugin\has_connection_token_file();
 }
 
 function _site_export_get_file_secret(): ?string {
-    return \WordPress\Reprint\Server\Plugin\get_file_secret();
+    return \WordPress\Reprint\Server\Plugin\get_file_connection_token();
 }
 
 function _site_export_get_option_secret(): string {
-    return \WordPress\Reprint\Server\Plugin\get_option_secret();
+    return \WordPress\Reprint\Server\Plugin\get_option_connection_token();
 }
 
 function _site_export_get_shared_secret(): ?string {
-    return \WordPress\Reprint\Server\Plugin\get_shared_secret();
+    return \WordPress\Reprint\Server\Plugin\get_connection_token();
 }
 
 function _site_export_update_shared_secret(string $secret): bool {
-    return \WordPress\Reprint\Server\Plugin\update_shared_secret($secret);
+    return \WordPress\Reprint\Server\Plugin\update_connection_token($secret);
 }
 
 function _site_export_get_managed_push_enabled(): ?bool {

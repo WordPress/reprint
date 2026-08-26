@@ -84,7 +84,7 @@ function plugin_basename(string $file): string {
 }
 
 function get_option(string $name, $fallback = false) {
-    if ($name === 'reprint_server_secret' || $name === 'site_export_secret') {
+    if ($name === 'reprint_server_connection_token' || $name === 'site_export_secret') {
         return trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_SECRET_CONFIG') ) );
     }
     if (
