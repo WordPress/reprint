@@ -129,7 +129,7 @@ final class ExportLibraryLoadTest extends TestCase {
             . 'echo json_encode([' . "\n"
             . '    \'canonical_function\' => function_exists(\'WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\handle_api_request\'),' . "\n"
             . '    \'released_function\' => function_exists(\'_site_export_handle_api_request\'),' . "\n"
-            . '    \'canonical_option\' => constant(\'WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\SECRET_OPTION\'),' . "\n"
+            . '    \'canonical_option\' => constant(\'WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\CONNECTION_TOKEN_OPTION\'),' . "\n"
             . '    \'released_option\' => constant(\'SITE_EXPORT_SECRET_OPTION\'),' . "\n"
             . '    \'canonical_query_added\' => isset($_GET[\'reprint-api\']),' . "\n"
             . '], JSON_THROW_ON_ERROR);' . "\n";
@@ -140,7 +140,7 @@ final class ExportLibraryLoadTest extends TestCase {
         $symbols = json_decode(trim($result['output']), true, 512, JSON_THROW_ON_ERROR);
         $this->assertTrue($symbols['canonical_function']);
         $this->assertTrue($symbols['released_function']);
-        $this->assertSame('reprint_server_secret', $symbols['canonical_option']);
+        $this->assertSame('reprint_server_connection_token', $symbols['canonical_option']);
         $this->assertSame($symbols['canonical_option'], $symbols['released_option']);
         $this->assertFalse($symbols['canonical_query_added']);
     }
@@ -206,7 +206,7 @@ final class ExportLibraryLoadTest extends TestCase {
         $stored_options = json_decode(trim($result['output']), true, 512, JSON_THROW_ON_ERROR);
         $this->assertSame(
             [
-                'reprint_server_secret' => 'legacy-token',
+                'reprint_server_connection_token' => 'legacy-token',
                 'reprint_server_push_authorized_token_fingerprint' => 'legacy-fingerprint',
             ],
             $stored_options

@@ -9,8 +9,8 @@ function reprint_server_compat_constants(): array {
     return [
         'SITE_EXPORT_VERSION' => 'WordPress\\Reprint\\Server\\Plugin\\VERSION',
         'SITE_EXPORT_PLUGIN_DIR' => 'WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR',
-        'SITE_EXPORT_SECRET_FILE' => 'WordPress\\Reprint\\Server\\Plugin\\SECRET_FILE',
-        'SITE_EXPORT_SECRET_OPTION' => 'WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION',
+        'SITE_EXPORT_SECRET_FILE' => 'WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE',
+        'SITE_EXPORT_SECRET_OPTION' => 'WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_OPTION',
         'SITE_EXPORT_PUSH_AUTHORIZATION_OPTION' =>
             'WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION',
         'SITE_EXPORT_TIMESTAMP_TOLERANCE' => 'WordPress\\Reprint\\Server\\Plugin\\TIMESTAMP_TOLERANCE',
@@ -118,14 +118,14 @@ function reprint_server_compat_migrate_legacy_options(): void {
         !function_exists('get_option')
         || !function_exists('update_option')
         || !function_exists('delete_option')
-        || !defined('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION')
+        || !defined('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_OPTION')
         || !defined('WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION')
     ) {
         return;
     }
 
     $legacy_option_names = [
-        'site_export_secret' => constant('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION'),
+        'site_export_secret' => constant('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_OPTION'),
         'site_export_push_authorized_token_fingerprint' =>
             constant('WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION'),
     ];
@@ -173,23 +173,23 @@ function _site_export_load_exporter_runtime(): ?string {
 }
 
 function _site_export_has_secret_file(): bool {
-    return \WordPress\Reprint\Server\Plugin\has_secret_file();
+    return \WordPress\Reprint\Server\Plugin\has_connection_token_file();
 }
 
 function _site_export_get_file_secret(): ?string {
-    return \WordPress\Reprint\Server\Plugin\get_file_secret();
+    return \WordPress\Reprint\Server\Plugin\get_file_connection_token();
 }
 
 function _site_export_get_option_secret(): string {
-    return \WordPress\Reprint\Server\Plugin\get_option_secret();
+    return \WordPress\Reprint\Server\Plugin\get_option_connection_token();
 }
 
 function _site_export_get_shared_secret(): ?string {
-    return \WordPress\Reprint\Server\Plugin\get_shared_secret();
+    return \WordPress\Reprint\Server\Plugin\get_connection_token();
 }
 
 function _site_export_update_shared_secret(string $secret): bool {
-    return \WordPress\Reprint\Server\Plugin\update_shared_secret($secret);
+    return \WordPress\Reprint\Server\Plugin\update_connection_token($secret);
 }
 
 function _site_export_get_managed_push_enabled(): ?bool {
