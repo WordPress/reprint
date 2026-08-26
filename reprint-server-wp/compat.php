@@ -249,8 +249,11 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
                     if (isset($_POST['site_export_save_push_access'])) {
                         $_POST['reprint_server_save_push_access'] = $_POST['site_export_save_push_access'];
                     }
-                    if (isset($_POST['site_export_secret']) && !isset($_POST['reprint_server_secret'])) {
-                        $_POST['reprint_server_secret'] = $_POST['site_export_secret'];
+                    if (
+                        isset($_POST['site_export_secret'])
+                        && !isset($_POST['reprint_server_connection_token'])
+                    ) {
+                        $_POST['reprint_server_connection_token'] = $_POST['site_export_secret'];
                     }
                     if (
                         isset($_POST['site_export_push_enabled'])

@@ -7,15 +7,15 @@ use WordPress\Reprint\Server\Plugin\SettingsPage;
 
 use const WordPress\Reprint\Server\Plugin\PLUGIN_DIR;
 use const WordPress\Reprint\Server\Plugin\PUSH_AUTHORIZATION_OPTION;
-use const WordPress\Reprint\Server\Plugin\SECRET_FILE;
-use const WordPress\Reprint\Server\Plugin\SECRET_OPTION;
+use const WordPress\Reprint\Server\Plugin\CONNECTION_TOKEN_FILE;
+use const WordPress\Reprint\Server\Plugin\CONNECTION_TOKEN_OPTION;
 
+use function WordPress\Reprint\Server\Plugin\get_connection_token;
 use function WordPress\Reprint\Server\Plugin\get_managed_push_enabled;
 use function WordPress\Reprint\Server\Plugin\get_push_authorization_error;
-use function WordPress\Reprint\Server\Plugin\get_shared_secret;
 use function WordPress\Reprint\Server\Plugin\is_push_authorized;
+use function WordPress\Reprint\Server\Plugin\update_connection_token;
 use function WordPress\Reprint\Server\Plugin\update_push_authorization;
-use function WordPress\Reprint\Server\Plugin\update_shared_secret;
 use function WordPress\Reprint\Server\Plugin\verify_hmac;
 
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound, WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound, WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- WordPress test stubs.
@@ -27,8 +27,11 @@ $reprint_server_test_plugin_dir = sys_get_temp_dir() . '/reprint-server-plugin-t
 if (!defined('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR')) {
     define('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR', $reprint_server_test_plugin_dir);
 }
-if (!defined('WordPress\\Reprint\\Server\\Plugin\\SECRET_FILE')) {
-    define('WordPress\\Reprint\\Server\\Plugin\\SECRET_FILE', $reprint_server_test_plugin_dir . 'secret.php');
+if (!defined('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE')) {
+    define(
+        'WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE',
+        $reprint_server_test_plugin_dir . 'secret.php'
+    );
 }
 
 $GLOBALS['reprint_server_test_options'] = [];
@@ -318,15 +321,15 @@ final class ReprintServerPluginTest extends TestCase {
         putenv('SITE_EXPORT_PUSH_ENABLED');
         putenv('REPRINT_SERVER_PUSH_ENABLED');
 
-        if (file_exists(SECRET_FILE)) {
-            unlink(SECRET_FILE);
+        if (file_exists(CONNECTION_TOKEN_FILE)) {
+            unlink(CONNECTION_TOKEN_FILE);
         }
     }
 
     protected function tearDown(): void
     {
-        if (file_exists(SECRET_FILE)) {
-            unlink(SECRET_FILE);
+        if (file_exists(CONNECTION_TOKEN_FILE)) {
+            unlink(CONNECTION_TOKEN_FILE);
         }
 
         if (is_dir(PLUGIN_DIR)) {
@@ -351,11 +354,11 @@ final class ReprintServerPluginTest extends TestCase {
         parent::tearDown();
     }
 
-    public function testSharedSecretFallsBackToOptionWhenSecretFileMissing(): void
+    public function testConnectionTokenFallsBackToOptionWhenSecretFileMissing(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'option-secret';
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'option-token';
 
-        $this->assertSame('option-secret', get_shared_secret());
+        $this->assertSame('option-token', get_connection_token());
     }
 
     public function testLegacyOptionValuesRemainVisibleBeforeMigration(): void
@@ -364,23 +367,29 @@ final class ReprintServerPluginTest extends TestCase {
         $GLOBALS['reprint_server_test_options']['site_export_push_authorized_token_fingerprint'] =
             hash('sha256', 'legacy-token');
 
-        $this->assertSame('legacy-token', get_shared_secret());
+        $this->assertSame('legacy-token', get_connection_token());
         $this->assertTrue(is_push_authorized());
     }
 
-    public function testCanonicalPluginSymbolsArePrimaryAndLegacySymbolsRemainAvailable(): void
+    public function testCanonicalPluginSymbolsArePrimaryAndReleasedCompatibilityNamesRemainAvailable(): void
     {
-        $this->assertTrue(defined('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION'));
+        $this->assertTrue(defined('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE'));
+        $this->assertTrue(defined('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_OPTION'));
         $this->assertSame(
-            'reprint_server_secret',
-            constant('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION')
+            'reprint_server_connection_token',
+            constant('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_OPTION')
         );
+        $this->assertFalse(defined('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION'));
         $this->assertTrue(function_exists('WordPress\\Reprint\\Server\\Plugin\\handle_api_request'));
+        $this->assertTrue(function_exists('WordPress\\Reprint\\Server\\Plugin\\get_connection_token'));
+        $this->assertTrue(function_exists('WordPress\\Reprint\\Server\\Plugin\\update_connection_token'));
+        $this->assertFalse(function_exists('WordPress\\Reprint\\Server\\Plugin\\get_shared_secret'));
         $this->assertTrue(class_exists('WordPress\\Reprint\\Server\\Plugin\\SettingsPage'));
         $this->assertTrue(function_exists('_site_export_handle_api_request'));
         $this->assertTrue(class_exists('Site_Export_Plugin'));
         $this->assertTrue(defined('SITE_EXPORT_SECRET_OPTION'));
-        $this->assertSame(SECRET_OPTION, SITE_EXPORT_SECRET_OPTION);
+        $this->assertSame(CONNECTION_TOKEN_OPTION, SITE_EXPORT_SECRET_OPTION);
+        $this->assertSame(CONNECTION_TOKEN_FILE, SITE_EXPORT_SECRET_FILE);
     }
 
     public function testLegacyAdminIncludeAndClassNameResolveToCanonicalSettingsPage(): void
@@ -421,7 +430,10 @@ final class ReprintServerPluginTest extends TestCase {
 
         do_action('plugins_loaded');
 
-        $this->assertSame('legacy-token', $GLOBALS['reprint_server_test_options']['reprint_server_secret']);
+        $this->assertSame(
+            'legacy-token',
+            $GLOBALS['reprint_server_test_options']['reprint_server_connection_token']
+        );
         $this->assertSame(
             'legacy-fingerprint',
             $GLOBALS['reprint_server_test_options']['reprint_server_push_authorized_token_fingerprint']
@@ -431,7 +443,7 @@ final class ReprintServerPluginTest extends TestCase {
     public function testCanonicalOptionsTakePrecedenceDuringLegacyMigration(): void
     {
         $GLOBALS['reprint_server_test_options']['site_export_secret'] = 'legacy-token';
-        $GLOBALS['reprint_server_test_options']['reprint_server_secret'] = 'canonical-token';
+        $GLOBALS['reprint_server_test_options']['reprint_server_connection_token'] = 'canonical-token';
         $GLOBALS['reprint_server_test_options']['site_export_push_authorized_token_fingerprint'] =
             'legacy-fingerprint';
         $GLOBALS['reprint_server_test_options']['reprint_server_push_authorized_token_fingerprint'] =
@@ -439,7 +451,10 @@ final class ReprintServerPluginTest extends TestCase {
 
         do_action('plugins_loaded');
 
-        $this->assertSame('canonical-token', $GLOBALS['reprint_server_test_options']['reprint_server_secret']);
+        $this->assertSame(
+            'canonical-token',
+            $GLOBALS['reprint_server_test_options']['reprint_server_connection_token']
+        );
         $this->assertSame(
             'canonical-fingerprint',
             $GLOBALS['reprint_server_test_options']['reprint_server_push_authorized_token_fingerprint']
@@ -453,7 +468,7 @@ final class ReprintServerPluginTest extends TestCase {
         update_option('site_export_secret', 'legacy-write');
         update_option('site_export_push_authorized_token_fingerprint', 'legacy-fingerprint');
 
-        $this->assertSame('legacy-write', $GLOBALS['reprint_server_test_options'][SECRET_OPTION]);
+        $this->assertSame('legacy-write', $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION]);
         $this->assertSame(
             'legacy-fingerprint',
             $GLOBALS['reprint_server_test_options'][PUSH_AUTHORIZATION_OPTION]
@@ -471,12 +486,15 @@ final class ReprintServerPluginTest extends TestCase {
         do_action('admin_init');
 
         $this->assertSame('site_export_settings', $GLOBALS['reprint_server_checked_nonce_action']);
-        $this->assertSame('legacy-form-token', $GLOBALS['reprint_server_test_options'][SECRET_OPTION]);
+        $this->assertSame(
+            'legacy-form-token',
+            $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION]
+        );
     }
 
     public function testLegacyPushAccessRequestIsNormalizedBeforeCanonicalHandling(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
         $_POST = [
             'site_export_save_push_access' => '1',
             'site_export_push_enabled' => '1',
@@ -537,9 +555,13 @@ final class ReprintServerPluginTest extends TestCase {
         $settings_page->add_admin_menu();
         $this->assertSame('reprint-server', $GLOBALS['reprint_server_test_admin_menu'][3]);
 
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('name="reprint_server_connection_token"', $html);
+        $this->assertStringNotContainsString('name="reprint_server_secret"', $html);
+
         $_POST = [
             'reprint_server_save_settings' => '1',
-            'reprint_server_secret' => 'canonical-token',
+            'reprint_server_connection_token' => 'canonical-token',
         ];
         $settings_page->handle_settings_save();
 
@@ -580,27 +602,27 @@ final class ReprintServerPluginTest extends TestCase {
         $this->assertTrue(get_managed_push_enabled());
     }
 
-    public function testSecretFileOverridesSiteOptionWhenPresent(): void
+    public function testLegacySecretFileConnectionTokenOverridesSiteOptionWhenPresent(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'option-secret';
-        file_put_contents(SECRET_FILE, "<?php return 'file-secret';\n");
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'option-token';
+        file_put_contents(CONNECTION_TOKEN_FILE, "<?php return 'file-token';\n");
 
-        $this->assertSame('file-secret', get_shared_secret());
+        $this->assertSame('file-token', get_connection_token());
     }
 
-    public function testUpdatingSharedSecretWritesCanonicalAndLegacyOptions(): void
+    public function testUpdatingConnectionTokenWritesCanonicalAndLegacyOptions(): void
     {
-        $this->assertTrue(update_shared_secret('new-secret'));
-        $this->assertSame('new-secret', $GLOBALS['reprint_server_test_options'][SECRET_OPTION]);
-        $this->assertSame('new-secret', $GLOBALS['reprint_server_test_options']['site_export_secret']);
-        $this->assertFileDoesNotExist(SECRET_FILE);
+        $this->assertTrue(update_connection_token('new-token'));
+        $this->assertSame('new-token', $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION]);
+        $this->assertSame('new-token', $GLOBALS['reprint_server_test_options']['site_export_secret']);
+        $this->assertFileDoesNotExist(CONNECTION_TOKEN_FILE);
     }
 
-    public function testPluginRegistersSecretOptionForCoreSettingsRestEndpoint(): void
+    public function testPluginRegistersConnectionTokenOptionForCoreSettingsRestEndpoint(): void
     {
         SettingsPage::get_instance()->register_settings();
 
-        $setting = $GLOBALS['reprint_server_registered_settings'][SECRET_OPTION] ?? null;
+        $setting = $GLOBALS['reprint_server_registered_settings'][CONNECTION_TOKEN_OPTION] ?? null;
         $this->assertNotNull($setting);
         $this->assertSame('general', $setting['group']);
         $this->assertTrue($setting['args']['show_in_rest']);
@@ -626,7 +648,7 @@ final class ReprintServerPluginTest extends TestCase {
 
     public function testPushAuthorizationMatchesOnlyTheCurrentConnectionToken(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
         $this->assertFalse(is_push_authorized());
 
         $this->assertTrue(update_push_authorization(true));
@@ -636,13 +658,13 @@ final class ReprintServerPluginTest extends TestCase {
             $GLOBALS['reprint_server_test_options']['site_export_push_authorized_token_fingerprint']
         );
 
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'rotated-token';
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'rotated-token';
         $this->assertFalse(is_push_authorized());
     }
 
     public function testManagedEnvironmentOverridesLocalPushAuthorization(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
 
         putenv('SITE_EXPORT_PUSH_ENABLED=true');
         $this->assertTrue(is_push_authorized());
@@ -654,7 +676,7 @@ final class ReprintServerPluginTest extends TestCase {
 
     public function testPresentEmptyManagedEnvironmentFailsClosed(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
         $this->assertTrue(update_push_authorization(true));
 
         putenv('SITE_EXPORT_PUSH_ENABLED=');
@@ -669,12 +691,12 @@ final class ReprintServerPluginTest extends TestCase {
 
     public function testSavingRotatedConnectionTokenRevokesPriorConsent(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
         $this->assertTrue(update_push_authorization(true));
 
         $_POST = [
             'reprint_server_save_settings' => '1',
-            'reprint_server_secret' => 'rotated-token',
+            'reprint_server_connection_token' => 'rotated-token',
         ];
         SettingsPage::get_instance()->handle_settings_save();
 
@@ -682,41 +704,41 @@ final class ReprintServerPluginTest extends TestCase {
         $this->assertFalse(is_push_authorized());
     }
 
-    public function testRestSettingsTokenRotationPermanentlyRevokesPushAuthorization(): void
+    public function testRestSettingsConnectionTokenRotationPermanentlyRevokesPushAuthorization(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'token-a';
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'token-a';
         $this->assertTrue(update_push_authorization(true));
         SettingsPage::get_instance()->register_settings();
 
-        update_option(SECRET_OPTION, 'token-b');
-        update_option(SECRET_OPTION, 'token-a');
+        update_option(CONNECTION_TOKEN_OPTION, 'token-b');
+        update_option(CONNECTION_TOKEN_OPTION, 'token-a');
 
         $this->assertSame('', $GLOBALS['reprint_server_test_options'][PUSH_AUTHORIZATION_OPTION]);
         $this->assertFalse(is_push_authorized());
     }
 
-    public function testAddingAFormerSecretFileTokenCannotRestorePushAuthorization(): void
+    public function testAddingAFormerSecretFileConnectionTokenCannotRestorePushAuthorization(): void
     {
-        file_put_contents(SECRET_FILE, "<?php return 'token-a';\n");
+        file_put_contents(CONNECTION_TOKEN_FILE, "<?php return 'token-a';\n");
         $this->assertTrue(update_push_authorization(true));
         SettingsPage::get_instance()->register_settings();
 
-        unlink(SECRET_FILE);
+        unlink(CONNECTION_TOKEN_FILE);
         $this->assertFalse(is_push_authorized());
-        update_option(SECRET_OPTION, 'token-a');
+        update_option(CONNECTION_TOKEN_OPTION, 'token-a');
 
         $this->assertSame('', $GLOBALS['reprint_server_test_options'][PUSH_AUTHORIZATION_OPTION]);
         $this->assertFalse(is_push_authorized());
     }
 
-    public function testRestSettingsOptionChangePreservesAuthorizationForSecretFileToken(): void
+    public function testRestSettingsOptionChangePreservesAuthorizationForSecretFileConnectionToken(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'option-token-a';
-        file_put_contents(SECRET_FILE, "<?php return 'file-token';\n");
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'option-token-a';
+        file_put_contents(CONNECTION_TOKEN_FILE, "<?php return 'file-token';\n");
         $this->assertTrue(update_push_authorization(true));
         SettingsPage::get_instance()->register_settings();
 
-        update_option(SECRET_OPTION, 'option-token-b');
+        update_option(CONNECTION_TOKEN_OPTION, 'option-token-b');
 
         $this->assertSame(
             hash('sha256', 'file-token'),
@@ -727,7 +749,7 @@ final class ReprintServerPluginTest extends TestCase {
 
     public function testPushAccessFormAuthorizesTheCurrentConnectionToken(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
         $_POST = [
             'reprint_server_save_push_access' => '1',
             'reprint_server_push_enabled' => '1',
@@ -744,7 +766,7 @@ final class ReprintServerPluginTest extends TestCase {
 
     public function testDownloadOnlyAdminCopyAndPushAccessForm(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
 
         $html = $this->renderAdminPage();
 
@@ -756,9 +778,9 @@ final class ReprintServerPluginTest extends TestCase {
         $this->assertStringNotContainsString('name="reprint_server_push_enabled" value="1" checked', $html);
     }
 
-    public function testOptedInAdminCopyShowsCurrentTokenCanPush(): void
+    public function testOptedInAdminCopyShowsCurrentConnectionTokenCanPush(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
         $this->assertTrue(update_push_authorization(true));
 
         $html = $this->renderAdminPage();
@@ -769,7 +791,7 @@ final class ReprintServerPluginTest extends TestCase {
 
     public function testManagedAdminCopyIsReadOnlyAndShowsEffectiveState(): void
     {
-        $GLOBALS['reprint_server_test_options'][SECRET_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
         putenv('SITE_EXPORT_PUSH_ENABLED=true');
 
         $html = $this->renderAdminPage();

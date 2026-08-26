@@ -7,10 +7,10 @@ namespace WordPress\Reprint\Server\Plugin;
  *
  * This plugin provides a WordPress admin UI for configuring Reprint Server.
  * The server API is triggered via `?reprint-api` during plugin load,
- * before WordPress finishes booting. It reads the secret from a site option,
+ * before WordPress finishes booting. It reads the connection token from a site option,
  * with secret.php supported only as an override when present.
  *
- * Authentication uses HMAC signatures: the importing side generates a secret,
+ * Authentication uses HMAC signatures: the importing side generates a connection token,
  * the user enters it here, and all requests must include a valid signature
  * computed from the nonce, timestamp, and request content hash.
  */
@@ -28,13 +28,13 @@ class SettingsPage {
     private function __construct() {
         add_action('init', [$this, 'register_settings']);
         add_action(
-            'update_option_' . SECRET_OPTION,
+            'update_option_' . CONNECTION_TOKEN_OPTION,
             [$this, 'revoke_push_authorization_after_connection_token_change'],
             10,
             2
         );
         add_action(
-            'add_option_' . SECRET_OPTION,
+            'add_option_' . CONNECTION_TOKEN_OPTION,
             [$this, 'revoke_push_authorization_after_connection_token_added'],
             10,
             0
@@ -49,7 +49,7 @@ class SettingsPage {
     public function register_settings() {
         register_setting(
             'general',
-            SECRET_OPTION,
+            CONNECTION_TOKEN_OPTION,
             [
                 'type' => 'string',
                 'sanitize_callback' => 'sanitize_text_field',
@@ -68,7 +68,7 @@ class SettingsPage {
      * @param mixed $new_value New option value.
      */
     public function revoke_push_authorization_after_connection_token_change($old_value, $new_value) {
-        if (has_secret_file()) {
+        if (has_connection_token_file()) {
             return;
         }
 
@@ -88,7 +88,7 @@ class SettingsPage {
      *
      */
     public function revoke_push_authorization_after_connection_token_added() {
-        if (!has_secret_file()) {
+        if (!has_connection_token_file()) {
             update_push_authorization(false);
         }
     }
@@ -155,16 +155,23 @@ class SettingsPage {
         check_admin_referer(is_string($nonce_action) ? $nonce_action : 'reprint_server_settings');
 
         if ($saving_connection_token) {
-            if (isset($_POST['reprint_server_secret'])) {
-                $secret = sanitize_text_field(wp_unslash($_POST['reprint_server_secret']));
+            if (isset($_POST['reprint_server_connection_token'])) {
+                $connection_token = sanitize_text_field(
+                    wp_unslash($_POST['reprint_server_connection_token'])
+                );
             } else {
-                $secret = '';
+                $connection_token = '';
             }
-            $updated = update_shared_secret($secret);
-            $saved = $updated || get_option_secret() === $secret;
+            $updated = update_connection_token($connection_token);
+            $saved = $updated || get_option_connection_token() === $connection_token;
 
             if (!$saved) {
-                add_settings_error('reprint_server', 'save_failed', 'Failed to save secret.', 'error');
+                add_settings_error(
+                    'reprint_server',
+                    'save_failed',
+                    'Failed to save connection token.',
+                    'error'
+                );
                 return;
             }
 
@@ -214,11 +221,11 @@ class SettingsPage {
             return;
         }
 
-        $stored_secret = get_option_secret();
-        $effective_secret = get_shared_secret() ?? '';
+        $stored_connection_token = get_option_connection_token();
+        $effective_connection_token = get_connection_token() ?? '';
         $api_url = home_url('?reprint-api');
-        $is_configured = $effective_secret !== '';
-        $has_file_override = has_secret_file();
+        $is_configured = $effective_connection_token !== '';
+        $has_file_override = has_connection_token_file();
         $push_supported = push_is_supported();
         $managed_push_enabled = get_managed_push_enabled();
         $push_enabled = $push_supported && is_push_authorized();
@@ -278,20 +285,20 @@ class SettingsPage {
                 color: #646970;
                 margin: 12px 0 0 24px;
             }
-            .reprint-server-secret-field {
+            .reprint-server-connection-token-field {
                 display: flex;
                 gap: 8px;
                 align-items: start;
             }
-            .reprint-server-secret-field input[type="password"],
-            .reprint-server-secret-field input[type="text"] {
+            .reprint-server-connection-token-field input[type="password"],
+            .reprint-server-connection-token-field input[type="text"] {
                 flex: 1;
                 font-family: monospace;
                 font-size: 14px;
                 padding: 8px 12px;
                 border-radius: 4px;
             }
-            .reprint-server-secret-field .button {
+            .reprint-server-connection-token-field .button {
                 flex-shrink: 0;
                 height: 38px;
             }
@@ -404,14 +411,14 @@ class SettingsPage {
                 <form method="post" action="">
                     <?php wp_nonce_field('reprint_server_settings'); ?>
 
-                    <div class="reprint-server-secret-field">
+                    <div class="reprint-server-connection-token-field">
                         <input type="password"
-                               id="reprint_server_secret"
-                               name="reprint_server_secret"
-                               value="<?php echo esc_attr($stored_secret); ?>"
+                               id="reprint_server_connection_token"
+                               name="reprint_server_connection_token"
+                               value="<?php echo esc_attr($stored_connection_token); ?>"
                                placeholder="Paste your token here"
                                autocomplete="off" />
-                        <button type="button" class="reprint-server-toggle-btn" onclick="reprintServerToggleSecret()" title="Show / hide token">
+                        <button type="button" class="reprint-server-toggle-btn" onclick="reprintServerToggleConnectionToken()" title="Show / hide token">
                             <span class="dashicons dashicons-visibility"></span>
                         </button>
                         <input type="submit"
@@ -468,8 +475,8 @@ class SettingsPage {
         </div>
 
         <script>
-        function reprintServerToggleSecret() {
-            var input = document.getElementById('reprint_server_secret');
+        function reprintServerToggleConnectionToken() {
+            var input = document.getElementById('reprint_server_connection_token');
             input.type = input.type === 'password' ? 'text' : 'password';
         }
         function reprintServerCopyUrl() {
