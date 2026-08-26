@@ -151,20 +151,7 @@ class SettingsPage {
             ?>
             </p>
 
-            <?php
-            ob_start();
-            settings_errors();
-            $settings_errors_markup = ob_get_clean();
-            if (is_string($settings_errors_markup)) {
-                // Core bolds each complete message and moves non-inline notices after load.
-                // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- settings_errors() returns escaped core markup.
-                echo str_replace(
-                    ['settings-error is-dismissible', '<strong>', '</strong>'],
-                    ['settings-error is-dismissible inline', '', ''],
-                    $settings_errors_markup
-                );
-            }
-            ?>
+            <?php $this->render_settings_notices(); ?>
             <?php $this->render_push_access_notice(); ?>
             <?php $this->render_configuration_status($configuration); ?>
 
@@ -219,34 +206,33 @@ class SettingsPage {
      */
     private function render_configuration_status(array $configuration): void {
         if ($configuration['has_secret_file']) {
-            echo '<div class="notice notice-warning inline"><p><strong><code>secret.php</code> '
+            $message = '<strong><code>secret.php</code> '
                 . esc_html__('override is active.', 'reprint')
                 . '</strong> '
                 . esc_html__(
                     'This page and the REST API update only the site option. Remove secret.php to use the stored option value.',
                     'reprint'
-                )
-                . '</p></div>';
+                );
+            $this->render_notice('warning', $message);
         }
 
         if (!$configuration['is_configured']) {
-            echo '<div class="notice notice-warning inline"><p><strong>'
+            $message = '<strong>'
                 . esc_html__('Not configured yet.', 'reprint')
                 . '</strong> '
-                . esc_html__('Enter a connection token to get started.', 'reprint')
-                . '</p></div>';
+                . esc_html__('Enter a connection token to get started.', 'reprint');
+            $this->render_notice('warning', $message);
             return;
         }
 
-        echo '<div class="notice notice-info inline"><p>';
         if ($configuration['push_enabled']) {
-            echo '<strong>' . esc_html__('Connected for downloads and push.', 'reprint') . '</strong> '
+            $message = '<strong>' . esc_html__('Connected for downloads and push.', 'reprint') . '</strong> '
                 . esc_html__('The current connection token can change files on this site.', 'reprint');
         } else {
-            echo '<strong>' . esc_html__('Connected for downloads.', 'reprint') . '</strong> '
+            $message = '<strong>' . esc_html__('Connected for downloads.', 'reprint') . '</strong> '
                 . esc_html__('The connection token cannot change files on this site.', 'reprint');
         }
-        echo '</p></div>';
+        $this->render_notice('info', $message);
     }
 
     /** Render the push-access form or its read-only state. */
@@ -260,9 +246,7 @@ class SettingsPage {
                 ),
                 PHP_VERSION
             );
-            echo '<div class="notice notice-warning inline"><p>'
-                . esc_html($unsupported_message)
-                . '</p></div>';
+            $this->render_notice('warning', esc_html($unsupported_message));
             return;
         }
 
@@ -344,10 +328,54 @@ class SettingsPage {
             return;
         }
 
-        $notice_classes = 'notice notice-' . $notices[$result][0] . ' is-dismissible inline';
-        echo '<div class="' . esc_attr($notice_classes) . '"><p>'
-            . esc_html($notices[$result][1])
-            . '</p></div>';
+        $this->render_notice(
+            $notices[$result][0],
+            esc_html($notices[$result][1]),
+            true
+        );
+    }
+
+    /** Render Settings API results with stable native notice markup. */
+    private function render_settings_notices(): void {
+        foreach (get_settings_errors() as $notice) {
+            $type = $notice['type'] === 'updated' ? 'success' : $notice['type'];
+            $this->render_notice(
+                $type,
+                $notice['message'],
+                true,
+                'setting-error-' . $notice['code'],
+                true
+            );
+        }
+    }
+
+    /** Render one native inline administrator notice. */
+    private function render_notice(
+        string $type,
+        string $message,
+        bool $dismissible = false,
+        string $id = '',
+        bool $settings_error = false
+    ): void {
+        $allowed_types = ['error', 'success', 'warning', 'info'];
+        if (!in_array($type, $allowed_types, true)) {
+            $type = 'error';
+        }
+
+        $classes = 'notice notice-' . $type;
+        if ($settings_error) {
+            $classes .= ' settings-error';
+        }
+        if ($dismissible) {
+            $classes .= ' is-dismissible';
+        }
+        $classes .= ' inline';
+        ?>
+        <div<?php if ($id !== ''): ?> id="<?php echo esc_attr($id); ?>"<?php endif; ?>
+             class="<?php echo esc_attr($classes); ?>">
+            <p><?php echo wp_kses_post($message); ?></p>
+        </div>
+        <?php
     }
 }
 

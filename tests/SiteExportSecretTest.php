@@ -27,7 +27,6 @@ $GLOBALS['site_export_test_options'] = [];
 $GLOBALS['site_export_registered_settings'] = [];
 $GLOBALS['site_export_settings_errors'] = [];
 $GLOBALS['site_export_settings_error_requests'] = [];
-$GLOBALS['site_export_settings_errors_markup'] = '';
 $GLOBALS['site_export_test_actions'] = [];
 $GLOBALS['site_export_test_menu'] = null;
 $GLOBALS['site_export_test_sections'] = [];
@@ -266,10 +265,21 @@ if (!function_exists('add_settings_error')) {
     }
 }
 
-if (!function_exists('settings_errors')) {
-    function settings_errors(string $setting = ''): void {
+if (!function_exists('get_settings_errors')) {
+    function get_settings_errors(string $setting = '', bool $sanitize = false): array {
         $GLOBALS['site_export_settings_error_requests'][] = $setting;
-        echo $GLOBALS['site_export_settings_errors_markup'];
+        if ($setting === '') {
+            return $GLOBALS['site_export_settings_errors'];
+        }
+
+        return array_values(
+            array_filter(
+                $GLOBALS['site_export_settings_errors'],
+                static function(array $notice) use ($setting): bool {
+                    return $notice['setting'] === $setting;
+                }
+            )
+        );
     }
 }
 
@@ -387,6 +397,12 @@ if (!function_exists('esc_html')) {
     }
 }
 
+if (!function_exists('wp_kses_post')) {
+    function wp_kses_post(string $value): string {
+        return $value;
+    }
+}
+
 if (!function_exists('esc_url')) {
     function esc_url(string $value): string {
         return esc_attr($value);
@@ -439,7 +455,6 @@ final class SiteExportSecretTest extends TestCase
         $GLOBALS['site_export_registered_settings'] = [];
         $GLOBALS['site_export_settings_errors'] = [];
         $GLOBALS['site_export_settings_error_requests'] = [];
-        $GLOBALS['site_export_settings_errors_markup'] = '';
         $GLOBALS['site_export_test_menu'] = null;
         $GLOBALS['site_export_test_sections'] = [];
         $GLOBALS['site_export_test_fields'] = [];
@@ -908,6 +923,10 @@ final class SiteExportSecretTest extends TestCase
         );
         $this->assertStringContainsString('class SettingsPage', $administrator_source);
         $this->assertStringNotContainsString('class Site_Export', $administrator_source);
+        $this->assertStringContainsString('get_settings_errors()', $administrator_source);
+        $this->assertDoesNotMatchRegularExpression('/(?<!get_)settings_errors\s*\(/', $administrator_source);
+        $this->assertStringNotContainsString('ob_start()', $administrator_source);
+        $this->assertStringNotContainsString('str_replace(', $administrator_source);
         $this->assertStringNotContainsString('site-export', $administrator_source);
         $this->assertStringNotContainsString('site_export', $administrator_source);
         $this->assertStringNotContainsString('site-export', $administrator_script);
@@ -951,12 +970,16 @@ final class SiteExportSecretTest extends TestCase
 
     public function testCoreSettingsNoticeIsInlineAtItsRenderedPosition(): void
     {
-        $GLOBALS['site_export_settings_errors_markup'] =
-            '<div class="notice notice-success settings-error is-dismissible"><p><strong>'
-            . 'Settings saved.</strong></p></div>';
+        $GLOBALS['site_export_settings_errors'][] = [
+            'setting' => 'general',
+            'code' => 'settings_updated',
+            'message' => 'Settings saved.',
+            'type' => 'updated',
+        ];
 
         $html = $this->renderAdminPage();
 
+        $this->assertStringContainsString('id="setting-error-settings_updated"', $html);
         $this->assertStringContainsString(
             'notice notice-success settings-error is-dismissible inline',
             $html
@@ -967,6 +990,24 @@ final class SiteExportSecretTest extends TestCase
         );
         $this->assertStringContainsString('<p>Settings saved.</p>', $html);
         $this->assertStringNotContainsString('<strong>Settings saved.</strong>', $html);
+    }
+
+    public function testCoreSettingsNoticeFallsBackToErrorForAnUnknownType(): void
+    {
+        $GLOBALS['site_export_settings_errors'][] = [
+            'setting' => 'general',
+            'code' => 'unexpected_type',
+            'message' => 'Something needs attention.',
+            'type' => 'unexpected',
+        ];
+
+        $html = $this->renderAdminPage();
+
+        $this->assertStringContainsString(
+            'notice notice-error settings-error is-dismissible inline',
+            $html
+        );
+        $this->assertStringContainsString('<p>Something needs attention.</p>', $html);
     }
 
     public function testOptedInAdminCopyShowsCurrentConnectionTokenCanPush(): void
@@ -1070,9 +1111,12 @@ final class SiteExportSecretTest extends TestCase
     public function testSettingsSaveSupersedesAStalePushAccessNotice(): void
     {
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
-        $GLOBALS['site_export_settings_errors_markup'] =
-            '<div class="notice notice-success settings-error is-dismissible"><p><strong>'
-            . 'Settings saved.</strong></p></div>';
+        $GLOBALS['site_export_settings_errors'][] = [
+            'setting' => 'general',
+            'code' => 'settings_updated',
+            'message' => 'Settings saved.',
+            'type' => 'updated',
+        ];
         $_GET['settings-updated'] = 'true';
         $_GET['reprint_server_notice'] = 'saved';
 
