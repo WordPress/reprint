@@ -2434,6 +2434,24 @@ function endpoint_preflight(array $config): array
         array_keys($environment_variables)
     )));
 
+    // -- Probe whether streaming responses can avoid double compression --
+    $current_output_compression = ini_get("zlib.output_compression");
+    $output_compression_is_on = ! in_array($current_output_compression, [false, "", "0"], true);
+
+    $output_compression_can_be_disabled = true;
+    if ($output_compression_is_on) {
+        $output_compression_can_be_disabled = false;
+
+        if (function_exists("ini_set")) {
+            @ini_set("zlib.output_compression", "0");
+
+            $probed = ini_get("zlib.output_compression");
+            $output_compression_can_be_disabled = in_array($probed, [false, "", "0"], true);
+
+            @ini_set("zlib.output_compression", $current_output_compression);
+        }
+    }
+
     // -- Assemble and return the preflight response --
     $ok =
         $preflight_error === null &&
@@ -2473,8 +2491,8 @@ function endpoint_preflight(array $config): array
             "upload_max_bytes" => $upload_max_bytes,
             "max_request_bytes" => $max_request_bytes,
             "output_buffering" => ini_get("output_buffering") ?: null,
-            "zlib_output_compression" =>
-                ini_get("zlib.output_compression") ?: null,
+            "zlib_output_compression" => ini_get("zlib.output_compression") ?: null,
+            "zlib_output_compression_can_be_disabled" => $output_compression_can_be_disabled,
             "disable_functions" => ini_get("disable_functions") ?: null,
             "allow_url_fopen" => ini_get("allow_url_fopen") ?: null,
             "open_basedir" => ini_get("open_basedir") ?: null,
