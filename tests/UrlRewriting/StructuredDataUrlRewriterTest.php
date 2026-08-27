@@ -785,4 +785,147 @@ class StructuredDataUrlRewriterTest extends TestCase
             $rewriter->value_might_contain_source_domain('<a href="https://other-site.com/page">Link</a>')
         );
     }
+
+    // --- cache bounds ---
+
+    /** Reads a private member so the bound itself is asserted, not a proxy for it. */
+    private function readPrivate(StructuredDataUrlRewriter $rewriter, string $member)
+    {
+        $property = new ReflectionProperty($rewriter, $member);
+        $property->setAccessible(true);
+
+        return $property->getValue($rewriter);
+    }
+
+    public function testOversizedValuesSkipTheCacheButAreStillRewritten(): void
+    {
+        $rewriter = $this->createRewriter();
+
+        $unit = '<a href="https://old-site.com/page">Link</a>';
+        $oversized = str_repeat($unit, (int) ceil(70000 / strlen($unit)));
+        $this->assertGreaterThan(65536, strlen($oversized));
+
+        $result = $rewriter->rewrite($oversized);
+
+        $this->assertStringNotContainsString('old-site.com', $result);
+        $this->assertSame(
+            substr_count($oversized, 'old-site.com'),
+            substr_count($result, 'new-site.com')
+        );
+        $this->assertSame([], $this->readPrivate($rewriter, 'value_rewrite_cache')['data']);
+
+        // A repeat of the same oversized value must rewrite identically
+        // even though nothing was cached for it.
+        $this->assertSame($result, $rewriter->rewrite($oversized));
+    }
+
+    public function testBoundedCacheStaysWithinItsByteBudget(): void
+    {
+        $rewriter = $this->createRewriter();
+
+        $reflection = new ReflectionClass($rewriter);
+        $budget = $reflection->getConstant('URL_REWRITE_CACHE_MAX_TOTAL_BYTES');
+
+        // Enough distinct URLs to overflow the budget several times over, so
+        // eviction has to run. Driven through the URL cache because it shares
+        // store_in_bounded_cache() with the value cache but has a far smaller
+        // budget, keeping the test well inside PHP's default memory_limit.
+        $markup = '';
+        for ($i = 0; $i < 6000; $i++) {
+            $markup .= '<a href="https://old-site.com/page-' . $i . '">x</a>';
+        }
+
+        $rewriter->rewrite($markup, 'block_markup');
+
+        $cache = $this->readPrivate($rewriter, 'url_rewrite_cache');
+        $this->assertLessThanOrEqual($budget, $cache['bytes']);
+        $this->assertNotEmpty($cache['data']);
+        $this->assertLessThan(6000, count($cache['data']), 'Expected eviction to drop the oldest entries.');
+    }
+
+    public function testInlineDataUriIsNotCachedByTheUrlCache(): void
+    {
+        $rewriter = $this->createRewriter();
+
+        // An inline image is ordinary in post content, and its whole payload
+        // would otherwise become the cache key.
+        $data_uri = 'data:image/png;base64,' . base64_encode(str_repeat('p', 300000));
+        $markup = '<figure><img src="' . $data_uri . '"/>'
+            . '<a href="https://old-site.com/p">x</a></figure>';
+
+        $result = $rewriter->rewrite($markup, 'block_markup');
+
+        // The data: URI survives untouched and the real URL is still rewritten.
+        $this->assertStringContainsString($data_uri, $result);
+        $this->assertStringContainsString('https://new-site.com/p', $result);
+
+        $this->assertLessThan(
+            strlen($data_uri),
+            $this->readPrivate($rewriter, 'url_rewrite_cache')['bytes'],
+            'The data: URI payload must not be retained as a cache key.'
+        );
+    }
+
+    public function testRewritingTheSameValueTwiceDoesNotDoubleCountCacheBytes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $value = '<a href="https://old-site.com/page">Link</a>';
+
+        $rewriter->rewrite($value);
+        $after_first = $this->readPrivate($rewriter, 'value_rewrite_cache')['bytes'];
+
+        $rewriter->rewrite($value);
+
+        $cache = $this->readPrivate($rewriter, 'value_rewrite_cache');
+        $this->assertSame($after_first, $cache['bytes']);
+        $this->assertCount(1, $cache['data']);
+    }
+
+    /**
+     * Each URL appears twice, so the second occurrence is served from the URL
+     * cache. A cached entry stores its parsed URL serialized, and a relative
+     * URL cannot be re-derived from its raw form alone — the processor's base
+     * is the source host — so this locks the round-trip for every shape.
+     */
+    public function testCachedUrlHitsRewriteIdenticallyForEveryUrlShape(): void
+    {
+        $shapes = [
+            'absolute'          => ['https://old-site.com/uploads/a.jpg', 'https://new-site.com/uploads/a.jpg'],
+            'relative path'     => ['/uploads/b.jpg', '/uploads/b.jpg'],
+            'protocol-relative' => ['//old-site.com/uploads/c.jpg', '/uploads/c.jpg'],
+            'relative no-slash' => ['uploads/d.jpg', '/uploads/d.jpg'],
+            'relative dotted'   => ['../uploads/e.jpg', '/uploads/e.jpg'],
+            'query embedded'    => ['/page?ref=https://old-site.com/x', '/page?ref=https://new-site.com/x'],
+        ];
+
+        $rewriter = $this->createRewriter();
+
+        foreach ($shapes as $label => [$input, $expected]) {
+            $markup = '<figure><img src="' . $input . '"/><img src="' . $input . '"/></figure>';
+            $result = $rewriter->rewrite($markup, 'block_markup');
+
+            $this->assertSame(
+                '<figure><img src="' . $expected . '"/><img src="' . $expected . '"/></figure>',
+                $result,
+                "Cached hit diverged from the first rewrite for: {$label}"
+            );
+        }
+    }
+
+    public function testUrlCacheRetainsNoObjects(): void
+    {
+        $rewriter = $this->createRewriter();
+        $rewriter->rewrite('<a href="https://old-site.com/page">x</a>', 'block_markup');
+
+        $cache = $this->readPrivate($rewriter, 'url_rewrite_cache');
+        $this->assertNotEmpty($cache['data']);
+
+        foreach ($cache['data'] as $entry) {
+            $parts = (array) $entry;
+
+            foreach ($parts as $part) {
+                $this->assertIsNotObject($part, 'The URL cache must hold no live object graph.');
+            }
+        }
+    }
 }
