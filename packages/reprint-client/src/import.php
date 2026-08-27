@@ -2942,6 +2942,23 @@ class ImportClient
             $all_pass = false;
         }
 
+        // 6. Response streaming won't be double-compressed
+        $limits = $data["limits"] ?? null;
+        $stream_ok = true;
+        if (is_array($limits) && isset($limits["zlib_output_compression_can_be_disabled"])) {
+            $stream_ok = $limits["zlib_output_compression_can_be_disabled"] !== false;
+        }
+        $checks[] = [
+            "label" => "Response streaming won't be double-compressed",
+            "pass" => $stream_ok,
+            "detail" => $stream_ok
+                ? "zlib.output_compression can be disabled"
+                : "zlib.output_compression is on and cannot be disabled",
+        ];
+        if (!$stream_ok) {
+            $all_pass = false;
+        }
+
         // We do not check for any encoding issues here. We'll move over
         // the entire database as it is.
 

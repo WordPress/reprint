@@ -643,9 +643,11 @@ function prepare_streaming_response(): void
      * entire point of this plugin is to stream the response, therefore we use a custom
      * GzipOutputStream.
      */
-    @ini_set("zlib.output_compression", "0");
-    @ini_set("output_buffering", "0");
-    @ini_set("implicit_flush", "1");
+    if (function_exists("ini_set")) {
+        @ini_set("zlib.output_compression", "0");
+        @ini_set("output_buffering", "0");
+        @ini_set("implicit_flush", "1");
+    }
 
     @ob_implicit_flush(true);
 }
@@ -1647,8 +1649,8 @@ function endpoint_preflight(array $config): array
                 }
             }
             if ($openable) {
-                $disk_free = @disk_free_space($dir);
-                $disk_total = @disk_total_space($dir);
+                $disk_free = function_exists("disk_free_space") ? @disk_free_space($dir) : false;
+                $disk_total = function_exists("disk_total_space") ? @disk_total_space($dir) : false;
             }
             $dir_checks[] = [
                 "path" => $dir,
@@ -2432,6 +2434,24 @@ function endpoint_preflight(array $config): array
         array_keys($environment_variables)
     )));
 
+    // -- Probe whether streaming responses can avoid double compression --
+    $current_output_compression = ini_get("zlib.output_compression");
+    $output_compression_is_on = ! in_array($current_output_compression, [false, "", "0"], true);
+
+    $output_compression_can_be_disabled = true;
+    if ($output_compression_is_on) {
+        $output_compression_can_be_disabled = false;
+
+        if (function_exists("ini_set")) {
+            @ini_set("zlib.output_compression", "0");
+
+            $probed = ini_get("zlib.output_compression");
+            $output_compression_can_be_disabled = in_array($probed, [false, "", "0"], true);
+
+            @ini_set("zlib.output_compression", $current_output_compression);
+        }
+    }
+
     // -- Assemble and return the preflight response --
     $ok =
         $preflight_error === null &&
@@ -2453,7 +2473,7 @@ function endpoint_preflight(array $config): array
         ],
         "php" => [
             "version" => PHP_VERSION,
-            "sapi" => php_sapi_name(),
+            "sapi" => function_exists("php_sapi_name") ? php_sapi_name() : null,
             "timezone" => date_default_timezone_get(),
             "extensions" => $extensions,
             "extension_versions" => $extension_versions,
@@ -2471,8 +2491,8 @@ function endpoint_preflight(array $config): array
             "upload_max_bytes" => $upload_max_bytes,
             "max_request_bytes" => $max_request_bytes,
             "output_buffering" => ini_get("output_buffering") ?: null,
-            "zlib_output_compression" =>
-                ini_get("zlib.output_compression") ?: null,
+            "zlib_output_compression" => ini_get("zlib.output_compression") ?: null,
+            "zlib_output_compression_can_be_disabled" => $output_compression_can_be_disabled,
             "disable_functions" => ini_get("disable_functions") ?: null,
             "allow_url_fopen" => ini_get("allow_url_fopen") ?: null,
             "open_basedir" => ini_get("open_basedir") ?: null,
@@ -2501,7 +2521,7 @@ function endpoint_preflight(array $config): array
             // overrides.  This captures the full configuration without
             // needing to read the .ini files themselves.
             "ini_get_all" => ini_get_all(null, false),
-            "temp_dir" => sys_get_temp_dir(),
+            "temp_dir" => function_exists("sys_get_temp_dir") ? sys_get_temp_dir() : null,
             "document_root" => $_SERVER["DOCUMENT_ROOT"] ?? null,
             "script_filename" => $_SERVER["SCRIPT_FILENAME"] ?? null,
             "cwd" => getcwd() ?: null,
