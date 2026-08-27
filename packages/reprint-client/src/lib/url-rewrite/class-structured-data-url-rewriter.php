@@ -30,8 +30,13 @@ class StructuredDataUrlRewriter
 {
     const BLOCK_MARKUP = 'block_markup';
     const PLAIN_TEXT = 'plain_text';
-    private const STRUCTURED_REWRITE_CACHE_MAX = 4096;
-    private const REWRITE_RESULT_CACHE_MAX = 4096;
+
+    /** There are diminishing hit rate returns when dealing with values larger than this. */
+    private const VALUE_REWRITE_CACHE_MAX_INPUT_BYTES = 64 * 1024;
+    private const VALUE_REWRITE_CACHE_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
+
+    private const URL_REWRITE_CACHE_MAX_INPUT_BYTES = 2 * 1024;
+    private const URL_REWRITE_CACHE_MAX_TOTAL_BYTES = 4 * 1024 * 1024;
 
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
@@ -64,21 +69,20 @@ class StructuredDataUrlRewriter
     /** @var string Cache namespace for this rewriter's URL mapping. */
     private string $mapping_cache_key;
 
-    /** @var array<string, array{content_type: string, input: string, output: string}> */
-    private array $structured_rewrite_cache = [];
+    /**
+     * Rewrites keyed by an entire value; hits only on an exact repeat.
+     *
+     * @var array{bytes: int, data: array<string, string>}
+     */
+    private array $value_rewrite_cache = ['bytes' => 0, 'data' => []];
 
-    /** @var string[] */
-    private array $structured_rewrite_cache_ring = [];
-
-    private int $structured_rewrite_cache_next = 0;
-
-    /** @var array<string, false|array{raw_url: string, parsed_url: mixed}> */
-    private array $rewrite_result_cache = [];
-
-    /** @var string[] */
-    private array $rewrite_result_cache_ring = [];
-
-    private int $rewrite_result_cache_next = 0;
+    /**
+     * Rewrites keyed by one URL found inside a value, including misses. An
+     * empty entry records a URL that matched no source base.
+     *
+     * @var array{bytes: int, data: array<string, string>}
+     */
+    private array $url_rewrite_cache = ['bytes' => 0, 'data' => []];
 
     /**
      * @param array<string, string> $url_mapping Source URL => target URL mapping.
@@ -137,10 +141,14 @@ class StructuredDataUrlRewriter
             $content_type = self::PLAIN_TEXT;
         }
 
-        $structured_cache_key = sha1($content_type . "\0" . $value);
-        $cached = $this->get_cached_structured_rewrite($structured_cache_key, $content_type, $value);
-        if ($cached !== null) {
-            return $cached;
+        $cache_key = null;
+        if (strlen($value) <= self::VALUE_REWRITE_CACHE_MAX_INPUT_BYTES) {
+            $cache_key = sha1($content_type . "\0" . $value);
+
+            $cached = $this->get_cached_value_rewrite($cache_key, $content_type, $value);
+            if ($cached !== null) {
+                return $cached;
+            }
         }
 
         // Quick-reject: if the value doesn't contain href=", src=", or any
@@ -166,7 +174,9 @@ class StructuredDataUrlRewriter
                     }
                 }
                 $rewritten_value = $p->get_updated_serialization();
-                $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
+                if ($cache_key !== null) {
+                    $this->set_cached_value_rewrite($cache_key, $content_type, $value, $rewritten_value);
+                }
                 return $rewritten_value;
             }
         }
@@ -186,7 +196,9 @@ class StructuredDataUrlRewriter
                     }
                 }
                 $rewritten_value = $iter->get_result();
-                $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
+                if ($cache_key !== null) {
+                    $this->set_cached_value_rewrite($cache_key, $content_type, $value, $rewritten_value);
+                }
                 return $rewritten_value;
             }
         }
@@ -197,7 +209,10 @@ class StructuredDataUrlRewriter
         // was for base64-within-base64 nesting which is rare in practice.
 
         $rewritten_value = $this->rewrite_urls($value, $content_type);
-        $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
+        if ($cache_key !== null) {
+            $this->set_cached_value_rewrite($cache_key, $content_type, $value, $rewritten_value);
+        }
+
         return $rewritten_value;
     }
 
@@ -296,13 +311,14 @@ class StructuredDataUrlRewriter
         }
     }
 
-    private function get_cached_structured_rewrite(string $cache_key, string $content_type, string $value): ?string
+    private function get_cached_value_rewrite(string $cache_key, string $content_type, string $value): ?string
     {
-        if (!array_key_exists($cache_key, $this->structured_rewrite_cache)) {
+        $cached_entry = $this->value_rewrite_cache['data'][$cache_key] ?? null;
+        if ($cached_entry === null) {
             return null;
         }
 
-        $entry = $this->structured_rewrite_cache[$cache_key];
+        $entry = unserialize($cached_entry);
         if ($entry['content_type'] !== $content_type || $entry['input'] !== $value) {
             return null;
         }
@@ -310,25 +326,20 @@ class StructuredDataUrlRewriter
         return $entry['output'];
     }
 
-    private function set_cached_structured_rewrite(string $cache_key, string $content_type, string $input, string $output): void
+    private function set_cached_value_rewrite(string $cache_key, string $content_type, string $input, string $output): void
     {
-        if (!array_key_exists($cache_key, $this->structured_rewrite_cache)) {
-            if (count($this->structured_rewrite_cache_ring) < self::STRUCTURED_REWRITE_CACHE_MAX) {
-                $this->structured_rewrite_cache_ring[] = $cache_key;
-            } else {
-                $evicted_key = $this->structured_rewrite_cache_ring[$this->structured_rewrite_cache_next];
-                unset($this->structured_rewrite_cache[$evicted_key]);
-                $this->structured_rewrite_cache_ring[$this->structured_rewrite_cache_next] = $cache_key;
-            }
-
-            $this->structured_rewrite_cache_next = ($this->structured_rewrite_cache_next + 1) % self::STRUCTURED_REWRITE_CACHE_MAX;
-        }
-
-        $this->structured_rewrite_cache[$cache_key] = [
+        $entry = serialize([
             'content_type' => $content_type,
-            'input'       => $input,
-            'output'      => $output,
-        ];
+            'input'        => $input,
+            'output'       => $output,
+        ]);
+
+        $this->store_in_bounded_cache(
+            $this->value_rewrite_cache,
+            $cache_key,
+            $entry,
+            self::VALUE_REWRITE_CACHE_MAX_TOTAL_BYTES
+        );
     }
 
     /**
@@ -364,11 +375,14 @@ class StructuredDataUrlRewriter
         return false;
     }
 
-    private function get_cached_rewrite_result(string $cache_key)
+    private function get_cached_url_rewrite(string $cache_key)
     {
-        return array_key_exists($cache_key, $this->rewrite_result_cache)
-            ? $this->rewrite_result_cache[$cache_key]
-            : null;
+        $cached_entry = $this->url_rewrite_cache['data'][$cache_key] ?? null;
+        if ($cached_entry === null) {
+            return null;
+        }
+
+        return $cached_entry === '' ? false : unserialize($cached_entry);
     }
 
     /**
@@ -380,21 +394,16 @@ class StructuredDataUrlRewriter
      * }
      * @phpstan-param false|array{raw_url: string, parsed_url: mixed} $value
      */
-    private function set_cached_rewrite_result(string $cache_key, $value): void
+    private function set_cached_url_rewrite(string $cache_key, $value): void
     {
-        if (!array_key_exists($cache_key, $this->rewrite_result_cache)) {
-            if (count($this->rewrite_result_cache_ring) < self::REWRITE_RESULT_CACHE_MAX) {
-                $this->rewrite_result_cache_ring[] = $cache_key;
-            } else {
-                $evicted_key = $this->rewrite_result_cache_ring[$this->rewrite_result_cache_next];
-                unset($this->rewrite_result_cache[$evicted_key]);
-                $this->rewrite_result_cache_ring[$this->rewrite_result_cache_next] = $cache_key;
-            }
+        $entry = $value === false ? '' : serialize($value);
 
-            $this->rewrite_result_cache_next = ($this->rewrite_result_cache_next + 1) % self::REWRITE_RESULT_CACHE_MAX;
-        }
-
-        $this->rewrite_result_cache[$cache_key] = $value;
+        $this->store_in_bounded_cache(
+            $this->url_rewrite_cache,
+            $cache_key,
+            $entry,
+            self::URL_REWRITE_CACHE_MAX_TOTAL_BYTES
+        );
     }
 
     /**
@@ -426,7 +435,7 @@ class StructuredDataUrlRewriter
      *
      * then it would be nice to re-encode that block markup also without the space character. This is similar
      * to how the tag processor avoids changing parts of the tag it doesn't need to change.
-     * 
+     *
      * TODO: Migrate these changes back into the php-toolkit repo
      */
     private function rewrite_urls( string $content, string $content_type ): string {
@@ -443,13 +452,18 @@ class StructuredDataUrlRewriter
                     $token_type = $p->get_token_type() ?? '';
                     while ( $p->next_url_in_current_token() ) {
                         $raw_url = $p->get_raw_url();
-                        $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
-                        $cached = $this->get_cached_rewrite_result($cache_key);
-                        if ($cached !== null) {
-                            if ($cached !== false) {
-                                $p->set_url($cached['raw_url'], $cached['parsed_url']);
+
+                        $url_cache_key = null;
+                        if (strlen($raw_url) <= self::URL_REWRITE_CACHE_MAX_INPUT_BYTES) {
+                            $url_cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
+
+                            $cached = $this->get_cached_url_rewrite($url_cache_key);
+                            if ($cached !== null) {
+                                if ($cached !== false) {
+                                    $p->set_url($cached['raw_url'], $cached['parsed_url']);
+                                }
+                                continue;
                             }
-                            continue;
                         }
 
                         $parsed_url = $p->get_parsed_url();
@@ -477,7 +491,9 @@ class StructuredDataUrlRewriter
                             ];
                             $p->set_url($cache_value['raw_url'], $cache_value['parsed_url']);
                         }
-                        $this->set_cached_rewrite_result($cache_key, $cache_value);
+                        if ($url_cache_key !== null) {
+                            $this->set_cached_url_rewrite($url_cache_key, $cache_value);
+                        }
                     }
                     $p->replace_url_bases_in_current_token( $this->cautious_url_base_rewrite_mapping );
                 }
@@ -500,8 +516,42 @@ class StructuredDataUrlRewriter
                 return $p->get_updated_text();
 
             default:
-                _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );
-                return '';
+                trigger_error('rewrite_urls() requires either block_markup or plain_text to be provided', E_USER_WARNING);
+                return $content;
         }
+    }
+
+    /**
+     * Store one entry, then evict oldest until the cache is within budget.
+     */
+    private function store_in_bounded_cache(array &$cache, string $key, string $value, int $max_bytes): void
+    {
+        if (isset($cache['data'][$key])) {
+            $cache['bytes'] -= $this->measure_cache_entry($key, $cache['data'][$key]);
+            unset($cache['data'][$key]);
+        }
+
+        $cache['data'][$key] = $value;
+        $cache['bytes'] += $this->measure_cache_entry($key, $value);
+
+        while ($cache['bytes'] > $max_bytes) {
+            $oldest_key = array_key_first($cache['data']);
+            if ($oldest_key === null) {
+                $cache['bytes'] = 0;
+                break;
+            }
+
+            $cache['bytes'] -= $this->measure_cache_entry($oldest_key, $cache['data'][$oldest_key]);
+            unset($cache['data'][$oldest_key]);
+        }
+    }
+
+    /**
+     * Total bytes one entry retains: The key, its value, and the average PHP storage overhead.
+     */
+    private function measure_cache_entry(string $key, string $value): int
+    {
+        $cache_storage_overhead_bytes = 512;
+        return strlen($key) + strlen($value) + $cache_storage_overhead_bytes;
     }
 }

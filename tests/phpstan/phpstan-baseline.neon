@@ -31,11 +31,6 @@ parameters:
 			path: ../../packages/reprint-server/src/export.php
 
 		-
-			message: "#^Function _doing_it_wrong not found\\.$#"
-			count: 1
-			path: ../../packages/reprint-client/src/lib/url-rewrite/class-structured-data-url-rewriter.php
-
-		-
 			message: "#^Class PDO\\\\SQLite not found\\.$#"
 			count: 1
 			path: ../../packages/reprint-client/src/lib/import/functions.php
