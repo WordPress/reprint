@@ -9,15 +9,13 @@
  * namespace, and more than one plugin on a WordPress.com site loads this
  * file.
  *
- * Composer's "files" autoload includes this file, so every host that installs
- * the package gets these symbols on every request. Keep this file limited to
- * guarded function declarations: do not add I/O, hooks, mutable global state,
- * or eager class definitions here. Changes to this eager-load surface require
- * security-sensitive review.
+ * Consumers require this file when they need its helpers. Keep this file
+ * limited to guarded function declarations: do not add I/O, hooks, mutable
+ * global state, or eager class definitions here.
  *
- * The two str_* polyfills at the top stay global on purpose: they
- * backfill functions unavailable before PHP 8.0, so callers reach them via
- * the global namespace without a use-statement.
+ * The two str_* polyfills stay global on purpose: they backfill functions
+ * unavailable before PHP 8.0, so callers reach them via the global namespace
+ * without a use-statement.
  */
 
 // Polyfill for PHP versions before 8.0, which lack str_starts_with().
@@ -53,11 +51,9 @@ use RuntimeException;
 // Per-function guards degrade to "whoever loaded first wins the functions it
 // has, this copy supplies the rest" instead.
 //
-// Composer's "files" autoload dedupes by file identifier, so a single installed
-// copy is included once however many plugins depend on it, and these guards do
-// nothing in the common case. They earn their keep when two identifiers exist:
-// a monorepo checkout that loads both packages/reprint-server/src/utils.php and
-// the vendor/ mirror of it, or a site still carrying reprint-exporter v0.1.47
+// The guards earn their keep when two copies are loaded: a monorepo checkout
+// that loads both packages/reprint-server/src/utils.php and the vendor/ mirror
+// of it, or a site still carrying reprint-exporter v0.1.47
 // under its old package name. That older copy declares its helpers in
 // WordPress\Reprint\Exporter, a namespace nothing here uses any more, so it
 // cannot reach these names at all — but the guards cost nothing and they

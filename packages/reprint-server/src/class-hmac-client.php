@@ -2,6 +2,8 @@
 
 use function WordPress\Reprint\Server\generate_random_bytes;
 
+require_once __DIR__ . '/utils.php';
+
 /**
  * HMAC Client for the Site Export API.
  *

@@ -4,6 +4,8 @@ use WordPress\Reprint\Server\ResourceBudget;
 
 use function WordPress\Reprint\Server\parse_size;
 
+require_once __DIR__ . '/utils.php';
+
 if (!class_exists('WordPress\\Reprint\\Server\\ResourceBudget', false)) {
     require_once __DIR__ . '/class-resource-budget.php';
 }

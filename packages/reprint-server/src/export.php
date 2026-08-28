@@ -22,6 +22,7 @@ use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\trim_right_slash;
 use function WordPress\Reprint\Server\wp_join_unix_paths;
 
+require_once __DIR__ . '/utils.php';
 require_once __DIR__ . '/class-resource-budget.php';
 require_once __DIR__ . '/class-gzip-output-stream.php';
 require_once __DIR__ . '/class-file-index-processor.php';
@@ -396,15 +397,6 @@ function create_wpdb_pdo_adapter()
     return new WpdbDriverPDO($wpdb);
 }
 
-// Guard with existence checks: when loaded via Composer autoloader, both
-// files are already included from a path that may differ from __DIR__
-// (e.g. symlink vs realpath). With opcache.revalidate_path=0 (default),
-// require_once does not resolve symlinks, so the same physical file can
-// be loaded twice through different paths, causing "Cannot redeclare"
-// fatal errors.
-if (!function_exists('WordPress\\Reprint\\Server\\build_pdo_dsn')) {
-    require_once __DIR__ . "/utils.php";
-}
 if (!class_exists('Site_Export_HTTP_Server', false)) {
     require_once __DIR__ . "/class-http-server.php";
 }

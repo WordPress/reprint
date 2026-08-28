@@ -10,6 +10,8 @@ use function WordPress\Reprint\Server\parse_size;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\realpath_with_missing_tail;
 
+require_once __DIR__ . '/utils.php';
+
 /**
  * Exposes push-session operations through the exporter HTTP dispatcher.
  *

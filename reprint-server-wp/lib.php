@@ -105,25 +105,29 @@ function _site_export_load_exporter_runtime(): ?string {
         [
             'autoload' => SITE_EXPORT_PLUGIN_DIR . 'vendor/autoload.php',
             'export' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-server/src/export.php',
+            'utils' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-server/src/utils.php',
         ],
         [
             'autoload' => $repo_root . '/vendor/autoload.php',
             'export' => $repo_root . '/vendor/wp-php-toolkit/reprint-server/src/export.php',
+            'utils' => $repo_root . '/vendor/wp-php-toolkit/reprint-server/src/utils.php',
         ],
     ];
 
     foreach ($candidates as $candidate) {
-        if (!file_exists($candidate['autoload']) || !file_exists($candidate['export'])) {
+        if (!file_exists($candidate['autoload']) || !file_exists($candidate['export']) || !file_exists($candidate['utils'])) {
             continue;
         }
 
         $autoload_path = realpath($candidate['autoload']);
         $export_path = realpath($candidate['export']);
-        if ($autoload_path === false || $export_path === false) {
+        $utils_path = realpath($candidate['utils']);
+        if ($autoload_path === false || $export_path === false || $utils_path === false) {
             continue;
         }
 
         require_once $autoload_path;
+        require_once $utils_path;
         $loaded_export_path = $export_path;
         return $export_path;
     }

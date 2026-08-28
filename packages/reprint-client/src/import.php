@@ -70,6 +70,8 @@ foreach ([
     }
 }
 
+require_once __DIR__ . '/../../reprint-server/src/utils.php';
+
 // Load vendored MySQL query stream (from sqlite-database-integration PR #264)
 require_once __DIR__ . '/lib/mysql-query-stream/load.php';
 

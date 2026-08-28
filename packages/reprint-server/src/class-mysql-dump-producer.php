@@ -2,6 +2,7 @@
 
 namespace WordPress\Reprint\Server;
 
+require_once __DIR__ . '/utils.php';
 require_once __DIR__ . "/class-database-rows-reader.php";
 
 /**

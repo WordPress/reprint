@@ -76,9 +76,11 @@ final class ExportLibraryLoadTest extends TestCase {
         $autoload_path = $physical_plugin_directory . '/vendor/autoload.php';
         $linked_autoload_path = $linked_plugin_directory . '/vendor/autoload.php';
         $export_path = $physical_plugin_directory . '/vendor/wp-php-toolkit/reprint-server/src/export.php';
+        $utils_path = $physical_plugin_directory . '/vendor/wp-php-toolkit/reprint-server/src/utils.php';
         mkdir(dirname($export_path), 0755, true);
         file_put_contents($autoload_path, "<?php\n");
         file_put_contents($export_path, "<?php\n");
+        file_put_contents($utils_path, "<?php\n");
 
         if (!symlink($physical_plugin_directory, $linked_plugin_directory)) {
             $this->removePath($tmp_dir);
