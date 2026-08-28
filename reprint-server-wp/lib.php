@@ -85,6 +85,23 @@ function _site_export_push_is_supported(): bool {
     return PHP_VERSION_ID >= 70200;
 }
 
+/** Resolves dot segments in a slash-delimited path without touching the filesystem. */
+function _site_export_normalize_path(string $path): string {
+    $parts = explode('/', $path);
+    $resolved = [];
+    foreach ($parts as $part) {
+        if ($part === '' || $part === '.') {
+            continue;
+        }
+        if ($part === '..') {
+            array_pop($resolved);
+        } else {
+            $resolved[] = $part;
+        }
+    }
+    return '/' . implode('/', $resolved);
+}
+
 /**
  * Resolve and load the server package runtime.
  *
@@ -105,29 +122,25 @@ function _site_export_load_exporter_runtime(): ?string {
         [
             'autoload' => SITE_EXPORT_PLUGIN_DIR . 'vendor/autoload.php',
             'export' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-server/src/export.php',
-            'utils' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-server/src/utils.php',
         ],
         [
             'autoload' => $repo_root . '/vendor/autoload.php',
             'export' => $repo_root . '/vendor/wp-php-toolkit/reprint-server/src/export.php',
-            'utils' => $repo_root . '/vendor/wp-php-toolkit/reprint-server/src/utils.php',
         ],
     ];
 
     foreach ($candidates as $candidate) {
-        if (!file_exists($candidate['autoload']) || !file_exists($candidate['export']) || !file_exists($candidate['utils'])) {
+        if (!file_exists($candidate['autoload']) || !file_exists($candidate['export'])) {
             continue;
         }
 
         $autoload_path = realpath($candidate['autoload']);
         $export_path = realpath($candidate['export']);
-        $utils_path = realpath($candidate['utils']);
-        if ($autoload_path === false || $export_path === false || $utils_path === false) {
+        if ($autoload_path === false || $export_path === false) {
             continue;
         }
 
         require_once $autoload_path;
-        require_once $utils_path;
         $loaded_export_path = $export_path;
         return $export_path;
     }
@@ -527,7 +540,7 @@ function _site_export_handle_api_request(array $options = []): void {
                 );
             }
             $docroot = $canonical_docroot === '/' ? '/' : rtrim($canonical_docroot, '/\\');
-            $lexical_docroot = \WordPress\Reprint\Server\normalize_path(str_replace('\\', '/', $configured_docroot));
+            $lexical_docroot = _site_export_normalize_path(str_replace('\\', '/', $configured_docroot));
             $reprint_directory = $options['reprint_directory'] ?? (
                 dirname($docroot) . '/.reprint-' . substr(hash('sha256', $docroot), 0, 12)
             );
@@ -544,7 +557,7 @@ function _site_export_handle_api_request(array $options = []): void {
                 // symlinked plugin into its outside target and omit protection.
                 $registered_plugin_file = str_replace('\\', '/', plugin_basename(SITE_EXPORT_PLUGIN_DIR . 'index.php'));
                 $registered_plugin_directory = dirname($registered_plugin_file);
-                $logical_plugin_directory = \WordPress\Reprint\Server\normalize_path(
+                $logical_plugin_directory = _site_export_normalize_path(
                     str_replace('\\', '/', (string) WP_PLUGIN_DIR)
                     . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
                 );
@@ -566,7 +579,7 @@ function _site_export_handle_api_request(array $options = []): void {
                     // path survives a final symlink to the outside target.
                     $canonical_wordpress_plugin_directory = realpath( (string) WP_PLUGIN_DIR );
                     if ($canonical_wordpress_plugin_directory !== false) {
-                        $logical_plugin_directory_from_canonical_parent = \WordPress\Reprint\Server\normalize_path(
+                        $logical_plugin_directory_from_canonical_parent = _site_export_normalize_path(
                             str_replace('\\', '/', $canonical_wordpress_plugin_directory)
                             . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
                         );
