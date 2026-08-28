@@ -13,19 +13,8 @@ installed side by side. Consumers should require
 Composer's classmap covers every class in `src/`, so classes resolve after
 requiring `vendor/autoload.php`.
 
-The namespaced helpers in `src/utils.php` are loaded lazily. A consumer that
-calls one directly must require the file after Composer's autoloader:
-
-```php
-require __DIR__ . '/vendor/autoload.php';
-require_once __DIR__ . '/vendor/wp-php-toolkit/reprint-server/src/utils.php';
-
-\WordPress\Reprint\Server\normalize_path('/srv/site/../site/wp-content');
-```
-
-This is a loading-contract change from releases that declared `utils.php` in
-Composer's `autoload.files`: code that previously called a helper after only
-requiring `vendor/autoload.php` must add the explicit `require_once` above.
+Reprint's entry points load their utility functions internally. `src/utils.php`
+is an internal implementation file and is not a public autoload entry point.
 
 `src/export.php` never autoloads, and that is deliberate. It declares functions
 rather than classes, so the classmap scan finds nothing in it to register. Keep
