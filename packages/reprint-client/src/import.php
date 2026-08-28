@@ -70,7 +70,15 @@ foreach ([
     }
 }
 
-require_once __DIR__ . '/../../reprint-server/src/utils.php';
+foreach ([
+    __DIR__ . '/../../reprint-server/src/utils.php',
+    __DIR__ . '/../../../vendor/wp-php-toolkit/reprint-server/src/utils.php',
+] as $utils_path) {
+    if (file_exists($utils_path)) {
+        require_once $utils_path;
+        break;
+    }
+}
 
 // Load vendored MySQL query stream (from sqlite-database-integration PR #264)
 require_once __DIR__ . '/lib/mysql-query-stream/load.php';
