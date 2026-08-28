@@ -35,7 +35,7 @@ class AdaptiveTunerTest extends TestCase
 
         $result = null;
         for ($i = 0; $i < $count; $i++) {
-            $result = $tuner->record_result($endpoint, [
+            $result = $tuner->tune_after_response($endpoint, [
                 "wall_time" => $serverTime + 0.1,
                 "server_time" => $serverTime,
                 "status" => "continue",
@@ -201,7 +201,7 @@ class AdaptiveTunerTest extends TestCase
         $sizeBefore = $tuner->get_state()["file_chunk_size"];
 
         // Now simulate much lower throughput (same time, way less work).
-        $result = $tuner->record_result("file_fetch", [
+        $result = $tuner->tune_after_response("file_fetch", [
             "server_time" => 1.0,
             "wall_time" => 1.1,
             "status" => "continue",
@@ -226,7 +226,7 @@ class AdaptiveTunerTest extends TestCase
 
         // Trigger many decreases.
         for ($i = 0; $i < 10; $i++) {
-            $tuner->record_result("file_fetch", [
+            $tuner->tune_after_response("file_fetch", [
                 "server_time" => 1.0,
                 "wall_time" => 1.1,
                 "status" => "continue",
@@ -250,7 +250,7 @@ class AdaptiveTunerTest extends TestCase
             "file_chunk_min" => 100,
         ]);
 
-        $result = $tuner->record_error("file_fetch", [
+        $result = $tuner->tune_after_error("file_fetch", [
             "http_code" => 500,
             "timeout" => false,
         ]);
@@ -263,11 +263,11 @@ class AdaptiveTunerTest extends TestCase
     public function testErrorBackoffDecays(): void
     {
         $tuner = $this->makeTuner(["error_backoff_requests" => 3]);
-        $tuner->record_error("file_fetch", ["http_code" => 500]);
+        $tuner->tune_after_error("file_fetch", ["http_code" => 500]);
 
         $this->assertSame(3, $tuner->get_state()["error_backoff_remaining"]);
 
-        // Each record_result should decrement.
+        // Each tune_after_response should decrement.
         [$tuner, $r] = $this->runRequests($tuner, "file_fetch", 1, 1.0, 1000);
         $this->assertSame(2, $tuner->get_state()["error_backoff_remaining"]);
 
@@ -282,7 +282,7 @@ class AdaptiveTunerTest extends TestCase
         // Warmup first so we have EMA.
         [$tuner] = $this->runRequests($tuner, "file_fetch", 2, 1.0, 10000);
 
-        $tuner->record_error("file_fetch", ["http_code" => 503]);
+        $tuner->tune_after_error("file_fetch", ["http_code" => 503]);
         $sizeAfterError = $tuner->get_state()["file_chunk_size"];
 
         // Next successful request should hold steady, not increase.
@@ -294,17 +294,136 @@ class AdaptiveTunerTest extends TestCase
     public function testTimeoutTriggersBackoff(): void
     {
         $tuner = $this->makeTuner();
-        $result = $tuner->record_error("file_fetch", [
+        $result = $tuner->tune_after_error("file_fetch", [
             "http_code" => 0,
             "timeout" => true,
         ]);
         $this->assertSame("backoff", $result["decision"]);
     }
 
+    // ---------------------------------------------------------------
+    // Request body sizing (HTTP 413)
+    // ---------------------------------------------------------------
+
+    public function testRequestBodyShrinksTowardTheFloorAcrossTheAllowedAttempts(): void
+    {
+        // Observed in the wild: post_max_size=512M with upload_max_filesize=256M
+        // reports a 256 MiB maximum, which would otherwise build a 204 MB body.
+        $tuner = $this->makeTuner([
+            "file_fetch_request_body_max" => 204 * 1024 * 1024,
+        ]);
+        $this->assertSame(800 * 1024, $tuner->get_request_body_budget("file_fetch"));
+
+        $result = $tuner->tune_after_error("file_fetch", ["http_code" => 413]);
+        $this->assertSame("request_too_large", $result["decision"]);
+        $this->assertSame("file_fetch_request_body_bytes", $result["size_key"]);
+        $this->assertSame(400 * 1024, $result["size_value"]);
+
+        // The last attempt stops narrowing and takes the floor: overshooting
+        // ends the transfer, undershooting only costs throughput.
+        $result = $tuner->tune_after_error("file_fetch", [
+            "http_code" => 413,
+            "final_attempt" => true,
+        ]);
+        $this->assertSame(256 * 1024, $result["size_value"]);
+
+        // And never below it.
+        $tuner->tune_after_error("file_fetch", ["http_code" => 413]);
+        $this->assertSame(256 * 1024, $tuner->get_request_body_budget("file_fetch"));
+    }
+
+    public function testTheLastAttemptTakesTheFloorRatherThanHalvingAgain(): void
+    {
+        // The shipped floor is within 4x of the cap, so plain halving reaches it
+        // on the same attempt and hides the difference. A lower floor separates
+        // the two paths, which is what the branch exists for if the cap is ever
+        // raised again.
+        $config = [
+            "file_fetch_request_body_max" => 800 * 1024,
+            "file_fetch_request_body_min" => 64 * 1024,
+        ];
+
+        $halving = $this->makeTuner($config);
+        $halving->tune_after_error("file_fetch", ["http_code" => 413]);
+        $halving->tune_after_error("file_fetch", ["http_code" => 413]);
+        $this->assertSame(200 * 1024, $halving->get_request_body_budget("file_fetch"));
+
+        $final = $this->makeTuner($config);
+        $final->tune_after_error("file_fetch", ["http_code" => 413]);
+        $final->tune_after_error("file_fetch", [
+            "http_code" => 413,
+            "final_attempt" => true,
+        ]);
+        $this->assertSame(64 * 1024, $final->get_request_body_budget("file_fetch"));
+    }
+
+    public function testTheFloorWinsOverASmallerReportedMaximum(): void
+    {
+        // Predates the 413 handling: a host claiming it accepts less than one
+        // sensible batch would otherwise produce near-degenerate requests.
+        $tuner = $this->makeTuner(["file_fetch_request_body_max" => 52 * 1024]);
+
+        $this->assertSame(256 * 1024, $tuner->get_request_body_budget("file_fetch"));
+    }
+
+    public function testTooLargeLeavesResponseSizingAndBackoffAlone(): void
+    {
+        // 413 rejects the request body. chunk_size sizes the response and
+        // error_backoff paces later requests; neither caused the rejection.
+        $tuner = $this->makeTuner([
+            "file_chunk_start" => 5000,
+            "file_chunk_min" => 100,
+        ]);
+
+        $tuner->tune_after_error("file_fetch", ["http_code" => 413]);
+
+        $this->assertSame(5000, $tuner->get_state()["file_chunk_size"]);
+        $this->assertSame(0, $tuner->get_state()["error_backoff_remaining"]);
+    }
+
+    public function testATighterReportedLimitClampsABudgetCarriedForward(): void
+    {
+        // preflight runs after the first command has already stored a budget,
+        // and reports a smaller maximum than the one in that state.
+        $tuner = $this->makeTuner(["file_fetch_request_body_max" => 800 * 1024]);
+
+        $resumed = new AdaptiveTuner(
+            array_merge($tuner->get_config(), [
+                "file_fetch_request_body_max" => 600 * 1024,
+            ]),
+            $tuner->get_state(),
+        );
+
+        $this->assertSame(600 * 1024, $resumed->get_request_body_budget("file_fetch"));
+    }
+
+    public function testEndpointsWithoutARequestBodyFallBackToOrdinaryBackoff(): void
+    {
+        // file_index, sql_chunk and db_index are GETs — nothing to size, so a
+        // 413 there came from something else (an over-long URL, a firewall)
+        // and still deserves the pacing and shrink every other error gets.
+        $tuner = $this->makeTuner([
+            "index_batch_start" => 5000,
+            "index_batch_min" => 100,
+        ]);
+
+        $this->assertNull($tuner->get_request_body_budget("file_index"));
+        $this->assertNull($tuner->get_request_body_budget("sql_chunk"));
+        $this->assertNull(
+            $this->makeTuner(["enabled" => false])->get_request_body_budget("file_fetch")
+        );
+
+        $result = $tuner->tune_after_error("file_index", ["http_code" => 413]);
+
+        $this->assertSame("backoff", $result["decision"]);
+        $this->assertSame(3, $result["error_backoff_remaining"]);
+        $this->assertSame(2500, $tuner->get_state()["index_batch_size"]);
+    }
+
     public function testLowStatusCodeIgnored(): void
     {
         $tuner = $this->makeTuner();
-        $result = $tuner->record_error("file_fetch", [
+        $result = $tuner->tune_after_error("file_fetch", [
             "http_code" => 301,
             "timeout" => false,
         ]);
@@ -330,7 +449,7 @@ class AdaptiveTunerTest extends TestCase
     {
         $tuner = $this->makeTuner(["duty" => 0.5]);
 
-        $result = $tuner->record_result("file_fetch", [
+        $result = $tuner->tune_after_response("file_fetch", [
             "server_time" => 2.0,
             "wall_time" => 2.1,
             "status" => "complete",
@@ -356,7 +475,7 @@ class AdaptiveTunerTest extends TestCase
     {
         $tuner = $this->makeTuner(["enabled" => false]);
 
-        $result = $tuner->record_result("file_fetch", [
+        $result = $tuner->tune_after_response("file_fetch", [
             "server_time" => 2.0,
             "wall_time" => 2.1,
             "status" => "continue",
@@ -423,7 +542,7 @@ class AdaptiveTunerTest extends TestCase
     {
         $tuner = $this->makeTuner();
 
-        $result = $tuner->record_result("file_fetch", [
+        $result = $tuner->tune_after_response("file_fetch", [
             "server_time" => 1.0,
             "wall_time" => 1.1,
             "status" => "continue",
@@ -437,7 +556,7 @@ class AdaptiveTunerTest extends TestCase
     {
         $tuner = $this->makeTuner();
 
-        $result = $tuner->record_result("file_fetch", [
+        $result = $tuner->tune_after_response("file_fetch", [
             "server_time" => 1.0,
             "wall_time" => 1.1,
             "status" => "continue",
@@ -455,7 +574,7 @@ class AdaptiveTunerTest extends TestCase
     {
         $tuner = $this->makeTuner(["use_server_time" => true]);
 
-        $result = $tuner->record_result("file_fetch", [
+        $result = $tuner->tune_after_response("file_fetch", [
             "wall_time" => 1.0,
             "server_time" => 0,
             "status" => "continue",
@@ -469,7 +588,7 @@ class AdaptiveTunerTest extends TestCase
     {
         $tuner = $this->makeTuner(["use_server_time" => false]);
 
-        $result = $tuner->record_result("file_fetch", [
+        $result = $tuner->tune_after_response("file_fetch", [
             "wall_time" => 2.0,
             "server_time" => 0,
             "status" => "continue",

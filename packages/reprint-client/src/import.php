@@ -222,6 +222,7 @@ class ImportClient
     private const POTENTIALLY_TRANSIENT_HTTP_STATUS_CODES = [
         400, // Bad Request
         408, // Request Timeout
+        413, // Content Too Large (adaptive tuner will adjust)
         418, // Observed when an upstream bot filter replaced a Reprint response
         425, // Too Early
         429, // Too Many Requests
@@ -2503,6 +2504,23 @@ class ImportClient
     }
 
     /**
+     * Bound the file_fetch request body by what preflight reported.
+     */
+    private function apply_reported_request_body_limit(): void
+    {
+        if (!$this->tuner instanceof AdaptiveTuner) {
+            return;
+        }
+
+        $this->tuner->apply_reported_request_body_limit(
+            "file_fetch",
+            (int) (
+                (int) $this->get_state()->get('preflight.limits.max_request_bytes') * 0.8
+            ),
+        );
+    }
+
+    /**
      * Initialize adaptive tuning from CLI options and persisted state.
      */
     private function initialize_tuner(array $options): void
@@ -2514,6 +2532,7 @@ class ImportClient
         $config = array_merge($config, $cli_config);
 
         $this->tuner = new AdaptiveTuner($config, $state);
+        $this->apply_reported_request_body_limit();
         $this->get_state()->tuning->config = $this->tuner->get_config();
         $this->get_state()->tuning->state = $this->tuner->get_state();
 
@@ -2627,6 +2646,8 @@ class ImportClient
         }
 
         $this->fetch_runtime_files();
+
+        $this->apply_reported_request_body_limit();
     }
 
     /**
@@ -3036,7 +3057,7 @@ class ImportClient
             return;
         }
 
-        $decision = $this->tuner->record_error($endpoint, $error);
+        $decision = $this->tuner->tune_after_error($endpoint, $error);
         $log = [
             "TUNER ERROR",
             "endpoint={$endpoint}",
@@ -3066,7 +3087,7 @@ class ImportClient
             return;
         }
 
-        $decision = $this->tuner->record_result($endpoint, [
+        $decision = $this->tuner->tune_after_response($endpoint, [
             "wall_time" => $wall_time,
             "server_time" => $response_stats["server_time"] ?? null,
             "status" => $response_stats["status"] ?? null,
@@ -8099,6 +8120,27 @@ class ImportClient
     }
 
     /**
+     * Byte budget for the JSON path list uploaded to file_fetch.
+     */
+    private function fetch_request_body_budget(): int
+    {
+        $budget = $this->tuner instanceof AdaptiveTuner
+            ? $this->tuner->get_request_body_budget("file_fetch")
+            : null;
+
+        if ($budget !== null) {
+            return $budget;
+        }
+
+        // Fallback for if the adaptive tuner is disabled.
+        $max_request = $this->get_state()->get('preflight.limits.max_request_bytes');
+        return (int) max(
+            256 * 1024,
+            min(AdaptiveTuner::REQUEST_BODY_HARD_CAP_BYTES, (int) ($max_request * 0.8)),
+        );
+    }
+
+    /**
      * Download files from a prepared list.
      *
      * @param string $list_file Path to the JSONL fetch list to process.
@@ -8130,6 +8172,24 @@ class ImportClient
         $cursor = $fetch_state->cursor;
 
         $batch_entries = $fetch_state->batch_entries;
+
+        // Reset the batch if the request body budget has dropped below this batch's list size.
+        if (
+            $batch_file !== null
+            && file_exists($batch_file)
+            && filesize($batch_file) > $this->fetch_request_body_budget()
+        ) {
+            @unlink($batch_file);
+            $this->audit_log(
+                "FILE DELETE | {$batch_file} | larger than the request body budget",
+            );
+            $batch_file = null;
+
+            // Clear this batch's progress tracking, as it's going to be rebuilt & restarted.
+            $this->get_state()->current_file = null;
+            $this->get_state()->current_file_bytes = null;
+            $this->files_pulled = 0;
+        }
 
         if ($batch_file === null || !file_exists($batch_file)) {
             $batch = $this->prepare_fetch_batch($list_file, $batch_offset);
@@ -8195,9 +8255,9 @@ class ImportClient
      * Builds a JSON batch file listing the next set of paths to download.
      *
      * Reads from the fetch list (pull/fetch-list.jsonl) starting at
-     * $offset, accumulating paths into a JSON array until the batch approaches
-     * 80% of the server's max request size.  Always includes at least one path,
-     * even if it alone exceeds the limit.
+     * $offset, accumulating paths into a JSON array until the batch reaches the
+     * budget from fetch_request_body_budget().  Always includes at least one
+     * path, even if it alone exceeds the budget.
      *
      * The batch file is written to a temp file and intended to be uploaded as
      * the request body for the file_fetch endpoint.
@@ -8216,11 +8276,7 @@ class ImportClient
      */
     private function prepare_fetch_batch(string $list_file, int $offset): ?array
     {
-        // Cap the batch at 80% of the server's max request size so the
-        // multipart envelope and headers still fit.  Floor at 256 KB so
-        // tiny max_request values don't produce degenerate single-file batches.
-        $max_request = $this->get_state()->get('preflight.limits.max_request_bytes');
-        $limit = (int) max(256 * 1024, $max_request * 0.8);
+        $limit = $this->fetch_request_body_budget();
 
         // Open the fetch list and seek to where the previous batch left off.
         $handle = fopen($list_file, "r");
@@ -11264,6 +11320,17 @@ class ImportClient
     }
 
     /**
+     * Whether the request after this failure is the last one that will be tried.
+     */
+    private function is_final_resume_attempt(): bool
+    {
+        // The current failure hasn't been counted yet, so add an artificial 1 to the count.
+        $failures = $this->get_state()->consecutive_interrupted_responses + 1;
+
+        return self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES - $failures <= 1;
+    }
+
+    /**
      * Track consecutive temporary request failures and decide whether to resume.
      *
      * Compares the cursor before and after the request. A cursor advance means
@@ -11449,6 +11516,14 @@ class ImportClient
             $msg .= "\n\nRun `php reprint.phar install-server` for setup " .
                      "instructions.";
             return ['code' => 'NOT_FOUND', 'message' => $msg];
+        }
+
+        if ($http_code === 413) {
+            $msg = "The source rejected the request as too large (HTTP 413).";
+            if ($server_msg !== null) {
+                $msg .= "\n\nThe source reported: {$server_msg}";
+            }
+            return ['code' => 'REQUEST_TOO_LARGE', 'message' => $msg];
         }
 
         // An endpoint media-type rejection and a firewall greylist can both
@@ -11925,6 +12000,7 @@ class ImportClient
                     "http_code" => $http_code,
                     "timeout" => false,
                     "curl_errno" => 0,
+                    "final_attempt" => $this->is_final_resume_attempt(),
                 ]);
             }
 
