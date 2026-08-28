@@ -188,6 +188,30 @@ class DiagnoseHttpErrorTest extends TestCase
         $this->assertStringContainsString('install-server', $result['message']);
     }
 
+    // ── Request too large (413) ──────────────────────────────────
+
+    public function testNginx413ReadsAsATooLargeRequestAndIsRetried()
+    {
+        $nginx = "<html>\r\n" .
+            "<head><title>413 Request Entity Too Large</title></head>\r\n" .
+            "<body>\r\n" .
+            "<center><h1>413 Request Entity Too Large</h1></center>\r\n" .
+            "<hr><center>nginx</center>\r\n" .
+            "</body>\r\n</html>\r\n";
+
+        $result = $this->diagnose(413, $nginx);
+
+        $this->assertSame('REQUEST_TOO_LARGE', $result['code']);
+        $this->assertStringNotContainsString('not installed', $result['message']);
+        $this->assertStringNotContainsString('install-server', $result['message']);
+        $this->assertStringContainsString('413', $result['message']);
+
+        $this->assertTrue($this->isPotentiallyTransientHttpError(413, $nginx));
+        $this->assertFalse(
+            $this->isPotentiallyTransientHttpError(413, '{"code":413,"error":"too large"}')
+        );
+    }
+
     // ── Server errors (500+) ─────────────────────────────────────
 
     public function testServerError500WithMessage()

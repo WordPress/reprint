@@ -13,6 +13,13 @@ namespace Reprint\Importer\Tuning;
  */
 class AdaptiveTuner
 {
+    /**
+     * Ceiling for the request body size.
+     *
+     * Under nginx's 1 MiB default to leave room for envelope wrapping and other overhead.
+     */
+    public const REQUEST_BODY_HARD_CAP_BYTES = 800 * 1024;
+
     /** @var array<string, mixed> */
     private array $config;
 
@@ -36,6 +43,9 @@ class AdaptiveTuner
             "max_key" => "file_chunk_max",
             "start_key" => "file_chunk_start",
             "work_metric" => "bytes_processed",
+            "request_body_key" => "file_fetch_request_body_bytes",
+            "request_body_min_key" => "file_fetch_request_body_min",
+            "request_body_max_key" => "file_fetch_request_body_max",
         ],
         "file_index" => [
             "size_key" => "index_batch_size",
@@ -129,12 +139,12 @@ class AdaptiveTuner
     }
 
     /**
-     * Record a successful request and update endpoint sizing state.
+     * Record a completed response and update endpoint sizing state.
      *
      * @param array<string, mixed> $metrics
      * @return array<string, mixed>
      */
-    public function record_result(string $endpoint, array $metrics): array
+    public function tune_after_response(string $endpoint, array $metrics): array
     {
         if (!$this->config["enabled"]) {
             return [
@@ -176,16 +186,23 @@ class AdaptiveTuner
     }
 
     /**
-     * Record a request-level error and trigger temporary backoff.
+     * Record a request-level error, adjust sizing, and trigger backoff.
      *
      * @param array<string, mixed> $error
      * @return array<string, mixed>
      */
-    public function record_error(string $endpoint, array $error): array
+    public function tune_after_error(string $endpoint, array $error): array
     {
         $http_code = (int) ($error["http_code"] ?? 0);
         $timeout = (bool) ($error["timeout"] ?? false);
         $curl_errno = (int) ($error["curl_errno"] ?? 0);
+
+        if ($http_code === 413 && isset(self::ENDPOINTS[$endpoint]["request_body_key"])) {
+            return $this->shrink_request_body(
+                $endpoint,
+                !empty($error["final_attempt"]),
+            );
+        }
 
         $should_backoff =
             $timeout ||
@@ -228,6 +245,82 @@ class AdaptiveTuner
     }
 
     /**
+     * Current request-body budget for an endpoint in bytes.
+     */
+    public function get_request_body_budget(string $endpoint): ?int
+    {
+        if (!$this->config["enabled"]) {
+            return null;
+        }
+
+        $key = self::ENDPOINTS[$endpoint]["request_body_key"] ?? null;
+
+        return $key === null ? null : (int) $this->state[$key];
+    }
+
+    /**
+     * Bound the request body by what the source reported it accepts.
+     */
+    public function apply_reported_request_body_limit(string $endpoint, int $bytes): void
+    {
+        $ep = self::ENDPOINTS[$endpoint] ?? null;
+        if (!isset($ep["request_body_key"]) || $bytes <= 0) {
+            return;
+        }
+
+        $this->config[$ep["request_body_max_key"]] = max(
+            (int) $this->config[$ep["request_body_min_key"]],
+            min(self::REQUEST_BODY_HARD_CAP_BYTES, $bytes),
+        );
+        $this->state[$ep["request_body_key"]] = $this->clamp_request_body(
+            $ep,
+            (int) $this->state[$ep["request_body_key"]],
+        );
+    }
+
+    /**
+     * Shrink the request-body budget after a size rejection.
+     *
+     * @return array<string, mixed>
+     */
+    private function shrink_request_body(string $endpoint, bool $final_attempt): array
+    {
+        $ep = self::ENDPOINTS[$endpoint];
+        $key = $ep["request_body_key"];
+
+        $decision = [
+            "decision" => "request_too_large",
+            "http_code" => 413,
+            "timeout" => false,
+            "curl_errno" => 0,
+            "error_backoff_remaining" => $this->state["error_backoff_remaining"],
+            "size_key" => $key,
+            "size_value" => null,
+        ];
+
+        $new_size = (int) round( (int) $this->state[$key] * (float) $this->config["error_decrease_factor"] );
+        if ( $final_attempt ) {
+            $new_size = (int) $this->config[$ep["request_body_min_key"]];
+        }
+
+        $this->state[$key] = $this->clamp_request_body($ep, $new_size);
+        $decision["size_value"] = $this->state[$key];
+
+        return $decision;
+    }
+
+    /**
+     * @param array<string, string> $endpoint
+     */
+    private function clamp_request_body(array $endpoint, int $size): int
+    {
+        return max(
+            (int) $this->config[$endpoint["request_body_min_key"]],
+            min((int) $this->config[$endpoint["request_body_max_key"]], $size),
+        );
+    }
+
+    /**
      * @param array<string, mixed> $config
      * @return array<string, mixed>
      */
@@ -251,6 +344,8 @@ class AdaptiveTuner
             "aimd_increase_index_entries" => 500,
             "aimd_increase_sql_fragments" => 100,
             "error_backoff_requests" => 3,
+            "file_fetch_request_body_min" => 256 * 1024,
+            "file_fetch_request_body_max" => self::REQUEST_BODY_HARD_CAP_BYTES,
             "file_chunk_start" => 5 * 1024 * 1024,
             "file_chunk_min" => 256 * 1024,
             "file_chunk_max" => 16 * 1024 * 1024,
@@ -287,6 +382,24 @@ class AdaptiveTuner
                 1,
                 min((int) $config[$endpoint["max_key"]], (int) $config[$endpoint["increase_key"]]),
             );
+
+            if (isset($endpoint["request_body_key"])) {
+                $config[$endpoint["request_body_min_key"]] = max(
+                    1,
+                    min(
+                        self::REQUEST_BODY_HARD_CAP_BYTES,
+                        (int) $config[$endpoint["request_body_min_key"]],
+                    ),
+                );
+
+                $config[$endpoint["request_body_max_key"]] = max(
+                    (int) $config[$endpoint["request_body_min_key"]],
+                    min(
+                        self::REQUEST_BODY_HARD_CAP_BYTES,
+                        (int) $config[$endpoint["request_body_max_key"]],
+                    ),
+                );
+            }
         }
 
         return $config;
@@ -319,6 +432,13 @@ class AdaptiveTuner
 
             $ema = $state[$endpoint["ema_key"]] ?? null;
             $state[$endpoint["ema_key"]] = ($ema !== null && (float) $ema > 0) ? (float) $ema : null;
+
+            if (isset($endpoint["request_body_key"])) {
+                $state[$endpoint["request_body_key"]] = $this->clamp_request_body(
+                    $endpoint,
+                    (int) ($state[$endpoint["request_body_key"]] ?? $config[$endpoint["request_body_max_key"]]),
+                );
+            }
         }
 
         $state["duty"] = $this->clamp((float) $state["duty"], $config["duty_min"], $config["duty_max"]);
