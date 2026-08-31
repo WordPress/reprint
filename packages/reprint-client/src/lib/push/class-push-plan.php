@@ -156,11 +156,11 @@ class PushPlan
             $local_index_file,
             $document_root_local_relative_path
         );
-        $plan->create_patch_base_index_without_default_skipped_entries();
         if (!@copy($excluded_paths_path, $plan->excluded_paths_file)) {
             throw new RuntimeException("Failed to copy excluded paths into the push plan: {$excluded_paths_path}");
         }
         $plan->excluded_paths = $plan->load_excluded_paths();
+        $plan->create_patch_base_index_without_default_skipped_entries();
         $plan->fresh_local_index_handle = fopen($plan->fresh_local_index_file, "w+b");
         if (!is_resource($plan->fresh_local_index_handle)) {
             throw new RuntimeException("Failed to open the fresh local index: {$plan->fresh_local_index_file}");
