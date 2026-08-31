@@ -15,6 +15,7 @@ use WordPress\Reprint\Server\HMACServer;
 use WordPress\Reprint\Server\HTTPServer;
 use WordPress\Reprint\Server\PushConfigurationException;
 
+use function WordPress\Reprint\Server\normalize_path;
 use function WordPress\Reprint\Server\relative_path_under;
 
 if (!defined('ABSPATH')) {
@@ -97,23 +98,6 @@ function is_push_endpoint(string $endpoint): bool {
 /** Returns whether this PHP runtime can serve push endpoints. */
 function push_is_supported(): bool {
     return PHP_VERSION_ID >= 70200;
-}
-
-/** Resolves dot segments in a slash-delimited path without touching the filesystem. */
-function _site_export_normalize_path(string $path): string {
-    $parts = explode('/', $path);
-    $resolved = [];
-    foreach ($parts as $part) {
-        if ($part === '' || $part === '.') {
-            continue;
-        }
-        if ($part === '..') {
-            array_pop($resolved);
-        } else {
-            $resolved[] = $part;
-        }
-    }
-    return '/' . implode('/', $resolved);
 }
 
 /**
@@ -571,7 +555,7 @@ function handle_api_request(array $options = []): void {
                 );
             }
             $docroot = $canonical_docroot === '/' ? '/' : rtrim($canonical_docroot, '/\\');
-            $lexical_docroot = _site_export_normalize_path(str_replace('\\', '/', $configured_docroot));
+            $lexical_docroot = normalize_path(str_replace('\\', '/', $configured_docroot));
             $reprint_directory = $options['reprint_directory'] ?? (
                 dirname($docroot) . '/.reprint-' . substr(hash('sha256', $docroot), 0, 12)
             );
@@ -588,7 +572,7 @@ function handle_api_request(array $options = []): void {
                 // symlinked plugin into its outside target and omit protection.
                 $registered_plugin_file = str_replace('\\', '/', plugin_basename(PLUGIN_DIR . 'index.php'));
                 $registered_plugin_directory = dirname($registered_plugin_file);
-                $logical_plugin_directory = _site_export_normalize_path(
+                $logical_plugin_directory = normalize_path(
                     str_replace('\\', '/', (string) WP_PLUGIN_DIR)
                     . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
                 );
@@ -610,7 +594,7 @@ function handle_api_request(array $options = []): void {
                     // path survives a final symlink to the outside target.
                     $canonical_wordpress_plugin_directory = realpath( (string) WP_PLUGIN_DIR );
                     if ($canonical_wordpress_plugin_directory !== false) {
-                        $logical_plugin_directory_from_canonical_parent = _site_export_normalize_path(
+                        $logical_plugin_directory_from_canonical_parent = normalize_path(
                             str_replace('\\', '/', $canonical_wordpress_plugin_directory)
                             . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
                         );
