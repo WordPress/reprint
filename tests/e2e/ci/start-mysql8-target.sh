@@ -17,7 +17,7 @@ for _attempt in $(seq 1 60); do
     if docker exec \
         --env MYSQL_PWD="$root_password" \
         "$container" \
-        mysqladmin ping --user=root --silent >/dev/null 2>&1; then
+        mysql --user=root --execute='SELECT 1' >/dev/null 2>&1; then
         ready=1
         break
     fi
