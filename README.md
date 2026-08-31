@@ -275,10 +275,10 @@ the selection. `--on-fs-root-nonempty=preserve-local`
 also keeps pre-existing local paths which were not recorded by the first pull.
 
 File pulls always omit paths matched by the built-in default skip rules. These
-rules cover generated cache, upgrade, and Wordfence data under `wp-content`,
-version-control metadata, `node_modules`, IDE and package-manager caches,
-operating-system metadata, and editor scratch files. `--include`, `--exclude`,
-`--filter`, and `--remap` cannot override these omissions.
+rules cover known generated backup archives, cache, log, upgrade, and temporary
+paths, plus version-control metadata, `node_modules`, IDE and package-manager
+caches, operating-system metadata, and editor scratch files. `--include`,
+`--exclude`, `--filter`, and `--remap` cannot override these omissions.
 
 Mirror mode requires `--state-dir` to be outside `--fs-root`, because the state
 files must not appear in the local tree being compared. The selected mode is

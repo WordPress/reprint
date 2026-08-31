@@ -3735,7 +3735,8 @@ class ImportClient
     /**
      * Checks whether a local path is omitted from the remote index by default.
      *
-     * The file index omits generated caches, version-control metadata, OS
+     * The file index omits generated backup archives, logs, caches, temporary
+     * files, version-control metadata, OS
      * metadata, and editor scratch files. A remap may place one of those paths
      * under a different local name, so this checks both the path relative to
      * --fs-root and every matching remote path before allowing its removal.
