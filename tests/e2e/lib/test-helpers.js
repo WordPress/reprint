@@ -65,7 +65,7 @@ export async function apiRequest(siteName, endpoint, params = {}, options = {}) 
     const url = new URL(options.url || getSiteUrl(siteName));
     url.searchParams.set('endpoint', endpoint);
     for (const [k, v] of Object.entries(params)) {
-        url.searchParams.set(k, String(v));
+        setApiRequestParameter(url, k, v);
     }
 
     const body = options.body || '';
@@ -655,7 +655,7 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
     const url = new URL(getSiteUrl(siteName));
     url.searchParams.set('endpoint', 'file_fetch');
     for (const [k, v] of Object.entries(params)) {
-        url.searchParams.set(k, String(v));
+        setApiRequestParameter(url, k, v);
     }
 
     const fileListJson = JSON.stringify(filePaths.map(path => ({
@@ -719,6 +719,21 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
         text: await response.text(),
         headers: Object.fromEntries(response.headers.entries()),
     };
+}
+
+function setApiRequestParameter(url, parameter, value) {
+    const pathParameters = ['directory', 'list_dir', 'pulled_before'];
+    const values = Array.isArray(value) ? value : [value];
+    url.searchParams.delete(parameter);
+    url.searchParams.delete(`${parameter}[]`);
+    for (const item of values) {
+        url.searchParams.append(
+            Array.isArray(value) ? `${parameter}[]` : parameter,
+            pathParameters.includes(parameter)
+                ? Buffer.from(String(item)).toString('base64')
+                : String(item)
+        );
+    }
 }
 
 /**

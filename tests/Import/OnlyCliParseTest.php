@@ -93,7 +93,9 @@ class OnlyCliParseTest extends TestCase
 $log = %s;
 file_put_contents($log, json_encode(array(
     'endpoint' => $_GET['endpoint'] ?? null,
-    'directory' => $_GET['directory'] ?? null,
+    'directory' => isset($_GET['directory'])
+        ? array_map('base64_decode', (array) $_GET['directory'])
+        : null,
     'exclude_path' => $_GET['exclude_path'] ?? null,
 ), JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND);
 
@@ -158,6 +160,9 @@ PHP, var_export($requestsLog, true)));
     {
         $data = array(
             'ok' => true,
+            'capabilities' => array(
+                'base64_path_parameters' => true,
+            ),
             'database' => array(
                 'wp' => array(
                     'paths_urls' => array(

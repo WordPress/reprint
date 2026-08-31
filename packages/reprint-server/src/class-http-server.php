@@ -237,6 +237,40 @@ final class HTTPServer {
                 if (is_array($decoded)) {
                     $value = $decoded;
                 }
+            } elseif (in_array($key, ['directory', 'list_dir', 'pulled_before'], true)) {
+                $path_values = is_array($value) ? $value : [$value];
+                $decoded_paths = [];
+                foreach ($path_values as $path_key => $path_value) {
+                    // Do not decode first: PHP accepts a raw path such as /tmp
+                    // as strict base64 and turns it into unrelated bytes. Raw
+                    // absolute paths start with /; their base64 form starts with L.
+                    if (is_string($path_value) && substr($path_value, 0, 1) === '/') {
+                        $decoded_path = $path_value;
+                    } else {
+                        $decoded_path = is_string($path_value)
+                            ? base64_decode($path_value, true)
+                            : false;
+                    }
+                    if (
+                        $decoded_path === false
+                        || $decoded_path === ''
+                        || substr($decoded_path, 0, 1) !== '/'
+                    ) {
+                        $entry = is_array($value) ? ' entry ' . $path_key : '';
+                        $observed = is_string($path_value)
+                            ? json_encode($path_value)
+                            : gettype($path_value);
+                        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The exception reports the rejected HTTP parameter and value to the API caller.
+                        throw new InvalidArgumentException(
+                            $key . $entry
+                            . ' must be an absolute path or a base64-encoded absolute path; observed '
+                            . $observed . '.'
+                        );
+                        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+                    }
+                    $decoded_paths[$path_key] = $decoded_path;
+                }
+                $value = is_array($value) ? $decoded_paths : reset($decoded_paths);
             }
 
             $config[$key] = $value;

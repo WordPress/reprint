@@ -33,6 +33,10 @@ describe('Import: Preflight Endpoint', () => {
         assert.ok(preflight.protocol_version >= 1, `Expected protocol_version >= 1, got ${preflight.protocol_version}`);
     });
 
+    it('reports base64 path parameter support', () => {
+        assert.equal(preflight.capabilities.base64_path_parameters, true);
+    });
+
     it('detects WordPress installation', () => {
         assert.ok(preflight.wp_detect, 'Expected wp_detect in response');
         assert.ok(preflight.wp_detect.found, 'Expected WordPress to be found');

@@ -105,7 +105,9 @@ _site_export_handle_api_request();
 
         // Build the URL with array-style directory[] params manually,
         // then pass it to apiRequest via the url option.
-        const url = `${getSiteUrl(site)}&directory%5B%5D=${encodeURIComponent(wpDir)}&directory%5B%5D=${encodeURIComponent(docRoot)}`;
+        const encodedWpDir = encodeURIComponent(Buffer.from(wpDir).toString('base64'));
+        const encodedDocRoot = encodeURIComponent(Buffer.from(docRoot).toString('base64'));
+        const url = `${getSiteUrl(site)}&directory%5B%5D=${encodedWpDir}&directory%5B%5D=${encodedDocRoot}`;
         const response = await apiRequest(site, 'file_index', {
             list_dir: wpDir,
             follow_symlinks: '1',

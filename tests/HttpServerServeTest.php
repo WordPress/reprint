@@ -21,7 +21,7 @@ final class HttpServerServeTest extends TestCase
     {
         $script = <<<PHP
         \$_GET['endpoint'] = 'preflight';
-        \$_GET['directory'] = sys_get_temp_dir();
+        \$_GET['directory'] = base64_encode(sys_get_temp_dir());
 
         require '{$this->classPath()}';
 
@@ -48,7 +48,7 @@ final class HttpServerServeTest extends TestCase
     {
         $script = <<<PHP
         \$_GET['endpoint'] = 'preflight';
-        \$_GET['directory'] = sys_get_temp_dir();
+        \$_GET['directory'] = base64_encode(sys_get_temp_dir());
 
         require '{$this->classPath()}';
         require '{$this->exportPath()}';
