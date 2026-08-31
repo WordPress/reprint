@@ -149,7 +149,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         unlinkSync(join(localRoot, 'test-data', 'subdir', 'nested', 'deep.txt'));
         mkdirSync(join(localRoot, 'test-data', 'local-only'), { recursive: true });
         writeFileSync(
-            join(localRoot, 'test-data', 'local-only', 'debug.log'),
+            join(localRoot, 'test-data', 'local-only', 'local.txt'),
             'local only\n',
         );
     }
@@ -216,7 +216,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         mkdirSync(join(localRoot, 'test-data', 'local-only'), { recursive: true });
         writeFileSync(join(localRoot, 'test-data', 'hello.txt'), 'old local content\n');
         writeFileSync(
-            join(localRoot, 'test-data', 'local-only', 'debug.log'),
+            join(localRoot, 'test-data', 'local-only', 'local.txt'),
             'local only\n',
         );
 
@@ -417,7 +417,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         );
         assert.equal(
             readFileSync(
-                join(localRoot, 'test-data', 'local-only', 'debug.log'),
+                join(localRoot, 'test-data', 'local-only', 'local.txt'),
                 'utf-8',
             ),
             'local only\n',
@@ -730,7 +730,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         assertTreesMatch(getSiteDir(site), mirrorLocalRoot);
         assert.equal(
             readFileSync(
-                join(catchUpLocalRoot, 'test-data', 'local-only', 'debug.log'),
+                join(catchUpLocalRoot, 'test-data', 'local-only', 'local.txt'),
                 'utf-8',
             ),
             'local only\n',
