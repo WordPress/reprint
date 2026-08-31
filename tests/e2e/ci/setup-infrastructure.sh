@@ -14,6 +14,15 @@ FPM_SOCKET="/run/php/e2e.sock"
 OPEN_BASEDIR_FPM_SOCKET="/run/php/e2e-open-basedir.sock"
 NO_PDO_MYSQL_FPM_SOCKET="/run/php/e2e-no-pdo-mysql.sock"
 
+duplicate_ports="$(
+    jq -r '.sites | to_entries | group_by(.value.port)[] | select(length > 1) | "\(.[0].value.port): \(map(.key) | join(", "))"' "$REGISTRY"
+)"
+if [[ -n "$duplicate_ports" ]]; then
+    echo "Each E2E site must use a unique port. Duplicate ports:" >&2
+    echo "$duplicate_ports" >&2
+    exit 1
+fi
+
 echo "=== Setting up infrastructure with PHP ${PHP_VERSION} ==="
 
 # ---------- PHP ----------
