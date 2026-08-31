@@ -3144,9 +3144,23 @@ class ImportClient
      * - Prior completed files-pull → delta mode (re-index, diff, fetch changes)
      * - In-progress files-pull → resume from saved state
      *
-     * Both modes share the same pipeline: index → diff → fetch.
+     * Both modes share the same pipeline: index → diff → fetch. Partial
+     * source responses continue in this process while PHP has memory headroom.
+     * Otherwise the saved partial state leaves exit code 2 for the next process.
      */
     public function run_files_pull(): void
+    {
+        do {
+            $this->run_files_pull_once();
+        } while (
+            $this->get_state()->active_resumable_command->completion_state === "partial"
+            && !$this->shutdown_requested
+            && $this->has_memory_for_another_files_pull_request()
+        );
+    }
+
+    /** Runs files-pull until it completes or receives a partial response. */
+    private function run_files_pull_once(): void
     {
         $sender_state_path = wp_join_unix_paths(
             dirname($this->pull_state_directory),
@@ -3501,6 +3515,22 @@ class ImportClient
         ], true);
 
         $this->report_volatile_files();
+    }
+
+    /**
+     * The next request starts only while at least one fifth of PHP's memory
+     * limit remains available. An unlimited PHP memory limit has no local
+     * memory boundary.
+     */
+    private function has_memory_for_another_files_pull_request(): bool
+    {
+        $memory_limit_value = trim( (string) ini_get('memory_limit') );
+        $memory_limit_bytes = $memory_limit_value === '' || $memory_limit_value === '-1'
+            ? -1
+            : parse_size($memory_limit_value);
+
+        return $memory_limit_bytes === -1
+            || memory_get_usage(true) < $memory_limit_bytes * 0.8;
     }
 
     /** Saves the local-before to local-now changes before remote work begins. */
