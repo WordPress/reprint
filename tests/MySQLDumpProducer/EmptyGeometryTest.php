@@ -75,7 +75,14 @@ class EmptyGeometryTest extends TestCase {
         );
         $this->source_pdo->exec(
             "ALTER TABLE first_empty
-                ADD COLUMN location POINT NOT NULL COMMENT 'Map point'"
+                ADD COLUMN location POINT NOT NULL COMMENT 'Map point',
+                ADD COLUMN route LINESTRING NOT NULL,
+                ADD COLUMN boundary POLYGON NOT NULL,
+                ADD COLUMN locations MULTIPOINT NOT NULL,
+                ADD COLUMN routes MULTILINESTRING NOT NULL,
+                ADD COLUMN boundaries MULTIPOLYGON NOT NULL,
+                ADD COLUMN shape GEOMETRY NOT NULL,
+                ADD COLUMN shapes GEOMETRYCOLLECTION NOT NULL"
         );
         $this->source_pdo->exec(
             "UPDATE first_empty
@@ -138,6 +145,16 @@ class EmptyGeometryTest extends TestCase {
                     'FROM first_empty ORDER BY id'
                 )
                 ->fetchAll()
+        );
+        $this->assertSame(
+            8,
+            (int) $target_pdo
+                ->query(
+                    'SELECT (location IS NULL) + (route IS NULL) + (boundary IS NULL) + ' .
+                    '(locations IS NULL) + (routes IS NULL) + (boundaries IS NULL) + ' .
+                    '(shape IS NULL) + (shapes IS NULL) FROM first_empty WHERE id = 1'
+                )
+                ->fetchColumn()
         );
         $this->assertSame(
             [
