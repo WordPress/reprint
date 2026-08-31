@@ -31,6 +31,7 @@ import {
     getSiteSecret,
     getSiteUrl,
     pullStateDirectory,
+    readHookState,
     removeTestHooks,
     runImporter,
     writeHookState,
@@ -346,7 +347,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         assert.ok(!existsSync(localOnlyPath));
     });
 
-    it('resumes an interrupted mirror and restores the current remote tree', () => {
+    it('recovers from an interrupted mirror and restores the current remote tree', () => {
         resetCompletedFilesPull(mirrorTempDir);
         changeLocalTree(localSiteRoot(mirrorTempDir));
 
@@ -364,31 +365,33 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         ].join('\n'));
         writeHookState(site, { scan_count: 0 });
 
-        const interrupted = runFilesPull(mirrorTempDir, 'mirror', {
+        const recovered = runFilesPull(mirrorTempDir, 'mirror', {
             autoResume: false,
         });
         assert.equal(
-            interrupted.exitCode,
-            2,
-            `Expected an interrupted mirror pull\nstderr: ${interrupted.stderr}\nstdout: ${interrupted.stdout}`,
+            recovered.exitCode,
+            0,
+            `Expected one process to recover from the interrupted mirror pull\nstderr: ${recovered.stderr}\nstdout: ${recovered.stdout}`,
+        );
+        assert.ok(
+            readHookState(site).scan_count >= 5,
+            'Expected the source cutoff hook to fire',
         );
 
-        const interruptedState = JSON.parse(readFileSync(
+        const recoveredState = JSON.parse(readFileSync(
             join(pullStateDirectory(mirrorTempDir, importUrl()), 'state.json'),
             'utf-8',
         ));
-        assert.equal(interruptedState.active_resumable_command.current_stage, 'index');
-        assert.equal(interruptedState.active_resumable_command.completion_state, 'partial');
-
         removeTestHooks(site);
-        const resumed = runFilesPull(mirrorTempDir, 'mirror');
         assert.equal(
-            resumed.exitCode,
-            0,
-            `Mirror resume failed\nstderr: ${resumed.stderr}\nstdout: ${resumed.stdout}`,
+            recoveredState.active_resumable_command.completion_state,
+            'complete',
+            'Expected the mirror pull to complete after the internal retry',
         );
 
-        assertTreesMatch(getSiteDir(site), localSiteRoot(mirrorTempDir));
+        assertTreesMatch(getSiteDir(site), localSiteRoot(mirrorTempDir), {
+            exclude: ['wp-content/plugins/site-export/test-hooks.php'],
+        });
         assert.ok(
             !existsSync(join(localSiteRoot(mirrorTempDir), 'test-data', 'local-only')),
             'Mirror should remove the local-only directory',
