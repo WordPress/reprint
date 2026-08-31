@@ -6997,13 +6997,13 @@ class ImportClient
             $statement_count = 0;
             while ($query_stream->next_query()) {
                 $query = $query_stream->get_query();
-                $query = $nullable_spatial_column_rewriter->rewrite($query) ?? $query;
                 $spatial_inspection = $spatial_statement_diagnostics !== null
                     ? $spatial_statement_diagnostics->inspect($query)
                     : null;
                 if ($spatial_statement_diagnostics !== null) {
                     $spatial_statement_diagnostics->assert_supported($spatial_inspection);
                 }
+                $query = $nullable_spatial_column_rewriter->rewrite($query) ?? $query;
                 if ($stmt_rewriter !== null) {
                     $query = $stmt_rewriter->rewrite($query);
                 }

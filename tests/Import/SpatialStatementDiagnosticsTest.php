@@ -13,6 +13,74 @@ use WordPress\Reprint\Server\MySQLDumpProducer;
 
 class SpatialStatementDiagnosticsTest extends TestCase {
 
+    public function testReadsVersionedContextWithoutParsingTheInsert(): void
+    {
+        $diagnostics = new SpatialStatementDiagnostics(
+            $this->targetDatabase('10.11.18-MariaDB', []),
+            '10.11.18-MariaDB',
+            'test target'
+        );
+        $statement =
+            "INSERT IGNORE INTO maps SET id = 42, location = ST_GeomFromText('POINT(7 8)', 4326);";
+        $sql = $this->markedStatement($statement, [
+            'v' => [[
+                'h' => str_repeat('a', 64),
+                'b' => 25,
+                's' => 4326,
+                'z' => false,
+                't' => base64_encode('point'),
+                'c' => base64_encode('location'),
+            ]],
+            'd' => false,
+            'k' => [[
+                'v' => base64_encode('42'),
+                'n' => false,
+                't' => base64_encode('int'),
+                'c' => base64_encode('id'),
+            ]],
+            't' => base64_encode('maps'),
+        ]);
+
+        $inspection = $diagnostics->inspect($sql);
+        $diagnostics->assert_supported($inspection);
+
+        $this->assertSame('maps', $inspection['table']);
+        $this->assertSame('42', $inspection['primary_key']['id']['display']);
+        $this->assertSame(4326, $inspection['spatial_values'][0]['srid']);
+    }
+
+    public function testRejectsContextChangedAfterTheProducerHash(): void
+    {
+        $sql = $this->pointInsert(42, 4326);
+        $payload_start = strlen(
+            MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX .
+            MySQLDumpProducer::SPATIAL_STATEMENT_CONTEXT_VERSION . ' '
+        );
+        $payload_end = strpos($sql, ' */', $payload_start);
+        $this->assertIsInt($payload_end);
+        $marker_body = substr($sql, $payload_start, $payload_end - $payload_start);
+        $hash_separator = strrpos($marker_body, ' ');
+        $this->assertIsInt($hash_separator);
+        $payload = json_decode(
+            (string) base64_decode(substr($marker_body, 0, $hash_separator)),
+            true
+        );
+        $payload['v'][0]['c'] = base64_encode('boundary');
+        $sql = MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX .
+            MySQLDumpProducer::SPATIAL_STATEMENT_CONTEXT_VERSION . ' ' .
+            base64_encode( (string) json_encode($payload) ) .
+            substr($sql, $payload_start + $hash_separator);
+        $diagnostics = new SpatialStatementDiagnostics(
+            $this->targetDatabase('8.0.46', [4326]),
+            '10.11.18-MariaDB',
+            'test target'
+        );
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('does not match its SQL statement');
+        $diagnostics->inspect($sql);
+    }
+
     public function testRejectsKnownNonzeroSridAcrossDatabaseEngines(): void
     {
         $diagnostics = new SpatialStatementDiagnostics(
@@ -84,7 +152,7 @@ class SpatialStatementDiagnosticsTest extends TestCase {
             '8.0.45',
             'engine=mysql host=mysql8 port=3306 db=wordpress user=root'
         );
-        $same_engine->assert_supported($same_engine->inspect($this->pointInsert(2, 4326)));
+        $same_engine->assert_supported($same_engine->inspect($this->pointInsert(2, 4326, true)));
 
         $this->addToAssertionCount(2);
     }
@@ -114,7 +182,7 @@ class SpatialStatementDiagnosticsTest extends TestCase {
             );
             try {
                 $diagnostics->assert_supported(
-                    $diagnostics->inspect($this->pointInsert(9, 4326))
+                    $diagnostics->inspect($this->pointInsert(9, 4326, true))
                 );
                 $this->fail('Expected different SRS behavior to stop the INSERT.');
             } catch (RuntimeException $error) {
@@ -132,22 +200,26 @@ class SpatialStatementDiagnosticsTest extends TestCase {
             '10.11.18-MariaDB',
             'engine=mysql host=mysql8 port=3306 db=wordpress user=root'
         );
-        $marker_payload = base64_encode( (string) json_encode([
+        $statement = "INSERT INTO `maps` (`id`,`location`) VALUES\n" .
+            "(17,NULLIF(1, 1 " . MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT . "));";
+        $sql = $this->markedStatement($statement, [
             't' => base64_encode('maps'),
-            'r' => 1,
-            'k' => [
-                [
-                    'c' => base64_encode('id'),
-                    'n' => false,
-                    'v' => base64_encode('17'),
-                ],
-            ],
-            'c' => [base64_encode('location')],
-        ]));
-        $sql = "INSERT INTO `maps` (`id`,`location`) VALUES\n" .
-            MySQLDumpProducer::ZERO_BYTE_SPATIAL_ROW_COMMENT_PREFIX .
-            $marker_payload . " */(17,NULLIF(1, 1 " .
-            MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT . "));";
+            'k' => [[
+                'c' => base64_encode('id'),
+                't' => base64_encode('int'),
+                'n' => false,
+                'v' => base64_encode('17'),
+            ]],
+            'd' => false,
+            'v' => [[
+                'c' => base64_encode('location'),
+                't' => base64_encode('point'),
+                'z' => true,
+                's' => null,
+                'b' => 0,
+                'h' => hash('sha256', ''),
+            ]],
+        ]);
         $inspection = $diagnostics->inspect($sql);
         $error = new PDOException(
             "The target database statement failed: Check constraint 'location_required' is violated.",
@@ -162,85 +234,113 @@ class SpatialStatementDiagnosticsTest extends TestCase {
             $sql
         );
 
-        $this->assertStringContainsString('[SPATIAL_NULL_CONSTRAINT]', $message);
+        $this->assertStringContainsString('[SPATIAL_ROW_REJECTED]', $message);
         $this->assertStringContainsString('Table: `maps`', $message);
         $this->assertStringContainsString('Row: `id` = 17', $message);
-        $this->assertStringContainsString('Column: `location` POINT', $message);
-        $this->assertStringContainsString('Conversion: zero bytes -> SQL NULL', $message);
-        $this->assertStringContainsString("Target constraint: 'location_required'", $message);
+        $this->assertStringContainsString(
+            'Column candidate: `location` POINT (zero bytes converted to SQL NULL)',
+            $message
+        );
+        $this->assertStringContainsString("Check constraint 'location_required'", $message);
         $this->assertStringContainsString('Target error 3819', $message);
         $this->assertStringContainsString('Statement in SQL group: 3', $message);
         $this->assertStringContainsString('db.sql group starts at byte: 1,200', $message);
         $this->assertStringContainsString('SHOW CREATE TABLE `maps`;', $message);
         $this->assertStringContainsString('The target cursor did not advance.', $message);
+        $this->assertStringContainsString(
+            'The target did not report which value caused the failure.',
+            $message
+        );
     }
 
-    public function testZeroByteMarkerUsesStatementRowWhenTableHasNoPrimaryKey(): void
+    public function testSpatialMarkerUsesStatementRowWhenTableHasNoPrimaryKey(): void
     {
         $diagnostics = new SpatialStatementDiagnostics(
-            $this->targetDatabase('8.0.46', [4326], false),
+            $this->targetDatabase('8.0.46', [4326]),
             '10.11.18-MariaDB',
             'test target'
         );
-        $point = pack('V', 0) . hex2bin('01010000000000000000001c400000000000002040');
-        $marker_payload = base64_encode( (string) json_encode([
+        $statement = 'INSERT INTO `maps` (`id`,`location`) VALUES (2,NULL);';
+        $sql = $this->markedStatement($statement, [
             't' => base64_encode('maps'),
-            'r' => 2,
             'k' => [],
-            'c' => [base64_encode('location')],
-        ]) );
-        $sql = "INSERT INTO `maps` (`id`,`location`) VALUES\n" .
-            "(1,FROM_BASE64('" . base64_encode($point) . "'))," .
-            MySQLDumpProducer::ZERO_BYTE_SPATIAL_ROW_COMMENT_PREFIX .
-            $marker_payload . ' */(2,NULL);';
+            'd' => false,
+            'v' => [[
+                'c' => base64_encode('location'),
+                't' => base64_encode('point'),
+                'z' => true,
+                's' => null,
+                'b' => 0,
+                'h' => hash('sha256', ''),
+            ]],
+        ]);
 
         $inspection = $diagnostics->inspect($sql);
 
-        $this->assertCount(1, $inspection['zero_byte_values']);
-        $this->assertSame(2, $inspection['zero_byte_values'][0]['row_number']);
+        $this->assertSame([], $inspection['primary_key']);
+        $message = $diagnostics->describe_target_failure(
+            new PDOException('Target rejected the row.', 1),
+            $inspection,
+            1,
+            null,
+            $sql
+        );
+        $this->assertStringContainsString(
+            'Row: statement row 1 (table has no primary key)',
+            $message
+        );
     }
 
-    public function testRejectsZeroByteMarkersWhichDoNotIdentifyAnExactSpatialRow(): void
+    public function testRejectsSpatialMarkerWhoseStatementHashDoesNotMatch(): void
     {
-        $primary_key = [
-            [
+        $statement = 'INSERT INTO `maps` (`id`,`location`) VALUES (17,NULL);';
+        $sql = $this->markedStatement($statement, [
+            't' => base64_encode('maps'),
+            'k' => [[
                 'c' => base64_encode('id'),
+                't' => base64_encode('int'),
                 'n' => false,
                 'v' => base64_encode('17'),
-            ],
-        ];
-        $valid = [
-            't' => base64_encode('maps'),
-            'r' => 1,
-            'k' => $primary_key,
-            'c' => [base64_encode('location')],
-        ];
-        $cases = [
-            [array_diff_key($valid, ['r' => true]), 'invalid row number'],
-            [array_merge($valid, ['r' => 2]), 'but the INSERT row count is 1'],
-            [array_merge($valid, ['t' => base64_encode('other')]), 'but its INSERT names `maps`'],
-            [array_merge($valid, ['k' => []]), 'but the target primary key is `id`'],
-            [array_merge($valid, ['c' => [base64_encode('id')]]), 'target reports type int'],
-            [array_merge($valid, ['t' => rtrim(base64_encode('maps'), '=')]), 'invalid base64'],
-        ];
+            ]],
+            'd' => false,
+            'v' => [[
+                'c' => base64_encode('location'),
+                't' => base64_encode('point'),
+                'z' => true,
+                's' => null,
+                'b' => 0,
+                'h' => hash('sha256', ''),
+            ]],
+        ]);
+        $sql = str_replace('VALUES (17,NULL)', 'VALUES (18,NULL)', $sql);
         $diagnostics = new SpatialStatementDiagnostics(
             $this->targetDatabase('8.0.46', [4326]),
             '10.11.18-MariaDB',
             'test target'
         );
 
-        foreach ($cases as [$payload, $expected_message]) {
-            $marker = base64_encode( (string) json_encode($payload) );
-            $sql = "INSERT INTO `maps` (`id`,`location`) VALUES\n" .
-                MySQLDumpProducer::ZERO_BYTE_SPATIAL_ROW_COMMENT_PREFIX .
-                $marker . ' */(17,NULL);';
-            try {
-                $diagnostics->inspect($sql);
-                $this->fail('Expected the invalid zero-byte row marker to be rejected.');
-            } catch (RuntimeException $error) {
-                $this->assertStringContainsString($expected_message, $error->getMessage());
-            }
-        }
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('does not match its SQL statement');
+        $diagnostics->inspect($sql);
+    }
+
+    public function testRejectsUnknownSpatialContextVersion(): void
+    {
+        $sql = str_replace(
+            MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX .
+                MySQLDumpProducer::SPATIAL_STATEMENT_CONTEXT_VERSION . ' ',
+            MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX . 'v2 ',
+            $this->pointInsert(42, 4326)
+        );
+        $diagnostics = new SpatialStatementDiagnostics(
+            $this->targetDatabase('8.0.46', [4326]),
+            '8.0.45',
+            'test target'
+        );
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('unsupported context version v2');
+        $diagnostics->inspect($sql);
     }
 
     public function testDoesNotBlameAnOrdinarySqlNullForAnUnrelatedTargetFailure(): void
@@ -259,7 +359,20 @@ class SpatialStatementDiagnosticsTest extends TestCase {
         );
     }
 
-    public function testCorruptSpatialDumpReportsRejectedValueContext(): void
+    public function testMarkerTextInsideSqlIsNotTreatedAsProducerContext(): void
+    {
+        $diagnostics = new SpatialStatementDiagnostics(
+            $this->targetDatabase('8.0.46', [4326]),
+            '8.0.45',
+            'test target'
+        );
+        $sql = "CREATE TABLE notes (value TEXT COMMENT '" .
+            MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX . "not metadata */');";
+
+        $this->assertNull($diagnostics->inspect($sql));
+    }
+
+    public function testUnmarkedCorruptSpatialDumpIsNotClassified(): void
     {
         $diagnostics = new SpatialStatementDiagnostics(
             $this->targetDatabase('8.0.46', [4326]),
@@ -270,38 +383,49 @@ class SpatialStatementDiagnosticsTest extends TestCase {
         $sql = "INSERT INTO `maps` (`id`,`location`) VALUES\n" .
             "(23,FROM_BASE64('" . base64_encode($stored_value) . "'));";
         $inspection = $diagnostics->inspect($sql);
-        $error = new PDOException(
-            'The target database statement failed: Cannot get geometry object from data you send to the GEOMETRY field',
-            1416
-        );
-
-        $message = $diagnostics->describe_target_failure(
-            $error,
-            $inspection,
-            1,
-            null,
-            $sql
-        );
-
-        $this->assertStringContainsString('[SPATIAL_VALUE_REJECTED]', $message);
-        $this->assertStringContainsString('Row: `id` = 23', $message);
-        $this->assertStringContainsString('Column: `location` POINT', $message);
-        $this->assertStringContainsString('Stored value: 10 bytes', $message);
-        $this->assertStringContainsString('SRID: 0', $message);
-        $this->assertStringContainsString('SHA-256: ' . hash('sha256', $stored_value), $message);
-        $this->assertStringContainsString('Target error 1416', $message);
-        $this->assertStringContainsString('SQL statement SHA-256: ' . hash('sha256', $sql), $message);
-        $this->assertStringContainsString(
-            'Reprint did not replace this nonzero value with NULL.',
-            $message
-        );
+        $this->assertNull($inspection);
     }
 
-    private function pointInsert(int $id, int $srid): string
+    private function pointInsert(
+        int $id,
+        int $srid,
+        bool $source_uses_srs_definitions = false
+    ): string
     {
         $point_wkb = hex2bin('01010000000000000000001c400000000000002040');
-        return "INSERT INTO `maps` (`id`,`location`) VALUES\n" .
+        $stored_value = pack('V', $srid) . $point_wkb;
+        $statement = "INSERT INTO `maps` (`id`,`location`) VALUES\n" .
             "({$id},FROM_BASE64('" . base64_encode(pack('V', $srid) . $point_wkb) . "'));";
+        if ($srid === 0) {
+            return $statement;
+        }
+        return $this->markedStatement($statement, [
+            't' => base64_encode('maps'),
+            'k' => [[
+                'c' => base64_encode('id'),
+                't' => base64_encode('int'),
+                'n' => false,
+                'v' => base64_encode( (string) $id ),
+            ]],
+            'd' => $source_uses_srs_definitions,
+            'v' => [[
+                'c' => base64_encode('location'),
+                't' => base64_encode('point'),
+                'z' => false,
+                's' => $srid,
+                'b' => strlen($stored_value),
+                'h' => hash('sha256', $stored_value),
+            ]],
+        ]);
+    }
+
+    private function markedStatement(string $statement, array $payload): string
+    {
+        $context_json = (string) json_encode($payload);
+        return MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX .
+            MySQLDumpProducer::SPATIAL_STATEMENT_CONTEXT_VERSION . ' ' .
+            base64_encode($context_json) . ' ' .
+            hash('sha256', $context_json . "\n" . $statement) . " */\n" . $statement;
     }
 
     /**
@@ -309,30 +433,25 @@ class SpatialStatementDiagnosticsTest extends TestCase {
      */
     private function targetDatabase(
         string $version,
-        array $known_srids,
-        bool $has_primary_key = true
+        array $known_srids
     ): PdoDatabaseConnection
     {
         $pdo = new PDO('sqlite::memory:');
-        return new class($pdo, $version, $known_srids, $has_primary_key) extends PdoDatabaseConnection {
+        return new class($pdo, $version, $known_srids) extends PdoDatabaseConnection {
             private string $version;
 
             /** @var int[] */
             private array $known_srids;
 
-            private bool $has_primary_key;
-
             public function __construct(
                 PDO $pdo,
                 string $version,
-                array $known_srids,
-                bool $has_primary_key
+                array $known_srids
             )
             {
                 parent::__construct($pdo);
                 $this->version = $version;
                 $this->known_srids = $known_srids;
-                $this->has_primary_key = $has_primary_key;
             }
 
             public function query(string $sql, array $params = []): DatabaseResult
@@ -340,18 +459,12 @@ class SpatialStatementDiagnosticsTest extends TestCase {
                 if (strpos($sql, 'SELECT VERSION()') === 0) {
                     return parent::query('SELECT ? AS version', [$this->version]);
                 }
-                if (strpos($sql, 'SHOW FULL COLUMNS FROM `maps`') === 0) {
+                if (strpos($sql, 'FROM INFORMATION_SCHEMA.TABLES') !== false) {
+                    $uses_srs_definitions = strpos($this->version, 'MariaDB') === false
+                        && (int) $this->version >= 8;
                     return parent::query(
-                        "SELECT 'id' AS Field, 'int' AS Type " .
-                        "UNION ALL SELECT 'location', 'point'"
-                    );
-                }
-                if (strpos($sql, 'SHOW KEYS FROM `maps`') === 0) {
-                    if (!$this->has_primary_key) {
-                        return parent::query("SELECT 'PRIMARY' AS Key_name WHERE 0");
-                    }
-                    return parent::query(
-                        "SELECT 'PRIMARY' AS Key_name, 1 AS Seq_in_index, 'id' AS Column_name"
+                        'SELECT ? AS uses_srs_definitions',
+                        [$uses_srs_definitions ? 1 : 0]
                     );
                 }
                 if (strpos($sql, 'SELECT SRS_ID FROM INFORMATION_SCHEMA') === 0) {

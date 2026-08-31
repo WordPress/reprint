@@ -64,9 +64,12 @@ class MySQLDumpProducer
 
     private const SPATIAL_STAGING_TABLE = "__reprint_db_pull_progress_spatial";
 
-    /** Starts row context for spatial values which the dump normalized to SQL NULL. */
-    public const ZERO_BYTE_SPATIAL_ROW_COMMENT_PREFIX =
-        "/* REPRINT: zero-byte spatial row ";
+    /** Starts versioned source-row context for one spatial INSERT statement. */
+    public const SPATIAL_STATEMENT_COMMENT_PREFIX =
+        "/* REPRINT: spatial statement ";
+
+    /** Identifies the spatial statement context fields emitted below. */
+    public const SPATIAL_STATEMENT_CONTEXT_VERSION = 'v1';
 
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
@@ -157,6 +160,9 @@ class MySQLDumpProducer
 
     /** @var string[] Spatial columns waiting for their nullable ALTER TABLE. */
     private $pending_nullable_spatial_columns = [];
+
+    /** @var bool|null Whether the source interprets SRIDs through registered SRS definitions. */
+    private $source_uses_srs_definitions = null;
 
     /**
      * @param object $db Database connection — either a real PDO (MySQL) or a
@@ -329,14 +335,17 @@ class MySQLDumpProducer
         }
 
         $current_record = $this->row_reader->get_current_record();
-        $has_zero_byte_spatial_value = $this->has_zero_byte_spatial_value();
-        $spatial_columns = $this->get_spatial_columns_to_make_nullable();
+        $spatial_columns = $this->get_spatial_columns_to_make_nullable($current_record);
         if (!empty($spatial_columns)) {
             $this->reader_cursor_before_retained_record = $reader_cursor_before_current_record;
             $this->pending_nullable_spatial_columns = $spatial_columns;
             $this->state = self::STATE_EMIT_NULLABLE_SPATIAL_COLUMNS;
             return false;
         }
+        $spatial_statement_comment_size = strlen(
+            $this->format_spatial_statement_comment($current_record, null)
+        );
+        $has_spatial_statement_context = $spatial_statement_comment_size > 0;
 
         $column_list = implode(
             ",",
@@ -347,6 +356,9 @@ class MySQLDumpProducer
 
         $header = "INSERT INTO " . $this->row_reader->quote_identifier($this->row_reader->get_current_table()) . " ({$column_list}) VALUES\n";
         $this->current_statement_size = strlen($header) + strlen($this->on_duplicate_key()) + 1;
+        if ($has_spatial_statement_context) {
+            $this->current_statement_size += $spatial_statement_comment_size + 1;
+        }
 
         $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
         $first_row_sql = $this->format_row_for_insert(
@@ -378,9 +390,13 @@ class MySQLDumpProducer
         if (
             $current_record_ends_query_batch ||
             $this->rows_in_batch >= $this->row_reader->get_batch_size() ||
-            $has_zero_byte_spatial_value
+            $has_spatial_statement_context
         ) {
-            $this->finish_insert_batch($header . $first_row_sql, $has_oversized);
+            $this->finish_insert_batch(
+                $header . $first_row_sql,
+                $has_oversized,
+                $has_spatial_statement_context ? $current_record : null
+            );
             return true;
         }
 
@@ -409,7 +425,9 @@ class MySQLDumpProducer
             return true;
         }
 
-        $spatial_columns = $this->get_spatial_columns_to_make_nullable();
+        $spatial_columns = $this->get_spatial_columns_to_make_nullable(
+            $this->row_reader->get_current_record()
+        );
         if (!empty($spatial_columns)) {
             // Finish the INSERT before changing its table definition. The
             // retained row starts a new INSERT after the ALTER TABLE.
@@ -422,10 +440,10 @@ class MySQLDumpProducer
             return true;
         }
 
-        if ($this->has_zero_byte_spatial_value()) {
-            // MariaDB needs this row's INSERT column list to omit its
-            // zero-byte geometry. Close the preceding multi-row INSERT and
-            // retain the row for a one-row INSERT after this fragment.
+        if ($this->get_spatial_statement_values($this->row_reader->get_current_record()) !== []) {
+            // Keep a marked spatial row in its own INSERT. A target rejection
+            // can then name the exact source row without guessing which tuple
+            // in a multi-row statement failed.
             $this->reader_cursor_before_retained_record = $reader_cursor_before_current_record;
             $this->current_sql_fragment = $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
@@ -435,8 +453,7 @@ class MySQLDumpProducer
         }
 
         $current_record = $this->row_reader->get_current_record();
-        $row_tuple_bytes = strlen($this->format_zero_byte_spatial_row_marker($current_record)) +
-            $this->estimate_formatted_row_tuple_bytes($current_record);
+        $row_tuple_bytes = $this->estimate_formatted_row_tuple_bytes($current_record);
         $maximum_insert_statement_bytes = min(
             $this->max_statement_size,
             self::MAX_SQL_PART_BODY_BYTES
@@ -566,24 +583,19 @@ class MySQLDumpProducer
         return $columns;
     }
 
-    /** Returns whether this row contains a MariaDB zero-byte spatial placeholder. */
-    private function has_zero_byte_spatial_value()
-    {
-        foreach ($this->row_reader->get_current_column_names() as $column) {
-            if (
-                $this->row_reader->is_spatial_type($this->row_reader->get_data_type($column)) &&
-                $this->row_reader->get_current_spatial_value_length($column) === 0
-            ) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /** Finishes an INSERT batch at its bounded row limit. */
-    private function finish_insert_batch($sql, $has_oversized)
+    private function finish_insert_batch($sql, $has_oversized, $spatial_context_row = null)
     {
-        $this->current_sql_fragment = $sql . $this->on_duplicate_key() . ';';
+        $statement = $sql . $this->on_duplicate_key() . ';';
+        $spatial_statement_comment = $spatial_context_row === null
+            ? ''
+            : $this->format_spatial_statement_comment(
+                $spatial_context_row,
+                $statement
+            );
+        $this->current_sql_fragment = $spatial_statement_comment === ''
+            ? $statement
+            : $spatial_statement_comment . "\n" . $statement;
         $this->current_statement_size = 0;
         if ($has_oversized) {
             $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
@@ -1204,8 +1216,6 @@ class MySQLDumpProducer
     {
         $estimated_sizes = [];
         $raw_values = [];
-        $zero_byte_spatial_row_marker = $this->format_zero_byte_spatial_row_marker($row);
-
         foreach ($this->row_reader->get_current_column_names() as $col) {
             $value = $row[$col] ?? null;
             $raw_values[$col] = $value;
@@ -1234,8 +1244,7 @@ class MySQLDumpProducer
             }
         }
 
-        $row_tuple_bytes = strlen($zero_byte_spatial_row_marker) +
-            $this->estimate_formatted_row_tuple_bytes($row);
+        $row_tuple_bytes = $this->estimate_formatted_row_tuple_bytes($row);
         $row_separator_bytes = $this->rows_in_batch > 0 ? 1 : 0;
         $maximum_insert_statement_bytes = min(
             $this->max_statement_size,
@@ -1264,8 +1273,7 @@ class MySQLDumpProducer
                 }
                 $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
             }
-            return $zero_byte_spatial_row_marker .
-                "(" . implode(",", array_values($formatted_values)) . ")";
+            return "(" . implode(",", array_values($formatted_values)) . ")";
         }
 
         // The rest of this method deals with rows that are too large to fit into a single INSERT on
@@ -1446,23 +1454,55 @@ class MySQLDumpProducer
             $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
         }
 
-        return $zero_byte_spatial_row_marker .
-            "(" . implode(",", array_values($formatted_values)) . ")";
+        return "(" . implode(",", array_values($formatted_values)) . ")";
     }
 
-    /** Marks exact source rows whose zero-byte spatial values became SQL NULL. */
-    private function format_zero_byte_spatial_row_marker($row)
+    /** Returns zero-byte and nonzero-SRID values which need importer context. */
+    private function get_spatial_statement_values($row)
     {
-        $columns = [];
+        $values = [];
         foreach ($this->row_reader->get_current_column_names() as $column) {
-            if (
-                ( $row[$column] ?? null ) === '' &&
-                $this->row_reader->is_spatial_type($this->row_reader->get_data_type($column))
-            ) {
-                $columns[] = base64_encode($column);
+            $data_type = $this->row_reader->get_data_type($column);
+            if (!$this->row_reader->is_spatial_type($data_type)) {
+                continue;
             }
+            $value = $row[$column] ?? null;
+            if ($value === '') {
+                $values[] = [
+                    'c' => base64_encode($column),
+                    't' => base64_encode($data_type),
+                    'z' => true,
+                    's' => null,
+                    'b' => 0,
+                    'h' => hash('sha256', ''),
+                ];
+                continue;
+            }
+            if (!is_string($value) || strlen($value) < 4) {
+                continue;
+            }
+            $unpacked = unpack('Vsrid', substr($value, 0, 4));
+            $srid = is_array($unpacked) ? (int) $unpacked['srid'] : 0;
+            if ($srid === 0) {
+                continue;
+            }
+            $values[] = [
+                'c' => base64_encode($column),
+                't' => base64_encode($data_type),
+                'z' => false,
+                's' => $srid,
+                'b' => strlen($value),
+                'h' => hash('sha256', $value),
+            ];
         }
-        if ($columns === []) {
+        return $values;
+    }
+
+    /** Marks one exact source row without requiring the importer to parse its INSERT. */
+    private function format_spatial_statement_comment($row, $statement)
+    {
+        $spatial_values = $this->get_spatial_statement_values($row);
+        if ($spatial_values === []) {
             return '';
         }
 
@@ -1471,6 +1511,7 @@ class MySQLDumpProducer
             $value = $row[$column] ?? null;
             $item = [
                 'c' => base64_encode($column),
+                't' => base64_encode($this->row_reader->get_data_type($column)),
                 'n' => $value === null,
             ];
             if ($value !== null) {
@@ -1478,18 +1519,50 @@ class MySQLDumpProducer
             }
             $primary_key[] = $item;
         }
-        // This marker counts toward the SQL statement limit, so keep its field names compact.
-        $payload = json_encode([
+        // This comment counts toward the SQL statement limit, so keep its field names compact.
+        $context = [
             't' => base64_encode($this->row_reader->get_current_table()),
-            'r' => $this->rows_in_batch + 1,
             'k' => $primary_key,
-            'c' => $columns,
-        ]);
-        if ($payload === false) {
-            throw new \RuntimeException('Cannot encode zero-byte spatial row context.');
+            'd' => $this->source_uses_srs_definitions(),
+            'v' => $spatial_values,
+        ];
+        $context_json = json_encode($context);
+        if ($context_json === false) {
+            throw new \RuntimeException('Cannot encode spatial statement context.');
         }
-        return self::ZERO_BYTE_SPATIAL_ROW_COMMENT_PREFIX .
-            base64_encode($payload) . ' */';
+        $statement_hash = $statement === null
+            ? str_repeat('0', 64)
+            : hash('sha256', $context_json . "\n" . $statement);
+        return self::SPATIAL_STATEMENT_COMMENT_PREFIX .
+            self::SPATIAL_STATEMENT_CONTEXT_VERSION . ' ' .
+            base64_encode($context_json) . ' ' . $statement_hash . ' */';
+    }
+
+    /** Returns whether this database interprets SRIDs through registered definitions. */
+    private function source_uses_srs_definitions()
+    {
+        if ($this->source_uses_srs_definitions !== null) {
+            return $this->source_uses_srs_definitions;
+        }
+        try {
+            $result = $this->db->query(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES " .
+                "WHERE TABLE_SCHEMA = 'information_schema' " .
+                "AND TABLE_NAME = 'ST_SPATIAL_REFERENCE_SYSTEMS'"
+            );
+            $count = $result->fetchColumn();
+        } catch (\Exception $error) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error returned as authenticated API data, never HTML.
+            throw new \RuntimeException(
+                'Cannot determine how the source database interprets spatial SRIDs: ' .
+                $error->getMessage(),
+                0,
+                $error
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
+        $this->source_uses_srs_definitions = is_numeric($count) && (int) $count > 0;
+        return $this->source_uses_srs_definitions;
     }
 
     /** Explains why one complete spatial value cannot use the oversized-value path. */

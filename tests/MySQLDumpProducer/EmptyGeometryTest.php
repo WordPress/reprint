@@ -155,6 +155,10 @@ class EmptyGeometryTest extends TestCase {
             MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT,
             $sql
         );
+        $this->assertStringContainsString(
+            MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX,
+            $sql
+        );
 
         $target_pdo = $this->executeDump($sql, $target);
         $this->assertSame(
@@ -425,12 +429,19 @@ class EmptyGeometryTest extends TestCase {
             $this->executeDump($sql, $target);
             $this->fail('The target CHECK constraint should reject the normalized NULL.');
         } catch (RuntimeException $error) {
-            $this->assertStringContainsString('[SPATIAL_NULL_CONSTRAINT]', $error->getMessage());
+            $this->assertStringContainsString('[SPATIAL_ROW_REJECTED]', $error->getMessage());
             $this->assertStringContainsString('Table: `constrained_geometry`', $error->getMessage());
             $this->assertStringContainsString('Row: `id` = 1', $error->getMessage());
-            $this->assertStringContainsString('Column: `location` POINT', $error->getMessage());
+            $this->assertStringContainsString(
+                'Column candidate: `location` POINT (zero bytes converted to SQL NULL)',
+                $error->getMessage()
+            );
             $this->assertStringContainsString('location_required', $error->getMessage());
             $this->assertStringContainsString('The target cursor did not advance.', $error->getMessage());
+            $this->assertStringContainsString(
+                'The target did not report which value caused the failure.',
+                $error->getMessage()
+            );
         }
 
         $target_pdo = $this->connectTarget($target);
@@ -565,6 +576,107 @@ class EmptyGeometryTest extends TestCase {
         }
     }
 
+    public function testNonzeroSridRowHasVersionedContextAndItsOwnInsert(): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE isolated_srid (id INT PRIMARY KEY, location POINT)'
+        );
+        $this->source_pdo->exec(
+            "INSERT INTO isolated_srid VALUES " .
+            "(1, ST_GeomFromText('POINT(1 1)', 0)), " .
+            "(2, ST_GeomFromText('POINT(2 2)', 4326)), " .
+            "(3, ST_GeomFromText('POINT(3 3)', 0))"
+        );
+
+        $sql = $this->exportWithResumeAfterEveryFragment([
+            'batch_size' => 10,
+            'tables_to_process' => ['isolated_srid'],
+        ]);
+
+        $this->assertSame(3, substr_count($sql, 'INSERT INTO `isolated_srid`'));
+        $this->assertSame(
+            1,
+            substr_count($sql, MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX)
+        );
+        $matched = preg_match(
+            '/' . preg_quote(MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX, '/') .
+            preg_quote(MySQLDumpProducer::SPATIAL_STATEMENT_CONTEXT_VERSION, '/') . ' ' .
+            '([A-Za-z0-9+\/=]+) ([a-f0-9]{64}) \*\/\n' .
+            '(INSERT INTO `isolated_srid`.*?;)/s',
+            $sql,
+            $matches
+        );
+        $this->assertSame(1, $matched);
+        $context_json = base64_decode($matches[1], true);
+        $this->assertIsString($context_json);
+        $context = json_decode($context_json, true);
+        $this->assertSame(false, $context['d']);
+        $this->assertSame(base64_encode('2'), $context['k'][0]['v']);
+        $this->assertSame(4326, $context['v'][0]['s']);
+        $this->assertSame(
+            hash('sha256', $context_json . "\n" . $matches[3]),
+            $matches[2]
+        );
+    }
+
+    public function testMysql8SourceToMariaDbTargetStopsNonzeroSrid(): void
+    {
+        $mariadb_target = $this->source_pdo;
+        $mysql_source = $this->connect(
+            getenv('DB_HOST') ?: '127.0.0.1',
+            getenv('DB_PORT') ?: '3306',
+            getenv('DB_USER') ?: 'root',
+            getenv('DB_PASS') ?: ''
+        );
+        $database = 'test_empty_geometry_mysql_source';
+        $sql = '';
+        $source_version = '';
+        $mysql_source->exec("DROP DATABASE IF EXISTS `{$database}`");
+        $mysql_source->exec("CREATE DATABASE `{$database}`");
+        $mysql_source->exec("USE `{$database}`");
+        try {
+            $mysql_source->exec(
+                'CREATE TABLE maps (id INT PRIMARY KEY, location POINT)'
+            );
+            $mysql_source->exec(
+                "INSERT INTO maps VALUES (42, ST_GeomFromText('POINT(7 8)', 4326))"
+            );
+            $this->source_pdo = $mysql_source;
+            $sql = $this->exportWithResumeAfterEveryFragment([
+                'tables_to_process' => ['maps'],
+            ]);
+            $source_version = (string) $mysql_source->query('SELECT VERSION()')->fetchColumn();
+        } finally {
+            $this->source_pdo = $mariadb_target;
+            $mysql_source->exec("DROP DATABASE IF EXISTS `{$database}`");
+        }
+
+        $diagnostics = new SpatialStatementDiagnostics(
+            new PdoDatabaseConnection($mariadb_target),
+            $source_version,
+            'engine=mysql db=test_empty_geometry_source'
+        );
+        $query_stream = new WP_MySQL_FastQueryStream();
+        $query_stream->append_sql($sql);
+        $query_stream->mark_input_complete();
+        while ($query_stream->next_query()) {
+            $inspection = $diagnostics->inspect($query_stream->get_query());
+            if ($inspection === null) {
+                continue;
+            }
+            try {
+                $diagnostics->assert_supported($inspection);
+                $this->fail('Expected different SRS behavior to stop the INSERT.');
+            } catch (RuntimeException $error) {
+                $this->assertStringContainsString('[SPATIAL_AXIS_ORDER_UNSAFE]', $error->getMessage());
+                $this->assertStringContainsString('Source: MySQL', $error->getMessage());
+                $this->assertStringContainsString('Target: MariaDB', $error->getMessage());
+                return;
+            }
+        }
+        $this->fail('The MySQL 8 dump did not contain marked spatial row context.');
+    }
+
     public function testNonzeroSridStillImportsBetweenMariaDbServers(): void
     {
         $this->source_pdo->exec(
@@ -639,49 +751,6 @@ class EmptyGeometryTest extends TestCase {
             ->fetchAll();
         $columns_by_name = array_column($columns, null, 'Field');
         $this->assertSame('NO', $columns_by_name['location']['Null']);
-    }
-
-    /**
-     * This deliberately corrupts dump input. It does not model a supported source operation.
-     *
-     * @dataProvider targetDatabaseProvider
-     */
-    public function testCorruptSpatialDumpReportsRealTargetFailure(string $target): void
-    {
-        $target_pdo = $this->connectTarget($target);
-        $target_pdo->exec("DROP DATABASE IF EXISTS `{$target}`");
-        $target_pdo->exec("CREATE DATABASE `{$target}`");
-        $target_pdo->exec("USE `{$target}`");
-        $target_pdo->exec('CREATE TABLE corrupt_spatial (id INT PRIMARY KEY, location POINT)');
-        $this->target_databases[] = $target;
-
-        $database = new PdoDatabaseConnection($target_pdo);
-        $diagnostics = new SpatialStatementDiagnostics(
-            $database,
-            (string) $target_pdo->query('SELECT VERSION()')->fetchColumn(),
-            "engine=mysql db={$target}"
-        );
-        $sql = "INSERT INTO `corrupt_spatial` (`id`,`location`) VALUES " .
-            "(23,FROM_BASE64('" . base64_encode(pack('V', 0) . 'broken') . "'));";
-        $inspection = $diagnostics->inspect($sql);
-        try {
-            $diagnostics->assert_supported($inspection);
-            $target_pdo->exec($sql);
-            $this->fail('The real target should reject the deliberately corrupt geometry bytes.');
-        } catch (PDOException $error) {
-            $message = $diagnostics->describe_target_failure(
-                $error,
-                $inspection,
-                1,
-                0,
-                $sql
-            );
-            $this->assertStringContainsString('[SPATIAL_VALUE_REJECTED]', $message);
-            $this->assertStringContainsString('Table: `corrupt_spatial`', $message);
-            $this->assertStringContainsString('Row: `id` = 23', $message);
-            $this->assertStringContainsString('Target error', $message);
-            $this->assertStringContainsString('The target cursor did not advance.', $message);
-        }
     }
 
     public function testEarlierCursorFormatResumesBeforeFirstEmptyValue(): void
@@ -825,9 +894,9 @@ class EmptyGeometryTest extends TestCase {
         $query_stream->mark_input_complete();
         while ($query_stream->next_query()) {
             $query = $query_stream->get_query();
-            $query = $rewriter->rewrite($query) ?? $query;
             $inspection = $diagnostics->inspect($query);
             $diagnostics->assert_supported($inspection);
+            $query = $rewriter->rewrite($query) ?? $query;
             try {
                 $target_pdo->exec($query);
             } catch (PDOException $error) {

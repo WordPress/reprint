@@ -556,14 +556,14 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
                         + 'CHECK (`location` IS NOT NULL)'
                     );
                 },
-                code: 'SPATIAL_NULL_CONSTRAINT',
+                code: 'SPATIAL_ROW_REJECTED',
                 details: [
                     /Table: `zz_spatial_check_failure`/,
                     /Row: `id` = 17/,
-                    /Column: `location` POINT/,
-                    /Conversion: zero bytes -> SQL NULL/,
+                    /Column candidate: `location` POINT \(zero bytes converted to SQL NULL\)/,
                     /location_required/,
                     /SHOW CREATE TABLE `zz_spatial_check_failure`/,
+                    /The target did not report which value caused the failure\./,
                 ],
             });
         });
