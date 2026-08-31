@@ -15,6 +15,7 @@ use Reprint\Importer\Database\DatabaseConnection;
 use Reprint\Importer\Database\MysqliDatabaseConnection;
 use Reprint\Importer\Database\PdoDatabaseConnection;
 use Reprint\Importer\DatabaseUrlRewriteProcessor;
+use Reprint\Importer\NullableSpatialColumnStatementRewriter;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\Pull\PullFailureReportedException;
 use Reprint\Importer\State\DatabaseApplyCommandState;
@@ -6949,6 +6950,9 @@ class ImportClient
         string $target_engine,
         ?SqlStatementRewriter $stmt_rewriter = null
     ): int {
+        $nullable_spatial_column_rewriter = new NullableSpatialColumnStatementRewriter(
+            $connection
+        );
         if ($target_engine === 'mysql') {
             $query_stream = new \WP_MySQL_FastQueryStream();
             $query_stream->append_sql($sql);
@@ -6956,6 +6960,7 @@ class ImportClient
             $statement_count = 0;
             while ($query_stream->next_query()) {
                 $query = $query_stream->get_query();
+                $query = $nullable_spatial_column_rewriter->rewrite($query) ?? $query;
                 if ($stmt_rewriter !== null) {
                     $query = $stmt_rewriter->rewrite($query);
                 }
@@ -6990,6 +6995,7 @@ class ImportClient
             $statement_count = 0;
             while ($query_stream->next_query()) {
                 $query = $query_stream->get_query();
+                $query = $nullable_spatial_column_rewriter->rewrite($query) ?? $query;
                 $executed_query = $query;
                 try {
                     $this->execute_db_apply_query(

@@ -52,6 +52,10 @@ class MySQLDumpProducer
      */
     public const MAX_SQL_PART_BODY_BYTES = 16 * 1024 * 1024;
 
+    /** Starts the importer marker whose remaining words are base64 table and column names. */
+    public const NULLABLE_SPATIAL_COLUMNS_COMMENT_PREFIX =
+        "/* REPRINT: make zero-byte spatial columns nullable ";
+
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
     const STATE_NEXT_TABLE = "next_table";
@@ -425,28 +429,36 @@ class MySQLDumpProducer
             );
         }
 
+        // The valid fallback keeps the dump usable by importers which do not
+        // recognize the marker. Importers which recognize it rebuild the ALTER
+        // from the target definition so MODIFY COLUMN keeps every attribute.
+        $table = $this->row_reader->get_current_table();
+        $encoded_identifiers = [base64_encode($table)];
         $definitions = [];
         foreach ($this->pending_nullable_spatial_columns as $column) {
+            $encoded_identifiers[] = base64_encode($column);
             $column_metadata = $this->row_reader->get_column_metadata($column);
             $definition = "MODIFY COLUMN " . $this->row_reader->quote_identifier($column) .
                 " " . $column_metadata["column_type"] . " NULL";
             if ($column_metadata["comment"] !== "") {
                 $quoted_comment = $this->db->quote($column_metadata["comment"]);
                 if (!is_string($quoted_comment)) {
+                    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Schema errors are API text.
                     throw new \RuntimeException(
                         "Failed to quote the comment for column " .
                         $this->row_reader->quote_identifier($column) . "."
                     );
+                    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
                 }
                 $definition .= " COMMENT {$quoted_comment}";
             }
             $definitions[] = $definition;
         }
 
-        $quoted_table = $this->row_reader->quote_identifier(
-            $this->row_reader->get_current_table()
-        );
-        $this->current_sql_fragment = "ALTER TABLE {$quoted_table}\n" .
+        $quoted_table = $this->row_reader->quote_identifier($table);
+        $this->current_sql_fragment = self::NULLABLE_SPATIAL_COLUMNS_COMMENT_PREFIX .
+            implode(" ", $encoded_identifiers) . " */\n" .
+            "ALTER TABLE {$quoted_table}\n" .
             implode(",\n", $definitions) . ";";
         foreach ($this->pending_nullable_spatial_columns as $column) {
             $this->nullable_spatial_columns[] = $column;

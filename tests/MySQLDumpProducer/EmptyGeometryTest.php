@@ -1,6 +1,12 @@
 <?php
 
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/mysql-query-stream/load.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/database/load.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/import/load.php';
+
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Database\PdoDatabaseConnection;
+use Reprint\Importer\NullableSpatialColumnStatementRewriter;
 use WordPress\Reprint\Server\MySQLDumpProducer;
 
 /**
@@ -196,11 +202,78 @@ class EmptyGeometryTest extends TestCase {
         $this->assertSame('YES', $columns_by_name['boundary']['Null']);
         $this->assertSame('Map area', $columns_by_name['boundary']['Comment']);
 
-        preg_match_all('/ALTER TABLE `[^`]+`\n.*?;/s', $sql, $alter_statements);
+        preg_match_all(
+            '/' . preg_quote(MySQLDumpProducer::NULLABLE_SPATIAL_COLUMNS_COMMENT_PREFIX, '/') .
+                '.*? \*\/\s+ALTER TABLE `[^`]+`\n.*?;/s',
+            $sql,
+            $alter_statements
+        );
         $this->assertCount(2, $alter_statements[0]);
+        $database = new PdoDatabaseConnection($target_pdo);
+        $rewriter = new NullableSpatialColumnStatementRewriter($database);
         foreach ($alter_statements[0] as $alter_statement) {
-            $target_pdo->exec($alter_statement);
+            $rewritten_statement = $rewriter->rewrite($alter_statement);
+            $this->assertNotNull($rewritten_statement);
+            $target_pdo->exec($rewritten_statement);
         }
+    }
+
+    public function testNullableAlterPreservesCompleteColumnDefinition(): void
+    {
+        $column = "location,\n`north";
+        $quoted_column = '`' . str_replace('`', '``', $column) . '`';
+        $comment = "North's path \\tiles\nSecond line";
+        $quoted_comment = $this->source_pdo->quote($comment);
+
+        $this->source_pdo->exec(
+            'CREATE TABLE definition_attributes (id INT PRIMARY KEY)'
+        );
+        $this->source_pdo->exec('INSERT INTO definition_attributes VALUES (1)');
+        $this->source_pdo->exec(
+            "ALTER TABLE definition_attributes ADD COLUMN {$quoted_column} POINT NOT NULL"
+        );
+        $this->source_pdo->exec(
+            "ALTER TABLE definition_attributes MODIFY COLUMN {$quoted_column} POINT NOT NULL " .
+            "INVISIBLE DEFAULT (ST_GeomFromText('POINT(4 5)')) COMMENT {$quoted_comment}"
+        );
+
+        $source_columns = $this->source_pdo
+            ->query('SHOW FULL COLUMNS FROM definition_attributes')
+            ->fetchAll();
+        $source_column = array_column($source_columns, null, 'Field')[$column];
+        $this->assertSame('NO', $source_column['Null']);
+        $this->assertSame(
+            0,
+            (int) $this->source_pdo
+                ->query(
+                    "SELECT OCTET_LENGTH(CAST({$quoted_column} AS BINARY)) " .
+                    'FROM definition_attributes'
+                )
+                ->fetchColumn()
+        );
+
+        $sql = $this->exportWithResumeAfterEveryFragment([
+            'tables_to_process' => ['definition_attributes'],
+        ]);
+        $target_pdo = $this->executeDump(
+            $sql,
+            'test_empty_geometry_mariadb_definition_target'
+        );
+
+        $target_columns = $target_pdo
+            ->query('SHOW FULL COLUMNS FROM definition_attributes')
+            ->fetchAll();
+        $target_column = array_column($target_columns, null, 'Field')[$column];
+        $this->assertSame('YES', $target_column['Null']);
+        foreach (['Type', 'Default', 'Extra', 'Comment'] as $field) {
+            $this->assertSame($source_column[$field], $target_column[$field], $field);
+        }
+        $this->assertSame(
+            1,
+            (int) $target_pdo
+                ->query("SELECT {$quoted_column} IS NULL FROM definition_attributes")
+                ->fetchColumn()
+        );
     }
 
     public function testEarlierCursorFormatResumesBeforeFirstEmptyValue(): void
@@ -330,7 +403,16 @@ class EmptyGeometryTest extends TestCase {
         );
         $target_pdo->exec("USE `{$database}`");
         $this->target_databases[] = $database;
-        $target_pdo->exec($sql);
+
+        $connection = new PdoDatabaseConnection($target_pdo);
+        $rewriter = new NullableSpatialColumnStatementRewriter($connection);
+        $query_stream = new WP_MySQL_FastQueryStream();
+        $query_stream->append_sql($sql);
+        $query_stream->mark_input_complete();
+        while ($query_stream->next_query()) {
+            $query = $query_stream->get_query();
+            $target_pdo->exec($rewriter->rewrite($query) ?? $query);
+        }
         return $target_pdo;
     }
 
