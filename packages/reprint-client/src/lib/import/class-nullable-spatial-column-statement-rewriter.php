@@ -34,6 +34,9 @@ class NullableSpatialColumnStatementRewriter {
         if (strpos($sql, $marker_prefix) !== false) {
             return $this->rewrite_nullable_spatial_alter($sql, $marker_prefix);
         }
+        // MariaDB recreates its own zero-byte placeholder when this one-row
+        // INSERT omits the geometry column. MySQL cannot represent that value,
+        // so it keeps the marked NULL expression after the nullable ALTER.
         if (
             strpos($sql, MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT) !== false
             && $this->is_mariadb_target()
@@ -70,9 +73,9 @@ class NullableSpatialColumnStatementRewriter {
                 'The marked spatial ALTER TABLE names a different table than its marker.'
             );
         }
+        // MariaDB uses the omitted-column INSERT below and keeps the source
+        // NOT NULL definition. MySQL needs this ALTER before it can store NULL.
         if ($this->is_mariadb_target()) {
-            // MariaDB creates the source placeholder when marked values are
-            // omitted from the INSERT, so keep the source definition unchanged.
             return 'DO 0;';
         }
         $quoted_table = self::quote_identifier($table);
