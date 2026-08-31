@@ -3151,7 +3151,7 @@ class ImportClient
     public function run_files_pull(): void
     {
         do {
-            $this->run_files_pull_once();
+            $this->run_files_pull_until_complete_or_partial_response();
         } while (
             $this->get_state()->active_resumable_command->completion_state === "partial"
             && !$this->shutdown_requested
@@ -3159,8 +3159,8 @@ class ImportClient
         );
     }
 
-    /** Runs files-pull until it completes or receives a partial response. */
-    private function run_files_pull_once(): void
+    /** Runs files-pull until it completes or receives a partial source response. */
+    private function run_files_pull_until_complete_or_partial_response(): void
     {
         $sender_state_path = wp_join_unix_paths(
             dirname($this->pull_state_directory),
