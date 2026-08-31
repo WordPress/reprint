@@ -1897,6 +1897,11 @@ final class PushEndpointsTest extends TestCase {
         );
         try {
             $this->takeSenderStepsUntilPhase($sender, 'planning');
+            $this->takeSenderStepsUntilPlanPhase(
+                $sender,
+                $push_state_directory,
+                'indexing'
+            );
             $create_result = $this->senderResult($sender);
             $this->assertSame('planning', $create_result['phase']);
             $plan = $plan_property->getValue($sender);
@@ -1962,6 +1967,11 @@ final class PushEndpointsTest extends TestCase {
         try {
             $this->assertSame('creating', $sender->get_phase());
             $this->takeSenderStepsUntilPhase($sender, 'planning');
+            $this->takeSenderStepsUntilPlanPhase(
+                $sender,
+                $push_state_directory,
+                'indexing'
+            );
             $this->assertFileExists($fresh_local_index_path);
             $this->assertFileExists($push_state_directory . '/plan/excluded_paths.json');
             $this->assertFileDoesNotExist($push_state_directory . '/plan/cursor.json');
@@ -2059,6 +2069,11 @@ final class PushEndpointsTest extends TestCase {
         if ($child === 0) {
             $sender = $this->startSender($options);
             $this->takeSenderStepsUntilPhase($sender, 'planning');
+            $this->takeSenderStepsUntilPlanPhase(
+                $sender,
+                $push_state_directory,
+                'indexing'
+            );
             if (!$sender->next_step()) {
                 exit(2);
             }

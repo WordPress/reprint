@@ -169,6 +169,186 @@ final class PushPlanTest extends TestCase
         $this->assertArrayNotHasKey('empty', $freshLocalIndexEntries['public.txt']);
     }
 
+    public function testNewDefaultSkipOmitsLegacyEntryWithoutPlanningDeletion(): void
+    {
+        $ordinaryPath = 'index.php';
+        $backupPath = 'wp-content/updraft/backup_site-uploads.zip';
+        $filesystemDescription = $this->writeIndex([
+            $ordinaryPath => [1, 5, 'file'],
+            $backupPath => [1, 5, 'file'],
+        ]);
+        $this->materializeFilesystemRoot($filesystemDescription);
+        $ordinaryStat = lstat($this->filesystemRoot() . '/' . $ordinaryPath);
+        $backupStat = lstat($this->filesystemRoot() . '/' . $backupPath);
+        $this->assertIsArray($ordinaryStat);
+        $this->assertIsArray($backupStat);
+        $legacyIndex = $this->writeIndex([
+            $ordinaryPath => [
+                (int) $ordinaryStat['ctime'],
+                (int) $ordinaryStat['size'],
+                'file',
+            ],
+            $backupPath => [
+                (int) $backupStat['ctime'],
+                (int) $backupStat['size'],
+                'file',
+            ],
+        ]);
+        mkdir(dirname($this->localIndexFile()), 0755, true);
+        copy($legacyIndex, $this->localIndexFile());
+
+        $plan = $this->startPlan($filesystemDescription);
+        $plan->close();
+        $plan = $this->resumePlan();
+        $this->planToCompletion($plan);
+
+        $this->assertPathCounts(0, 0);
+        $this->assertSame(
+            [$ordinaryPath, $backupPath],
+            array_keys($this->indexEntries($this->localIndexFile()))
+        );
+        $this->assertSame(
+            [$ordinaryPath],
+            array_keys(
+                $this->indexEntries(
+                    $this->planPath('patch_base_index.jsonl')
+                )
+            )
+        );
+        $this->assertSame(
+            [$ordinaryPath],
+            array_keys(
+                $this->indexEntries(
+                    $this->planPath('fresh_local_index.jsonl')
+                )
+            )
+        );
+    }
+
+    public function testPatchBaseFilteringProcessesOneEntryPerStepAndResumes(): void
+    {
+        $filesystemDescription = $this->writeIndex([
+            'a.txt' => [1, 1, 'file'],
+            'b.txt' => [1, 1, 'file'],
+            'c.txt' => [1, 1, 'file'],
+        ]);
+        mkdir(dirname($this->localIndexFile()), 0755, true);
+        copy($filesystemDescription, $this->localIndexFile());
+
+        $plan = $this->startPlanAtInitialCursor($filesystemDescription);
+        $this->assertSame('filtering_patch_base', $this->planCursor()['phase']);
+        $this->assertTrue($this->nextPlanStep($plan));
+        $this->assertSame(
+            ['a.txt'],
+            array_keys($this->indexEntries($this->planPath('patch_base_index.jsonl')))
+        );
+        $storedCursor = $this->cursor;
+        $this->assertTrue($plan->next_step());
+        $plan->close();
+
+        $this->cursor = $storedCursor;
+        $plan = $this->resumePlan();
+        $this->assertSame(
+            ['a.txt'],
+            array_keys($this->indexEntries($this->planPath('patch_base_index.jsonl')))
+        );
+        $this->assertTrue($this->nextPlanStep($plan));
+        $this->assertSame('filtering_patch_base', $this->planCursor()['phase']);
+        $this->assertSame(
+            ['a.txt', 'b.txt'],
+            array_keys($this->indexEntries($this->planPath('patch_base_index.jsonl')))
+        );
+        $plan->close();
+    }
+
+    public function testPatchBaseUsesCurrentFilesystemTypeForSkippedFileNames(): void
+    {
+        $legacyIndex = $this->writeIndex([
+            'access.log' => [1, 1, 'file'],
+            'debug.log' => [1, 0, 'dir', true],
+            'error.log' => [1, 1, 'file'],
+            'history.log' => [1, 0, 'link'],
+        ]);
+        mkdir(dirname($this->localIndexFile()), 0755, true);
+        copy($legacyIndex, $this->localIndexFile());
+        $current = $this->writeIndex([
+            'access.log' => [2, 0, 'link'],
+            'debug.log' => [2, 1, 'file'],
+            'error.log' => [2, 0, 'dir', true],
+            'history.log' => [2, 1, 'file'],
+        ]);
+
+        $plan = $this->startPlan($current);
+        $this->planToCompletion($plan);
+
+        $this->assertSame(
+            ['access.log', 'error.log'],
+            array_keys($this->indexEntries($this->planPath('patch_base_index.jsonl')))
+        );
+        $this->assertSame(
+            ['access.log', 'error.log'],
+            array_keys($this->indexEntries($this->planPath('fresh_local_index.jsonl')))
+        );
+        $this->assertSame(
+            ['access.log', 'error.log'],
+            $this->listPaths($this->planPath('local_paths_to_push.jsonl'))
+        );
+        $this->assertSame(
+            ['error.log'],
+            $this->localPathsToDelete($this->planPath('local_paths_to_delete'))
+        );
+    }
+
+    public function testLegacyIndexingCursorRestartsWithAFilteredPatchBase(): void
+    {
+        $ordinaryPath = 'index.php';
+        $backupPath = 'wp-content/updraft/backup_site-uploads.zip';
+        $filesystemDescription = $this->writeIndex([
+            $ordinaryPath => [1, 5, 'file'],
+            $backupPath => [1, 5, 'file'],
+        ]);
+        $this->materializeFilesystemRoot($filesystemDescription);
+        $ordinaryStat = lstat($this->filesystemRoot() . '/' . $ordinaryPath);
+        $backupStat = lstat($this->filesystemRoot() . '/' . $backupPath);
+        $this->assertIsArray($ordinaryStat);
+        $this->assertIsArray($backupStat);
+        $legacyIndex = $this->writeIndex([
+            $ordinaryPath => [
+                (int) $ordinaryStat['ctime'],
+                (int) $ordinaryStat['size'],
+                'file',
+            ],
+            $backupPath => [
+                (int) $backupStat['ctime'],
+                (int) $backupStat['size'],
+                'file',
+            ],
+        ]);
+        mkdir(dirname($this->localIndexFile()), 0755, true);
+        copy($legacyIndex, $this->localIndexFile());
+
+        $plan = $this->startPlanAtInitialCursor($filesystemDescription);
+        while ($this->planCursor()['phase'] === 'filtering_patch_base') {
+            $this->assertTrue($this->nextPlanStep($plan));
+        }
+        $this->assertSame('indexing', $this->planCursor()['phase']);
+        $this->assertTrue($this->nextPlanStep($plan));
+        unset($this->cursor['push_plan_version']);
+        $plan->close();
+        unlink($this->planPath('patch_base_index.jsonl'));
+
+        $plan = $this->resumePlan();
+        $this->cursor = $plan->get_cursor();
+        $this->assertSame('filtering_patch_base', $this->planCursor()['phase']);
+        $this->planToCompletion($plan);
+
+        $this->assertPathCounts(0, 0);
+        $this->assertSame(
+            [$ordinaryPath],
+            array_keys($this->indexEntries($this->planPath('patch_base_index.jsonl')))
+        );
+    }
+
     public function testUnchangedIndexProducesEmptyPlans(): void
     {
         $index = $this->writeIndex([
@@ -594,6 +774,7 @@ final class PushPlanTest extends TestCase
 
         $cursor = $plan->get_cursor();
         $this->assertSame([
+            'push_plan_version',
             'plan_directory',
             'filesystem_root',
             'local_index_file',
@@ -802,6 +983,26 @@ final class PushPlanTest extends TestCase
         array $excludedPaths = [],
         string $documentRootLocalRelativePath = ''
     ): PushPlan {
+        $plan = $this->startPlanAtInitialCursor(
+            $filesystemRootDescriptionFile,
+            $excludedPaths,
+            $documentRootLocalRelativePath
+        );
+        for ($step = 0; $step < 100; ++$step) {
+            if ($this->planCursor()['phase'] === 'diffing') {
+                return $plan;
+            }
+            $this->assertTrue($this->nextPlanStep($plan));
+        }
+        $this->fail('Push plan did not finish indexing within 100 bounded steps.');
+    }
+
+    /** @param list<string> $excludedPaths */
+    private function startPlanAtInitialCursor(
+        ?string $filesystemRootDescriptionFile = null,
+        array $excludedPaths = [],
+        string $documentRootLocalRelativePath = ''
+    ): PushPlan {
         if ($filesystemRootDescriptionFile === null) {
             $filesystemRootDescriptionFile = $this->tempDir . '/empty-filesystem-root.jsonl';
             if (!is_file($filesystemRootDescriptionFile)) {
@@ -827,13 +1028,7 @@ final class PushPlanTest extends TestCase
             $documentRootLocalRelativePath
         );
         $this->cursor = $plan->get_cursor();
-        for ($step = 0; $step < 100; ++$step) {
-            if ($this->planCursor()['phase'] === 'diffing') {
-                return $plan;
-            }
-            $this->assertTrue($this->nextPlanStep($plan));
-        }
-        $this->fail('Push plan did not finish indexing within 100 bounded steps.');
+        return $plan;
     }
 
     private function resumePlan(): PushPlan

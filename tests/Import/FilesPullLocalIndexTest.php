@@ -192,9 +192,11 @@ final class FilesPullLocalIndexTest extends TestCase
 
     public function testPullDoesNotAddDefaultSkippedPathsToTheLocalIndex(): void
     {
+        $backupPath = 'wp-content/updraft/backup_site-uploads.zip';
         $this->writeRemoteOverrides([
             'added_files' => [
                 'node_modules/pulled-package.js' => 'pulled dependency',
+                $backupPath => 'pulled backup',
             ],
         ]);
 
@@ -206,6 +208,10 @@ final class FilesPullLocalIndexTest extends TestCase
                 $this->localTree . '/node_modules/pulled-package.js'
             )
         );
+        $this->assertSame(
+            'pulled backup',
+            file_get_contents($this->localTree . '/' . $backupPath)
+        );
         $index = $this->readIndex($this->localIndexPath());
         $this->assertArrayNotHasKey(
             $this->localIndexEntryPath('node_modules'),
@@ -213,6 +219,10 @@ final class FilesPullLocalIndexTest extends TestCase
         );
         $this->assertArrayNotHasKey(
             $this->localIndexEntryPath('node_modules/pulled-package.js'),
+            $index
+        );
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath($backupPath),
             $index
         );
         $diff = $this->runFilesDiff();
@@ -1234,6 +1244,44 @@ final class FilesPullLocalIndexTest extends TestCase
             'local_paths_to_push' => 0,
             'local_paths_to_delete' => 0,
         ]], $this->filesDiffRecords($diff['stdout']));
+    }
+
+    public function testPulledDeletionRecordsTheDerivedDirectoryType(): void
+    {
+        $arguments = [
+            '--include=/var/www/html/folder',
+            '--remap',
+            '/var/www/html/folder',
+            ':fs-root:/var/www/html/history.log',
+        ];
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        file_put_contents(
+            $this->localTree . '/history.log/local-added.txt',
+            'local addition'
+        );
+        $this->writeRemoteOverrides([
+            'removed_paths' => ['folder/remote-deleted.txt'],
+        ]);
+
+        $this->abortFilesPull();
+        $pull = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertDirectoryDoesNotExist($this->localTree . '/history.log');
+        $index = $this->readIndex($this->localIndexPath());
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath('history.log'),
+            $index
+        );
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath('history.log/remote-deleted.txt'),
+            $index
+        );
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath('history.log/local-added.txt'),
+            $index
+        );
     }
 
     public function testPulledDirectoryDeletionRemovesItsLocalIndexSubtree(): void

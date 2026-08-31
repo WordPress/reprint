@@ -110,9 +110,14 @@ sorted path mutations directly and removes an indexed subtree when its root is
 deleted or replaced. Non-empty directories remain implicit. A successful
 initial pull with no local mutations creates an empty local index.
 
-`PushPlan` first builds a path-sorted fresh local index, then derives the local
-paths to push and delete by diffing it against the local index its caller
-supplies. The indexer marks physical emptiness while
+`PushPlan` first copies the caller's local index to
+`plan/patch_base_index.jsonl`, omitting entries which are now
+default-skipped. It then builds a path-sorted fresh local index and derives the
+local paths to push and delete by diffing the two plan-owned indexes. The
+caller's local index remains unchanged during planning. File-name rules use
+the current filesystem type, so a file which became a directory or symlink
+remains in the patch base and is replaced. The indexer marks physical
+emptiness while
 it observes each directory, so a completed index distinguishes empty
 directories from non-empty ones. Files and symlinks change when their `type`,
 `ctime`, or `size` changes; unrelated index values do not select a path for
@@ -135,24 +140,29 @@ A push plan is an internal part of the sender lifecycle:
    create stores the exclusions in `excluded_paths.json` after creating the
    active `plan/` directory.
 2. The sender starts one internal `PushPlan`. The plan copies the exclusions to
-   `plan/excluded_paths.json`, then opens
+   `plan/excluded_paths.json` and enters `filtering_patch_base`. Each step reads
+   at most one caller-owned local-index entry and appends it to
+   `plan/patch_base_index.jsonl` unless it is now default-skipped. The cursor
+   stores the byte offsets in both files.
+3. When the patch base reaches EOF, the plan opens
    `plan/fresh_local_index.jsonl` and a `FileIndexProcessor`. Each internal
    `indexing` step advances one traversal event, appends its JSONL entries when
    applicable, and updates its traversal cursor and fresh-index byte offset.
    One sender step runs at most 256 internal planning steps without crossing
    an internal phase boundary, flushes their output, and stores the resulting
    cursor in `sender.json` before returning.
-3. Once traversal is complete, the plan enters `starting_diff`. The next step
-   starts the index diff and enters `diffing`.
-4. Each later `next_step()` compares at most one path represented by either
+4. Once traversal is complete, the plan enters `starting_diff`. The next step
+   starts the index diff between the selected patch base and the fresh local
+   index, then enters `diffing`.
+5. Each later `next_step()` compares at most one path represented by either
    index. It returns true while another planning step remains and false when
    both indexes reach EOF. It
    writes files, symlinks, and empty directories with their local relative
    path, planned type, size, and ctime to `plan/local_paths_to_push.jsonl`,
    and writes raw NUL-delimited document-root-relative paths to
    `plan/local_paths_to_delete`.
-5. The sender closes the plan before consuming those two files.
-6. After the target confirms commit, the sender saves the retained fresh local
+6. The sender closes the plan before consuming those two files.
+7. After the target confirms commit, the sender saves the retained fresh local
    index as `<remote-state-directory>/local_index.jsonl` through the same
    swap-file copy. It then removes the complete `plan/` directory and the
    sender-owned exclusions file. After the target confirms removal of a
@@ -164,29 +174,31 @@ the durable phase. An interrupted start is repeated and overwrites its initial
 plan files. After each later plan step, changed files are flushed before the
 sender atomically stores the returned cursor in `sender.json`.
 
-The completed-index copy after commit is a deliberate exception to bounded
-sender steps. A
-representative index entry is about 150 bytes, so one million paths produce
-roughly 150 MB, which takes about 15 seconds even at 10 MiB/s. PHP `copy()`
-streams the index without loading it into memory, and only the final rename
-moves the completed copy into place. This accepts that a 1 MiB/s drive reaches
-30 seconds at roughly 200,000 paths. A stopped copy is repeated by the next
-sender run. Keeping another cursor and retained handle for this post-commit copy
-is not justified until measurements from materially larger installations show
-that it matters.
+The completed-index copy after commit is the deliberate exception to bounded
+sender steps. A representative index entry is about 150 bytes, so one million
+paths produce roughly 150 MB, which takes about 15 seconds even at 10 MiB/s.
+PHP `copy()` streams the index without loading it into memory, and only the
+final rename moves the completed copy into place. This accepts that a 1 MiB/s
+drive reaches 30 seconds at roughly 200,000 paths. A stopped copy is repeated
+by the next sender run. Keeping another cursor and retained handle for this
+post-commit copy is not justified until measurements from materially larger
+installations show that it matters.
 
-The cursor contains the plan directory, filesystem root, local index file,
-document root's local relative path, and current planning position. During
-indexing, that position contains the `FileIndexProcessor` cursor and committed
-fresh-index byte offset. During diffing, each step flushes only the path list or
-append-only active deletion roots file changed by that step before updating
+The cursor contains the push-plan version, plan directory, filesystem root,
+local index file, document root's local relative path, and current planning
+position. During `filtering_patch_base`, that position contains committed byte
+offsets in the caller's local index and the plan-owned patch base. During
+`indexing`, it contains the `FileIndexProcessor` cursor and committed
+fresh-index byte offset. During `diffing`, each step flushes only the path list
+or append-only active deletion roots file changed by that step before updating
 the two output byte offsets and the nested FileSyncPatchPlanner cursor. Each
 active deletion root links to the preceding one, so continuation reads only
 the current root. PushPlan stores and restores the planner cursor without
 rebuilding it. A later process passes the stored cursor to
 `PushPlan::resume()`. The plan uses its private exclusions copy, discards bytes
 beyond the stored output offsets, and continues from the retained internal
-phase.
+phase. An older cursor stopped during `indexing` restarts at
+`filtering_patch_base` so one traversal never mixes old and current skip rules.
 
 The first push to a site has no local index or previously pushed rows. Every
 current file, symlink, and empty directory is selected, and no local deletion
@@ -199,9 +211,11 @@ manager.
 
 ## Deletes
 
-Local deletions since the last push come from paths present in the local index
-but absent from the fresh local index. They
-travel as NUL-delimited document-root-relative paths in `work/deletes`. Commit
+Local deletions since the last push come from paths present in the filtered
+patch base but absent from the fresh local index. A path omitted from a
+filtered patch base because it is now default-skipped does not become a delete
+operation. Local deletions travel as NUL-delimited document-root-relative paths
+in `work/deletes`. Commit
 records its byte offset before and after every destructive mutation, so a later
 request can resume from a durable checkpoint instead of repeating a delete.
 
@@ -326,6 +340,7 @@ state:
     plan/
       excluded_paths.json               target exclusions for the active push
       fresh_local_index.jsonl           plan-owned fresh local index
+      patch_base_index.jsonl            patch base without newly default-skipped entries
       local_paths_to_push.jsonl         local paths to push
       local_paths_to_delete             raw NUL-delimited document-root-relative paths
       deleted_directories_stack.jsonl   active directory-deletion roots
@@ -347,10 +362,12 @@ may stop after any true return and close the sender. If the process stops
 without closing, the next process uses the preceding sender boundary and
 receiver-confirmed cursors to account for later remote work.
 
-During PushPlan's internal `indexing` phase, the plan retains one
-`FileIndexProcessor` and the open fresh local index across steps. A
-newly opened plan truncates that file to the byte offset stored with the
-processor cursor before continuing. The sender lazily opens
+During PushPlan's internal `filtering_patch_base` phase, the plan retains the
+open local index and patch base across steps. A reopened plan truncates the
+patch base and seeks both files to their stored byte offsets. During
+`indexing`, it retains one `FileIndexProcessor` and the open fresh local index
+across steps. A newly opened plan truncates that file to the byte offset stored
+with the processor cursor before continuing. The sender lazily opens
 `local_paths_to_push.jsonl`, `local_paths_to_delete`, and the current local file.
 It retains those handles across `next_step()` calls, lets each handle advance
 with the work, and seeks only when a newly opened or receiver-confirmed offset
@@ -359,6 +376,7 @@ remaining handles before `close()` returns.
 
 The sender stores the mandatory preflight document root, creates the push session,
 and stores its exclusion policy before it starts PushPlan. Each internal
+`filtering_patch_base` step reads at most one local-index entry, each
 `indexing` step completes one traversal event, and `starting_diff` initializes
 the index diff. Each internal `diffing` step compares at most one path and
 updates the path lists. One sender step runs at most 256 internal steps from
@@ -527,10 +545,11 @@ receiver cursors or tentative upload positions.
 
 `reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl]`
 reports a local minimized push operation plan before target exclusions: the
-local paths a files-push would send or delete, compared against
-`<remote-state-directory>/local_index.jsonl`. Files-pull advances that local
-index after completed local mutations, and files-push replaces it after the
-target confirms commit. The remote state directory is
+local paths a files-push would send or delete, compared against the same
+filtered patch base used by files-push. The retained local index is not
+changed. Files-pull advances that local index after
+completed local mutations, and files-push replaces it after the target
+confirms commit. The remote state directory is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`, so another URL
 query cannot reuse the index. A different filesystem root uses a different
 state directory. The command accepts only `--state-dir`, `--fs-root`, and the

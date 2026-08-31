@@ -12,10 +12,11 @@ use function WordPress\Reprint\Server\relative_path_under;
  * Two layers of testing:
  *
  *   1. path_is_default_skipped() unit tests — exhaustive per-input
- *      classification of cache dirs, VCS metadata, OS junk, editor
- *      scratch, AND a long list of *negative* cases where a name
- *      looks superficially similar but should be preserved
- *      (.htaccess, .well-known, cache-control.css, etc.).
+ *      classification of generated backup, log, cache, and temporary
+ *      files, VCS metadata, OS junk, editor scratch, AND a long list of
+ *      *negative* cases where a name looks superficially similar but
+ *      should be preserved (.htaccess, .well-known, cache-control.css,
+ *      non-backup files inside backup directories, etc.).
  *
  *   2. endpoint_file_index() integration tests via subprocess: build a
  *      fixture tree that mixes real-WP-shaped junk and real content,
@@ -77,6 +78,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
             'wp-content upgrade'          => ['/srv/htdocs/wp-content/upgrade/wp-7.0-12345/wp-admin/about.php', true],
             'wpcomsh-cache'               => ['/srv/htdocs/wp-content/wpcomsh-cache/data.bin', true],
             'wflogs (Wordfence)'          => ['/srv/htdocs/wp-content/wflogs/attack-data.php', true],
+            'wfcache (Wordfence)'         => ['/srv/htdocs/wp-content/wfcache/config.php', true],
 
             // Negative: file or dir whose NAME starts with cache- but is NOT inside the cache dir.
             'cache-control plugin css'    => ['/srv/htdocs/wp-content/plugins/cache-control/admin.css', false],
@@ -84,6 +86,53 @@ final class FileIndexSkipDefaultsTest extends TestCase
             'image with cache in name'    => ['/srv/htdocs/wp-content/uploads/2024/cache-page.png', false],
             // Negative: dir literally named "cache" but NOT under wp-content/ — out of our scope.
             'cache outside wp-content'    => ['/srv/htdocs/data/cache/x.json', false],
+
+            // -------- backup archives in known plugin directories --------
+            'Updraft uploads archive'     => ['/srv/htdocs/wp-content/updraft/backup_2025-02-16-1332_DailyRidgecom_61e86367b74c-uploads639.zip', true],
+            'Updraft database archive'    => ['/srv/htdocs/wp-content/updraft/backup_2025-02-16-1332_DailyRidgecom_61e86367b74c-db.gz', true],
+            'Updraft encrypted database'  => ['/srv/htdocs/wp-content/updraft/backup_2025-02-16-1332_DailyRidgecom_61e86367b74c-db.gz.crypt', true],
+            'Updraft job log'             => ['/srv/htdocs/wp-content/updraft/log.61e86367b74c.txt', true],
+            'All-in-One WP Migration'     => ['/srv/htdocs/wp-content/ai1wm-backups/example-com-20260831-120000.wpress', true],
+            'WPvivid archive'             => ['/srv/htdocs/wp-content/wpvividbackups/example.com_wpvivid-123_2026-08-31-12-00_backup_db.zip', true],
+            'Duplicator Lite archive'     => ['/srv/htdocs/wp-content/backups-dup-lite/example_archive.zip', true],
+            'Duplicator Pro archive'      => ['/srv/htdocs/wp-content/backups-dup-pro/example_archive.daf', true],
+            'BackupBuddy archive'         => ['/srv/htdocs/wp-content/uploads/backupbuddy_backups/backup-full-example.zip', true],
+            'BackWPup current archive'    => ['/srv/htdocs/wp-content/uploads/backwpup/8f17c/backups/example.tar.gz', true],
+            'BackWPup legacy archive'     => ['/srv/htdocs/wp-content/uploads/backwpup-8f17c-backups/example.tar.bz2', true],
+            'WP STAGING archive'          => ['/srv/htdocs/wp-content/uploads/wp-staging/backups/example.wpstg', true],
+            'Backup Guard archive'        => ['/srv/htdocs/wp-content/uploads/backup-guard/example.sgbp', true],
+            'Backup Guard content path'   => ['/srv/htdocs/wp-content/backup-guard/job/example.sgbp', true],
+            'database backup'             => ['/srv/htdocs/wp-content/backup-db/example.sql.gz', true],
+            'WP Time Capsule database'    => ['/srv/htdocs/wp-content/uploads/tCapsule/backups/example-wptc_meta.sql.gz', true],
+            'Duplicator legacy archive'   => ['/srv/htdocs/wp-snapshots/example_archive.zip', true],
+
+            // Known backup directories remain traversable. Only archive and
+            // plugin-generated log names are omitted from them.
+            'notes inside Updraft dir'    => ['/srv/htdocs/wp-content/updraft/restore-notes.txt', false],
+            'image inside AIOWPM dir'     => ['/srv/htdocs/wp-content/ai1wm-backups/site-diagram.png', false],
+            'readme inside Duplicator dir'=> ['/srv/htdocs/wp-content/backups-dup-lite/important-readme.md', false],
+            'unknown zip inside Updraft'  => ['/srv/htdocs/wp-content/updraft/customer-download.zip', false],
+            'notes inside WPTC dir'       => ['/srv/htdocs/wp-content/uploads/tCapsule/backups/restore-notes.txt', false],
+            'archive outside known dirs'  => ['/srv/htdocs/wp-content/uploads/customer-download.zip', false],
+            'similarly named Updraft dir' => ['/srv/htdocs/wp-content/updraft-archive/backup_example.zip', false],
+
+            // -------- logs and temporary files --------
+            'WordPress debug log'         => ['/srv/htdocs/wp-content/debug.log', true],
+            'PHP error log'               => ['/srv/htdocs/error_log', true],
+            'plugin log file'             => ['/srv/htdocs/wp-content/plugins/example/runtime.log', true],
+            'WooCommerce logs'            => ['/srv/htdocs/wp-content/uploads/wc-logs/checkout-2026-08-31.log', true],
+            'WP All Import logs'          => ['/srv/htdocs/wp-content/uploads/wpallimport/logs/import-history.txt', true],
+            'WPvivid job log'             => ['/srv/htdocs/wp-content/wpvividbackups/wpvivid_log/job.txt', true],
+            'AIOWPM temporary storage'    => ['/srv/htdocs/wp-content/plugins/all-in-one-wp-migration/storage/job/export.wpress', true],
+            'SI CAPTCHA temporary storage'=> ['/srv/htdocs/wp-content/plugins/si-captcha-for-wordpress/temp/session.php', true],
+            'BackWPup restore work'       => ['/srv/htdocs/wp-content/uploads/backwpup-restore/manifest.json', true],
+            'BackupBuddy restore work'    => ['/srv/htdocs/wp-content/uploads/backupbuddy_temp/manifest.json', true],
+            'BackupBuddy temporary files'=> ['/srv/htdocs/wp-content/uploads/pb_backupbuddy/status.txt', true],
+            'generic temporary file'      => ['/srv/htdocs/wp-content/uploads/incomplete.tmp', true],
+
+            'log word in normal name'     => ['/srv/htdocs/wp-content/uploads/catalog.pdf', false],
+            'tmp word in normal name'     => ['/srv/htdocs/wp-content/uploads/template.php', false],
+            'AIOWPM plugin code'          => ['/srv/htdocs/wp-content/plugins/all-in-one-wp-migration/lib/model.php', false],
 
             // -------- VCS metadata --------
             '.git head'                   => ['/srv/htdocs/.git/HEAD', true],
@@ -180,6 +229,11 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertContains('wp-content/uploads/2024/01/photo.jpg', $rel);
         $this->assertContains('wp-content/uploads/some-cache.zip', $rel);
         $this->assertContains('wp-content/plugins/cache-control/admin.css', $rel);
+        $this->assertContains('wp-content/updraft/restore-notes.txt', $rel);
+        $this->assertContains('wp-content/ai1wm-backups/site-diagram.png', $rel);
+        $this->assertContains('wp-content/updraft/backup_project.zip/important.txt', $rel);
+        $this->assertContains('wp-content/uploads/history.log/important.txt', $rel);
+        $this->assertContains('wp-content/uploads/theme-history.log', $rel);
 
         // --- must be filtered (junk / regenerable) ---
         $this->assertNotContains('wp-content/cache/page.html', $rel);
@@ -187,6 +241,13 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-content/upgrade/wp-7.0/file.php', $rel);
         $this->assertNotContains('wp-content/wpcomsh-cache/data.bin', $rel);
         $this->assertNotContains('wp-content/wflogs/attack-data.php', $rel);
+        $this->assertNotContains('wp-content/wfcache/config.php', $rel);
+        $this->assertNotContains('wp-content/updraft/backup_2025-02-16-1332_DailyRidgecom_61e86367b74c-uploads639.zip', $rel);
+        $this->assertNotContains('wp-content/updraft/log.61e86367b74c.txt', $rel);
+        $this->assertNotContains('wp-content/ai1wm-backups/example-com-20260831-120000.wpress', $rel);
+        $this->assertNotContains('wp-content/debug.log', $rel);
+        $this->assertNotContains('wp-content/uploads/wc-logs/checkout.log', $rel);
+        $this->assertNotContains('wp-content/plugins/all-in-one-wp-migration/storage/job.tmp', $rel);
         $this->assertNotContains('.git/HEAD', $rel);
         $this->assertNotContains('wp-content/themes/foo/node_modules/react.js', $rel);
         $this->assertNotContains('.DS_Store', $rel);
@@ -195,6 +256,28 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-config.php.swp', $rel);
         $this->assertNotContains('database.sql.bak', $rel);
         $this->assertNotContains('wp-content/themes/foo/.#style.css', $rel);
+    }
+
+    public function testFileIndexIncludesFilesLargerThanOneGigabyte(): void
+    {
+        if (PHP_INT_SIZE < 8) {
+            $this->markTestSkipped('This test needs 64-bit file sizes.');
+        }
+
+        $siteDir = $this->tempDir . '/large-site';
+        $largeFile = $siteDir . '/wp-content/uploads/source-video.mp4';
+        mkdir(dirname($largeFile), 0755, true);
+        $handle = fopen($largeFile, 'wb');
+        $this->assertIsResource($handle);
+        $this->assertTrue(ftruncate($handle, 1024 * 1024 * 1024 + 1));
+        fclose($handle);
+
+        $rel = $this->relativePaths(
+            $this->runFileIndexEntries($siteDir),
+            $siteDir
+        );
+
+        $this->assertContains('wp-content/uploads/source-video.mp4', $rel);
     }
 
     public function testFileIndexNeverListsReprintStorage(): void
@@ -330,6 +413,17 @@ final class FileIndexSkipDefaultsTest extends TestCase
             'wp-content/upgrade/wp-7.0/file.php' => "<?php\n",
             'wp-content/wpcomsh-cache/data.bin' => "bin",
             'wp-content/wflogs/attack-data.php' => "<?php\n",
+            'wp-content/wfcache/config.php' => "<?php\n",
+            'wp-content/updraft/backup_2025-02-16-1332_DailyRidgecom_61e86367b74c-uploads639.zip' => "backup",
+            'wp-content/updraft/log.61e86367b74c.txt' => "log",
+            'wp-content/updraft/restore-notes.txt' => "keep",
+            'wp-content/updraft/backup_project.zip/important.txt' => "keep",
+            'wp-content/ai1wm-backups/example-com-20260831-120000.wpress' => "backup",
+            'wp-content/ai1wm-backups/site-diagram.png' => "keep",
+            'wp-content/debug.log' => "debug",
+            'wp-content/uploads/history.log/important.txt' => "keep",
+            'wp-content/uploads/wc-logs/checkout.log' => "log",
+            'wp-content/plugins/all-in-one-wp-migration/storage/job.tmp' => "temporary",
             '.git/HEAD' => "ref: refs/heads/main\n",
             '.git/objects/12/abcdef' => "object",
             'wp-content/themes/foo/node_modules/react.js' => "// react",
@@ -349,6 +443,8 @@ final class FileIndexSkipDefaultsTest extends TestCase
             }
             file_put_contents($abs, $body);
         }
+
+        symlink('../themes/foo', $site . '/wp-content/uploads/theme-history.log');
 
         return $site;
     }

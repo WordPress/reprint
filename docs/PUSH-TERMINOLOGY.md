@@ -264,7 +264,10 @@ The local index is `<remote-state-directory>/local_index.jsonl`.
 `files-diff` and PushPlan read it. Files-pull advances it only for local paths
 changed by completed file, directory, symlink, or deletion mutations.
 PushFilesSender replaces it only after the target confirms commit. Planning
-and active push state remain under `<remote-state-directory>/push/`.
+and active push state remain under `<remote-state-directory>/push/`. PushPlan
+copies the local index to `plan/patch_base_index.jsonl` one entry per step,
+omits entries which are now default-skipped, and uses that file as the patch
+base. The local index remains unchanged during planning.
 
 Use these names verbatim:
 
@@ -272,6 +275,7 @@ Use these names verbatim:
 | --- | --- |
 | Active plan directory | `plan`, `$plan_directory` |
 | Plan-owned fresh local index file | `fresh_local_index.jsonl`, `$fresh_local_index_file` |
+| Filtered patch base index file | `patch_base_index.jsonl`, `$patch_base_index_file` |
 | Local index file | `local_index.jsonl`, `local_index_file`, `$local_index_file` |
 | Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
 | Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
@@ -296,24 +300,27 @@ Use these names verbatim:
 `sender.json` and `excluded_paths.json` live directly under the local push
 state directory. The sender creates `plan/` for one active plan. PushPlan
 copies the sender-owned exclusions to `plan/excluded_paths.json` when it starts.
-`fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
-`local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
+`fresh_local_index.jsonl`, `patch_base_index.jsonl`,
+`local_paths_to_push.jsonl`, `local_paths_to_delete`, and
+`deleted_directories_stack.jsonl` live inside it.
 
 The local index contains the fresh filesystem-root scan the sender saved after
 a target-confirmed files-push commit, advanced path by path by later completed
 files-pull mutations.
 Files-pull does not scan unrelated paths or accept their pending local changes.
-PushPlan diffs its fresh local index against the local index its caller
-supplies. Its FileSyncPatchPlanner owns the FileIndexDiffProcessor and the
-active deletion roots file. That file remembers directory deletions which
-cover index paths the planner has not processed yet.
+PushPlan diffs its fresh local index against the filtered patch base derived
+from the local index its caller supplies. Its
+FileSyncPatchPlanner owns the FileIndexDiffProcessor and the active deletion
+roots file. That file remembers directory deletions which cover index paths
+the planner has not processed yet.
 
-The PushPlan cursor is stored in `sender.json`. It contains `plan_directory`,
-`filesystem_root`, `local_index_file`, and the current
-planning position. During `indexing`, that position contains the
-FileIndexProcessor cursor and the committed byte offset in
-`fresh_local_index.jsonl`. During `diffing`, it contains the output offsets
-and the complete FileSyncPatchPlanner cursor. PushPlan
+The PushPlan cursor is stored in `sender.json`. It contains
+`push_plan_version`, `plan_directory`, `filesystem_root`, `local_index_file`,
+and the current planning position. During `filtering_patch_base`, that position
+contains the committed byte offsets in the local index and filtered patch
+base. During `indexing`, it contains the FileIndexProcessor cursor and the
+committed byte offset in `fresh_local_index.jsonl`. During `diffing`, it
+contains the output offsets and the complete FileSyncPatchPlanner cursor. PushPlan
 stores that nested cursor without unpacking or rebuilding it. The active
 deletion roots file is append-only; each entry links to the preceding active
 directory. The exclusions have a maximum of 100 paths. The `sender.json`
@@ -515,11 +522,14 @@ Use these names verbatim inside `PushPlan`:
 | Active plan directory | `$plan_directory` |
 | Filesystem root | `$filesystem_root`, `set_filesystem_root()` |
 | Local index file | `$local_index_file` |
+| Filtered patch base index file | `$patch_base_index_file`, `get_patch_base_index_file()` |
 | Open local index file | `$local_index_file_handle` |
+| Open filtered patch base index | `$patch_base_index_handle` |
 | Local index lookahead entry | `$local_index_lookahead_entry`, `$local_index_lookahead_entry_loaded` |
 | Read the next index entry | `read_next_index_entry()`, `$index_file_handle` |
 | Index entry and shape | `$index_entry`, `$local_index_entry`, `$local_index_entry_shape`, `index_entry_shape()` |
 | Cursor | `$cursor`, `get_cursor()` |
+| Patch-base filtering cursor | `FilteringPatchBaseCursor`, `local_index_byte_offset`, `patch_base_index_byte_offset` |
 | Plan-owned excluded paths | `$excluded_paths_file` |
 | Fresh local index processor | `$file_index_processor`, `next_file_index_step()` |
 | Fresh local indexing cursor | `IndexingCursor`, `file_index_cursor` |

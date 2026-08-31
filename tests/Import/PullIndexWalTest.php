@@ -86,7 +86,8 @@ final class PullIndexWalTest extends TestCase
         $this->assertIsString($filesystemRoot);
         $journal->record_successful_deletion(
             '/site/file.txt',
-            $filesystemRoot . '/site/file.txt'
+            $filesystemRoot . '/site/file.txt',
+            'file'
         );
         $journal->record_remote_invalidation(
             '/site/unreadable.txt'
@@ -135,7 +136,7 @@ final class PullIndexWalTest extends TestCase
         $journal->apply_pending_records();
 
         unlink($localAbsolutePath);
-        $journal->record_local_deletion($localAbsolutePath);
+        $journal->record_local_deletion($localAbsolutePath, 'file');
         $journal->apply_pending_records();
 
         $this->assertSame(
