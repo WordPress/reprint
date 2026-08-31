@@ -726,10 +726,12 @@ final class PushCommitTest extends TestCase {
         }
         $this->push_parts($push_session, $parts);
         $this->complete_work_deletes($push_session);
-        $push_session->commit(1);
+        $push_session->commit(1000);
 
         $commit_state_lock_path = $this->reprint_directory . '/.reprint/push/commit-state.lock';
         $deleted_docroot_path = $this->docroot . '/' . $deleted_path;
+        $active_path = $this->reprint_directory . '/.reprint/push/commit-state';
+        file_put_contents($active_path, $push_session->get_push_session_id() . "\n");
         $ready_path = $this->root . '/release-lock-ready';
         $script = '$lock_path = base64_decode(' . json_encode(base64_encode($commit_state_lock_path), JSON_THROW_ON_ERROR) . ');'
             . '$deleted = base64_decode(' . json_encode(base64_encode($deleted_docroot_path), JSON_THROW_ON_ERROR) . ');'
@@ -746,6 +748,11 @@ final class PushCommitTest extends TestCase {
         foreach ($pipes as $pipe) {
             fclose($pipe);
         }
+        $deadline = microtime(true) + 10;
+        while (!is_file($ready_path) && microtime(true) < $deadline) {
+            usleep(100);
+        }
+        $this->assertFileExists($ready_path);
         try {
             $push_session->commit(1000);
             $this->fail('Commit reported success while another request held the commit-state lock.');
@@ -754,9 +761,7 @@ final class PushCommitTest extends TestCase {
         } finally {
             $this->assertSame(0, proc_close($process));
         }
-        $this->assertFileExists($ready_path);
         $this->assertSame('complete', $this->commit_state($push_session)['phase']);
-        $active_path = $this->reprint_directory . '/.reprint/push/commit-state';
         $this->assertSame($push_session->get_push_session_id() . "\n", file_get_contents($active_path));
 
         file_put_contents($this->docroot . '/reachable-release-entry-0', 'changed after completion');
@@ -792,10 +797,12 @@ final class PushCommitTest extends TestCase {
         }
         $this->push_parts($push_session, $parts);
         $this->complete_work_deletes($push_session);
-        $push_session->commit(1);
+        $push_session->commit(1000);
 
         $commit_state_lock_path = $this->reprint_directory . '/.reprint/push/commit-state.lock';
         $deleted_docroot_path = $this->docroot . '/' . $deleted_path;
+        $active_path = $this->reprint_directory . '/.reprint/push/commit-state';
+        file_put_contents($active_path, $push_session->get_push_session_id() . "\n");
         $completion_ready_path = $this->root . '/remove-completion-lock-ready';
         $completion_script = '$lock_path = base64_decode(' . json_encode(base64_encode($commit_state_lock_path), JSON_THROW_ON_ERROR) . ');'
             . '$deleted = base64_decode(' . json_encode(base64_encode($deleted_docroot_path), JSON_THROW_ON_ERROR) . ');'
@@ -812,6 +819,11 @@ final class PushCommitTest extends TestCase {
         foreach ($completion_pipes as $pipe) {
             fclose($pipe);
         }
+        $deadline = microtime(true) + 10;
+        while (!is_file($completion_ready_path) && microtime(true) < $deadline) {
+            usleep(100);
+        }
+        $this->assertFileExists($completion_ready_path);
         try {
             $push_session->commit(1000);
             $this->fail('Commit release was not blocked by valid commit-state lock contention.');
@@ -821,7 +833,6 @@ final class PushCommitTest extends TestCase {
             $this->assertSame(0, proc_close($completion_process));
         }
         $this->assertSame('complete', $this->commit_state($push_session)['phase']);
-        $active_path = $this->reprint_directory . '/.reprint/push/commit-state';
         $this->assertSame($push_session->get_push_session_id() . "\n", file_get_contents($active_path));
 
         $remove_ready_path = $this->root . '/remove-lock-ready';
