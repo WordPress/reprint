@@ -146,7 +146,8 @@ class SpatialStatementDiagnosticsTest extends TestCase {
         ]));
         $sql = "INSERT INTO `maps` (`id`,`location`) VALUES\n" .
             MySQLDumpProducer::ZERO_BYTE_SPATIAL_ROW_COMMENT_PREFIX .
-            $marker_payload . " */(17,NULL);";
+            $marker_payload . " */(17,NULLIF(1, 1 " .
+            MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT . "));";
         $inspection = $diagnostics->inspect($sql);
         $error = new PDOException(
             "The target database statement failed: Check constraint 'location_required' is violated.",

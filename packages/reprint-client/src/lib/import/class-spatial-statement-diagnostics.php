@@ -70,6 +70,14 @@ class SpatialStatementDiagnostics {
         if (!is_string($sql_without_markers)) {
             throw new RuntimeException('Cannot remove zero-byte spatial row markers.');
         }
+        // FastInsertScanner handles SQL literals, not function calls. This
+        // exact producer expression is SQL NULL with a marker for the MariaDB
+        // zero-byte placeholder, so expose the literal to the scanner.
+        $sql_without_markers = str_replace(
+            'NULLIF(1, 1 ' . MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT . ')',
+            'NULL',
+            $sql_without_markers
+        );
         $sql_without_leading_comments = preg_replace(
             '/\A(?:(?:\s+)|(?:--[^\r\n]*(?:\r?\n|\z))|(?:#[^\r\n]*(?:\r?\n|\z))|(?:\/\*.*?\*\/))*/s',
             '',
