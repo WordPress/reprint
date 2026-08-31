@@ -86,6 +86,40 @@ class NullableSpatialColumnStatementRewriterTest extends TestCase {
         $rewriter->rewrite($marker);
     }
 
+    public function testMariaDbKeepsTheColumnNotNullAndOmitsThePlaceholderColumn(): void
+    {
+        $database = $this->databaseReturningCreateTable(
+            'CREATE TABLE `maps` (`id` int NOT NULL, `location` point NOT NULL)',
+            [],
+            '10.11.8-MariaDB'
+        );
+        $rewriter = new NullableSpatialColumnStatementRewriter($database);
+        $marker = MySQLDumpProducer::NULLABLE_SPATIAL_COLUMNS_COMMENT_PREFIX .
+            implode(' ', array_map('base64_encode', ['maps', 'location'])) . " */\n" .
+            'ALTER TABLE `maps` MODIFY COLUMN `location` point NULL;';
+
+        $this->assertSame('DO 0;', $rewriter->rewrite($marker));
+        $this->assertSame(
+            'INSERT INTO `maps` (`id`) VALUES (1);',
+            $rewriter->rewrite(
+                'INSERT INTO `maps` (`id`,`location`) VALUES (1,' .
+                'NULLIF(1, 1 /* REPRINT: zero-byte spatial value */));'
+            )
+        );
+    }
+
+    public function testMySqlLeavesTheMarkedPlaceholderAsSqlNull(): void
+    {
+        $rewriter = new NullableSpatialColumnStatementRewriter(
+            $this->databaseReturningCreateTable('unused')
+        );
+
+        $this->assertNull($rewriter->rewrite(
+            'INSERT INTO `maps` (`id`,`location`) VALUES (1,' .
+            'NULLIF(1, 1 /* REPRINT: zero-byte spatial value */));'
+        ));
+    }
+
     /** @dataProvider invalidMarkerProvider */
     public function testRejectsInvalidMarkers(string $payload, string $message): void
     {
@@ -116,25 +150,32 @@ class NullableSpatialColumnStatementRewriterTest extends TestCase {
     /** @param array<int,array{Key_name:string,Column_name:string,Index_type:string}> $spatial_indexes */
     private function databaseReturningCreateTable(
         string $create_table_sql,
-        array $spatial_indexes = []
+        array $spatial_indexes = [],
+        string $version = '8.0.0'
     ): PdoDatabaseConnection
     {
         $pdo = new PDO('sqlite::memory:');
-        return new class($pdo, $create_table_sql, $spatial_indexes) extends PdoDatabaseConnection {
+        return new class($pdo, $create_table_sql, $spatial_indexes, $version) extends PdoDatabaseConnection {
             private string $create_table_sql;
 
             /** @var array<int,array{Key_name:string,Column_name:string,Index_type:string}> */
             private array $spatial_indexes;
 
-            public function __construct(PDO $pdo, string $create_table_sql, array $spatial_indexes)
+            private string $version;
+
+            public function __construct(PDO $pdo, string $create_table_sql, array $spatial_indexes, string $version)
             {
                 parent::__construct($pdo);
                 $this->create_table_sql = $create_table_sql;
                 $this->spatial_indexes = $spatial_indexes;
+                $this->version = $version;
             }
 
             public function query(string $sql, array $params = []): DatabaseResult
             {
+                if ($sql === 'SELECT VERSION() AS version') {
+                    return parent::query('SELECT ? AS version', [$this->version]);
+                }
                 if (strpos($sql, 'SHOW INDEX FROM ') === 0) {
                     if ($this->spatial_indexes !== []) {
                         $index = $this->spatial_indexes[0];

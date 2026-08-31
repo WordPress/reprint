@@ -150,23 +150,32 @@ class EmptyGeometryTest extends TestCase {
             'UPDATE `mixed_geometry` SET `payload` = CONCAT',
             $sql
         );
+        $this->assertStringContainsString(
+            MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT,
+            $sql
+        );
 
         $target_pdo = $this->executeDump($sql, $target);
         $this->assertSame(
-            [
-                ['id' => 1, 'location' => null, 'empty_blob_bytes' => 0],
-                ['id' => 2, 'location' => 'POINT(2 3)', 'empty_blob_bytes' => 1],
-            ],
-            $target_pdo
-                ->query(
-                    'SELECT id, ST_AsText(location) AS location, ' .
-                    'OCTET_LENGTH(empty_blob) AS empty_blob_bytes ' .
-                    'FROM first_empty ORDER BY id'
-                )
-                ->fetchAll()
+            strpos($target, 'mariadb') !== false ? 0 : 1,
+            (int) $target_pdo
+                ->query('SELECT location IS NULL FROM first_empty WHERE id = 1')
+                ->fetchColumn()
         );
         $this->assertSame(
-            9,
+            'POINT(2 3)',
+            $target_pdo
+                ->query('SELECT ST_AsText(location) FROM first_empty WHERE id = 2')
+                ->fetchColumn()
+        );
+        $this->assertSame(
+            1,
+            (int) $target_pdo
+                ->query('SELECT OCTET_LENGTH(empty_blob) FROM first_empty WHERE id = 2')
+                ->fetchColumn()
+        );
+        $this->assertSame(
+            strpos($target, 'mariadb') !== false ? 1 : 9,
             (int) $target_pdo
                 ->query(
                     'SELECT (location IS NULL) + (route IS NULL) + (boundary IS NULL) + ' .
@@ -194,12 +203,30 @@ class EmptyGeometryTest extends TestCase {
             $large_text,
             $target_pdo->query('SELECT payload FROM mixed_geometry WHERE id = 4')->fetchColumn()
         );
+        $this->assertSame(
+            strpos($target, 'mariadb') !== false ? [0, 0] : [2, 2],
+            array_map(
+                'intval',
+                $target_pdo
+                    ->query(
+                        'SELECT (location IS NULL) + (boundary IS NULL) FROM mixed_geometry ' .
+                        'WHERE id IN (2, 4) ORDER BY id'
+                    )
+                    ->fetchAll(PDO::FETCH_COLUMN)
+            )
+        );
 
         $columns = $target_pdo->query('SHOW FULL COLUMNS FROM mixed_geometry')->fetchAll();
         $columns_by_name = array_column($columns, null, 'Field');
-        $this->assertSame('YES', $columns_by_name['location']['Null']);
+        $this->assertSame(
+            strpos($target, 'mariadb') !== false ? 'NO' : 'YES',
+            $columns_by_name['location']['Null']
+        );
         $this->assertSame($location_comment, $columns_by_name['location']['Comment']);
-        $this->assertSame('YES', $columns_by_name['boundary']['Null']);
+        $this->assertSame(
+            strpos($target, 'mariadb') !== false ? 'NO' : 'YES',
+            $columns_by_name['boundary']['Null']
+        );
         $this->assertSame('Map area', $columns_by_name['boundary']['Comment']);
 
         preg_match_all(
@@ -264,21 +291,27 @@ class EmptyGeometryTest extends TestCase {
             ->query('SHOW FULL COLUMNS FROM definition_attributes')
             ->fetchAll();
         $target_column = array_column($target_columns, null, 'Field')[$column];
-        $this->assertSame('YES', $target_column['Null']);
+        $this->assertSame('NO', $target_column['Null']);
         foreach (['Type', 'Default', 'Extra', 'Comment'] as $field) {
             $this->assertSame($source_column[$field], $target_column[$field], $field);
         }
         $this->assertSame(
-            1,
+            0,
             (int) $target_pdo
                 ->query("SELECT {$quoted_column} IS NULL FROM definition_attributes")
+                ->fetchColumn()
+        );
+        $this->assertSame(
+            'POINT(4 5)',
+            $target_pdo
+                ->query("SELECT ST_AsText({$quoted_column}) FROM definition_attributes")
                 ->fetchColumn()
         );
     }
 
     /**
-     * A target CHECK which rejects NULL cannot represent the normalized row.
-     * The import must stop rather than silently remove or weaken that constraint.
+     * MariaDB preserves its non-NULL placeholder, while MySQL rejects the
+     * normalized NULL instead of silently weakening the source CHECK.
      *
      * @dataProvider targetDatabaseProvider
      */
@@ -299,6 +332,16 @@ class EmptyGeometryTest extends TestCase {
         $sql = $this->exportWithResumeAfterEveryFragment([
             'tables_to_process' => ['constrained_geometry'],
         ]);
+        if (strpos($target, 'mariadb') !== false) {
+            $target_pdo = $this->executeDump($sql, $target);
+            $this->assertSame(
+                0,
+                (int) $target_pdo
+                    ->query('SELECT location IS NULL FROM constrained_geometry')
+                    ->fetchColumn()
+            );
+            return;
+        }
         try {
             $this->executeDump($sql, $target);
             $this->fail('The target CHECK constraint should reject the normalized NULL.');
@@ -350,7 +393,7 @@ class EmptyGeometryTest extends TestCase {
      * SHOW CREATE TABLE can omit backticks when the target session disabled
      * sql_quote_show_create. The rewriter must set it before parsing.
      *
-     * @dataProvider targetDatabaseProvider
+     * @dataProvider mysqlTargetDatabaseProvider
      */
     public function testRewriterForcesQuotedShowCreateOutput(string $target): void
     {
@@ -383,8 +426,8 @@ class EmptyGeometryTest extends TestCase {
     }
 
     /**
-     * A spatial index requires its geometry column to remain NOT NULL. Stop
-     * before issuing a target ALTER which cannot succeed.
+     * MariaDB preserves a spatial index and its NOT NULL column. MySQL stops
+     * before issuing an ALTER which cannot coexist with that index.
      *
      * @dataProvider targetDatabaseProvider
      */
@@ -401,15 +444,25 @@ class EmptyGeometryTest extends TestCase {
         $rewriter = new NullableSpatialColumnStatementRewriter(
             new PdoDatabaseConnection($target_pdo)
         );
-        try {
-            $rewriter->rewrite($this->nullableSpatialColumnMarker(
-                'spatially_indexed_geometry',
-                ['location']
-            ));
-            $this->fail('The rewriter must reject a nullable spatial index column.');
-        } catch (RuntimeException $error) {
-            $this->assertStringContainsString('location_index', $error->getMessage());
-            $this->assertStringContainsString('NOT NULL', $error->getMessage());
+        if (strpos($target, 'mariadb') !== false) {
+            $this->assertSame(
+                'DO 0;',
+                $rewriter->rewrite($this->nullableSpatialColumnMarker(
+                    'spatially_indexed_geometry',
+                    ['location']
+                ))
+            );
+        } else {
+            try {
+                $rewriter->rewrite($this->nullableSpatialColumnMarker(
+                    'spatially_indexed_geometry',
+                    ['location']
+                ));
+                $this->fail('The rewriter must reject a nullable spatial index column.');
+            } catch (RuntimeException $error) {
+                $this->assertStringContainsString('location_index', $error->getMessage());
+                $this->assertStringContainsString('NOT NULL', $error->getMessage());
+            }
         }
 
         $columns = $target_pdo
@@ -516,6 +569,13 @@ class EmptyGeometryTest extends TestCase {
         return [
             'MySQL 8 target' => ['test_empty_geometry_mysql_target'],
             'MariaDB target' => ['test_empty_geometry_mariadb_target'],
+        ];
+    }
+
+    public static function mysqlTargetDatabaseProvider(): array
+    {
+        return [
+            'MySQL 8 target' => ['test_empty_geometry_mysql_target'],
         ];
     }
 

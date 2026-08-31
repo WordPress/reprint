@@ -56,6 +56,10 @@ class MySQLDumpProducer
     public const NULLABLE_SPATIAL_COLUMNS_COMMENT_PREFIX =
         "/* REPRINT: make zero-byte spatial columns nullable ";
 
+    /** Marks a zero-byte spatial placeholder for the MariaDB importer path. */
+    public const ZERO_BYTE_SPATIAL_VALUE_COMMENT =
+        "/* REPRINT: zero-byte spatial value */";
+
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
     const STATE_NEXT_TABLE = "next_table";
@@ -279,9 +283,9 @@ class MySQLDumpProducer
             }
         }
 
-        $spatial_columns = $this->get_spatial_columns_to_make_nullable(
-            $this->row_reader->get_current_record()
-        );
+        $current_record = $this->row_reader->get_current_record();
+        $has_zero_byte_spatial_value = $this->has_zero_byte_spatial_value($current_record);
+        $spatial_columns = $this->get_spatial_columns_to_make_nullable($current_record);
         if (!empty($spatial_columns)) {
             $this->reader_cursor_before_retained_record = $reader_cursor_before_current_record;
             $this->pending_nullable_spatial_columns = $spatial_columns;
@@ -316,7 +320,8 @@ class MySQLDumpProducer
 
         if (
             $current_record_ends_query_batch ||
-            $this->rows_in_batch >= $this->row_reader->get_batch_size()
+            $this->rows_in_batch >= $this->row_reader->get_batch_size() ||
+            $has_zero_byte_spatial_value
         ) {
             $this->finish_insert_batch($header . $first_row_sql, $has_oversized);
             return true;
@@ -359,6 +364,18 @@ class MySQLDumpProducer
             $this->current_statement_size = 0;
             $this->rows_in_batch = 0;
             $this->state = self::STATE_EMIT_NULLABLE_SPATIAL_COLUMNS;
+            return true;
+        }
+
+        if ($this->has_zero_byte_spatial_value($this->row_reader->get_current_record())) {
+            // MariaDB needs this row's INSERT column list to omit its
+            // zero-byte geometry. Close the preceding multi-row INSERT and
+            // retain the row for a one-row INSERT after this fragment.
+            $this->reader_cursor_before_retained_record = $reader_cursor_before_current_record;
+            $this->current_sql_fragment = $this->on_duplicate_key() . ';';
+            $this->current_statement_size = 0;
+            $this->rows_in_batch = 0;
+            $this->state = self::STATE_START_INSERT;
             return true;
         }
 
@@ -483,6 +500,20 @@ class MySQLDumpProducer
             $columns[] = $column;
         }
         return $columns;
+    }
+
+    /** Returns whether this row contains a MariaDB zero-byte spatial placeholder. */
+    private function has_zero_byte_spatial_value($row)
+    {
+        foreach ($this->row_reader->get_current_column_names() as $column) {
+            if (
+                $row[$column] === "" &&
+                $this->row_reader->is_spatial_type($this->row_reader->get_data_type($column))
+            ) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Finishes an INSERT batch at its bounded row limit. */
@@ -927,7 +958,7 @@ class MySQLDumpProducer
         }
 
         if ($value === "" && $this->row_reader->is_spatial_type($data_type)) {
-            return "NULL";
+            return "NULLIF(1, 1 " . self::ZERO_BYTE_SPATIAL_VALUE_COMMENT . ")";
         }
 
         if (strtoupper($data_type) === "JSON") {
@@ -962,7 +993,7 @@ class MySQLDumpProducer
         }
 
         if ($value === "" && $this->row_reader->is_spatial_type($data_type)) {
-            return 4; // NULL
+            return strlen("NULLIF(1, 1 " . self::ZERO_BYTE_SPATIAL_VALUE_COMMENT . ")");
         }
 
         $len = strlen((string) $value);

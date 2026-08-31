@@ -332,17 +332,29 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
                         ).join(', ')}, optional_shape IS NULL AS optional_shape `
                         + `FROM \`${geometryTable}\` WHERE id = 1`
                     );
-                    assert.deepEqual(valueStates, {
-                        location: 1,
-                        route: 1,
-                        boundary: 1,
-                        locations: 1,
-                        routes: 1,
-                        boundaries: 1,
-                        shape: 1,
-                        shapes: 1,
-                        optional_shape: 1,
-                    });
+                    assert.deepEqual(valueStates, target === mysql8Target
+                        ? {
+                            location: 1,
+                            route: 1,
+                            boundary: 1,
+                            locations: 1,
+                            routes: 1,
+                            boundaries: 1,
+                            shape: 1,
+                            shapes: 1,
+                            optional_shape: 1,
+                        }
+                        : {
+                            location: 0,
+                            route: 0,
+                            boundary: 0,
+                            locations: 0,
+                            routes: 0,
+                            boundaries: 0,
+                            shape: 0,
+                            shapes: 0,
+                            optional_shape: 1,
+                        });
 
                     const [[specialValues]] = await targetDatabase.query(
                         'SELECT '
@@ -381,9 +393,13 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
                     const [targetSpatialBytes] = await targetDatabase.query(
                         `SELECT id, ${spatialColumns.map(column =>
                             `HEX(CAST(\`${column}\` AS BINARY)) AS \`${column}\``
-                        ).join(', ')} FROM \`${geometryTable}\` WHERE id > 1 ORDER BY id`
+                        ).join(', ')} FROM \`${geometryTable}\` `
+                        + `${target === mysql8Target ? 'WHERE id > 1 ' : ''}ORDER BY id`
                     );
-                    assert.deepEqual(targetSpatialBytes, sourceSpatialBytes.slice(1));
+                    assert.deepEqual(
+                        targetSpatialBytes,
+                        target === mysql8Target ? sourceSpatialBytes.slice(1) : sourceSpatialBytes,
+                    );
 
                     const [columns] = await targetDatabase.query(
                         `SHOW FULL COLUMNS FROM \`${geometryTable}\``
@@ -391,12 +407,21 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
                     const columnsByName = Object.fromEntries(
                         columns.map(column => [column.Field, column])
                     );
-                    assert.equal(columnsByName.location.Null, 'YES');
+                    assert.equal(
+                        columnsByName.location.Null,
+                        target === mysql8Target ? 'YES' : 'NO',
+                    );
                     assert.equal(columnsByName.location.Comment, 'Map point');
-                    assert.equal(columnsByName.boundary.Null, 'YES');
+                    assert.equal(
+                        columnsByName.boundary.Null,
+                        target === mysql8Target ? 'YES' : 'NO',
+                    );
                     assert.equal(columnsByName.boundary.Comment, 'Map area');
                     for (const column of spatialColumns) {
-                        assert.equal(columnsByName[column].Null, 'YES');
+                        assert.equal(
+                            columnsByName[column].Null,
+                            target === mysql8Target ? 'YES' : 'NO',
+                        );
                     }
                 } finally {
                     await targetDatabase.end();

@@ -14,6 +14,8 @@ class NullableSpatialColumnStatementRewriter {
 
     private DatabaseConnection $database;
 
+    private ?bool $target_is_mariadb = null;
+
     public function __construct(DatabaseConnection $database)
     {
         $this->database = $database;
@@ -29,10 +31,21 @@ class NullableSpatialColumnStatementRewriter {
     public function rewrite(string $sql): ?string
     {
         $marker_prefix = MySQLDumpProducer::NULLABLE_SPATIAL_COLUMNS_COMMENT_PREFIX;
-        if (strpos($sql, $marker_prefix) === false) {
-            return null;
+        if (strpos($sql, $marker_prefix) !== false) {
+            return $this->rewrite_nullable_spatial_alter($sql, $marker_prefix);
         }
+        if (
+            strpos($sql, MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT) !== false
+            && $this->is_mariadb_target()
+        ) {
+            return $this->replace_marked_zero_byte_values_with_omitted_columns($sql);
+        }
+        return null;
+    }
 
+    /** Rewrites an exporter-marked fallback ALTER. */
+    private function rewrite_nullable_spatial_alter(string $sql, string $marker_prefix): ?string
+    {
         $tokens = self::significant_tokens($sql, 'marked spatial ALTER TABLE');
         if (
             count($tokens) < 4
@@ -56,6 +69,11 @@ class NullableSpatialColumnStatementRewriter {
             throw new RuntimeException(
                 'The marked spatial ALTER TABLE names a different table than its marker.'
             );
+        }
+        if ($this->is_mariadb_target()) {
+            // MariaDB creates the source placeholder when marked values are
+            // omitted from the INSERT, so keep the source definition unchanged.
+            return 'DO 0;';
         }
         $quoted_table = self::quote_identifier($table);
         $this->database->exec('SET SESSION sql_quote_show_create = 1');
@@ -81,6 +99,163 @@ class NullableSpatialColumnStatementRewriter {
         $this->assert_no_spatial_indexes($quoted_table, $table, $columns);
         return "ALTER TABLE {$quoted_table}\nMODIFY COLUMN " .
             implode(",\nMODIFY COLUMN ", $column_definitions) . ";";
+    }
+
+    /** Rewrites a one-row marked INSERT to omit its zero-byte spatial columns. */
+    private function replace_marked_zero_byte_values_with_omitted_columns(string $sql): string
+    {
+        $tokens = self::significant_tokens($sql, 'marked zero-byte spatial value');
+        $token_count = count($tokens);
+        if (
+            $token_count < 7
+            || $tokens[0]->id !== \WP_MySQL_Lexer::INSERT_SYMBOL
+            || $tokens[1]->id !== \WP_MySQL_Lexer::INTO_SYMBOL
+        ) {
+            throw new RuntimeException(
+                'Cannot rewrite a marked zero-byte spatial value outside an INSERT statement.'
+            );
+        }
+        $cursor = 2;
+        $table_token = $tokens[$cursor++];
+        if (
+            !in_array(
+                $table_token->id,
+                [\WP_MySQL_Lexer::BACK_TICK_QUOTED_ID, \WP_MySQL_Lexer::IDENTIFIER],
+                true
+            )
+            || $tokens[$cursor++]->id !== \WP_MySQL_Lexer::OPEN_PAR_SYMBOL
+        ) {
+            throw new RuntimeException('Cannot parse the marked INSERT table and column list.');
+        }
+
+        $columns = [];
+        while ($cursor < $token_count && $tokens[$cursor]->id !== \WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+            $column_token = $tokens[$cursor++];
+            if (!in_array(
+                $column_token->id,
+                [\WP_MySQL_Lexer::BACK_TICK_QUOTED_ID, \WP_MySQL_Lexer::IDENTIFIER],
+                true
+            )) {
+                throw new RuntimeException('Cannot parse the marked INSERT column list.');
+            }
+            $columns[] = substr($sql, $column_token->start, $column_token->length);
+            if ($cursor < $token_count && $tokens[$cursor]->id === \WP_MySQL_Lexer::COMMA_SYMBOL) {
+                ++$cursor;
+            }
+        }
+        if ($columns === [] || $cursor >= $token_count) {
+            throw new RuntimeException('Cannot parse the marked INSERT values.');
+        }
+        if ($tokens[$cursor]->id !== \WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+            throw new RuntimeException('Cannot parse the marked INSERT column list ending.');
+        }
+        ++$cursor;
+        if (
+            $cursor >= $token_count ||
+            !in_array(
+                $tokens[$cursor]->id,
+                [\WP_MySQL_Lexer::VALUES_SYMBOL, \WP_MySQL_Lexer::VALUE_SYMBOL],
+                true
+            )
+        ) {
+            throw new RuntimeException('Cannot parse the marked INSERT values.');
+        }
+        ++$cursor;
+        if (
+            $cursor >= $token_count ||
+            $tokens[$cursor]->id !== \WP_MySQL_Lexer::OPEN_PAR_SYMBOL
+        ) {
+            throw new RuntimeException('Cannot parse the marked INSERT value tuple.');
+        }
+        ++$cursor;
+
+        $values = [];
+        $keep_value = [];
+        $expression_start = $cursor;
+        $parenthesis_depth = 0;
+        $tuple_end = null;
+        while ($cursor < $token_count) {
+            $token_id = $tokens[$cursor]->id;
+            if ($token_id === \WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+                ++$parenthesis_depth;
+            } elseif ($token_id === \WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+                if ($parenthesis_depth === 0) {
+                    $tuple_end = $tokens[$cursor]->start + $tokens[$cursor]->length;
+                    break;
+                }
+                --$parenthesis_depth;
+            }
+            if ($token_id === \WP_MySQL_Lexer::COMMA_SYMBOL && $parenthesis_depth === 0) {
+                $last_token = $tokens[$cursor - 1] ?? null;
+                if ($expression_start >= $cursor || $last_token === null) {
+                    throw new RuntimeException('The marked INSERT has an empty value expression.');
+                }
+                $first_token = $tokens[$expression_start];
+                $length = $last_token->start + $last_token->length - $first_token->start;
+                $value = substr($sql, $first_token->start, $length);
+                $values[] = $value;
+                $keep_value[] = strpos(
+                    $value,
+                    MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT
+                ) === false;
+                $expression_start = $cursor + 1;
+            }
+            ++$cursor;
+        }
+        $last_token = $tokens[$cursor - 1] ?? null;
+        if ($tuple_end === null || $expression_start >= $cursor || $last_token === null) {
+            throw new RuntimeException('Cannot parse the marked INSERT value tuple.');
+        }
+        $first_token = $tokens[$expression_start];
+        $length = $last_token->start + $last_token->length - $first_token->start;
+        $value = substr($sql, $first_token->start, $length);
+        $values[] = $value;
+        $keep_value[] = strpos($value, MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT) === false;
+
+        if (count($columns) !== count($values)) {
+            throw new RuntimeException('The marked INSERT tuple has the wrong number of values.');
+        }
+        if (!in_array(false, $keep_value, true)) {
+            throw new RuntimeException('The marked INSERT has no zero-byte spatial value.');
+        }
+        if (
+            isset($tokens[$cursor + 1]) &&
+            $tokens[$cursor + 1]->id === \WP_MySQL_Lexer::COMMA_SYMBOL
+        ) {
+            throw new RuntimeException('The marked INSERT must contain exactly one row.');
+        }
+
+        $kept_columns = [];
+        $kept_values = [];
+        foreach ($columns as $index => $column) {
+            if ($keep_value[$index]) {
+                $kept_columns[] = $column;
+                $kept_values[] = $values[$index];
+            }
+        }
+        return substr($sql, 0, $tokens[0]->start) .
+            'INSERT INTO ' . substr($sql, $table_token->start, $table_token->length) .
+            ' (' . implode(',', $kept_columns) . ') VALUES (' . implode(',', $kept_values) . ')' .
+            substr($sql, $tuple_end);
+    }
+
+    private function is_mariadb_target(): bool
+    {
+        if ($this->target_is_mariadb !== null) {
+            return $this->target_is_mariadb;
+        }
+        $result = $this->database->query('SELECT VERSION() AS version');
+        try {
+            $row = $result->fetch(PDO::FETCH_ASSOC);
+        } finally {
+            $result->closeCursor();
+        }
+        $version = is_array($row) ? ( $row['version'] ?? null ) : null;
+        if (!is_string($version) || $version === '') {
+            throw new RuntimeException('The target database returned no usable version string.');
+        }
+        $this->target_is_mariadb = stripos($version, 'mariadb') !== false;
+        return $this->target_is_mariadb;
     }
 
     /**
