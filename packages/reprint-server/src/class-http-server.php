@@ -386,7 +386,7 @@ final class HTTPServer {
     private function default_budget_factory(array $config) {
         $max_execution_time = require_int_range(
             'max_execution_time',
-            (int) ($config['max_execution_time'] ?? 5),
+            (int) ($config['max_execution_time'] ?? 15),
             1,
             60
         );

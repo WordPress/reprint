@@ -111,6 +111,14 @@ final class ExportHttpServerTest extends TestCase
         $this->assertSame(['from' => 'file_index'], $calls[0][1]);
     }
 
+    public function testDefaultResourceBudgetAllowsFifteenSeconds(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-server/src/export.php';
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+
+        $this->assertSame(15, $server->create_resource_budget([])->max_time);
+    }
+
     public function testClassifiesOnlyTheRegisteredPushEndpoints(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer();
