@@ -129,23 +129,25 @@ function reprint_server_compat_migrate_legacy_options(): void {
         'site_export_push_authorized_token_fingerprint' =>
             constant('WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION'),
     ];
-    $missing_option = new stdClass();
     foreach ($legacy_option_names as $legacy_name => $canonical_name) {
         if ($canonical_name === $legacy_name) {
             continue;
         }
 
-        $legacy_value = get_option($legacy_name, $missing_option);
-        if ($legacy_value === $missing_option) {
+        // WordPress stores no option as null, so it marks a missing one.
+        $legacy_value = get_option($legacy_name, null);
+        if ($legacy_value === null) {
             continue;
         }
 
-        // An empty canonical value counts as missing: writing the connection
-        // token fires the settings listener which revokes push authorization,
-        // and that stores an empty fingerprint before the entry below moves
-        // the granted one.
-        $canonical_value = get_option($canonical_name, $missing_option);
-        if ($canonical_value === $missing_option || $canonical_value === '') {
+        // An empty canonical value counts as missing. The plugin migrates
+        // while lib.php loads, before the settings page registers the
+        // listener which revokes push authorization when the connection token
+        // option appears. A project which embeds lib.php after that listener
+        // exists writes an empty fingerprint here, and the entry below then
+        // restores the granted one.
+        $canonical_value = get_option($canonical_name, null);
+        if ($canonical_value === null || $canonical_value === '') {
             update_option($canonical_name, $legacy_value, false);
         }
         delete_option($legacy_name);

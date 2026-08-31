@@ -313,9 +313,11 @@ final class SiteExportSecretTest extends TestCase
 
     public function testMigrationKeepsPushAuthorizationGrantedUnderTheLegacyOptionNames(): void
     {
-        // The settings listeners revoke authorization when the connection
-        // token option changes, so they must be registered for this test to
-        // show that migrating both options is not read as a token rotation.
+        // The plugin migrates before the settings page registers its
+        // listeners. Registering them first models a project which embeds
+        // lib.php later in the request, where the listener revoking
+        // authorization for the appearing connection token runs during the
+        // migration.
         Site_Export_Plugin::get_instance();
         $GLOBALS['site_export_test_options']['site_export_secret'] = 'legacy-token';
         $GLOBALS['site_export_test_options']['site_export_push_authorized_token_fingerprint'] =
