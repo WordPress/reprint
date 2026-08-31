@@ -8133,7 +8133,7 @@ class ImportClient
             return $budget;
         }
 
-        // Fallback for if the adaptive tuner is disabled.
+        // Fallback for callers that have not initialized the tuner.
         $max_request = $this->get_state()->get('preflight.limits.max_request_bytes');
         return (int) max(
             256 * 1024,

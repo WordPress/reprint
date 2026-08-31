@@ -246,13 +246,11 @@ class AdaptiveTuner
 
     /**
      * Current request-body budget for an endpoint in bytes.
+     *
+     * Size-rejection recovery remains active when performance tuning is disabled.
      */
     public function get_request_body_budget(string $endpoint): ?int
     {
-        if (!$this->config["enabled"]) {
-            return null;
-        }
-
         $key = self::ENDPOINTS[$endpoint]["request_body_key"] ?? null;
 
         return $key === null ? null : (int) $this->state[$key];
