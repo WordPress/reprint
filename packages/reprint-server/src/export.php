@@ -3484,7 +3484,7 @@ function path_head_looks_like_text(string $path): bool
  * Reports whether a path belongs to the established default file-index skip set.
  *
  * @param string $path Filesystem path to classify.
- * @return bool Whether the path is omitted unless caches are included.
+ * @return bool Whether the path is omitted.
  */
 function path_is_default_skipped(string $path): bool
 {

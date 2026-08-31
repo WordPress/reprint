@@ -506,7 +506,7 @@ final class FileIndexProcessor {
      * Reports whether a path belongs to the established default skip set.
      *
      * @param string $path Filesystem path to classify.
-     * @return bool Whether the path should be omitted unless caches are included.
+     * @return bool Whether the path should be omitted.
      */
     public static function path_is_default_skipped(string $path): bool
     {
