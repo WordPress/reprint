@@ -82,7 +82,12 @@ class EmptyGeometryTest extends TestCase {
                 ADD COLUMN routes MULTILINESTRING NOT NULL,
                 ADD COLUMN boundaries MULTIPOLYGON NOT NULL,
                 ADD COLUMN shape GEOMETRY NOT NULL,
-                ADD COLUMN shapes GEOMETRYCOLLECTION NOT NULL"
+                ADD COLUMN shapes GEOMETRYCOLLECTION NOT NULL,
+                ADD COLUMN optional_shape GEOMETRY NOT NULL"
+        );
+        $this->source_pdo->exec(
+            "ALTER TABLE first_empty
+                MODIFY COLUMN optional_shape GEOMETRY NULL COMMENT 'Optional shape'"
         );
         $this->source_pdo->exec(
             "UPDATE first_empty
@@ -132,6 +137,7 @@ class EmptyGeometryTest extends TestCase {
         ];
         $sql = $this->exportWithResumeAfterEveryFragment($options);
         $this->assertSame(2, substr_count($sql, 'ALTER TABLE'));
+        $this->assertStringNotContainsString('MODIFY COLUMN `optional_shape`', $sql);
         $this->assertStringContainsString(
             'UPDATE `mixed_geometry` SET `payload` = CONCAT',
             $sql
@@ -152,12 +158,13 @@ class EmptyGeometryTest extends TestCase {
                 ->fetchAll()
         );
         $this->assertSame(
-            8,
+            9,
             (int) $target_pdo
                 ->query(
                     'SELECT (location IS NULL) + (route IS NULL) + (boundary IS NULL) + ' .
                     '(locations IS NULL) + (routes IS NULL) + (boundaries IS NULL) + ' .
-                    '(shape IS NULL) + (shapes IS NULL) FROM first_empty WHERE id = 1'
+                    '(shape IS NULL) + (shapes IS NULL) + (optional_shape IS NULL) ' .
+                    'FROM first_empty WHERE id = 1'
                 )
                 ->fetchColumn()
         );
