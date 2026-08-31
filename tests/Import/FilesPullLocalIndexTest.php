@@ -634,15 +634,12 @@ final class FilesPullLocalIndexTest extends TestCase
         );
     }
 
-    public function testMirrorIncludesGeneratedCachePathsWhenRequested(): void
+    public function testMirrorPreservesGeneratedCachePaths(): void
     {
-        $remoteCache = 'wp-content/cache/remote.txt';
-        $this->writeRemoteOverrides([
-            'added_files' => [$remoteCache => 'remote cache'],
-        ]);
+        $cachePath = 'wp-content/cache/remote.txt';
         mkdir($this->localTree . '/wp-content/cache', 0700, true);
         file_put_contents(
-            $this->localTree . '/' . $remoteCache,
+            $this->localTree . '/' . $cachePath,
             'local cache edit'
         );
         file_put_contents(
@@ -650,18 +647,16 @@ final class FilesPullLocalIndexTest extends TestCase
             'local only cache'
         );
 
-        $mirror = $this->runFilesPull([
-            '--mode=mirror',
-            '--include-caches',
-        ]);
+        $mirror = $this->runFilesPull(['--mode=mirror']);
 
         $this->assertSame(0, $mirror['exit'], $mirror['output']);
         $this->assertSame(
-            'remote cache',
-            file_get_contents($this->localTree . '/' . $remoteCache)
+            'local cache edit',
+            file_get_contents($this->localTree . '/' . $cachePath)
         );
-        $this->assertFileDoesNotExist(
-            $this->localTree . '/wp-content/cache/local-only.txt'
+        $this->assertSame(
+            'local only cache',
+            file_get_contents($this->localTree . '/wp-content/cache/local-only.txt')
         );
     }
 

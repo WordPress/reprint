@@ -72,7 +72,6 @@ final class FileIndexProcessorTest extends TestCase {
             [$docroot],
             $docroot,
             false,
-            true,
             ''
         );
         $this->assertTrue($processor->next_index_step());
@@ -102,7 +101,6 @@ final class FileIndexProcessorTest extends TestCase {
             [$docroot],
             $docroot,
             false,
-            true,
             ''
         );
         $this->assertTrue($processor->next_index_step());
@@ -141,7 +139,6 @@ final class FileIndexProcessorTest extends TestCase {
             ['/'],
             $docroot,
             false,
-            true,
             ''
         );
 
@@ -163,7 +160,6 @@ final class FileIndexProcessorTest extends TestCase {
         $processor = $this->startProcessor(
             [$docroot],
             $docroot,
-            true,
             true,
             ''
         );
@@ -204,7 +200,6 @@ final class FileIndexProcessorTest extends TestCase {
             [$docroot],
             $docroot,
             false,
-            true,
             ''
         );
         $this->assertTrue($processor->next_index_step());
@@ -222,7 +217,6 @@ final class FileIndexProcessorTest extends TestCase {
             [$this->root($docroot)],
             $cursor,
             false,
-            true,
             ''
         );
         $this->assertFalse($resumed->next_index_step());
@@ -237,7 +231,6 @@ final class FileIndexProcessorTest extends TestCase {
             [$docroot],
             $docroot,
             false,
-            true,
             ''
         );
         $processor->close();
@@ -316,7 +309,7 @@ final class FileIndexProcessorTest extends TestCase {
             'requested_path' => $brokenPath,
             'resolved_path' => null,
             'type' => 'symlink',
-        ], false, true, '');
+        ], false, '');
     }
 
     public function testStartRootMustBeConfiguredOrADirectory(): void
@@ -333,7 +326,6 @@ final class FileIndexProcessorTest extends TestCase {
             [$this->root($docroot)],
             $this->root($unconfiguredPath),
             false,
-            false,
             ''
         );
     }
@@ -346,23 +338,10 @@ final class FileIndexProcessorTest extends TestCase {
         file_put_contents($docroot . '/wp-content/cache/keep.php', '<?php // keep');
         $cachedPath = (string) realpath($docroot . '/wp-content/cache/keep.php');
 
-        $result = $this->collectEntries([$cachedPath], $cachedPath, false);
+        $result = $this->collectEntries([$cachedPath], $cachedPath);
 
         $this->assertSame([], $result['entries']);
         $this->assertContains(FileIndexProcessor::STATUS_SKIPPED, $result['statuses']);
-    }
-
-    public function testFileRootInsideASkippedDirectoryIsIndexedWhenCachesAreIncluded(): void
-    {
-        $docroot = $this->tempDir . '/site';
-        mkdir($docroot . '/wp-content/cache', 0755, true);
-        file_put_contents($docroot . '/wp-content/cache/keep.php', '<?php // keep');
-        $cachedPath = (string) realpath($docroot . '/wp-content/cache/keep.php');
-
-        $result = $this->collectEntries([$cachedPath], $cachedPath, true);
-
-        $this->assertCount(1, $result['entries']);
-        $this->assertSame($cachedPath, $result['entries'][0]['path']);
     }
 
     public function testFileRootInsideTheStoragePathIsNeverIndexed(): void
@@ -373,7 +352,7 @@ final class FileIndexProcessorTest extends TestCase {
         $storagePath = (string) realpath($docroot . '/.reprint');
         $senderPath = $storagePath . '/sender.json';
 
-        $processor = $this->startProcessor([$senderPath], $senderPath, false, true, $storagePath);
+        $processor = $this->startProcessor([$senderPath], $senderPath, false, $storagePath);
         $entries = [];
         while ($processor->next_index_step()) {
             foreach ($processor->get_index_entries() as $entry) {
@@ -397,7 +376,7 @@ final class FileIndexProcessorTest extends TestCase {
         }
 
         $uninterrupted = $this->collectEntries($roots, $roots[0]);
-        $resumed = $this->collectEntries($roots, $roots[0], true, true);
+        $resumed = $this->collectEntries($roots, $roots[0], true);
 
         $this->assertSame($roots, array_column($uninterrupted['entries'], 'path'));
         $this->assertSame($roots, array_column($resumed['entries'], 'path'));
@@ -422,7 +401,7 @@ final class FileIndexProcessorTest extends TestCase {
         $roots = [$configPath, $nestedPath];
 
         $uninterrupted = $this->collectEntries($roots, $configPath);
-        $resumed = $this->collectEntries($roots, $configPath, true, true);
+        $resumed = $this->collectEntries($roots, $configPath, true);
 
         $this->assertSame(
             array_column($uninterrupted['entries'], 'path'),
@@ -440,7 +419,6 @@ final class FileIndexProcessorTest extends TestCase {
      *
      * @param string[] $roots                Configured roots, canonical.
      * @param string   $indexDirectory       Root where traversal begins.
-     * @param bool     $includeCaches        Whether generated caches are included.
      * @param bool     $resumeAfterEveryStep Whether to reopen from the cursor each step.
      * @return array {
      *     @type array[]  $entries  File-index entries.
@@ -450,7 +428,6 @@ final class FileIndexProcessorTest extends TestCase {
     private function collectEntries(
         array $roots,
         string $indexDirectory,
-        bool $includeCaches = true,
         bool $resumeAfterEveryStep = false
     ): array {
         $root_records = array_map([$this, 'root'], $roots);
@@ -458,7 +435,6 @@ final class FileIndexProcessorTest extends TestCase {
             $root_records,
             $this->root($indexDirectory),
             false,
-            $includeCaches,
             ''
         );
         $entries = [];
@@ -475,7 +451,6 @@ final class FileIndexProcessorTest extends TestCase {
                     $root_records,
                     $cursor,
                     false,
-                    $includeCaches,
                     ''
                 );
             }
@@ -492,7 +467,6 @@ final class FileIndexProcessorTest extends TestCase {
         array $roots,
         string $start,
         bool $followSymlinks,
-        bool $includeCaches,
         string $storagePath
     ): FileIndexProcessor {
         $rootRecords = array_map([$this, 'root'], $roots);
@@ -500,7 +474,6 @@ final class FileIndexProcessorTest extends TestCase {
             $rootRecords,
             $this->root($start),
             $followSymlinks,
-            $includeCaches,
             $storagePath
         );
     }
@@ -546,7 +519,6 @@ final class FileIndexProcessorTest extends TestCase {
             [$root],
             $root,
             false,
-            false,
             ''
         );
         $entries = [];
@@ -563,7 +535,6 @@ final class FileIndexProcessorTest extends TestCase {
                 $processor = FileIndexProcessor::resume(
                     [$root],
                     $cursor,
-                    false,
                     false,
                     ''
                 );

@@ -20,9 +20,7 @@ use function WordPress\Reprint\Server\relative_path_under;
  *   2. endpoint_file_index() integration tests via subprocess: build a
  *      fixture tree that mixes real-WP-shaped junk and real content,
  *      run the endpoint, decode the multipart response, and assert
- *      which entries appear and which were filtered. A separate run
- *      with include_caches=1 confirms the override turns the filter
- *      off cleanly.
+ *      which entries appear and which were filtered.
  *
  * The unit tests are the safety net: silent over-skip would mean
  * silent data loss during migration, which is the worst failure mode.
@@ -170,7 +168,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
     public function testFileIndexFiltersDefaultJunk(): void
     {
         $siteDir = $this->buildFixtureSite();
-        $entries = $this->runFileIndexEntries($siteDir, /* include_caches */ false);
+        $entries = $this->runFileIndexEntries($siteDir);
 
         $rel = $this->relativePaths($entries, $siteDir);
 
@@ -199,21 +197,6 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-content/themes/foo/.#style.css', $rel);
     }
 
-    public function testFileIndexIncludesEverythingWhenOverrideEnabled(): void
-    {
-        $siteDir = $this->buildFixtureSite();
-        $entries = $this->runFileIndexEntries($siteDir, /* include_caches */ true);
-        $rel = $this->relativePaths($entries, $siteDir);
-
-        // Override should ship the junk too.
-        $this->assertContains('wp-content/cache/page.html', $rel);
-        $this->assertContains('wp-content/upgrade/wp-7.0/file.php', $rel);
-        $this->assertContains('.git/HEAD', $rel);
-        $this->assertContains('wp-content/themes/foo/node_modules/react.js', $rel);
-        $this->assertContains('.DS_Store', $rel);
-        $this->assertContains('wp-content/themes/foo/style.css~', $rel);
-    }
-
     public function testFileIndexNeverListsReprintStorage(): void
     {
         $siteDir = $this->buildFixtureSite();
@@ -229,7 +212,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
         // Configured with a trailing slash on purpose: the endpoint must
         // normalize the setting before comparing it against entry paths.
         $rel = $this->relativePaths(
-            $this->runFileIndexEntries($siteDir, false, 5000, $storage . '/'),
+            $this->runFileIndexEntries($siteDir, 5000, $storage . '/'),
             $siteDir
         );
 
@@ -237,15 +220,6 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-content/reprint-storage/state.json', $rel);
         $this->assertNotContains('wp-content/reprint-storage/files/wp-content/themes/foo/style.css', $rel);
         $this->assertContains('wp-content/reprint-storage-2/keep.txt', $rel, 'a shared name prefix must not widen the exclusion');
-
-        // include_caches=1 turns the junk filter off; it must not turn the
-        // storage exclusion off.
-        $withCaches = $this->relativePaths(
-            $this->runFileIndexEntries($siteDir, true, 5000, $storage),
-            $siteDir
-        );
-        $this->assertContains('wp-content/cache/page.html', $withCaches);
-        $this->assertNotContains('wp-content/reprint-storage/state.json', $withCaches);
     }
 
     public function testFileIndexKeepsOnlyPhysicalEmptyDirectories(): void
@@ -262,7 +236,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
         file_put_contents($siteDir . '/file.txt', 'file');
 
         $entries = $this->relativeEntries(
-            $this->runFileIndexEntries($siteDir, false, 5000, $storage),
+            $this->runFileIndexEntries($siteDir, 5000, $storage),
             $siteDir
         );
 
@@ -301,7 +275,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
 
         try {
             $entries = $this->relativeEntries(
-                $this->runFileIndexEntries($siteDir, false),
+                $this->runFileIndexEntries($siteDir),
                 $siteDir
             );
             $this->assertSame('dir', $entries['unreadable']['type']);
@@ -322,8 +296,8 @@ final class FileIndexSkipDefaultsTest extends TestCase
         // in endpoint_file_index), so the "small" run picks the minimum
         // that still forces multiple batches given our fixture size.
         $siteDir = $this->buildFixtureSite();
-        $small = $this->runFileIndexEntries($siteDir, false, /* batch_size */ 100);
-        $large = $this->runFileIndexEntries($siteDir, false, /* batch_size */ 5000);
+        $small = $this->runFileIndexEntries($siteDir, /* batch_size */ 100);
+        $large = $this->runFileIndexEntries($siteDir, /* batch_size */ 5000);
 
         $this->assertSame(
             $this->relativePaths($large, $siteDir),
@@ -390,9 +364,9 @@ final class FileIndexSkipDefaultsTest extends TestCase
      * }
      * @phpstan-return list<array{path: string, type: string, empty?: bool}>
      */
-    private function runFileIndexEntries(string $siteDir, bool $includeCaches, int $batchSize = 5000, ?string $storagePath = null): array
+    private function runFileIndexEntries(string $siteDir, int $batchSize = 5000, ?string $storagePath = null): array
     {
-        $stdout = $this->runFileIndex($siteDir, $includeCaches, $batchSize, $storagePath);
+        $stdout = $this->runFileIndex($siteDir, $batchSize, $storagePath);
 
         // The response is `multipart/mixed; boundary="…"` containing one or
         // more `index_batch` JSON chunks. Parse out each batch and flatten.
@@ -474,14 +448,13 @@ final class FileIndexSkipDefaultsTest extends TestCase
         return $out;
     }
 
-    private function runFileIndex(string $siteDir, bool $includeCaches, int $batchSize, ?string $storagePath = null): string
+    private function runFileIndex(string $siteDir, int $batchSize, ?string $storagePath = null): string
     {
         $configPath = $this->tempDir . '/index-config.json';
         $config = [
             'directory' => $siteDir,
             'list_dir' => $siteDir,
             'batch_size' => $batchSize,
-            'include_caches' => $includeCaches,
         ];
         if ($storagePath !== null) {
             $config['storage_path'] = $storagePath;

@@ -167,7 +167,6 @@ class PushPlan
             [$filesystem_root_record],
             $filesystem_root_record,
             false,
-            false,
             $plan->plan_directory
         );
         $plan->cursor = [
@@ -376,7 +375,6 @@ class PushPlan
         $this->file_index_processor = FileIndexProcessor::resume(
             [$filesystem_root_record],
             json_encode($cursor["file_index_cursor"], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
-            false,
             false,
             $this->plan_directory
         );

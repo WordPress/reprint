@@ -58,9 +58,6 @@ final class FileIndexProcessor {
     /** @var bool Whether directory symlinks may lead outside the allowed directories. */
     private $follow_symlinks;
 
-    /** @var bool Whether generated caches and development files are included. */
-    private $include_caches;
-
     /** @var string Canonical Reprint storage path omitted from the index, or an empty string. */
     private $storage_path;
 
@@ -104,7 +101,6 @@ final class FileIndexProcessor {
      * @param FileIndexRoot   $start_root  Root scheduled first. It may be an
      *                                      external directory reached by a followed link.
      * @param bool            $follow_symlinks Whether directory symlinks may lead outside the allowed directories.
-     * @param bool            $include_caches Whether generated caches and development files are included.
      * @param string          $storage_path Reprint storage path omitted from the index, or an empty string.
      * @return self New file-index processor.
      */
@@ -112,7 +108,6 @@ final class FileIndexProcessor {
         array $roots,
         array $start_root,
         bool $follow_symlinks,
-        bool $include_caches,
         string $storage_path
     ): self {
         $roots = self::validate_roots($roots);
@@ -192,7 +187,6 @@ final class FileIndexProcessor {
             $roots,
             $configured_directories,
             $follow_symlinks,
-            $include_caches,
             $storage_path,
             $directory_stack,
             $reported_index_directory,
@@ -207,7 +201,6 @@ final class FileIndexProcessor {
      * @param FileIndexRoot[] $roots   Structured roots scheduled for this index.
      * @param string          $cursor_json JSON cursor returned by the preceding request.
      * @param bool            $follow_symlinks Whether directory symlinks may lead outside the allowed directories.
-     * @param bool            $include_caches Whether generated caches and development files are included.
      * @param string          $storage_path Reprint storage path omitted from the index, or an empty string.
      * @return self Resumed file-index processor.
      */
@@ -215,7 +208,6 @@ final class FileIndexProcessor {
         array $roots,
         string $cursor_json,
         bool $follow_symlinks,
-        bool $include_caches,
         string $storage_path
     ): self {
         $roots = self::validate_roots($roots);
@@ -294,7 +286,6 @@ final class FileIndexProcessor {
             $roots,
             $configured_directories,
             $follow_symlinks,
-            $include_caches,
             $storage_path,
             $directory_stack,
             $index_directory,
@@ -369,7 +360,7 @@ final class FileIndexProcessor {
 
         // Apply omissions before lstat() and before a directory can enter the
         // stack. Omitted subtrees therefore cost no extra filesystem calls.
-        if (!$this->include_caches && self::path_is_default_skipped($path)) {
+        if (self::path_is_default_skipped($path)) {
             $this->step_status = self::STATUS_SKIPPED;
             return true;
         }
@@ -584,7 +575,6 @@ final class FileIndexProcessor {
      * @param array[]  $roots                Structured file-index roots.
      * @param string[] $configured_directories Canonical directories selected by the request.
      * @param bool     $follow_symlinks      Whether directory symlinks may leave the allowed directories.
-     * @param bool     $include_caches       Whether generated caches and development files are included.
      * @param string   $storage_path         Reprint storage path omitted from the index, or an empty string.
      * @param array[]  $directory_stack      Active directory stack.
      * @param string   $index_directory      Directory reported by the endpoint.
@@ -595,7 +585,6 @@ final class FileIndexProcessor {
         array $roots,
         array $configured_directories,
         bool $follow_symlinks,
-        bool $include_caches,
         string $storage_path,
         array $directory_stack,
         string $index_directory,
@@ -605,7 +594,6 @@ final class FileIndexProcessor {
         $this->roots = $roots;
         $this->configured_directories = $configured_directories;
         $this->follow_symlinks = $follow_symlinks;
-        $this->include_caches = $include_caches;
         $this->storage_path = self::canonical_storage_path($storage_path);
         $this->directory_stack = $directory_stack;
         $this->index_directory = $index_directory;
@@ -782,7 +770,7 @@ final class FileIndexProcessor {
 
         $path_root = $root["requested_path"];
 
-        if (!$this->include_caches && self::path_is_default_skipped($path_root)) {
+        if (self::path_is_default_skipped($path_root)) {
             $this->step_status = self::STATUS_SKIPPED;
             return;
         }
