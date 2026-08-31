@@ -63,6 +63,8 @@ class MySQLDumpProducer
     public const ZERO_BYTE_SPATIAL_VALUE_COMMENT =
         "/* REPRINT: zero-byte spatial value */";
 
+    private const SPATIAL_STAGING_TABLE = "__reprint_db_pull_progress_spatial";
+
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
     const STATE_NEXT_TABLE = "next_table";
@@ -122,9 +124,6 @@ class MySQLDumpProducer
 
     /** @var array|null */
     private $oversized_pk_values = null;
-
-    /** @var string|null Target table used to assemble complete spatial values. */
-    private $spatial_staging_table = null;
 
     /** @var bool Whether the dump has created its target spatial staging table. */
     private $spatial_staging_table_created = false;
@@ -656,7 +655,7 @@ class MySQLDumpProducer
         $footer = "\nCOMMIT;\n";
         if ($this->spatial_staging_table_created) {
             $quoted_staging_table = $this->row_reader->quote_identifier(
-                $this->spatial_staging_table
+                self::SPATIAL_STAGING_TABLE
             );
             $footer .= "DROP TABLE IF EXISTS {$quoted_staging_table};\n";
         }
@@ -724,7 +723,6 @@ class MySQLDumpProducer
          */
         $cursor_data["oversized_queue"] = $this->encode_oversized_queue_for_cursor($this->oversized_queue);
         $cursor_data["current_statement_size"] = $this->current_statement_size;
-        $cursor_data["spatial_staging_table"] = $this->spatial_staging_table;
         $cursor_data["spatial_staging_table_created"] = $this->spatial_staging_table_created;
         $cursor_data["nullable_spatial_columns"] = $this->nullable_spatial_columns;
         $cursor_data["pending_nullable_spatial_columns"] = $this->pending_nullable_spatial_columns;
@@ -848,29 +846,8 @@ class MySQLDumpProducer
                 );
             }
             $this->current_statement_size = $cursor_data["current_statement_size"] ?? 0;
-            $spatial_staging_table = $cursor_data["spatial_staging_table"] ?? null;
-            if (
-                $spatial_staging_table !== null &&
-                (
-                    !is_string($spatial_staging_table) ||
-                    !preg_match(
-                        '/^__reprint_db_pull_progress_spatial_[a-f0-9]{24}$/D',
-                        $spatial_staging_table
-                    )
-                )
-            ) {
-                throw new \InvalidArgumentException(
-                    "Invalid cursor: spatial_staging_table must be a Reprint staging table name"
-                );
-            }
-            $this->spatial_staging_table = $spatial_staging_table;
             $this->spatial_staging_table_created =
                 (bool) ( $cursor_data["spatial_staging_table_created"] ?? false );
-            if ($this->spatial_staging_table_created && $this->spatial_staging_table === null) {
-                throw new \InvalidArgumentException(
-                    "Invalid cursor: a created spatial staging table requires its table name"
-                );
-            }
             $this->nullable_spatial_columns = $this->decode_spatial_columns_from_cursor(
                 $cursor_data["nullable_spatial_columns"] ?? [],
                 "nullable_spatial_columns"
@@ -1230,11 +1207,6 @@ class MySQLDumpProducer
                         $placeholder_wkb_by_type[$normalized_data_type];
                     $replacement = $this->format_value($placeholder, 'LONGBLOB');
                     $spatial_placeholders[$col] = $replacement;
-                    if ($this->spatial_staging_table === null) {
-                        $this->spatial_staging_table =
-                            '__reprint_db_pull_progress_spatial_' .
-                            bin2hex(generate_random_bytes(12));
-                    }
                 }
                 $chunked_columns[$col] = true;
                 $replacement_bytes = strlen($replacement);
@@ -1389,7 +1361,7 @@ class MySQLDumpProducer
         $spatial_type = $this->row_reader->is_spatial_type($data_type);
         if ($spatial_type && !$this->spatial_staging_table_created) {
             $quoted_staging_table = $this->row_reader->quote_identifier(
-                $this->spatial_staging_table
+                self::SPATIAL_STAGING_TABLE
             );
             $this->current_sql_fragment =
                 "CREATE TABLE IF NOT EXISTS {$quoted_staging_table} (" .
@@ -1401,7 +1373,7 @@ class MySQLDumpProducer
         }
         if ($spatial_type && !$current['spatial_staging_initialized']) {
             $quoted_staging_table = $this->row_reader->quote_identifier(
-                $this->spatial_staging_table
+                self::SPATIAL_STAGING_TABLE
             );
             $this->current_sql_fragment =
                 "REPLACE INTO {$quoted_staging_table} (`id`, `value`) VALUES (1, '');";
@@ -1419,7 +1391,7 @@ class MySQLDumpProducer
             );
             $quoted_column = $this->row_reader->quote_identifier($column);
             $quoted_staging_table = $this->row_reader->quote_identifier(
-                $this->spatial_staging_table
+                self::SPATIAL_STAGING_TABLE
             );
             $this->current_sql_fragment =
                 "UPDATE {$quoted_table} SET {$quoted_column} = " .
@@ -1499,7 +1471,7 @@ class MySQLDumpProducer
 
         if ($spatial_type) {
             $quoted_staging_table = $this->row_reader->quote_identifier(
-                $this->spatial_staging_table
+                self::SPATIAL_STAGING_TABLE
             );
             $sql = "UPDATE {$quoted_staging_table} " .
                 "SET `value` = CONCAT(`value`, {$formatted_chunk}) " .

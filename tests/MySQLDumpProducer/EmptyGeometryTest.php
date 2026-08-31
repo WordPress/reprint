@@ -284,7 +284,7 @@ class EmptyGeometryTest extends TestCase {
                 ->query(
                     "SELECT COUNT(*) FROM information_schema.tables " .
                     "WHERE table_schema = DATABASE() " .
-                    "AND table_name LIKE '__reprint_db_pull_progress_spatial_%'"
+                    "AND table_name = '__reprint_db_pull_progress_spatial'"
                 )
                 ->fetchColumn()
         );

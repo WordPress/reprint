@@ -357,19 +357,18 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         }
         $sql = implode("\n", $fragments);
         $this->assertStringNotContainsString('ST_GeomFromText(', $sql);
-        $this->assertMatchesRegularExpression(
-            '/UPDATE `__reprint_db_pull_progress_spatial_[a-f0-9]+` ' .
-                'SET `value` = CONCAT/s',
+        $this->assertStringContainsString(
+            'UPDATE `__reprint_db_pull_progress_spatial` SET `value` = CONCAT',
             $sql
         );
         $this->assertStringContainsString(
-            'SET `content` = (SELECT `value` FROM `__reprint_db_pull_progress_spatial_',
+            'SET `content` = (SELECT `value` FROM `__reprint_db_pull_progress_spatial`',
             $sql
         );
         $this->assertSame(
             1,
             preg_match(
-                "/UPDATE `__reprint_db_pull_progress_spatial_[a-f0-9]+` " .
+                "/UPDATE `__reprint_db_pull_progress_spatial` " .
                     "SET `value` = CONCAT\\(`value`, FROM_BASE64\\('[A-Za-z0-9+\\/=]+'\\)\\) " .
                     "WHERE `id` = 1 AND OCTET_LENGTH\\(`value`\\) = 0;/",
                 $sql,
@@ -397,7 +396,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
                 ->query(
                     "SELECT COUNT(*) FROM information_schema.tables " .
                     "WHERE table_schema = DATABASE() " .
-                    "AND table_name LIKE '__reprint_db_pull_progress_spatial_%'"
+                    "AND table_name = '__reprint_db_pull_progress_spatial'"
                 )
                 ->fetchColumn()
         );
@@ -453,11 +452,11 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $sql = $this->getDumpSQL(['max_statement_size' => 8 * 1024]);
         $this->assertSame(
             1,
-            substr_count($sql, 'CREATE TABLE IF NOT EXISTS `__reprint_db_pull_progress_spatial_')
+            substr_count($sql, 'CREATE TABLE IF NOT EXISTS `__reprint_db_pull_progress_spatial`')
         );
         $this->assertSame(
             2,
-            substr_count($sql, 'REPLACE INTO `__reprint_db_pull_progress_spatial_')
+            substr_count($sql, 'REPLACE INTO `__reprint_db_pull_progress_spatial`')
         );
 
         $import_pdo = $this->executeDumpInNewDatabase($sql);
@@ -515,7 +514,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
 
     public function testStartingNewImportDropsSavedSpatialStagingTable(): void
     {
-        $staging_table = '__reprint_db_pull_progress_spatial_' . str_repeat('a', 24);
+        $staging_table = '__reprint_db_pull_progress_spatial';
         $this->pdo->exec(
             "CREATE TABLE `{$staging_table}` (" .
             '`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY, `value` LONGBLOB NOT NULL)'
@@ -532,9 +531,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
             'DATABASE_IMPORT_POSITION_TABLE'
         );
         $this->assertIsString($position_table);
-        $cursor = base64_encode(json_encode([
-            'spatial_staging_table' => $staging_table,
-        ]));
+        $cursor = base64_encode(json_encode([]));
         $statement = $this->pdo->prepare(
             "REPLACE INTO `{$position_table}` " .
             '(`id`, `source_hash`, `source_cursor`, `file_byte_offset`) ' .

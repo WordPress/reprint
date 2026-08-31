@@ -194,6 +194,8 @@ class ImportClient
     // Change this UUID whenever the progress-table schema changes.
     private const DATABASE_IMPORT_POSITION_TABLE =
         self::DATABASE_IMPORT_POSITION_TABLE_PREFIX . "49acb118-a97a-45c7-814d-8e670db7f6b4";
+    private const DATABASE_IMPORT_SPATIAL_STAGING_TABLE =
+        self::DATABASE_IMPORT_POSITION_TABLE_PREFIX . "spatial";
     private const SQL_GROUP_MARKER = "-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 ";
 
     /**
@@ -9158,31 +9160,8 @@ class ImportClient
     private function reset_database_import_position(DatabaseConnection $database): void
     {
         $table = self::DATABASE_IMPORT_POSITION_TABLE;
-        // An unfinished spatial value keeps its binary staging table for a
-        // later resume. A fresh import discards that table before it forgets
-        // the target cursor which names it.
-        $result = $database->query(
-            "SELECT `source_cursor` FROM `{$table}` WHERE `id` = 1"
-        );
-        $encoded_cursor = $result->fetchColumn();
-        $result->closeCursor();
-        if (is_string($encoded_cursor)) {
-            $cursor_json = base64_decode($encoded_cursor, true);
-            $cursor = $cursor_json === false ? null : json_decode($cursor_json, true);
-            $spatial_staging_table = is_array($cursor)
-                ? ( $cursor["spatial_staging_table"] ?? null )
-                : null;
-            if (
-                is_string($spatial_staging_table) &&
-                preg_match(
-                    '/^__reprint_db_pull_progress_spatial_[a-f0-9]{24}$/D',
-                    $spatial_staging_table
-                )
-            ) {
-                $quoted_staging_table = '`' . str_replace('`', '``', $spatial_staging_table) . '`';
-                $database->exec("DROP TABLE IF EXISTS {$quoted_staging_table}");
-            }
-        }
+        $spatial_staging_table = self::DATABASE_IMPORT_SPATIAL_STAGING_TABLE;
+        $database->exec("DROP TABLE IF EXISTS `{$spatial_staging_table}`");
         $query = "DELETE FROM `{$table}` WHERE `id` = 1";
         $database->exec($query);
     }
