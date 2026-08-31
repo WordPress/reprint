@@ -3,7 +3,8 @@
  *
  * Runs a complete pull through a local HTTP reverse proxy which rejects
  * Reprint requests unless they have a same-origin WordPress admin Referer.
- * Before forwarding each streaming endpoint, the proxy also returns two
+ * After preflight reports base64 path support, the proxy also rejects clear
+ * path query values. Before forwarding each streaming endpoint, it returns two
  * potentially transient HTTP errors. The third request reaches the real E2E
  * site, so the pull must recover without hitting its three-failure limit.
  */
@@ -150,6 +151,23 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         }
     });
 
+    it('base64-encodes filesystem path query values', () => {
+        const encodedPaths = readRequestRecords()
+            .filter(record => record.isReprintRequest && record.endpoint !== 'preflight')
+            .flatMap(record => {
+                const url = new URL(record.path, firewallOrigin);
+                return ['directory', 'list_dir', 'pulled_before']
+                    .flatMap(parameter => url.searchParams.getAll(parameter));
+            });
+
+        assert.ok(encodedPaths.length > 0, 'Expected path query values');
+        for (const encodedPath of encodedPaths) {
+            const decodedPath = Buffer.from(encodedPath, 'base64');
+            assert.equal(decodedPath.toString('base64'), encodedPath);
+            assert.ok(decodedPath.toString().startsWith('/'));
+        }
+    });
+
     it('retries two potentially transient HTTP errors at every pull streaming endpoint', () => {
         const expectedStatusesByEndpoint = new Map([
             ['file_index', [408, 418]],
@@ -232,6 +250,16 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
     it('rejects a Reprint GET without the Referer', async () => {
         const response = await fetch(
             `${firewallOrigin}/?reprint-api&endpoint=preflight`,
+        );
+
+        assert.equal(response.status, 403);
+        assert.equal(response.headers.get('x-app-firewall'), 'blocked');
+    });
+
+    it('rejects a clear absolute path after preflight', async () => {
+        const response = await fetch(
+            `${firewallOrigin}/?reprint-api&endpoint=file_index&directory=/srv/site`,
+            { headers: { Referer: `${firewallOrigin}/wp-admin/upload.php` } },
         );
 
         assert.equal(response.status, 403);

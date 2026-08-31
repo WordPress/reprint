@@ -28,6 +28,50 @@ final class ExportHttpServerTest extends TestCase
         $this->assertTrue($config['create_table_query']);
     }
 
+    public function testParsesBase64EncodedPathParameters(): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        $config = $server->parse_http_config([
+            'endpoint' => 'file_index',
+            'directory' => [
+                base64_encode('/srv/site'),
+                base64_encode("/srv/binary-\xff"),
+            ],
+            'list_dir' => base64_encode('/srv/site'),
+            'pulled_before' => [base64_encode('/srv/site/removed')],
+        ]);
+
+        $this->assertSame(['/srv/site', "/srv/binary-\xff"], $config['directory']);
+        $this->assertSame('/srv/site', $config['list_dir']);
+        $this->assertSame(['/srv/site/removed'], $config['pulled_before']);
+    }
+
+    public function testRejectsInvalidBase64EncodedPathParameter(): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'directory entry 1 must be an absolute path or a base64-encoded absolute path; observed "not base64".'
+        );
+
+        $server->parse_http_config([
+            'endpoint' => 'file_index',
+            'directory' => [base64_encode('/srv/site'), 'not base64'],
+        ]);
+    }
+
+    public function testKeepsLegacyRawPathParameterForProtocolNegotiation(): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        $config = $server->parse_http_config([
+            'endpoint' => 'preflight',
+            'directory' => ['/tmp', '/srv/site'],
+        ]);
+
+        $this->assertSame(['/tmp', '/srv/site'], $config['directory']);
+    }
+
     public function testNormalizeConfigAppliesDefaultDirectoryAndDecodesCursorHeader(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer([

@@ -1544,6 +1544,9 @@ final class FilesPullLocalIndexTest extends TestCase
             'http_code' => 200,
             'data' => [
                 'ok' => true,
+                'capabilities' => [
+                    'base64_path_parameters' => true,
+                ],
                 'runtime' => [
                     'document_root' =>
                         'base64:'
@@ -1653,7 +1656,10 @@ uksort($remote_index, static function (string $left, string $right): int {
 
 $endpoint = $_GET['endpoint'] ?? null;
 $request_cursor = $_GET['cursor'] ?? null;
-$selected_directories = $_GET['directory'] ?? array();
+$selected_directories = array_map(
+    'base64_decode',
+    (array) ($_GET['directory'] ?? array())
+);
 if ($endpoint === 'file_index' && count($selected_directories) > 0) {
     $remote_index = array_filter(
         $remote_index,
@@ -1674,6 +1680,9 @@ if ($endpoint === 'preflight') {
     header('Content-Type: application/json');
     echo json_encode(array(
         'ok' => true,
+        'capabilities' => array(
+            'base64_path_parameters' => true,
+        ),
         'runtime' => array(
             'document_root' => '/var/www/html',
             'ini_get_all' => array(),

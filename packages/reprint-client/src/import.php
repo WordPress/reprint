@@ -10973,9 +10973,30 @@ class ImportClient
         ?string $cursor,
         array $params = []
     ): string {
-        $url = $this->remote_reprint_api_url;
+        $preflight_record = $this->get_state()->preflight_record();
+        // Preflight keeps the legacy path parameters so a new client can learn
+        // whether an older server supports the base64 form before using it.
+        $server_supports_base64_paths = $endpoint !== 'preflight'
+            && !empty($preflight_record['data']['capabilities']['base64_path_parameters']);
+        $url = $server_supports_base64_paths
+            ? self::encode_url_path_parameters($this->remote_reprint_api_url)
+            : $this->remote_reprint_api_url;
         $separator = strpos($url, "?") === false ? "?" : "&";
 
+        if ($server_supports_base64_paths) {
+            foreach (["directory", "list_dir", "pulled_before"] as $parameter) {
+                if (!array_key_exists($parameter, $params)) {
+                    continue;
+                }
+                if (is_array($params[$parameter])) {
+                    foreach ($params[$parameter] as $key => $path) {
+                        $params[$parameter][$key] = base64_encode($path);
+                    }
+                } else {
+                    $params[$parameter] = base64_encode($params[$parameter]);
+                }
+            }
+        }
         $params["endpoint"] = $endpoint;
         if ($cursor) {
             // Also include cursor in query params as a fallback when headers are stripped.
@@ -10984,6 +11005,36 @@ class ImportClient
         $params["_cache_bust"] = time() . "-" . rand(0, 999999);
 
         return $url . $separator . http_build_query($params);
+    }
+
+    /**
+     * Base64-encode and rename path parameters already present in an API URL.
+     */
+    private static function encode_url_path_parameters(string $url): string
+    {
+        $query_start = strpos($url, '?');
+        if ($query_start === false) {
+            return $url;
+        }
+
+        $url_prefix = substr($url, 0, $query_start + 1);
+        $query_parts = explode('&', substr($url, $query_start + 1));
+        foreach ($query_parts as $index => $query_part) {
+            $value_start = strpos($query_part, '=');
+            if ($value_start === false) {
+                continue;
+            }
+            $decoded_key = urldecode(substr($query_part, 0, $value_start));
+            $key = preg_replace('/\[.*\]$/', '', $decoded_key);
+            if (!in_array($key, ['directory', 'list_dir', 'pulled_before'], true)) {
+                continue;
+            }
+            $path = urldecode(substr($query_part, $value_start + 1));
+            $query_parts[$index] = substr($query_part, 0, $value_start)
+                . '=' . rawurlencode(base64_encode($path));
+        }
+
+        return $url_prefix . implode('&', $query_parts);
     }
 
     /**

@@ -94,7 +94,9 @@ final class RuntimeFilesRootPathTest extends TestCase
 <?php
 $request = array(
     'endpoint' => $_GET['endpoint'] ?? null,
-    'directory' => $_GET['directory'] ?? null,
+    'directory' => isset($_GET['directory'])
+        ? (array) $_GET['directory']
+        : null,
 );
 file_put_contents(
     %s,

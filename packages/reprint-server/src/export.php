@@ -2455,6 +2455,9 @@ function endpoint_preflight(array $config): array
         "error" => $preflight_error,
         "timestamp" => time(),
         "protocol_version" => EXPORT_PROTOCOL_VERSION,
+        "capabilities" => [
+            "base64_path_parameters" => true,
+        ],
         "wp_detect" => [
             "found" => !empty($wp_detect["roots"]),
             "searched" => $wp_detect["searched"],

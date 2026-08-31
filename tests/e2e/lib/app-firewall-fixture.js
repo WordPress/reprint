@@ -2,8 +2,9 @@
  * Local reverse proxy which models an application firewall around WordPress.
  *
  * Reprint requests are accepted only when their Referer points to the same
- * origin's WordPress Media Library page. It injects the planned HTTP errors,
- * then streams later requests to the real E2E WordPress site.
+ * origin's WordPress Media Library page. After preflight, path query values
+ * must not expose absolute filesystem paths. It injects the planned HTTP
+ * errors, then streams later requests to the real E2E WordPress site.
  */
 import http from 'node:http';
 import { appendFileSync } from 'node:fs';
@@ -38,8 +39,15 @@ const server = http.createServer((request, response) => {
         requestUrl.searchParams.has('site-export-api');
     const expectedReferer = `http://${request.headers.host}/wp-admin/upload.php`;
     const referer = request.headers.referer || '';
-    const allowed = !isReprintRequest || referer === expectedReferer;
     const endpoint = requestUrl.searchParams.get('endpoint') || '';
+    const rawPathParameter = ['directory', 'list_dir', 'pulled_before']
+        .flatMap(parameter => requestUrl.searchParams.getAll(parameter))
+        .find(value => value.startsWith('/')) || null;
+    const allowed = !isReprintRequest || (
+        referer === expectedReferer && (
+            endpoint === 'preflight' || rawPathParameter === null
+        )
+    );
     const injectedStatuses = injectedStatusesByEndpoint.get(endpoint) || [];
     const injectedResponseCount = injectedResponseCounts.get(endpoint) || 0;
     const injectedStatus = allowed
@@ -62,6 +70,7 @@ const server = http.createServer((request, response) => {
         endpoint,
         referer,
         expectedReferer,
+        rawPathParameter,
         isReprintRequest,
         allowed,
         action,
