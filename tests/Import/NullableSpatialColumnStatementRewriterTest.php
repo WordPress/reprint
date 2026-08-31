@@ -64,6 +64,28 @@ class NullableSpatialColumnStatementRewriterTest extends TestCase {
         ));
     }
 
+    public function testRejectsSpatialIndexesBeforeMakingTheirColumnsNullable(): void
+    {
+        $database = $this->databaseReturningCreateTable(
+            'CREATE TABLE `maps` (`location` point NOT NULL, SPATIAL KEY `location_index` (`location`))',
+            [
+                [
+                    'Key_name' => 'location_index',
+                    'Column_name' => 'location',
+                    'Index_type' => 'SPATIAL',
+                ],
+            ]
+        );
+        $rewriter = new NullableSpatialColumnStatementRewriter($database);
+        $marker = MySQLDumpProducer::NULLABLE_SPATIAL_COLUMNS_COMMENT_PREFIX .
+            implode(' ', array_map('base64_encode', ['maps', 'location'])) . " */\n" .
+            'ALTER TABLE `maps` MODIFY COLUMN `location` point NULL;';
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('spatial index `location_index` requires the column to remain NOT NULL');
+        $rewriter->rewrite($marker);
+    }
+
     /** @dataProvider invalidMarkerProvider */
     public function testRejectsInvalidMarkers(string $payload, string $message): void
     {
@@ -91,24 +113,49 @@ class NullableSpatialColumnStatementRewriterTest extends TestCase {
         ];
     }
 
-    private function databaseReturningCreateTable(string $create_table_sql): PdoDatabaseConnection
+    /** @param array<int,array{Key_name:string,Column_name:string,Index_type:string}> $spatial_indexes */
+    private function databaseReturningCreateTable(
+        string $create_table_sql,
+        array $spatial_indexes = []
+    ): PdoDatabaseConnection
     {
         $pdo = new PDO('sqlite::memory:');
-        return new class($pdo, $create_table_sql) extends PdoDatabaseConnection {
+        return new class($pdo, $create_table_sql, $spatial_indexes) extends PdoDatabaseConnection {
             private string $create_table_sql;
 
-            public function __construct(PDO $pdo, string $create_table_sql)
+            /** @var array<int,array{Key_name:string,Column_name:string,Index_type:string}> */
+            private array $spatial_indexes;
+
+            public function __construct(PDO $pdo, string $create_table_sql, array $spatial_indexes)
             {
                 parent::__construct($pdo);
                 $this->create_table_sql = $create_table_sql;
+                $this->spatial_indexes = $spatial_indexes;
             }
 
             public function query(string $sql, array $params = []): DatabaseResult
             {
+                if (strpos($sql, 'SHOW INDEX FROM ') === 0) {
+                    if ($this->spatial_indexes !== []) {
+                        $index = $this->spatial_indexes[0];
+                        return parent::query(
+                            'SELECT ? AS Key_name, ? AS Column_name, ? AS Index_type',
+                            [$index['Key_name'], $index['Column_name'], $index['Index_type']]
+                        );
+                    }
+                    return parent::query(
+                        'SELECT NULL AS Key_name, NULL AS Column_name, NULL AS Index_type WHERE 0 = 1'
+                    );
+                }
                 return parent::query(
                     'SELECT ? AS "Create Table"',
                     [$this->create_table_sql]
                 );
+            }
+
+            public function exec(string $sql): int
+            {
+                return 0;
             }
         };
     }

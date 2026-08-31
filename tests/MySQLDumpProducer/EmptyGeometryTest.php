@@ -319,6 +319,106 @@ class EmptyGeometryTest extends TestCase {
         $this->assertSame('YES', $columns_by_name['location']['Null']);
     }
 
+    /**
+     * A zero-byte geometry has no bounding box, so MariaDB cannot build an
+     * R-tree over the column after the populated-table ADD COLUMN operation.
+     */
+    public function testMariaDbRejectsSpatialIndexForZeroByteGeometry(): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE zero_byte_spatial_index (id INT PRIMARY KEY)'
+        );
+        $this->source_pdo->exec('INSERT INTO zero_byte_spatial_index VALUES (1)');
+        $this->source_pdo->exec(
+            'ALTER TABLE zero_byte_spatial_index ADD COLUMN location POINT NOT NULL'
+        );
+
+        try {
+            $this->source_pdo->exec(
+                'ALTER TABLE zero_byte_spatial_index ADD SPATIAL INDEX location_index (location)'
+            );
+            $this->fail('MariaDB accepted a spatial index over a zero-byte geometry.');
+        } catch (PDOException $error) {
+            $this->assertStringContainsString(
+                'geometry object',
+                strtolower($error->getMessage())
+            );
+        }
+    }
+
+    /**
+     * SHOW CREATE TABLE can omit backticks when the target session disabled
+     * sql_quote_show_create. The rewriter must set it before parsing.
+     *
+     * @dataProvider targetDatabaseProvider
+     */
+    public function testRewriterForcesQuotedShowCreateOutput(string $target): void
+    {
+        $database = $this->targetDatabaseName('test_empty_geometry_quoted_show_create', $target);
+        $target_pdo = $this->initializeTargetDatabase($database);
+        $target_pdo->exec(
+            'CREATE TABLE quoted_show_create (id INT PRIMARY KEY, location POINT NOT NULL)'
+        );
+        $target_pdo->exec('SET SESSION sql_quote_show_create = 0');
+
+        $rewriter = new NullableSpatialColumnStatementRewriter(
+            new PdoDatabaseConnection($target_pdo)
+        );
+        $rewritten_alter = $rewriter->rewrite($this->nullableSpatialColumnMarker(
+            'quoted_show_create',
+            ['location']
+        ));
+        $this->assertStringContainsString(
+            'ALTER TABLE `quoted_show_create`',
+            $rewritten_alter
+        );
+        $this->assertMatchesRegularExpression(
+            '/MODIFY COLUMN `location` POINT NULL/i',
+            $rewritten_alter
+        );
+        $this->assertSame(
+            1,
+            (int) $target_pdo->query('SELECT @@SESSION.sql_quote_show_create')->fetchColumn()
+        );
+    }
+
+    /**
+     * A spatial index requires its geometry column to remain NOT NULL. Stop
+     * before issuing a target ALTER which cannot succeed.
+     *
+     * @dataProvider targetDatabaseProvider
+     */
+    public function testSpatialIndexStopsNullableRewrite(string $target): void
+    {
+        $database = $this->targetDatabaseName('test_empty_geometry_spatial_index', $target);
+        $target_pdo = $this->initializeTargetDatabase($database);
+        $target_pdo->exec(
+            'CREATE TABLE spatially_indexed_geometry (' .
+            'id INT PRIMARY KEY, location POINT NOT NULL, ' .
+            'SPATIAL INDEX location_index (location))'
+        );
+
+        $rewriter = new NullableSpatialColumnStatementRewriter(
+            new PdoDatabaseConnection($target_pdo)
+        );
+        try {
+            $rewriter->rewrite($this->nullableSpatialColumnMarker(
+                'spatially_indexed_geometry',
+                ['location']
+            ));
+            $this->fail('The rewriter must reject a nullable spatial index column.');
+        } catch (RuntimeException $error) {
+            $this->assertStringContainsString('location_index', $error->getMessage());
+            $this->assertStringContainsString('NOT NULL', $error->getMessage());
+        }
+
+        $columns = $target_pdo
+            ->query('SHOW FULL COLUMNS FROM spatially_indexed_geometry')
+            ->fetchAll();
+        $columns_by_name = array_column($columns, null, 'Field');
+        $this->assertSame('NO', $columns_by_name['location']['Null']);
+    }
+
     public function testEarlierCursorFormatResumesBeforeFirstEmptyValue(): void
     {
         $this->source_pdo->exec(
@@ -439,13 +539,7 @@ class EmptyGeometryTest extends TestCase {
 
     private function executeDump(string $sql, string $database): PDO
     {
-        $target_pdo = $this->connectTarget($database);
-        $target_pdo->exec("DROP DATABASE IF EXISTS `{$database}`");
-        $target_pdo->exec(
-            "CREATE DATABASE `{$database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
-        );
-        $target_pdo->exec("USE `{$database}`");
-        $this->target_databases[] = $database;
+        $target_pdo = $this->initializeTargetDatabase($database);
 
         $connection = new PdoDatabaseConnection($target_pdo);
         $rewriter = new NullableSpatialColumnStatementRewriter($connection);
@@ -457,6 +551,32 @@ class EmptyGeometryTest extends TestCase {
             $target_pdo->exec($rewriter->rewrite($query) ?? $query);
         }
         return $target_pdo;
+    }
+
+    private function initializeTargetDatabase(string $database): PDO
+    {
+        $target_pdo = $this->connectTarget($database);
+        $target_pdo->exec("DROP DATABASE IF EXISTS `{$database}`");
+        $target_pdo->exec(
+            "CREATE DATABASE `{$database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+        );
+        $target_pdo->exec("USE `{$database}`");
+        $this->target_databases[] = $database;
+        return $target_pdo;
+    }
+
+    private function targetDatabaseName(string $prefix, string $target): string
+    {
+        return $prefix . ( strpos($target, 'mariadb') !== false ? '_mariadb' : '_mysql' );
+    }
+
+    /** @param string[] $columns */
+    private function nullableSpatialColumnMarker(string $table, array $columns): string
+    {
+        return MySQLDumpProducer::NULLABLE_SPATIAL_COLUMNS_COMMENT_PREFIX .
+            implode(' ', array_map('base64_encode', array_merge([$table], $columns))) .
+            " */\nALTER TABLE `" . str_replace('`', '``', $table) . "`\nMODIFY COLUMN `" .
+            str_replace('`', '``', $columns[0]) . '` POINT NULL;';
     }
 
     private function connectTarget(string $database): PDO

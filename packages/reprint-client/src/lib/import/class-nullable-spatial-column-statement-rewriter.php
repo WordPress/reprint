@@ -58,6 +58,7 @@ class NullableSpatialColumnStatementRewriter {
             );
         }
         $quoted_table = self::quote_identifier($table);
+        $this->database->exec('SET SESSION sql_quote_show_create = 1');
         $result = $this->database->query("SHOW CREATE TABLE {$quoted_table}");
         try {
             $row = $result->fetch(PDO::FETCH_ASSOC);
@@ -77,6 +78,7 @@ class NullableSpatialColumnStatementRewriter {
             $create_table_sql,
             $columns
         );
+        $this->assert_no_spatial_indexes($quoted_table, $table, $columns);
         return "ALTER TABLE {$quoted_table}\nMODIFY COLUMN " .
             implode(",\nMODIFY COLUMN ", $column_definitions) . ";";
     }
@@ -122,6 +124,46 @@ class NullableSpatialColumnStatementRewriter {
 
         $table = array_shift($identifiers);
         return [$table, $identifiers];
+    }
+
+    /** @param string[] $columns Columns which must become nullable. */
+    private function assert_no_spatial_indexes(
+        string $quoted_table,
+        string $table,
+        array $columns
+    ): void {
+        $requested_columns = array_fill_keys($columns, true);
+        $result = $this->database->query("SHOW INDEX FROM {$quoted_table}");
+        try {
+            while (true) {
+                $row = $result->fetch(PDO::FETCH_ASSOC);
+                if ($row === false) {
+                    break;
+                }
+                if (!is_array($row)) {
+                    continue;
+                }
+                $index_type = $row['Index_type'] ?? null;
+                $column = $row['Column_name'] ?? null;
+                if (
+                    !is_string($index_type) ||
+                    !in_array(strtoupper($index_type), ['SPATIAL', 'RTREE'], true) ||
+                    !is_string($column) ||
+                    !isset($requested_columns[$column])
+                ) {
+                    continue;
+                }
+                $index = $row['Key_name'] ?? '(unnamed)';
+                throw new RuntimeException(
+                    'Cannot make target column ' . self::quote_identifier($table) . '.' .
+                    self::quote_identifier($column) . ' nullable because spatial index ' .
+                    self::quote_identifier(is_string($index) ? $index : '(unnamed)') .
+                    ' requires the column to remain NOT NULL. Remove the spatial index and migrate this table separately.'
+                );
+            }
+        } finally {
+            $result->closeCursor();
+        }
     }
 
     /**
