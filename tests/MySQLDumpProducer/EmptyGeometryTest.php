@@ -131,6 +131,11 @@ class EmptyGeometryTest extends TestCase {
             'tables_to_process' => ['first_empty', 'mixed_geometry'],
         ];
         $sql = $this->exportWithResumeAfterEveryFragment($options);
+        $this->assertSame(2, substr_count($sql, 'ALTER TABLE'));
+        $this->assertStringContainsString(
+            'UPDATE `mixed_geometry` SET `payload` = CONCAT',
+            $sql
+        );
 
         $target_pdo = $this->executeDump($sql, $target);
         $this->assertSame(
@@ -181,6 +186,64 @@ class EmptyGeometryTest extends TestCase {
         $this->assertSame('Map point', $columns_by_name['location']['Comment']);
         $this->assertSame('YES', $columns_by_name['boundary']['Null']);
         $this->assertSame('Map area', $columns_by_name['boundary']['Comment']);
+
+        preg_match_all('/ALTER TABLE `[^`]+`\n.*?;/s', $sql, $alter_statements);
+        $this->assertCount(2, $alter_statements[0]);
+        foreach ($alter_statements[0] as $alter_statement) {
+            $target_pdo->exec($alter_statement);
+        }
+    }
+
+    public function testEarlierCursorFormatResumesBeforeFirstEmptyValue(): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE earlier_cursor (id INT PRIMARY KEY)'
+        );
+        $this->source_pdo->exec('INSERT INTO earlier_cursor VALUES (1), (2)');
+        $this->source_pdo->exec(
+            'ALTER TABLE earlier_cursor ADD COLUMN location POINT NOT NULL'
+        );
+        $this->source_pdo->exec(
+            "UPDATE earlier_cursor SET location = ST_GeomFromText('POINT(1 1)') WHERE id = 1"
+        );
+
+        $options = [
+            'batch_size' => 10,
+            'tables_to_process' => ['earlier_cursor'],
+        ];
+        $producer = new MySQLDumpProducer($this->source_pdo, $options);
+        $fragments = [];
+        $cursor = null;
+        while ($producer->next_sql_fragment()) {
+            $fragment = $producer->get_sql_fragment();
+            $fragments[] = $fragment;
+            if (strpos($fragment, 'INSERT INTO `earlier_cursor`') === 0) {
+                $cursor = json_decode($producer->get_reentrancy_cursor(), true);
+                break;
+            }
+        }
+        $this->assertNotNull($cursor);
+        unset(
+            $cursor['nullable_spatial_columns'],
+            $cursor['pending_nullable_spatial_columns']
+        );
+
+        $options['cursor'] = json_encode($cursor);
+        $producer = new MySQLDumpProducer($this->source_pdo, $options);
+        while ($producer->next_sql_fragment()) {
+            $fragments[] = $producer->get_sql_fragment();
+        }
+
+        $target_pdo = $this->executeDump(
+            implode("\n", $fragments),
+            'test_empty_geometry_earlier_cursor_target'
+        );
+        $this->assertSame(
+            ['POINT(1 1)', null],
+            $target_pdo
+                ->query('SELECT ST_AsText(location) FROM earlier_cursor ORDER BY id')
+                ->fetchAll(PDO::FETCH_COLUMN)
+        );
     }
 
     public static function targetDatabaseProvider(): array
