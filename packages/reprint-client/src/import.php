@@ -348,19 +348,6 @@ class ImportClient
     /** @var array|null Cached result of get_export_directories(). */
     private $export_directories_cache = null;
 
-    /**
-     * @var bool When true, ask the server to ship the default-skipped
-     * generated content (wp-content/cache, .git, node_modules, etc.).
-     *
-     * The server's file-index endpoint filters these by default so a
-     * typical migration doesn't waste bytes on regeneratable junk. Set
-     * to true with --include-caches when the consumer genuinely needs
-     * those paths transferred (for example, debugging a caching plugin
-     * or migrating a site whose cache holds first-render-only artifacts
-     * with no source).
-     */
-    private $include_caches = false;
-
     /** @var string `mirror` or `catch-up`. */
     private $files_pull_mode = "catch-up";
 
@@ -881,7 +868,6 @@ class ImportClient
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
-        $this->include_caches = $options["include_caches"] ?? false;
         $this->extra_directory = $options["extra_directory"] ?? null;
         if (isset($options["fs_root_nonempty_behavior"])) {
             $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
@@ -3549,7 +3535,6 @@ class ImportClient
             [$filesystem_root_record],
             $filesystem_root_record,
             false,
-            $this->include_caches,
             $plan_directory
         );
         try {
@@ -3698,12 +3683,9 @@ class ImportClient
                     $local_relative_path
                 );
                 if (
-                    (
-                        !$this->include_caches
-                        && $this->local_path_requires_include_caches(
-                            $local_absolute_path,
-                            $local_relative_path
-                        )
+                    $this->local_path_is_default_skipped(
+                        $local_absolute_path,
+                        $local_relative_path
                     )
                     || !$this->is_selected_for_pulling(
                         $local_absolute_path,
@@ -3751,15 +3733,14 @@ class ImportClient
     }
 
     /**
-     * Checks whether mirroring this local path requires --include-caches.
+     * Checks whether a local path is omitted from the remote index by default.
      *
-     * Unless --include-caches is set, the file index omits generated caches,
-     * version-control metadata, OS metadata, and editor scratch files. A remap
-     * may place one of those paths under a different local name, so this checks
-     * both the path relative to --fs-root and every matching remote path before
-     * allowing its removal.
+     * The file index omits generated caches, version-control metadata, OS
+     * metadata, and editor scratch files. A remap may place one of those paths
+     * under a different local name, so this checks both the path relative to
+     * --fs-root and every matching remote path before allowing its removal.
      */
-    private function local_path_requires_include_caches(
+    private function local_path_is_default_skipped(
         string $local_absolute_path,
         string $local_relative_path
     ): bool {
@@ -7693,11 +7674,6 @@ class ImportClient
         }
         if ($this->follow_symlinks) {
             $params["follow_symlinks"] = "1";
-        }
-        if ($this->include_caches) {
-            // Server defaults to skipping caches/VCS metadata/OS junk.
-            // Opt in to include them when the consumer explicitly asks.
-            $params["include_caches"] = "1";
         }
         // Always send directory[] to the server when we have export dirs.
         // Without this parameter, the server falls back to ABSPATH as the
@@ -12778,15 +12754,6 @@ if (
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'files-pull'],
             'aliases' => ['on-docroot-nonempty'],
-        ],
-        [
-            'name' => 'include-caches',
-            'type' => 'flag',
-            'target' => 'include_caches',
-            'flag_value' => true,
-            'help' => 'Include generated caches, VCS metadata, OS junk and editor scratch files (skipped by default)',
-            'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'files-pull', 'files-index'],
         ],
         [
             'name' => 'adaptive',

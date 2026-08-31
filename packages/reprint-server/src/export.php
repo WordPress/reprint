@@ -2929,7 +2929,6 @@ function endpoint_file_index(
         100000
     );
     $follow_symlinks = !empty($config["follow_symlinks"]);
-    $include_caches = !empty($config["include_caches"]);
     $storage_path = isset($config["storage_path"]) && is_string($config["storage_path"])
         ? $config["storage_path"]
         : "";
@@ -2939,7 +2938,6 @@ function endpoint_file_index(
             $file_index_roots,
             $config["cursor"],
             $follow_symlinks,
-            $include_caches,
             $storage_path
         );
     } else {
@@ -2956,7 +2954,6 @@ function endpoint_file_index(
             $file_index_roots,
             $start_root,
             $follow_symlinks,
-            $include_caches,
             $storage_path
         );
     }
@@ -3488,7 +3485,7 @@ function path_head_looks_like_text(string $path): bool
  * Reports whether a path belongs to the established default file-index skip set.
  *
  * @param string $path Filesystem path to classify.
- * @return bool Whether the path is omitted unless caches are included.
+ * @return bool Whether the path is omitted.
  */
 function path_is_default_skipped(string $path): bool
 {
