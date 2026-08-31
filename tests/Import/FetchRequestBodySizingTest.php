@@ -233,9 +233,9 @@ class FetchRequestBodySizingTest extends TestCase
 
     public function testAShrunkBudgetSurvivesIntoTheNextInvocationWhenAdaptiveTuningIsDisabled(): void
     {
-        // files-pull sends one request per process and the adapter loops on
-        // exit 2. A budget that did not outlive the process would resend the
-        // same oversized body every attempt and never recover.
+        // files-pull can make several requests before it exits. A budget that
+        // did not survive a partial response would resend the same oversized
+        // body on the next request and never recover.
         $reflection = new \ReflectionClass(\ImportClient::class);
         $loadState = $reflection->getMethod('load_state');
         $initTuner = $reflection->getMethod('initialize_tuner');

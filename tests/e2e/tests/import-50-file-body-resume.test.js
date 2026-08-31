@@ -16,8 +16,8 @@
  *
  * The source exits before it writes the boundary which would confirm the
  * first part. The importer must leave its cursor at the preceding boundary,
- * replay the unconfirmed bytes, and replace rather than append them. After
- * removing the hook, files-pull resumes and completes. Final assertion:
+ * replay the unconfirmed bytes, and replace rather than append them. The
+ * same files-pull process then resumes and completes. Final assertion:
  * SHA-256 of the imported file equals the source.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -31,7 +31,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     writeTestHooks, removeTestHooks,
     clearHookState,
-    fsRootDir, pullStateDirectory,
+    fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -92,7 +92,7 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('first run crashes mid-file on the second body chunk', () => {
+    it('one files-pull process recovers after the second body chunk cutoff', () => {
         // Hook exits when we hit a non-first chunk of the specific file
         // we care about. Two non-obvious bits:
         //
@@ -102,7 +102,7 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
         //   2. Self-disabling via a marker file. removeTestHooks() deletes
         //      the hook PHP source, but PHP-FPM workers keep the function
         //      in memory across requests — so a worker that already loaded
-        //      the hook would still call it on the resume run and crash
+        //      the hook would still call it on the next source request and crash
         //      again. The marker check makes the function a no-op once
         //      it has fired.
         const marker = `${'/srv/e2e-sites'}/.e2e-hook-fired-${site}`;
@@ -124,53 +124,12 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
             ],
             autoResume: false,
         });
-        assert.equal(result.exitCode, 2,
-            `Expected first run to retain partial progress after the interrupted response\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
-    });
-
-    it('partial file is on disk and smaller than source', () => {
-        const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
-        const localPath = join(importedRoot, fileRel);
-        assert.ok(existsSync(localPath),
-            'Expected the partially-downloaded file to exist on disk; the streaming change should have flushed the first chunk before the crash');
-        const partialSize = statSync(localPath).size;
-        assert.ok(partialSize > 0 && partialSize < fileSize,
-            `Expected a partial file (0 < size < ${fileSize}), got ${partialSize}`);
-    });
-
-    it('state does not checkpoint the unconfirmed file part', () => {
-        const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
-        const localPath = join(importedRoot, fileRel);
-        const serializedLocalPath = `base64:${Buffer.from(localPath).toString('base64')}`;
-        const stateFile = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
-        assert.ok(existsSync(stateFile), 'Expected import state file to exist');
-        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.notEqual(
-            state.current_file,
-            serializedLocalPath,
-            'Expected the unconfirmed file part to remain outside the checkpoint',
-        );
-    });
-
-    it('resume completes after removing the hook', () => {
-        removeTestHooks(site);
-
-        const result = runImporter(importUrl(), tempDir, 'files-pull', {
-            secret: getSiteSecret(site),
-            extraArgs: [
-                '--file-chunk-start=262144',
-                '--file-chunk-max=262144',
-            ],
-        });
         assert.equal(result.exitCode, 0,
-            `Expected resume to complete\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
-
-        const stateFile = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
-        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state.active_resumable_command.completion_state, 'complete', `Expected status=complete after resume, got ${state.active_resumable_command.completion_state}`);
+            `Expected the same process to recover after the interrupted response\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+        assert.ok(existsSync(marker), 'Expected the source cutoff hook to fire');
     });
 
-    it('resumed file matches source byte-for-byte (no gap, no duplication)', () => {
+    it('recovered file matches source byte-for-byte (no gap, no duplication)', () => {
         const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         const localPath = join(importedRoot, fileRel);
         const localSize = statSync(localPath).size;

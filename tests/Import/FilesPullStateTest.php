@@ -166,6 +166,24 @@ class FilesPullStateTest extends TestCase
         $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
     }
 
+    public function testFilesPullRequiresMemoryHeadroomForTheNextRequest()
+    {
+        [$client, $reflection] = $this->prepareClient();
+        $method = $reflection->getMethod('has_memory_for_another_files_pull_request');
+        $previous_memory_limit = ini_get('memory_limit');
+        $allocated_bytes = memory_get_usage(true);
+
+        try {
+            ini_set('memory_limit', sprintf('%d', $allocated_bytes + 1024 * 1024));
+            $this->assertFalse($method->invoke($client));
+
+            ini_set('memory_limit', '-1');
+            $this->assertTrue($method->invoke($client));
+        } finally {
+            ini_set('memory_limit', $previous_memory_limit);
+        }
+    }
+
     /**
      * After --abort, the state should not be "complete".
      */

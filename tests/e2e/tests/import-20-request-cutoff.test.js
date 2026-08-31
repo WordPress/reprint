@@ -1,8 +1,8 @@
 /**
  * Test 20: Request Cutoff and Resume via import.php
  * Uses test hooks to simulate PHP crashing mid-stream by calling exit()
- * after a few file index batches. Verifies the importer can resume
- * and eventually reach completion.
+ * after a few file index batches. Verifies files-pull continues from its
+ * saved partial state and reaches completion in the same local process.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -53,7 +53,7 @@ describe('Import: Request Cutoff', () => {
         cleanupTempDir(tempDir);
     });
 
-    it('first importer run exits partial after cutoff', () => {
+    it('one importer run recovers after cutoff', () => {
         const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         const result = runImporter(url, tempDir, 'files-pull', {
             secret: getSiteSecret(site),
@@ -62,21 +62,16 @@ describe('Import: Request Cutoff', () => {
         });
         assert.equal(
             result.exitCode,
-            2,
-            `Expected exit 2 after the interrupted file index response\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
+            0,
+            `Expected one process to recover after the interrupted file index response\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
         );
 
         const stateFile = join(pullStateDirectory(tempDir, url), 'state.json');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assert.equal(
             state.active_resumable_command.completion_state,
-            'partial',
-            'Expected files-pull to retain a partial checkpoint',
-        );
-        assert.equal(
-            state.active_resumable_command.current_stage,
-            'index',
-            'Expected files-pull to remain in the index stage',
+            'complete',
+            'Expected files-pull to complete after the internal retry',
         );
     });
 
@@ -86,26 +81,15 @@ describe('Import: Request Cutoff', () => {
         assert.ok(state.scan_count >= 5, `Expected scan_count >= 5, got ${state.scan_count}`);
     });
 
-    it('importer resumes and completes after removing cutoff hook', () => {
-        // Remove the crashing hook so subsequent requests succeed
+    it('all file hashes match source after same-process recovery', () => {
         removeTestHooks(site);
 
-        const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
-        // Run the importer again — it should resume from saved state
-        const result = runImporter(url, tempDir, 'files-pull', {
-            secret: getSiteSecret(site),
-            extraArgs: ['--max-exec=10'],
-        });
-        assert.equal(result.exitCode, 0, `Expected exit 0 on resume\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
-
-        const stateFile = join(pullStateDirectory(tempDir, url), 'state.json');
-        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state.active_resumable_command.completion_state, 'complete', `Expected complete status, got ${state.active_resumable_command.completion_state}`);
-    });
-
-    it('all file hashes match source after resume', () => {
+        // The source hook itself was present while files-pull indexed the
+        // source. It is test setup rather than site content.
         const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
-        assertTreesMatch(getSiteDir(site), importedRoot);
+        assertTreesMatch(getSiteDir(site), importedRoot, {
+            exclude: ['wp-content/plugins/site-export/test-hooks.php'],
+        });
     });
 
     it('audit log shows the crash and recovery', () => {
