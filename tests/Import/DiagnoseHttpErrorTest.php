@@ -166,7 +166,7 @@ class DiagnoseHttpErrorTest extends TestCase
 
     public function testExportNotConfigured503()
     {
-        $body = '{"error":"Export not configured. Please configure the shared secret in WordPress admin under Tools > Site Export."}';
+        $body = '{"error":"Export not configured. Please configure the shared secret in WordPress admin under Tools > Reprint Server."}';
         $result = $this->diagnose(503, $body);
         $this->assertSame('EXPORT_NOT_CONFIGURED', $result['code']);
         $this->assertStringContainsString('not configured', $result['message']);

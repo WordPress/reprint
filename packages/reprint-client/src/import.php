@@ -349,19 +349,6 @@ class ImportClient
     /** @var array|null Cached result of get_export_directories(). */
     private $export_directories_cache = null;
 
-    /**
-     * @var bool When true, ask the server to ship the default-skipped
-     * generated content (wp-content/cache, .git, node_modules, etc.).
-     *
-     * The server's file-index endpoint filters these by default so a
-     * typical migration doesn't waste bytes on regeneratable junk. Set
-     * to true with --include-caches when the consumer genuinely needs
-     * those paths transferred (for example, debugging a caching plugin
-     * or migrating a site whose cache holds first-render-only artifacts
-     * with no source).
-     */
-    private $include_caches = false;
-
     /** @var string `mirror` or `catch-up`. */
     private $files_pull_mode = "catch-up";
 
@@ -882,7 +869,6 @@ class ImportClient
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
-        $this->include_caches = $options["include_caches"] ?? false;
         $this->extra_directory = $options["extra_directory"] ?? null;
         if (isset($options["fs_root_nonempty_behavior"])) {
             $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
@@ -3550,7 +3536,6 @@ class ImportClient
             [$filesystem_root_record],
             $filesystem_root_record,
             false,
-            $this->include_caches,
             $plan_directory
         );
         try {
@@ -3699,12 +3684,10 @@ class ImportClient
                     $local_relative_path
                 );
                 if (
-                    (
-                        !$this->include_caches
-                        && $this->local_path_requires_include_caches(
-                            $local_absolute_path,
-                            $local_relative_path
-                        )
+                    $this->local_path_is_default_skipped(
+                        $local_absolute_path,
+                        $local_relative_path,
+                        $local_entry["type"]
                     )
                     || !$this->is_selected_for_pulling(
                         $local_absolute_path,
@@ -3726,7 +3709,10 @@ class ImportClient
                         "Failed to remove a local path absent from the current remote index."
                     );
                 }
-                $this->pull_index_journal->record_local_deletion($local_absolute_path);
+                $this->pull_index_journal->record_local_deletion(
+                    $local_absolute_path,
+                    $local_entry["type"]
+                );
                 $local_parent_path = dirname($local_absolute_path);
                 while (
                     $local_parent_path !== $this->filesystem_root
@@ -3752,17 +3738,18 @@ class ImportClient
     }
 
     /**
-     * Checks whether mirroring this local path requires --include-caches.
+     * Checks whether a local path is omitted from the remote index by default.
      *
-     * Unless --include-caches is set, the file index omits generated caches,
-     * version-control metadata, OS metadata, and editor scratch files. A remap
-     * may place one of those paths under a different local name, so this checks
-     * both the path relative to --fs-root and every matching remote path before
-     * allowing its removal.
+     * The file index omits generated backup archives, logs, caches, temporary
+     * files, version-control metadata, OS metadata, and editor scratch files.
+     * A remap may place one of those paths under a different local name, so
+     * this checks both the path relative to --fs-root and every matching remote
+     * path before allowing its removal.
      */
-    private function local_path_requires_include_caches(
+    private function local_path_is_default_skipped(
         string $local_absolute_path,
-        string $local_relative_path
+        string $local_relative_path,
+        string $local_path_type
     ): bool {
         $candidate_paths = [$local_relative_path];
         foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
@@ -3777,8 +3764,14 @@ class ImportClient
                 );
             }
         }
+        $path_is_file = $local_path_type === "file";
         foreach ($candidate_paths as $candidate_path) {
-            if (FileIndexProcessor::path_is_default_skipped($candidate_path)) {
+            if (
+                FileIndexProcessor::path_is_default_skipped(
+                    $candidate_path,
+                    $path_is_file
+                )
+            ) {
                 return true;
             }
         }
@@ -7700,11 +7693,6 @@ class ImportClient
         if ($this->follow_symlinks) {
             $params["follow_symlinks"] = "1";
         }
-        if ($this->include_caches) {
-            // Server defaults to skipping caches/VCS metadata/OS junk.
-            // Opt in to include them when the consumer explicitly asks.
-            $params["include_caches"] = "1";
-        }
         // Always send directory[] to the server when we have export dirs.
         // Without this parameter, the server falls back to ABSPATH as the
         // scan root. On managed hosts like wp.com Atomic, ABSPATH points to
@@ -7995,9 +7983,14 @@ class ImportClient
                                     $remote_absolute_path
                                 );
                             } else {
+                                $removed_local_path_type =
+                                    $remote_deletion_root === $remote_absolute_path
+                                        ? $remote_path_type
+                                        : "dir";
                                 $this->pull_index_journal->record_successful_deletion(
                                     $remote_absolute_path,
-                                    $local_absolute_path
+                                    $local_absolute_path,
+                                    $removed_local_path_type
                                 );
                             }
                         }
@@ -8139,7 +8132,7 @@ class ImportClient
             return $budget;
         }
 
-        // Fallback for if the adaptive tuner is disabled.
+        // Fallback for callers that have not initialized the tuner.
         $max_request = $this->get_state()->get('preflight.limits.max_request_bytes');
         return (int) max(
             256 * 1024,
@@ -8539,7 +8532,7 @@ class ImportClient
             $remote_parent_components[] = $missing_remote_path_components[$component_index];
             $path_prefix = wp_join_unix_paths("/", ...$remote_parent_components);
             // A parent above every export directory proves nothing: the next remote
-            // index never covered it, so its absence is not evidence of deletion.
+            // index never covered it, so its absence does not confirm deletion.
             if (
                 $stop_at_export_directory
                 && !path_is_same_as_or_descendant_of($path_prefix, $export_directories)
@@ -11435,7 +11428,7 @@ class ImportClient
                         "No --secret was provided. The remote site requires " .
                         "authentication.\n\n" .
                         "Pass --secret=YOUR_SECRET using the same secret " .
-                        "configured in the Site Export plugin on the remote site.",
+                        "configured in the Reprint Server plugin on the remote site.",
                 ];
             }
 
@@ -11459,8 +11452,8 @@ class ImportClient
                     'code' => 'AUTH_SECRET_MISMATCH',
                     'message' =>
                         "Wrong shared secret. The --secret value does not match " .
-                        "the one configured in the Site Export plugin settings " .
-                        "(wp-admin → Site Export).",
+                        "the one configured in the Reprint Server plugin settings " .
+                        "(wp-admin → Reprint Server).",
                 ];
             }
 
@@ -12786,15 +12779,6 @@ if (
             'aliases' => ['on-docroot-nonempty'],
         ],
         [
-            'name' => 'include-caches',
-            'type' => 'flag',
-            'target' => 'include_caches',
-            'flag_value' => true,
-            'help' => 'Include generated caches, VCS metadata, OS junk and editor scratch files (skipped by default)',
-            'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'files-pull', 'files-index'],
-        ],
-        [
             'name' => 'adaptive',
             'type' => 'flag',
             'target' => 'tuning_config.enabled',
@@ -13384,7 +13368,7 @@ if (
      * Shows the download URL for the Reprint Server plugin matching this
      * version of reprint, and step-by-step installation instructions.
      */
-    function _cli_render_install_exporter(): void
+    function _cli_render_install_server(): void
     {
         $version = get_importer_version();
         $is_dev = str_contains($version, '-trunk') || $version === 'v0.0.0';
@@ -13412,6 +13396,7 @@ if (
             echo "  {$dim}composer build:server-plugin{$reset}\n";
             echo "\n";
             echo "  Then upload reprint-exporter-wp.zip through wp-admin,\n";
+            echo "  (the legacy filename is retained so existing plugin installs upgrade),\n";
             echo "  or symlink reprint-server-wp/ into wp-content/plugins/.\n";
         } else {
             echo "  {$cyan}{$zip_url}{$reset}\n";
@@ -13422,7 +13407,7 @@ if (
         echo "\n";
         echo "  1. Log in to wp-admin\n";
         echo "  2. Go to Plugins → Add New Plugin → Upload Plugin\n";
-        echo "  3. Upload reprint-exporter-wp.zip and activate it\n";
+        echo "  3. Upload reprint-exporter-wp.zip and activate Reprint Server\n";
         echo "\n";
         echo "{$bold}Step 3: Configure the shared secret{$reset}\n";
         echo "\n";
@@ -13524,7 +13509,7 @@ if (
                 "interrupted, re-run the same command to resume from where it left off.\n" .
                 "Running pull again after completion performs a delta sync.\n" .
                 "\n" .
-                "The ?site-export-api query parameter is added automatically if missing,\n" .
+                "The ?reprint-api query parameter is added automatically if missing,\n" .
                 "so you can pass just the site URL.\n",
             "extra" =>
                 "Examples:\n" .
@@ -13985,7 +13970,7 @@ if (
     // install-server is a standalone guide — no URL, state-dir, or filesystem root needed.
     // Handle it before per-command --help so it always shows the full guide.
     if ($command === "install-server") {
-        _cli_render_install_exporter();
+        _cli_render_install_server();
         exit(0);
     }
 

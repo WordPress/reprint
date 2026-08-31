@@ -747,15 +747,30 @@ class Pull
     }
 
     /**
-     * Append ?site-export-api to bare site URLs so users can pass
-     * https://example.com instead of https://example.com/?site-export-api.
+     * Append ?reprint-api to bare site URLs so users can pass
+     * https://example.com instead of https://example.com/?reprint-api.
+     * Explicit legacy endpoint URLs remain unchanged.
      */
     private function normalize_url(): void
     {
         $url = $this->client->remote_reprint_api_url;
-        if (strpos($url, 'site-export-api') === false) {
+        $query = parse_url($url, PHP_URL_QUERY);
+        $query_parameters = [];
+        if (is_string($query)) {
+            parse_str($query, $query_parameters);
+        }
+        if (
+            !array_key_exists('reprint-api', $query_parameters)
+            && !array_key_exists('site-export-api', $query_parameters)
+        ) {
+            $fragment_position = strpos($url, '#');
+            $fragment = '';
+            if ($fragment_position !== false) {
+                $fragment = substr($url, $fragment_position);
+                $url = substr($url, 0, $fragment_position);
+            }
             $separator = strpos($url, '?') === false ? '?' : '&';
-            $this->client->remote_reprint_api_url = $url . $separator . 'site-export-api';
+            $this->client->remote_reprint_api_url = $url . $separator . 'reprint-api' . $fragment;
         }
     }
 

@@ -128,7 +128,6 @@ final class FileIndexNamedRootTest extends TestCase
             $roots,
             $this->startRoot($roots, $start),
             true,
-            true,
             ''
         );
         $entries = [];
@@ -139,7 +138,7 @@ final class FileIndexNamedRootTest extends TestCase
             if ($resume) {
                 $cursor = json_encode($processor->get_cursor(), JSON_THROW_ON_ERROR);
                 $processor->close();
-                $processor = FileIndexProcessor::resume($roots, $cursor, true, true, '');
+                $processor = FileIndexProcessor::resume($roots, $cursor, true, '');
             }
         }
         $processor->close();

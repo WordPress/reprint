@@ -12,17 +12,16 @@ use function WordPress\Reprint\Server\relative_path_under;
  * Two layers of testing:
  *
  *   1. path_is_default_skipped() unit tests — exhaustive per-input
- *      classification of cache dirs, VCS metadata, OS junk, editor
- *      scratch, AND a long list of *negative* cases where a name
- *      looks superficially similar but should be preserved
- *      (.htaccess, .well-known, cache-control.css, etc.).
+ *      classification of generated backup, log, cache, and temporary
+ *      files, VCS metadata, OS junk, editor scratch, AND a long list of
+ *      *negative* cases where a name looks superficially similar but
+ *      should be preserved (.htaccess, .well-known, cache-control.css,
+ *      non-backup files inside backup directories, etc.).
  *
  *   2. endpoint_file_index() integration tests via subprocess: build a
  *      fixture tree that mixes real-WP-shaped junk and real content,
  *      run the endpoint, decode the multipart response, and assert
- *      which entries appear and which were filtered. A separate run
- *      with include_caches=1 confirms the override turns the filter
- *      off cleanly.
+ *      which entries appear and which were filtered.
  *
  * The unit tests are the safety net: silent over-skip would mean
  * silent data loss during migration, which is the worst failure mode.
@@ -79,6 +78,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
             'wp-content upgrade'          => ['/srv/htdocs/wp-content/upgrade/wp-7.0-12345/wp-admin/about.php', true],
             'wpcomsh-cache'               => ['/srv/htdocs/wp-content/wpcomsh-cache/data.bin', true],
             'wflogs (Wordfence)'          => ['/srv/htdocs/wp-content/wflogs/attack-data.php', true],
+            'wfcache (Wordfence)'         => ['/srv/htdocs/wp-content/wfcache/config.php', true],
 
             // Negative: file or dir whose NAME starts with cache- but is NOT inside the cache dir.
             'cache-control plugin css'    => ['/srv/htdocs/wp-content/plugins/cache-control/admin.css', false],
@@ -86,6 +86,53 @@ final class FileIndexSkipDefaultsTest extends TestCase
             'image with cache in name'    => ['/srv/htdocs/wp-content/uploads/2024/cache-page.png', false],
             // Negative: dir literally named "cache" but NOT under wp-content/ — out of our scope.
             'cache outside wp-content'    => ['/srv/htdocs/data/cache/x.json', false],
+
+            // -------- backup archives in known plugin directories --------
+            'Updraft uploads archive'     => ['/srv/htdocs/wp-content/updraft/backup_2025-02-16-1332_DailyRidgecom_61e86367b74c-uploads639.zip', true],
+            'Updraft database archive'    => ['/srv/htdocs/wp-content/updraft/backup_2025-02-16-1332_DailyRidgecom_61e86367b74c-db.gz', true],
+            'Updraft encrypted database'  => ['/srv/htdocs/wp-content/updraft/backup_2025-02-16-1332_DailyRidgecom_61e86367b74c-db.gz.crypt', true],
+            'Updraft job log'             => ['/srv/htdocs/wp-content/updraft/log.61e86367b74c.txt', true],
+            'All-in-One WP Migration'     => ['/srv/htdocs/wp-content/ai1wm-backups/example-com-20260831-120000.wpress', true],
+            'WPvivid archive'             => ['/srv/htdocs/wp-content/wpvividbackups/example.com_wpvivid-123_2026-08-31-12-00_backup_db.zip', true],
+            'Duplicator Lite archive'     => ['/srv/htdocs/wp-content/backups-dup-lite/example_archive.zip', true],
+            'Duplicator Pro archive'      => ['/srv/htdocs/wp-content/backups-dup-pro/example_archive.daf', true],
+            'BackupBuddy archive'         => ['/srv/htdocs/wp-content/uploads/backupbuddy_backups/backup-full-example.zip', true],
+            'BackWPup current archive'    => ['/srv/htdocs/wp-content/uploads/backwpup/8f17c/backups/example.tar.gz', true],
+            'BackWPup legacy archive'     => ['/srv/htdocs/wp-content/uploads/backwpup-8f17c-backups/example.tar.bz2', true],
+            'WP STAGING archive'          => ['/srv/htdocs/wp-content/uploads/wp-staging/backups/example.wpstg', true],
+            'Backup Guard archive'        => ['/srv/htdocs/wp-content/uploads/backup-guard/example.sgbp', true],
+            'Backup Guard content path'   => ['/srv/htdocs/wp-content/backup-guard/job/example.sgbp', true],
+            'database backup'             => ['/srv/htdocs/wp-content/backup-db/example.sql.gz', true],
+            'WP Time Capsule database'    => ['/srv/htdocs/wp-content/uploads/tCapsule/backups/example-wptc_meta.sql.gz', true],
+            'Duplicator legacy archive'   => ['/srv/htdocs/wp-snapshots/example_archive.zip', true],
+
+            // Known backup directories remain traversable. Only archive and
+            // plugin-generated log names are omitted from them.
+            'notes inside Updraft dir'    => ['/srv/htdocs/wp-content/updraft/restore-notes.txt', false],
+            'image inside AIOWPM dir'     => ['/srv/htdocs/wp-content/ai1wm-backups/site-diagram.png', false],
+            'readme inside Duplicator dir'=> ['/srv/htdocs/wp-content/backups-dup-lite/important-readme.md', false],
+            'unknown zip inside Updraft'  => ['/srv/htdocs/wp-content/updraft/customer-download.zip', false],
+            'notes inside WPTC dir'       => ['/srv/htdocs/wp-content/uploads/tCapsule/backups/restore-notes.txt', false],
+            'archive outside known dirs'  => ['/srv/htdocs/wp-content/uploads/customer-download.zip', false],
+            'similarly named Updraft dir' => ['/srv/htdocs/wp-content/updraft-archive/backup_example.zip', false],
+
+            // -------- logs and temporary files --------
+            'WordPress debug log'         => ['/srv/htdocs/wp-content/debug.log', true],
+            'PHP error log'               => ['/srv/htdocs/error_log', true],
+            'plugin log file'             => ['/srv/htdocs/wp-content/plugins/example/runtime.log', true],
+            'WooCommerce logs'            => ['/srv/htdocs/wp-content/uploads/wc-logs/checkout-2026-08-31.log', true],
+            'WP All Import logs'          => ['/srv/htdocs/wp-content/uploads/wpallimport/logs/import-history.txt', true],
+            'WPvivid job log'             => ['/srv/htdocs/wp-content/wpvividbackups/wpvivid_log/job.txt', true],
+            'AIOWPM temporary storage'    => ['/srv/htdocs/wp-content/plugins/all-in-one-wp-migration/storage/job/export.wpress', true],
+            'SI CAPTCHA temporary storage'=> ['/srv/htdocs/wp-content/plugins/si-captcha-for-wordpress/temp/session.php', true],
+            'BackWPup restore work'       => ['/srv/htdocs/wp-content/uploads/backwpup-restore/manifest.json', true],
+            'BackupBuddy restore work'    => ['/srv/htdocs/wp-content/uploads/backupbuddy_temp/manifest.json', true],
+            'BackupBuddy temporary files'=> ['/srv/htdocs/wp-content/uploads/pb_backupbuddy/status.txt', true],
+            'generic temporary file'      => ['/srv/htdocs/wp-content/uploads/incomplete.tmp', true],
+
+            'log word in normal name'     => ['/srv/htdocs/wp-content/uploads/catalog.pdf', false],
+            'tmp word in normal name'     => ['/srv/htdocs/wp-content/uploads/template.php', false],
+            'AIOWPM plugin code'          => ['/srv/htdocs/wp-content/plugins/all-in-one-wp-migration/lib/model.php', false],
 
             // -------- VCS metadata --------
             '.git head'                   => ['/srv/htdocs/.git/HEAD', true],
@@ -170,7 +217,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
     public function testFileIndexFiltersDefaultJunk(): void
     {
         $siteDir = $this->buildFixtureSite();
-        $entries = $this->runFileIndexEntries($siteDir, /* include_caches */ false);
+        $entries = $this->runFileIndexEntries($siteDir);
 
         $rel = $this->relativePaths($entries, $siteDir);
 
@@ -182,6 +229,11 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertContains('wp-content/uploads/2024/01/photo.jpg', $rel);
         $this->assertContains('wp-content/uploads/some-cache.zip', $rel);
         $this->assertContains('wp-content/plugins/cache-control/admin.css', $rel);
+        $this->assertContains('wp-content/updraft/restore-notes.txt', $rel);
+        $this->assertContains('wp-content/ai1wm-backups/site-diagram.png', $rel);
+        $this->assertContains('wp-content/updraft/backup_project.zip/important.txt', $rel);
+        $this->assertContains('wp-content/uploads/history.log/important.txt', $rel);
+        $this->assertContains('wp-content/uploads/theme-history.log', $rel);
 
         // --- must be filtered (junk / regenerable) ---
         $this->assertNotContains('wp-content/cache/page.html', $rel);
@@ -189,6 +241,13 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-content/upgrade/wp-7.0/file.php', $rel);
         $this->assertNotContains('wp-content/wpcomsh-cache/data.bin', $rel);
         $this->assertNotContains('wp-content/wflogs/attack-data.php', $rel);
+        $this->assertNotContains('wp-content/wfcache/config.php', $rel);
+        $this->assertNotContains('wp-content/updraft/backup_2025-02-16-1332_DailyRidgecom_61e86367b74c-uploads639.zip', $rel);
+        $this->assertNotContains('wp-content/updraft/log.61e86367b74c.txt', $rel);
+        $this->assertNotContains('wp-content/ai1wm-backups/example-com-20260831-120000.wpress', $rel);
+        $this->assertNotContains('wp-content/debug.log', $rel);
+        $this->assertNotContains('wp-content/uploads/wc-logs/checkout.log', $rel);
+        $this->assertNotContains('wp-content/plugins/all-in-one-wp-migration/storage/job.tmp', $rel);
         $this->assertNotContains('.git/HEAD', $rel);
         $this->assertNotContains('wp-content/themes/foo/node_modules/react.js', $rel);
         $this->assertNotContains('.DS_Store', $rel);
@@ -199,19 +258,26 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-content/themes/foo/.#style.css', $rel);
     }
 
-    public function testFileIndexIncludesEverythingWhenOverrideEnabled(): void
+    public function testFileIndexIncludesFilesLargerThanOneGigabyte(): void
     {
-        $siteDir = $this->buildFixtureSite();
-        $entries = $this->runFileIndexEntries($siteDir, /* include_caches */ true);
-        $rel = $this->relativePaths($entries, $siteDir);
+        if (PHP_INT_SIZE < 8) {
+            $this->markTestSkipped('This test needs 64-bit file sizes.');
+        }
 
-        // Override should ship the junk too.
-        $this->assertContains('wp-content/cache/page.html', $rel);
-        $this->assertContains('wp-content/upgrade/wp-7.0/file.php', $rel);
-        $this->assertContains('.git/HEAD', $rel);
-        $this->assertContains('wp-content/themes/foo/node_modules/react.js', $rel);
-        $this->assertContains('.DS_Store', $rel);
-        $this->assertContains('wp-content/themes/foo/style.css~', $rel);
+        $siteDir = $this->tempDir . '/large-site';
+        $largeFile = $siteDir . '/wp-content/uploads/source-video.mp4';
+        mkdir(dirname($largeFile), 0755, true);
+        $handle = fopen($largeFile, 'wb');
+        $this->assertIsResource($handle);
+        $this->assertTrue(ftruncate($handle, 1024 * 1024 * 1024 + 1));
+        fclose($handle);
+
+        $rel = $this->relativePaths(
+            $this->runFileIndexEntries($siteDir),
+            $siteDir
+        );
+
+        $this->assertContains('wp-content/uploads/source-video.mp4', $rel);
     }
 
     public function testFileIndexNeverListsReprintStorage(): void
@@ -229,7 +295,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
         // Configured with a trailing slash on purpose: the endpoint must
         // normalize the setting before comparing it against entry paths.
         $rel = $this->relativePaths(
-            $this->runFileIndexEntries($siteDir, false, 5000, $storage . '/'),
+            $this->runFileIndexEntries($siteDir, 5000, $storage . '/'),
             $siteDir
         );
 
@@ -237,15 +303,6 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-content/reprint-storage/state.json', $rel);
         $this->assertNotContains('wp-content/reprint-storage/files/wp-content/themes/foo/style.css', $rel);
         $this->assertContains('wp-content/reprint-storage-2/keep.txt', $rel, 'a shared name prefix must not widen the exclusion');
-
-        // include_caches=1 turns the junk filter off; it must not turn the
-        // storage exclusion off.
-        $withCaches = $this->relativePaths(
-            $this->runFileIndexEntries($siteDir, true, 5000, $storage),
-            $siteDir
-        );
-        $this->assertContains('wp-content/cache/page.html', $withCaches);
-        $this->assertNotContains('wp-content/reprint-storage/state.json', $withCaches);
     }
 
     public function testFileIndexKeepsOnlyPhysicalEmptyDirectories(): void
@@ -262,7 +319,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
         file_put_contents($siteDir . '/file.txt', 'file');
 
         $entries = $this->relativeEntries(
-            $this->runFileIndexEntries($siteDir, false, 5000, $storage),
+            $this->runFileIndexEntries($siteDir, 5000, $storage),
             $siteDir
         );
 
@@ -301,7 +358,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
 
         try {
             $entries = $this->relativeEntries(
-                $this->runFileIndexEntries($siteDir, false),
+                $this->runFileIndexEntries($siteDir),
                 $siteDir
             );
             $this->assertSame('dir', $entries['unreadable']['type']);
@@ -322,8 +379,8 @@ final class FileIndexSkipDefaultsTest extends TestCase
         // in endpoint_file_index), so the "small" run picks the minimum
         // that still forces multiple batches given our fixture size.
         $siteDir = $this->buildFixtureSite();
-        $small = $this->runFileIndexEntries($siteDir, false, /* batch_size */ 100);
-        $large = $this->runFileIndexEntries($siteDir, false, /* batch_size */ 5000);
+        $small = $this->runFileIndexEntries($siteDir, /* batch_size */ 100);
+        $large = $this->runFileIndexEntries($siteDir, /* batch_size */ 5000);
 
         $this->assertSame(
             $this->relativePaths($large, $siteDir),
@@ -356,6 +413,17 @@ final class FileIndexSkipDefaultsTest extends TestCase
             'wp-content/upgrade/wp-7.0/file.php' => "<?php\n",
             'wp-content/wpcomsh-cache/data.bin' => "bin",
             'wp-content/wflogs/attack-data.php' => "<?php\n",
+            'wp-content/wfcache/config.php' => "<?php\n",
+            'wp-content/updraft/backup_2025-02-16-1332_DailyRidgecom_61e86367b74c-uploads639.zip' => "backup",
+            'wp-content/updraft/log.61e86367b74c.txt' => "log",
+            'wp-content/updraft/restore-notes.txt' => "keep",
+            'wp-content/updraft/backup_project.zip/important.txt' => "keep",
+            'wp-content/ai1wm-backups/example-com-20260831-120000.wpress' => "backup",
+            'wp-content/ai1wm-backups/site-diagram.png' => "keep",
+            'wp-content/debug.log' => "debug",
+            'wp-content/uploads/history.log/important.txt' => "keep",
+            'wp-content/uploads/wc-logs/checkout.log' => "log",
+            'wp-content/plugins/all-in-one-wp-migration/storage/job.tmp' => "temporary",
             '.git/HEAD' => "ref: refs/heads/main\n",
             '.git/objects/12/abcdef' => "object",
             'wp-content/themes/foo/node_modules/react.js' => "// react",
@@ -376,6 +444,8 @@ final class FileIndexSkipDefaultsTest extends TestCase
             file_put_contents($abs, $body);
         }
 
+        symlink('../themes/foo', $site . '/wp-content/uploads/theme-history.log');
+
         return $site;
     }
 
@@ -390,9 +460,9 @@ final class FileIndexSkipDefaultsTest extends TestCase
      * }
      * @phpstan-return list<array{path: string, type: string, empty?: bool}>
      */
-    private function runFileIndexEntries(string $siteDir, bool $includeCaches, int $batchSize = 5000, ?string $storagePath = null): array
+    private function runFileIndexEntries(string $siteDir, int $batchSize = 5000, ?string $storagePath = null): array
     {
-        $stdout = $this->runFileIndex($siteDir, $includeCaches, $batchSize, $storagePath);
+        $stdout = $this->runFileIndex($siteDir, $batchSize, $storagePath);
 
         // The response is `multipart/mixed; boundary="…"` containing one or
         // more `index_batch` JSON chunks. Parse out each batch and flatten.
@@ -474,14 +544,13 @@ final class FileIndexSkipDefaultsTest extends TestCase
         return $out;
     }
 
-    private function runFileIndex(string $siteDir, bool $includeCaches, int $batchSize, ?string $storagePath = null): string
+    private function runFileIndex(string $siteDir, int $batchSize, ?string $storagePath = null): string
     {
         $configPath = $this->tempDir . '/index-config.json';
         $config = [
             'directory' => $siteDir,
             'list_dir' => $siteDir,
             'batch_size' => $batchSize,
-            'include_caches' => $includeCaches,
         ];
         if ($storagePath !== null) {
             $config['storage_path'] = $storagePath;

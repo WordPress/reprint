@@ -12,7 +12,7 @@ class AdaptiveTunerTest extends TestCase
     private function makeTuner(array $config = [], array $state = []): AdaptiveTuner
     {
         return new AdaptiveTuner(array_merge([
-            "max_execution_time" => 5,
+            "max_execution_time" => 15,
             "duty" => 0.5,
         ], $config), $state);
     }
@@ -56,7 +56,7 @@ class AdaptiveTunerTest extends TestCase
         $state = $tuner->get_state();
 
         $this->assertTrue($config["enabled"]);
-        $this->assertSame(5, $config["max_execution_time"]);
+        $this->assertSame(15, $config["max_execution_time"]);
         $this->assertSame(0.5, $config["duty"]);
         $this->assertSame(5 * 1024 * 1024, $state["file_chunk_size"]);
         $this->assertSame(5000, $state["index_batch_size"]);
@@ -107,7 +107,7 @@ class AdaptiveTunerTest extends TestCase
         $params = $tuner->get_request_params("file_fetch");
 
         $this->assertSame(2048, $params["chunk_size"]);
-        $this->assertSame(5, $params["max_execution_time"]);
+        $this->assertSame(15, $params["max_execution_time"]);
         $this->assertArrayHasKey("memory_threshold", $params);
         $this->assertArrayNotHasKey("batch_size", $params);
     }
@@ -409,7 +409,8 @@ class AdaptiveTunerTest extends TestCase
 
         $this->assertNull($tuner->get_request_body_budget("file_index"));
         $this->assertNull($tuner->get_request_body_budget("sql_chunk"));
-        $this->assertNull(
+        $this->assertSame(
+            800 * 1024,
             $this->makeTuner(["enabled" => false])->get_request_body_budget("file_fetch")
         );
 

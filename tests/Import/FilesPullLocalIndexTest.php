@@ -192,9 +192,11 @@ final class FilesPullLocalIndexTest extends TestCase
 
     public function testPullDoesNotAddDefaultSkippedPathsToTheLocalIndex(): void
     {
+        $backupPath = 'wp-content/updraft/backup_site-uploads.zip';
         $this->writeRemoteOverrides([
             'added_files' => [
                 'node_modules/pulled-package.js' => 'pulled dependency',
+                $backupPath => 'pulled backup',
             ],
         ]);
 
@@ -206,6 +208,10 @@ final class FilesPullLocalIndexTest extends TestCase
                 $this->localTree . '/node_modules/pulled-package.js'
             )
         );
+        $this->assertSame(
+            'pulled backup',
+            file_get_contents($this->localTree . '/' . $backupPath)
+        );
         $index = $this->readIndex($this->localIndexPath());
         $this->assertArrayNotHasKey(
             $this->localIndexEntryPath('node_modules'),
@@ -213,6 +219,10 @@ final class FilesPullLocalIndexTest extends TestCase
         );
         $this->assertArrayNotHasKey(
             $this->localIndexEntryPath('node_modules/pulled-package.js'),
+            $index
+        );
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath($backupPath),
             $index
         );
         $diff = $this->runFilesDiff();
@@ -634,15 +644,12 @@ final class FilesPullLocalIndexTest extends TestCase
         );
     }
 
-    public function testMirrorIncludesGeneratedCachePathsWhenRequested(): void
+    public function testMirrorPreservesGeneratedCachePaths(): void
     {
-        $remoteCache = 'wp-content/cache/remote.txt';
-        $this->writeRemoteOverrides([
-            'added_files' => [$remoteCache => 'remote cache'],
-        ]);
+        $cachePath = 'wp-content/cache/remote.txt';
         mkdir($this->localTree . '/wp-content/cache', 0700, true);
         file_put_contents(
-            $this->localTree . '/' . $remoteCache,
+            $this->localTree . '/' . $cachePath,
             'local cache edit'
         );
         file_put_contents(
@@ -650,18 +657,16 @@ final class FilesPullLocalIndexTest extends TestCase
             'local only cache'
         );
 
-        $mirror = $this->runFilesPull([
-            '--mode=mirror',
-            '--include-caches',
-        ]);
+        $mirror = $this->runFilesPull(['--mode=mirror']);
 
         $this->assertSame(0, $mirror['exit'], $mirror['output']);
         $this->assertSame(
-            'remote cache',
-            file_get_contents($this->localTree . '/' . $remoteCache)
+            'local cache edit',
+            file_get_contents($this->localTree . '/' . $cachePath)
         );
-        $this->assertFileDoesNotExist(
-            $this->localTree . '/wp-content/cache/local-only.txt'
+        $this->assertSame(
+            'local only cache',
+            file_get_contents($this->localTree . '/wp-content/cache/local-only.txt')
         );
     }
 
@@ -1241,6 +1246,44 @@ final class FilesPullLocalIndexTest extends TestCase
         ]], $this->filesDiffRecords($diff['stdout']));
     }
 
+    public function testPulledDeletionRecordsTheDerivedDirectoryType(): void
+    {
+        $arguments = [
+            '--include=/var/www/html/folder',
+            '--remap',
+            '/var/www/html/folder',
+            ':fs-root:/var/www/html/history.log',
+        ];
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        file_put_contents(
+            $this->localTree . '/history.log/local-added.txt',
+            'local addition'
+        );
+        $this->writeRemoteOverrides([
+            'removed_paths' => ['folder/remote-deleted.txt'],
+        ]);
+
+        $this->abortFilesPull();
+        $pull = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertDirectoryDoesNotExist($this->localTree . '/history.log');
+        $index = $this->readIndex($this->localIndexPath());
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath('history.log'),
+            $index
+        );
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath('history.log/remote-deleted.txt'),
+            $index
+        );
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath('history.log/local-added.txt'),
+            $index
+        );
+    }
+
     public function testPulledDirectoryDeletionRemovesItsLocalIndexSubtree(): void
     {
         $this->writeRemoteOverrides([
@@ -1793,7 +1836,7 @@ PHP,
             $connection = @fsockopen('127.0.0.1', $port, $errorNumber, $errorMessage, 0.1);
             if (is_resource($connection)) {
                 fclose($connection);
-                return 'http://127.0.0.1:' . $port . '/export.php?site-export-api';
+                return 'http://127.0.0.1:' . $port . '/export.php?reprint-api';
             }
             usleep(100000);
         }

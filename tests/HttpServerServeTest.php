@@ -5,7 +5,7 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 
 /**
- * Tests Site_Export_HTTP_Server::serve() — the one-call convenience
+ * Tests \WordPress\Reprint\Server\HTTPServer::serve() — the one-call convenience
  * entry point that loads export.php, constructs the server, and
  * dispatches the current request.
  *
@@ -32,7 +32,7 @@ final class HttpServerServeTest extends TestCase
             exit;
         }
 
-        Site_Export_HTTP_Server::serve();
+        \WordPress\Reprint\Server\HTTPServer::serve();
 
         // serve() should have required export.php, which defines endpoint_preflight.
         echo function_exists('endpoint_preflight') ? "OK" : "FAIL: endpoint_preflight not defined";
@@ -55,7 +55,7 @@ final class HttpServerServeTest extends TestCase
 
         // Track require side-effect: if export.php was re-required, endpoint_preflight
         // would be re-declared which would be a fatal error.
-        Site_Export_HTTP_Server::serve();
+        \WordPress\Reprint\Server\HTTPServer::serve();
         echo "OK";
         PHP;
 
@@ -72,7 +72,7 @@ final class HttpServerServeTest extends TestCase
 
         // Override the default handler for 'preflight' to verify the
         // options were passed through to the constructor.
-        Site_Export_HTTP_Server::serve([
+        \WordPress\Reprint\Server\HTTPServer::serve([
             'handlers' => [
                 'preflight' => function (\$config) {
                     echo "handler-called:" . \$config['endpoint'];

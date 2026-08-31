@@ -58,9 +58,6 @@ final class FileIndexProcessor {
     /** @var bool Whether directory symlinks may lead outside the allowed directories. */
     private $follow_symlinks;
 
-    /** @var bool Whether generated caches and development files are included. */
-    private $include_caches;
-
     /** @var string Canonical Reprint storage path omitted from the index, or an empty string. */
     private $storage_path;
 
@@ -104,7 +101,6 @@ final class FileIndexProcessor {
      * @param FileIndexRoot   $start_root  Root scheduled first. It may be an
      *                                      external directory reached by a followed link.
      * @param bool            $follow_symlinks Whether directory symlinks may lead outside the allowed directories.
-     * @param bool            $include_caches Whether generated caches and development files are included.
      * @param string          $storage_path Reprint storage path omitted from the index, or an empty string.
      * @return self New file-index processor.
      */
@@ -112,7 +108,6 @@ final class FileIndexProcessor {
         array $roots,
         array $start_root,
         bool $follow_symlinks,
-        bool $include_caches,
         string $storage_path
     ): self {
         $roots = self::validate_roots($roots);
@@ -192,7 +187,6 @@ final class FileIndexProcessor {
             $roots,
             $configured_directories,
             $follow_symlinks,
-            $include_caches,
             $storage_path,
             $directory_stack,
             $reported_index_directory,
@@ -207,7 +201,6 @@ final class FileIndexProcessor {
      * @param FileIndexRoot[] $roots   Structured roots scheduled for this index.
      * @param string          $cursor_json JSON cursor returned by the preceding request.
      * @param bool            $follow_symlinks Whether directory symlinks may lead outside the allowed directories.
-     * @param bool            $include_caches Whether generated caches and development files are included.
      * @param string          $storage_path Reprint storage path omitted from the index, or an empty string.
      * @return self Resumed file-index processor.
      */
@@ -215,7 +208,6 @@ final class FileIndexProcessor {
         array $roots,
         string $cursor_json,
         bool $follow_symlinks,
-        bool $include_caches,
         string $storage_path
     ): self {
         $roots = self::validate_roots($roots);
@@ -294,7 +286,6 @@ final class FileIndexProcessor {
             $roots,
             $configured_directories,
             $follow_symlinks,
-            $include_caches,
             $storage_path,
             $directory_stack,
             $index_directory,
@@ -367,9 +358,10 @@ final class FileIndexProcessor {
         $this->directory_stack[$frame_index]["after"] = $entry_name;
         $path = wp_join_unix_paths($this->current_directory, $entry_name);
 
-        // Apply omissions before lstat() and before a directory can enter the
-        // stack. Omitted subtrees therefore cost no extra filesystem calls.
-        if (!$this->include_caches && self::path_is_default_skipped($path)) {
+        // Apply component omissions before lstat() and before a directory can
+        // enter the stack. Omitted subtrees therefore cost no extra filesystem
+        // calls.
+        if (self::path_has_default_skipped_component($path)) {
             $this->step_status = self::STATUS_SKIPPED;
             return true;
         }
@@ -387,6 +379,13 @@ final class FileIndexProcessor {
         $stat = @lstat($path);
         if ($stat === false) {
             $this->step_status = self::STATUS_PATH_UNAVAILABLE;
+            return true;
+        }
+        if (
+            self::stat_is_file($stat)
+            && self::file_name_is_default_skipped($path)
+        ) {
+            $this->step_status = self::STATUS_SKIPPED;
             return true;
         }
 
@@ -514,26 +513,49 @@ final class FileIndexProcessor {
     /**
      * Reports whether a path belongs to the established default skip set.
      *
-     * @param string $path Filesystem path to classify.
-     * @return bool Whether the path should be omitted unless caches are included.
+     * @param string $path         Filesystem path to classify.
+     * @param bool   $path_is_file Whether the path is a regular file.
+     * @return bool Whether the path should be omitted.
      */
-    public static function path_is_default_skipped(string $path): bool
+    public static function path_is_default_skipped(
+        string $path,
+        bool $path_is_file = true
+    ): bool
+    {
+        return self::path_has_default_skipped_component($path)
+            || (
+                $path_is_file
+                && self::file_name_is_default_skipped($path)
+            );
+    }
+
+    /** Reports whether a path contains a complete default-skipped component. */
+    private static function path_has_default_skipped_component(string $path): bool
     {
         // Sentinel slashes make component matches independent of whether the
         // component appears at the beginning, middle, or end of the path.
         $path_with_boundaries = "/" . trim($path, "/") . "/";
 
-        // These generated directories are limited to wp-content. A directory
-        // named cache elsewhere may contain user files and remains included.
-        // wpcomsh-cache is wp.com Atomic's filesystem cache shadow; wflogs is
-        // Wordfence request and scan data which can grow to gigabytes.
-        static $cache_directories = [
+        // These generated directories are limited to known plugin paths. A
+        // directory with a similar name elsewhere may contain user files and
+        // remains included. wpcomsh-cache is wp.com Atomic's filesystem cache
+        // shadow; wflogs and wfcache are Wordfence runtime data.
+        static $generated_directories = [
             "/wp-content/cache/",
             "/wp-content/upgrade/",
             "/wp-content/wpcomsh-cache/",
             "/wp-content/wflogs/",
+            "/wp-content/wfcache/",
+            "/wp-content/wpvividbackups/wpvivid_log/",
+            "/wp-content/plugins/all-in-one-wp-migration/storage/",
+            "/wp-content/plugins/si-captcha-for-wordpress/temp/",
+            "/wp-content/uploads/backwpup-restore/",
+            "/wp-content/uploads/backupbuddy_temp/",
+            "/wp-content/uploads/pb_backupbuddy/",
+            "/wp-content/uploads/wc-logs/",
+            "/wp-content/uploads/wpallimport/logs/",
         ];
-        foreach ($cache_directories as $directory) {
+        foreach ($generated_directories as $directory) {
             if (strpos($path_with_boundaries, $directory) !== false) {
                 return true;
             }
@@ -554,11 +576,61 @@ final class FileIndexProcessor {
             }
         }
 
-        // Operating-system metadata matches only the basename.
+        return false;
+    }
+
+    /** Reports whether a basename matches a default-skipped file shape. */
+    private static function file_name_is_default_skipped(string $path): bool
+    {
+        $path_with_boundaries = "/" . trim($path, "/") . "/";
         $basename = basename($path);
+
+        // Keep walking backup directories so an unrelated file placed there
+        // is still indexed. Match the file shape generated by each plugin
+        // instead of omitting the entire directory.
+        static $backup_file_patterns = [
+            "/wp-content/updraft/" => "/^backup_.*\\.(?:gz(?:\\.crypt)?|zip)$/i",
+            "/wp-content/ai1wm-backups/" => "/\\.wpress$/i",
+            "/wp-content/wpvividbackups/" => "/_wpvivid-.*_backup_.*\\.zip$/i",
+            "/wp-content/backups-dup-lite/" => "/_archive\\.(?:daf|zip)$/i",
+            "/wp-content/backups-dup-pro/" => "/_archive\\.(?:daf|zip)$/i",
+            "/wp-content/backup-db/" => "/\\.sql(?:\\.gz)?$/i",
+            "/wp-content/backup-guard/" => "/\\.sgbp$/i",
+            "/wp-content/uploads/backupbuddy_backups/" => "/^backup-.*\\.zip$/i",
+            "/wp-content/uploads/backup-guard/" => "/\\.sgbp$/i",
+            "/wp-content/uploads/wp-staging/backups/" => "/\\.wpstg$/i",
+            "/wp-content/uploads/tCapsule/backups/" => "/\\.sql(?:\\.gz)?$/i",
+            "/wp-snapshots/" => "/_archive\\.(?:daf|zip)$/i",
+        ];
+        foreach ($backup_file_patterns as $directory => $file_pattern) {
+            if (
+                strpos($path_with_boundaries, $directory) !== false
+                && preg_match($file_pattern, $basename) === 1
+            ) {
+                return true;
+            }
+        }
+        if (
+            preg_match(
+                "#/wp-content/uploads/backwpup(?:/[^/]+/backups|-[^/]+-backups)/#",
+                $path_with_boundaries
+            ) === 1
+            && preg_match("/\\.(?:tar(?:\\.bz2|\\.gz)?|tgz|zip)$/i", $basename) === 1
+        ) {
+            return true;
+        }
+        if (
+            strpos($path_with_boundaries, "/wp-content/updraft/") !== false
+            && preg_match("/^log\\.[a-z0-9]+\\.txt$/i", $basename) === 1
+        ) {
+            return true;
+        }
+
+        // Operating-system and server log metadata matches only the basename.
         static $skipped_basenames = [
             ".DS_Store", "._.DS_Store",
             "Thumbs.db", "desktop.ini", "ehthumbs.db",
+            "error_log", "php_errorlog",
         ];
         if (in_array($basename, $skipped_basenames, true)) {
             return true;
@@ -571,6 +643,9 @@ final class FileIndexProcessor {
         if (strlen($basename) >= 3 && $basename[0] === "#" && substr($basename, -1) === "#") {
             return true;
         }
+        if (preg_match("/\\.(?:log|tmp)$/i", $basename) === 1) {
+            return true;
+        }
         if (preg_match("/(?:~|\\.(?:swp|swo|swn|bak|orig|rej))$/", $basename) === 1) {
             return true;
         }
@@ -579,12 +654,21 @@ final class FileIndexProcessor {
     }
 
     /**
+     * Reports whether an inspected path is a regular file.
+     *
+     * @param array $stat lstat() result for the path.
+     */
+    private static function stat_is_file(array $stat): bool
+    {
+        return ( $stat["mode"] & self::STAT_TYPE_MASK ) === self::STAT_TYPE_FILE;
+    }
+
+    /**
      * Initializes common traversal state.
      *
      * @param array[]  $roots                Structured file-index roots.
      * @param string[] $configured_directories Canonical directories selected by the request.
      * @param bool     $follow_symlinks      Whether directory symlinks may leave the allowed directories.
-     * @param bool     $include_caches       Whether generated caches and development files are included.
      * @param string   $storage_path         Reprint storage path omitted from the index, or an empty string.
      * @param array[]  $directory_stack      Active directory stack.
      * @param string   $index_directory      Directory reported by the endpoint.
@@ -595,7 +679,6 @@ final class FileIndexProcessor {
         array $roots,
         array $configured_directories,
         bool $follow_symlinks,
-        bool $include_caches,
         string $storage_path,
         array $directory_stack,
         string $index_directory,
@@ -605,7 +688,6 @@ final class FileIndexProcessor {
         $this->roots = $roots;
         $this->configured_directories = $configured_directories;
         $this->follow_symlinks = $follow_symlinks;
-        $this->include_caches = $include_caches;
         $this->storage_path = self::canonical_storage_path($storage_path);
         $this->directory_stack = $directory_stack;
         $this->index_directory = $index_directory;
@@ -782,7 +864,7 @@ final class FileIndexProcessor {
 
         $path_root = $root["requested_path"];
 
-        if (!$this->include_caches && self::path_is_default_skipped($path_root)) {
+        if (self::path_has_default_skipped_component($path_root)) {
             $this->step_status = self::STATUS_SKIPPED;
             return;
         }
@@ -798,6 +880,13 @@ final class FileIndexProcessor {
         $stat = @lstat($path_root);
         if ($stat === false) {
             $this->step_status = self::STATUS_PATH_UNAVAILABLE;
+            return;
+        }
+        if (
+            self::stat_is_file($stat)
+            && self::file_name_is_default_skipped($path_root)
+        ) {
+            $this->step_status = self::STATUS_SKIPPED;
             return;
         }
 

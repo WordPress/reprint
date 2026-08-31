@@ -27,7 +27,7 @@ final class ReprintProcessLockTest extends TestCase
 
     public function testLocalStateLayoutUsesMatchingDirectoriesAndFileNames(): void
     {
-        $remote_reprint_api_url = 'https://example.com/?site-export-api';
+        $remote_reprint_api_url = 'https://example.com/?reprint-api';
         $process_lock = new \ReprintProcessLock($this->root . '/state');
         $client = new \ImportClient(
             $remote_reprint_api_url,
@@ -88,10 +88,10 @@ final class ReprintProcessLockTest extends TestCase
         $this->assertSame(
             $canonical_state_directory_target
                 . '/remotes/'
-                . md5('https://example.com/?site-export-api')
+                . md5('https://example.com/?reprint-api')
                 . '/push',
             \ImportClient::resolve_push_state_directory(
-                'https://example.com/?site-export-api',
+                'https://example.com/?reprint-api',
                 $state_directory_link,
                 $this->root . '/files',
                 'files-diff'
@@ -103,7 +103,7 @@ final class ReprintProcessLockTest extends TestCase
     {
         $process_lock = new \ReprintProcessLock($this->root . '/state');
         $client = new \ImportClient(
-            'https://example.com/?site-export-api',
+            'https://example.com/?reprint-api',
             $this->root . '/state',
             $this->root . '/files'
         );

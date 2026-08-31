@@ -299,13 +299,16 @@ class PullIndexJournal
             "remote_path_size" => $remote_path_size,
             "remote_path_type" => $remote_path_type,
         ];
+        if ($local_absolute_path !== null) {
+            clearstatcache(true, $local_absolute_path);
+        }
         $local_relative_path = $local_absolute_path === null
             ? null
             : $this->local_relative_path_from_local_absolute_path(
-                $local_absolute_path
+                $local_absolute_path,
+                is_file($local_absolute_path) && !is_link($local_absolute_path)
             );
         if ($local_relative_path !== null) {
-            clearstatcache(true, $local_absolute_path);
             $local_path_stat = lstat($local_absolute_path);
             if ($local_path_stat === false) {
                 throw new RuntimeException(
@@ -343,18 +346,21 @@ class PullIndexJournal
      *
      * @param string $remote_absolute_path Deleted source absolute path.
      * @param string $local_absolute_path  Local path already removed.
+     * @param string $local_path_type       Removed local path type.
      * @throws RuntimeException When the record cannot be appended.
      */
     public function record_successful_deletion(
         string $remote_absolute_path,
-        string $local_absolute_path
+        string $local_absolute_path,
+        string $local_path_type
     ): void {
         $pull_index_wal_record = [
             "op" => "-",
             "remote_absolute_path_b64" => base64_encode($remote_absolute_path),
         ];
         $local_relative_path = $this->local_relative_path_from_local_absolute_path(
-            $local_absolute_path
+            $local_absolute_path,
+            $local_path_type === "file"
         );
         if ($local_relative_path !== null) {
             $pull_index_wal_record["local_relative_path_b64"] =
@@ -367,12 +373,16 @@ class PullIndexJournal
      * Adds a `-` record after mirror removes a local-only path.
      *
      * @param string $local_absolute_path Local path already removed.
+     * @param string $local_path_type     Removed local path type.
      * @throws RuntimeException When the record cannot be appended.
      */
-    public function record_local_deletion(string $local_absolute_path): void
-    {
+    public function record_local_deletion(
+        string $local_absolute_path,
+        string $local_path_type
+    ): void {
         $local_relative_path = $this->local_relative_path_from_local_absolute_path(
-            $local_absolute_path
+            $local_absolute_path,
+            $local_path_type === "file"
         );
         if ($local_relative_path === null) {
             return;
@@ -736,11 +746,13 @@ class PullIndexJournal
      * for the root itself, a path outside it, or a skipped path.
      *
      * @param string $local_absolute_path Absolute local path.
+     * @param bool   $path_is_file        Whether the path was a regular file.
      * @return string|null Relative path, or null when the local index must not
      *                     contain it.
      */
     private function local_relative_path_from_local_absolute_path(
-        string $local_absolute_path
+        string $local_absolute_path,
+        bool $path_is_file
     ): ?string {
         $local_relative_path = relative_path_under(
             $local_absolute_path,
@@ -753,7 +765,8 @@ class PullIndexJournal
             return null;
         }
         return FileIndexProcessor::path_is_default_skipped(
-            $local_relative_path
+            $local_relative_path,
+            $path_is_file
         )
             ? null
             : $local_relative_path;

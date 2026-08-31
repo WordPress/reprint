@@ -922,7 +922,7 @@ final class PushEndpointsTest extends TestCase {
 
     public function testChunkedUploadDistinguishesEofTrailingDataAndRequestLimitAtTheFragmentBoundary(): void
     {
-        $maximum_request_body_bytes = Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES;
+        $maximum_request_body_bytes = \WordPress\Reprint\Server\MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES;
         $this->writeDocrootConfiguration([
             'document_root' => $this->docroot,
             'maximum_part_bytes' => $maximum_request_body_bytes,
@@ -1016,7 +1016,7 @@ final class PushEndpointsTest extends TestCase {
 
     public function testLogicExceptionUsesGenericServerFailureResponse(): void
     {
-        $endpoints = new Site_Export_Push_Endpoints([
+        $endpoints = new \WordPress\Reprint\Server\PushEndpoints([
             'reprint_directory' => $this->reprint_directory,
             'docroot' => $this->docroot,
             'excluded_paths' => [],
@@ -1039,7 +1039,7 @@ final class PushEndpointsTest extends TestCase {
 
     public function testFailureResponseDoesNotExposeInternalExceptionContext(): void
     {
-        $endpoints = new Site_Export_Push_Endpoints([
+        $endpoints = new \WordPress\Reprint\Server\PushEndpoints([
             'reprint_directory' => $this->reprint_directory,
             'docroot' => $this->docroot,
             'excluded_paths' => [],
@@ -1050,8 +1050,8 @@ final class PushEndpointsTest extends TestCase {
         ob_start();
         $respond_to_failure->invoke(
             $endpoints,
-            new Site_Export_Push_Exception(
-                Site_Export_Push_Session::ERROR_SAME_DEVICE,
+            new \WordPress\Reprint\Server\PushException(
+                \WordPress\Reprint\Server\PushSession::ERROR_SAME_DEVICE,
                 'The work and document-root filesystems differ.',
                 [
                     'status' => 'context-status',
@@ -1099,7 +1099,7 @@ final class PushEndpointsTest extends TestCase {
 
         foreach ($reprint_directories as $reprint_directory) {
             try {
-                new Site_Export_Push_Endpoints([
+                new \WordPress\Reprint\Server\PushEndpoints([
                     'reprint_directory' => $reprint_directory,
                     'docroot' => $this->docroot,
                     'excluded_paths' => [],
@@ -1897,6 +1897,11 @@ final class PushEndpointsTest extends TestCase {
         );
         try {
             $this->takeSenderStepsUntilPhase($sender, 'planning');
+            $this->takeSenderStepsUntilPlanPhase(
+                $sender,
+                $push_state_directory,
+                'indexing'
+            );
             $create_result = $this->senderResult($sender);
             $this->assertSame('planning', $create_result['phase']);
             $plan = $plan_property->getValue($sender);
@@ -1962,6 +1967,11 @@ final class PushEndpointsTest extends TestCase {
         try {
             $this->assertSame('creating', $sender->get_phase());
             $this->takeSenderStepsUntilPhase($sender, 'planning');
+            $this->takeSenderStepsUntilPlanPhase(
+                $sender,
+                $push_state_directory,
+                'indexing'
+            );
             $this->assertFileExists($fresh_local_index_path);
             $this->assertFileExists($push_state_directory . '/plan/excluded_paths.json');
             $this->assertFileDoesNotExist($push_state_directory . '/plan/cursor.json');
@@ -2059,6 +2069,11 @@ final class PushEndpointsTest extends TestCase {
         if ($child === 0) {
             $sender = $this->startSender($options);
             $this->takeSenderStepsUntilPhase($sender, 'planning');
+            $this->takeSenderStepsUntilPlanPhase(
+                $sender,
+                $push_state_directory,
+                'indexing'
+            );
             if (!$sender->next_step()) {
                 exit(2);
             }

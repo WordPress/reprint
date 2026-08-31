@@ -149,7 +149,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         unlinkSync(join(localRoot, 'test-data', 'subdir', 'nested', 'deep.txt'));
         mkdirSync(join(localRoot, 'test-data', 'local-only'), { recursive: true });
         writeFileSync(
-            join(localRoot, 'test-data', 'local-only', 'debug.log'),
+            join(localRoot, 'test-data', 'local-only', 'local.txt'),
             'local only\n',
         );
     }
@@ -216,7 +216,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         mkdirSync(join(localRoot, 'test-data', 'local-only'), { recursive: true });
         writeFileSync(join(localRoot, 'test-data', 'hello.txt'), 'old local content\n');
         writeFileSync(
-            join(localRoot, 'test-data', 'local-only', 'debug.log'),
+            join(localRoot, 'test-data', 'local-only', 'local.txt'),
             'local only\n',
         );
 
@@ -417,7 +417,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         );
         assert.equal(
             readFileSync(
-                join(localRoot, 'test-data', 'local-only', 'debug.log'),
+                join(localRoot, 'test-data', 'local-only', 'local.txt'),
                 'utf-8',
             ),
             'local only\n',
@@ -575,7 +575,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         }
     });
 
-    it('includes caches and preserves unrecorded local paths when requested', () => {
+    it('preserves caches and unrecorded local paths', () => {
         const remoteCache = join(
             getSiteDir(site),
             'wp-content',
@@ -597,9 +597,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
             writeFileSync(join(localCacheDirectory, 'remote.txt'), 'local cache edit\n');
             writeFileSync(join(localCacheDirectory, 'local-only.txt'), 'local cache only\n');
 
-            const cacheResult = runFilesPull(cacheMirrorTempDir, 'mirror', {
-                extraArgs: ['--include-caches'],
-            });
+            const cacheResult = runFilesPull(cacheMirrorTempDir, 'mirror');
             assert.equal(
                 cacheResult.exitCode,
                 0,
@@ -607,9 +605,12 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
             );
             assert.equal(
                 readFileSync(join(localCacheDirectory, 'remote.txt'), 'utf-8'),
-                'remote cache\n',
+                'local cache edit\n',
             );
-            assert.ok(!existsSync(join(localCacheDirectory, 'local-only.txt')));
+            assert.equal(
+                readFileSync(join(localCacheDirectory, 'local-only.txt'), 'utf-8'),
+                'local cache only\n',
+            );
 
             const preservedLocalRoot = localSiteRoot(preservedMirrorTempDir);
             mkdirSync(join(preservedLocalRoot, 'test-data', 'local-only'), {
@@ -729,7 +730,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         assertTreesMatch(getSiteDir(site), mirrorLocalRoot);
         assert.equal(
             readFileSync(
-                join(catchUpLocalRoot, 'test-data', 'local-only', 'debug.log'),
+                join(catchUpLocalRoot, 'test-data', 'local-only', 'local.txt'),
                 'utf-8',
             ),
             'local only\n',

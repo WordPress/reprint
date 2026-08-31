@@ -104,7 +104,11 @@ class FetchRequestBodySizingTest extends TestCase
     /**
      * @return array{0: \ImportClient, 1: \ReflectionClass}
      */
-    private function prepareClient(int $requestBodyBudget, array $fetchState = []): array
+    private function prepareClient(
+        int $requestBodyBudget,
+        array $fetchState = [],
+        bool $adaptiveTuningEnabled = true
+    ): array
     {
         $client = new BatchCapturingClient(
             'http://fake.url',
@@ -126,6 +130,7 @@ class FetchRequestBodySizingTest extends TestCase
         );
         $reflection->getProperty('is_tty')->setValue($client, false);
         $reflection->getProperty('tuner')->setValue($client, new AdaptiveTuner([
+            'enabled' => $adaptiveTuningEnabled,
             'file_fetch_request_body_max' => $requestBodyBudget,
             'file_fetch_request_body_min' => 1024,
         ]));
@@ -194,7 +199,39 @@ class FetchRequestBodySizingTest extends TestCase
         $this->assertNull($client->currentFileAtSend);
     }
 
-    public function testAShrunkBudgetSurvivesIntoTheNextInvocation(): void
+    public function testA413RebuildsTheNextBatchWhenAdaptiveTuningIsDisabled(): void
+    {
+        $lines = file($this->fetchListFile);
+        $offsetOfLine100 = strlen(implode('', array_slice($lines, 0, 100)));
+        $expectedFirstPath = json_decode($lines[100], true)['path'];
+
+        $stale = $this->writeBatchFile(128 * 1024);
+        [$client, $reflection] = $this->prepareClient(128 * 1024, [
+            'offset' => $offsetOfLine100,
+            'batch_file' => $stale,
+            'batch_entries' => 3900,
+            'next_offset' => filesize($this->fetchListFile),
+            'cursor' => 'cursor-from-a-completed-part',
+        ], false);
+
+        $reflection->getMethod('handle_tuner_error')->invoke($client, 'file_fetch', [
+            'http_code' => 413,
+            'timeout' => false,
+            'curl_errno' => 0,
+            'final_attempt' => false,
+        ]);
+        $reflection->getMethod('fetch_files_from_list')
+            ->invoke($client, $this->fetchListFile);
+
+        $this->assertLessThanOrEqual(64 * 1024, $client->sentBatchBytes);
+        $state = $reflection->getMethod('get_state')->invoke($client);
+        $this->assertSame($offsetOfLine100, $state->fetch->offset);
+
+        $rebuilt = json_decode(file_get_contents($client->sentBatchFile), true);
+        $this->assertSame($expectedFirstPath, $rebuilt[0]['path']);
+    }
+
+    public function testAShrunkBudgetSurvivesIntoTheNextInvocationWhenAdaptiveTuningIsDisabled(): void
     {
         // files-pull sends one request per process and the adapter loops on
         // exit 2. A budget that did not outlive the process would resend the
@@ -215,7 +252,9 @@ class FetchRequestBodySizingTest extends TestCase
             ],
         ]);
         $reflection->getProperty('state')->setValue($first, $loadState->invoke($first));
-        $initTuner->invoke($first, []);
+        $initTuner->invoke($first, [
+            'tuning_config' => ['enabled' => false],
+        ]);
 
         // 640 KiB reported, x0.8, under the cap so it stands as-is.
         $this->assertSame(
@@ -233,7 +272,9 @@ class FetchRequestBodySizingTest extends TestCase
 
         $second = new \ImportClient('http://fake.url', $this->stateDir, $this->filesystemRoot);
         $reflection->getProperty('state')->setValue($second, $loadState->invoke($second));
-        $initTuner->invoke($second, []);
+        $initTuner->invoke($second, [
+            'tuning_config' => ['enabled' => false],
+        ]);
 
         $this->assertSame(
             262144,

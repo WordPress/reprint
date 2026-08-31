@@ -1,22 +1,22 @@
 <?php
 
-use WordPress\Reprint\Server\ResourceBudget;
+namespace WordPress\Reprint\Server;
 
-use function WordPress\Reprint\Server\parse_size;
+use InvalidArgumentException;
 
 require_once __DIR__ . '/utils.php';
 
 if (!class_exists('WordPress\\Reprint\\Server\\ResourceBudget', false)) {
     require_once __DIR__ . '/class-resource-budget.php';
 }
-if (!class_exists('Site_Export_Push_Configuration_Exception', false)) {
+if (!class_exists(PushConfigurationException::class, false)) {
     require_once __DIR__ . '/class-push-configuration-exception.php';
 }
 
 /**
- * HTTP dispatcher for the Site Export API.
+ * HTTP dispatcher for the Reprint Server API.
  */
-final class Site_Export_HTTP_Server {
+final class HTTPServer {
 
     private const PUSH_ENDPOINT_METHODS = [
         'push_create' => 'create',
@@ -41,7 +41,7 @@ final class Site_Export_HTTP_Server {
     /** @var string|null */
     private $default_directory;
 
-    /** @var Site_Export_Push_Endpoints|null */
+    /** @var PushEndpoints|null */
     private $push_endpoints;
 
     public function __construct(array $options = []) {
@@ -58,13 +58,13 @@ final class Site_Export_HTTP_Server {
                 if (!is_array($options['push'])) {
                     throw new InvalidArgumentException('The push HTTP server option must be an array.');
                 }
-                if (!class_exists('Site_Export_Push_Endpoints', false)) {
+                if (!class_exists(PushEndpoints::class, false)) {
                     require_once __DIR__ . '/class-push-endpoints.php';
                 }
-                $this->push_endpoints = new Site_Export_Push_Endpoints($options['push']);
+                $this->push_endpoints = new PushEndpoints($options['push']);
             } catch (InvalidArgumentException $exception) {
                 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This rethrows a trusted configuration error; it does not render output.
-                throw new Site_Export_Push_Configuration_Exception(
+                throw new PushConfigurationException(
                     $exception->getMessage(),
                     0,
                     $exception
@@ -172,14 +172,14 @@ final class Site_Export_HTTP_Server {
      * Equivalent to:
      *
      *     require_once __DIR__ . '/export.php';
-     *     $server = new Site_Export_HTTP_Server($options);
+     *     $server = new HTTPServer($options);
      *     $server->handle_request();
      *
      * export.php is only required once. Callers that need to run CORS
      * or their own authentication must do that before calling this method.
      *
      * @param array<string, mixed> $options Forwarded to the constructor.
-     * @throws Exception If request parsing or endpoint dispatch fails.
+     * @throws \Exception If request parsing or endpoint dispatch fails.
      */
     public static function serve(array $options = []): void {
         // endpoint_preflight is defined by export.php — use it as a
@@ -386,10 +386,17 @@ final class Site_Export_HTTP_Server {
     private function default_budget_factory(array $config) {
         $max_execution_time = require_int_range(
             'max_execution_time',
-            (int) ($config['max_execution_time'] ?? 5),
+            (int) ($config['max_execution_time'] ?? 15),
             1,
             60
         );
+        $ini_max_execution_time = (int) ini_get('max_execution_time');
+        if ($ini_max_execution_time > 0) {
+            $max_execution_time = min(
+                $max_execution_time,
+                $ini_max_execution_time
+            );
+        }
         $memory_threshold = require_float_range(
             'memory_threshold',
             (float) ($config['memory_threshold'] ?? 0.8),
@@ -411,4 +418,8 @@ final class Site_Export_HTTP_Server {
     private function get_valid_endpoints_message(): string {
         return "'" . implode("', '", array_keys($this->handlers)) . "'";
     }
+}
+
+if (!class_exists('Site_Export_HTTP_Server', false)) {
+    class_alias(HTTPServer::class, 'Site_Export_HTTP_Server');
 }

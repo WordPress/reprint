@@ -22,7 +22,7 @@ final class PullIndexWalTest extends TestCase
             . '/pull-index-wal-'
             . bin2hex(random_bytes(6));
         $this->stateDirectory = $this->root . '/state';
-        $remoteReprintApiUrl = 'https://example.com/?site-export-api';
+        $remoteReprintApiUrl = 'https://example.com/?reprint-api';
         $this->pullStateDirectory =
             $this->stateDirectory
             . '/remotes/'
@@ -86,7 +86,8 @@ final class PullIndexWalTest extends TestCase
         $this->assertIsString($filesystemRoot);
         $journal->record_successful_deletion(
             '/site/file.txt',
-            $filesystemRoot . '/site/file.txt'
+            $filesystemRoot . '/site/file.txt',
+            'file'
         );
         $journal->record_remote_invalidation(
             '/site/unreadable.txt'
@@ -135,7 +136,7 @@ final class PullIndexWalTest extends TestCase
         $journal->apply_pending_records();
 
         unlink($localAbsolutePath);
-        $journal->record_local_deletion($localAbsolutePath);
+        $journal->record_local_deletion($localAbsolutePath, 'file');
         $journal->apply_pending_records();
 
         $this->assertSame(
@@ -264,7 +265,7 @@ final class PullIndexWalTest extends TestCase
     private function client(): \ImportClient
     {
         return new \ImportClient(
-            'https://example.com/?site-export-api',
+            'https://example.com/?reprint-api',
             $this->stateDirectory,
             $this->fileRoot
         );

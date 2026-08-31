@@ -8,7 +8,7 @@ final class ExportHttpServerTest extends TestCase
 {
     public function testParsesJsonBodyAndCastsKnownTypes(): void
     {
-        $server = new Site_Export_HTTP_Server();
+        $server = new \WordPress\Reprint\Server\HTTPServer();
         $config = $server->parse_http_config(
             ['endpoint' => 'file_index'],
             [],
@@ -30,7 +30,7 @@ final class ExportHttpServerTest extends TestCase
 
     public function testNormalizeConfigAppliesDefaultDirectoryAndDecodesCursorHeader(): void
     {
-        $server = new Site_Export_HTTP_Server([
+        $server = new \WordPress\Reprint\Server\HTTPServer([
             'default_directory' => '/srv/site',
         ]);
         $cursor = base64_encode(json_encode(['offset' => 10]) ?: '');
@@ -46,7 +46,7 @@ final class ExportHttpServerTest extends TestCase
 
     public function testNormalizeConfigAppliesDefaultDirectoryEvenWhenListDirPresent(): void
     {
-        $server = new Site_Export_HTTP_Server([
+        $server = new \WordPress\Reprint\Server\HTTPServer([
             'default_directory' => '/srv/site',
         ]);
 
@@ -61,7 +61,7 @@ final class ExportHttpServerTest extends TestCase
 
     public function testNormalizeConfigRejectsInvalidCursor(): void
     {
-        $server = new Site_Export_HTTP_Server();
+        $server = new \WordPress\Reprint\Server\HTTPServer();
 
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Cursor must be base64-encoded');
@@ -75,7 +75,7 @@ final class ExportHttpServerTest extends TestCase
     public function testDispatchRoutesPreflightWithoutBudget(): void
     {
         $calls = [];
-        $server = new Site_Export_HTTP_Server([
+        $server = new \WordPress\Reprint\Server\HTTPServer([
             'handlers' => [
                 'preflight' => function (array $config) use (&$calls): void {
                     $calls[] = ['preflight', $config];
@@ -93,7 +93,7 @@ final class ExportHttpServerTest extends TestCase
     public function testDispatchRoutesStreamingEndpointsWithCreatedBudget(): void
     {
         $calls = [];
-        $server = new Site_Export_HTTP_Server([
+        $server = new \WordPress\Reprint\Server\HTTPServer([
             'handlers' => [
                 'file_index' => function (array $config, $budget) use (&$calls): void {
                     $calls[] = [$config, $budget];
@@ -111,9 +111,39 @@ final class ExportHttpServerTest extends TestCase
         $this->assertSame(['from' => 'file_index'], $calls[0][1]);
     }
 
+    public function testDefaultResourceBudgetAllowsFifteenSecondsWhenPhpIsUnlimited(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-server/src/export.php';
+        $previous_max_execution_time = ini_get('max_execution_time');
+        $this->assertNotFalse(ini_set('max_execution_time', '0'));
+
+        try {
+            $server = new \WordPress\Reprint\Server\HTTPServer();
+
+            $this->assertSame(15, $server->create_resource_budget([])->max_time);
+        } finally {
+            ini_set('max_execution_time', (string) $previous_max_execution_time);
+        }
+    }
+
+    public function testResourceBudgetDoesNotExceedPhpExecutionLimit(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-server/src/export.php';
+        $previous_max_execution_time = ini_get('max_execution_time');
+        $this->assertNotFalse(ini_set('max_execution_time', '7'));
+
+        try {
+            $server = new \WordPress\Reprint\Server\HTTPServer();
+
+            $this->assertSame(7, $server->create_resource_budget([])->max_time);
+        } finally {
+            ini_set('max_execution_time', (string) $previous_max_execution_time);
+        }
+    }
+
     public function testClassifiesOnlyTheRegisteredPushEndpoints(): void
     {
-        $server = new Site_Export_HTTP_Server();
+        $server = new \WordPress\Reprint\Server\HTTPServer();
 
         $this->assertTrue(
             is_callable([$server, 'is_push_endpoint']),
@@ -137,14 +167,14 @@ final class ExportHttpServerTest extends TestCase
         mkdir($reprint_directory, 0700);
 
         try {
-            $server = new Site_Export_HTTP_Server([
+            $server = new \WordPress\Reprint\Server\HTTPServer([
                 'push' => [
                     'reprint_directory' => $reprint_directory,
                     'docroot' => $docroot,
                     'excluded_paths' => [],
                 ],
             ]);
-            $handlers_property = new ReflectionProperty(Site_Export_HTTP_Server::class, 'handlers');
+            $handlers_property = new ReflectionProperty(\WordPress\Reprint\Server\HTTPServer::class, 'handlers');
             $handlers_property->setAccessible(true);
             $handlers = $handlers_property->getValue($server);
             $registered_push_endpoint_methods = [];
@@ -153,7 +183,7 @@ final class ExportHttpServerTest extends TestCase
                     continue;
                 }
                 $this->assertIsArray($handler);
-                $this->assertInstanceOf(Site_Export_Push_Endpoints::class, $handler[0]);
+                $this->assertInstanceOf(\WordPress\Reprint\Server\PushEndpoints::class, $handler[0]);
                 $registered_push_endpoint_methods[$endpoint] = $handler[1];
             }
 
@@ -182,7 +212,7 @@ final class ExportHttpServerTest extends TestCase
             };
         }
         $budget_creations = 0;
-        $server = new Site_Export_HTTP_Server([
+        $server = new \WordPress\Reprint\Server\HTTPServer([
             'handlers' => $handlers,
             'budget_factory' => static function () use (&$budget_creations): array {
                 ++$budget_creations;
@@ -200,7 +230,7 @@ final class ExportHttpServerTest extends TestCase
 
     public function testDispatchRejectsUnknownEndpoints(): void
     {
-        $server = new Site_Export_HTTP_Server([
+        $server = new \WordPress\Reprint\Server\HTTPServer([
             'handlers' => [
                 'preflight' => static function (): void {},
             ],
@@ -215,7 +245,7 @@ final class ExportHttpServerTest extends TestCase
     public function testHandleRequestUsesParsedConfigAndDispatches(): void
     {
         $calls = [];
-        $server = new Site_Export_HTTP_Server([
+        $server = new \WordPress\Reprint\Server\HTTPServer([
             'handlers' => [
                 'preflight' => function (array $config) use (&$calls): void {
                     $calls[] = $config;
@@ -238,7 +268,7 @@ final class ExportHttpServerTest extends TestCase
         foreach (['push_create', 'push_upload', 'push_status', 'push_commit', 'push_remove', 'push_future_operation'] as $endpoint) {
             $body_reads = 0;
             $calls = [];
-            $server = new Site_Export_HTTP_Server([
+            $server = new \WordPress\Reprint\Server\HTTPServer([
                 'budget_factory' => static function (): stdClass {
                     return new stdClass();
                 },
@@ -276,7 +306,7 @@ final class ExportHttpServerTest extends TestCase
     public function testPushQueryParametersCannotBeOverriddenByPostData(): void
     {
         $calls = [];
-        $server = new Site_Export_HTTP_Server([
+        $server = new \WordPress\Reprint\Server\HTTPServer([
             'handlers' => [
                 'push_commit' => static function (array $config) use (&$calls): void {
                     $calls[] = $config;
@@ -307,9 +337,9 @@ final class ExportHttpServerTest extends TestCase
 
     public function testNonArrayPushOptionsThrowConfigurationException(): void
     {
-        $this->expectException(Site_Export_Push_Configuration_Exception::class);
+        $this->expectException(\WordPress\Reprint\Server\PushConfigurationException::class);
         $this->expectExceptionMessage('The push HTTP server option must be an array.');
 
-        new Site_Export_HTTP_Server(['push' => null]);
+        new \WordPress\Reprint\Server\HTTPServer(['push' => null]);
     }
 }

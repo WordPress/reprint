@@ -10,18 +10,31 @@ installed side by side. Consumers should require
 
 ## Loading it
 
-Composer's classmap covers every class in `src/`, so classes resolve after
-requiring `vendor/autoload.php`.
+Composer's classmap covers every canonical class in `src/`, so classes
+resolve after requiring `vendor/autoload.php`.
 
 Reprint's entry points load their utility functions internally. `src/utils.php`
 is an internal implementation file and is not a public autoload entry point.
+
+The Reprint Server plugin loads `src/compat.php` when it opens the server
+runtime so that released `Site_Export_*` server names continue to resolve
+without adding work to every request which loads the shared Composer
+autoloader.
+
+Standalone consumers which request a released server name before its canonical
+class must explicitly require `src/compat.php` after Composer's autoloader.
 
 `src/export.php` never autoloads, and that is deliberate. It declares functions
 rather than classes, so the classmap scan finds nothing in it to register. Keep
 it that way: requiring the file starts an output buffer and installs error,
 exception and shutdown handlers, all of which belong at dispatch time.
-`Site_Export_HTTP_Server::serve()` requires it at the right moment. Adding a
-class to `export.php` would make it autoloadable and break that.
+`WordPress\Reprint\Server\HTTPServer::serve()` requires it at the right moment.
+Adding a class to `export.php` would make it autoloadable and break that.
+
+Server classes use the `WordPress\Reprint\Server` namespace. The released
+`Site_Export_*` server names remain autoloadable aliases. The global
+`Site_Export_HMAC_Client` name and file remain unchanged because the Reprint
+client package consumes that class directly.
 
 ## Development
 
