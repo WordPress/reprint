@@ -22,7 +22,7 @@ final class PullIndexWalTest extends TestCase
             . '/pull-index-wal-'
             . bin2hex(random_bytes(6));
         $this->stateDirectory = $this->root . '/state';
-        $remoteReprintApiUrl = 'https://example.com/?site-export-api';
+        $remoteReprintApiUrl = 'https://example.com/?reprint-api';
         $this->pullStateDirectory =
             $this->stateDirectory
             . '/remotes/'
@@ -264,7 +264,7 @@ final class PullIndexWalTest extends TestCase
     private function client(): \ImportClient
     {
         return new \ImportClient(
-            'https://example.com/?site-export-api',
+            'https://example.com/?reprint-api',
             $this->stateDirectory,
             $this->fileRoot
         );

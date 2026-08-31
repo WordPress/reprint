@@ -147,7 +147,7 @@ final class SortIndexFileTest extends TestCase
     public function testImporterRejectsAMissingNextRemoteIndex(): void
     {
         $client = new \ImportClient(
-            'https://example.test/?site-export-api',
+            'https://example.test/?reprint-api',
             $this->temporary_directory . '/state',
             $this->temporary_directory . '/files'
         );
