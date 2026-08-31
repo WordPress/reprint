@@ -169,6 +169,62 @@ final class PushPlanTest extends TestCase
         $this->assertArrayNotHasKey('empty', $freshLocalIndexEntries['public.txt']);
     }
 
+    public function testNewDefaultSkipOmitsLegacyEntryWithoutPlanningDeletion(): void
+    {
+        $ordinaryPath = 'index.php';
+        $backupPath = 'wp-content/updraft/backup_site-uploads.zip';
+        $filesystemDescription = $this->writeIndex([
+            $ordinaryPath => [1, 5, 'file'],
+            $backupPath => [1, 5, 'file'],
+        ]);
+        $this->materializeFilesystemRoot($filesystemDescription);
+        $ordinaryStat = lstat($this->filesystemRoot() . '/' . $ordinaryPath);
+        $backupStat = lstat($this->filesystemRoot() . '/' . $backupPath);
+        $this->assertIsArray($ordinaryStat);
+        $this->assertIsArray($backupStat);
+        $legacyIndex = $this->writeIndex([
+            $ordinaryPath => [
+                (int) $ordinaryStat['ctime'],
+                (int) $ordinaryStat['size'],
+                'file',
+            ],
+            $backupPath => [
+                (int) $backupStat['ctime'],
+                (int) $backupStat['size'],
+                'file',
+            ],
+        ]);
+        mkdir(dirname($this->localIndexFile()), 0755, true);
+        copy($legacyIndex, $this->localIndexFile());
+
+        $plan = $this->startPlan($filesystemDescription);
+        $plan->close();
+        $plan = $this->resumePlan();
+        $this->planToCompletion($plan);
+
+        $this->assertPathCounts(0, 0);
+        $this->assertSame(
+            [$ordinaryPath, $backupPath],
+            array_keys($this->indexEntries($this->localIndexFile()))
+        );
+        $this->assertSame(
+            [$ordinaryPath],
+            array_keys(
+                $this->indexEntries(
+                    $this->planPath('patch_base_index.jsonl')
+                )
+            )
+        );
+        $this->assertSame(
+            [$ordinaryPath],
+            array_keys(
+                $this->indexEntries(
+                    $this->planPath('fresh_local_index.jsonl')
+                )
+            )
+        );
+    }
+
     public function testUnchangedIndexProducesEmptyPlans(): void
     {
         $index = $this->writeIndex([

@@ -264,7 +264,10 @@ The local index is `<remote-state-directory>/local_index.jsonl`.
 `files-diff` and PushPlan read it. Files-pull advances it only for local paths
 changed by completed file, directory, symlink, or deletion mutations.
 PushFilesSender replaces it only after the target confirms commit. Planning
-and active push state remain under `<remote-state-directory>/push/`.
+and active push state remain under `<remote-state-directory>/push/`. When an
+older local index contains entries which are now default-skipped, PushPlan
+writes `plan/patch_base_index.jsonl` without those entries and uses that file
+as the patch base. The local index remains unchanged during planning.
 
 Use these names verbatim:
 
@@ -272,6 +275,7 @@ Use these names verbatim:
 | --- | --- |
 | Active plan directory | `plan`, `$plan_directory` |
 | Plan-owned fresh local index file | `fresh_local_index.jsonl`, `$fresh_local_index_file` |
+| Optional filtered patch base index file | `patch_base_index.jsonl`, `$patch_base_index_file` |
 | Local index file | `local_index.jsonl`, `local_index_file`, `$local_index_file` |
 | Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
 | Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
@@ -296,17 +300,19 @@ Use these names verbatim:
 `sender.json` and `excluded_paths.json` live directly under the local push
 state directory. The sender creates `plan/` for one active plan. PushPlan
 copies the sender-owned exclusions to `plan/excluded_paths.json` when it starts.
-`fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
-`local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
+`fresh_local_index.jsonl`, optional `patch_base_index.jsonl`,
+`local_paths_to_push.jsonl`, `local_paths_to_delete`, and
+`deleted_directories_stack.jsonl` live inside it.
 
 The local index contains the fresh filesystem-root scan the sender saved after
 a target-confirmed files-push commit, advanced path by path by later completed
 files-pull mutations.
 Files-pull does not scan unrelated paths or accept their pending local changes.
 PushPlan diffs its fresh local index against the local index its caller
-supplies. Its FileSyncPatchPlanner owns the FileIndexDiffProcessor and the
-active deletion roots file. That file remembers directory deletions which
-cover index paths the planner has not processed yet.
+supplies, or against the filtered patch base when one is required. Its
+FileSyncPatchPlanner owns the FileIndexDiffProcessor and the active deletion
+roots file. That file remembers directory deletions which cover index paths
+the planner has not processed yet.
 
 The PushPlan cursor is stored in `sender.json`. It contains `plan_directory`,
 `filesystem_root`, `local_index_file`, and the current
@@ -515,6 +521,7 @@ Use these names verbatim inside `PushPlan`:
 | Active plan directory | `$plan_directory` |
 | Filesystem root | `$filesystem_root`, `set_filesystem_root()` |
 | Local index file | `$local_index_file` |
+| Optional filtered patch base index file | `$patch_base_index_file`, `get_patch_base_index_file()` |
 | Open local index file | `$local_index_file_handle` |
 | Local index lookahead entry | `$local_index_lookahead_entry`, `$local_index_lookahead_entry_loaded` |
 | Read the next index entry | `read_next_index_entry()`, `$index_file_handle` |
