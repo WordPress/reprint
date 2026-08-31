@@ -111,6 +111,36 @@ final class ExportHttpServerTest extends TestCase
         $this->assertSame(['from' => 'file_index'], $calls[0][1]);
     }
 
+    public function testDefaultResourceBudgetAllowsFifteenSecondsWhenPhpIsUnlimited(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-server/src/export.php';
+        $previous_max_execution_time = ini_get('max_execution_time');
+        $this->assertNotFalse(ini_set('max_execution_time', '0'));
+
+        try {
+            $server = new \WordPress\Reprint\Server\HTTPServer();
+
+            $this->assertSame(15, $server->create_resource_budget([])->max_time);
+        } finally {
+            ini_set('max_execution_time', (string) $previous_max_execution_time);
+        }
+    }
+
+    public function testResourceBudgetDoesNotExceedPhpExecutionLimit(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-server/src/export.php';
+        $previous_max_execution_time = ini_get('max_execution_time');
+        $this->assertNotFalse(ini_set('max_execution_time', '7'));
+
+        try {
+            $server = new \WordPress\Reprint\Server\HTTPServer();
+
+            $this->assertSame(7, $server->create_resource_budget([])->max_time);
+        } finally {
+            ini_set('max_execution_time', (string) $previous_max_execution_time);
+        }
+    }
+
     public function testClassifiesOnlyTheRegisteredPushEndpoints(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer();
