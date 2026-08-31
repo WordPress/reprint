@@ -29,6 +29,7 @@ class PullState
         'preflight.limits.max_request_bytes' => 4 * 1024 * 1024,
         'preflight.runtime.document_root' => '',
         'preflight.runtime.ini_get_all' => [],
+        'preflight.database.version' => '',
         'preflight.database.wp.table_prefix' => 'wp_',
         'preflight.database.wp.paths_urls.abspath' => null,
         'preflight.database.wp.paths_urls.wp_admin_path' => null,

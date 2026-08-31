@@ -112,9 +112,13 @@ class PullStateTest extends TestCase
         // String and array paths default the same way; null-default paths
         // report absence as null for the caller to handle.
         $state = new \PullState();
+        $this->assertSame('', $state->get('preflight.database.version'));
         $this->assertSame('wp_', $state->get('preflight.database.wp.table_prefix'));
         $this->assertSame([], $state->get('preflight.wp_detect.roots'));
         $this->assertNull($state->get('preflight.database.wp.paths_urls.abspath'));
+
+        $state->set_preflight_record(['data' => ['database' => ['version' => '10.11.14-MariaDB']]]);
+        $this->assertSame('10.11.14-MariaDB', $state->get('preflight.database.version'));
 
         // A value of the wrong type is as unusable as a missing one.
         $state->set_preflight_record(['data' => ['database' => ['wp' => ['table_prefix' => 123]]]]);

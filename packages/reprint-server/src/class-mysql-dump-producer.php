@@ -64,6 +64,10 @@ class MySQLDumpProducer
 
     private const SPATIAL_STAGING_TABLE = "__reprint_db_pull_progress_spatial";
 
+    /** Starts row context for spatial values which the dump normalized to SQL NULL. */
+    public const ZERO_BYTE_SPATIAL_ROW_COMMENT_PREFIX =
+        "/* REPRINT: zero-byte spatial row ";
+
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
     const STATE_NEXT_TABLE = "next_table";
@@ -430,9 +434,9 @@ class MySQLDumpProducer
             return true;
         }
 
-        $row_tuple_bytes = $this->estimate_formatted_row_tuple_bytes(
-            $this->row_reader->get_current_record()
-        );
+        $current_record = $this->row_reader->get_current_record();
+        $row_tuple_bytes = strlen($this->format_zero_byte_spatial_row_marker($current_record)) +
+            $this->estimate_formatted_row_tuple_bytes($current_record);
         $maximum_insert_statement_bytes = min(
             $this->max_statement_size,
             self::MAX_SQL_PART_BODY_BYTES
@@ -1200,6 +1204,7 @@ class MySQLDumpProducer
     {
         $estimated_sizes = [];
         $raw_values = [];
+        $zero_byte_spatial_row_marker = $this->format_zero_byte_spatial_row_marker($row);
 
         foreach ($this->row_reader->get_current_column_names() as $col) {
             $value = $row[$col] ?? null;
@@ -1229,7 +1234,8 @@ class MySQLDumpProducer
             }
         }
 
-        $row_tuple_bytes = $this->estimate_formatted_row_tuple_bytes($row);
+        $row_tuple_bytes = strlen($zero_byte_spatial_row_marker) +
+            $this->estimate_formatted_row_tuple_bytes($row);
         $row_separator_bytes = $this->rows_in_batch > 0 ? 1 : 0;
         $maximum_insert_statement_bytes = min(
             $this->max_statement_size,
@@ -1258,7 +1264,8 @@ class MySQLDumpProducer
                 }
                 $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
             }
-            return "(" . implode(",", array_values($formatted_values)) . ")";
+            return $zero_byte_spatial_row_marker .
+                "(" . implode(",", array_values($formatted_values)) . ")";
         }
 
         // The rest of this method deals with rows that are too large to fit into a single INSERT on
@@ -1303,7 +1310,7 @@ class MySQLDumpProducer
             $projected_fragment_size - self::MAX_SQL_PART_BODY_BYTES
         );
         $saved_bytes = 0;
-        $unchunkable_data_types = [];
+        $unchunkable_columns = [];
 
         foreach ($sorted_sizes as $col => $size) {
             if (in_array($col, $this->row_reader->get_current_primary_key_columns())) {
@@ -1337,7 +1344,7 @@ class MySQLDumpProducer
                 !$this->row_reader->is_character_string_type($normalized_data_type) &&
                 !$spatial_type
             ) {
-                $unchunkable_data_types[$normalized_data_type] = true;
+                $unchunkable_columns[$col] = $normalized_data_type;
                 continue;
             }
             $value_length = $spatial_type
@@ -1387,8 +1394,20 @@ class MySQLDumpProducer
             }
         }
 
-        if ($excess > 0 && !empty($unchunkable_data_types)) {
-            $unchunkable_data_type = key($unchunkable_data_types);
+        if ($excess > 0 && !empty($unchunkable_columns)) {
+            $unchunkable_column = key($unchunkable_columns);
+            $unchunkable_data_type = $unchunkable_columns[$unchunkable_column];
+            if ($this->row_reader->is_spatial_type($unchunkable_data_type)) {
+                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error returned as authenticated API data, never HTML.
+                throw new \RuntimeException($this->oversized_spatial_value_message(
+                    $row,
+                    $unchunkable_column,
+                    $unchunkable_data_type,
+                    $raw_values[$unchunkable_column],
+                    $estimated_sizes[$unchunkable_column]
+                ));
+                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+            }
             // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error returned as authenticated API data, never HTML.
             throw new \RuntimeException(
                 "Row in table " . $this->row_reader->quote_identifier($this->row_reader->get_current_table()) .
@@ -1427,7 +1446,147 @@ class MySQLDumpProducer
             $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
         }
 
-        return "(" . implode(",", array_values($formatted_values)) . ")";
+        return $zero_byte_spatial_row_marker .
+            "(" . implode(",", array_values($formatted_values)) . ")";
+    }
+
+    /** Marks exact source rows whose zero-byte spatial values became SQL NULL. */
+    private function format_zero_byte_spatial_row_marker($row)
+    {
+        $columns = [];
+        foreach ($this->row_reader->get_current_column_names() as $column) {
+            if (
+                ( $row[$column] ?? null ) === '' &&
+                $this->row_reader->is_spatial_type($this->row_reader->get_data_type($column))
+            ) {
+                $columns[] = base64_encode($column);
+            }
+        }
+        if ($columns === []) {
+            return '';
+        }
+
+        $primary_key = [];
+        foreach ($this->row_reader->get_current_primary_key_columns() ?: [] as $column) {
+            $value = $row[$column] ?? null;
+            $item = [
+                'c' => base64_encode($column),
+                'n' => $value === null,
+            ];
+            if ($value !== null) {
+                $item['v'] = base64_encode( (string) $value );
+            }
+            $primary_key[] = $item;
+        }
+        // This marker counts toward the SQL statement limit, so keep its field names compact.
+        $payload = json_encode([
+            't' => base64_encode($this->row_reader->get_current_table()),
+            'r' => $this->rows_in_batch + 1,
+            'k' => $primary_key,
+            'c' => $columns,
+        ]);
+        if ($payload === false) {
+            throw new \RuntimeException('Cannot encode zero-byte spatial row context.');
+        }
+        return self::ZERO_BYTE_SPATIAL_ROW_COMMENT_PREFIX .
+            base64_encode($payload) . ' */';
+    }
+
+    /** Explains why one complete spatial value cannot use the oversized-value path. */
+    private function oversized_spatial_value_message(
+        $row,
+        $column,
+        $data_type,
+        $value,
+        $estimated_sql_value_bytes
+    ) {
+        $stored_bytes = strlen( (string) $value );
+        $srid = null;
+        if ($stored_bytes >= 4) {
+            // MySQL and MariaDB internal geometry bytes start with a little-endian 32-bit SRID.
+            $unpacked = unpack('Vsrid', substr($value, 0, 4));
+            $srid = is_array($unpacked) ? (int) $unpacked['srid'] : null;
+        }
+        $quoted_table = $this->row_reader->quote_identifier(
+            $this->row_reader->get_current_table()
+        );
+        $quoted_column = $this->row_reader->quote_identifier($column);
+        $lines = [
+            '[SPATIAL_VALUE_TOO_LARGE] Reprint cannot export this spatial value.',
+            '',
+            'Table: ' . $quoted_table,
+            'Row: ' . $this->format_row_primary_key_for_message($row),
+            'Column: ' . $quoted_column . ' ' . strtoupper($data_type),
+            'Stored value: ' . number_format($stored_bytes) . ' bytes',
+            'SRID: ' . ( $srid ?? 'unreadable' ),
+            'SHA-256: ' . hash('sha256', (string) $value),
+            'Estimated SQL value: ' . number_format($estimated_sql_value_bytes) . ' bytes',
+            'SQL statement limit: ' . number_format($this->max_statement_size) . ' bytes',
+            'SQL part limit: ' . number_format(self::MAX_SQL_PART_BODY_BYTES) . ' bytes',
+            '',
+            'Reprint can append chunks to text and binary columns.',
+            'It cannot append partial geometry bytes because partial geometry is invalid.',
+            'No SQL for this row was emitted.',
+            '',
+            'Inspect the source with:',
+            'SELECT OCTET_LENGTH(' . $quoted_column . '), ST_SRID(' . $quoted_column . ')',
+            'FROM ' . $quoted_table,
+        ];
+        $where = $this->format_row_primary_key_where_clause($row);
+        if ($where !== '') {
+            $lines[] = 'WHERE ' . $where . ';';
+        } else {
+            $lines[count($lines) - 1] .= ';';
+        }
+        $lines[] = '';
+        $lines[] = 'Reduce or split the geometry, or migrate this table separately.';
+        $lines[] = 'Then run pull-db --abort and start the database pull again.';
+        return implode("\n", $lines);
+    }
+
+    private function format_row_primary_key_for_message($row)
+    {
+        $columns = $this->row_reader->get_current_primary_key_columns() ?: [];
+        if ($columns === []) {
+            return 'table has no primary key';
+        }
+        $parts = [];
+        foreach ($columns as $column) {
+            $value = $row[$column] ?? null;
+            $parts[] = $this->row_reader->quote_identifier($column) . ' = ' .
+                $this->format_database_value_for_message($value, $column);
+        }
+        return implode(', ', $parts);
+    }
+
+    private function format_row_primary_key_where_clause($row)
+    {
+        $predicates = [];
+        foreach ($this->row_reader->get_current_primary_key_columns() ?: [] as $column) {
+            $quoted_column = $this->row_reader->quote_identifier($column);
+            $value = $row[$column] ?? null;
+            if ($value === null) {
+                $predicates[] = $quoted_column . ' IS NULL';
+                continue;
+            }
+            $predicates[] = $quoted_column . ' = ' . $this->format_value(
+                $value,
+                $this->row_reader->get_data_type($column)
+            );
+        }
+        return implode(' AND ', $predicates);
+    }
+
+    private function format_database_value_for_message($value, $column)
+    {
+        if ($value === null) {
+            return 'NULL';
+        }
+        if ($this->row_reader->is_numeric_type($this->row_reader->get_data_type($column))) {
+            return (string) $value;
+        }
+        $json = json_encode( (string) $value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+        return $json !== false ? $json : 'base64:' . base64_encode( (string) $value );
     }
 
     /** Returns the exact SQL bytes used by one formatted VALUES tuple. */
