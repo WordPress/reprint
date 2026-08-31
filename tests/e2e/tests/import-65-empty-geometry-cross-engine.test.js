@@ -28,6 +28,16 @@ describeWithMysql8Target(
     () => {
         const site = 'empty-geometry-cross-engine';
         const geometryTable = 'aa_empty_geometry_upgrade';
+        const spatialColumns = [
+            'location',
+            'route',
+            'boundary',
+            'locations',
+            'routes',
+            'boundaries',
+            'shape',
+            'shapes',
+        ];
         const mysql8Target = {
             name: 'Oracle MySQL 8',
             host: process.env.E2E_MYSQL8_HOST,
@@ -50,6 +60,7 @@ describeWithMysql8Target(
             mysql8Target,
         ];
         const tempDirectories = [];
+        let sourceSpatialBytes;
 
         function importUrl() {
             return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
@@ -84,22 +95,56 @@ describeWithMysql8Target(
                     await connection.query(
                         `CREATE TABLE \`${geometryTable}\` (`
                         + '`id` BIGINT NOT NULL, `label` VARCHAR(64) NOT NULL, '
+                        + '`optional_shape` GEOMETRY NULL, '
                         + 'PRIMARY KEY (`id`)) ENGINE=InnoDB'
                     );
                     await connection.query(
                         `INSERT INTO \`${geometryTable}\` (id, label) VALUES `
-                        + "(1, 'zero-byte values'), (2, 'valid values')"
+                        + "(1, 'zero-byte values'), (2, 'valid values'), "
+                        + "(3, 'empty collection'), (4, 'invalid polygon'), "
+                        + "(5, 'SRID 4326')"
                     );
                     await connection.query(
                         `ALTER TABLE \`${geometryTable}\` `
                         + "ADD COLUMN `location` POINT NOT NULL COMMENT 'Map point', "
-                        + "ADD COLUMN `boundary` POLYGON NOT NULL COMMENT 'Map area'"
+                        + 'ADD COLUMN `route` LINESTRING NOT NULL, '
+                        + "ADD COLUMN `boundary` POLYGON NOT NULL COMMENT 'Map area', "
+                        + 'ADD COLUMN `locations` MULTIPOINT NOT NULL, '
+                        + 'ADD COLUMN `routes` MULTILINESTRING NOT NULL, '
+                        + 'ADD COLUMN `boundaries` MULTIPOLYGON NOT NULL, '
+                        + 'ADD COLUMN `shape` GEOMETRY NOT NULL, '
+                        + 'ADD COLUMN `shapes` GEOMETRYCOLLECTION NOT NULL'
                     );
                     await connection.query(
                         `UPDATE \`${geometryTable}\` SET `
-                        + "location = ST_GeomFromText('POINT(7 8)'), "
-                        + "boundary = ST_GeomFromText('POLYGON((0 0,0 2,2 2,0 0))') "
-                        + 'WHERE id = 2'
+                        + "location = ST_GeomFromText('POINT(7 8)', 0), "
+                        + "route = ST_GeomFromText('LINESTRING(0 0,1 1,2 1)'), "
+                        + "boundary = ST_GeomFromText('POLYGON((0 0,0 2,2 2,0 0))'), "
+                        + "locations = ST_GeomFromText('MULTIPOINT(0 0,1 1)'), "
+                        + "routes = ST_GeomFromText('MULTILINESTRING((0 0,1 1),(2 2,3 3))'), "
+                        + 'boundaries = ST_GeomFromText('
+                        + "'MULTIPOLYGON(((0 0,0 1,1 1,0 0)),((2 2,2 3,3 3,2 2)))'), "
+                        + "shape = ST_GeomFromText('POINT(9 10)'), "
+                        + 'shapes = ST_GeomFromText('
+                        + "'GEOMETRYCOLLECTION(POINT(1 2),LINESTRING(0 0,1 1))') "
+                        + 'WHERE id IN (2, 3, 4, 5)'
+                    );
+                    await connection.query(
+                        `UPDATE \`${geometryTable}\` SET `
+                        + "shapes = ST_GeomFromText('GEOMETRYCOLLECTION()') WHERE id = 3"
+                    );
+                    await connection.query(
+                        `UPDATE \`${geometryTable}\` SET `
+                        + 'boundary = ST_GeomFromText('
+                        + "'POLYGON((0 0,2 2,0 2,2 0,0 0))') WHERE id = 4"
+                    );
+                    await connection.query(
+                        `UPDATE \`${geometryTable}\` SET `
+                        + "location = ST_GeomFromText('POINT(7 8)', 4326) WHERE id = 5"
+                    );
+                    await connection.query(
+                        `UPDATE \`${geometryTable}\` SET `
+                        + "optional_shape = ST_GeomFromText('POINT(11 12)') WHERE id = 2"
                     );
                 },
             });
@@ -113,14 +158,27 @@ describeWithMysql8Target(
                     `The source must be MariaDB, got ${sourceVersion.version}`,
                 );
                 const [sourceRows] = await source.query(
-                    `SELECT id, OCTET_LENGTH(CAST(location AS BINARY)) AS locationBytes, `
-                    + 'OCTET_LENGTH(CAST(boundary AS BINARY)) AS boundaryBytes '
-                    + `FROM \`${geometryTable}\` ORDER BY id`
+                    `SELECT id, ${spatialColumns.map(column =>
+                        `HEX(CAST(\`${column}\` AS BINARY)) AS \`${column}\``
+                    ).join(', ')} FROM \`${geometryTable}\` ORDER BY id`
                 );
-                assert.equal(Number(sourceRows[0].locationBytes), 0);
-                assert.equal(Number(sourceRows[0].boundaryBytes), 0);
-                assert.ok(Number(sourceRows[1].locationBytes) > 0);
-                assert.ok(Number(sourceRows[1].boundaryBytes) > 0);
+                sourceSpatialBytes = sourceRows;
+                for (const column of spatialColumns) {
+                    assert.equal(sourceRows[0][column], '');
+                    assert.ok(sourceRows[1][column].length > 0);
+                }
+                assert.ok(sourceRows[2].shapes.length > 0);
+                const [[sourceEmptyCollection]] = await source.query(
+                    'SELECT ST_AsText(shapes) AS value, '
+                    + '(shapes IS NULL) AS is_null, '
+                    + '(optional_shape IS NULL) AS optional_is_null '
+                    + `FROM \`${geometryTable}\` WHERE id = 3`
+                );
+                assert.deepEqual(sourceEmptyCollection, {
+                    value: 'GEOMETRYCOLLECTION EMPTY',
+                    is_null: 0,
+                    optional_is_null: 1,
+                });
             } finally {
                 await source.end();
             }
@@ -250,24 +308,82 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
 
                 const targetDatabase = await targetConnection(target, target.database);
                 try {
-                    const [rows] = await targetDatabase.query(
-                        `SELECT id, label, ST_AsText(location) AS location, `
-                        + `ST_AsText(boundary) AS boundary FROM \`${geometryTable}\` ORDER BY id`
+                    const [[validValues]] = await targetDatabase.query(
+                        `SELECT ${spatialColumns.map(column =>
+                            `ST_AsText(\`${column}\`) AS \`${column}\``
+                        ).join(', ')} FROM \`${geometryTable}\` WHERE id = 2`
                     );
-                    assert.deepEqual(rows, [
-                        {
-                            id: 1,
-                            label: 'zero-byte values',
-                            location: null,
-                            boundary: null,
-                        },
-                        {
-                            id: 2,
-                            label: 'valid values',
-                            location: 'POINT(7 8)',
-                            boundary: 'POLYGON((0 0,0 2,2 2,0 0))',
-                        },
+                    assert.deepEqual(validValues, {
+                        location: 'POINT(7 8)',
+                        route: 'LINESTRING(0 0,1 1,2 1)',
+                        boundary: 'POLYGON((0 0,0 2,2 2,0 0))',
+                        locations: target === mysql8Target
+                            ? 'MULTIPOINT((0 0),(1 1))'
+                            : 'MULTIPOINT(0 0,1 1)',
+                        routes: 'MULTILINESTRING((0 0,1 1),(2 2,3 3))',
+                        boundaries: 'MULTIPOLYGON(((0 0,0 1,1 1,0 0)),((2 2,2 3,3 3,2 2)))',
+                        shape: 'POINT(9 10)',
+                        shapes: 'GEOMETRYCOLLECTION(POINT(1 2),LINESTRING(0 0,1 1))',
+                    });
+
+                    const [[valueStates]] = await targetDatabase.query(
+                        `SELECT ${spatialColumns.map(column =>
+                            `(\`${column}\` IS NULL) AS \`${column}\``
+                        ).join(', ')}, optional_shape IS NULL AS optional_shape `
+                        + `FROM \`${geometryTable}\` WHERE id = 1`
+                    );
+                    assert.deepEqual(valueStates, {
+                        location: 1,
+                        route: 1,
+                        boundary: 1,
+                        locations: 1,
+                        routes: 1,
+                        boundaries: 1,
+                        shape: 1,
+                        shapes: 1,
+                        optional_shape: 1,
+                    });
+
+                    const [[specialValues]] = await targetDatabase.query(
+                        'SELECT '
+                        + 'ST_AsText(shapes) AS empty_collection, '
+                        + '(shapes IS NULL) AS empty_collection_is_null '
+                        + `FROM \`${geometryTable}\` WHERE id = 3`
+                    );
+                    assert.deepEqual(specialValues, {
+                        empty_collection: 'GEOMETRYCOLLECTION EMPTY',
+                        empty_collection_is_null: 0,
+                    });
+                    const [[invalidPolygon]] = await targetDatabase.query(
+                        `SELECT ST_AsText(boundary) AS value FROM \`${geometryTable}\` WHERE id = 4`
+                    );
+                    assert.equal(
+                        invalidPolygon.value,
+                        'POLYGON((0 0,2 2,0 2,2 0,0 0))',
+                    );
+                    if (target === mysql8Target) {
+                        const [[validity]] = await targetDatabase.query(
+                            `SELECT ST_IsValid(boundary) AS value `
+                            + `FROM \`${geometryTable}\` WHERE id = 4`
+                        );
+                        assert.equal(validity.value, 0);
+                    }
+
+                    const [srids] = await targetDatabase.query(
+                        `SELECT id, ST_SRID(location) AS srid FROM \`${geometryTable}\` `
+                        + 'WHERE id IN (2, 5) ORDER BY id'
+                    );
+                    assert.deepEqual(srids, [
+                        { id: 2, srid: 0 },
+                        { id: 5, srid: 4326 },
                     ]);
+
+                    const [targetSpatialBytes] = await targetDatabase.query(
+                        `SELECT id, ${spatialColumns.map(column =>
+                            `HEX(CAST(\`${column}\` AS BINARY)) AS \`${column}\``
+                        ).join(', ')} FROM \`${geometryTable}\` WHERE id > 1 ORDER BY id`
+                    );
+                    assert.deepEqual(targetSpatialBytes, sourceSpatialBytes.slice(1));
 
                     const [columns] = await targetDatabase.query(
                         `SHOW FULL COLUMNS FROM \`${geometryTable}\``
@@ -279,6 +395,9 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
                     assert.equal(columnsByName.location.Comment, 'Map point');
                     assert.equal(columnsByName.boundary.Null, 'YES');
                     assert.equal(columnsByName.boundary.Comment, 'Map area');
+                    for (const column of spatialColumns) {
+                        assert.equal(columnsByName[column].Null, 'YES');
+                    }
                 } finally {
                     await targetDatabase.end();
                 }

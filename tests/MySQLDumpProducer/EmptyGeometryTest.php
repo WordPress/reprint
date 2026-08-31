@@ -276,6 +276,49 @@ class EmptyGeometryTest extends TestCase {
         );
     }
 
+    /**
+     * A target CHECK which rejects NULL cannot represent the normalized row.
+     * The import must stop rather than silently remove or weaken that constraint.
+     *
+     * @dataProvider targetDatabaseProvider
+     */
+    public function testCheckConstraintRejectingNullStopsImport(string $target): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE constrained_geometry (id INT PRIMARY KEY)'
+        );
+        $this->source_pdo->exec('INSERT INTO constrained_geometry VALUES (1)');
+        $this->source_pdo->exec(
+            'ALTER TABLE constrained_geometry ADD COLUMN location POINT NOT NULL'
+        );
+        $this->source_pdo->exec(
+            'ALTER TABLE constrained_geometry ADD CONSTRAINT location_required ' .
+            'CHECK (location IS NOT NULL)'
+        );
+
+        $sql = $this->exportWithResumeAfterEveryFragment([
+            'tables_to_process' => ['constrained_geometry'],
+        ]);
+        try {
+            $this->executeDump($sql, $target);
+            $this->fail('The target CHECK constraint should reject the normalized NULL.');
+        } catch (PDOException $error) {
+            $this->assertStringContainsString('location_required', $error->getMessage());
+        }
+
+        $target_pdo = $this->connectTarget($target);
+        $target_pdo->exec("USE `{$target}`");
+        $create_table = $target_pdo
+            ->query('SHOW CREATE TABLE constrained_geometry')
+            ->fetch();
+        $this->assertStringContainsString('location_required', $create_table['Create Table']);
+        $columns = $target_pdo
+            ->query('SHOW FULL COLUMNS FROM constrained_geometry')
+            ->fetchAll();
+        $columns_by_name = array_column($columns, null, 'Field');
+        $this->assertSame('YES', $columns_by_name['location']['Null']);
+    }
+
     public function testEarlierCursorFormatResumesBeforeFirstEmptyValue(): void
     {
         $this->source_pdo->exec(
