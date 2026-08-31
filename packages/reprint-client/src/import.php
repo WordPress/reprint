@@ -66,16 +66,7 @@ foreach ([
 ] as $autoloader) {
     if (file_exists($autoloader)) {
         require_once $autoloader;
-        break;
-    }
-}
-
-foreach ([
-    __DIR__ . '/../../reprint-server/src/utils.php',
-    __DIR__ . '/../../../vendor/wp-php-toolkit/reprint-server/src/utils.php',
-] as $utils_path) {
-    if (file_exists($utils_path)) {
-        require_once $utils_path;
+        require_once dirname($autoloader) . '/wp-php-toolkit/reprint-server/src/utils.php';
         break;
     }
 }
