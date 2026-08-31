@@ -691,6 +691,7 @@ class DatabaseRowsReader {
                 "MULTIPOINT",
                 "MULTILINESTRING",
                 "MULTIPOLYGON",
+                "GEOMCOLLECTION",
                 "GEOMETRYCOLLECTION",
             ],
             true

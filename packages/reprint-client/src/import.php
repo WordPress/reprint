@@ -9158,6 +9158,31 @@ class ImportClient
     private function reset_database_import_position(DatabaseConnection $database): void
     {
         $table = self::DATABASE_IMPORT_POSITION_TABLE;
+        // An unfinished spatial value keeps its binary staging table for a
+        // later resume. A fresh import discards that table before it forgets
+        // the target cursor which names it.
+        $result = $database->query(
+            "SELECT `source_cursor` FROM `{$table}` WHERE `id` = 1"
+        );
+        $encoded_cursor = $result->fetchColumn();
+        $result->closeCursor();
+        if (is_string($encoded_cursor)) {
+            $cursor_json = base64_decode($encoded_cursor, true);
+            $cursor = $cursor_json === false ? null : json_decode($cursor_json, true);
+            $spatial_staging_table = is_array($cursor)
+                ? ( $cursor["spatial_staging_table"] ?? null )
+                : null;
+            if (
+                is_string($spatial_staging_table) &&
+                preg_match(
+                    '/^__reprint_db_pull_progress_spatial_[a-f0-9]{24}$/D',
+                    $spatial_staging_table
+                )
+            ) {
+                $quoted_staging_table = '`' . str_replace('`', '``', $spatial_staging_table) . '`';
+                $database->exec("DROP TABLE IF EXISTS {$quoted_staging_table}");
+            }
+        }
         $query = "DELETE FROM `{$table}` WHERE `id` = 1";
         $database->exec($query);
     }
@@ -9306,10 +9331,22 @@ class ImportClient
             return;
         }
 
-        // Large values are written by UPDATE statements which append pieces.
-        // A non-transactional table may keep one piece, so repeating the UPDATE
-        // could append those bytes twice.
-        if (!empty($cursor_data["oversized_queue"])) {
+        // Large text and binary values append pieces directly to the target
+        // row. A non-transactional table may keep one piece, so repeating that
+        // UPDATE could append those bytes twice. Spatial pieces go into a
+        // separate staging row with an expected-length guard, and the final
+        // target assignment is safe to repeat.
+        $has_direct_oversized_update = false;
+        foreach ($cursor_data["oversized_queue"] ?? [] as $oversized_value) {
+            if (
+                !is_array($oversized_value) ||
+                !array_key_exists("spatial_staging_initialized", $oversized_value)
+            ) {
+                $has_direct_oversized_update = true;
+                break;
+            }
+        }
+        if ($has_direct_oversized_update) {
             throw new RuntimeException(
                 "Cannot continue {$command} in target table `{$current_table}` because {$engine} may have " .
                 "already appended part of a large value. Run {$command} --abort to rebuild the target."
