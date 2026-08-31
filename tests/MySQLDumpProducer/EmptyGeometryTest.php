@@ -246,6 +246,46 @@ class EmptyGeometryTest extends TestCase {
         );
     }
 
+    public function testPendingSpatialAlterRejectsSourceTypeChange(): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE changed_spatial_type (id INT PRIMARY KEY)'
+        );
+        $this->source_pdo->exec('INSERT INTO changed_spatial_type VALUES (1), (2)');
+        $this->source_pdo->exec(
+            'ALTER TABLE changed_spatial_type ADD COLUMN location POINT NOT NULL'
+        );
+        $this->source_pdo->exec(
+            "UPDATE changed_spatial_type SET location = ST_GeomFromText('POINT(1 1)') WHERE id = 1"
+        );
+
+        $options = [
+            'batch_size' => 10,
+            'tables_to_process' => ['changed_spatial_type'],
+        ];
+        $producer = new MySQLDumpProducer($this->source_pdo, $options);
+        $cursor = null;
+        while ($producer->next_sql_fragment()) {
+            $cursor_data = json_decode($producer->get_reentrancy_cursor(), true);
+            if ($cursor_data['state'] === 'emit_nullable_spatial_columns') {
+                $cursor = json_encode($cursor_data);
+                break;
+            }
+        }
+        $this->assertNotNull($cursor);
+
+        $this->source_pdo->exec(
+            'ALTER TABLE changed_spatial_type MODIFY COLUMN location LONGBLOB NOT NULL'
+        );
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage(
+            'column `changed_spatial_type`.`location` is no longer spatial'
+        );
+        $options['cursor'] = $cursor;
+        new MySQLDumpProducer($this->source_pdo, $options);
+    }
+
     public static function targetDatabaseProvider(): array
     {
         return [
