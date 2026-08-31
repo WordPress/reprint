@@ -44,8 +44,8 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
     }
 
     function mysqlArguments() {
-        // One table comment plus one 250-row INSERT completes the first part.
-        // The hook pauses the following part while those 250 rows are committed.
+        // One table comment plus one 250-row INSERT completes the first response.
+        // The hook pauses the next response after the target stores those 250 rows.
         return [
             '--sql-output=mysql',
             '--mysql-host=127.0.0.1',
@@ -55,6 +55,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             '--sql-fragments-start=251',
             '--sql-fragments-min=251',
             '--sql-fragments-max=251',
+            '--max-exec=1',
             '--progress=jsonl',
         ];
     }
@@ -135,8 +136,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         clearHookState(site);
         writeHookState(site, {
             pauseTable: sourceTable,
-            pauseNextBatch: false,
-            stopAfterBatch: false,
+            pauseNextRequest: false,
             paused: false,
             releasePausedSource: false,
             sourceRequestStopped: false,
@@ -154,32 +154,36 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             '            }',
             '        }',
             '    }',
-            '    if (!empty($state[\'stopAfterBatch\'])) {',
-            '        $state[\'paused\'] = true;',
-            '        e2e_write_hook_state($state_file, $state);',
-            '        // The preceding batch has been emitted. Keep this request open',
-            '        // until the test observes its target-side position.',
-            '        do {',
-            '            usleep(10000);',
-            '            $state = json_decode(file_get_contents($state_file), true);',
-            '        } while (empty($state[\'releasePausedSource\']));',
-            '        $state[\'sourceRequestStopped\'] = true;',
-            '        e2e_write_hook_state($state_file, $state);',
-            '        exit;',
-            '    }',
-            '    if (!empty($state[\'pauseNextBatch\'])) {',
-            '        $state[\'pauseNextBatch\'] = false;',
-            '        $state[\'stopAfterBatch\'] = true;',
-            '        e2e_write_hook_state($state_file, $state);',
-            '        return;',
-            '    }',
             '    $pause_table = $state[\'pauseTable\'] ?? null;',
             '    if ($pause_table !== null',
             '        && strpos($sql, "INSERT INTO `{$pause_table}`") !== false',
             '        && substr(rtrim($sql), -1) === \';\') {',
-            '        $state[\'pauseNextBatch\'] = true;',
+            '        // End this response after the complete INSERT. The target',
+            '        // saves its cursor before the next SQL response starts.',
+            '        $state[\'pauseNextRequest\'] = true;',
+            '        e2e_write_hook_state($state_file, $state);',
+            '        usleep(1100000);',
+            '        return;',
             '    }',
             '    e2e_write_hook_state($state_file, $state);',
+            '}',
+            '',
+            'function test_hook_after_gzip_init($gz, $boundary) {',
+            `    $state_file = '/srv/e2e-sites/.e2e-hook-state-${site}';`,
+            '    $state = json_decode(file_get_contents($state_file), true);',
+            '    if (empty($state[\'pauseNextRequest\'])) {',
+            '        return;',
+            '    }',
+            '    $state[\'pauseNextRequest\'] = false;',
+            '    $state[\'paused\'] = true;',
+            '    e2e_write_hook_state($state_file, $state);',
+            '    do {',
+            '        usleep(10000);',
+            '        $state = json_decode(file_get_contents($state_file), true);',
+            '    } while (empty($state[\'releasePausedSource\']));',
+            '    $state[\'sourceRequestStopped\'] = true;',
+            '    e2e_write_hook_state($state_file, $state);',
+            '    exit;',
             '}',
         ].join('\n'));
 
@@ -202,8 +206,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         writeHookState(site, {
             ...readHookState(site),
             pauseTable: null,
-            pauseNextBatch: false,
-            stopAfterBatch: false,
+            pauseNextRequest: false,
             paused: false,
         });
         const collisionDir = createTempDir('e2e-mysql-source-cursor-collision');
@@ -280,8 +283,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
     it('continues after a finished unkeyed MyISAM table', async () => {
         writeHookState(site, {
             pauseTable: sourceTable,
-            pauseNextBatch: false,
-            stopAfterBatch: false,
+            pauseNextRequest: false,
             paused: false,
             releasePausedSource: false,
             sourceRequestStopped: false,
@@ -394,8 +396,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         writeHookState(site, {
             ...readHookState(site),
             pauseTable: myisamSourceTable,
-            pauseNextBatch: false,
-            stopAfterBatch: false,
+            pauseNextRequest: false,
             paused: false,
             releasePausedSource: false,
             sourceRequestStopped: false,
@@ -457,8 +458,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         writeHookState(site, {
             ...secondHookState,
             pauseTable: null,
-            pauseNextBatch: false,
-            stopAfterBatch: false,
+            pauseNextRequest: false,
             paused: false,
             releasePausedSource: false,
             sourceRequestStopped: false,
@@ -494,8 +494,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         writeHookState(site, {
             ...finalHookState,
             pauseTable: null,
-            pauseNextBatch: false,
-            stopAfterBatch: false,
+            pauseNextRequest: false,
             paused: false,
             drops: {
                 ...finalHookState.drops,
