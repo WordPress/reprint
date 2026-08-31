@@ -189,6 +189,9 @@
     "adversarial-database-no-pdo-mysql": {
       "port": 8137,
       "noPdoMysql": true
+    },
+    "empty-geometry-cross-engine": {
+      "port": 8140
     }
   }
 }

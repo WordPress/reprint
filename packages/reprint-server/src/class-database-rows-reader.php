@@ -56,9 +56,10 @@ class DatabaseRowsReader {
     /**
      * Column metadata cached by table and column name. Each column contains
      * data_type (for example, varchar), column_type (for example,
-     * varchar(255)), and its nullable collation name.
+     * varchar(255)), its nullable collation name, whether it accepts NULL,
+     * and its comment.
      *
-     * @var array<string,array<string,array{data_type:string,column_type:string,collation:?string}>>
+     * @var array<string,array<string,array{data_type:string,column_type:string,collation:?string,nullable:bool,comment:string}>>
      */
     private $column_type_cache = [];
 
@@ -632,6 +633,8 @@ class DatabaseRowsReader {
                 "data_type" => preg_replace('/[\s(].*$/', '', $column_type),
                 "column_type" => $column_type,
                 "collation" => $row["Collation"] ?? null,
+                "nullable" => isset($row["Null"]) && strtoupper($row["Null"]) === "YES",
+                "comment" => (string) ( $row["Comment"] ?? "" ),
             ];
             $row = $statement->fetch(PdoConstants::fetch_assoc());
         }
@@ -675,17 +678,54 @@ class DatabaseRowsReader {
         return false;
     }
 
+    /** Identifies MySQL and MariaDB spatial column types. */
+    public function is_spatial_type($data_type)
+    {
+        return in_array(
+            strtoupper($data_type),
+            [
+                "GEOMETRY",
+                "POINT",
+                "LINESTRING",
+                "POLYGON",
+                "MULTIPOINT",
+                "MULTILINESTRING",
+                "MULTIPOLYGON",
+                "GEOMETRYCOLLECTION",
+            ],
+            true
+        );
+    }
+
     /** Returns the DATA_TYPE string for a column, or throws if unknown. */
     public function get_data_type(string $column): string
     {
-        if (!isset($this->current_column_types[$column]["data_type"])) {
+        return $this->get_column_metadata($column)["data_type"];
+    }
+
+    /**
+     * Returns the cached SHOW FULL COLUMNS fields needed by the producer.
+     *
+     * @return array {
+     *     Column metadata.
+     *
+     *     @type string      $data_type   Base data type.
+     *     @type string      $column_type Complete declared data type.
+     *     @type string|null $collation   Collation name, or null for non-character columns.
+     *     @type bool        $nullable    Whether the column accepts NULL.
+     *     @type string      $comment     Column comment.
+     * }
+     */
+    public function get_column_metadata(string $column): array
+    {
+        if (!isset($this->current_column_types[$column])) {
             throw new \RuntimeException(
                 "No column type info for '{$column}' in table " .
                 $this->quote_identifier($this->current_table) .
                 ". This is a bug — SHOW FULL COLUMNS should have returned it."
             );
         }
-        return $this->current_column_types[$column]["data_type"];
+        return $this->current_column_types[$column];
     }
 
     /** Returns the declared character set's maximum bytes per character. */

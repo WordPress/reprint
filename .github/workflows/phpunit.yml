@@ -27,6 +27,17 @@ jobs:
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: my-secret-pw
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
     steps:
       - uses: actions/checkout@v5
@@ -42,3 +53,8 @@ jobs:
 
       - name: Run tests
         run: composer test
+        env:
+          MARIADB_SOURCE_HOST: 127.0.0.1
+          MARIADB_SOURCE_PORT: 3307
+          MARIADB_SOURCE_USER: root
+          MARIADB_SOURCE_PASS: my-secret-pw
