@@ -135,3 +135,14 @@ exposes the released `_site_export_*()` functions and `SITE_EXPORT_*`
 constants. New integrations should use the Reprint Server names. `compat.php`
 owns the compatibility names; canonical request and library code use only the
 Reprint Server runtime API.
+
+Sites that stored their connection token under the earlier option names keep
+it: `compat.php` copies `site_export_secret` and
+`site_export_push_authorized_token_fingerprint` into the option names above
+when those do not exist yet, then deletes the legacy options. The copy runs
+while `lib.php` loads, which is early enough for the endpoint to authenticate
+on the first request after the update — that request exits before any hook
+fires — and early enough that the settings page has not yet registered its
+option listeners, so moving the token does not read as a rotation and does not
+revoke push authorization. Once no site carries the legacy options,
+`compat.php` can be deleted outright.

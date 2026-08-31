@@ -140,9 +140,77 @@ final class ExportLibraryLoadTest extends TestCase {
         $symbols = json_decode(trim($result['output']), true, 512, JSON_THROW_ON_ERROR);
         $this->assertTrue($symbols['canonical_function']);
         $this->assertTrue($symbols['released_function']);
-        $this->assertSame('site_export_secret', $symbols['canonical_option']);
+        $this->assertSame('reprint_server_secret', $symbols['canonical_option']);
         $this->assertSame($symbols['canonical_option'], $symbols['released_option']);
         $this->assertFalse($symbols['canonical_query_added']);
+    }
+
+    public function testDirectPluginLibraryLoadMigratesLegacyStoredOptions(): void
+    {
+        $lib_path = realpath(__DIR__ . '/../reprint-server-wp/lib.php');
+        $this->assertNotFalse($lib_path, 'lib.php must exist');
+        $plugin_directory_encoded = base64_encode(dirname($lib_path) . '/');
+        $lib_path_encoded = base64_encode($lib_path);
+
+        // WordPress hook functions are defined so compat.php registers its
+        // reprint_server_library_loaded listener, which calls the bootstrap a
+        // second time with the canonical constants already in place.
+        $php_code = <<<PHP
+        <?php
+        function plugin_dir_path(string \$file): string {
+            return base64_decode('{$plugin_directory_encoded}', true);
+        }
+        define('ABSPATH', __DIR__ . '/');
+        \$GLOBALS['hook_callbacks'] = [];
+        \$GLOBALS['stored_options'] = [
+            'site_export_secret' => 'legacy-token',
+            'site_export_push_authorized_token_fingerprint' => 'legacy-fingerprint',
+        ];
+        function add_filter(string \$hook_name, \$callback, int \$priority = 10, int \$accepted_args = 1): void {
+            \$GLOBALS['hook_callbacks'][\$hook_name][] = \$callback;
+        }
+        function add_action(string \$hook_name, \$callback, int \$priority = 10, int \$accepted_args = 1): void {
+            add_filter(\$hook_name, \$callback, \$priority, \$accepted_args);
+        }
+        function apply_filters(string \$hook_name, \$value) {
+            foreach (\$GLOBALS['hook_callbacks'][\$hook_name] ?? [] as \$callback) {
+                \$value = \$callback(\$value);
+            }
+            return \$value;
+        }
+        function do_action(string \$hook_name): void {
+            foreach (\$GLOBALS['hook_callbacks'][\$hook_name] ?? [] as \$callback) {
+                \$callback();
+            }
+        }
+        function get_option(string \$name, \$default = false) {
+            return array_key_exists(\$name, \$GLOBALS['stored_options'])
+                ? \$GLOBALS['stored_options'][\$name]
+                : \$default;
+        }
+        function update_option(string \$name, \$value, \$autoload = null): bool {
+            \$GLOBALS['stored_options'][\$name] = \$value;
+            return true;
+        }
+        function delete_option(string \$name): bool {
+            unset(\$GLOBALS['stored_options'][\$name]);
+            return true;
+        }
+        require base64_decode('{$lib_path_encoded}', true);
+        echo json_encode(\$GLOBALS['stored_options'], JSON_THROW_ON_ERROR);
+        PHP;
+
+        $result = $this->runPhpCode($php_code);
+
+        $this->assertSame(0, $result['status'], $result['output']);
+        $stored_options = json_decode(trim($result['output']), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(
+            [
+                'reprint_server_secret' => 'legacy-token',
+                'reprint_server_push_authorized_token_fingerprint' => 'legacy-fingerprint',
+            ],
+            $stored_options
+        );
     }
 
     /**

@@ -84,10 +84,10 @@ function plugin_basename(string $file): string {
 }
 
 function get_option(string $name, $fallback = false) {
-    if ($name === 'site_export_secret') {
+    if ($name === 'reprint_server_secret') {
         return trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_SECRET_CONFIG') ) );
     }
-    if ($name === 'site_export_push_authorized_token_fingerprint') {
+    if ($name === 'reprint_server_push_authorized_token_fingerprint') {
         return trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_AUTHORIZATION_CONFIG') ) );
     }
     return $fallback;

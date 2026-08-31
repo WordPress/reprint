@@ -26,6 +26,15 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
         }
     }
 
+    // TODO: This call should be deleted after September 2026, as it should no longer be relevant by then.
+    // Migrating here covers every request with one call: the library loads
+    // before index.php answers an API request, which exits before any hook
+    // fires, and before Site_Export_Plugin::get_instance() registers its
+    // add_option_/update_option_ listeners on plugins_loaded, so moving the
+    // stored connection token does not read as a token rotation and revoke
+    // push authorization.
+    reprint_server_migrate_legacy_options();
+
     // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Only request routing presence is normalized.
     if ($normalize_request && isset($_GET['site-export-api']) && !isset($_GET['reprint-api'])) {
         $_GET['reprint-api'] = true;
@@ -44,6 +53,7 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
     }
     $hooks_bootstrapped = true;
 
+    // TODO: This filter should be deleted after September 2026, as it should no longer be relevant by then.
     add_filter(
         'reprint_server_api_options',
         static function ($options) {
@@ -68,6 +78,54 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
         },
         -PHP_INT_MAX
     );
+}
+
+/**
+ * Moves values stored under Site Export option names to the Reprint Server names.
+ *
+ * Each legacy option is copied to its canonical option when that option does
+ * not exist yet, and then deleted. A site therefore migrates on the first
+ * request after the update and carries no legacy option afterwards, which is
+ * what lets this compatibility file be deleted later.
+ *
+ * The bootstrap calls this on every request until then. It runs more than
+ * once per request because the bootstrap does; repeat calls cost nothing
+ * beyond WordPress's own missing-option cache.
+ *
+ * TODO: Delete this migration after September 2026, as it should no longer be relevant by then.
+ */
+function reprint_server_migrate_legacy_options(): void {
+    if (
+        !function_exists('get_option')
+        || !function_exists('update_option')
+        || !function_exists('delete_option')
+        || !defined('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION')
+        || !defined('WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION')
+    ) {
+        return;
+    }
+
+    $legacy_option_names = [
+        'site_export_secret' => constant('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION'),
+        'site_export_push_authorized_token_fingerprint' =>
+            constant('WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION'),
+    ];
+    $missing_option = new stdClass();
+    foreach ($legacy_option_names as $legacy_name => $canonical_name) {
+        if ($canonical_name === $legacy_name) {
+            continue;
+        }
+
+        $legacy_value = get_option($legacy_name, $missing_option);
+        if ($legacy_value === $missing_option) {
+            continue;
+        }
+
+        if (get_option($canonical_name, $missing_option) === $missing_option) {
+            update_option($canonical_name, $legacy_value, false);
+        }
+        delete_option($legacy_name);
+    }
 }
 
 function _site_export_error(int $code, string $message): void {

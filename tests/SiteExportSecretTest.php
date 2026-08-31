@@ -61,6 +61,17 @@ if (!function_exists('update_option')) {
     }
 }
 
+if (!function_exists('delete_option')) {
+    function delete_option(string $name): bool {
+        if (!array_key_exists($name, $GLOBALS['site_export_test_options'])) {
+            return false;
+        }
+
+        unset($GLOBALS['site_export_test_options'][$name]);
+        return true;
+    }
+}
+
 if (!function_exists('register_setting')) {
     function register_setting(string $group, string $name, array $args = []): void {
         $GLOBALS['site_export_registered_settings'][$name] = [
@@ -296,12 +307,64 @@ final class SiteExportSecretTest extends TestCase
         $this->assertSame('option-secret', _site_export_get_shared_secret());
     }
 
+    public function testLegacyStoredSecretMovesToTheCanonicalOptionAndIsDeleted(): void
+    {
+        $GLOBALS['site_export_test_options']['site_export_secret'] = 'legacy-token';
+
+        reprint_server_migrate_legacy_options();
+
+        $this->assertSame('legacy-token', $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION]);
+        $this->assertArrayNotHasKey('site_export_secret', $GLOBALS['site_export_test_options']);
+        $this->assertSame('legacy-token', _site_export_get_shared_secret());
+    }
+
+    public function testLegacyStoredSecretIsDiscardedWhenTheCanonicalOptionAlreadyHasAValue(): void
+    {
+        $GLOBALS['site_export_test_options']['site_export_secret'] = 'legacy-token';
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+
+        reprint_server_migrate_legacy_options();
+
+        $this->assertSame('current-token', $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION]);
+        $this->assertArrayNotHasKey('site_export_secret', $GLOBALS['site_export_test_options']);
+    }
+
+    public function testMigrationCreatesNoOptionsWhenNoLegacyOptionExists(): void
+    {
+        reprint_server_migrate_legacy_options();
+
+        $this->assertSame([], $GLOBALS['site_export_test_options']);
+    }
+
+    public function testMigrationKeepsPushAuthorizationGrantedUnderTheLegacyOptionNames(): void
+    {
+        // The settings listeners revoke authorization when the connection
+        // token option changes, so they must be registered for this test to
+        // show that migrating both options is not read as a token rotation.
+        Site_Export_Plugin::get_instance();
+        $GLOBALS['site_export_test_options']['site_export_secret'] = 'legacy-token';
+        $GLOBALS['site_export_test_options']['site_export_push_authorized_token_fingerprint'] =
+            hash('sha256', 'legacy-token');
+
+        reprint_server_migrate_legacy_options();
+
+        $this->assertSame(
+            hash('sha256', 'legacy-token'),
+            $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]
+        );
+        $this->assertArrayNotHasKey(
+            'site_export_push_authorized_token_fingerprint',
+            $GLOBALS['site_export_test_options']
+        );
+        $this->assertTrue(_site_export_is_push_authorized());
+    }
+
     public function testCanonicalPluginSymbolsAndReleasedCompatibilityNamesRemainAvailable(): void
     {
         $this->assertTrue(defined('WordPress\\Reprint\\Server\\Plugin\\VERSION'));
         $this->assertTrue(defined('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION'));
         $this->assertSame(
-            'site_export_secret',
+            'reprint_server_secret',
             constant('WordPress\\Reprint\\Server\\Plugin\\SECRET_OPTION')
         );
         $this->assertSame(

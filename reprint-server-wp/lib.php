@@ -34,10 +34,10 @@ if (!defined(__NAMESPACE__ . '\\SECRET_FILE')) {
     define(__NAMESPACE__ . '\\SECRET_FILE', PLUGIN_DIR . 'secret.php');
 }
 if (!defined(__NAMESPACE__ . '\\SECRET_OPTION')) {
-    define(__NAMESPACE__ . '\\SECRET_OPTION', 'site_export_secret');
+    define(__NAMESPACE__ . '\\SECRET_OPTION', 'reprint_server_secret');
 }
 if (!defined(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION')) {
-    define(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION', 'site_export_push_authorized_token_fingerprint');
+    define(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION', 'reprint_server_push_authorized_token_fingerprint');
 }
 
 /**
