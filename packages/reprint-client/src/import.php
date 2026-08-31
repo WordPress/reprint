@@ -7977,10 +7977,14 @@ class ImportClient
                                     $remote_absolute_path
                                 );
                             } else {
+                                $removed_local_path_type =
+                                    $remote_deletion_root === $remote_absolute_path
+                                        ? $remote_path_type
+                                        : "dir";
                                 $this->pull_index_journal->record_successful_deletion(
                                     $remote_absolute_path,
                                     $local_absolute_path,
-                                    $remote_path_type
+                                    $removed_local_path_type
                                 );
                             }
                         }
