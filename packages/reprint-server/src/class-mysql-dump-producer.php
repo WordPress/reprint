@@ -18,7 +18,8 @@ require_once __DIR__ . "/class-database-rows-reader.php";
  * The producer is a finite state machine that walks through tables sequentially:
  *
  *   INIT → EMIT_HEADER → NEXT_TABLE → CREATE_TABLE → TABLE_HEADER →
- *   START_INSERT ⇄ EMIT_ROW → (EMIT_OVERSIZED_UPDATE) → … → EMIT_FOOTER → FINISHED
+ *   START_INSERT ⇄ EMIT_ROW → (EMIT_NULLABLE_SPATIAL_COLUMNS) →
+ *   (EMIT_OVERSIZED_UPDATE) → … → EMIT_FOOTER → FINISHED
  *
  * All values are base64-encoded in the SQL output (via FROM_BASE64('...')). This avoids
  * charset-related corruption: MySQL interprets string literals according to the
@@ -58,6 +59,7 @@ class MySQLDumpProducer
     const STATE_TABLE_HEADER = "table_header";
     const STATE_START_INSERT = "start_insert";
     const STATE_EMIT_ROW = "emit_row";
+    const STATE_EMIT_NULLABLE_SPATIAL_COLUMNS = "emit_nullable_spatial_columns";
     const STATE_EMIT_OVERSIZED_UPDATE = "emit_oversized_update";
     const STATE_EMIT_FOOTER = "emit_footer";
     const STATE_FINISHED = "finished";
@@ -122,6 +124,12 @@ class MySQLDumpProducer
      * @var array|null
      */
     private $reader_cursor_before_retained_record = null;
+
+    /** @var string[] Spatial columns already changed to nullable in the dump. */
+    private $nullable_spatial_columns = [];
+
+    /** @var string[] Spatial columns waiting for their nullable ALTER TABLE. */
+    private $pending_nullable_spatial_columns = [];
 
     /**
      * @param object $db Database connection — either a real PDO (MySQL) or a
@@ -227,6 +235,12 @@ class MySQLDumpProducer
                 case self::STATE_EMIT_ROW:
                     return $this->emit_row();
 
+                case self::STATE_EMIT_NULLABLE_SPATIAL_COLUMNS:
+                    $this->emit_nullable_spatial_columns();
+                    $this->state = self::STATE_START_INSERT;
+                    $this->current_fragment_must_be_its_own_part = true;
+                    return true;
+
                 case self::STATE_EMIT_OVERSIZED_UPDATE:
                     if ($this->emit_oversized_update()) {
                         $this->current_fragment_must_be_its_own_part = true;
@@ -252,11 +266,23 @@ class MySQLDumpProducer
     private function emit_insert_header()
     {
         $this->rows_in_batch = 0;
+        $reader_cursor_before_current_record = $this->reader_cursor_before_retained_record;
         if ($this->row_reader->get_current_record() === null) {
+            $reader_cursor_before_current_record = $this->row_reader->get_cursor_state();
             if (!$this->row_reader->next_record()) {
                 $this->state = self::STATE_NEXT_TABLE;
                 return false;
             }
+        }
+
+        $spatial_columns = $this->get_spatial_columns_to_make_nullable(
+            $this->row_reader->get_current_record()
+        );
+        if (!empty($spatial_columns)) {
+            $this->reader_cursor_before_retained_record = $reader_cursor_before_current_record;
+            $this->pending_nullable_spatial_columns = $spatial_columns;
+            $this->state = self::STATE_EMIT_NULLABLE_SPATIAL_COLUMNS;
+            return false;
         }
 
         $column_list = implode(
@@ -317,6 +343,21 @@ class MySQLDumpProducer
             return true;
         }
 
+        $spatial_columns = $this->get_spatial_columns_to_make_nullable(
+            $this->row_reader->get_current_record()
+        );
+        if (!empty($spatial_columns)) {
+            // Finish the INSERT before changing its table definition. The
+            // retained row starts a new INSERT after the ALTER TABLE.
+            $this->reader_cursor_before_retained_record = $reader_cursor_before_current_record;
+            $this->pending_nullable_spatial_columns = $spatial_columns;
+            $this->current_sql_fragment = $this->on_duplicate_key() . ';';
+            $this->current_statement_size = 0;
+            $this->rows_in_batch = 0;
+            $this->state = self::STATE_EMIT_NULLABLE_SPATIAL_COLUMNS;
+            return true;
+        }
+
         $row_tuple_bytes = $this->estimate_formatted_row_tuple_bytes(
             $this->row_reader->get_current_record()
         );
@@ -367,6 +408,67 @@ class MySQLDumpProducer
         }
 
         return true;
+    }
+
+    /**
+     * Makes target columns nullable before emitting zero-byte spatial values.
+     *
+     * MariaDB can fill old rows with a zero-byte spatial value when a NOT NULL
+     * spatial column is added. Neither MariaDB nor MySQL accepts those bytes in
+     * an INSERT, so the dump represents that missing geometry as NULL.
+     */
+    private function emit_nullable_spatial_columns()
+    {
+        if (empty($this->pending_nullable_spatial_columns)) {
+            throw new \RuntimeException(
+                "Cannot emit a nullable spatial ALTER TABLE without any pending columns."
+            );
+        }
+
+        $definitions = [];
+        foreach ($this->pending_nullable_spatial_columns as $column) {
+            $column_metadata = $this->row_reader->get_column_metadata($column);
+            $definition = "MODIFY COLUMN " . $this->row_reader->quote_identifier($column) .
+                " " . $column_metadata["column_type"] . " NULL";
+            if ($column_metadata["comment"] !== "") {
+                $comment = str_replace(
+                    ["\\", "'"],
+                    ["\\\\", "''"],
+                    $column_metadata["comment"]
+                );
+                $definition .= " COMMENT '{$comment}'";
+            }
+            $definitions[] = $definition;
+        }
+
+        $quoted_table = $this->row_reader->quote_identifier(
+            $this->row_reader->get_current_table()
+        );
+        $this->current_sql_fragment = "ALTER TABLE {$quoted_table}\n" .
+            implode(",\n", $definitions) . ";";
+        foreach ($this->pending_nullable_spatial_columns as $column) {
+            $this->nullable_spatial_columns[] = $column;
+        }
+        $this->pending_nullable_spatial_columns = [];
+    }
+
+    /** Returns NOT NULL spatial columns which contain a zero-byte value in this row. */
+    private function get_spatial_columns_to_make_nullable($row)
+    {
+        $columns = [];
+        foreach ($this->row_reader->get_current_column_names() as $column) {
+            $column_metadata = $this->row_reader->get_column_metadata($column);
+            if (
+                $row[$column] !== "" ||
+                !$this->row_reader->is_spatial_type($column_metadata["data_type"]) ||
+                $column_metadata["nullable"] ||
+                in_array($column, $this->nullable_spatial_columns, true)
+            ) {
+                continue;
+            }
+            $columns[] = $column;
+        }
+        return $columns;
     }
 
     /** Finishes an INSERT batch at its bounded row limit. */
@@ -521,6 +623,8 @@ class MySQLDumpProducer
             $this->oversized_pk_values = null;
             $this->current_statement_size = 0;
             $this->reader_cursor_before_retained_record = null;
+            $this->nullable_spatial_columns = [];
+            $this->pending_nullable_spatial_columns = [];
         }
         return $has_table;
     }
@@ -559,6 +663,8 @@ class MySQLDumpProducer
          */
         $cursor_data["oversized_queue"] = $this->encode_oversized_queue_for_cursor($this->oversized_queue);
         $cursor_data["current_statement_size"] = $this->current_statement_size;
+        $cursor_data["nullable_spatial_columns"] = $this->nullable_spatial_columns;
+        $cursor_data["pending_nullable_spatial_columns"] = $this->pending_nullable_spatial_columns;
 
         $json = json_encode($cursor_data);
         if ($json === false) {
@@ -665,9 +771,19 @@ class MySQLDumpProducer
                 );
             }
             $this->current_statement_size = $cursor_data["current_statement_size"] ?? 0;
+            $this->nullable_spatial_columns = $this->decode_spatial_columns_from_cursor(
+                $cursor_data["nullable_spatial_columns"] ?? [],
+                "nullable_spatial_columns"
+            );
+            $this->pending_nullable_spatial_columns = $this->decode_spatial_columns_from_cursor(
+                $cursor_data["pending_nullable_spatial_columns"] ?? [],
+                "pending_nullable_spatial_columns"
+            );
 
             if (!$this->row_reader->restore_cursor_state($cursor_data)) {
                 $this->state = self::STATE_INIT;
+                $this->nullable_spatial_columns = [];
+                $this->pending_nullable_spatial_columns = [];
             } else {
                 $expected_column_names_hash = $cursor_data["current_column_names_hash"] ?? null;
                 $actual_column_names_hash = $this->get_current_column_names_hash();
@@ -696,8 +812,66 @@ class MySQLDumpProducer
                         // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
                     }
                 }
+                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Cursor errors are returned as plain API messages.
+                foreach (array_merge(
+                    $this->nullable_spatial_columns,
+                    $this->pending_nullable_spatial_columns
+                ) as $column) {
+                    $column_metadata = $this->row_reader->get_column_metadata($column);
+                    if (!$this->row_reader->is_spatial_type($column_metadata["data_type"])) {
+                        throw new \RuntimeException(
+                            "Cannot restore the database row cursor because column " .
+                            $this->row_reader->quote_identifier($this->row_reader->get_current_table()) .
+                            "." . $this->row_reader->quote_identifier($column) .
+                            " is no longer spatial. Run db-pull --abort and start again."
+                        );
+                    }
+                }
+                if (
+                    $this->state === self::STATE_EMIT_NULLABLE_SPATIAL_COLUMNS &&
+                    empty($this->pending_nullable_spatial_columns)
+                ) {
+                    throw new \InvalidArgumentException(
+                        "Invalid cursor: emit_nullable_spatial_columns requires pending columns"
+                    );
+                }
+                if (
+                    $this->state !== self::STATE_EMIT_NULLABLE_SPATIAL_COLUMNS &&
+                    !empty($this->pending_nullable_spatial_columns)
+                ) {
+                    throw new \InvalidArgumentException(
+                        "Invalid cursor: pending nullable spatial columns require " .
+                        "the emit_nullable_spatial_columns state"
+                    );
+                }
+                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
             }
         }
+    }
+
+    /** Validates a list of spatial column names read from a cursor. */
+    private function decode_spatial_columns_from_cursor($columns, $cursor_field)
+    {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Cursor errors are returned as plain API messages.
+        if (!is_array($columns)) {
+            throw new \InvalidArgumentException("Invalid cursor: {$cursor_field} must be an array");
+        }
+        $decoded = [];
+        foreach ($columns as $column) {
+            if (!is_string($column) || $column === "") {
+                throw new \InvalidArgumentException(
+                    "Invalid cursor: {$cursor_field} must contain non-empty column names"
+                );
+            }
+            if (in_array($column, $decoded, true)) {
+                throw new \InvalidArgumentException(
+                    "Invalid cursor: {$cursor_field} contains duplicate column '{$column}'"
+                );
+            }
+            $decoded[] = $column;
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        return $decoded;
     }
 
     /** Returns a fixed-size SHA-256 hash of the current table's ordered column names. */
@@ -738,6 +912,10 @@ class MySQLDumpProducer
             return (string) $value;
         }
 
+        if ($value === "" && $this->row_reader->is_spatial_type($data_type)) {
+            return "NULL";
+        }
+
         if (strtoupper($data_type) === "JSON") {
             if ($value === "") {
                 return "''";
@@ -767,6 +945,10 @@ class MySQLDumpProducer
 
         if ($this->row_reader->is_numeric_type($data_type)) {
             return strlen((string) $value);
+        }
+
+        if ($value === "" && $this->row_reader->is_spatial_type($data_type)) {
+            return 4; // NULL
         }
 
         $len = strlen((string) $value);
