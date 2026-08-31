@@ -1,12 +1,12 @@
 <?php
 
 /**
- * Installs support for integrations which still use Site Export names.
+ * Maps every released Site Export constant to its Reprint Server name.
  *
- * @param bool $normalize_request Whether to map the legacy query key for plugin routing.
+ * @return array<string, string> Released constant name keyed to its canonical name.
  */
-function reprint_server_bootstrap_compatibility(bool $normalize_request = true): void {
-    $constant_aliases = [
+function reprint_server_compat_constants(): array {
+    return [
         'SITE_EXPORT_VERSION' => 'WordPress\\Reprint\\Server\\Plugin\\VERSION',
         'SITE_EXPORT_PLUGIN_DIR' => 'WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR',
         'SITE_EXPORT_SECRET_FILE' => 'WordPress\\Reprint\\Server\\Plugin\\SECRET_FILE',
@@ -15,43 +15,40 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
             'WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION',
         'SITE_EXPORT_TIMESTAMP_TOLERANCE' => 'WordPress\\Reprint\\Server\\Plugin\\TIMESTAMP_TOLERANCE',
     ];
-    foreach ($constant_aliases as $legacy_name => $canonical_name) {
+}
+
+/**
+ * Defines canonical constants from the released names a platform already set.
+ *
+ * The library requires this before it defines its own defaults, so a platform
+ * which still defines SITE_EXPORT_* from a must-use plugin keeps its values.
+ */
+function reprint_server_compat_adopt_legacy_constants(): void {
+    foreach (reprint_server_compat_constants() as $legacy_name => $canonical_name) {
         if (defined($legacy_name) && !defined($canonical_name)) {
             // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.VariableConstantNameFound -- Both names are constrained by the compatibility map above.
             define($canonical_name, constant($legacy_name));
         }
+    }
+}
+
+/**
+ * Publishes the loaded library under the released Site Export names.
+ *
+ * The library requires this once its own constants exist, which is also
+ * before index.php applies the endpoint configuration filter.
+ */
+function reprint_server_compat_expose_legacy_names(): void {
+    foreach (reprint_server_compat_constants() as $legacy_name => $canonical_name) {
         if (defined($canonical_name) && !defined($legacy_name)) {
             // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.VariableConstantNameFound -- Both names are constrained by the compatibility map above.
             define($legacy_name, constant($canonical_name));
         }
     }
 
-    // TODO: This call should be deleted after September 2026, as it should no longer be relevant by then.
-    // Migrating here covers every request with one call: the library loads
-    // before index.php answers an API request, which exits before any hook
-    // fires, and before Site_Export_Plugin::get_instance() registers its
-    // add_option_/update_option_ listeners on plugins_loaded, so moving the
-    // stored connection token does not read as a token rotation and revoke
-    // push authorization.
-    reprint_server_migrate_legacy_options();
-
-    // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Only request routing presence is normalized.
-    if ($normalize_request && isset($_GET['site-export-api']) && !isset($_GET['reprint-api'])) {
-        $_GET['reprint-api'] = true;
-    }
-
-    static $hooks_bootstrapped = false;
-    if ($hooks_bootstrapped) {
+    if (!function_exists('add_filter') || !function_exists('apply_filters')) {
         return;
     }
-    if (
-        !function_exists('add_filter')
-        || !function_exists('add_action')
-        || !function_exists('apply_filters')
-    ) {
-        return;
-    }
-    $hooks_bootstrapped = true;
 
     // TODO: This filter should be deleted after September 2026, as it should no longer be relevant by then.
     add_filter(
@@ -70,14 +67,19 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
         },
         -PHP_INT_MAX
     );
+}
 
-    add_action(
-        'reprint_server_library_loaded',
-        static function (): void {
-            reprint_server_bootstrap_compatibility(false);
-        },
-        -PHP_INT_MAX
-    );
+/**
+ * Routes a released ?site-export-api request through the canonical query key.
+ *
+ * Only the plugin entry point calls this: a project embedding lib.php owns its
+ * own routing and must keep the request globals it was given.
+ */
+function reprint_server_compat_normalize_legacy_request(): void {
+    // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Only request routing presence is normalized.
+    if (isset($_GET['site-export-api']) && !isset($_GET['reprint-api'])) {
+        $_GET['reprint-api'] = true;
+    }
 }
 
 /**
@@ -88,13 +90,11 @@ function reprint_server_bootstrap_compatibility(bool $normalize_request = true):
  * request after the update and carries no legacy option afterwards, which is
  * what lets this compatibility file be deleted later.
  *
- * The bootstrap calls this on every request until then. It runs more than
- * once per request because the bootstrap does; repeat calls cost nothing
- * beyond WordPress's own missing-option cache.
+ * The library calls this once per request until then.
  *
  * TODO: Delete this migration after September 2026, as it should no longer be relevant by then.
  */
-function reprint_server_migrate_legacy_options(): void {
+function reprint_server_compat_migrate_legacy_options(): void {
     if (
         !function_exists('get_option')
         || !function_exists('update_option')

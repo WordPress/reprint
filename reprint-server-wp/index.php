@@ -12,7 +12,7 @@
  */
 
 require_once __DIR__ . '/compat.php';
-reprint_server_bootstrap_compatibility();
+reprint_server_compat_normalize_legacy_request();
 require_once __DIR__ . '/lib.php';
 
 // Intercept Reprint Server API requests as early as possible.

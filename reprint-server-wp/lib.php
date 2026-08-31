@@ -22,7 +22,7 @@ if (!defined('ABSPATH')) {
 }
 
 require_once __DIR__ . '/compat.php';
-\reprint_server_bootstrap_compatibility(false);
+\reprint_server_compat_adopt_legacy_constants();
 
 if (!defined(__NAMESPACE__ . '\\VERSION')) {
     define(__NAMESPACE__ . '\\VERSION', '0.10.7-dev');
@@ -686,8 +686,11 @@ function handle_api_request(array $options = []): void {
     }
 }
 
+\reprint_server_compat_expose_legacy_names();
+// TODO: This call should be deleted after September 2026, as it should no longer be relevant by then.
+\reprint_server_compat_migrate_legacy_options();
+
 if (function_exists('do_action')) {
     /** Fires after the canonical Reprint Server library has loaded. */
     do_action('reprint_server_library_loaded');
 }
-\reprint_server_bootstrap_compatibility(false);

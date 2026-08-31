@@ -311,7 +311,7 @@ final class SiteExportSecretTest extends TestCase
     {
         $GLOBALS['site_export_test_options']['site_export_secret'] = 'legacy-token';
 
-        reprint_server_migrate_legacy_options();
+        reprint_server_compat_migrate_legacy_options();
 
         $this->assertSame('legacy-token', $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION]);
         $this->assertArrayNotHasKey('site_export_secret', $GLOBALS['site_export_test_options']);
@@ -323,7 +323,7 @@ final class SiteExportSecretTest extends TestCase
         $GLOBALS['site_export_test_options']['site_export_secret'] = 'legacy-token';
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
 
-        reprint_server_migrate_legacy_options();
+        reprint_server_compat_migrate_legacy_options();
 
         $this->assertSame('current-token', $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION]);
         $this->assertArrayNotHasKey('site_export_secret', $GLOBALS['site_export_test_options']);
@@ -331,7 +331,7 @@ final class SiteExportSecretTest extends TestCase
 
     public function testMigrationCreatesNoOptionsWhenNoLegacyOptionExists(): void
     {
-        reprint_server_migrate_legacy_options();
+        reprint_server_compat_migrate_legacy_options();
 
         $this->assertSame([], $GLOBALS['site_export_test_options']);
     }
@@ -346,7 +346,7 @@ final class SiteExportSecretTest extends TestCase
         $GLOBALS['site_export_test_options']['site_export_push_authorized_token_fingerprint'] =
             hash('sha256', 'legacy-token');
 
-        reprint_server_migrate_legacy_options();
+        reprint_server_compat_migrate_legacy_options();
 
         $this->assertSame(
             hash('sha256', 'legacy-token'),
