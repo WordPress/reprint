@@ -2769,6 +2769,11 @@ final class PushEndpointsTest extends TestCase {
             'document_root' => '/',
             'push_state_directory' => $push_state_directory,
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
+            'request_context_headers' => [
+                'User-Agent' => 'Reprint/1.0',
+                'Accept-Language' => 'en-US,en;q=0.9',
+                'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
+            ],
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
@@ -3547,6 +3552,11 @@ final class PushEndpointsTest extends TestCase {
             'document_root' => '/',
             'push_state_directory' => $push_state_directory,
             'remote_reprint_api_url' => $this->remote_reprint_api_url,
+            'request_context_headers' => [
+                'User-Agent' => 'Reprint/1.0',
+                'Accept-Language' => 'en-US,en;q=0.9',
+                'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
+            ],
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 4 * 1024 * 1024,
@@ -3801,6 +3811,11 @@ final class PushEndpointsTest extends TestCase {
             'document_root' => '/',
             'push_state_directory' => $push_state_directory,
             'remote_reprint_api_url' => $this->remote_reprint_api_url,
+            'request_context_headers' => [
+                'User-Agent' => 'Reprint/1.0',
+                'Accept-Language' => 'en-US,en;q=0.9',
+                'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
+            ],
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 64,
@@ -4086,6 +4101,11 @@ final class PushEndpointsTest extends TestCase {
     {
         return new MultipartPushStreamClient([
             'remote_reprint_api_url' => $remote_reprint_api_url ?? $this->remote_reprint_api_url,
+            'request_context_headers' => [
+                'User-Agent' => 'Reprint/1.0',
+                'Accept-Language' => 'en-US,en;q=0.9',
+                'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
+            ],
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client($secret),
             'chunk_bytes' => 4,

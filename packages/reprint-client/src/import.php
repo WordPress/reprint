@@ -236,8 +236,8 @@ class ImportClient
     /** @var string Remote Reprint API URL. */
     public $remote_reprint_api_url;
 
-    /** @var string|null Same-origin WordPress Media Library URL for remote Reprint requests. */
-    private $remote_reprint_api_referer = null;
+    /** @var array<string,string> Request-context headers shared by pull and push. */
+    private $request_context_headers = [];
 
     /** @var string Caller-selected state directory for this filesystem root. */
     public $state_dir;
@@ -531,9 +531,18 @@ class ImportClient
         }
 
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
-        $this->remote_reprint_api_referer = wordpress_admin_referer(
-            $this->remote_reprint_api_url
-        );
+        // Some WAFs reject automated requests without User-Agent or Referer.
+        // Accept-Language supplies the browser-language context managed hosts
+        // ask users to configure when diagnosing request-header blocks. These
+        // headers do not authenticate the request.
+        $this->request_context_headers = [
+            'User-Agent' => self::DEFAULT_USER_AGENT,
+            'Accept-Language' => 'en-US,en;q=0.9',
+        ];
+        $referer = wordpress_admin_referer($this->remote_reprint_api_url);
+        if ($referer !== null) {
+            $this->request_context_headers['Referer'] = $referer;
+        }
         $this->state_dir = trim_right_slash($state_dir);
         $this->filesystem_root = trim_right_slash($filesystem_root);
         $remote_state_directory = $selected_remote_state_directory === null
@@ -965,7 +974,7 @@ class ImportClient
             }
             // files-push reads preflight to locate the remote document root,
             // but its lifecycle never writes pull state.
-            $this->state = $this->load_state();
+            $this->state = $this->load_state_with_request_context();
             $this->require_preflight();
             $this->run_files_push($options, $process_lock);
             return;
@@ -978,7 +987,7 @@ class ImportClient
             $this->pull->assert_options_valid_before_state_write($command, $options);
         }
 
-        $this->state = $this->load_state();
+        $this->state = $this->load_state_with_request_context();
 
         if ($command === "pull-metadata") {
             $this->run_pull_metadata();
@@ -1704,6 +1713,7 @@ class ImportClient
             'document_root' => $document_root,
             'push_state_directory' => $context['push_state_directory'],
             'remote_reprint_api_url' => $context['remote_reprint_api_url'],
+            'request_context_headers' => $this->request_context_headers,
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
             'allow_http' => $options['force_http'] ?? false,
             'chunk_bytes' => $chunk_bytes,
@@ -2556,8 +2566,16 @@ class ImportClient
         // headers), so we cycle through candidates and remember the winner.
         $result = null;
         $payload = null;
-        foreach (self::USER_AGENTS as $ua) {
+        $user_agents = array_values(array_unique(array_merge(
+            [
+                $this->request_context_headers['User-Agent'],
+                self::DEFAULT_USER_AGENT,
+            ],
+            self::ALTERNATE_USER_AGENTS
+        )));
+        foreach ($user_agents as $ua) {
             $this->get_state()->user_agent = $ua;
+            $this->request_context_headers['User-Agent'] = $ua;
             $result = $this->fetch_json($url);
             $payload = $result["json"] ?? null;
             if ($payload !== null) {
@@ -11122,35 +11140,34 @@ class ImportClient
         $this->last_error_code = null;
     }
 
+    /** Honest non-browser User-Agent used when no saved choice exists. */
+    private const DEFAULT_USER_AGENT = "Reprint/1.0";
+
     /**
-     * User-Agent strings to try during preflight, in order of preference.
-     * Some WAFs block browser UAs that carry custom auth headers, so we
-     * start with an honest non-browser identity and fall back to common
-     * browser strings.
+     * Browser User-Agent candidates retained for preflight fallback.
+     * Some WAFs block browser UAs that carry custom auth headers, so the
+     * honest non-browser identity remains the default when none is saved.
      */
-    private const USER_AGENTS = [
-        "Reprint/1.0",
+    private const ALTERNATE_USER_AGENTS = [
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
     ];
 
     private function get_base_headers(string $accept): array
     {
-        $ua = $this->get_state()->user_agent ?? self::USER_AGENTS[0];
-        $headers = [
-            "User-Agent: {$ua}",
-            "Accept: {$accept}",
-            "Accept-Language: en-US,en;q=0.9",
-            "Accept-Encoding: gzip, deflate",
-            "Cache-Control: no-cache",
-            "Pragma: no-cache",
-            "Connection: keep-alive",
-        ];
-        if ($this->remote_reprint_api_referer !== null) {
-            $headers[] = "Referer: {$this->remote_reprint_api_referer}";
+        $headers = $this->request_context_headers;
+        $headers['Accept'] = $accept;
+        $headers['Accept-Encoding'] = 'gzip, deflate';
+        $headers['Cache-Control'] = 'no-cache';
+        $headers['Pragma'] = 'no-cache';
+        $headers['Connection'] = 'keep-alive';
+
+        $header_lines = [];
+        foreach ($headers as $name => $value) {
+            $header_lines[] = "{$name}: {$value}";
         }
 
-        return $headers;
+        return $header_lines;
     }
 
     /**
@@ -12087,6 +12104,7 @@ class ImportClient
         $this->state->set_preflight_record($previous_state->preflight_record());
         $this->state->version = $previous_state->version;
         $this->state->webhost = $previous_state->webhost;
+        $this->state->user_agent = $previous_state->user_agent;
         $this->state->follow_symlinks = $previous_state->follow_symlinks;
         $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
         $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
@@ -12326,9 +12344,16 @@ class ImportClient
         return $decoded;
     }
 
-    /**
-     * Load pull state from disk.
-     */
+    /** Load pull state and apply its saved User-Agent to the shared request context. */
+    private function load_state_with_request_context(): PullState
+    {
+        $state = $this->load_state();
+        $this->request_context_headers['User-Agent'] =
+            $state->user_agent ?? self::DEFAULT_USER_AGENT;
+        return $state;
+    }
+
+    /** Load pull state from disk. */
     private function load_state(): PullState
     {
         if (!file_exists($this->pull_state_file)) {

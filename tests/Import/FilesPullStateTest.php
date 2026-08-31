@@ -175,6 +175,7 @@ class FilesPullStateTest extends TestCase
         file_put_contents($remoteIndexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
+            "user_agent" => "Saved-Browser/1.0",
             "active_resumable_command" => [
                 "command_name" => "files-pull",
                 "completion_state" => "complete",
@@ -187,6 +188,7 @@ class FilesPullStateTest extends TestCase
         $abortMethod->invoke($client, 'files-pull');
 
         $state = $this->readState();
+        $this->assertSame("Saved-Browser/1.0", $state["user_agent"]);
         $this->assertNotEquals(
             "complete",
             $state["active_resumable_command"]["completion_state"] ?? null,
