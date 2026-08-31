@@ -409,7 +409,8 @@ class AdaptiveTunerTest extends TestCase
 
         $this->assertNull($tuner->get_request_body_budget("file_index"));
         $this->assertNull($tuner->get_request_body_budget("sql_chunk"));
-        $this->assertNull(
+        $this->assertSame(
+            800 * 1024,
             $this->makeTuner(["enabled" => false])->get_request_body_budget("file_fetch")
         );
 
