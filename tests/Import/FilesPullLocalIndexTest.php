@@ -192,9 +192,11 @@ final class FilesPullLocalIndexTest extends TestCase
 
     public function testPullDoesNotAddDefaultSkippedPathsToTheLocalIndex(): void
     {
+        $backupPath = 'wp-content/updraft/backup_site-uploads.zip';
         $this->writeRemoteOverrides([
             'added_files' => [
                 'node_modules/pulled-package.js' => 'pulled dependency',
+                $backupPath => 'pulled backup',
             ],
         ]);
 
@@ -206,6 +208,10 @@ final class FilesPullLocalIndexTest extends TestCase
                 $this->localTree . '/node_modules/pulled-package.js'
             )
         );
+        $this->assertSame(
+            'pulled backup',
+            file_get_contents($this->localTree . '/' . $backupPath)
+        );
         $index = $this->readIndex($this->localIndexPath());
         $this->assertArrayNotHasKey(
             $this->localIndexEntryPath('node_modules'),
@@ -213,6 +219,10 @@ final class FilesPullLocalIndexTest extends TestCase
         );
         $this->assertArrayNotHasKey(
             $this->localIndexEntryPath('node_modules/pulled-package.js'),
+            $index
+        );
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath($backupPath),
             $index
         );
         $diff = $this->runFilesDiff();

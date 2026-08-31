@@ -358,9 +358,10 @@ final class FileIndexProcessor {
         $this->directory_stack[$frame_index]["after"] = $entry_name;
         $path = wp_join_unix_paths($this->current_directory, $entry_name);
 
-        // Apply omissions before lstat() and before a directory can enter the
-        // stack. Omitted subtrees therefore cost no extra filesystem calls.
-        if (self::path_is_default_skipped($path)) {
+        // Apply component omissions before lstat() and before a directory can
+        // enter the stack. Omitted subtrees therefore cost no extra filesystem
+        // calls.
+        if (self::path_has_default_skipped_component($path)) {
             $this->step_status = self::STATUS_SKIPPED;
             return true;
         }
@@ -378,6 +379,13 @@ final class FileIndexProcessor {
         $stat = @lstat($path);
         if ($stat === false) {
             $this->step_status = self::STATUS_PATH_UNAVAILABLE;
+            return true;
+        }
+        if (
+            self::stat_is_file($stat)
+            && self::file_name_is_default_skipped($path)
+        ) {
+            $this->step_status = self::STATUS_SKIPPED;
             return true;
         }
 
@@ -505,10 +513,24 @@ final class FileIndexProcessor {
     /**
      * Reports whether a path belongs to the established default skip set.
      *
-     * @param string $path Filesystem path to classify.
+     * @param string $path         Filesystem path to classify.
+     * @param bool   $path_is_file Whether the path is a regular file.
      * @return bool Whether the path should be omitted.
      */
-    public static function path_is_default_skipped(string $path): bool
+    public static function path_is_default_skipped(
+        string $path,
+        bool $path_is_file = true
+    ): bool
+    {
+        return self::path_has_default_skipped_component($path)
+            || (
+                $path_is_file
+                && self::file_name_is_default_skipped($path)
+            );
+    }
+
+    /** Reports whether a path contains a complete default-skipped component. */
+    private static function path_has_default_skipped_component(string $path): bool
     {
         // Sentinel slashes make component matches independent of whether the
         // component appears at the beginning, middle, or end of the path.
@@ -539,6 +561,28 @@ final class FileIndexProcessor {
             }
         }
 
+        // Version-control metadata and local development dependencies match
+        // complete path components. Similar names such as cache-control or
+        // node_modules-backup remain included.
+        static $skipped_components = [
+            ".git", ".svn", ".hg", ".bzr",
+            "node_modules",
+            ".idea", ".vscode",
+            ".cache", ".npm", ".yarn", ".pnpm-store",
+        ];
+        foreach ($skipped_components as $component) {
+            if (strpos($path_with_boundaries, "/" . $component . "/") !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** Reports whether a basename matches a default-skipped file shape. */
+    private static function file_name_is_default_skipped(string $path): bool
+    {
+        $path_with_boundaries = "/" . trim($path, "/") . "/";
         $basename = basename($path);
 
         // Keep walking backup directories so an unrelated file placed there
@@ -582,21 +626,6 @@ final class FileIndexProcessor {
             return true;
         }
 
-        // Version-control metadata and local development dependencies match
-        // complete path components. Similar names such as cache-control or
-        // node_modules-backup remain included.
-        static $skipped_components = [
-            ".git", ".svn", ".hg", ".bzr",
-            "node_modules",
-            ".idea", ".vscode",
-            ".cache", ".npm", ".yarn", ".pnpm-store",
-        ];
-        foreach ($skipped_components as $component) {
-            if (strpos($path_with_boundaries, "/" . $component . "/") !== false) {
-                return true;
-            }
-        }
-
         // Operating-system and server log metadata matches only the basename.
         static $skipped_basenames = [
             ".DS_Store", "._.DS_Store",
@@ -622,6 +651,16 @@ final class FileIndexProcessor {
         }
 
         return false;
+    }
+
+    /**
+     * Reports whether an inspected path is a regular file.
+     *
+     * @param array $stat lstat() result for the path.
+     */
+    private static function stat_is_file(array $stat): bool
+    {
+        return ( $stat["mode"] & self::STAT_TYPE_MASK ) === self::STAT_TYPE_FILE;
     }
 
     /**
@@ -825,7 +864,7 @@ final class FileIndexProcessor {
 
         $path_root = $root["requested_path"];
 
-        if (self::path_is_default_skipped($path_root)) {
+        if (self::path_has_default_skipped_component($path_root)) {
             $this->step_status = self::STATUS_SKIPPED;
             return;
         }
@@ -841,6 +880,13 @@ final class FileIndexProcessor {
         $stat = @lstat($path_root);
         if ($stat === false) {
             $this->step_status = self::STATUS_PATH_UNAVAILABLE;
+            return;
+        }
+        if (
+            self::stat_is_file($stat)
+            && self::file_name_is_default_skipped($path_root)
+        ) {
+            $this->step_status = self::STATUS_SKIPPED;
             return;
         }
 

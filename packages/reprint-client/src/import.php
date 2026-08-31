@@ -3685,7 +3685,8 @@ class ImportClient
                 if (
                     $this->local_path_is_default_skipped(
                         $local_absolute_path,
-                        $local_relative_path
+                        $local_relative_path,
+                        $local_entry["type"]
                     )
                     || !$this->is_selected_for_pulling(
                         $local_absolute_path,
@@ -3707,7 +3708,10 @@ class ImportClient
                         "Failed to remove a local path absent from the current remote index."
                     );
                 }
-                $this->pull_index_journal->record_local_deletion($local_absolute_path);
+                $this->pull_index_journal->record_local_deletion(
+                    $local_absolute_path,
+                    $local_entry["type"]
+                );
                 $local_parent_path = dirname($local_absolute_path);
                 while (
                     $local_parent_path !== $this->filesystem_root
@@ -3736,14 +3740,15 @@ class ImportClient
      * Checks whether a local path is omitted from the remote index by default.
      *
      * The file index omits generated backup archives, logs, caches, temporary
-     * files, version-control metadata, OS
-     * metadata, and editor scratch files. A remap may place one of those paths
-     * under a different local name, so this checks both the path relative to
-     * --fs-root and every matching remote path before allowing its removal.
+     * files, version-control metadata, OS metadata, and editor scratch files.
+     * A remap may place one of those paths under a different local name, so
+     * this checks both the path relative to --fs-root and every matching remote
+     * path before allowing its removal.
      */
     private function local_path_is_default_skipped(
         string $local_absolute_path,
-        string $local_relative_path
+        string $local_relative_path,
+        string $local_path_type
     ): bool {
         $candidate_paths = [$local_relative_path];
         foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
@@ -3758,8 +3763,14 @@ class ImportClient
                 );
             }
         }
+        $path_is_file = $local_path_type === "file";
         foreach ($candidate_paths as $candidate_path) {
-            if (FileIndexProcessor::path_is_default_skipped($candidate_path)) {
+            if (
+                FileIndexProcessor::path_is_default_skipped(
+                    $candidate_path,
+                    $path_is_file
+                )
+            ) {
                 return true;
             }
         }
@@ -7968,7 +7979,8 @@ class ImportClient
                             } else {
                                 $this->pull_index_journal->record_successful_deletion(
                                     $remote_absolute_path,
-                                    $local_absolute_path
+                                    $local_absolute_path,
+                                    $remote_path_type
                                 );
                             }
                         }

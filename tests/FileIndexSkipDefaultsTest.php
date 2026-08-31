@@ -231,6 +231,9 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertContains('wp-content/plugins/cache-control/admin.css', $rel);
         $this->assertContains('wp-content/updraft/restore-notes.txt', $rel);
         $this->assertContains('wp-content/ai1wm-backups/site-diagram.png', $rel);
+        $this->assertContains('wp-content/updraft/backup_project.zip/important.txt', $rel);
+        $this->assertContains('wp-content/uploads/history.log/important.txt', $rel);
+        $this->assertContains('wp-content/uploads/theme-history.log', $rel);
 
         // --- must be filtered (junk / regenerable) ---
         $this->assertNotContains('wp-content/cache/page.html', $rel);
@@ -414,9 +417,11 @@ final class FileIndexSkipDefaultsTest extends TestCase
             'wp-content/updraft/backup_2025-02-16-1332_DailyRidgecom_61e86367b74c-uploads639.zip' => "backup",
             'wp-content/updraft/log.61e86367b74c.txt' => "log",
             'wp-content/updraft/restore-notes.txt' => "keep",
+            'wp-content/updraft/backup_project.zip/important.txt' => "keep",
             'wp-content/ai1wm-backups/example-com-20260831-120000.wpress' => "backup",
             'wp-content/ai1wm-backups/site-diagram.png' => "keep",
             'wp-content/debug.log' => "debug",
+            'wp-content/uploads/history.log/important.txt' => "keep",
             'wp-content/uploads/wc-logs/checkout.log' => "log",
             'wp-content/plugins/all-in-one-wp-migration/storage/job.tmp' => "temporary",
             '.git/HEAD' => "ref: refs/heads/main\n",
@@ -438,6 +443,8 @@ final class FileIndexSkipDefaultsTest extends TestCase
             }
             file_put_contents($abs, $body);
         }
+
+        symlink('../themes/foo', $site . '/wp-content/uploads/theme-history.log');
 
         return $site;
     }
