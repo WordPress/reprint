@@ -29,11 +29,12 @@ require_once __DIR__ . '/../index/class-file-sync-plan-runner.php';
  *
  * ## Durable boundary
  *
- * The PushPlan cursor contains one of four internal phases: `indexing`,
- * `starting_diff`, `diffing`, or `complete`. A false next_step() result means
- * both indexes reached EOF; the caller stores the returned cursor and closes
- * the plan before changing its phase. The completed files remain in the
- * caller-owned plan directory until the caller no longer needs them.
+ * The PushPlan cursor contains one of five internal phases:
+ * `filtering_patch_base`, `indexing`, `starting_diff`, `diffing`, or
+ * `complete`. A false next_step() result means both indexes reached EOF; the
+ * caller stores the returned cursor and closes the plan before changing its
+ * phase. The completed files remain in the caller-owned plan directory until
+ * the caller no longer needs them.
  *
  * ## Change detection
  *
@@ -46,19 +47,21 @@ require_once __DIR__ . '/../index/class-file-sync-plan-runner.php';
  * With no local index, every file, symlink, and empty directory is
  * selected, and no deletion can be detected. Excluded paths are omitted from
  * both path lists but remain in the fresh local index.
- * Entries which became default-skipped are omitted from a plan-owned patch
- * base index, so leaving the managed set does not plan a delete operation.
+ * A plan-owned patch base omits entries which became default-skipped, so
+ * leaving the managed set does not plan a delete operation. The retained
+ * local index remains unchanged.
  *
  * The index reader trusts the entry values produced by the indexer. It retains
  * failure handling for reading lines, decoding JSON, and decoding base64 paths.
  *
  * ## Durability and memory
  *
+ * Each patch-base filtering step reads at most one retained local-index entry.
  * Each indexing step advances one FileIndexProcessor traversal event and
  * updates the traversal cursor and fresh-index byte offset returned to the
  * caller. A separate step starts the index diff. Each diff step compares at
- * most one path represented by either index and updates its next cursor.
- * The owner flushes pending output before storing a cursor. `resume()` discards
+ * most one path represented by either index and updates its next cursor. The
+ * owner flushes pending output before storing a cursor. `resume()` discards
  * bytes beyond saved offsets, so an interrupted step cannot leave duplicate
  * durable entries.
  *
@@ -70,15 +73,19 @@ require_once __DIR__ . '/../index/class-file-sync-plan-runner.php';
  *
  * @phpstan-import-type Cursor from FileSyncPlanRunner as FileSyncPlanRunnerCursor
  * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
+ * @phpstan-type FilteringPatchBaseCursor array{phase:'filtering_patch_base',local_index_byte_offset:int,patch_base_index_byte_offset:int}
  * @phpstan-type IndexingCursor array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}
  * @phpstan-type StartingDiffCursor array{phase:'starting_diff'}
  * @phpstan-type IndexDiffCursor array{phase:'diffing',file_sync_plan_runner_cursor:FileSyncPlanRunnerCursor}
  * @phpstan-type CompleteCursor array{phase:'complete',local_paths_to_push_count:int,local_file_bytes_to_push:int}
- * @phpstan-type PushPlanPosition IndexingCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
- * @phpstan-type PushPlanCursor array{plan_directory:string,filesystem_root:string,local_index_file:string,document_root_local_relative_path:string,position:PushPlanPosition}
+ * @phpstan-type PushPlanPosition FilteringPatchBaseCursor|IndexingCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
+ * @phpstan-type PushPlanCursor array{push_plan_version:2,plan_directory:string,filesystem_root:string,local_index_file:string,document_root_local_relative_path:string,position:PushPlanPosition}
  */
 class PushPlan
 {
+    /** Current durable cursor format. */
+    private const CURSOR_VERSION = 2;
+
     /** @var string Resolved filesystem root inspected while building the fresh local index. */
     private string $filesystem_root;
 
@@ -100,7 +107,7 @@ class PushPlan
     /** @var string Plan-owned fresh local index file. */
     private string $fresh_local_index_file;
 
-    /** @var string Optional patch base index without newly default-skipped entries. */
+    /** @var string Plan-owned patch base index without newly default-skipped entries. */
     private string $patch_base_index_file;
 
     /** @var string Plan path containing receiver-owned exclusions for the active push. */
@@ -126,15 +133,21 @@ class PushPlan
 
     /** @var resource|null Open fresh local index retained during indexing. */
     private $fresh_local_index_handle = null;
+
+    /** @var resource|null Open retained local index used while filtering the patch base. */
+    private $local_index_file_handle = null;
+
+    /** @var resource|null Open plan-owned patch base retained while filtering. */
+    private $patch_base_index_handle = null;
     /** @var int|null Combined size of the two retained indexes during the index diff. */
     private ?int $index_bytes_total = null;
 
     /**
-     * Starts a push plan by opening a fresh local index traversal.
+     * Starts a push plan by opening its filtered patch base.
      *
      * Copies the target exclusions into the plan directory before opening the
-     * fresh local index traversal. Until the caller stores the returned cursor,
-     * an interrupted start is repeated and overwrites these initial plan files.
+     * filtered patch base. Until the caller stores the returned cursor, an
+     * interrupted start is repeated and overwrites these initial plan files.
      *
      * @param string $plan_directory      Caller-owned active plan directory.
      * @param string $filesystem_root     Resolved filesystem root.
@@ -160,33 +173,7 @@ class PushPlan
             throw new RuntimeException("Failed to copy excluded paths into the push plan: {$excluded_paths_path}");
         }
         $plan->excluded_paths = $plan->load_excluded_paths();
-        $plan->create_patch_base_index_without_default_skipped_entries();
-        $plan->fresh_local_index_handle = fopen($plan->fresh_local_index_file, "w+b");
-        if (!is_resource($plan->fresh_local_index_handle)) {
-            throw new RuntimeException("Failed to open the fresh local index: {$plan->fresh_local_index_file}");
-        }
-        $filesystem_root_record = [
-            "requested_path" => $plan->filesystem_root,
-            "resolved_path" => $plan->filesystem_root,
-            "type" => "directory",
-        ];
-        $plan->file_index_processor = FileIndexProcessor::start(
-            [$filesystem_root_record],
-            $filesystem_root_record,
-            false,
-            $plan->plan_directory
-        );
-        $plan->cursor = [
-            "plan_directory" => $plan->plan_directory,
-            "filesystem_root" => $plan->filesystem_root,
-            "local_index_file" => $plan->local_index_file,
-            "document_root_local_relative_path" => $plan->document_root_local_relative_path,
-            "position" => [
-                "phase" => "indexing",
-                "file_index_cursor" => $plan->file_index_processor->get_cursor(),
-                "fresh_local_index_byte_offset" => 0,
-            ],
-        ];
+        $plan->start_patch_base_filter();
         return $plan;
     }
 
@@ -216,7 +203,23 @@ class PushPlan
         if ($position["phase"] !== "complete") {
             $plan->excluded_paths = $plan->load_excluded_paths();
         }
-        if ($position["phase"] === "indexing") {
+
+        // An indexing cursor from before patch-base filtering existed would
+        // mix the old traversal rules with the current default skips. Restart
+        // only that unfinished traversal; later old phases already contain a
+        // complete index made under one rule set.
+        if (
+            !array_key_exists("push_plan_version", $cursor)
+            && $position["phase"] === "indexing"
+        ) {
+            $plan->start_patch_base_filter();
+            return $plan;
+        }
+        $plan->cursor["push_plan_version"] = self::CURSOR_VERSION;
+
+        if ($position["phase"] === "filtering_patch_base") {
+            $plan->open_patch_base_indexes_for_continuation();
+        } elseif ($position["phase"] === "indexing") {
             $plan->open_fresh_local_index_for_continuation();
         } elseif ($position["phase"] === "diffing") {
             $plan->file_sync_plan_runner = FileSyncPlanRunner::resume(
@@ -298,6 +301,12 @@ class PushPlan
      */
     public function flush_pending_outputs(): void
     {
+        if (
+            is_resource($this->patch_base_index_handle)
+            && !fflush($this->patch_base_index_handle)
+        ) {
+            throw new RuntimeException("Failed to flush the filtered patch base index.");
+        }
         if (
             is_resource($this->fresh_local_index_handle)
             && !fflush($this->fresh_local_index_handle)
@@ -407,6 +416,9 @@ class PushPlan
         }
 
         switch ($position["phase"]) {
+            case "filtering_patch_base":
+                $this->next_patch_base_filter_step();
+                return true;
             case "indexing":
                 $this->next_file_index_step();
                 return true;
@@ -502,127 +514,185 @@ class PushPlan
         $this->set_index_bytes_total();
     }
 
-    /**
-     * Creates a filtered patch base when an older local index contains paths
-     * which are now default-skipped.
-     *
-     * Without this filtered comparison, their absence from the fresh local
-     * index would plan delete operations. The local index remains unchanged.
-     */
-    private function create_patch_base_index_without_default_skipped_entries(): void
+    /** Opens a new filtered patch base and stores its initial cursor. */
+    private function start_patch_base_filter(): void
     {
-        if (
-            is_file($this->patch_base_index_file)
-            && !@unlink($this->patch_base_index_file)
-        ) {
+        $this->patch_base_index_handle = @fopen(
+            $this->patch_base_index_file,
+            "w+b"
+        );
+        if (!is_resource($this->patch_base_index_handle)) {
             throw new RuntimeException(
-                "Failed to remove the earlier filtered patch base index: {$this->patch_base_index_file}"
+                "Failed to open the filtered patch base index: {$this->patch_base_index_file}"
+            );
+        }
+        if (is_file($this->local_index_file)) {
+            $this->local_index_file_handle = @fopen($this->local_index_file, "rb");
+            if (!is_resource($this->local_index_file_handle)) {
+                $this->close_patch_base_index_handles();
+                throw new RuntimeException(
+                    "Failed to open the local index: {$this->local_index_file}"
+                );
+            }
+        }
+        $this->cursor = [
+            "push_plan_version" => self::CURSOR_VERSION,
+            "plan_directory" => $this->plan_directory,
+            "filesystem_root" => $this->filesystem_root,
+            "local_index_file" => $this->local_index_file,
+            "document_root_local_relative_path" => $this->document_root_local_relative_path,
+            "position" => [
+                "phase" => "filtering_patch_base",
+                "local_index_byte_offset" => 0,
+                "patch_base_index_byte_offset" => 0,
+            ],
+        ];
+    }
+
+    /** Reopens the patch-base inputs at their last durable byte offsets. */
+    private function open_patch_base_indexes_for_continuation(): void
+    {
+        /** @var FilteringPatchBaseCursor $position */
+        $position = $this->cursor["position"];
+        $this->patch_base_index_handle = @fopen(
+            $this->patch_base_index_file,
+            "r+b"
+        );
+        if (!is_resource($this->patch_base_index_handle)) {
+            throw new RuntimeException(
+                "Failed to reopen the filtered patch base index: {$this->patch_base_index_file}"
+            );
+        }
+        if (
+            !ftruncate(
+                $this->patch_base_index_handle,
+                $position["patch_base_index_byte_offset"]
+            )
+            || fseek(
+                $this->patch_base_index_handle,
+                $position["patch_base_index_byte_offset"]
+            ) !== 0
+        ) {
+            $this->close_patch_base_index_handles();
+            throw new RuntimeException(
+                "Failed to restore the filtered patch base byte offset."
             );
         }
         if (!is_file($this->local_index_file)) {
+            if ($position["local_index_byte_offset"] !== 0) {
+                $this->close_patch_base_index_handles();
+                throw new RuntimeException(
+                    "Cannot resume patch-base filtering because the local index is missing: {$this->local_index_file}"
+                );
+            }
             return;
         }
-        $local_index_handle = @fopen($this->local_index_file, "rb");
-        if (!is_resource($local_index_handle)) {
+        $this->local_index_file_handle = @fopen($this->local_index_file, "rb");
+        if (
+            !is_resource($this->local_index_file_handle)
+            || fseek(
+                $this->local_index_file_handle,
+                $position["local_index_byte_offset"]
+            ) !== 0
+        ) {
+            $this->close_patch_base_index_handles();
             throw new RuntimeException(
-                "Failed to open the local index: {$this->local_index_file}"
-            );
-        }
-        $has_default_skipped_entry = false;
-        try {
-            while (true) {
-                $local_index_line = fgets($local_index_handle);
-                if ($local_index_line === false) {
-                    break;
-                }
-                $local_index_entry = decode_local_index_entry($local_index_line);
-                if (
-                    FileIndexProcessor::path_is_default_skipped(
-                        $local_index_entry["path"],
-                        $local_index_entry["type"] === "file"
-                    )
-                ) {
-                    $has_default_skipped_entry = true;
-                    break;
-                }
-            }
-            if (!$has_default_skipped_entry && !feof($local_index_handle)) {
-                throw new RuntimeException(
-                    "Failed to read the local index: {$this->local_index_file}"
-                );
-            }
-        } finally {
-            fclose($local_index_handle);
-        }
-        if (!$has_default_skipped_entry) {
-            return;
-        }
-
-        $next_patch_base_index_file = $this->patch_base_index_file . ".swap";
-        $local_index_handle = @fopen($this->local_index_file, "rb");
-        if (!is_resource($local_index_handle)) {
-            throw new RuntimeException(
-                "Failed to reopen the local index: {$this->local_index_file}"
-            );
-        }
-        $patch_base_index_handle = @fopen($next_patch_base_index_file, "wb");
-        if (!is_resource($patch_base_index_handle)) {
-            fclose($local_index_handle);
-            throw new RuntimeException(
-                "Failed to open the filtered patch base index: {$next_patch_base_index_file}"
-            );
-        }
-        try {
-            while (true) {
-                $local_index_line = fgets($local_index_handle);
-                if ($local_index_line === false) {
-                    break;
-                }
-                $local_index_entry = decode_local_index_entry($local_index_line);
-                if (
-                    FileIndexProcessor::path_is_default_skipped(
-                        $local_index_entry["path"],
-                        $local_index_entry["type"] === "file"
-                    )
-                ) {
-                    continue;
-                }
-                if (
-                    fwrite($patch_base_index_handle, $local_index_line)
-                    !== strlen($local_index_line)
-                ) {
-                    throw new RuntimeException(
-                        "Failed to write the filtered patch base index: {$next_patch_base_index_file}"
-                    );
-                }
-            }
-            if (!feof($local_index_handle)) {
-                throw new RuntimeException(
-                    "Failed to read the local index: {$this->local_index_file}"
-                );
-            }
-            if (!fflush($patch_base_index_handle)) {
-                throw new RuntimeException(
-                    "Failed to flush the filtered patch base index: {$next_patch_base_index_file}"
-                );
-            }
-        } catch (Throwable $throwable) {
-            fclose($local_index_handle);
-            fclose($patch_base_index_handle);
-            @unlink($next_patch_base_index_file);
-            throw $throwable;
-        }
-        fclose($local_index_handle);
-        fclose($patch_base_index_handle);
-        if (!@rename($next_patch_base_index_file, $this->patch_base_index_file)) {
-            @unlink($next_patch_base_index_file);
-            throw new RuntimeException(
-                "Failed to replace the filtered patch base index: {$this->patch_base_index_file}"
+                "Failed to restore the local index byte offset: {$this->local_index_file}"
             );
         }
     }
 
-    /** Returns the local index snapshot used as the patch base. */
+    /** Copies or omits one retained local-index entry from the patch base. */
+    private function next_patch_base_filter_step(): void
+    {
+        if (is_resource($this->local_index_file_handle)) {
+            $local_index_line = fgets($this->local_index_file_handle);
+            if ($local_index_line !== false) {
+                $local_index_entry = decode_local_index_entry($local_index_line);
+                $local_absolute_path = wp_join_unix_paths(
+                    $this->filesystem_root,
+                    $local_index_entry["path"]
+                );
+                clearstatcache(true, $local_absolute_path);
+                $current_path_stat = @lstat($local_absolute_path);
+                $current_path_is_file = $current_path_stat === false
+                    ? $local_index_entry["type"] === "file"
+                    : (
+                        ( $current_path_stat["mode"] & FileIndexProcessor::STAT_TYPE_MASK )
+                        === FileIndexProcessor::STAT_TYPE_FILE
+                    );
+                if (
+                    !FileIndexProcessor::path_is_default_skipped(
+                        $local_index_entry["path"],
+                        $current_path_is_file
+                    )
+                    && fwrite($this->patch_base_index_handle, $local_index_line)
+                        !== strlen($local_index_line)
+                ) {
+                    throw new RuntimeException(
+                        "Failed to write the filtered patch base index: {$this->patch_base_index_file}"
+                    );
+                }
+                $local_index_byte_offset = ftell($this->local_index_file_handle);
+                $patch_base_index_byte_offset = ftell(
+                    $this->patch_base_index_handle
+                );
+                if (
+                    !is_int($local_index_byte_offset)
+                    || !is_int($patch_base_index_byte_offset)
+                ) {
+                    throw new RuntimeException(
+                        "Failed to determine the filtered patch base byte offsets."
+                    );
+                }
+                $this->cursor["position"] = [
+                    "phase" => "filtering_patch_base",
+                    "local_index_byte_offset" => $local_index_byte_offset,
+                    "patch_base_index_byte_offset" => $patch_base_index_byte_offset,
+                ];
+                return;
+            }
+            if (!feof($this->local_index_file_handle)) {
+                throw new RuntimeException(
+                    "Failed to read the local index: {$this->local_index_file}"
+                );
+            }
+        }
+        if (!fflush($this->patch_base_index_handle)) {
+            throw new RuntimeException(
+                "Failed to flush the filtered patch base index: {$this->patch_base_index_file}"
+            );
+        }
+        $this->close_patch_base_index_handles();
+
+        $this->fresh_local_index_handle = @fopen(
+            $this->fresh_local_index_file,
+            "w+b"
+        );
+        if (!is_resource($this->fresh_local_index_handle)) {
+            throw new RuntimeException(
+                "Failed to open the fresh local index: {$this->fresh_local_index_file}"
+            );
+        }
+        $filesystem_root_record = [
+            "requested_path" => $this->filesystem_root,
+            "resolved_path" => $this->filesystem_root,
+            "type" => "directory",
+        ];
+        $this->file_index_processor = FileIndexProcessor::start(
+            [$filesystem_root_record],
+            $filesystem_root_record,
+            false,
+            $this->plan_directory
+        );
+        $this->cursor["position"] = [
+            "phase" => "indexing",
+            "file_index_cursor" => $this->file_index_processor->get_cursor(),
+            "fresh_local_index_byte_offset" => 0,
+        ];
+    }
+
+    /** Returns the filtered patch base, or the local index for a legacy cursor. */
     private function get_patch_base_index_file(): string
     {
         return is_file($this->patch_base_index_file)
@@ -715,6 +785,7 @@ class PushPlan
         if (isset($this->file_sync_plan_runner)) {
             $this->file_sync_plan_runner->close();
         }
+        $this->close_patch_base_index_handles();
         $this->close_fresh_local_index_handle();
         $this->closed = true;
     }
@@ -728,6 +799,19 @@ class PushPlan
             fclose($this->fresh_local_index_handle);
         }
         $this->fresh_local_index_handle = null;
+    }
+
+    /** Closes the retained and filtered patch-base index handles. */
+    private function close_patch_base_index_handles(): void
+    {
+        if (is_resource($this->local_index_file_handle)) {
+            fclose($this->local_index_file_handle);
+        }
+        $this->local_index_file_handle = null;
+        if (is_resource($this->patch_base_index_handle)) {
+            fclose($this->patch_base_index_handle);
+        }
+        $this->patch_base_index_handle = null;
     }
 
     /**
