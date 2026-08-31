@@ -10,6 +10,8 @@ use function WordPress\Reprint\Server\relative_path_under;
 use function WordPress\Reprint\Server\trim_right_slash;
 use function WordPress\Reprint\Server\wp_join_unix_paths;
 
+require_once __DIR__ . '/utils.php';
+
 if (!class_exists('Site_Export_Multipart_Processor', false)) {
     require_once __DIR__ . '/class-multipart-processor.php';
 }

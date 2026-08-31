@@ -66,6 +66,7 @@ foreach ([
 ] as $autoloader) {
     if (file_exists($autoloader)) {
         require_once $autoloader;
+        require_once dirname($autoloader) . '/wp-php-toolkit/reprint-server/src/utils.php';
         break;
     }
 }

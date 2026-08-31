@@ -8,11 +8,11 @@
     "packages": [
         {
             "name": "wp-php-toolkit/reprint-server",
-            "version": "dev-fix/remove-pdo-polyfill",
+            "version": "dev-feature/lazy-reprint-server-utils",
             "dist": {
                 "type": "path",
                 "url": "../packages/reprint-server",
-                "reference": "111b06d1c519dcdf5a401baee240400d59dba7f1"
+                "reference": "57cc3844bfe2644c9a6b500ed0044f4f8ecacdfa"
             },
             "require": {
                 "php": ">=7.2"
@@ -28,9 +28,6 @@
             "autoload": {
                 "classmap": [
                     "src/"
-                ],
-                "files": [
-                    "src/utils.php"
                 ]
             },
             "license": [

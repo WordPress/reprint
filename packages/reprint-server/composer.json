@@ -12,9 +12,6 @@
     "autoload": {
         "classmap": [
             "src/"
-        ],
-        "files": [
-            "src/utils.php"
         ]
     },
     "suggest": {

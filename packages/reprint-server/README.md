@@ -10,9 +10,11 @@ installed side by side. Consumers should require
 
 ## Loading it
 
-The package autoloads normally. Composer's classmap covers every class in
-`src/`, and the `files` entry loads `src/utils.php`. Install it and the classes
-resolve — there is nothing to call.
+Composer's classmap covers every class in `src/`, so classes resolve after
+requiring `vendor/autoload.php`.
+
+Reprint's entry points load their utility functions internally. `src/utils.php`
+is an internal implementation file and is not a public autoload entry point.
 
 `src/export.php` never autoloads, and that is deliberate. It declares functions
 rather than classes, so the classmap scan finds nothing in it to register. Keep
