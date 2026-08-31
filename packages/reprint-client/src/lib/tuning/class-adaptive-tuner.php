@@ -327,7 +327,7 @@ class AdaptiveTuner
         $defaults = [
             "enabled" => true,
             "use_server_time" => true,
-            "max_execution_time" => 5,
+            "max_execution_time" => 15,
             "memory_threshold" => 0.8,
             "duty" => 0.5,
             "duty_min" => 0.35,
