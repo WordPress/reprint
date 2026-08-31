@@ -55,6 +55,9 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             '--sql-fragments-start=251',
             '--sql-fragments-min=251',
             '--sql-fragments-max=251',
+            // End the request after the hook's 10-second pause. This keeps the
+            // next batch in a separate request, where the test stops it.
+            '--max-exec=5',
             '--progress=jsonl',
         ];
     }
