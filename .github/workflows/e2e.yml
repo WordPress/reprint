@@ -133,6 +133,10 @@ jobs:
       - name: Setup infrastructure
         run: tests/e2e/ci/setup-infrastructure.sh "${{ matrix.exporter_php }}"
 
+      - name: Start Oracle MySQL 8 target
+        if: matrix.exporter_php == '8.2'
+        run: tests/e2e/ci/start-mysql8-target.sh
+
       - name: Restore importer PHP and Composer for CLI tools
         if: matrix.exporter_php == '5.6'
         uses: shivammathur/setup-php@v2
@@ -359,5 +363,7 @@ jobs:
           sudo journalctl -u nginx --no-pager -n 30 2>/dev/null || true
           echo "--- MariaDB journal ---"
           sudo journalctl -u mariadb --no-pager -n 30 2>/dev/null || true
+          echo "--- Oracle MySQL 8 log ---"
+          docker logs reprint-e2e-mysql8-target 2>/dev/null || true
           echo "--- PHP processes ---"
           ps aux | grep php || true
