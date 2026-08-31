@@ -87,6 +87,21 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         return { childProcess, output, exit };
     }
 
+    async function releasePausedSource() {
+        writeHookState(site, {
+            ...readHookState(site),
+            releasePausedSource: true,
+        });
+        const sourceDeadline = Date.now() + 5000;
+        while (Date.now() < sourceDeadline) {
+            if (readHookState(site)?.sourceRequestStopped === true) {
+                return;
+            }
+            await sleep(25);
+        }
+        assert.fail('The paused source request did not stop after the importer exited.');
+    }
+
     beforeAll(async () => {
         await ensureSite(site, {
             files: 'none',
@@ -121,8 +136,9 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         writeHookState(site, {
             pauseTable: sourceTable,
             pauseNextBatch: false,
-            stopAfterBatch: false,
             paused: false,
+            releasePausedSource: false,
+            sourceRequestStopped: false,
             countDrops: false,
             drops: {},
         });
@@ -137,18 +153,19 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             '            }',
             '        }',
             '    }',
-            '    if (!empty($state[\'stopAfterBatch\'])) {',
-            '        // Keep the request open while the importer saves the preceding part.',
-            '        usleep(10000000);',
-            '        exit;',
-            '    }',
             '    if (!empty($state[\'pauseNextBatch\'])) {',
             '        $state[\'pauseNextBatch\'] = false;',
             '        $state[\'paused\'] = true;',
-            '        $state[\'stopAfterBatch\'] = true;',
             '        e2e_write_hook_state($state_file, $state);',
-            '        usleep(10000000);',
-            '        return;',
+            '        // Keep the request open until the test has killed the importer',
+            '        // after it observes the preceding SQL position on the target.',
+            '        do {',
+            '            usleep(10000);',
+            '            $state = json_decode(file_get_contents($state_file), true);',
+            '        } while (empty($state[\'releasePausedSource\']));',
+            '        $state[\'sourceRequestStopped\'] = true;',
+            '        e2e_write_hook_state($state_file, $state);',
+            '        exit;',
             '    }',
             '    $pause_table = $state[\'pauseTable\'] ?? null;',
             '    if ($pause_table !== null',
@@ -180,7 +197,6 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             ...readHookState(site),
             pauseTable: null,
             pauseNextBatch: false,
-            stopAfterBatch: false,
             paused: false,
         });
         const collisionDir = createTempDir('e2e-mysql-source-cursor-collision');
@@ -258,8 +274,9 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         writeHookState(site, {
             pauseTable: sourceTable,
             pauseNextBatch: false,
-            stopAfterBatch: false,
             paused: false,
+            releasePausedSource: false,
+            sourceRequestStopped: false,
             countDrops: false,
             drops: {},
         });
@@ -365,13 +382,14 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         assert.equal(firstKilled.code, null);
         assert.equal(firstKilled.signal, 'SIGKILL');
 
-        const hookState = readHookState(site);
+        await releasePausedSource();
         writeHookState(site, {
-            ...hookState,
+            ...readHookState(site),
             pauseTable: myisamSourceTable,
             pauseNextBatch: false,
-            stopAfterBatch: false,
             paused: false,
+            releasePausedSource: false,
+            sourceRequestStopped: false,
             countDrops: true,
             drops: {},
         });
@@ -424,18 +442,16 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
         assert.equal(secondKilled.code, null);
         assert.equal(secondKilled.signal, 'SIGKILL');
 
-        // The source request can outlive the killed importer. Its hook sleeps
-        // twice for 10 seconds before exiting, so let it finish before the
-        // replacement process starts using the same hook state.
-        await sleep(21000);
+        await releasePausedSource();
 
         const secondHookState = readHookState(site);
         writeHookState(site, {
             ...secondHookState,
             pauseTable: null,
             pauseNextBatch: false,
-            stopAfterBatch: false,
             paused: false,
+            releasePausedSource: false,
+            sourceRequestStopped: false,
         });
 
         const blockedFollowingTable = await createMysqlConnection(targetDb);
@@ -469,7 +485,6 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             ...finalHookState,
             pauseTable: null,
             pauseNextBatch: false,
-            stopAfterBatch: false,
             paused: false,
             drops: {
                 ...finalHookState.drops,
