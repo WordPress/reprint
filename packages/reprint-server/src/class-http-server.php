@@ -390,6 +390,13 @@ final class HTTPServer {
             1,
             60
         );
+        $ini_max_execution_time = (int) ini_get('max_execution_time');
+        if ($ini_max_execution_time > 0) {
+            $max_execution_time = min(
+                $max_execution_time,
+                $ini_max_execution_time
+            );
+        }
         $memory_threshold = require_float_range(
             'memory_threshold',
             (float) ($config['memory_threshold'] ?? 0.8),
