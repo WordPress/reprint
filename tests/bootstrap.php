@@ -20,27 +20,27 @@ if (!class_exists('Site_Export_HMAC_Client', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-hmac-client.php';
 }
 
-if (!class_exists('Site_Export_HMAC_Server', false)) {
+if (!class_exists('WordPress\\Reprint\\Server\\HMACServer', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-hmac-server.php';
 }
 
-if (!class_exists('Site_Export_HTTP_Server', false)) {
+if (!class_exists('WordPress\\Reprint\\Server\\HTTPServer', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-http-server.php';
 }
 
-if (!class_exists('Site_Export_Multipart_Processor', false)) {
+if (!class_exists('WordPress\\Reprint\\Server\\MultipartProcessor', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-multipart-processor.php';
 }
 
-if (!class_exists('Site_Export_Push_Exception', false)) {
+if (!class_exists('WordPress\\Reprint\\Server\\PushException', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-push-exception.php';
 }
 
-if (!class_exists('Site_Export_Push_Endpoints', false)) {
+if (!class_exists('WordPress\\Reprint\\Server\\PushEndpoints', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-push-endpoints.php';
 }
 
-if (!class_exists('Site_Export_Push_Session', false)) {
+if (!class_exists('WordPress\\Reprint\\Server\\PushSession', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-push-session.php';
 }
 

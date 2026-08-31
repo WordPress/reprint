@@ -6,6 +6,7 @@
 use WordPress\Reprint\Server\FileIndexProcessor;
 use WordPress\Reprint\Server\FileTreeProducer;
 use WordPress\Reprint\Server\GzipOutputStream;
+use WordPress\Reprint\Server\HTTPServer;
 use WordPress\Reprint\Server\MySQLDumpProducer;
 use WordPress\Reprint\Server\PdoConstants;
 use WordPress\Reprint\Server\ResourceBudget;
@@ -397,7 +398,7 @@ function create_wpdb_pdo_adapter()
     return new WpdbDriverPDO($wpdb);
 }
 
-if (!class_exists('Site_Export_HTTP_Server', false)) {
+if (!class_exists(HTTPServer::class, false)) {
     require_once __DIR__ . "/class-http-server.php";
 }
 
@@ -3630,6 +3631,6 @@ function parse_http_config(): array
         $body = '';
     }
 
-    $server = new Site_Export_HTTP_Server();
+    $server = new HTTPServer();
     return $server->parse_http_config($_GET, $_POST, $_SERVER, $body);
 }

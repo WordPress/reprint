@@ -106,8 +106,8 @@ Use these names verbatim:
 
 | Surface | Name |
 | --- | --- |
-| Exception class and file | `Site_Export_Push_Exception`, `class-push-exception.php` |
-| Session class and file | `Site_Export_Push_Session`, `class-push-session.php` |
+| Exception class and file | `WordPress\Reprint\Server\PushException`, `class-push-exception.php` |
+| Session class and file | `WordPress\Reprint\Server\PushSession`, `class-push-session.php` |
 | reprint directory | `$reprint_directory` |
 | Document root | `$docroot` |
 | Excluded paths | `$excluded_paths` |

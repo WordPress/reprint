@@ -5,7 +5,7 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 
 /**
- * Tests Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options —
+ * Tests \WordPress\Reprint\Server\HTTPServer::handle_cors_headers_and_terminate_on_options —
  * the static helper consumers call before authentication to emit CORS response
  * headers and short-circuit OPTIONS preflight.
  */
@@ -14,7 +14,7 @@ final class HttpServerCorsTest extends TestCase
     public function testEmitsWildcardOriginByDefault(): void
     {
         $emitted = [];
-        Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options(
+        \WordPress\Reprint\Server\HTTPServer::handle_cors_headers_and_terminate_on_options(
             '*',
             '*',
             ['REQUEST_METHOD' => 'GET'],
@@ -31,7 +31,7 @@ final class HttpServerCorsTest extends TestCase
     public function testEmitsSpecificOrigin(): void
     {
         $emitted = [];
-        Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options(
+        \WordPress\Reprint\Server\HTTPServer::handle_cors_headers_and_terminate_on_options(
             'https://playground.wordpress.net',
             '*',
             ['REQUEST_METHOD' => 'GET'],
@@ -49,7 +49,7 @@ final class HttpServerCorsTest extends TestCase
     public function testTrueMeansWildcard(): void
     {
         $emitted = [];
-        Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options(
+        \WordPress\Reprint\Server\HTTPServer::handle_cors_headers_and_terminate_on_options(
             true,
             '*',
             ['REQUEST_METHOD' => 'GET'],
@@ -64,7 +64,7 @@ final class HttpServerCorsTest extends TestCase
     public function testEmitsCustomAllowHeaders(): void
     {
         $emitted = [];
-        Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options(
+        \WordPress\Reprint\Server\HTTPServer::handle_cors_headers_and_terminate_on_options(
             '*',
             'Content-Type, X-Auth-Signature, X-Auth-Nonce, X-Auth-Timestamp',
             ['REQUEST_METHOD' => 'GET'],
@@ -83,7 +83,7 @@ final class HttpServerCorsTest extends TestCase
     {
         $emitted = [];
         $terminated = false;
-        Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options(
+        \WordPress\Reprint\Server\HTTPServer::handle_cors_headers_and_terminate_on_options(
             '*',
             '*',
             ['REQUEST_METHOD' => 'OPTIONS'],
@@ -104,7 +104,7 @@ final class HttpServerCorsTest extends TestCase
     public function testNonOptionsRequestDoesNotTerminate(): void
     {
         $terminated = false;
-        Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options(
+        \WordPress\Reprint\Server\HTTPServer::handle_cors_headers_and_terminate_on_options(
             '*',
             '*',
             ['REQUEST_METHOD' => 'POST'],
@@ -122,13 +122,13 @@ final class HttpServerCorsTest extends TestCase
     public function testRejectsEmptyOrigin(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options('', '*', ['REQUEST_METHOD' => 'GET']);
+        \WordPress\Reprint\Server\HTTPServer::handle_cors_headers_and_terminate_on_options('', '*', ['REQUEST_METHOD' => 'GET']);
     }
 
     public function testRejectsInvalidOriginType(): void
     {
         $this->expectException(InvalidArgumentException::class);
         /** @phpstan-ignore-next-line — intentionally passing wrong type */
-        Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options(false, '*', ['REQUEST_METHOD' => 'GET']);
+        \WordPress\Reprint\Server\HTTPServer::handle_cors_headers_and_terminate_on_options(false, '*', ['REQUEST_METHOD' => 'GET']);
     }
 }
