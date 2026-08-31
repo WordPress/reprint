@@ -64,6 +64,8 @@ class EmptyGeometryTest extends TestCase {
     public function testZeroByteSpatialValuesRoundTripToRealTargets(string $target): void
     {
         $large_text = str_repeat('large geometry row ', 1000);
+        $location_comment = "Map's path \\tiles\nSecond line";
+        $quoted_location_comment = $this->source_pdo->quote($location_comment);
         $this->source_pdo->exec(
             "CREATE TABLE first_empty (
                 id INT PRIMARY KEY,
@@ -75,7 +77,7 @@ class EmptyGeometryTest extends TestCase {
         );
         $this->source_pdo->exec(
             "ALTER TABLE first_empty
-                ADD COLUMN location POINT NOT NULL COMMENT 'Map point',
+                ADD COLUMN location POINT NOT NULL COMMENT {$quoted_location_comment},
                 ADD COLUMN route LINESTRING NOT NULL,
                 ADD COLUMN boundary POLYGON NOT NULL,
                 ADD COLUMN locations MULTIPOINT NOT NULL,
@@ -111,7 +113,7 @@ class EmptyGeometryTest extends TestCase {
         $insert->execute([4, 'repeated empty', $large_text]);
         $this->source_pdo->exec(
             "ALTER TABLE mixed_geometry
-                ADD COLUMN location POINT NOT NULL COMMENT 'Map point',
+                ADD COLUMN location POINT NOT NULL COMMENT {$quoted_location_comment},
                 ADD COLUMN boundary POLYGON NOT NULL COMMENT 'Map area'"
         );
         $this->source_pdo->exec(
@@ -190,7 +192,7 @@ class EmptyGeometryTest extends TestCase {
         $columns = $target_pdo->query('SHOW FULL COLUMNS FROM mixed_geometry')->fetchAll();
         $columns_by_name = array_column($columns, null, 'Field');
         $this->assertSame('YES', $columns_by_name['location']['Null']);
-        $this->assertSame('Map point', $columns_by_name['location']['Comment']);
+        $this->assertSame($location_comment, $columns_by_name['location']['Comment']);
         $this->assertSame('YES', $columns_by_name['boundary']['Null']);
         $this->assertSame('Map area', $columns_by_name['boundary']['Comment']);
 

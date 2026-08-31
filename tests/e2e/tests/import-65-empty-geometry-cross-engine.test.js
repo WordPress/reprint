@@ -147,6 +147,8 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
         if (empty($state['pause_injected'])) {
             $state['pause_injected'] = true;
             e2e_write_hook_state($state_file, $state);
+            // This exceeds the --max-exec=1 budget below so the ALTER ends
+            // one HTTP request and the next SQL fragment requires a resume.
             usleep(1100000);
             return;
         }

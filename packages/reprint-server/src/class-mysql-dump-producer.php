@@ -431,12 +431,14 @@ class MySQLDumpProducer
             $definition = "MODIFY COLUMN " . $this->row_reader->quote_identifier($column) .
                 " " . $column_metadata["column_type"] . " NULL";
             if ($column_metadata["comment"] !== "") {
-                $comment = str_replace(
-                    ["\\", "'"],
-                    ["\\\\", "''"],
-                    $column_metadata["comment"]
-                );
-                $definition .= " COMMENT '{$comment}'";
+                $quoted_comment = $this->db->quote($column_metadata["comment"]);
+                if (!is_string($quoted_comment)) {
+                    throw new \RuntimeException(
+                        "Failed to quote the comment for column " .
+                        $this->row_reader->quote_identifier($column) . "."
+                    );
+                }
+                $definition .= " COMMENT {$quoted_comment}";
             }
             $definitions[] = $definition;
         }
