@@ -601,20 +601,19 @@ class EmptyGeometryTest extends TestCase {
         $matched = preg_match(
             '/' . preg_quote(MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX, '/') .
             preg_quote(MySQLDumpProducer::SPATIAL_STATEMENT_CONTEXT_VERSION, '/') . ' ' .
-            '([A-Za-z0-9+\/=]+) ([a-f0-9]{64}) \*\/\n' .
+            '(\{[^\r\n]+\}) ([A-Za-z0-9+\/=]{44}) \*\/\n' .
             '(INSERT INTO `isolated_srid`.*?;)/s',
             $sql,
             $matches
         );
         $this->assertSame(1, $matched);
-        $context_json = base64_decode($matches[1], true);
-        $this->assertIsString($context_json);
+        $context_json = $matches[1];
         $context = json_decode($context_json, true);
         $this->assertSame(false, $context['d']);
-        $this->assertSame(base64_encode('2'), $context['k'][0]['v']);
-        $this->assertSame(4326, $context['v'][0]['s']);
+        $this->assertSame(base64_encode('2'), $context['k'][0][2]);
+        $this->assertSame(4326, $context['v'][0][2]);
         $this->assertSame(
-            hash('sha256', $context_json . "\n" . $matches[3]),
+            base64_encode(hash('sha256', $context_json . "\n" . $matches[3], true)),
             $matches[2]
         );
     }

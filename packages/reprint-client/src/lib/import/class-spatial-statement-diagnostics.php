@@ -87,12 +87,8 @@ class SpatialStatementDiagnostics {
         if ($hash_separator === false) {
             throw new RuntimeException('The spatial statement marker has no SQL statement hash.');
         }
-        $encoded_payload = substr($marker_body, 0, $hash_separator);
+        $json = substr($marker_body, 0, $hash_separator);
         $reported_hash = substr($marker_body, $hash_separator + 1);
-        $json = base64_decode($encoded_payload, true);
-        if (!is_string($json) || base64_encode($json) !== $encoded_payload) {
-            throw new RuntimeException('The spatial statement marker contains invalid base64.');
-        }
         $payload = json_decode($json, true);
         if (!is_array($payload) || !$this->has_exact_keys($payload, ['t', 'k', 'd', 'v'])) {
             throw new RuntimeException('The spatial statement marker has an invalid object shape.');
@@ -107,9 +103,12 @@ class SpatialStatementDiagnostics {
             throw new RuntimeException('The spatial statement marker has no following SQL line.');
         }
         $statement = substr($sql, $statement_start);
+        $decoded_hash = base64_decode($reported_hash, true);
         if (
-            !$this->is_sha256($reported_hash)
-            || !hash_equals($reported_hash, hash('sha256', $json . "\n" . $statement))
+            !is_string($decoded_hash)
+            || strlen($decoded_hash) !== 32
+            || base64_encode($decoded_hash) !== $reported_hash
+            || !hash_equals($decoded_hash, hash('sha256', $json . "\n" . $statement, true))
         ) {
             throw new RuntimeException('The spatial statement marker does not match its SQL statement.');
         }
@@ -207,24 +206,24 @@ class SpatialStatementDiagnostics {
         }
         $primary_key = [];
         foreach ($encoded_primary_key as $item) {
-            if (!is_array($item) || !is_bool($item['n'] ?? null)) {
+            if (
+                !is_array($item)
+                || count($item) !== 3
+                || array_keys($item) !== [0, 1, 2]
+                || !is_bool($item[1])
+            ) {
                 throw new RuntimeException('The spatial statement marker has an invalid primary key.');
             }
-            $expected_keys = $item['n'] ? ['c', 't', 'n'] : ['c', 't', 'n', 'v'];
-            if (!$this->has_exact_keys($item, $expected_keys)) {
-                throw new RuntimeException('The spatial statement marker has an invalid primary-key shape.');
-            }
-            $column = $this->decode_marker_string($item['c']);
-            $data_type = $this->decode_marker_string($item['t']);
+            $column = $this->decode_marker_string($item[0]);
             if (array_key_exists($column, $primary_key)) {
                 throw new RuntimeException('The spatial statement marker repeats a primary-key column.');
             }
-            if ($item['n']) {
+            if ($item[2] === null) {
                 $primary_key[$column] = ['display' => 'NULL', 'sql' => 'IS NULL'];
                 continue;
             }
-            $raw_value = $this->decode_marker_string($item['v'], true);
-            if ($this->is_numeric_type($data_type) && is_numeric($raw_value)) {
+            $raw_value = $this->decode_marker_string($item[2], true);
+            if ($item[1] && is_numeric($raw_value)) {
                 $primary_key[$column] = [
                     'display' => $raw_value,
                     'sql' => '= ' . $raw_value,
@@ -249,38 +248,32 @@ class SpatialStatementDiagnostics {
         $values = [];
         $seen_columns = [];
         foreach ($encoded_values as $encoded_value) {
-            if (
-                !is_array($encoded_value)
-                || !$this->has_exact_keys($encoded_value, ['c', 't', 'z', 's', 'b', 'h'])
-            ) {
+            if (!is_array($encoded_value) || !in_array(count($encoded_value), [2, 5], true)) {
                 throw new RuntimeException('The spatial statement marker has an invalid spatial value shape.');
             }
-            $column = $this->decode_marker_string($encoded_value['c']);
-            $data_type = $this->decode_marker_string($encoded_value['t']);
+            if (array_keys($encoded_value) !== range(0, count($encoded_value) - 1)) {
+                throw new RuntimeException('The spatial statement marker has an invalid spatial value list.');
+            }
+            $column = $this->decode_marker_string($encoded_value[0]);
+            $data_type = $this->decode_spatial_type($encoded_value[1]);
             if (isset($seen_columns[$column])) {
                 throw new RuntimeException('The spatial statement marker repeats a spatial column.');
             }
-            if (!$this->is_spatial_type($data_type)) {
-                throw new RuntimeException('The spatial statement marker reports a non-spatial column type.');
-            }
             $seen_columns[$column] = true;
-            $zero_byte_placeholder = $encoded_value['z'] ?? null;
-            $srid = $encoded_value['s'] ?? null;
-            $bytes = $encoded_value['b'] ?? null;
-            $sha256 = $encoded_value['h'] ?? null;
-            if (!is_bool($zero_byte_placeholder) || !is_int($bytes) || !$this->is_sha256($sha256)) {
-                throw new RuntimeException('The spatial statement marker has invalid spatial value details.');
-            }
-            if ($zero_byte_placeholder) {
-                if ($srid !== null || $bytes !== 0 || $sha256 !== hash('sha256', '')) {
-                    throw new RuntimeException('The spatial statement marker has invalid zero-byte details.');
-                }
-            } elseif (!is_int($srid) || $srid <= 0 || $bytes < 4) {
+            $zero_byte_placeholder = count($encoded_value) === 2;
+            $srid = $zero_byte_placeholder ? null : $encoded_value[2];
+            $bytes = $zero_byte_placeholder ? 0 : $encoded_value[3];
+            $sha256 = $zero_byte_placeholder ? hash('sha256', '') : $encoded_value[4];
+            if (
+                !$zero_byte_placeholder
+                && ( !is_int($srid) || $srid <= 0 || !is_int($bytes) || $bytes < 4
+                    || !$this->is_sha256($sha256) )
+            ) {
                 throw new RuntimeException('The spatial statement marker has invalid nonzero-SRID details.');
             }
             $values[] = [
                 'column' => $column,
-                'data_type' => strtoupper($this->base_data_type($data_type)),
+                'data_type' => $data_type,
                 'zero_byte_placeholder' => $zero_byte_placeholder,
                 'srid' => $srid,
                 'bytes' => $bytes,
@@ -288,6 +281,14 @@ class SpatialStatementDiagnostics {
             ];
         }
         return $values;
+    }
+
+    private function decode_spatial_type($code): string
+    {
+        if (!is_string($code) || !isset(MySQLDumpProducer::SPATIAL_TYPE_BY_CODE[$code])) {
+            throw new RuntimeException('The spatial statement marker has an invalid spatial type code.');
+        }
+        return MySQLDumpProducer::SPATIAL_TYPE_BY_CODE[$code];
     }
 
     private function target_uses_srs_definitions(): bool
@@ -468,50 +469,6 @@ class SpatialStatementDiagnostics {
             return 'Unknown';
         }
         return stripos($version, 'MariaDB') !== false ? 'MariaDB' : 'MySQL';
-    }
-
-    private function is_spatial_type(string $data_type): bool
-    {
-        return in_array(strtoupper($this->base_data_type($data_type)), [
-            'GEOMETRY',
-            'POINT',
-            'LINESTRING',
-            'POLYGON',
-            'MULTIPOINT',
-            'MULTILINESTRING',
-            'MULTIPOLYGON',
-            'GEOMCOLLECTION',
-            'GEOMETRYCOLLECTION',
-        ], true);
-    }
-
-    private function is_numeric_type(string $data_type): bool
-    {
-        return in_array(strtoupper($this->base_data_type($data_type)), [
-            'BIT',
-            'TINYINT',
-            'SMALLINT',
-            'MEDIUMINT',
-            'INT',
-            'INTEGER',
-            'BIGINT',
-            'DECIMAL',
-            'DEC',
-            'NUMERIC',
-            'FIXED',
-            'FLOAT',
-            'DOUBLE',
-            'REAL',
-            'BOOL',
-            'BOOLEAN',
-            'SERIAL',
-        ], true);
-    }
-
-    private function base_data_type(string $data_type): string
-    {
-        $length = strcspn($data_type, " (\t\r\n");
-        return substr($data_type, 0, $length);
     }
 
     private function quote_identifier(string $identifier): string

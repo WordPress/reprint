@@ -71,6 +71,18 @@ class MySQLDumpProducer
     /** Identifies the spatial statement context fields emitted below. */
     public const SPATIAL_STATEMENT_CONTEXT_VERSION = 'v1';
 
+    /** Compact spatial type names used by version 1 statement context. */
+    public const SPATIAL_TYPE_BY_CODE = [
+        'g' => 'GEOMETRY',
+        'p' => 'POINT',
+        'l' => 'LINESTRING',
+        'o' => 'POLYGON',
+        'm' => 'MULTIPOINT',
+        'n' => 'MULTILINESTRING',
+        'q' => 'MULTIPOLYGON',
+        'c' => 'GEOMETRYCOLLECTION',
+    ];
+
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
     const STATE_NEXT_TABLE = "next_table";
@@ -1468,14 +1480,7 @@ class MySQLDumpProducer
             }
             $value = $row[$column] ?? null;
             if ($value === '') {
-                $values[] = [
-                    'c' => base64_encode($column),
-                    't' => base64_encode($data_type),
-                    'z' => true,
-                    's' => null,
-                    'b' => 0,
-                    'h' => hash('sha256', ''),
-                ];
+                $values[] = [base64_encode($column), $this->spatial_type_code($data_type)];
                 continue;
             }
             if (!is_string($value) || strlen($value) < 4) {
@@ -1487,15 +1492,28 @@ class MySQLDumpProducer
                 continue;
             }
             $values[] = [
-                'c' => base64_encode($column),
-                't' => base64_encode($data_type),
-                'z' => false,
-                's' => $srid,
-                'b' => strlen($value),
-                'h' => hash('sha256', $value),
+                base64_encode($column),
+                $this->spatial_type_code($data_type),
+                $srid,
+                strlen($value),
+                hash('sha256', $value),
             ];
         }
         return $values;
+    }
+
+    /** Returns the compact type code used in spatial statement context. */
+    private function spatial_type_code($data_type)
+    {
+        $normalized_type = strtoupper($data_type);
+        if ($normalized_type === 'GEOMCOLLECTION') {
+            $normalized_type = 'GEOMETRYCOLLECTION';
+        }
+        $code = array_search($normalized_type, self::SPATIAL_TYPE_BY_CODE, true);
+        if (!is_string($code)) {
+            throw new \RuntimeException('Cannot encode an unknown spatial column type.');
+        }
+        return $code;
     }
 
     /** Marks one exact source row without requiring the importer to parse its INSERT. */
@@ -1509,15 +1527,11 @@ class MySQLDumpProducer
         $primary_key = [];
         foreach ($this->row_reader->get_current_primary_key_columns() ?: [] as $column) {
             $value = $row[$column] ?? null;
-            $item = [
-                'c' => base64_encode($column),
-                't' => base64_encode($this->row_reader->get_data_type($column)),
-                'n' => $value === null,
+            $primary_key[] = [
+                base64_encode($column),
+                $this->row_reader->is_numeric_type($this->row_reader->get_data_type($column)),
+                $value === null ? null : base64_encode( (string) $value ),
             ];
-            if ($value !== null) {
-                $item['v'] = base64_encode( (string) $value );
-            }
-            $primary_key[] = $item;
         }
         // This comment counts toward the SQL statement limit, so keep its field names compact.
         $context = [
@@ -1531,11 +1545,11 @@ class MySQLDumpProducer
             throw new \RuntimeException('Cannot encode spatial statement context.');
         }
         $statement_hash = $statement === null
-            ? str_repeat('0', 64)
-            : hash('sha256', $context_json . "\n" . $statement);
+            ? str_repeat('A', 44)
+            : base64_encode(hash('sha256', $context_json . "\n" . $statement, true));
         return self::SPATIAL_STATEMENT_COMMENT_PREFIX .
             self::SPATIAL_STATEMENT_CONTEXT_VERSION . ' ' .
-            base64_encode($context_json) . ' ' . $statement_hash . ' */';
+            $context_json . ' ' . $statement_hash . ' */';
     }
 
     /** Returns whether this database interprets SRIDs through registered definitions. */

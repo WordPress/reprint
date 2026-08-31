@@ -24,20 +24,14 @@ class SpatialStatementDiagnosticsTest extends TestCase {
             "INSERT IGNORE INTO maps SET id = 42, location = ST_GeomFromText('POINT(7 8)', 4326);";
         $sql = $this->markedStatement($statement, [
             'v' => [[
-                'h' => str_repeat('a', 64),
-                'b' => 25,
-                's' => 4326,
-                'z' => false,
-                't' => base64_encode('point'),
-                'c' => base64_encode('location'),
+                base64_encode('location'),
+                'p',
+                4326,
+                25,
+                str_repeat('a', 64),
             ]],
             'd' => false,
-            'k' => [[
-                'v' => base64_encode('42'),
-                'n' => false,
-                't' => base64_encode('int'),
-                'c' => base64_encode('id'),
-            ]],
+            'k' => [[base64_encode('id'), true, base64_encode('42')]],
             't' => base64_encode('maps'),
         ]);
 
@@ -61,14 +55,11 @@ class SpatialStatementDiagnosticsTest extends TestCase {
         $marker_body = substr($sql, $payload_start, $payload_end - $payload_start);
         $hash_separator = strrpos($marker_body, ' ');
         $this->assertIsInt($hash_separator);
-        $payload = json_decode(
-            (string) base64_decode(substr($marker_body, 0, $hash_separator)),
-            true
-        );
-        $payload['v'][0]['c'] = base64_encode('boundary');
+        $payload = json_decode(substr($marker_body, 0, $hash_separator), true);
+        $payload['v'][0][0] = base64_encode('boundary');
         $sql = MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX .
             MySQLDumpProducer::SPATIAL_STATEMENT_CONTEXT_VERSION . ' ' .
-            base64_encode( (string) json_encode($payload) ) .
+            (string) json_encode($payload) .
             substr($sql, $payload_start + $hash_separator);
         $diagnostics = new SpatialStatementDiagnostics(
             $this->targetDatabase('8.0.46', [4326]),
@@ -204,20 +195,11 @@ class SpatialStatementDiagnosticsTest extends TestCase {
             "(17,NULLIF(1, 1 " . MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT . "));";
         $sql = $this->markedStatement($statement, [
             't' => base64_encode('maps'),
-            'k' => [[
-                'c' => base64_encode('id'),
-                't' => base64_encode('int'),
-                'n' => false,
-                'v' => base64_encode('17'),
-            ]],
+            'k' => [[base64_encode('id'), true, base64_encode('17')]],
             'd' => false,
             'v' => [[
-                'c' => base64_encode('location'),
-                't' => base64_encode('point'),
-                'z' => true,
-                's' => null,
-                'b' => 0,
-                'h' => hash('sha256', ''),
+                base64_encode('location'),
+                'p',
             ]],
         ]);
         $inspection = $diagnostics->inspect($sql);
@@ -266,12 +248,8 @@ class SpatialStatementDiagnosticsTest extends TestCase {
             'k' => [],
             'd' => false,
             'v' => [[
-                'c' => base64_encode('location'),
-                't' => base64_encode('point'),
-                'z' => true,
-                's' => null,
-                'b' => 0,
-                'h' => hash('sha256', ''),
+                base64_encode('location'),
+                'p',
             ]],
         ]);
 
@@ -296,20 +274,11 @@ class SpatialStatementDiagnosticsTest extends TestCase {
         $statement = 'INSERT INTO `maps` (`id`,`location`) VALUES (17,NULL);';
         $sql = $this->markedStatement($statement, [
             't' => base64_encode('maps'),
-            'k' => [[
-                'c' => base64_encode('id'),
-                't' => base64_encode('int'),
-                'n' => false,
-                'v' => base64_encode('17'),
-            ]],
+            'k' => [[base64_encode('id'), true, base64_encode('17')]],
             'd' => false,
             'v' => [[
-                'c' => base64_encode('location'),
-                't' => base64_encode('point'),
-                'z' => true,
-                's' => null,
-                'b' => 0,
-                'h' => hash('sha256', ''),
+                base64_encode('location'),
+                'p',
             ]],
         ]);
         $sql = str_replace('VALUES (17,NULL)', 'VALUES (18,NULL)', $sql);
@@ -401,20 +370,14 @@ class SpatialStatementDiagnosticsTest extends TestCase {
         }
         return $this->markedStatement($statement, [
             't' => base64_encode('maps'),
-            'k' => [[
-                'c' => base64_encode('id'),
-                't' => base64_encode('int'),
-                'n' => false,
-                'v' => base64_encode( (string) $id ),
-            ]],
+            'k' => [[base64_encode('id'), true, base64_encode( (string) $id )]],
             'd' => $source_uses_srs_definitions,
             'v' => [[
-                'c' => base64_encode('location'),
-                't' => base64_encode('point'),
-                'z' => false,
-                's' => $srid,
-                'b' => strlen($stored_value),
-                'h' => hash('sha256', $stored_value),
+                base64_encode('location'),
+                'p',
+                $srid,
+                strlen($stored_value),
+                hash('sha256', $stored_value),
             ]],
         ]);
     }
@@ -424,8 +387,9 @@ class SpatialStatementDiagnosticsTest extends TestCase {
         $context_json = (string) json_encode($payload);
         return MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX .
             MySQLDumpProducer::SPATIAL_STATEMENT_CONTEXT_VERSION . ' ' .
-            base64_encode($context_json) . ' ' .
-            hash('sha256', $context_json . "\n" . $statement) . " */\n" . $statement;
+            $context_json . ' ' .
+            base64_encode(hash('sha256', $context_json . "\n" . $statement, true)) .
+            " */\n" . $statement;
     }
 
     /**
