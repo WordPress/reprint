@@ -24,8 +24,8 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * content_type='block_markup' for values known to contain HTML/block markup.
  * The hint propagates through recursive calls so that leaf strings inside
  * serialized PHP, JSON, or base64 eventually reach the same block-markup
- * parser. Strings extracted from namespaced block-comment JSON infer HTML and
- * CSS because no builder-specific schema is available there.
+ * parser. Strings extracted from namespaced block-comment JSON use naive
+ * syntax hints because no builder-specific schema is available there.
  */
 class StructuredDataUrlRewriter
 {
@@ -534,26 +534,51 @@ class StructuredDataUrlRewriter
     }
 
     /**
-     * Rewrite one string found inside another structured value.
+     * Guess how to rewrite one string found inside block attribute JSON.
      *
-     * PHP serialization and JSON are detected by rewrite() and validated by
-     * their parsers. An opening HTML tag or CSS url() selects block-markup
-     * handling. Unknown strings retain the enclosing value's content type.
+     * This is deliberately naive. These checks do not establish what the
+     * string means. Their order only tries the stronger, more likely formats
+     * before the broad CSS substring check. The PHP and JSON parsers still
+     * validate those two guesses before changing nested values.
      */
-    private function rewrite_nested_string( string $value, string $fallback_content_type ): string {
+    private function rewrite_inferred_block_attribute_string( string $value ): string {
+        // 1. Serialized PHP is a complete outer format. Check it before HTML,
+        // JSON, or CSS that may appear inside one of its string values. The
+        // coarse existing gate checks only the first `a`, `s`, `O`, or `C`
+        // byte. PhpSerializationProcessor then validates the complete value.
+        $could_be_php_serialization = $this->could_be_php_serialization_with_strings( $value );
+        if ( $could_be_php_serialization ) {
+            return $this->rewrite( $value, self::PLAIN_TEXT );
+        }
+
+        // 2. This only recognizes strings which begin with an opening tag. It
+        // misses HTML preceded by prose and may classify displayed code as HTML.
         $trimmed_value = ltrim( $value );
-        // Match opening tags such as `<a>`, `<div class="...">`, `<img/>`,
-        // and namespace-qualified tags such as `<svg:path>`.
         $html_opening_tag_pattern      = '/^<[a-z][a-z0-9:-]*(?:\s|\/?>)/i';
         $starts_with_html_opening_tag  = 1 === preg_match( $html_opening_tag_pattern, $trimmed_value );
-        $contains_css_url_function     = false !== stripos( $value, 'url(' );
-        if ( $starts_with_html_opening_tag || $contains_css_url_function ) {
+        if ( $starts_with_html_opening_tag ) {
             // The format is inferred, so do not reinterpret `#`, `/about`, or
             // other relative values against the configured source URL.
             return $this->rewrite_urls( $value, self::BLOCK_MARKUP, false );
         }
 
-        return $this->rewrite( $value, $fallback_content_type );
+        // 3. The coarse existing JSON gate checks only whether the first
+        // non-whitespace byte is `{`, `[`, or `"`. JsonStringIterator then
+        // validates the complete value before rewriting nested strings.
+        $could_be_json_with_strings = $this->could_be_json_with_strings( $value );
+        if ( $could_be_json_with_strings ) {
+            return $this->rewrite( $value, self::PLAIN_TEXT );
+        }
+
+        // 4. `url(` can occur in prose or code which is not CSS. Keep this
+        // broad, naive hint after the complete PHP, HTML, and JSON shapes.
+        $contains_css_url_function = false !== stripos( $value, 'url(' );
+        if ( $contains_css_url_function ) {
+            return $this->rewrite_urls( $value, self::BLOCK_MARKUP, false );
+        }
+
+        // 5. Unknown strings receive only the cautious plain-text scan.
+        return $this->rewrite( $value, self::PLAIN_TEXT );
     }
 
     /**
@@ -595,7 +620,7 @@ class StructuredDataUrlRewriter
 
         while ( $iterator->next_value() ) {
             $original  = $iterator->get_value();
-            $rewritten = $this->rewrite_nested_string( $original, self::PLAIN_TEXT );
+            $rewritten = $this->rewrite_inferred_block_attribute_string( $original );
             if ( $rewritten !== $original ) {
                 $iterator->set_value( $rewritten );
             }

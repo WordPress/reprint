@@ -438,6 +438,9 @@ class StructuredDataUrlRewriterTest extends TestCase
                     'json' => '{"url":"https://old-site.com/json"}',
                     'css' => 'background-image: url(https://old-site.com/css.jpg)',
                     'serialized' => serialize(['url' => 'https://old-site.com/serialized']),
+                    'serialized_css' => serialize([
+                        'css' => 'background-image: url(https://old-site.com/serialized-css.jpg)',
+                    ]),
                     'text' => 'Read https://old-site.com/text',
                 ],
             ],
@@ -459,7 +462,37 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame('https://much-longer.example/json', json_decode($values['json'], true)['url']);
         $this->assertSame('background-image: url(https://much-longer.example/css.jpg)', $values['css']);
         $this->assertSame('https://much-longer.example/serialized', unserialize($values['serialized'])['url']);
+        $this->assertSame(
+            'background-image: url(https://much-longer.example/serialized-css.jpg)',
+            unserialize($values['serialized_css'])['css']
+        );
         $this->assertSame('Read https://much-longer.example/text', $values['text']);
+    }
+
+    public function testNestedJsonIsCheckedBeforeTheBroadCssHint(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com' => 'https://much-longer.example',
+        ]);
+        $serialized_css = serialize([
+            'css' => 'background:url(https://old-site.com/value)',
+        ]);
+        $json = json_encode([
+            'serialized_css' => $serialized_css,
+        ], JSON_UNESCAPED_SLASHES);
+        $input = '<!-- wp:example/widget '
+            . json_encode(['module' => ['value' => $json]], JSON_UNESCAPED_SLASHES)
+            . ' /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+
+        $this->assertSame(1, preg_match('/<!-- wp:example\/widget (.*) \/-->/', $result, $matches));
+        $rewritten_attributes = json_decode($matches[1], true);
+        $rewritten_json = json_decode($rewritten_attributes['module']['value'], true);
+        $this->assertSame(
+            'background:url(https://much-longer.example/value)',
+            unserialize($rewritten_json['serialized_css'])['css']
+        );
     }
 
     public function testBlockMarkupUsesCautiousRewriterForOpaqueUrlContexts(): void
