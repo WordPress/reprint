@@ -184,6 +184,22 @@ class FilesPullStateTest extends TestCase
         }
     }
 
+    public function testSavingStateDoesNotReadTheRemoteIndex()
+    {
+        $client = $this->getMockBuilder(\ImportClient::class)
+            ->setConstructorArgs([
+                'http://fake.url',
+                $this->stateDir,
+                $this->filesystem_root,
+            ])
+            ->onlyMethods(['remote_index_entry_count'])
+            ->getMock();
+        $client->expects($this->never())
+            ->method('remote_index_entry_count');
+
+        $client->save_state();
+    }
+
     /**
      * After --abort, the state should not be "complete".
      */

@@ -12501,7 +12501,6 @@ class ImportClient
             throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->pull_state_file}");
         }
 
-        $remote_index_entry_count = $this->remote_index_entry_count();
         $files_pulled = $this->files_pulled; // Completed in this run
         $has_cursor =
             !empty($state["active_resumable_command"]["remote_cursor"] ?? null) ||
@@ -12511,8 +12510,7 @@ class ImportClient
 
         $this->audit_log(
             sprintf(
-                "SAVE CURSOR | remote_index_entries=%d | completed_this_run=%d | %s",
-                $remote_index_entry_count,
+                "SAVE CURSOR | completed_this_run=%d | %s",
                 $files_pulled,
                 $cursor_info,
             ),
