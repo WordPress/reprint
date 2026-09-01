@@ -7,6 +7,7 @@ require_once __DIR__ . '/../../packages/reprint-client/src/lib/import/load.php';
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Database\PdoDatabaseConnection;
 use Reprint\Importer\NullableSpatialColumnStatementRewriter;
+use Reprint\Importer\SpatialSridGuard;
 use WordPress\Reprint\Server\MySQLDumpProducer;
 
 /**
@@ -154,7 +155,6 @@ class EmptyGeometryTest extends TestCase {
             MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT,
             $sql
         );
-
         $target_pdo = $this->executeDump($sql, $target);
         $this->assertSame(
             strpos($target, 'mariadb') !== false ? 0 : 1,
@@ -255,12 +255,12 @@ class EmptyGeometryTest extends TestCase {
         );
         $points = [];
         for ($point = 0; $point < 3000; ++$point) {
-            $latitude = ($point % 179) - 89;
-            $longitude = ($point % 359) - 179;
+            $latitude = ( $point % 179 ) - 89;
+            $longitude = ( $point % 359 ) - 179;
             $points[] = $latitude . ' ' . $longitude;
         }
         $statement = $this->source_pdo->prepare(
-            'INSERT INTO oversized_route VALUES (1, ST_GeomFromText(?, 4326))'
+            'INSERT INTO oversized_route VALUES (1, ST_GeomFromText(?))'
         );
         $statement->execute(['LINESTRING(' . implode(',', $points) . ')']);
         $source_value = $this->source_pdo
@@ -287,6 +287,53 @@ class EmptyGeometryTest extends TestCase {
                     "AND table_name = '__reprint_db_pull_progress_spatial'"
                 )
                 ->fetchColumn()
+        );
+    }
+
+    public function testOversizedNonzeroSridStopsMariaDbToMySqlImportWithSourceRowContext(): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE oversized_srid_route (' .
+            'id INT PRIMARY KEY, route LINESTRING NOT NULL)'
+        );
+        $points = [];
+        for ($point = 0; $point < 3000; ++$point) {
+            $latitude = ( $point % 179 ) - 89;
+            $longitude = ( $point % 359 ) - 179;
+            $points[] = $latitude . ' ' . $longitude;
+        }
+        $statement = $this->source_pdo->prepare(
+            'INSERT INTO oversized_srid_route VALUES (1, ST_GeomFromText(?, 4326))'
+        );
+        $statement->execute(['LINESTRING(' . implode(',', $points) . ')']);
+        $source_value = $this->source_pdo
+            ->query('SELECT CAST(route AS BINARY) FROM oversized_srid_route')
+            ->fetchColumn();
+        $this->assertIsString($source_value);
+
+        $sql = $this->exportWithResumeAfterEveryFragment([
+            'batch_size' => 1,
+            'max_statement_size' => 8 * 1024,
+            'tables_to_process' => ['oversized_srid_route'],
+        ]);
+
+        try {
+            $this->executeDump($sql, 'test_empty_geometry_mysql_target');
+            $this->fail('The cross-engine import should stop before applying oversized SRID 4326 bytes.');
+        } catch (RuntimeException $error) {
+            $message = $error->getMessage();
+            $this->assertStringContainsString('[SPATIAL_AXIS_ORDER_UNSAFE]', $message);
+            $this->assertStringContainsString('Table: `oversized_srid_route`', $message);
+            $this->assertStringContainsString('Row: `id` = 1', $message);
+            $this->assertStringContainsString('Column: `route`, SRID 4326', $message);
+            $this->assertStringContainsString('The INSERT batch was not executed.', $message);
+        }
+
+        $target_pdo = $this->connectTarget('test_empty_geometry_mysql_target');
+        $target_pdo->exec('USE `test_empty_geometry_mysql_target`');
+        $this->assertSame(
+            0,
+            (int) $target_pdo->query('SELECT COUNT(*) FROM oversized_srid_route')->fetchColumn()
         );
     }
 
@@ -503,6 +550,167 @@ class EmptyGeometryTest extends TestCase {
         );
     }
 
+    public function testNonzeroSridStopsCrossEngineImportBeforeCoordinateMeaningCanChange(): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE axis_order (id INT PRIMARY KEY, location POINT)'
+        );
+        $this->source_pdo->exec(
+            "INSERT INTO axis_order VALUES (42, ST_GeomFromText('POINT(7 8)', 4326))"
+        );
+        $sql = $this->exportWithResumeAfterEveryFragment([
+            'tables_to_process' => ['axis_order'],
+        ]);
+
+        try {
+            $this->executeDump($sql, 'test_empty_geometry_mysql_axis_target');
+            $this->fail('The cross-engine import should stop before applying SRID 4326 bytes.');
+        } catch (RuntimeException $error) {
+            $message = $error->getMessage();
+            $this->assertStringContainsString('[SPATIAL_AXIS_ORDER_UNSAFE]', $message);
+            $this->assertStringContainsString('Source: MariaDB', $message);
+            $this->assertStringContainsString('Target: MySQL', $message);
+            $this->assertStringContainsString('Table: `axis_order`', $message);
+            $this->assertStringContainsString('Row: `id` = 42', $message);
+            $this->assertStringContainsString('Column: `location`, SRID 4326', $message);
+        }
+    }
+
+    public function testNonzeroSridRowsMarkTheirExistingInsertBatch(): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE isolated_srid (' .
+            'id INT PRIMARY KEY, location POINT, boundary POINT)'
+        );
+        $this->source_pdo->exec(
+            "INSERT INTO isolated_srid VALUES " .
+            "(1, ST_GeomFromText('POINT(1 1)', 0), ST_GeomFromText('POINT(1 2)', 0)), " .
+            "(2, ST_GeomFromText('POINT(2 2)', 4326), ST_GeomFromText('POINT(2 3)', 3857)), " .
+            "(3, ST_GeomFromText('POINT(3 3)', 0), ST_GeomFromText('POINT(3 4)', 0)), " .
+            "(4, ST_GeomFromText('POINT(4 4)', 3857), ST_GeomFromText('POINT(4 5)', 4326))"
+        );
+
+        $sql = $this->exportWithResumeAfterEveryFragment([
+            'batch_size' => 10,
+            'tables_to_process' => ['isolated_srid'],
+        ]);
+
+        $this->assertSame(1, substr_count($sql, 'INSERT INTO `isolated_srid`'));
+        $this->assertSame(1, substr_count($sql, MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX));
+        $matched = preg_match(
+            '/' . preg_quote(MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX, '/') .
+            preg_quote(MySQLDumpProducer::NONZERO_SRID_CONTEXT_VERSION, '/') . ' ' .
+            '(\{[^\r\n]+\}) \*\//',
+            $sql,
+            $matches
+        );
+        $this->assertSame(1, $matched);
+        $context = json_decode($matches[1], true);
+        $this->assertSame('isolated_srid', $context['table']);
+        $this->assertSame(
+            [['column' => 'id', 'display_value' => '2']],
+            $context['primary_key']
+        );
+        $this->assertSame(
+            [
+                ['column' => 'location', 'srid' => 4326],
+                ['column' => 'boundary', 'srid' => 3857],
+            ],
+            $context['spatial_columns']
+        );
+        $this->assertStringNotContainsString('"display_value":"4"', $matches[1]);
+    }
+
+    public function testMysql8SourceToMariaDbTargetStopsNonzeroSrid(): void
+    {
+        $mariadb_target = $this->source_pdo;
+        $mysql_source = $this->connect(
+            getenv('DB_HOST') ?: '127.0.0.1',
+            getenv('DB_PORT') ?: '3306',
+            getenv('DB_USER') ?: 'root',
+            getenv('DB_PASS') ?: ''
+        );
+        $database = 'test_empty_geometry_mysql_source';
+        $sql = '';
+        $source_version = '';
+        $mysql_source->exec("DROP DATABASE IF EXISTS `{$database}`");
+        $mysql_source->exec("CREATE DATABASE `{$database}`");
+        $mysql_source->exec("USE `{$database}`");
+        try {
+            $mysql_source->exec(
+                'CREATE TABLE maps (id INT PRIMARY KEY, location POINT)'
+            );
+            $mysql_source->exec(
+                "INSERT INTO maps VALUES (42, ST_GeomFromText('POINT(7 8)', 4326))"
+            );
+            $this->source_pdo = $mysql_source;
+            $sql = $this->exportWithResumeAfterEveryFragment([
+                'tables_to_process' => ['maps'],
+            ]);
+            $source_version = (string) $mysql_source->query('SELECT VERSION()')->fetchColumn();
+        } finally {
+            $this->source_pdo = $mariadb_target;
+            $mysql_source->exec("DROP DATABASE IF EXISTS `{$database}`");
+        }
+
+        $guard = new SpatialSridGuard(
+            new PdoDatabaseConnection($mariadb_target),
+            $source_version,
+            true,
+            'engine=mysql db=test_empty_geometry_source'
+        );
+        $query_stream = new WP_MySQL_FastQueryStream();
+        $query_stream->append_sql($sql);
+        $query_stream->mark_input_complete();
+        while ($query_stream->next_query()) {
+            try {
+                $guard->assert_statement_supported($query_stream->get_query());
+            } catch (RuntimeException $error) {
+                $this->assertStringContainsString('[SPATIAL_AXIS_ORDER_UNSAFE]', $error->getMessage());
+                $this->assertStringContainsString('Source: MySQL', $error->getMessage());
+                $this->assertStringContainsString('Target: MariaDB', $error->getMessage());
+                return;
+            }
+        }
+        $this->fail('The MySQL 8 dump did not contain marked spatial row context.');
+    }
+
+    public function testNonzeroSridStillImportsBetweenMariaDbServers(): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE same_engine_srid (id INT PRIMARY KEY, location POINT)'
+        );
+        $this->source_pdo->exec(
+            "INSERT INTO same_engine_srid VALUES " .
+            "(9, ST_GeomFromText('POINT(7 8)', 4326)), " .
+            "(10, ST_GeomFromText('POINT(9 10)', 3857))"
+        );
+        $source_rows = $this->source_pdo
+            ->query(
+                'SELECT id, HEX(CAST(location AS BINARY)) AS geometry, ' .
+                'ST_SRID(location) AS srid FROM same_engine_srid ORDER BY id'
+            )
+            ->fetchAll(PDO::FETCH_ASSOC);
+        $sql = $this->exportWithResumeAfterEveryFragment([
+            'batch_size' => 10,
+            'tables_to_process' => ['same_engine_srid'],
+        ]);
+        $this->assertSame(1, substr_count($sql, 'INSERT INTO `same_engine_srid`'));
+        $this->assertSame(1, substr_count($sql, MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX));
+
+        $target = $this->executeDump(
+            $sql,
+            'test_empty_geometry_mariadb_same_engine_srid_target'
+        );
+        $this->assertSame(
+            $source_rows,
+            $target->query(
+                'SELECT id, HEX(CAST(location AS BINARY)) AS geometry, ' .
+                'ST_SRID(location) AS srid FROM same_engine_srid ORDER BY id'
+            )->fetchAll(PDO::FETCH_ASSOC)
+        );
+    }
+
     /**
      * MariaDB preserves a spatial index and its NOT NULL column. MySQL stops
      * before issuing an ALTER which cannot coexist with that index.
@@ -681,14 +889,31 @@ class EmptyGeometryTest extends TestCase {
 
         $connection = new PdoDatabaseConnection($target_pdo);
         $rewriter = new NullableSpatialColumnStatementRewriter($connection);
+        $guard = new SpatialSridGuard(
+            $connection,
+            (string) $this->source_pdo->query('SELECT VERSION()')->fetchColumn(),
+            $this->usesSpatialReferenceDefinitions($this->source_pdo),
+            "engine=mysql db={$database}"
+        );
         $query_stream = new WP_MySQL_FastQueryStream();
         $query_stream->append_sql($sql);
         $query_stream->mark_input_complete();
         while ($query_stream->next_query()) {
             $query = $query_stream->get_query();
-            $target_pdo->exec($rewriter->rewrite($query) ?? $query);
+            $guard->assert_statement_supported($query);
+            $query = $rewriter->rewrite($query) ?? $query;
+            $target_pdo->exec($query);
         }
         return $target_pdo;
+    }
+
+    private function usesSpatialReferenceDefinitions(PDO $database): bool
+    {
+        return (int) $database->query(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES " .
+            "WHERE TABLE_SCHEMA = 'information_schema' " .
+            "AND TABLE_NAME = 'ST_SPATIAL_REFERENCE_SYSTEMS'"
+        )->fetchColumn() > 0;
     }
 
     private function initializeTargetDatabase(string $database): PDO

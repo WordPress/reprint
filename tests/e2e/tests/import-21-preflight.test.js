@@ -84,6 +84,11 @@ describe('Import: Preflight Endpoint', () => {
         assert.ok(preflight.database, 'Expected database section');
         assert.ok(preflight.database.credentials_found, 'Expected DB credentials found');
         assert.ok(preflight.database.connected, 'Expected DB connected');
+        assert.equal(
+            typeof preflight.database.uses_spatial_reference_definitions,
+            'boolean',
+            'Expected the source spatial-reference rule mode'
+        );
     });
 
     it('reports the charset/collation WordPress connects with from wpdb', () => {

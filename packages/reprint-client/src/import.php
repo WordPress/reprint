@@ -18,6 +18,7 @@ use Reprint\Importer\DatabaseUrlRewriteProcessor;
 use Reprint\Importer\NullableSpatialColumnStatementRewriter;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\Pull\PullFailureReportedException;
+use Reprint\Importer\SpatialSridGuard;
 use Reprint\Importer\State\DatabaseApplyCommandState;
 use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
 use Reprint\Importer\State\DatabaseTableIndexState;
@@ -6731,6 +6732,14 @@ class ImportClient
             true,
             'db-apply',
         );
+        $spatial_srid_guard = $target_engine === 'mysql'
+            ? new SpatialSridGuard(
+                $connection,
+                (string) ( $this->get_state()->get('preflight.database.version') ?? '' ),
+                $this->source_uses_spatial_reference_definitions(),
+                $connection_label,
+            )
+            : null;
         $sql_handle = fopen($sql_file, "r");
         if (!$sql_handle) {
             $connection->close();
@@ -6848,6 +6857,7 @@ class ImportClient
                     $group["byte_offset"],
                     $target_engine,
                     $stmt_rewriter,
+                    $spatial_srid_guard,
                 );
 
                 $statements_executed += $group_statement_count;
@@ -6972,7 +6982,8 @@ class ImportClient
         string $next_cursor,
         ?int $next_file_byte_offset,
         string $target_engine,
-        ?SqlStatementRewriter $stmt_rewriter = null
+        ?SqlStatementRewriter $stmt_rewriter = null,
+        ?SpatialSridGuard $spatial_srid_guard = null
     ): int {
         $nullable_spatial_column_rewriter = new NullableSpatialColumnStatementRewriter(
             $connection
@@ -6984,6 +6995,9 @@ class ImportClient
             $statement_count = 0;
             while ($query_stream->next_query()) {
                 $query = $query_stream->get_query();
+                if ($spatial_srid_guard !== null) {
+                    $spatial_srid_guard->assert_statement_supported($query);
+                }
                 $query = $nullable_spatial_column_rewriter->rewrite($query) ?? $query;
                 if ($stmt_rewriter !== null) {
                     $query = $stmt_rewriter->rewrite($query);
@@ -8643,6 +8657,7 @@ class ImportClient
 
         $sql_handle = null;
         $mysql_conn = null;
+        $spatial_srid_guard = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
         $session_setup_file = wp_join_unix_paths(
@@ -8697,7 +8712,7 @@ class ImportClient
                 "db" => $this->mysql_database,
                 "use_host_port" => $this->mysql_port === null,
             ];
-            [$mysql_conn] = $this->create_target_database_connection(
+            [$mysql_conn, $mysql_connection_label] = $this->create_target_database_connection(
                 $mysql_target,
                 false,
                 'db-pull',
@@ -8709,6 +8724,12 @@ class ImportClient
                 $this->max_allowed_packet = (int) $packet_result->fetchColumn();
                 $packet_result->closeCursor();
             }
+            $spatial_srid_guard = new SpatialSridGuard(
+                $mysql_conn,
+                (string) ( $this->get_state()->get('preflight.database.version') ?? '' ),
+                $this->source_uses_spatial_reference_definitions(),
+                $mysql_connection_label,
+            );
             if ($starts_mysql_output) {
                 // Keep the mysql-start stage until the old target position is gone.
                 // If this process stops before save_state(), the next process
@@ -8803,6 +8824,7 @@ class ImportClient
                     &$sql_handle,
                     $mysql_conn,
                     &$sql_buffer,
+                    $spatial_srid_guard,
                     $session_setup_file,
                     &$sql_bytes_written,
                     $context,
@@ -8910,6 +8932,8 @@ class ImportClient
                                         $cursor,
                                         null,
                                         'mysql',
+                                        null,
+                                        $spatial_srid_guard,
                                     );
                                     $sql_buffer = "";
                                 }
@@ -9118,6 +9142,19 @@ class ImportClient
                 " bytes) — incomplete export?"
             );
         }
+    }
+
+    private function source_uses_spatial_reference_definitions(): ?bool
+    {
+        $value = $this->get_state()->get(
+            'preflight.database.uses_spatial_reference_definitions'
+        );
+        if ($value === null || is_bool($value)) {
+            return $value;
+        }
+        throw new RuntimeException(
+            'Source preflight returned an invalid spatial reference rule mode.'
+        );
     }
 
     private function lock_database_import_target(
