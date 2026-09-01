@@ -542,10 +542,12 @@ class StructuredDataUrlRewriter
      */
     private function rewrite_nested_string( string $value, string $fallback_content_type ): string {
         $trimmed_value = ltrim( $value );
-        if (
-            preg_match( '/^<[a-z][a-z0-9:-]*(?:\s|\/?>)/i', $trimmed_value )
-            || false !== stripos( $value, 'url(' )
-        ) {
+        // Match opening tags such as `<a>`, `<div class="...">`, `<img/>`,
+        // and namespace-qualified tags such as `<svg:path>`.
+        $html_opening_tag_pattern      = '/^<[a-z][a-z0-9:-]*(?:\s|\/?>)/i';
+        $starts_with_html_opening_tag  = 1 === preg_match( $html_opening_tag_pattern, $trimmed_value );
+        $contains_css_url_function     = false !== stripos( $value, 'url(' );
+        if ( $starts_with_html_opening_tag || $contains_css_url_function ) {
             // The format is inferred, so do not reinterpret `#`, `/about`, or
             // other relative values against the configured source URL.
             return $this->rewrite_urls( $value, self::BLOCK_MARKUP, false );
@@ -567,15 +569,26 @@ class StructuredDataUrlRewriter
             return $comment_text;
         }
 
-        if ( ! preg_match(
-            '/^(\s*wp:[a-z0-9_-]+\/[a-z0-9_-]+\s+)(\{.*\})(\s*\/?\s*)$/is',
-            $comment_text,
-            $matches
-        ) ) {
+        // BlockMarkupProcessor exposes the comment contents without `<!--`
+        // and `-->`, for example: ` wp:divi/text {"module":{...}} /`.
+        $block_name_pattern             = 'wp:[a-z0-9_-]+\/[a-z0-9_-]+';
+        $block_comment_prefix_pattern   = '\s*' . $block_name_pattern . '\s+';
+        $block_attributes_json_pattern  = '\{.*\}';
+        $block_comment_suffix_pattern   = '\s*\/?\s*';
+        $namespaced_block_comment_pattern = '/^'
+            . '(?<block_comment_prefix>' . $block_comment_prefix_pattern . ')'
+            . '(?<attributes_json>' . $block_attributes_json_pattern . ')'
+            . '(?<block_comment_suffix>' . $block_comment_suffix_pattern . ')'
+            . '$/is';
+
+        if ( ! preg_match( $namespaced_block_comment_pattern, $comment_text, $matches ) ) {
             return $comment_text;
         }
 
-        $iterator = new JsonStringIterator( $matches[2] );
+        // The JSON capture deliberately ends at the final `}`. The iterator
+        // below, rather than the regular expression, validates the JSON.
+        $attributes_json = $matches['attributes_json'];
+        $iterator        = new JsonStringIterator( $attributes_json );
         if ( $iterator->is_malformed() ) {
             return $comment_text;
         }
@@ -591,21 +604,23 @@ class StructuredDataUrlRewriter
         $rewritten_json = $iterator->get_result();
         // Avoid normalizing the escape forms commonly used by block markup.
         foreach ( [ '<' => '003c', '>' => '003e', '&' => '0026', '\\"' => '0022' ] as $literal => $hex ) {
-            if ( false !== strpos( $matches[2], '\\u' . $hex ) ) {
+            if ( false !== strpos( $attributes_json, '\\u' . $hex ) ) {
                 $rewritten_json = str_replace( $literal, '\\u' . $hex, $rewritten_json );
-            } elseif ( false !== strpos( $matches[2], '\\u' . strtoupper( $hex ) ) ) {
+            } elseif ( false !== strpos( $attributes_json, '\\u' . strtoupper( $hex ) ) ) {
                 $rewritten_json = str_replace( $literal, '\\u' . strtoupper( $hex ), $rewritten_json );
             }
         }
-        if ( false !== strpos( $matches[2], '\\/' ) ) {
+        if ( false !== strpos( $attributes_json, '\\/' ) ) {
             $rewritten_json = str_replace( '/', '\\/', $rewritten_json );
         }
 
-        if ( $rewritten_json === $matches[2] ) {
+        if ( $rewritten_json === $attributes_json ) {
             return $comment_text;
         }
 
-        return $matches[1] . $rewritten_json . $matches[3];
+        return $matches['block_comment_prefix']
+            . $rewritten_json
+            . $matches['block_comment_suffix'];
     }
 
     /**
