@@ -24,7 +24,9 @@ use function WordPress\Reprint\Server\trim_right_slash;
 use function WordPress\Reprint\Server\wp_join_unix_paths;
 
 require_once __DIR__ . '/utils.php';
-require_once __DIR__ . '/class-resource-budget.php';
+if (!class_exists('WordPress\\Reprint\\Server\\ResourceBudget', false)) {
+    require_once __DIR__ . '/class-resource-budget.php';
+}
 require_once __DIR__ . '/class-gzip-output-stream.php';
 require_once __DIR__ . '/class-file-index-processor.php';
 

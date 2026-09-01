@@ -33,6 +33,35 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertStringContainsString('endpoint-handlers-loaded', $result['output']);
     }
 
+    public function testRequiringExportPhpKeepsResourceBudgetLoadedByAnotherPackageCopy(): void
+    {
+        $resource_budget_path = realpath(
+            __DIR__ . '/../packages/reprint-server/src/class-resource-budget.php'
+        );
+        $this->assertNotFalse($resource_budget_path, 'class-resource-budget.php must exist');
+        $export_path = realpath(self::EXPORT_PATH);
+        $this->assertNotFalse($export_path, 'export.php must exist');
+
+        $tmp_dir = sys_get_temp_dir() . '/reprint-server-resource-budget-test-' . uniqid('', true);
+        mkdir($tmp_dir, 0755, true);
+        $first_copy_path = $tmp_dir . '/class-resource-budget.php';
+        copy($resource_budget_path, $first_copy_path);
+
+        try {
+            $result = $this->runPhpCode(
+                "<?php\nrequire base64_decode('" . base64_encode($first_copy_path) . "', true);\n"
+                . "require base64_decode('" . base64_encode($export_path) . "', true);\n"
+                . "echo 'endpoint-handlers-loaded';\n"
+            );
+
+            $this->assertSame(0, $result['status'], $result['output']);
+            $this->assertSame('endpoint-handlers-loaded', trim($result['output']));
+        } finally {
+            unlink($first_copy_path);
+            rmdir($tmp_dir);
+        }
+    }
+
     public function testNormalizePathListKeepsTheFilesystemRoot(): void
     {
         $export_path = realpath(self::EXPORT_PATH);
