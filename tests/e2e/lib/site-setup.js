@@ -96,6 +96,8 @@ define('DB_USER', '${dbUser}');
 define('DB_PASSWORD', '${dbPass}');
 define('DB_CHARSET', 'utf8mb4');
 define('DB_COLLATE', '');
+// Keep source databases stable while exported snapshots are compared.
+define('DISABLE_WP_CRON', true);
 define('AUTH_KEY',         'e2e-test-key-1');
 define('SECURE_AUTH_KEY',  'e2e-test-key-2');
 define('LOGGED_IN_KEY',    'e2e-test-key-3');

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Stamps a version string into the WordPress plugin header and the
-# SITE_EXPORT_VERSION constant.
+# namespaced Reprint Server VERSION constant.
 #
 # Usage:
 #   ./bin/stamp-plugin-version.sh 0.2.0        # release
@@ -24,14 +24,14 @@ LIB="$PROJECT_ROOT/reprint-server-wp/lib.php"
 # Match any version string (with or without -dev suffix) in both locations.
 # Use a temp-file suffix for sed -i portability (macOS vs GNU).
 sed -i.bak "s/Version: [0-9][0-9.]*\(-dev\)\{0,1\}/Version: $VERSION/" "$INDEX" && rm -f "$INDEX.bak"
-sed -i.bak "s/SITE_EXPORT_VERSION', '[0-9][0-9.]*\(-dev\)\{0,1\}'/SITE_EXPORT_VERSION', '$VERSION'/" "$LIB" && rm -f "$LIB.bak"
+sed -i.bak "/define(__NAMESPACE__/s/'[0-9][0-9.]*\(-dev\)\{0,1\}'/'$VERSION'/" "$LIB" && rm -f "$LIB.bak"
 
 # Verify the stamp took effect — fail loudly if it didn't.
 if ! grep -q "Version: $VERSION" "$INDEX"; then
     echo "Error: failed to stamp version in index.php" >&2
     exit 1
 fi
-if ! grep -q "'$VERSION'" "$LIB"; then
+if ! grep -Fq "define(__NAMESPACE__ . '\\\\VERSION', '$VERSION');" "$LIB"; then
     echo "Error: failed to stamp version in lib.php" >&2
     exit 1
 fi

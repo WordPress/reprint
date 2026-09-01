@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Reprint Server
  * Plugin URI: https://github.com/WordPress/playground-tools
- * Description: Reprint Server – exposes a site export API with HMAC-authenticated endpoints for database and file synchronization.
+ * Description: Exposes the Reprint API with HMAC-authenticated endpoints for database and file synchronization.
  * Version: 0.10.7-dev
  * Requires PHP: 7.2
  * PHP 5.6 support: release builds downgrade a copy of this PHP 7.2 source and set its requirement to 5.6.20.
@@ -11,34 +11,33 @@
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  */
 
+require_once __DIR__ . '/compat.php';
+reprint_server_compat_normalize_legacy_request();
 require_once __DIR__ . '/lib.php';
 
-// Intercept export API requests as early as possible.
+// Intercept Reprint Server API requests as early as possible.
 // WordPress loads plugin files before firing `plugins_loaded`,
 // so this runs before almost anything else in the WordPress stack.
-//
-// `?site-export-api` is the legacy query parameter kept for backwards
-// compatibility with clients pinned to earlier plugin versions.
-// New integrations should use `?reprint-api`.
-if (isset($_GET['reprint-api']) || isset($_GET['site-export-api'])) {
+// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- This only selects API request routing.
+if (isset($_GET['reprint-api'])) {
     /**
      * Filters the endpoint configuration supplied by the WordPress plugin.
      *
      * Platforms must register this filter before regular plugins load, for
      * example from a must-use plugin.
      *
-     * @param array $site_export_api_options Endpoint configuration overrides.
+     * @param array $reprint_server_api_options Endpoint configuration overrides.
      */
-    $site_export_api_options = apply_filters('site_export_api_options', []);
-    if (!is_array($site_export_api_options)) {
-        _site_export_push_error(
+    $reprint_server_api_options = apply_filters('reprint_server_api_options', []);
+    if (!is_array($reprint_server_api_options)) {
+        \WordPress\Reprint\Server\Plugin\push_error(
             503,
             'not_configured',
-            'The site_export_api_options filter must return an array; observed '
-            . gettype($site_export_api_options) . '.'
+            'The reprint_server_api_options filter must return an array; observed '
+            . gettype($reprint_server_api_options) . '.'
         );
     }
-    _site_export_handle_api_request($site_export_api_options);
+    \WordPress\Reprint\Server\Plugin\handle_api_request($reprint_server_api_options);
     exit;
 }
 
