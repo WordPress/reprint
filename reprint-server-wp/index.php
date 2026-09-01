@@ -44,4 +44,4 @@ if (isset($_GET['reprint-api'])) {
 // Register the option-backed configuration, then the settings page.
 require_once __DIR__ . '/wordpress/configuration.php';
 \WordPress\Reprint\Server\Plugin\register_wordpress_configuration();
-require_once __DIR__ . '/wordpress/site-export.php';
+require_once __DIR__ . '/wordpress/reprint-server.php';

@@ -268,7 +268,7 @@ export async function ensureSite(name, options = {}) {
         wpCoreInstall(siteDir, siteUrl, name);
         log('wp core install done');
 
-        // Activate the site-export plugin so WordPress loads index.php on requests.
+        // Activate the Reprint Server plugin so WordPress loads index.php on requests.
         wpPluginActivate(siteDir, 'site-export');
 
         // Run customDb hook to add extra tables on top of real WP

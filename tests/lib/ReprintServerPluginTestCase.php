@@ -5,13 +5,13 @@ declare(strict_types=1);
 /**
  * Shared harness for the bundled WordPress plugin tests.
  *
- * Boots the plugin through the canonical Reprint Server runtime API only, so
+ * Boots the plugin against the canonical Reprint Server runtime API only, so
  * the suite keeps working unchanged when compat.php is deleted. Backwards
- * compatibility for the released names is covered separately by
- * ReprintServerCompatTest.
+ * compatibility is covered separately by ReprintServerCompatTest.
  */
 
 use PHPUnit\Framework\TestCase;
+use WordPress\Reprint\Server\Plugin\SettingsPage;
 
 use function WordPress\Reprint\Server\Plugin\register_wordpress_configuration;
 
@@ -20,7 +20,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Test-owned paths, named independently of the plugin's own constants so the
-// canonical tests never reach for a compat.php alias.
+// tests never reach for a compat.php alias.
 if (!defined('REPRINT_SERVER_TEST_PLUGIN_DIR')) {
     define(
         'REPRINT_SERVER_TEST_PLUGIN_DIR',
@@ -46,9 +46,15 @@ if (!defined('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE')) {
 $GLOBALS['reprint_server_test_options'] = [];
 $GLOBALS['reprint_server_registered_settings'] = [];
 $GLOBALS['reprint_server_settings_errors'] = [];
+$GLOBALS['reprint_server_settings_error_requests'] = [];
 $GLOBALS['reprint_server_test_actions'] = [];
+$GLOBALS['reprint_server_test_menu'] = null;
+$GLOBALS['reprint_server_test_sections'] = [];
+$GLOBALS['reprint_server_test_fields'] = [];
+$GLOBALS['reprint_server_test_scripts'] = [];
 $GLOBALS['reprint_server_fail_option_updates'] = [];
 
+// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound,Generic.CodeAnalysis.UnusedFunctionParameter.Found,Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed,Universal.NamingConventions.NoReservedKeywordParameterNames.defaultFound,WordPress.Security.EscapeOutput.OutputNotEscaped -- WordPress test stubs.
 if (!function_exists('plugin_dir_path')) {
     function plugin_dir_path(string $file): string {
         return REPRINT_SERVER_TEST_PLUGIN_DIR;
@@ -114,6 +120,32 @@ if (!function_exists('register_setting')) {
     }
 }
 
+if (!function_exists('add_settings_section')) {
+    function add_settings_section(string $id, string $title, $callback, string $page): void {
+        $GLOBALS['reprint_server_test_sections'][$page][$id] = [
+            'title' => $title,
+            'callback' => $callback,
+        ];
+    }
+}
+
+if (!function_exists('add_settings_field')) {
+    function add_settings_field(
+        string $id,
+        string $title,
+        $callback,
+        string $page,
+        string $section,
+        array $args = []
+    ): void {
+        $GLOBALS['reprint_server_test_fields'][$page][$section][$id] = [
+            'title' => $title,
+            'callback' => $callback,
+            'args' => $args,
+        ];
+    }
+}
+
 if (!function_exists('add_action')) {
     function add_action(string $hook_name, $callback, int $priority = 10, int $accepted_args = 1): void {
         $GLOBALS['reprint_server_test_actions'][$hook_name][] = [
@@ -155,6 +187,19 @@ if (!function_exists('plugin_basename')) {
     }
 }
 
+if (!function_exists('add_management_page')) {
+    function add_management_page($page_title, $menu_title, $capability, $menu_slug, $callback): string {
+        $GLOBALS['reprint_server_test_menu'] = [
+            'page_title' => $page_title,
+            'menu_title' => $menu_title,
+            'capability' => $capability,
+            'menu_slug' => $menu_slug,
+            'callback' => $callback,
+        ];
+        return 'tools_page_' . $menu_slug;
+    }
+}
+
 if (!function_exists('register_activation_hook')) {
     function register_activation_hook(...$args): void {}
 }
@@ -189,7 +234,24 @@ if (!function_exists('wp_safe_redirect')) {
     function wp_safe_redirect(...$args): void {}
 }
 
-// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- WordPress test stubs.
+if (!function_exists('__')) {
+    function __(string $text, string $domain = 'default'): string {
+        return $text;
+    }
+}
+
+if (!function_exists('esc_html__')) {
+    function esc_html__(string $text, string $domain = 'default'): string {
+        return esc_html($text);
+    }
+}
+
+if (!function_exists('esc_attr__')) {
+    function esc_attr__(string $text, string $domain = 'default'): string {
+        return esc_attr($text);
+    }
+}
+
 if (!function_exists('current_user_can')) {
     function current_user_can(string $capability): bool {
         return $capability === 'manage_options';
@@ -223,13 +285,117 @@ if (!function_exists('add_settings_error')) {
     }
 }
 
-if (!function_exists('settings_errors')) {
-    function settings_errors(string $setting): void {}
+if (!function_exists('get_settings_errors')) {
+    function get_settings_errors(string $setting = '', bool $sanitize = false): array {
+        $GLOBALS['reprint_server_settings_error_requests'][] = $setting;
+        if ($setting === '') {
+            return $GLOBALS['reprint_server_settings_errors'];
+        }
+
+        return array_values(
+            array_filter(
+                $GLOBALS['reprint_server_settings_errors'],
+                static function(array $notice) use ($setting): bool {
+                    return $notice['setting'] === $setting;
+                }
+            )
+        );
+    }
+}
+
+if (!function_exists('settings_fields')) {
+    function settings_fields(string $group): void {
+        echo '<input type="hidden" name="option_page" value="' . esc_attr($group) . '" />';
+    }
+}
+
+if (!function_exists('do_settings_sections')) {
+    function do_settings_sections(string $page): void {
+        foreach ($GLOBALS['reprint_server_test_sections'][$page] ?? [] as $section_id => $section) {
+            echo '<h2>' . esc_html($section['title']) . '</h2>';
+            call_user_func($section['callback']);
+            echo '<table class="form-table">';
+            foreach ($GLOBALS['reprint_server_test_fields'][$page][$section_id] ?? [] as $field) {
+                echo '<tr><th>' . esc_html($field['title']) . '</th><td>';
+                call_user_func($field['callback'], $field['args']);
+                echo '</td></tr>';
+            }
+            echo '</table>';
+        }
+    }
+}
+
+if (!function_exists('submit_button')) {
+    function submit_button(
+        string $text = 'Save Changes',
+        string $type = 'primary',
+        string $name = 'submit',
+        bool $wrap = true
+    ): void {
+        $button = '<input type="submit" name="' . esc_attr($name) . '" class="button button-'
+            . esc_attr($type) . '" value="' . esc_attr($text) . '" />';
+        echo $wrap ? '<p class="submit">' . $button . '</p>' : $button;
+    }
 }
 
 if (!function_exists('home_url')) {
     function home_url(string $path = ''): string {
         return 'https://example.test/' . ltrim($path, '/');
+    }
+}
+
+if (!function_exists('admin_url')) {
+    function admin_url(string $path = ''): string {
+        return 'https://example.test/wp-admin/' . ltrim($path, '/');
+    }
+}
+
+if (!function_exists('get_admin_page_title')) {
+    function get_admin_page_title(): string {
+        return 'Reprint Server';
+    }
+}
+
+if (!function_exists('checked')) {
+    function checked($checked, $current = true, bool $display = true): string {
+        $result = $checked == $current ? ' checked="checked"' : '';
+        if ($display) {
+            echo $result;
+        }
+        return $result;
+    }
+}
+
+if (!function_exists('disabled')) {
+    function disabled($disabled, $current = true, bool $display = true): string {
+        $result = $disabled == $current ? ' disabled="disabled"' : '';
+        if ($display) {
+            echo $result;
+        }
+        return $result;
+    }
+}
+
+if (!function_exists('plugins_url')) {
+    function plugins_url(string $path = '', string $plugin = ''): string {
+        return 'https://example.test/wp-content/plugins/reprint-server/' . ltrim($path, '/');
+    }
+}
+
+if (!function_exists('wp_enqueue_script')) {
+    function wp_enqueue_script($handle, $src, $dependencies, $version, $in_footer): void {
+        $GLOBALS['reprint_server_test_scripts'][$handle] = compact(
+            'src',
+            'dependencies',
+            'version',
+            'in_footer'
+        );
+    }
+}
+
+if (!function_exists('sanitize_key')) {
+    function sanitize_key(string $key): string {
+        return preg_replace('/[^a-z0-9_\-]/', '', strtolower($key)) ?? '';
     }
 }
 
@@ -250,12 +416,24 @@ if (!function_exists('esc_html')) {
         return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
     }
 }
+
+if (!function_exists('wp_kses_post')) {
+    function wp_kses_post(string $value): string {
+        return $value;
+    }
+}
+
+if (!function_exists('esc_url')) {
+    function esc_url(string $value): string {
+        return esc_attr($value);
+    }
+}
 // phpcs:enable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound
 
 require_once __DIR__ . '/../../reprint-server-wp/lib.php';
 require_once __DIR__ . '/../../reprint-server-wp/wordpress/configuration.php';
 register_wordpress_configuration();
-require_once __DIR__ . '/../../reprint-server-wp/wordpress/site-export.php';
+require_once __DIR__ . '/../../reprint-server-wp/wordpress/reprint-server.php';
 abstract class ReprintServerPluginTestCase extends TestCase
 {
     /** @var array<string, mixed> */
@@ -266,6 +444,9 @@ abstract class ReprintServerPluginTestCase extends TestCase
 
     /** @var array<string, mixed> */
     protected $original_post = [];
+
+    /** @var array<string, mixed> */
+    protected $original_get = [];
 
     /** @var string|false */
     protected $original_reprint_server_push_enabled_environment;
@@ -282,16 +463,23 @@ abstract class ReprintServerPluginTestCase extends TestCase
         $this->original_files = $_FILES;
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Test resets request globals.
         $this->original_post = $_POST;
+        $this->original_get = $_GET;
         $this->original_reprint_server_push_enabled_environment = getenv('REPRINT_SERVER_PUSH_ENABLED');
 
         $GLOBALS['reprint_server_test_options'] = [];
         $GLOBALS['reprint_server_registered_settings'] = [];
         $GLOBALS['reprint_server_settings_errors'] = [];
+        $GLOBALS['reprint_server_settings_error_requests'] = [];
+        $GLOBALS['reprint_server_test_menu'] = null;
+        $GLOBALS['reprint_server_test_sections'] = [];
+        $GLOBALS['reprint_server_test_fields'] = [];
+        $GLOBALS['reprint_server_test_scripts'] = [];
         $GLOBALS['reprint_server_fail_option_updates'] = [];
         $_SERVER = [];
         $_FILES = [];
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Test resets request globals.
         $_POST = [];
+        $_GET = [];
         putenv('REPRINT_SERVER_PUSH_ENABLED');
 
         if (file_exists(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE)) {
@@ -312,6 +500,7 @@ abstract class ReprintServerPluginTestCase extends TestCase
         $_SERVER = $this->original_server;
         $_FILES = $this->original_files;
         $_POST = $this->original_post;
+        $_GET = $this->original_get;
         if ($this->original_reprint_server_push_enabled_environment === false) {
             putenv('REPRINT_SERVER_PUSH_ENABLED');
         } else {
@@ -323,8 +512,9 @@ abstract class ReprintServerPluginTestCase extends TestCase
 
     protected function renderAdminPage(): string
     {
+        SettingsPage::get_instance()->register_settings_fields();
         ob_start();
-        Site_Export_Plugin::get_instance()->render_admin_page();
+        SettingsPage::get_instance()->render_admin_page();
         return (string) ob_get_clean();
     }
 }

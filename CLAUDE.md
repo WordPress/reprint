@@ -193,7 +193,7 @@ Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl` for that
 - reprint-server-wp/: Self-contained WordPress plugin distribution directory
   - index.php: WordPress plugin entry point — intercepts `?reprint-api` requests (and the legacy `?site-export-api` alias) during plugin load, requires lib.php
   - lib.php: Standalone library — constants, auth functions, and request handler. Can be required without index.php by projects that want to embed the export engine with their own URL routing and authentication (pass a custom `authenticate` callable in the `$options` array to `_site_export_handle_api_request()`)
-  - wordpress/: WordPress admin UI (site-export.php)
+  - wordpress/: Namespaced WordPress configuration adapter and native administrator UI (`configuration.php`, `reprint-server.php`)
 - docs/: Architecture documentation (read these for deep understanding) and project logos (docs/assets/)
 - tests/: PHPUnit test suite organized by component
 - tests/e2e/: End-to-end Docker-based integration tests

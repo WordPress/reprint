@@ -1175,7 +1175,7 @@ class ImportClient
 
         $this->initialize_tuner($options);
 
-        // Initialize HMAC authentication if a shared secret was provided.
+        // Initialize HMAC authentication if a connection token was provided.
         // When set, every outgoing HTTP request will include X-Auth-Signature,
         // X-Auth-Nonce, and X-Auth-Timestamp headers so the export API can verify
         // the caller without a SECRET_KEY in the URL.
@@ -1643,7 +1643,7 @@ class ImportClient
      * @param array $options {
      *     Parsed files-push options and context.
      *
-     *     @type string $secret             HMAC shared secret.
+     *     @type string $secret             HMAC connection token.
      *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
      *     @type string $progress           Progress output mode: auto, tty, or jsonl.
      *     @type array  $files_push_context Optional context already validated by the CLI entry point.
@@ -2114,7 +2114,7 @@ class ImportClient
      * @param array $options {
      *     Parsed files-push options.
      *
-     *     @type string $secret     HMAC shared secret.
+     *     @type string $secret     HMAC connection token.
      *     @type bool   $force_http Whether the operator allowed a plain-HTTP target.
      * }
      * @phpstan-param array<string,mixed> $options
@@ -11537,8 +11537,8 @@ class ImportClient
                     'message' =>
                         "No --secret was provided. The remote site requires " .
                         "authentication.\n\n" .
-                        "Pass --secret=YOUR_SECRET using the same secret " .
-                        "configured in the Reprint Server plugin on the remote site.",
+                        "Pass --secret=YOUR_SECRET using the same connection " .
+                        "token configured under Tools > Reprint Server on the remote site.",
                 ];
             }
 
@@ -11561,9 +11561,8 @@ class ImportClient
                 return [
                     'code' => 'AUTH_SECRET_MISMATCH',
                     'message' =>
-                        "Wrong shared secret. The --secret value does not match " .
-                        "the one configured in the Reprint Server plugin settings " .
-                        "(wp-admin → Reprint Server).",
+                        "Wrong connection token. The --secret value does not match " .
+                        "the one configured under Tools > Reprint Server in wp-admin.",
                 ];
             }
 
@@ -12803,7 +12802,7 @@ if (
             'type' => 'value',
             'target' => 'secret',
             'placeholder' => 'TOKEN',
-            'help' => 'HMAC shared secret for export API authentication',
+            'help' => 'HMAC connection token for export API authentication',
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
@@ -13519,11 +13518,11 @@ if (
         echo "  2. Go to Plugins → Add New Plugin → Upload Plugin\n";
         echo "  3. Upload reprint-exporter-wp.zip and activate Reprint Server\n";
         echo "\n";
-        echo "{$bold}Step 3: Configure the shared secret{$reset}\n";
+        echo "{$bold}Step 3: Configure the connection token{$reset}\n";
         echo "\n";
-        echo "  1. In wp-admin, go to Reprint Server (in the sidebar)\n";
-        echo "  2. Enter a shared secret and save\n";
-        echo "  3. Use the same secret with reprint:\n";
+        echo "  1. In wp-admin, go to Tools → Reprint Server\n";
+        echo "  2. Enter a connection token and save\n";
+        echo "  3. Pass the same token to reprint with --secret:\n";
         echo "\n";
         echo "     {$dim}php reprint.phar preflight https://your-site.com \\\n";
         echo "       --secret=YOUR_SECRET \\\n";
