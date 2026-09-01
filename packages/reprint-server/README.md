@@ -13,10 +13,6 @@ installed side by side. Consumers should require
 Composer's classmap covers every canonical class in `src/`, so classes
 resolve after requiring `vendor/autoload.php`.
 
-Class files do not require other class files. Composer therefore selects one
-installed package copy for each class instead of a later manual load declaring
-the same class name again.
-
 Reprint's entry points load their utility functions internally. `src/utils.php`
 is an internal implementation file and is not a public autoload entry point.
 

@@ -3,6 +3,7 @@
 namespace WordPress\Reprint\Server;
 
 require_once __DIR__ . '/utils.php';
+require_once __DIR__ . "/class-database-rows-reader.php";
 
 /**
  * Generates a MySQL dump as a sequence of SQL fragments, one per call to next_sql_fragment().
