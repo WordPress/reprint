@@ -8,7 +8,20 @@ use Reprint\Importer\Database\DatabaseConnection;
 use RuntimeException;
 use WordPress\Reprint\Server\MySQLDumpProducer;
 
-/** Stops nonzero SRIDs when the source and target interpret them differently. */
+/**
+ * Prevents a pull from changing the meaning of spatial coordinates.
+ *
+ * A spatial reference system identifier (SRID) tells a database how to read a
+ * geometry's coordinates. Some servers apply registered spatial reference
+ * definitions to nonzero SRIDs, while others preserve the SRID number without
+ * applying those rules. Moving the same geometry bytes between those two models
+ * may change which coordinate is read first.
+ *
+ * The dump producer marks INSERTs containing a nonzero SRID. Before such an
+ * INSERT reaches the target, this guard checks whether source and target use the
+ * same model. It stops a mismatched transfer because Reprint does not transform
+ * coordinates.
+ */
 class SpatialSridGuard {
 
     private DatabaseConnection $database;
@@ -41,7 +54,18 @@ class SpatialSridGuard {
         $this->target_database_version = $version;
     }
 
-    /** Stops before a marked INSERT when its nonzero SRID may change meaning. */
+    /**
+     * Checks whether a dump statement can run without changing coordinate meaning.
+     *
+     * Ordinary statements pass without a database capability query. A marked
+     * INSERT also passes when source and target both use registered spatial
+     * reference definitions, or both do not. When only one does, this method
+     * throws before the INSERT runs and names the database versions, table, row,
+     * spatial columns, and SRIDs which require manual handling.
+     *
+     * @throws RuntimeException When source spatial rules are missing or differ
+     *         from the target rules for a marked INSERT.
+     */
     public function assert_statement_supported(string $sql): void
     {
         $context = $this->read_context($sql);
@@ -78,7 +102,17 @@ class SpatialSridGuard {
         throw new RuntimeException($message);
     }
 
-    /** Returns marked source-row context, or null for an ordinary statement. */
+    /**
+     * Reads and validates row details written by the dump producer.
+     *
+     * The producer places a versioned JSON comment before the first nonzero-SRID
+     * row in an INSERT. The structured fields let this importer name the table,
+     * row, columns, and SRIDs without parsing SQL. A malformed or unknown marker
+     * is rejected instead of letting a possibly unsafe INSERT continue.
+     *
+     * @return array{row_details:string}|null Formatted row details, or null when
+     *         the statement has no producer marker.
+     */
     private function read_context(string $sql): ?array
     {
         $marker_prefix = MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX;
@@ -177,6 +211,13 @@ class SpatialSridGuard {
         return '`' . str_replace('`', '``', $identifier) . '`';
     }
 
+    /**
+     * Checks whether the target exposes registered spatial reference definitions.
+     *
+     * INFORMATION_SCHEMA.ST_SPATIAL_REFERENCE_SYSTEMS is the capability boundary
+     * used by source preflight as well. The result is cached because this guard
+     * runs once for every imported statement.
+     */
     private function target_uses_srs_definitions(): bool
     {
         if ($this->target_uses_srs_definitions !== null) {

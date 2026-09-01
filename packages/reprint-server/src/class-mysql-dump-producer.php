@@ -64,11 +64,21 @@ class MySQLDumpProducer
 
     private const SPATIAL_STAGING_TABLE = "__reprint_db_pull_progress_spatial";
 
-    /** Starts versioned context for an INSERT containing a nonzero SRID. */
+    /**
+     * Opens the SQL comment which carries nonzero-SRID row details to the importer.
+     *
+     * The importer searches for this exact prefix before executing an INSERT. This
+     * avoids teaching the importer how to parse MySQL INSERT syntax.
+     */
     public const NONZERO_SRID_COMMENT_PREFIX =
         "/* REPRINT: nonzero spatial SRID ";
 
-    /** Identifies the nonzero-SRID context fields emitted below. */
+    /**
+     * Identifies the JSON object written after NONZERO_SRID_COMMENT_PREFIX.
+     *
+     * The importer rejects unknown versions rather than guessing how to read row
+     * details which are used to decide whether an INSERT is safe.
+     */
     public const NONZERO_SRID_CONTEXT_VERSION = 'v1';
 
     const STATE_INIT = "init";
@@ -161,7 +171,14 @@ class MySQLDumpProducer
     /** @var string[] Spatial columns waiting for their nullable ALTER TABLE. */
     private $pending_nullable_spatial_columns = [];
 
-    /** @var bool Whether the open INSERT already contains nonzero-SRID context. */
+    /**
+     * Whether the open multi-row INSERT already has a nonzero-SRID marker.
+     *
+     * One marker stops the entire INSERT when source and target spatial rules
+     * differ, so later affected rows in the same INSERT do not need more markers.
+     *
+     * @var bool
+     */
     private $current_insert_has_nonzero_srid_context = false;
 
     /**
@@ -1482,7 +1499,24 @@ class MySQLDumpProducer
         return "(" . implode(",", array_values($formatted_values)) . ")";
     }
 
-    /** Returns nonzero SRIDs which the importer must compare with target rules. */
+    /**
+     * Finds spatial values which need an import-time spatial rule check.
+     *
+     * A spatial reference system identifier (SRID) tells a database how to
+     * interpret a geometry's coordinates. MySQL and MariaDB store that number
+     * in the first four bytes of their internal geometry value. Reprint can copy
+     * SRID 0 directly. A nonzero SRID needs an extra check because one server may
+     * apply a registered spatial reference definition while the other stores the
+     * same SRID only as a number. In that case the coordinate order may change.
+     *
+     * SQL NULL and MariaDB's zero-byte spatial placeholder have no SRID to check.
+     * Large spatial values are not held in $row, so their retained four-byte
+     * prefix is read from DatabaseRowsReader instead.
+     *
+     * @param array<string,mixed> $row Current source row keyed by column name.
+     * @return array<int,array{0:string,1:int}> Pairs containing the spatial
+     *         column name and its nonzero SRID.
+     */
     private function get_nonzero_srid_values($row)
     {
         $values = [];
@@ -1521,7 +1555,19 @@ class MySQLDumpProducer
         return $values;
     }
 
-    /** Marks the first nonzero-SRID row in an INSERT without target-side SQL parsing. */
+    /**
+     * Builds the SQL marker used to check a nonzero SRID before import.
+     *
+     * The marker is a versioned JSON comment placed immediately before the first
+     * affected VALUES tuple. It names the table, the row's primary key, and every
+     * nonzero-SRID column in that row. The importer can then report the exact row
+     * and decide whether the source and target use compatible spatial rules,
+     * without parsing the INSERT itself.
+     *
+     * @param array<string,mixed> $row Current source row keyed by column name.
+     * @return string The complete SQL comment, or an empty string when the row
+     *         has no nonzero SRID.
+     */
     private function format_nonzero_srid_comment($row)
     {
         $spatial_values = $this->get_nonzero_srid_values($row);
@@ -1560,8 +1606,8 @@ class MySQLDumpProducer
                 'srid' => $spatial_value[1],
             ];
         }
-        // The marker counts toward the SQL statement limit, so it names only
-        // the first affected row in this INSERT.
+        // One marker is enough to stop the entire INSERT. Naming only its first
+        // affected row also keeps the diagnostic within the SQL statement limit.
         $context = [
             'table' => $this->row_reader->get_current_table(),
             'primary_key' => $primary_key,
