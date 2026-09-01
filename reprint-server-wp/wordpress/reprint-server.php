@@ -24,7 +24,7 @@ class SettingsPage {
         add_action('admin_post_reprint_server_save_push_access', [$this, 'handle_push_access_save']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
         add_filter(
-            'plugin_action_links_' . plugin_basename(\SITE_EXPORT_PLUGIN_DIR . 'index.php'),
+            'plugin_action_links_' . plugin_basename(PLUGIN_DIR . 'index.php'),
             [$this, 'add_settings_link']
         );
     }
@@ -49,12 +49,12 @@ class SettingsPage {
             'reprint-server'
         );
         add_settings_field(
-            \SITE_EXPORT_SECRET_OPTION,
+            CONNECTION_TOKEN_OPTION,
             __('Connection token', 'reprint'),
             [$this, 'render_connection_token_field'],
             'reprint-server',
             'reprint_server_connection',
-            ['label_for' => \SITE_EXPORT_SECRET_OPTION]
+            ['label_for' => CONNECTION_TOKEN_OPTION]
         );
     }
 
@@ -76,9 +76,9 @@ class SettingsPage {
 
         wp_enqueue_script(
             'reprint-server-admin',
-            plugins_url('wordpress/reprint-server.js', \SITE_EXPORT_PLUGIN_DIR . 'index.php'),
+            plugins_url('wordpress/reprint-server.js', PLUGIN_DIR . 'index.php'),
             ['wp-a11y'],
-            \SITE_EXPORT_VERSION,
+            VERSION,
             true
         );
     }
@@ -98,7 +98,7 @@ class SettingsPage {
         <input type="password"
                class="regular-text code"
                id="reprint_server_connection_token"
-               name="<?php echo esc_attr(\SITE_EXPORT_SECRET_OPTION); ?>"
+               name="<?php echo esc_attr(CONNECTION_TOKEN_OPTION); ?>"
                value="<?php echo esc_attr($configuration['stored_connection_token']); ?>"
                autocomplete="off" />
         <button type="button"
@@ -205,7 +205,7 @@ class SettingsPage {
      * @param array $configuration Configuration returned by get_configuration_state().
      */
     private function render_configuration_status(array $configuration): void {
-        if ($configuration['has_secret_file']) {
+        if ($configuration['has_connection_token_file']) {
             $message = '<strong><code>secret.php</code> '
                 . esc_html__('override is active.', 'reprint')
                 . '</strong> '
@@ -383,12 +383,12 @@ add_action('plugins_loaded', function() {
     SettingsPage::get_instance();
 });
 
-register_activation_hook(\SITE_EXPORT_PLUGIN_DIR . 'index.php', function() {
+register_activation_hook(PLUGIN_DIR . 'index.php', function() {
     if (!wp_doing_ajax() && is_admin()) {
         set_transient('reprint_server_activated', 1, 30);
     }
 
-    $gitignore = \SITE_EXPORT_PLUGIN_DIR . '.gitignore';
+    $gitignore = PLUGIN_DIR . '.gitignore';
     if (!file_exists($gitignore)) {
         file_put_contents($gitignore, "secret.php\n");
     }

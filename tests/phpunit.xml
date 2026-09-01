@@ -39,6 +39,7 @@
             <file>MultipartProcessorTest.php</file>
             <file>PushEndpointsTest.php</file>
             <file>ReprintServerPluginTest.php</file>
+            <file>ReprintServerCompatTest.php</file>
             <file>PushSessionTest.php</file>
         </testsuite>
         <testsuite name="Query Stream Tests">
