@@ -261,7 +261,10 @@ class ImportClient
      */
     private $last_progress_output = 0;
 
-    /** @var float Minimum seconds between progress output lines. */
+    /** @var float Timestamp of the last successful progress.json write. */
+    private $last_progress_file_write = 0;
+
+    /** @var float Minimum seconds between recurring progress reports. */
     private $progress_throttle = 1.0;
 
     /** @var string Retained filesystem-root snapshot for this remote state directory. */
@@ -8910,6 +8913,7 @@ class ImportClient
                                     // Broken pipe — save state and exit cleanly so the
                                     // pipe reader (e.g. `mysql`) can finish on its own.
                                     $this->save_state();
+                                    $this->write_progress_file();
                                     exit(0);
                                 }
                                 $sql_bytes_written += $bytes;
@@ -12554,7 +12558,35 @@ class ImportClient
             false,
         );
 
-        $this->write_progress_file();
+        $completion_state =
+            $this->state->active_resumable_command->completion_state;
+
+        /**
+         * save_state() writes two files for different readers:
+         *
+         * 1. state.json tells the next PHP process where to resume. Write it
+         *    after every completed unit of work so a stopped pull can continue.
+         * 2. progress.json tells a polling UI what the pull is doing. The UI
+         *    needs a recent update, but it does not need every checkpoint.
+         *
+         * In a test with 30,000 files, save_state() ran 30,179 times. Each
+         * progress.json update wrote about 185 bytes to a temporary file and
+         * renamed that file over the old copy. Updating once per checkpoint
+         * therefore caused 30,179 writes and 30,179 renames.
+         *
+         * Limit active progress updates to once per second. Time is the useful
+         * limit because the UI cares how old its status is, and the number of
+         * checkpoints per second changes with the files being pulled. Write a
+         * cleared, partial, or complete state immediately because the command
+         * may not save another checkpoint afterward.
+         */
+        if (
+            $completion_state !== "in_progress"
+            || microtime(true) - $this->last_progress_file_write >=
+                $this->progress_throttle
+        ) {
+            $this->write_progress_file();
+        }
     }
 
     /**
@@ -12589,8 +12621,11 @@ class ImportClient
             return; // Best-effort — don't crash the pull over a progress file
         }
         $tmp = $this->progress_file . ".tmp";
-        if (file_put_contents($tmp, $json) !== false) {
-            rename($tmp, $this->progress_file);
+        if (
+            file_put_contents($tmp, $json) !== false
+            && rename($tmp, $this->progress_file)
+        ) {
+            $this->last_progress_file_write = microtime(true);
         }
     }
 
@@ -12668,6 +12703,9 @@ class ImportClient
         // Save current state (with timeout protection)
         try {
             $this->save_state();
+            // The process is about to be killed, so do not leave the final
+            // in-progress snapshot behind the one-second throttle.
+            $this->write_progress_file();
             $this->progress->show_lifecycle_line("✓ State saved successfully\n");
             $this->output_progress([
                 "type" => "state_saved",
@@ -12729,6 +12767,7 @@ class ImportClient
             if ($written === false) {
                 // Broken pipe — save state and exit cleanly
                 $this->save_state();
+                $this->write_progress_file();
                 exit(0);
             }
             @flush();
