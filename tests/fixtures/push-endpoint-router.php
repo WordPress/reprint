@@ -62,7 +62,7 @@ if (is_string($reprint_push_test_docroot_configuration['wp_plugin_dir'] ?? null)
 
 $reprint_push_test_managed_state = trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_MANAGED_PUSH_CONFIG') ) );
 if ($reprint_push_test_managed_state !== '') {
-    define('SITE_EXPORT_PUSH_ENABLED', $reprint_push_test_managed_state === 'true');
+    define('REPRINT_SERVER_PUSH_ENABLED', $reprint_push_test_managed_state === 'true');
 }
 
 function plugin_dir_path(string $file): string {
@@ -84,7 +84,7 @@ function plugin_basename(string $file): string {
 }
 
 function get_option(string $name, $fallback = false) {
-    if ($name === 'reprint_server_secret') {
+    if ($name === 'reprint_server_connection_token') {
         return trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_SECRET_CONFIG') ) );
     }
     if ($name === 'reprint_server_push_authorized_token_fingerprint') {
@@ -152,6 +152,10 @@ function add_action(string $hook_name, $callback, int $priority = 10, int $accep
 }
 function do_action(string $hook_name, ...$args): void {
     apply_filters($hook_name, null, ...$args);
+}
+// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- WordPress test stub signature.
+function update_option(string $name, $value, $autoload = null): bool {
+    return true;
 }
 
 add_filter('site_export_api_options', static function (): array {

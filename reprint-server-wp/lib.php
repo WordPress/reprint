@@ -30,11 +30,11 @@ if (!defined(__NAMESPACE__ . '\\VERSION')) {
 if (!defined(__NAMESPACE__ . '\\PLUGIN_DIR')) {
     define(__NAMESPACE__ . '\\PLUGIN_DIR', plugin_dir_path(__FILE__));
 }
-if (!defined(__NAMESPACE__ . '\\SECRET_FILE')) {
-    define(__NAMESPACE__ . '\\SECRET_FILE', PLUGIN_DIR . 'secret.php');
+if (!defined(__NAMESPACE__ . '\\CONNECTION_TOKEN_FILE')) {
+    define(__NAMESPACE__ . '\\CONNECTION_TOKEN_FILE', PLUGIN_DIR . 'secret.php');
 }
-if (!defined(__NAMESPACE__ . '\\SECRET_OPTION')) {
-    define(__NAMESPACE__ . '\\SECRET_OPTION', 'reprint_server_secret');
+if (!defined(__NAMESPACE__ . '\\CONNECTION_TOKEN_OPTION')) {
+    define(__NAMESPACE__ . '\\CONNECTION_TOKEN_OPTION', 'reprint_server_connection_token');
 }
 if (!defined(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION')) {
     define(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION', 'reprint_server_push_authorized_token_fingerprint');
@@ -170,79 +170,88 @@ function load_server_runtime(): ?string {
     return null;
 }
 
-/** Returns whether the legacy secret.php override exists. */
-function has_secret_file(): bool {
-    return file_exists(SECRET_FILE);
+/** Returns whether the legacy secret.php connection-token override exists. */
+function has_connection_token_file(): bool {
+    return file_exists(CONNECTION_TOKEN_FILE);
 }
 
 /**
- * Reads the legacy secret.php override when present.
+ * Reads the connection token from the legacy secret.php override when present.
  *
- * @return string|null String secret when the file is valid, otherwise null.
+ * @return string|null Connection token when the file is valid, otherwise null.
  */
-function get_file_secret(): ?string {
-    if (!has_secret_file()) {
+function get_file_connection_token(): ?string {
+    if (!has_connection_token_file()) {
         return null;
     }
 
-    $secret = require SECRET_FILE;
-    return is_string($secret) ? $secret : null;
+    $connection_token = require CONNECTION_TOKEN_FILE;
+    return is_string($connection_token) ? $connection_token : null;
 }
 
-/** Reads the option-backed shared secret. */
-function get_option_secret(): string {
+/** Reads the option-backed connection token. */
+function get_option_connection_token(): string {
     if (!function_exists('get_option')) {
         return '';
     }
 
-    $secret = get_option(SECRET_OPTION, '');
-    return is_string($secret) ? $secret : '';
+    $connection_token = get_option(CONNECTION_TOKEN_OPTION, '');
+    return is_string($connection_token) ? $connection_token : '';
 }
 
 /**
- * Returns the effective shared secret.
+ * Returns the effective connection token.
  *
  * The legacy secret.php file takes precedence when present; otherwise the
  * site option is used.
  */
-function get_shared_secret(): ?string {
-    if (has_secret_file()) {
-        return get_file_secret();
+function get_connection_token(): ?string {
+    if (has_connection_token_file()) {
+        return get_file_connection_token();
     }
 
-    $secret = get_option_secret();
-    return $secret === '' ? null : $secret;
+    $connection_token = get_option_connection_token();
+    return $connection_token === '' ? null : $connection_token;
 }
 
-/**
- * Updates only the option-backed shared secret used by the settings UI and REST API.
- */
-function update_shared_secret(string $secret): bool {
+/** Updates only the option-backed connection token used by the settings UI and REST API. */
+function update_connection_token(string $connection_token): bool {
     if (!function_exists('update_option')) {
         return false;
     }
 
-    return (bool) update_option(SECRET_OPTION, $secret, false);
+    return (bool) update_option(CONNECTION_TOKEN_OPTION, $connection_token, false);
 }
 
 /**
  * Returns the hosting provider's push policy, or null when the site controls it.
  *
- * An early boolean SITE_EXPORT_PUSH_ENABLED constant takes precedence over the
- * environment variable of the same name. Any unrecognized value fails closed.
+ * A canonical constant takes precedence over global configuration. Any
+ * unrecognized environment value fails closed.
  */
 function get_managed_push_enabled(): ?bool {
-    if (defined('SITE_EXPORT_PUSH_ENABLED')) {
-        return SITE_EXPORT_PUSH_ENABLED === true;
+    if (defined(__NAMESPACE__ . '\\PUSH_ENABLED')) {
+        return constant(__NAMESPACE__ . '\\PUSH_ENABLED') === true;
+    }
+    if (defined('REPRINT_SERVER_PUSH_ENABLED')) {
+        return constant('REPRINT_SERVER_PUSH_ENABLED') === true;
+    }
+    $environment_value = getenv('REPRINT_SERVER_PUSH_ENABLED');
+    if ($environment_value !== false) {
+        $enabled = filter_var($environment_value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+        return $enabled === true;
     }
 
-    $environment_value = getenv('SITE_EXPORT_PUSH_ENABLED');
-    if ($environment_value === false) {
-        return null;
+    if (function_exists('apply_filters')) {
+        /**
+         * Filters the managed push policy when canonical configuration is absent.
+         *
+         * @param bool|null $enabled Whether push is managed and enabled, or null when site-controlled.
+         */
+        $enabled = apply_filters('reprint_server_managed_push_enabled', null);
+        return $enabled === true ? true : ( $enabled === null ? null : false );
     }
-
-    $enabled = filter_var($environment_value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
-    return $enabled === true;
+    return null;
 }
 
 /** Returns whether the current connection token is authorized for push. */
@@ -256,18 +265,18 @@ function get_push_authorization_error(): ?string {
     if ($managed_enabled !== null) {
         return $managed_enabled
             ? null
-            : 'Push access is disabled by the hosting provider through SITE_EXPORT_PUSH_ENABLED.';
+            : 'Push access is disabled by the hosting provider through REPRINT_SERVER_PUSH_ENABLED.';
     }
 
-    $secret = get_shared_secret();
-    if ($secret === null || !function_exists('get_option')) {
+    $connection_token = get_connection_token();
+    if ($connection_token === null || !function_exists('get_option')) {
         return 'Push access is disabled for the current connection token.';
     }
 
     $authorized_fingerprint = get_option(PUSH_AUTHORIZATION_OPTION, '');
     $authorized = is_string($authorized_fingerprint)
         && $authorized_fingerprint !== ''
-        && hash_equals(hash('sha256', $secret), $authorized_fingerprint);
+        && hash_equals(hash('sha256', $connection_token), $authorized_fingerprint);
     return $authorized ? null : 'Push access is disabled for the current connection token.';
 }
 
@@ -282,16 +291,16 @@ function update_push_authorization(bool $enabled): bool {
         return false;
     }
 
-    $secret = get_shared_secret();
-    if ($enabled && $secret === null) {
+    $connection_token = get_connection_token();
+    if ($enabled && $connection_token === null) {
         return false;
     }
 
     $fingerprint = '';
     if ($enabled) {
-        $fingerprint = hash('sha256', $secret);
+        $fingerprint = hash('sha256', $connection_token);
     }
-    if (function_exists('get_option') && get_option(PUSH_AUTHORIZATION_OPTION, '') === $fingerprint) {
+    if (function_exists('get_option') && get_option(PUSH_AUTHORIZATION_OPTION, null) === $fingerprint) {
         return true;
     }
 
@@ -328,25 +337,25 @@ function verify_hmac(string $secret): ?string {
 /**
  * Default HMAC authentication handler.
  *
- * Reads the shared secret from secret.php when present, otherwise from the
+ * Reads the connection token from secret.php when present, otherwise from the
  * site option, and verifies the request's HMAC signature.
  * Calls error() on failure.
  */
 function default_authenticate(): void {
-    if (has_secret_file()) {
-        $secret = get_file_secret();
-        if (empty($secret)) {
-            error(503, 'Invalid secret.php configuration. Please remove it or replace it with a valid shared secret.');
+    if (has_connection_token_file()) {
+        $connection_token = get_file_connection_token();
+        if (empty($connection_token)) {
+            error(503, 'Invalid secret.php configuration. Please remove it or replace it with a valid connection token.');
         }
     } else {
-        $secret = get_option_secret();
+        $connection_token = get_option_connection_token();
     }
 
-    if (empty($secret) || !is_string($secret)) {
-        error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Reprint Server.');
+    if (empty($connection_token) || !is_string($connection_token)) {
+        error(503, 'Export not configured. Please configure the connection token in WordPress admin under Tools > Reprint Server.');
     }
 
-    $auth_error = verify_hmac($secret);
+    $auth_error = verify_hmac($connection_token);
     if ($auth_error !== null) {
         error(403, $auth_error);
     }
@@ -466,16 +475,16 @@ function handle_api_request(array $options = []): void {
     if ($authenticate !== null) {
         $authenticate();
     } elseif (is_push_endpoint($endpoint)) {
-        if (has_secret_file()) {
-            $secret = get_file_secret();
-            if (empty($secret)) {
-                push_error(503, 'not_configured', 'Invalid secret.php configuration. Remove it or replace it with a valid shared secret.');
+        if (has_connection_token_file()) {
+            $connection_token = get_file_connection_token();
+            if (empty($connection_token)) {
+                push_error(503, 'not_configured', 'Invalid secret.php configuration. Remove it or replace it with a valid connection token.');
             }
         } else {
-            $secret = get_option_secret();
+            $connection_token = get_option_connection_token();
         }
-        if (empty($secret) || !is_string($secret)) {
-            push_error(503, 'not_configured', 'Configure the shared secret in WordPress admin under Tools > Reprint Server.');
+        if (empty($connection_token) || !is_string($connection_token)) {
+            push_error(503, 'not_configured', 'Configure the connection token in WordPress admin under Tools > Reprint Server.');
         }
         if (!class_exists(HMACServer::class, false)) {
             load_server_runtime();
@@ -489,7 +498,7 @@ function handle_api_request(array $options = []): void {
         $request_method = (string) ( $_SERVER['REQUEST_METHOD'] ?? '' );
         // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
         $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
-        $hmac_server = new HMACServer($secret, TIMESTAMP_TOLERANCE);
+        $hmac_server = new HMACServer($connection_token, TIMESTAMP_TOLERANCE);
         $auth_error = $hmac_server->verify_envelope($_SERVER, $request_method, $request_target);
         if ($auth_error !== null) {
             push_error(403, 'auth_failed', $auth_error);
