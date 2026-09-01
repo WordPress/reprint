@@ -164,7 +164,8 @@ class MySQLDumpProducer
         $this->db = $db;
         $this->emit_create_table = (bool) ( $options["create_table_query"] ?? true );
 
-        $source_max_allowed_packet = $this->detect_max_allowed_packet();
+        $detected_source_max_allowed_packet = $this->detect_max_allowed_packet();
+        $source_max_allowed_packet = $detected_source_max_allowed_packet ?? 1024 * 1024;
         $this->target_max_allowed_packet = isset($options["target_max_allowed_packet"])
             ? (int) $options["target_max_allowed_packet"]
             : $source_max_allowed_packet;
@@ -177,7 +178,9 @@ class MySQLDumpProducer
         if (isset($options["max_statement_size"])) {
             $this->max_statement_size = (int)$options["max_statement_size"];
         } else {
-            $this->max_statement_size = (int) ($source_max_allowed_packet * 0.8);
+            $this->max_statement_size = $detected_source_max_allowed_packet === null
+                ? 1024 * 1024
+                : (int) ($source_max_allowed_packet * 0.8);
         }
 
         $options["maximum_inline_spatial_bytes"] = min(
@@ -1164,7 +1167,7 @@ class MySQLDumpProducer
         return 15 + 4 * integer_divide($byte_length + 2, 3);
     }
 
-    /** Returns the source max_allowed_packet value, or 1 MiB when it cannot be read. */
+    /** Returns the source max_allowed_packet value, or null when it cannot be read. */
     private function detect_max_allowed_packet()
     {
         try {
@@ -1176,7 +1179,7 @@ class MySQLDumpProducer
         } catch (\Exception $e) {
         }
 
-        return 1024 * 1024;
+        return null;
     }
 
     /**
