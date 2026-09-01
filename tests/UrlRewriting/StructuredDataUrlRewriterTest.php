@@ -423,7 +423,13 @@ class StructuredDataUrlRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($input, 'block_markup');
 
-        $this->assertSame(str_replace('old-site.com', 'new-site.com', $input), $result);
+        $this->assertStringNotContainsString('old-site.com', $result);
+        $this->assertSame(1, preg_match('/<!-- wp:divi\/text (.*) \/-->/', $result, $matches));
+        $rewritten_attributes = json_decode($matches[1], true);
+        $this->assertSame(
+            '<p>Read <a href="https://new-site.com/about/">more</a>.</p>',
+            $rewritten_attributes['module']['content']['innerContent']['desktop']['value']
+        );
     }
 
     public function testNamespacedBlockAttributeStringsReuseStructuredFormatInference(): void

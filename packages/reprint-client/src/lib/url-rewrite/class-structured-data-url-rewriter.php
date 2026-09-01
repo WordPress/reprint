@@ -24,8 +24,8 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * content_type='block_markup' for values known to contain HTML/block markup.
  * The hint propagates through recursive calls so that leaf strings inside
  * serialized PHP, JSON, or base64 eventually reach the same block-markup
- * parser. Strings extracted from namespaced block-comment JSON use naive
- * syntax hints because no builder-specific schema is available there.
+ * parser. Strings found in block attributes use naive syntax hints because no
+ * builder-specific schema is available there.
  */
 class StructuredDataUrlRewriter
 {
@@ -453,11 +453,18 @@ class StructuredDataUrlRewriter
                     $resolve_relative_urls ? $base_url : null
                 );
                 while ( $p->next_token() ) {
-                    if ( '#comment' === $p->get_token_type() ) {
-                        $comment_text           = $p->get_modifiable_text();
-                        $rewritten_comment_text = $this->rewrite_namespaced_block_comment_json( $comment_text );
-                        if ( $rewritten_comment_text !== $comment_text ) {
-                            $p->set_modifiable_text( $rewritten_comment_text );
+                    if (
+                        '#block-comment' === $p->get_token_type() &&
+                        $this->value_might_contain_source_domain( $p->get_modifiable_text() )
+                    ) {
+                        // The parser supplies the attributes. The raw comment
+                        // above is only a fast rejection for unrelated blocks.
+                        $block_attributes = $p->get_block_attributes();
+                        if ( is_array( $block_attributes ) ) {
+                            $rewritten_block_attributes = $this->rewrite_inferred_block_attribute_values( $block_attributes );
+                            if ( $rewritten_block_attributes !== $block_attributes ) {
+                                $p->set_block_attributes( $rewritten_block_attributes );
+                            }
                         }
                     }
 
@@ -534,6 +541,28 @@ class StructuredDataUrlRewriter
     }
 
     /**
+     * Rewrite every string in a block attribute array.
+     *
+     * BlockMarkupProcessor has already parsed and validated the block-comment
+     * JSON. Arrays can contain more arrays, so visit them recursively. Leave
+     * numbers, booleans, and null values unchanged.
+     *
+     * @param array<int|string, mixed> $values Block attribute values.
+     * @return array<int|string, mixed> Rewritten block attribute values.
+     */
+    private function rewrite_inferred_block_attribute_values( array $values ): array {
+        foreach ( $values as $key => $value ) {
+            if ( is_array( $value ) ) {
+                $values[ $key ] = $this->rewrite_inferred_block_attribute_values( $value );
+            } elseif ( is_string( $value ) ) {
+                $values[ $key ] = $this->rewrite_inferred_block_attribute_string( $value );
+            }
+        }
+
+        return $values;
+    }
+
+    /**
      * Guess how to rewrite one string found inside block attribute JSON.
      *
      * This is deliberately naive. These checks do not establish what the
@@ -579,73 +608,6 @@ class StructuredDataUrlRewriter
 
         // 5. Unknown strings receive only the cautious plain-text scan.
         return $this->rewrite( $value, self::PLAIN_TEXT );
-    }
-
-    /**
-     * Rewrite JSON attributes in a namespaced WordPress block comment.
-     *
-     * The bundled block parser currently treats names such as `wp:divi/text`
-     * as ordinary comments. Restrict this fallback to that exact namespaced
-     * shape and let JsonStringIterator decide whether the attribute text is
-     * valid JSON.
-     */
-    private function rewrite_namespaced_block_comment_json( string $comment_text ): string {
-        if ( ! $this->value_might_contain_source_domain( $comment_text ) ) {
-            return $comment_text;
-        }
-
-        // BlockMarkupProcessor exposes the comment contents without `<!--`
-        // and `-->`, for example: ` wp:divi/text {"module":{...}} /`.
-        $block_name_pattern             = 'wp:[a-z0-9_-]+\/[a-z0-9_-]+';
-        $block_comment_prefix_pattern   = '\s*' . $block_name_pattern . '\s+';
-        $block_attributes_json_pattern  = '\{.*\}';
-        $block_comment_suffix_pattern   = '\s*\/?\s*';
-        $namespaced_block_comment_pattern = '/^'
-            . '(?<block_comment_prefix>' . $block_comment_prefix_pattern . ')'
-            . '(?<attributes_json>' . $block_attributes_json_pattern . ')'
-            . '(?<block_comment_suffix>' . $block_comment_suffix_pattern . ')'
-            . '$/is';
-
-        if ( ! preg_match( $namespaced_block_comment_pattern, $comment_text, $matches ) ) {
-            return $comment_text;
-        }
-
-        // The JSON capture deliberately ends at the final `}`. The iterator
-        // below, rather than the regular expression, validates the JSON.
-        $attributes_json = $matches['attributes_json'];
-        $iterator        = new JsonStringIterator( $attributes_json );
-        if ( $iterator->is_malformed() ) {
-            return $comment_text;
-        }
-
-        while ( $iterator->next_value() ) {
-            $original  = $iterator->get_value();
-            $rewritten = $this->rewrite_inferred_block_attribute_string( $original );
-            if ( $rewritten !== $original ) {
-                $iterator->set_value( $rewritten );
-            }
-        }
-
-        $rewritten_json = $iterator->get_result();
-        // Avoid normalizing the escape forms commonly used by block markup.
-        foreach ( [ '<' => '003c', '>' => '003e', '&' => '0026', '\\"' => '0022' ] as $literal => $hex ) {
-            if ( false !== strpos( $attributes_json, '\\u' . $hex ) ) {
-                $rewritten_json = str_replace( $literal, '\\u' . $hex, $rewritten_json );
-            } elseif ( false !== strpos( $attributes_json, '\\u' . strtoupper( $hex ) ) ) {
-                $rewritten_json = str_replace( $literal, '\\u' . strtoupper( $hex ), $rewritten_json );
-            }
-        }
-        if ( false !== strpos( $attributes_json, '\\/' ) ) {
-            $rewritten_json = str_replace( '/', '\\/', $rewritten_json );
-        }
-
-        if ( $rewritten_json === $attributes_json ) {
-            return $comment_text;
-        }
-
-        return $matches['block_comment_prefix']
-            . $rewritten_json
-            . $matches['block_comment_suffix'];
     }
 
     /**
