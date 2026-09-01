@@ -290,6 +290,39 @@ class EmptyGeometryTest extends TestCase {
         );
     }
 
+    /** @dataProvider targetDatabaseProvider */
+    public function testOversizedSpatialValuePassesCheckConstraintOnFirstInsert(string $target): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE constrained_oversized_route (' .
+            'id INT PRIMARY KEY, route LINESTRING NOT NULL, ' .
+            'CONSTRAINT route_has_more_than_two_points CHECK (ST_NumPoints(route) > 2))'
+        );
+        $points = [];
+        for ($point = 0; $point < 3000; ++$point) {
+            $points[] = $point . ' ' . $point;
+        }
+        $statement = $this->source_pdo->prepare(
+            'INSERT INTO constrained_oversized_route VALUES (1, ST_GeomFromText(?))'
+        );
+        $statement->execute(['LINESTRING(' . implode(',', $points) . ')']);
+        $source_value = $this->source_pdo
+            ->query('SELECT CAST(route AS BINARY) FROM constrained_oversized_route')
+            ->fetchColumn();
+
+        $sql = $this->exportWithResumeAfterEveryFragment([
+            'batch_size' => 1,
+            'max_statement_size' => 8 * 1024,
+            'tables_to_process' => ['constrained_oversized_route'],
+        ]);
+        $target_pdo = $this->executeDump($sql, $target);
+        $target_value = $target_pdo
+            ->query('SELECT CAST(route AS BINARY) FROM constrained_oversized_route')
+            ->fetchColumn();
+
+        $this->assertSame($source_value, $target_value);
+    }
+
     public function testNullableAlterPreservesCompleteColumnDefinition(): void
     {
         $column = "location,\n`north";

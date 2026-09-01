@@ -239,6 +239,50 @@ class DatabaseRowsReader {
         $this->current_row_ends_query_batch = false;
     }
 
+    /**
+     * Re-fetches the current keyed row without moving the ordered reader.
+     *
+     * @param array<string,mixed> $primary_key_values Values keyed by primary key column name.
+     */
+    public function reload_current_record($primary_key_values)
+    {
+        if (!$this->current_pk_columns || count($primary_key_values) !== count($this->current_pk_columns)) {
+            throw new \RuntimeException(
+                "Cannot reload the current database row without its complete primary key."
+            );
+        }
+
+        $where_parts = [];
+        foreach ($this->current_pk_columns as $column) {
+            if (!array_key_exists($column, $primary_key_values)) {
+                throw new \RuntimeException(
+                    "Cannot reload the current database row because primary key column " .
+                    $this->quote_identifier($column) . " is missing."
+                );
+            }
+            $where_parts[] = $this->build_comparison(
+                $column,
+                $primary_key_values[$column],
+                "="
+            );
+        }
+
+        $query = $this->build_byte_preserving_select_from_current_table() .
+            " WHERE " . implode(" AND ", $where_parts) . " LIMIT 1";
+        $result = $this->db->query($query);
+        $record = $result->fetch(PdoConstants::fetch_assoc());
+        if ($record === false) {
+            throw new \RuntimeException(
+                "Cannot reload the oversized row from table " .
+                $this->quote_identifier($this->current_table) .
+                ". The source row changed during export; run db-pull --abort and start again."
+            );
+        }
+
+        $this->current_row = $record;
+        $this->current_row_ends_query_batch = false;
+    }
+
     /** Returns whether the retained record is the final row of its bounded query. */
     public function is_current_record_at_query_batch_boundary()
     {
@@ -368,30 +412,7 @@ class DatabaseRowsReader {
      */
     private function build_select_query()
     {
-        $select = "SELECT";
-        if ($this->query_time_limit_ms !== null) {
-            // Prevent one slow table query from consuming the PHP time budget.
-            $select .= " /*+ MAX_EXECUTION_TIME(" . $this->query_time_limit_ms . ") */";
-        }
-
-        if ($this->current_column_types) {
-            $select_parts = [];
-            foreach ($this->current_column_types as $column => $column_info) {
-                $quoted_column = $this->quote_identifier($column);
-                if (
-                    $this->is_numeric_type($column_info["data_type"]) ||
-                    $this->is_binary_type($column_info["data_type"])
-                ) {
-                    $select_parts[] = $quoted_column;
-                } else {
-                    $select_parts[] = "CAST({$quoted_column} AS BINARY) AS {$quoted_column}";
-                }
-            }
-            $query = $select . " " . implode(", ", $select_parts) .
-                " FROM " . $this->quote_identifier($this->current_table);
-        } else {
-            $query = $select . " * FROM " . $this->quote_identifier($this->current_table);
-        }
+        $query = $this->build_byte_preserving_select_from_current_table();
 
         $where_conditions = $this->build_row_exclusion_where_conditions();
         if ($this->current_pk_columns && count($this->current_pk_columns) > 0) {
@@ -420,6 +441,37 @@ class DatabaseRowsReader {
                 $query .= " OFFSET {$this->current_offset}";
             }
         }
+        return $query;
+    }
+
+    /** Builds the byte-preserving SELECT prefix shared by ordered and exact-row reads. */
+    private function build_byte_preserving_select_from_current_table()
+    {
+        $select = "SELECT";
+        if ($this->query_time_limit_ms !== null) {
+            // Prevent one slow table query from consuming the PHP time budget.
+            $select .= " /*+ MAX_EXECUTION_TIME(" . $this->query_time_limit_ms . ") */";
+        }
+
+        if ($this->current_column_types) {
+            $select_parts = [];
+            foreach ($this->current_column_types as $column => $column_info) {
+                $quoted_column = $this->quote_identifier($column);
+                if (
+                    $this->is_numeric_type($column_info["data_type"]) ||
+                    $this->is_binary_type($column_info["data_type"])
+                ) {
+                    $select_parts[] = $quoted_column;
+                } else {
+                    $select_parts[] = "CAST({$quoted_column} AS BINARY) AS {$quoted_column}";
+                }
+            }
+            $query = $select . " " . implode(", ", $select_parts) .
+                " FROM " . $this->quote_identifier($this->current_table);
+        } else {
+            $query = $select . " * FROM " . $this->quote_identifier($this->current_table);
+        }
+
         return $query;
     }
 

@@ -9310,11 +9310,18 @@ class ImportClient
             return;
         }
 
+        if ( ( $cursor_data["state"] ?? null ) === "stage_oversized_spatial" ) {
+            // No INSERT for this source row has been emitted in this phase.
+            // Only the transactional helper table has changed, and its chunk
+            // updates require the saved byte length, so each is safe to repeat.
+            return;
+        }
+
         // Large text and binary values append pieces directly to the target
         // row. A non-transactional table may keep one piece, so repeating that
         // UPDATE could append those bytes twice. Spatial pieces go into a
         // separate staging row with an expected-length guard, and the final
-        // target assignment is safe to repeat.
+        // INSERT reads the complete value and is safe to repeat.
         $has_direct_oversized_update = false;
         foreach ($cursor_data["oversized_queue"] ?? [] as $oversized_value) {
             if (

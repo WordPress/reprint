@@ -362,8 +362,12 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
             $sql
         );
         $this->assertStringContainsString(
-            'SET `content` = (SELECT `value` FROM `__reprint_db_pull_progress_spatial`',
+            '(1,(SELECT `value` FROM `__reprint_db_pull_progress_spatial` WHERE `id` = 1))',
             $sql
+        );
+        $this->assertLessThan(
+            strpos($sql, 'INSERT INTO `oversized_geometry_value`'),
+            strpos($sql, 'UPDATE `__reprint_db_pull_progress_spatial`')
         );
         $this->assertSame(
             1,
@@ -424,7 +428,8 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
             CREATE TABLE multiple_spatial_values (
                 id INT PRIMARY KEY,
                 route LINESTRING NOT NULL,
-                routes MULTILINESTRING NOT NULL
+                routes MULTILINESTRING NOT NULL,
+                payload LONGBLOB NOT NULL
             )
         ");
         $points = [];
@@ -436,20 +441,41 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $coordinates = implode(',', $points);
         $statement = $this->pdo->prepare(
             "INSERT INTO multiple_spatial_values VALUES (" .
-            "1, ST_GeomFromText(?, 4326), ST_GeomFromText(?, 4326))"
+            "1, ST_GeomFromText(?, 4326), ST_GeomFromText(?, 4326), ?)"
         );
         $statement->execute([
             'LINESTRING(' . $coordinates . ')',
             'MULTILINESTRING((' . $coordinates . '))',
+            str_repeat('mixed spatial and binary ', 4000),
+        ]);
+        $statement = $this->pdo->prepare(
+            "INSERT INTO multiple_spatial_values VALUES (" .
+            "2, ST_GeomFromText(?), ST_GeomFromText(?), ?)"
+        );
+        $statement->execute([
+            'LINESTRING(0 0,1 1)',
+            'MULTILINESTRING((0 0,1 1))',
+            'row after staged values',
         ]);
         $source_row = $this->pdo
             ->query(
-                'SELECT CAST(route AS BINARY) AS route, ' .
-                'CAST(routes AS BINARY) AS routes FROM multiple_spatial_values'
+                'SELECT id, CAST(route AS BINARY) AS route, ' .
+                'CAST(routes AS BINARY) AS routes, payload ' .
+                'FROM multiple_spatial_values ORDER BY id'
             )
-            ->fetch();
+            ->fetchAll();
 
-        $sql = $this->getDumpSQL(['max_statement_size' => 8 * 1024]);
+        $options = ['max_statement_size' => 8 * 1024];
+        $producer = $this->createProducer($options);
+        $fragments = [];
+        while ($producer->next_sql_fragment()) {
+            $fragments[] = $producer->get_sql_fragment();
+            if (!$producer->is_finished()) {
+                $options['cursor'] = $producer->get_reentrancy_cursor();
+                $producer = $this->createProducer($options);
+            }
+        }
+        $sql = implode("\n", $fragments);
         $this->assertSame(
             1,
             substr_count($sql, 'CREATE TABLE IF NOT EXISTS `__reprint_db_pull_progress_spatial`')
@@ -462,10 +488,11 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $import_pdo = $this->executeDumpInNewDatabase($sql);
         $imported_row = $import_pdo
             ->query(
-                'SELECT CAST(route AS BINARY) AS route, ' .
-                'CAST(routes AS BINARY) AS routes FROM multiple_spatial_values'
+                'SELECT id, CAST(route AS BINARY) AS route, ' .
+                'CAST(routes AS BINARY) AS routes, payload ' .
+                'FROM multiple_spatial_values ORDER BY id'
             )
-            ->fetch();
+            ->fetchAll();
         $this->assertSame($source_row, $imported_row);
     }
 
@@ -500,6 +527,22 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
             base64_encode(json_encode($cursor)),
             'db-pull'
         ));
+
+        $cursor['state'] = 'stage_oversized_spatial';
+        array_unshift($cursor['oversized_queue'], [
+            'column' => 'label',
+            'data_type' => 'LONGBLOB',
+            'byte_offset' => 0,
+            'total_length' => 16384,
+        ]);
+        $this->assertNull($assert_resume->invoke(
+            $client,
+            $database,
+            base64_encode(json_encode($cursor)),
+            'db-pull'
+        ));
+        array_shift($cursor['oversized_queue']);
+        $cursor['state'] = 'emit_oversized_update';
 
         unset($cursor['oversized_queue'][0]['spatial_staging_initialized']);
         $this->expectException(RuntimeException::class);
