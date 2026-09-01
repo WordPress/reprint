@@ -17,7 +17,7 @@ import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import {
     existsSync, readFileSync, readlinkSync,
-    mkdirSync, writeFileSync, symlinkSync, lstatSync, renameSync,
+    mkdirSync, realpathSync, symlinkSync, lstatSync,
 } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -37,19 +37,20 @@ describe('Import: Flat Document Root (WP Cloud-like layout)', () => {
 
     beforeAll(async () => {
         await ensureSite(site, {
+            // Establish the final path before WordPress installs or activates
+            // the plugin. Moving an active plugin later lets PHP encounter its
+            // classes through both the old and new path.
+            wpContentDir: `${CONTENT_DIR}/wp-content`,
             afterCreate: async (siteDir) => {
                 // Simulate WP Cloud layout:
                 //   wp-admin and wp-includes live behind __wp__ in a separate dir
                 //   wp-content lives in a completely separate dir
                 //
-                // Clean up previous external dirs first (may be nginx-owned
-                // from prior run).  This must happen inside afterCreate so
-                // that the dirs are only deleted when they will be recreated.
-                // Deleting them before ensureSite breaks re-runs: the marker
-                // file still exists → afterCreate is skipped → broken symlinks.
-                execSync(`sudo rm -rf ${CORE_DIR} ${CONTENT_DIR}`);
+                // Clean up the previous core directory first; it may be
+                // nginx-owned from a prior run. This stays inside afterCreate
+                // so a completed site's marker does not leave broken links.
+                execSync(`sudo rm -rf ${CORE_DIR}`);
                 mkdirSync(CORE_DIR, { recursive: true });
-                mkdirSync(CONTENT_DIR, { recursive: true });
 
                 // Move wp-admin and wp-includes to the core directory
                 execSync(`mv "${join(siteDir, 'wp-admin')}" "${CORE_DIR}/wp-admin"`);
@@ -62,33 +63,6 @@ describe('Import: Flat Document Root (WP Cloud-like layout)', () => {
                 symlinkSync('__wp__/wp-admin', join(siteDir, 'wp-admin'));
                 symlinkSync('__wp__/wp-includes', join(siteDir, 'wp-includes'));
 
-                // Move wp-content to separate location
-                renameSync(join(siteDir, 'wp-content'), `${CONTENT_DIR}/wp-content`);
-                symlinkSync(CONTENT_DIR + '/wp-content', join(siteDir, 'wp-content'));
-
-                // Rewrite wp-config.php to define WP_CONTENT_DIR
-                writeFileSync(join(siteDir, 'wp-config.php'), `<?php
-define('DB_HOST', '127.0.0.1');
-define('DB_NAME', 'e2e_wpcloud_flatten');
-define('DB_USER', 'e2e_admin');
-define('DB_PASSWORD', 'e2e_password');
-define('DB_CHARSET', 'utf8mb4');
-define('DB_COLLATE', '');
-define('AUTH_KEY',         'e2e-test-key-1');
-define('SECURE_AUTH_KEY',  'e2e-test-key-2');
-define('LOGGED_IN_KEY',    'e2e-test-key-3');
-define('NONCE_KEY',        'e2e-test-key-4');
-define('AUTH_SALT',        'e2e-test-salt-1');
-define('SECURE_AUTH_SALT', 'e2e-test-salt-2');
-define('LOGGED_IN_SALT',   'e2e-test-salt-3');
-define('NONCE_SALT',       'e2e-test-salt-4');
-define('WP_CONTENT_DIR', '${CONTENT_DIR}/wp-content');
-$table_prefix = 'wp_';
-if ( ! defined( 'ABSPATH' ) ) {
-    define( 'ABSPATH', __DIR__ . '/' );
-}
-require_once ABSPATH . 'wp-settings.php';
-`);
             },
             afterPermissions: async () => {
                 execSync(`sudo chown -R nginx:nginx ${CORE_DIR} ${CONTENT_DIR}`);
@@ -105,6 +79,24 @@ require_once ABSPATH . 'wp-settings.php';
     function importUrl() {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
+
+    it('configures the final wp-content path before WordPress loads', () => {
+        const siteDir = getSiteDir(site);
+        const wpConfig = readFileSync(join(siteDir, 'wp-config.php'), 'utf-8');
+        const contentDefinition = `define('WP_CONTENT_DIR', "${CONTENT_DIR}/wp-content");`;
+        const wordpressLoad = "require_once ABSPATH . 'wp-settings.php';";
+
+        assert.ok(wpConfig.includes(contentDefinition), 'wp-config.php defines the external wp-content path');
+        assert.ok(
+            wpConfig.indexOf(contentDefinition) < wpConfig.indexOf(wordpressLoad),
+            'the external wp-content path is set before WordPress loads',
+        );
+        assert.equal(
+            realpathSync(join(siteDir, 'wp-content')),
+            `${CONTENT_DIR}/wp-content`,
+            'the document-root link resolves to the path WordPress loaded',
+        );
+    });
 
     it('preflight reports resolved wp_admin_path and wp_includes_path', () => {
         const result = runImporter(importUrl(), tempDir, 'preflight', {
