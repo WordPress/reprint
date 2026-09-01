@@ -260,7 +260,10 @@ class ImportClient
      */
     private $last_progress_output = 0;
 
-    /** @var float Minimum seconds between progress output lines. */
+    /** @var float Timestamp of the last successful progress.json write. */
+    private $last_progress_file_write = 0;
+
+    /** @var float Minimum seconds between recurring progress reports. */
     private $progress_throttle = 1.0;
 
     /** @var string Retained filesystem-root snapshot for this remote state directory. */
@@ -8888,6 +8891,7 @@ class ImportClient
                                     // Broken pipe — save state and exit cleanly so the
                                     // pipe reader (e.g. `mysql`) can finish on its own.
                                     $this->save_state();
+                                    $this->write_progress_file();
                                     exit(0);
                                 }
                                 $sql_bytes_written += $bytes;
@@ -12517,7 +12521,24 @@ class ImportClient
             false,
         );
 
-        $this->write_progress_file();
+        $completion_state =
+            $this->state->active_resumable_command->completion_state;
+
+        /**
+         * A 30,000-file pull saved state 30,179 times. Replacing the roughly
+         * 185-byte progress.json at every checkpoint wrote only 5.3 MiB of
+         * payload, but also performed 30,179 temporary-file writes and
+         * renames. Keep state.json durable at every checkpoint while limiting
+         * this status file's recurring filesystem work to once per second.
+         * Cleared, partial, and complete states are always written immediately.
+         */
+        if (
+            $completion_state !== "in_progress"
+            || microtime(true) - $this->last_progress_file_write >=
+                $this->progress_throttle
+        ) {
+            $this->write_progress_file();
+        }
     }
 
     /**
@@ -12552,8 +12573,11 @@ class ImportClient
             return; // Best-effort — don't crash the pull over a progress file
         }
         $tmp = $this->progress_file . ".tmp";
-        if (file_put_contents($tmp, $json) !== false) {
-            rename($tmp, $this->progress_file);
+        if (
+            file_put_contents($tmp, $json) !== false
+            && rename($tmp, $this->progress_file)
+        ) {
+            $this->last_progress_file_write = microtime(true);
         }
     }
 
@@ -12631,6 +12655,9 @@ class ImportClient
         // Save current state (with timeout protection)
         try {
             $this->save_state();
+            // The process is about to be killed, so do not leave the final
+            // in-progress snapshot behind the one-second throttle.
+            $this->write_progress_file();
             $this->progress->show_lifecycle_line("✓ State saved successfully\n");
             $this->output_progress([
                 "type" => "state_saved",
@@ -12692,6 +12719,7 @@ class ImportClient
             if ($written === false) {
                 // Broken pipe — save state and exit cleanly
                 $this->save_state();
+                $this->write_progress_file();
                 exit(0);
             }
             @flush();
