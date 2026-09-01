@@ -152,19 +152,18 @@ class StructuredDataUrlRewriter
             }
         }
 
-        // Quick-reject: if the value doesn't contain href=", src=", or any
-        // source domain, there's nothing to rewrite. This avoids expensive
-        // parsing (serialized PHP, JSON, block markup) for the vast majority
-        // of values that don't contain any rewritable URLs.
         if (!$this->maybe_contains_rewritable_urls($value)) {
             return $value;
         }
+
+        $could_be_php_serialization = $this->could_be_php_serialization_with_strings($value);
+        $could_be_json_with_strings = $this->could_be_json_with_strings($value);
 
         // Performance guard: avoid constructing the serialized-PHP parser for
         // ordinary URL strings and block markup. The parser still owns
         // validation once entered; this gate only skips first-byte shapes that
         // cannot expose serialized string values for rewriting.
-        if ($this->could_be_php_serialization_with_strings($value)) {
+        if ($could_be_php_serialization) {
             $p = new PhpSerializationProcessor($value);
             if (!$p->is_malformed()) {
                 while ($p->next_value()) {
@@ -186,7 +185,7 @@ class StructuredDataUrlRewriter
         // strings and block markup. JsonStringIterator still owns validation
         // once entered; this gate only skips first non-whitespace bytes that
         // cannot start a JSON value containing string leaves.
-        if ($this->could_be_json_with_strings($value)) {
+        if ($could_be_json_with_strings) {
             $iter = new JsonStringIterator($value);
             if (!$iter->is_malformed()) {
                 while ($iter->next_value()) {
@@ -221,21 +220,17 @@ class StructuredDataUrlRewriter
      * Quick-reject check: returns false when the value certainly doesn't
      * contain any rewritable URLs, avoiding expensive parsing.
      *
-     * A value is considered potentially rewritable if it contains:
-     * - href=" or src=" (HTML attributes that carry URLs), OR
-     * - any source domain from the url_mapping (bare URL occurrences)
+     * A value is considered potentially rewritable if it contains an HTML URL
+     * attribute, a literal source domain, or an encoding marker which may hide
+     * a source-domain byte.
      */
     private function maybe_contains_rewritable_urls(string $value): bool
     {
         if (stripos($value, 'href=') !== false || stripos($value, 'src=') !== false) {
             return true;
         }
-        foreach ($this->source_domains as $domain) {
-            if (stripos($value, $domain) !== false) {
-                return true;
-            }
-        }
-        return false;
+
+        return $this->value_might_contain_source_domain($value);
     }
 
     /**
@@ -357,9 +352,11 @@ class StructuredDataUrlRewriter
     }
 
     /**
-     * Return whether a decoded value may contain one of the configured source
-     * domains. This intentionally checks hosts instead of full source URLs so
-     * escaped spellings of `://` in block markup or JSON do not matter.
+     * Return whether a decoded value may expose a configured source domain.
+     *
+     * Check literal hosts first. A JSON Unicode escape or HTML character
+     * reference may hide a host byte, so their coarse markers also require
+     * parsing. The format parsers still decide whether either marker is valid.
      */
     public function value_might_contain_source_domain(string $value): bool
     {
@@ -373,7 +370,7 @@ class StructuredDataUrlRewriter
             }
         }
 
-        return false;
+        return strpos($value, '\\u') !== false || strpos($value, '&') !== false;
     }
 
     private function get_cached_url_rewrite(string $cache_key)
@@ -453,12 +450,11 @@ class StructuredDataUrlRewriter
                     $resolve_relative_urls ? $base_url : null
                 );
                 while ( $p->next_token() ) {
-                    if (
-                        '#block-comment' === $p->get_token_type() &&
-                        $this->value_might_contain_source_domain( $p->get_modifiable_text() )
-                    ) {
-                        // The parser supplies the attributes. The raw comment
-                        // above is only a fast rejection for unrelated blocks.
+                    $block_comment_may_contain_source_domain = '#block-comment' === $p->get_token_type()
+                        && $this->value_might_contain_source_domain( $p->get_modifiable_text() );
+                    if ( $block_comment_may_contain_source_domain ) {
+                        // The fast check includes supported encoding markers;
+                        // the parsed string leaves decide whether a URL exists.
                         $block_attributes = $p->get_block_attributes();
                         if ( is_array( $block_attributes ) ) {
                             $rewritten_block_attributes = $this->rewrite_inferred_block_attribute_values( $block_attributes );

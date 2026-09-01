@@ -94,6 +94,22 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringContainsString('new-site.com', $decoded['url']);
     }
 
+    public function testRewritesJsonWhenEscapesHideTheSourceHost(): void
+    {
+        $rewriter = $this->createRewriter();
+        $json = '{"url":"https:\u002f\u002fold\u002dsite\u002ecom\u002fapi"}';
+        $encoded = base64_encode($json);
+        $sql = "INSERT INTO `wp_postmeta` VALUES(1, CONVERT(FROM_BASE64('{$encoded}') USING utf8mb4));";
+
+        $this->assertStringNotContainsString('old-site.com', $json);
+
+        $result = $rewriter->rewrite($sql);
+        $values = $this->collectValues($result);
+        $decoded = json_decode($values[0], true);
+
+        $this->assertSame('https://new-site.com/api', $decoded['url']);
+    }
+
     public function testHandlesMixedValueTypes(): void
     {
         $rewriter = $this->createRewriter();

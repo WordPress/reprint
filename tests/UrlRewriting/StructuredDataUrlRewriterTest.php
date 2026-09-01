@@ -175,6 +175,18 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame('https://new-site.com/api', json_decode($result, true));
     }
 
+    public function testJsonDecodesEscapedSourceHostBeforeUrlMatching(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '{"url":"https:\u002f\u002fold\u002dsite\u002ecom\u002fpage"}';
+
+        $this->assertStringNotContainsString('old-site.com', $input);
+
+        $result = json_decode($rewriter->rewrite($input), true);
+
+        $this->assertSame('https://new-site.com/page', $result['url']);
+    }
+
     public function testJsonOutputUsesUnescapedSlashes(): void
     {
         $rewriter = $this->createRewriter();
@@ -246,6 +258,21 @@ class StructuredDataUrlRewriterTest extends TestCase
         $unserialized = unserialize($result);
         $decoded = json_decode($unserialized['config'], true);
         $this->assertSame('https://new-site.com/api', $decoded['link']);
+    }
+
+    public function testSerializedPhpReachesJsonWithEscapedSourceHost(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = serialize([
+            'json' => '{"url":"https:\u002f\u002fold\u002dsite\u002ecom\u002fpage"}',
+        ]);
+
+        $this->assertStringNotContainsString('old-site.com', $input);
+
+        $result = unserialize($rewriter->rewrite($input));
+        $decoded_json = json_decode($result['json'], true);
+
+        $this->assertSame('https://new-site.com/page', $decoded_json['url']);
     }
 
     public function testSerializedPhpWithNoUrlsIsUnchanged(): void
@@ -641,12 +668,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://new-site.com/from-css.jpg', $rewritten_code);
     }
 
-    /**
-     * The HTML parser understands character references in a URL. A separate
-     * literal URL is needed here because the block-level speed check only sees
-     * raw source-host bytes before it asks that parser for the attributes.
-     */
-    public function testDiviHtmlEntityHostRewritesAfterAnotherValuePassesTheBlockFastCheck(): void
+    public function testDiviHtmlEntityHostRewritesWithoutLiteralSourceHostBytes(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<!-- wp:divi/text '
@@ -657,14 +679,11 @@ class StructuredDataUrlRewriterTest extends TestCase
                             'value' => '<a href="https://old&#45;site.com/entity-host">Entity host</a>',
                         ],
                     ],
-                    'advanced' => [
-                        'literalProbe' => [
-                            'desktop' => ['value' => 'https://old-site.com/probe'],
-                        ],
-                    ],
                 ],
             ], JSON_UNESCAPED_SLASHES)
             . ' /-->';
+
+        $this->assertStringNotContainsString('old-site.com', $input);
 
         $result = $rewriter->rewrite($input, 'block_markup');
         $rewritten_attributes = $this->getBlockAttributes($result, 'wp:divi/text');
@@ -836,7 +855,49 @@ class StructuredDataUrlRewriterTest extends TestCase
                 's:999:"https://old-site.com/incomplete";',
                 's:999:"https://new-site.com/incomplete";',
             ],
+            'JSON Unicode escape inside the source host' => [
+                '{"url":"https:\/\/old\u002dsite.com\/unicode-host"}',
+                '{"url":"https://new-site.com/unicode-host"}',
+            ],
+            'HTML character reference inside the source host' => [
+                '<a href="https://old&#45;site.com/entity-host">Entity host</a>',
+                '<a href="https://new-site.com/entity-host">Entity host</a>',
+            ],
         ];
+    }
+
+    public function testDiviBlockRewritesRecursivelyEncodedJsonWithoutLiteralSourceHostBytes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $encoded_url = '"https:\u002f\u002fold\u002dsite\u002ecom\u002fdeep"';
+        $nested_json = json_encode([
+            'payload' => json_encode([
+                'url' => $encoded_url,
+            ], JSON_UNESCAPED_SLASHES),
+        ], JSON_UNESCAPED_SLASHES);
+        $input = '<!-- wp:divi/text '
+            . json_encode([
+                'content' => [
+                    'advanced' => [
+                        'extensionPayload' => [
+                            'desktop' => ['value' => $nested_json],
+                        ],
+                    ],
+                ],
+            ], JSON_UNESCAPED_SLASHES)
+            . ' /-->';
+
+        $this->assertStringNotContainsString('old-site.com', $input);
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $rewritten_attributes = $this->getBlockAttributes($result, 'wp:divi/text');
+        $rewritten_outer_json = json_decode(
+            $rewritten_attributes['content']['advanced']['extensionPayload']['desktop']['value'],
+            true
+        );
+        $rewritten_inner_json = json_decode($rewritten_outer_json['payload'], true);
+
+        $this->assertSame('"https://new-site.com/deep"', $rewritten_inner_json['url']);
     }
 
     /**
@@ -845,10 +906,7 @@ class StructuredDataUrlRewriterTest extends TestCase
      * visible without making the whole suite red.
      */
     #[DataProvider('knownDiviInferenceLimitationCases')]
-    public function testKnownDiviInferenceLimitationsRemainUnchanged(
-        string $input_value,
-        bool $force_block_entry = true
-    ): void
+    public function testKnownDiviInferenceLimitationsRemainUnchanged(string $input_value): void
     {
         $rewriter = $this->createRewriter();
         $advanced_attributes = [
@@ -856,13 +914,6 @@ class StructuredDataUrlRewriterTest extends TestCase
                 'desktop' => ['value' => $input_value],
             ],
         ];
-        if ($force_block_entry) {
-            // Make the processor enter this block even when the limitation
-            // hides every source-host byte in the value under test.
-            $advanced_attributes['literalProbe'] = [
-                'desktop' => ['value' => 'https://old-site.com/probe'],
-            ];
-        }
         $input = '<!-- wp:divi/text '
             . json_encode([
                 'content' => [
@@ -878,12 +929,6 @@ class StructuredDataUrlRewriterTest extends TestCase
             $input_value,
             $rewritten_attributes['content']['advanced']['extensionPayload']['desktop']['value']
         );
-        if ($force_block_entry) {
-            $this->assertSame(
-                'https://new-site.com/probe',
-                $rewritten_attributes['content']['advanced']['literalProbe']['desktop']['value']
-            );
-        }
     }
 
     /**
@@ -897,13 +942,6 @@ class StructuredDataUrlRewriterTest extends TestCase
             ],
             'base64 payload is not decoded' => [
                 base64_encode('{"url":"https://old-site.com/base64"}'),
-            ],
-            'JSON Unicode escapes split the source host bytes' => [
-                '{"url":"https:\/\/old\u002dsite.com\/unicode-host"}',
-            ],
-            'HTML character reference defeats the block fast-reject check' => [
-                '<a href="https://old&#45;site.com/entity-host">Entity host</a>',
-                false,
             ],
             'CSS escape splits the source host bytes' => [
                 '.hero{background:url(https://old\\2d site.com/css-escape.jpg)}',
@@ -1278,6 +1316,12 @@ class StructuredDataUrlRewriterTest extends TestCase
         );
         $this->assertFalse(
             $rewriter->value_might_contain_source_domain('<a href="https://other-site.com/page">Link</a>')
+        );
+        $this->assertTrue(
+            $rewriter->value_might_contain_source_domain('{"url":"https://old\u002dsite.com/page"}')
+        );
+        $this->assertTrue(
+            $rewriter->value_might_contain_source_domain('<a href="https://old&#45;site.com/page">Link</a>')
         );
     }
 
