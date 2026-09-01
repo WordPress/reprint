@@ -29,10 +29,14 @@ jobs:
           path: reprint.phar
 
   e2e-playground:
-    name: E2E (Playground CLI)
+    name: E2E (Playground CLI, shard ${{ matrix.shard }}/4)
     needs: build-phar
     runs-on: ubuntu-22.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       PLAYGROUND_PHP_VERSION: '8.3'
       WP_MYSQL_PARSER_EXTENSION_MANIFEST: https://wordpress.github.io/sqlite-database-integration/wp_mysql_parser-wasm-extension/latest/manifest.json
@@ -49,6 +53,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
 
       # The export side still needs real PHP-FPM + nginx.
       # Use PHP 8.2 for the server; the importer runs under PHP.wasm.
@@ -143,9 +149,9 @@ jobs:
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
           PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
         working-directory: tests/e2e
-        # WASM PHP boot takes ~12s and full-site downloads run minutes, so allow
-        # plenty of room. Individual tests still set tighter per-call budgets.
-        run: npx vitest run --test-timeout=600000
+        # Run every test file once across four runners because each WASM PHP
+        # invocation has substantial startup overhead.
+        run: npx vitest run --shard=${{ matrix.shard }}/4 --test-timeout=600000
 
       - name: Debug logs
         if: always()
@@ -158,3 +164,18 @@ jobs:
           sudo tail -100 /var/log/nginx/error.log 2>/dev/null || echo "(empty)"
           echo "--- Nginx config test ---"
           sudo nginx -t 2>&1 || true
+
+  e2e-playground-result:
+    name: E2E (Playground CLI)
+    needs: e2e-playground
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Playground CLI E2E shard to pass
+        env:
+          PLAYGROUND_E2E_RESULT: ${{ needs.e2e-playground.result }}
+        run: |
+          if [ "$PLAYGROUND_E2E_RESULT" != "success" ]; then
+            echo "One or more Playground CLI E2E shards did not pass."
+            exit 1
+          fi
