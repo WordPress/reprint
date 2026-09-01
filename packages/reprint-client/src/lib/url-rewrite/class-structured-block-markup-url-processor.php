@@ -64,7 +64,6 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	private $inspecting_html_attributes;
 
 	public function __construct( $html, ?string $base_url_string = null ) {
-		// @phpstan-ignore-next-line -- The conditional HTML processor wrapper hides its parent constructor.
 		parent::__construct( $html );
 		$this->base_url_string = $base_url_string;
 		$this->base_url_object = $base_url_string ? WPURL::parse( $base_url_string ) : null;
