@@ -36,11 +36,9 @@ require_once __DIR__ . "/class-database-rows-reader.php";
  *
  * Known limitations:
  *
- * - Rows too large to be SELECTed. If a row is larger than max_allowed_packet or the
- *   PHP memory_limit, it won't be exported. The underlying assumption is that WordPress
- *   wouldn't be able to use that data anyway. If that turns out to be wrong, and there
- *   are plugins that use huge blobs with byte offset queries, we'll need to add measures
- *   to detect those situations and export that data in chunks.
+ * - Large spatial values use byte-range queries, but other columns are still selected
+ *   whole. A non-spatial row larger than max_allowed_packet or PHP memory_limit cannot
+ *   be exported.
  * - Tables without a primary key can't use the oversized row handling as there's no
  *   stable row identifier for the UPDATE ... SET col = CONCAT(col, chunk) WHERE ... query.
  */
@@ -110,17 +108,20 @@ class MySQLDumpProducer
      */
     private $max_statement_size;
 
+    /** @var int Exact target max_allowed_packet used as the spatial value ceiling. */
+    private $target_max_allowed_packet;
+
     /**
      * When a row is too large for a single INSERT, its big columns are split
      * into chunks and queued here. Each entry tracks the column name, its
      * data type, the current byte offset into the value, and the total byte
      * length. Character columns also track a character offset because MySQL's
      * SUBSTRING() counts characters for those types. Spatial columns track
-     * whether their durable binary staging row is ready. The actual data is
+     * their staging id and next chunk number. The actual data is
      * re-fetched from the database on demand, keeping cursors small (a few
      * hundred bytes rather than megabytes of raw data).
      *
-     * @var array Array of {column: string, data_type: string, byte_offset: int, total_length: int, character_offset?: int, spatial_staging_initialized?: bool, spatial_staging_id?: int}
+     * @var array Array of {column: string, data_type: string, byte_offset: int, total_length: int, character_offset?: int, spatial_staging_id?: int, chunk_number?: int}
      */
     private $oversized_queue = [];
 
@@ -130,7 +131,7 @@ class MySQLDumpProducer
     /** @var bool Whether the dump has created its target spatial staging table. */
     private $spatial_staging_table_created = false;
 
-    /** @var array<string,int> Complete staging rows keyed by target column name. */
+    /** @var array<string,array{staging_id:int,chunk_count:int}> Complete staged chunks keyed by target column name. */
     private $staged_spatial_columns = [];
 
     /** @var int */
@@ -161,14 +162,30 @@ class MySQLDumpProducer
     public function __construct($db, $options = [])
     {
         $this->db = $db;
-        $this->row_reader = new DatabaseRowsReader($db, $options);
-        $this->emit_create_table = (bool)($options["create_table_query"] ?? true);
+        $this->emit_create_table = (bool) ( $options["create_table_query"] ?? true );
+
+        $source_max_allowed_packet = $this->detect_max_allowed_packet();
+        $this->target_max_allowed_packet = isset($options["target_max_allowed_packet"])
+            ? (int) $options["target_max_allowed_packet"]
+            : $source_max_allowed_packet;
+        if ($this->target_max_allowed_packet < 1) {
+            throw new \InvalidArgumentException(
+                "target_max_allowed_packet must be a positive byte count."
+            );
+        }
 
         if (isset($options["max_statement_size"])) {
             $this->max_statement_size = (int)$options["max_statement_size"];
         } else {
-            $this->max_statement_size = $this->detect_max_statement_size();
+            $this->max_statement_size = (int) ($source_max_allowed_packet * 0.8);
         }
+
+        $options["maximum_inline_spatial_bytes"] = min(
+            $this->max_statement_size,
+            (int) ($source_max_allowed_packet * 0.8),
+            $this->target_max_allowed_packet
+        );
+        $this->row_reader = new DatabaseRowsReader($db, $options);
 
         if (isset($options["cursor"])) {
             $this->initialize_from_cursor($options["cursor"]);
@@ -305,8 +322,8 @@ class MySQLDumpProducer
         }
 
         $current_record = $this->row_reader->get_current_record();
-        $has_zero_byte_spatial_value = $this->has_zero_byte_spatial_value($current_record);
-        $spatial_columns = $this->get_spatial_columns_to_make_nullable($current_record);
+        $has_zero_byte_spatial_value = $this->has_zero_byte_spatial_value();
+        $spatial_columns = $this->get_spatial_columns_to_make_nullable();
         if (!empty($spatial_columns)) {
             $this->reader_cursor_before_retained_record = $reader_cursor_before_current_record;
             $this->pending_nullable_spatial_columns = $spatial_columns;
@@ -385,9 +402,7 @@ class MySQLDumpProducer
             return true;
         }
 
-        $spatial_columns = $this->get_spatial_columns_to_make_nullable(
-            $this->row_reader->get_current_record()
-        );
+        $spatial_columns = $this->get_spatial_columns_to_make_nullable();
         if (!empty($spatial_columns)) {
             // Finish the INSERT before changing its table definition. The
             // retained row starts a new INSERT after the ALTER TABLE.
@@ -400,7 +415,7 @@ class MySQLDumpProducer
             return true;
         }
 
-        if ($this->has_zero_byte_spatial_value($this->row_reader->get_current_record())) {
+        if ($this->has_zero_byte_spatial_value()) {
             // MariaDB needs this row's INSERT column list to omit its
             // zero-byte geometry. Close the preceding multi-row INSERT and
             // retain the row for a one-row INSERT after this fragment.
@@ -526,14 +541,14 @@ class MySQLDumpProducer
     }
 
     /** Returns NOT NULL spatial columns which contain a zero-byte value in this row. */
-    private function get_spatial_columns_to_make_nullable($row)
+    private function get_spatial_columns_to_make_nullable()
     {
         $columns = [];
         foreach ($this->row_reader->get_current_column_names() as $column) {
             $column_metadata = $this->row_reader->get_column_metadata($column);
             if (
-                $row[$column] !== "" ||
                 !$this->row_reader->is_spatial_type($column_metadata["data_type"]) ||
+                $this->row_reader->get_current_spatial_value_length($column) !== 0 ||
                 $column_metadata["nullable"] ||
                 in_array($column, $this->nullable_spatial_columns, true)
             ) {
@@ -545,12 +560,12 @@ class MySQLDumpProducer
     }
 
     /** Returns whether this row contains a MariaDB zero-byte spatial placeholder. */
-    private function has_zero_byte_spatial_value($row)
+    private function has_zero_byte_spatial_value()
     {
         foreach ($this->row_reader->get_current_column_names() as $column) {
             if (
-                $row[$column] === "" &&
-                $this->row_reader->is_spatial_type($this->row_reader->get_data_type($column))
+                $this->row_reader->is_spatial_type($this->row_reader->get_data_type($column)) &&
+                $this->row_reader->get_current_spatial_value_length($column) === 0
             ) {
                 return true;
             }
@@ -759,10 +774,11 @@ class MySQLDumpProducer
         $cursor_data["current_statement_size"] = $this->current_statement_size;
         $cursor_data["spatial_staging_table_created"] = $this->spatial_staging_table_created;
         $cursor_data["staged_spatial_columns"] = [];
-        foreach ($this->staged_spatial_columns as $column => $staging_id) {
+        foreach ($this->staged_spatial_columns as $column => $staged_spatial_column) {
             $cursor_data["staged_spatial_columns"][] = [
                 "column" => $column,
-                "staging_id" => $staging_id,
+                "staging_id" => $staged_spatial_column["staging_id"],
+                "chunk_count" => $staged_spatial_column["chunk_count"],
             ];
         }
         $cursor_data["nullable_spatial_columns"] = $this->nullable_spatial_columns;
@@ -824,24 +840,18 @@ class MySQLDumpProducer
                 }
             }
             if ($this->row_reader->is_spatial_type($item['data_type'])) {
-                if (!array_key_exists('spatial_staging_initialized', $item)) {
-                    if ( (int) $item['byte_offset'] !== 0 ) {
-                        throw new \InvalidArgumentException(
-                            "Invalid cursor: an oversized spatial value with progress must" .
-                            " record whether its staging row was initialized"
-                        );
-                    }
-                    $decoded_item['spatial_staging_initialized'] = false;
-                } else {
-                    $decoded_item['spatial_staging_initialized'] =
-                        (bool) $item['spatial_staging_initialized'];
-                }
                 if (!isset($item['spatial_staging_id']) || (int) $item['spatial_staging_id'] < 1) {
                     throw new \InvalidArgumentException(
                         "Invalid cursor: an oversized spatial value requires a positive staging id"
                     );
                 }
                 $decoded_item['spatial_staging_id'] = (int) $item['spatial_staging_id'];
+                if (!isset($item['chunk_number']) || (int) $item['chunk_number'] < 0) {
+                    throw new \InvalidArgumentException(
+                        "Invalid cursor: an oversized spatial value requires a chunk number"
+                    );
+                }
+                $decoded_item['chunk_number'] = (int) $item['chunk_number'];
             }
             $decoded[] = $decoded_item;
         }
@@ -909,13 +919,19 @@ class MySQLDumpProducer
             foreach ($staged_spatial_columns as $staged_spatial_column) {
                 if (
                     !is_array($staged_spatial_column) ||
-                    !isset($staged_spatial_column["column"], $staged_spatial_column["staging_id"]) ||
+                    !isset(
+                        $staged_spatial_column["column"],
+                        $staged_spatial_column["staging_id"],
+                        $staged_spatial_column["chunk_count"]
+                    ) ||
                     !is_string($staged_spatial_column["column"]) ||
                     $staged_spatial_column["column"] === "" ||
-                    (int) $staged_spatial_column["staging_id"] < 1
+                    (int) $staged_spatial_column["staging_id"] < 1 ||
+                    (int) $staged_spatial_column["chunk_count"] < 1
                 ) {
                     throw new \InvalidArgumentException(
-                        "Invalid cursor: each staged spatial column requires a name and positive id"
+                        "Invalid cursor: each staged spatial column requires a name, positive id, " .
+                        "and positive chunk count"
                     );
                 }
                 $column = $staged_spatial_column["column"];
@@ -928,7 +944,10 @@ class MySQLDumpProducer
                         "Invalid cursor: staged spatial column names and ids must be unique"
                     );
                 }
-                $this->staged_spatial_columns[$column] = $staging_id;
+                $this->staged_spatial_columns[$column] = [
+                    "staging_id" => $staging_id,
+                    "chunk_count" => (int) $staged_spatial_column["chunk_count"],
+                ];
                 $staging_ids[$staging_id] = true;
             }
             foreach ($this->oversized_queue as $oversized_value) {
@@ -1136,14 +1155,23 @@ class MySQLDumpProducer
         return $wrapper_bytes + $estimated_base64_length;
     }
 
-    /** Auto-detects max_allowed_packet and uses 80% of it. Falls back to 1MB. */
-    private function detect_max_statement_size()
+    /** Estimates a non-null binary value from its raw byte length. */
+    private function estimate_formatted_binary_size($byte_length)
+    {
+        if ($byte_length === 0) {
+            return strlen("NULLIF(1, 1 " . self::ZERO_BYTE_SPATIAL_VALUE_COMMENT . ")");
+        }
+        return 15 + 4 * integer_divide($byte_length + 2, 3);
+    }
+
+    /** Returns the source max_allowed_packet value, or 1 MiB when it cannot be read. */
+    private function detect_max_allowed_packet()
     {
         try {
             $result = $this->db->query("SELECT @@max_allowed_packet as max_allowed_packet");
             $row = $result->fetch(PdoConstants::fetch_assoc());
             if ($row && isset($row['max_allowed_packet'])) {
-                return (int)($row['max_allowed_packet'] * 0.8);
+                return (int) $row['max_allowed_packet'];
             }
         } catch (\Exception $e) {
         }
@@ -1174,7 +1202,28 @@ class MySQLDumpProducer
             $value = $row[$col] ?? null;
             $raw_values[$col] = $value;
             $data_type = $this->row_reader->get_data_type($col);
-            $estimated_sizes[$col] = $this->estimate_formatted_size($value, $data_type);
+            if ($this->row_reader->is_spatial_type($data_type)) {
+                $spatial_value_length = $this->row_reader->get_current_spatial_value_length($col);
+                if (
+                    $spatial_value_length !== null &&
+                    $spatial_value_length > $this->target_max_allowed_packet
+                ) {
+                    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error returned as authenticated API data, never HTML.
+                    throw new \RuntimeException(
+                        "Spatial column " .
+                        $this->row_reader->quote_identifier($this->row_reader->get_current_table()) . "." .
+                        $this->row_reader->quote_identifier($col) .
+                        " is {$spatial_value_length} bytes, but the target max_allowed_packet is " .
+                        "{$this->target_max_allowed_packet} bytes. Increase the target limit and start again."
+                    );
+                    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+                }
+                $estimated_sizes[$col] = $spatial_value_length === null
+                    ? 4
+                    : $this->estimate_formatted_binary_size($spatial_value_length);
+            } else {
+                $estimated_sizes[$col] = $this->estimate_formatted_size($value, $data_type);
+            }
         }
 
         $row_tuple_bytes = $this->estimate_formatted_row_tuple_bytes($row);
@@ -1195,6 +1244,15 @@ class MySQLDumpProducer
             $formatted_values = [];
             foreach ($this->row_reader->get_current_column_names() as $col) {
                 $data_type = $this->row_reader->get_data_type($col);
+                if (
+                    $this->row_reader->is_spatial_type($data_type) &&
+                    $this->row_reader->get_current_spatial_value_length($col) > 0 &&
+                    $raw_values[$col] === null
+                ) {
+                    throw new \LogicException(
+                        "A spatial value omitted from the row query cannot use a direct INSERT."
+                    );
+                }
                 $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
             }
             return "(" . implode(",", array_values($formatted_values)) . ")";
@@ -1257,14 +1315,20 @@ class MySQLDumpProducer
                 break;
             }
 
-            $raw_value = $raw_values[$col];
-            if ($raw_value === null || $raw_value === '') {
-                continue;
-            }
-
             $data_type = $this->row_reader->get_data_type($col);
             $normalized_data_type = strtoupper($data_type);
             $spatial_type = $this->row_reader->is_spatial_type($normalized_data_type);
+            $raw_value = $raw_values[$col];
+            $spatial_value_length = $spatial_type
+                ? $this->row_reader->get_current_spatial_value_length($col)
+                : null;
+            if (
+                ( !$spatial_type && ( $raw_value === null || $raw_value === '' ) ) ||
+                ( $spatial_type &&
+                    ( $spatial_value_length === null || $spatial_value_length === 0 ) )
+            ) {
+                continue;
+            }
             if (
                 !$this->row_reader->is_binary_type($normalized_data_type) &&
                 !$this->row_reader->is_character_string_type($normalized_data_type) &&
@@ -1273,45 +1337,50 @@ class MySQLDumpProducer
                 $unchunkable_data_types[$normalized_data_type] = true;
                 continue;
             }
-            $value_length = strlen($raw_value);
-            $chunk_size = $this->compute_chunk_size($col);
-
-            if ($value_length > $chunk_size) {
-                $replacement = "''";
-                $staging_id = 0;
-                if ($spatial_type) {
-                    $staging_id = $this->staged_spatial_columns[$col] ??
-                        $next_spatial_staging_id;
-                    $quoted_staging_table = $this->row_reader->quote_identifier(
-                        self::SPATIAL_STAGING_TABLE
-                    );
-                    $replacement =
+            $value_length = $spatial_type
+                ? $spatial_value_length
+                : strlen($raw_value);
+            $replacement = "''";
+            $staging_id = 0;
+            if ($spatial_type) {
+                $staged_spatial_column = $this->staged_spatial_columns[$col] ?? null;
+                $staging_id = $staged_spatial_column["staging_id"] ??
+                    $next_spatial_staging_id;
+                $quoted_staging_table = $this->row_reader->quote_identifier(
+                    self::SPATIAL_STAGING_TABLE
+                );
+                $chunk_count = $staged_spatial_column["chunk_count"] ??
+                    (int) ceil($value_length / $this->compute_chunk_size($col));
+                $chunk_selects = [];
+                for ($chunk_number = 0; $chunk_number < $chunk_count; ++$chunk_number) {
+                    $chunk_selects[] =
                         "(SELECT `value` FROM {$quoted_staging_table} " .
-                        "WHERE `id` = {$staging_id})";
-                    $chunked_replacements[$col] = $replacement;
-                    ++$next_spatial_staging_id;
+                        "WHERE `id` = {$staging_id} AND `chunk_number` = {$chunk_number})";
                 }
-                $chunked_columns[$col] = true;
-                $replacement_bytes = strlen($replacement);
-                $saved_bytes += $size - $replacement_bytes;
-                $excess -= $size - $replacement_bytes;
+                $replacement = "CONCAT(" . implode(",", $chunk_selects) . ")";
+                $chunked_replacements[$col] = $replacement;
+                ++$next_spatial_staging_id;
+            }
+            $chunked_columns[$col] = true;
+            $replacement_bytes = strlen($replacement);
+            $saved_bytes += $size - $replacement_bytes;
+            $excess -= $size - $replacement_bytes;
 
-                $queue_item = [
-                    'column' => $col,
-                    'data_type' => $data_type,
-                    'byte_offset' => 0,
-                    'total_length' => $value_length,
-                ];
-                if ($this->row_reader->is_character_string_type($data_type)) {
-                    $queue_item['character_offset'] = 0;
-                }
-                if ($spatial_type && !isset($this->staged_spatial_columns[$col])) {
-                    $queue_item['spatial_staging_initialized'] = false;
-                    $queue_item['spatial_staging_id'] = $staging_id;
-                }
-                if (!$spatial_type || !isset($this->staged_spatial_columns[$col])) {
-                    $this->oversized_queue[] = $queue_item;
-                }
+            $queue_item = [
+                'column' => $col,
+                'data_type' => $data_type,
+                'byte_offset' => 0,
+                'total_length' => $value_length,
+            ];
+            if ($this->row_reader->is_character_string_type($data_type)) {
+                $queue_item['character_offset'] = 0;
+            }
+            if ($spatial_type && !isset($this->staged_spatial_columns[$col])) {
+                $queue_item['spatial_staging_id'] = $staging_id;
+                $queue_item['chunk_number'] = 0;
+            }
+            if (!$spatial_type || !isset($this->staged_spatial_columns[$col])) {
+                $this->oversized_queue[] = $queue_item;
             }
         }
 
@@ -1367,10 +1436,18 @@ class MySQLDumpProducer
             if ($column_index > 0) {
                 ++$tuple_bytes;
             }
-            $tuple_bytes += $this->estimate_formatted_size(
-                $row[$column] ?? null,
-                $this->row_reader->get_data_type($column)
-            );
+            $data_type = $this->row_reader->get_data_type($column);
+            if ($this->row_reader->is_spatial_type($data_type)) {
+                $spatial_value_length = $this->row_reader->get_current_spatial_value_length($column);
+                $tuple_bytes += $spatial_value_length === null
+                    ? 4
+                    : $this->estimate_formatted_binary_size($spatial_value_length);
+            } else {
+                $tuple_bytes += $this->estimate_formatted_size(
+                    $row[$column] ?? null,
+                    $data_type
+                );
+            }
             ++$column_index;
         }
         return $tuple_bytes;
@@ -1451,23 +1528,20 @@ class MySQLDumpProducer
         if (!$this->spatial_staging_table_created) {
             $this->current_sql_fragment =
                 "CREATE TABLE IF NOT EXISTS {$quoted_staging_table} (" .
-                "`id` INT UNSIGNED NOT NULL PRIMARY KEY," .
-                "`value` LONGBLOB NOT NULL" .
+                "`id` INT UNSIGNED NOT NULL," .
+                "`chunk_number` INT UNSIGNED NOT NULL," .
+                "`value` LONGBLOB NOT NULL," .
+                "PRIMARY KEY (`id`, `chunk_number`)" .
                 ") ENGINE=InnoDB;";
             $this->spatial_staging_table_created = true;
             return true;
         }
 
-        if (!$current['spatial_staging_initialized']) {
-            $this->current_sql_fragment =
-                "REPLACE INTO {$quoted_staging_table} (`id`, `value`) " .
-                "VALUES ({$staging_id}, '');";
-            $this->oversized_queue[$spatial_queue_index]['spatial_staging_initialized'] = true;
-            return true;
-        }
-
         if ($current['byte_offset'] >= $current['total_length']) {
-            $this->staged_spatial_columns[$current['column']] = $staging_id;
+            $this->staged_spatial_columns[$current['column']] = [
+                "staging_id" => $staging_id,
+                "chunk_count" => $current['chunk_number'],
+            ];
             unset($this->oversized_queue[$spatial_queue_index]);
             $this->oversized_queue = array_values($this->oversized_queue);
             return false;
@@ -1475,12 +1549,11 @@ class MySQLDumpProducer
 
         $chunk = $this->read_next_oversized_chunk($current);
         $formatted_chunk = $this->format_value($chunk['value'], 'LONGBLOB');
-        $byte_offset = $current['byte_offset'];
         $this->current_sql_fragment =
-            "UPDATE {$quoted_staging_table} " .
-            "SET `value` = CONCAT(`value`, {$formatted_chunk}) " .
-            "WHERE `id` = {$staging_id} AND OCTET_LENGTH(`value`) = {$byte_offset};";
+            "REPLACE INTO {$quoted_staging_table} (`id`, `chunk_number`, `value`) " .
+            "VALUES ({$staging_id}, {$current['chunk_number']}, {$formatted_chunk});";
         $this->oversized_queue[$spatial_queue_index]['byte_offset'] += $chunk['byte_length'];
+        ++$this->oversized_queue[$spatial_queue_index]['chunk_number'];
         return true;
     }
 

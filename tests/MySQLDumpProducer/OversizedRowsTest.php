@@ -4,6 +4,7 @@ require_once __DIR__ . '/MySQLDumpProducerTestBase.php';
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 use Reprint\Importer\Database\PdoDatabaseConnection;
+use WordPress\Reprint\Server\DatabaseRowsReader;
 use WordPress\Reprint\Server\MySQLDumpProducer;
 
 /**
@@ -358,23 +359,24 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $sql = implode("\n", $fragments);
         $this->assertStringNotContainsString('ST_GeomFromText(', $sql);
         $this->assertStringContainsString(
-            'UPDATE `__reprint_db_pull_progress_spatial` SET `value` = CONCAT',
+            'REPLACE INTO `__reprint_db_pull_progress_spatial` (`id`, `chunk_number`, `value`)',
             $sql
         );
         $this->assertStringContainsString(
-            '(1,(SELECT `value` FROM `__reprint_db_pull_progress_spatial` WHERE `id` = 1))',
+            '(1,CONCAT((SELECT `value` FROM `__reprint_db_pull_progress_spatial` ' .
+                'WHERE `id` = 1 AND `chunk_number` = 0)',
             $sql
         );
         $this->assertLessThan(
             strpos($sql, 'INSERT INTO `oversized_geometry_value`'),
-            strpos($sql, 'UPDATE `__reprint_db_pull_progress_spatial`')
+            strpos($sql, 'REPLACE INTO `__reprint_db_pull_progress_spatial`')
         );
         $this->assertSame(
             1,
             preg_match(
-                "/UPDATE `__reprint_db_pull_progress_spatial` " .
-                    "SET `value` = CONCAT\\(`value`, FROM_BASE64\\('[A-Za-z0-9+\\/=]+'\\)\\) " .
-                    "WHERE `id` = 1 AND OCTET_LENGTH\\(`value`\\) = 0;/",
+                "/REPLACE INTO `__reprint_db_pull_progress_spatial` " .
+                    "\\(`id`, `chunk_number`, `value`\\) VALUES " .
+                    "\\(1, 0, FROM_BASE64\\('[A-Za-z0-9+\\/=]+'\\)\\);/",
                 $sql,
                 $first_chunk,
                 PREG_OFFSET_CAPTURE
@@ -420,6 +422,64 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
                 'GEOMETRYCOLLECTION(LINESTRING(%s))',
             ],
         ];
+    }
+
+    public function testOrderedRowQueryOmitsSpatialValueAboveItsInlineLimit(): void
+    {
+        $this->pdo->exec(
+            'CREATE TABLE deferred_spatial_value (' .
+            'id INT PRIMARY KEY, route LINESTRING NOT NULL)'
+        );
+        $points = [];
+        for ($point = 0; $point < 1000; ++$point) {
+            $points[] = $point . ' ' . $point;
+        }
+        $statement = $this->pdo->prepare(
+            'INSERT INTO deferred_spatial_value VALUES (1, ST_GeomFromText(?))'
+        );
+        $statement->execute(['LINESTRING(' . implode(',', $points) . ')']);
+        $expected_length = (int) $this->pdo
+            ->query(
+                'SELECT OCTET_LENGTH(CAST(route AS BINARY)) FROM deferred_spatial_value'
+            )
+            ->fetchColumn();
+
+        $reader = new DatabaseRowsReader($this->pdo, [
+            'tables_to_process' => ['deferred_spatial_value'],
+            'maximum_inline_spatial_bytes' => 1024,
+        ]);
+        $this->assertTrue($reader->move_to_next_table());
+        $this->assertTrue($reader->next_record());
+
+        $this->assertNull($reader->get_current_record()['route']);
+        $this->assertSame(
+            $expected_length,
+            $reader->get_current_spatial_value_length('route')
+        );
+    }
+
+    public function testSpatialValueAboveTargetPacketLimitStopsBeforeStaging(): void
+    {
+        $this->pdo->exec(
+            'CREATE TABLE spatial_value_above_target_packet (' .
+            'id INT PRIMARY KEY, route LINESTRING NOT NULL)'
+        );
+        $points = [];
+        for ($point = 0; $point < 2000; ++$point) {
+            $points[] = $point . ' ' . $point;
+        }
+        $statement = $this->pdo->prepare(
+            'INSERT INTO spatial_value_above_target_packet VALUES (1, ST_GeomFromText(?))'
+        );
+        $statement->execute(['LINESTRING(' . implode(',', $points) . ')']);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('but the target max_allowed_packet is 16384 bytes');
+
+        $this->collectAllFragments($this->createProducer([
+            'max_statement_size' => 8 * 1024,
+            'target_max_allowed_packet' => 16 * 1024,
+        ]));
     }
 
     public function testMultipleOversizedSpatialColumnsReuseOneStagingTable(): void
@@ -480,7 +540,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
             1,
             substr_count($sql, 'CREATE TABLE IF NOT EXISTS `__reprint_db_pull_progress_spatial`')
         );
-        $this->assertSame(
+        $this->assertGreaterThan(
             2,
             substr_count($sql, 'REPLACE INTO `__reprint_db_pull_progress_spatial`')
         );
@@ -516,7 +576,8 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
                 'data_type' => 'GEOMETRY',
                 'byte_offset' => 8192,
                 'total_length' => 16384,
-                'spatial_staging_initialized' => true,
+                'spatial_staging_id' => 1,
+                'chunk_number' => 1,
             ]],
         ];
         $database = new PdoDatabaseConnection($this->pdo);
@@ -544,7 +605,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         array_shift($cursor['oversized_queue']);
         $cursor['state'] = 'emit_oversized_update';
 
-        unset($cursor['oversized_queue'][0]['spatial_staging_initialized']);
+        unset($cursor['oversized_queue'][0]['spatial_staging_id']);
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('may have already appended part of a large value');
         $assert_resume->invoke(
@@ -640,8 +701,8 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $this->assertEquals('small value', $row['small_col']);
     }
 
-    /** Combined values must fail before an over-limit fragment is formatted. */
-    public function testCombinedValuesAbovePartBodyLimitThrowBeforeFormatting(): void
+    /** Combined values may use one bounded update apiece. */
+    public function testCombinedValuesAbovePartBodyLimitUseBoundedUpdates(): void
     {
         $this->pdo->exec("
             CREATE TABLE combined_fragment_limit (
@@ -658,11 +719,21 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         );
         $stmt->execute([$blob1, $blob2]);
 
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('cannot fit the SQL size limits');
-        $this->expectExceptionMessage('SQL part body limit is 16777216 bytes');
-
-        $this->getDumpSQL(['max_statement_size' => 64 * 1024 * 1024]);
+        $fragments = $this->collectAllFragments($this->createProducer([
+            'max_statement_size' => 64 * 1024 * 1024,
+        ]));
+        foreach ($fragments as $fragment) {
+            $this->assertLessThanOrEqual(
+                MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES,
+                strlen($fragment)
+            );
+        }
+        $target = $this->executeDumpInNewDatabase(implode("\n", $fragments));
+        $row = $target
+            ->query('SELECT blob1, blob2 FROM combined_fragment_limit WHERE id = 1')
+            ->fetch();
+        $this->assertSame($blob1, $row['blob1']);
+        $this->assertSame($blob2, $row['blob2']);
     }
 
     /** Text and binary chunks must both stay below the packet target. */

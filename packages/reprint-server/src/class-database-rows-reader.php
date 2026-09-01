@@ -85,6 +85,15 @@ class DatabaseRowsReader {
     /** @var int|null */
     private $query_time_limit_ms = null;
 
+    /** @var int|null Largest spatial value returned by the ordered row query. */
+    private $maximum_inline_spatial_bytes = null;
+
+    /** @var array<string,int|null> Byte lengths for spatial values in the retained row. */
+    private $current_spatial_value_lengths = [];
+
+    /** @var array<string,string> Internal length aliases keyed by spatial column name. */
+    private $spatial_length_aliases = [];
+
     /** @var array<string,list<array{column:string,value:string}>> Row exclusions keyed by table. */
     private $exclude_rows_by_table = [];
 
@@ -102,6 +111,7 @@ class DatabaseRowsReader {
      *     @type array|null $tables_to_process   Tables to read, or null to discover them.
      *     @type int        $batch_size          Maximum records per query.
      *     @type int|null   $query_time_limit_ms Maximum query duration in milliseconds.
+     *     @type int|null   $maximum_inline_spatial_bytes Largest spatial value returned inline.
      *     @type array      $exclude_rows        Table, column, and value exclusion rules.
      *     @type string[]   $exclude_tables      Table names to omit from automatic discovery.
      * }
@@ -119,6 +129,13 @@ class DatabaseRowsReader {
         if (isset($options["query_time_limit_ms"])) {
             $limit = (int) $options["query_time_limit_ms"];
             $this->query_time_limit_ms = $limit > 0 ? $limit : null;
+        }
+
+        if (isset($options["maximum_inline_spatial_bytes"])) {
+            $this->maximum_inline_spatial_bytes = max(
+                1,
+                (int) $options["maximum_inline_spatial_bytes"]
+            );
         }
 
         if (isset($options["exclude_rows"]) && is_array($options["exclude_rows"])) {
@@ -173,6 +190,7 @@ class DatabaseRowsReader {
             return false;
         }
 
+        $record = $this->extract_spatial_value_lengths($record);
         ++$this->rows_fetched_from_current_query;
         if ($this->current_column_names === null) {
             $this->current_column_names = array_keys($record);
@@ -237,6 +255,13 @@ class DatabaseRowsReader {
     {
         $this->current_row = null;
         $this->current_row_ends_query_batch = false;
+        $this->current_spatial_value_lengths = [];
+    }
+
+    /** Returns the retained spatial value length, or null for SQL NULL. */
+    public function get_current_spatial_value_length($column)
+    {
+        return $this->current_spatial_value_lengths[$column] ?? null;
     }
 
     /**
@@ -278,6 +303,8 @@ class DatabaseRowsReader {
                 ". The source row changed during export; run db-pull --abort and start again."
             );
         }
+
+        $record = $this->extract_spatial_value_lengths($record);
 
         $this->current_row = $record;
         $this->current_row_ends_query_batch = false;
@@ -458,6 +485,21 @@ class DatabaseRowsReader {
             foreach ($this->current_column_types as $column => $column_info) {
                 $quoted_column = $this->quote_identifier($column);
                 if (
+                    $this->maximum_inline_spatial_bytes !== null &&
+                    $this->is_spatial_type($column_info["data_type"])
+                ) {
+                    $length_alias = $this->get_spatial_length_alias($column);
+                    $quoted_length_alias = $this->quote_identifier($length_alias);
+                    $binary_value = "CAST({$quoted_column} AS BINARY)";
+                    $select_parts[] =
+                        "CASE WHEN OCTET_LENGTH({$binary_value}) <= " .
+                        $this->maximum_inline_spatial_bytes .
+                        " THEN {$binary_value} ELSE NULL END AS {$quoted_column}";
+                    $select_parts[] =
+                        "OCTET_LENGTH({$binary_value}) AS {$quoted_length_alias}";
+                    continue;
+                }
+                if (
                     $this->is_numeric_type($column_info["data_type"]) ||
                     $this->is_binary_type($column_info["data_type"])
                 ) {
@@ -473,6 +515,43 @@ class DatabaseRowsReader {
         }
 
         return $query;
+    }
+
+    /** Returns an internal SELECT alias which cannot collide with a real column. */
+    private function get_spatial_length_alias($column)
+    {
+        if (isset($this->spatial_length_aliases[$column])) {
+            return $this->spatial_length_aliases[$column];
+        }
+        $index = count($this->spatial_length_aliases);
+        $lowercase_column_names = array_map(
+            "strtolower",
+            array_keys($this->current_column_types)
+        );
+        do {
+            $alias = "__reprint_internal_spatial_length_{$index}";
+            ++$index;
+        } while (in_array(strtolower($alias), $lowercase_column_names, true));
+        $this->spatial_length_aliases[$column] = $alias;
+        return $alias;
+    }
+
+    /** Removes internal spatial length fields from one fetched row. */
+    private function extract_spatial_value_lengths($record)
+    {
+        $this->current_spatial_value_lengths = [];
+        foreach ($this->spatial_length_aliases as $column => $alias) {
+            if (!array_key_exists($alias, $record)) {
+                throw new \RuntimeException(
+                    "Spatial length field '{$alias}' is missing from the database row."
+                );
+            }
+            $this->current_spatial_value_lengths[$column] = $record[$alias] === null
+                ? null
+                : (int) $record[$alias];
+            unset($record[$alias]);
+        }
+        return $record;
     }
 
     private function build_row_exclusion_where_conditions()
@@ -625,6 +704,8 @@ class DatabaseRowsReader {
             $this->current_column_names = array_keys($this->current_column_types);
             $this->current_row = null;
             $this->current_row_ends_query_batch = false;
+            $this->current_spatial_value_lengths = [];
+            $this->spatial_length_aliases = [];
         }
         return (bool) $this->current_table;
     }

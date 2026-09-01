@@ -788,6 +788,7 @@ function endpoint_sql_chunk(
     if (!empty($config["max_allowed_packet"])) {
         $client_max = (int) $config["max_allowed_packet"];
         if ($client_max >= 1048576 && $client_max <= 1073741824) {
+            $producer_options["target_max_allowed_packet"] = $client_max;
             $client_statement_size = (int) ($client_max * 0.8);
             $server_statement_size = null;
             try {

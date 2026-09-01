@@ -8703,6 +8703,15 @@ class ImportClient
                 false,
                 'db-pull',
             );
+            if ($this->max_allowed_packet === null) {
+                $packet_result = $mysql_conn->query(
+                    "SELECT @@max_allowed_packet AS max_allowed_packet"
+                );
+                $this->max_allowed_packet = (int) $packet_result->fetchColumn();
+                $packet_result->closeCursor();
+                $this->get_state()->max_allowed_packet = $this->max_allowed_packet;
+                $this->save_state();
+            }
             if ($starts_mysql_output) {
                 // Keep the mysql-start stage until the old target position is gone.
                 // If this process stops before save_state(), the next process
@@ -9312,21 +9321,21 @@ class ImportClient
 
         if ( ( $cursor_data["state"] ?? null ) === "stage_oversized_spatial" ) {
             // No INSERT for this source row has been emitted in this phase.
-            // Only the transactional helper table has changed, and its chunk
-            // updates require the saved byte length, so each is safe to repeat.
+            // Only the transactional helper table has changed. Each chunk has
+            // its own primary key, so replay replaces it instead of appending it.
             return;
         }
 
         // Large text and binary values append pieces directly to the target
         // row. A non-transactional table may keep one piece, so repeating that
         // UPDATE could append those bytes twice. Spatial pieces go into a
-        // separate staging row with an expected-length guard, and the final
+        // separate staging rows keyed by chunk number, and the final
         // INSERT reads the complete value and is safe to repeat.
         $has_direct_oversized_update = false;
         foreach ($cursor_data["oversized_queue"] ?? [] as $oversized_value) {
             if (
                 !is_array($oversized_value) ||
-                !array_key_exists("spatial_staging_initialized", $oversized_value)
+                !array_key_exists("spatial_staging_id", $oversized_value)
             ) {
                 $has_direct_oversized_update = true;
                 break;
