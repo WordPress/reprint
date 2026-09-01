@@ -24,6 +24,21 @@ use function WordPress\Reprint\Server\trim_right_slash;
 use function WordPress\Reprint\Server\wp_join_unix_paths;
 
 require_once __DIR__ . '/utils.php';
+if (getenv('SITE_EXPORT_TEST_MODE') && class_exists(ResourceBudget::class, false)) {
+    $loaded_resource_budget_path = (new ReflectionClass(ResourceBudget::class))->getFileName();
+    $requested_resource_budget_path = __DIR__ . '/class-resource-budget.php';
+    error_log(
+        'Reprint class path diagnostic: '
+        . json_encode([
+            'loaded_path' => $loaded_resource_budget_path,
+            'loaded_realpath' => is_string($loaded_resource_budget_path)
+                ? realpath($loaded_resource_budget_path)
+                : false,
+            'requested_path' => $requested_resource_budget_path,
+            'requested_realpath' => realpath($requested_resource_budget_path),
+        ])
+    );
+}
 require_once __DIR__ . '/class-resource-budget.php';
 require_once __DIR__ . '/class-gzip-output-stream.php';
 require_once __DIR__ . '/class-file-index-processor.php';
