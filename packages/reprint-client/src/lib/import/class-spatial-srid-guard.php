@@ -107,23 +107,74 @@ class SpatialSridGuard {
             throw new RuntimeException('The nonzero SRID marker has no closing comment token.');
         }
         $context = json_decode(substr($sql, $context_start, $context_end - $context_start), true);
-        if (!is_array($context) || array_keys($context) !== ['row_b64']) {
+        if (
+            !is_array($context) ||
+            count($context) !== 3 ||
+            !array_key_exists('table', $context) ||
+            !array_key_exists('primary_key', $context) ||
+            !array_key_exists('spatial_columns', $context)
+        ) {
             throw new RuntimeException('The nonzero SRID marker has an invalid object shape.');
         }
-        if (!is_string($context['row_b64'])) {
-            throw new RuntimeException('The nonzero SRID marker has invalid fields.');
+        if (!is_string($context['table']) || $context['table'] === '') {
+            throw new RuntimeException('The nonzero SRID marker has an invalid table.');
         }
-        $row_details = base64_decode($context['row_b64'], true);
+        if (!is_array($context['primary_key'])) {
+            throw new RuntimeException('The nonzero SRID marker has an invalid primary key list.');
+        }
+        $primary_key = [];
+        foreach ($context['primary_key'] as $column) {
+            if (
+                !is_array($column) ||
+                count($column) !== 2 ||
+                !array_key_exists('column', $column) ||
+                !array_key_exists('display_value', $column) ||
+                !is_string($column['column']) ||
+                $column['column'] === '' ||
+                !is_string($column['display_value']) ||
+                $column['display_value'] === ''
+            ) {
+                throw new RuntimeException('The nonzero SRID marker has invalid primary key fields.');
+            }
+            $primary_key[] = $this->quote_identifier($column['column']) .
+                ' = ' . $column['display_value'];
+        }
         if (
-            !is_string($row_details) ||
-            $row_details === '' ||
-            base64_encode($row_details) !== $context['row_b64']
+            !is_array($context['spatial_columns']) ||
+            $context['spatial_columns'] === []
         ) {
-            throw new RuntimeException('The nonzero SRID marker contains invalid row details.');
+            throw new RuntimeException('The nonzero SRID marker has an invalid spatial column list.');
+        }
+        $row_details = [
+            'Table: ' . $this->quote_identifier($context['table']),
+            'Row: ' . ( $primary_key === []
+                ? 'statement row 1 (table has no primary key)'
+                : implode(', ', $primary_key) ),
+        ];
+        foreach ($context['spatial_columns'] as $column) {
+            if (
+                !is_array($column) ||
+                count($column) !== 2 ||
+                !array_key_exists('column', $column) ||
+                !array_key_exists('srid', $column) ||
+                !is_string($column['column']) ||
+                $column['column'] === '' ||
+                !is_int($column['srid']) ||
+                $column['srid'] <= 0
+            ) {
+                throw new RuntimeException('The nonzero SRID marker has invalid spatial column fields.');
+            }
+            $row_details[] = 'Column: ' . $this->quote_identifier($column['column']) .
+                ', SRID ' . $column['srid'];
         }
         return [
-            'row_details' => $row_details,
+            'row_details' => implode("\n", $row_details),
         ];
+    }
+
+    private function quote_identifier(string $identifier): string
+    {
+        return '`' . str_replace('`', '``', $identifier) . '`';
     }
 
     private function target_uses_srs_definitions(): bool

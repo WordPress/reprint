@@ -81,12 +81,62 @@ class SpatialSridGuardTest extends TestCase {
     public function testRejectsInvalidMarkerFields(): void
     {
         $sql = $this->markedStatement([
-            'wrong' => base64_encode('Table: `maps`'),
+            'wrong' => 'maps',
         ]);
 
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('invalid object shape');
         $this->guard(false, true, '8.0.46')->assert_statement_supported($sql);
+    }
+
+    public function testRejectsInvalidSpatialColumnFields(): void
+    {
+        $sql = $this->markedStatement([
+            'table' => 'maps',
+            'primary_key' => [
+                ['column' => 'id', 'display_value' => '42'],
+            ],
+            'spatial_columns' => [
+                ['column' => 'location', 'srid' => '4326'],
+            ],
+        ]);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('invalid spatial column fields');
+        $this->guard(false, true, '8.0.46')->assert_statement_supported($sql);
+    }
+
+    public function testStructuredContextCannotCloseItsSqlComment(): void
+    {
+        $sql = $this->markedStatement([
+            'table' => 'map`*/notes',
+            'primary_key' => [
+                ['column' => 'site`id', 'display_value' => '"row*/2"'],
+                ['column' => 'language', 'display_value' => '"en"'],
+            ],
+            'spatial_columns' => [
+                ['column' => 'entrance`*/point', 'srid' => 4326],
+                ['column' => 'exit_point', 'srid' => 3857],
+            ],
+        ]);
+        $this->assertSame(1, substr_count($sql, ' */'));
+
+        try {
+            $this->guard(false, true, '8.0.46')->assert_statement_supported($sql);
+            $this->fail('Different source and target SRS rules should stop the INSERT.');
+        } catch (RuntimeException $error) {
+            $message = $error->getMessage();
+            $this->assertStringContainsString('Table: `map``*/notes`', $message);
+            $this->assertStringContainsString(
+                'Row: `site``id` = "row*/2", `language` = "en"',
+                $message
+            );
+            $this->assertStringContainsString(
+                'Column: `entrance``*/point`, SRID 4326',
+                $message
+            );
+            $this->assertStringContainsString('Column: `exit_point`, SRID 3857', $message);
+        }
     }
 
     public function testRequiresSourceRulesOnlyForAMarkedStatement(): void
@@ -101,11 +151,13 @@ class SpatialSridGuardTest extends TestCase {
     private function markedPointInsert(int $id, int $srid): string
     {
         return $this->markedStatement([
-            'row_b64' => base64_encode(
-                "Table: `maps`\n" .
-                "Row: `id` = {$id}\n" .
-                "Column: `location`, SRID {$srid}"
-            ),
+            'table' => 'maps',
+            'primary_key' => [
+                ['column' => 'id', 'display_value' => (string) $id],
+            ],
+            'spatial_columns' => [
+                ['column' => 'location', 'srid' => $srid],
+            ],
         ]);
     }
 

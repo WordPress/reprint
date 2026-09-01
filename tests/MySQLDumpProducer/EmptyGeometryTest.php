@@ -579,14 +579,15 @@ class EmptyGeometryTest extends TestCase {
     public function testNonzeroSridRowsMarkTheirExistingInsertBatch(): void
     {
         $this->source_pdo->exec(
-            'CREATE TABLE isolated_srid (id INT PRIMARY KEY, location POINT)'
+            'CREATE TABLE isolated_srid (' .
+            'id INT PRIMARY KEY, location POINT, boundary POINT)'
         );
         $this->source_pdo->exec(
             "INSERT INTO isolated_srid VALUES " .
-            "(1, ST_GeomFromText('POINT(1 1)', 0)), " .
-            "(2, ST_GeomFromText('POINT(2 2)', 4326)), " .
-            "(3, ST_GeomFromText('POINT(3 3)', 0)), " .
-            "(4, ST_GeomFromText('POINT(4 4)', 3857))"
+            "(1, ST_GeomFromText('POINT(1 1)', 0), ST_GeomFromText('POINT(1 2)', 0)), " .
+            "(2, ST_GeomFromText('POINT(2 2)', 4326), ST_GeomFromText('POINT(2 3)', 3857)), " .
+            "(3, ST_GeomFromText('POINT(3 3)', 0), ST_GeomFromText('POINT(3 4)', 0)), " .
+            "(4, ST_GeomFromText('POINT(4 4)', 3857), ST_GeomFromText('POINT(4 5)', 4326))"
         );
 
         $sql = $this->exportWithResumeAfterEveryFragment([
@@ -605,11 +606,19 @@ class EmptyGeometryTest extends TestCase {
         );
         $this->assertSame(1, $matched);
         $context = json_decode($matches[1], true);
-        $this->assertSame(['row_b64'], array_keys($context));
-        $row_details = base64_decode($context['row_b64'], true);
-        $this->assertStringContainsString('Row: `id` = 2', $row_details);
-        $this->assertStringContainsString('Column: `location`, SRID 4326', $row_details);
-        $this->assertStringNotContainsString('Row: `id` = 4', $row_details);
+        $this->assertSame('isolated_srid', $context['table']);
+        $this->assertSame(
+            [['column' => 'id', 'display_value' => '2']],
+            $context['primary_key']
+        );
+        $this->assertSame(
+            [
+                ['column' => 'location', 'srid' => 4326],
+                ['column' => 'boundary', 'srid' => 3857],
+            ],
+            $context['spatial_columns']
+        );
+        $this->assertStringNotContainsString('"display_value":"4"', $matches[1]);
     }
 
     public function testMysql8SourceToMariaDbTargetStopsNonzeroSrid(): void

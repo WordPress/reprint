@@ -1548,22 +1548,24 @@ class MySQLDumpProducer
                     $display_value = 'base64:' . base64_encode( (string) $value );
                 }
             }
-            $primary_key[] = $this->row_reader->quote_identifier($column) . ' = ' . $display_value;
+            $primary_key[] = [
+                'column' => $column,
+                'display_value' => $display_value,
+            ];
         }
-        $row_details = [
-            'Table: ' . $this->row_reader->quote_identifier($this->row_reader->get_current_table()),
-            'Row: ' . ( $primary_key === []
-                ? 'statement row 1 (table has no primary key)'
-                : implode(', ', $primary_key) ),
-        ];
+        $spatial_columns = [];
         foreach ($spatial_values as $spatial_value) {
-            $row_details[] = 'Column: ' . $this->row_reader->quote_identifier($spatial_value[0]) .
-                ', SRID ' . $spatial_value[1];
+            $spatial_columns[] = [
+                'column' => $spatial_value[0],
+                'srid' => $spatial_value[1],
+            ];
         }
         // The marker counts toward the SQL statement limit, so it names only
         // the first affected row in this INSERT.
         $context = [
-            'row_b64' => base64_encode(implode("\n", $row_details)),
+            'table' => $this->row_reader->get_current_table(),
+            'primary_key' => $primary_key,
+            'spatial_columns' => $spatial_columns,
         ];
         $context_json = json_encode($context);
         if ($context_json === false) {
