@@ -260,12 +260,12 @@ class EmptyGeometryTest extends TestCase {
         );
         $points = [];
         for ($point = 0; $point < 3000; ++$point) {
-            $latitude = ($point % 179) - 89;
-            $longitude = ($point % 359) - 179;
+            $latitude = ( $point % 179 ) - 89;
+            $longitude = ( $point % 359 ) - 179;
             $points[] = $latitude . ' ' . $longitude;
         }
         $statement = $this->source_pdo->prepare(
-            'INSERT INTO oversized_route VALUES (1, ST_GeomFromText(?, 4326))'
+            'INSERT INTO oversized_route VALUES (1, ST_GeomFromText(?))'
         );
         $statement->execute(['LINESTRING(' . implode(',', $points) . ')']);
         $source_value = $this->source_pdo
@@ -292,6 +292,59 @@ class EmptyGeometryTest extends TestCase {
                     "AND table_name = '__reprint_db_pull_progress_spatial'"
                 )
                 ->fetchColumn()
+        );
+    }
+
+    public function testOversizedNonzeroSridStopsMariaDbToMySqlImportWithSourceRowContext(): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE oversized_srid_route (' .
+            'id INT PRIMARY KEY, route LINESTRING NOT NULL)'
+        );
+        $points = [];
+        for ($point = 0; $point < 3000; ++$point) {
+            $latitude = ( $point % 179 ) - 89;
+            $longitude = ( $point % 359 ) - 179;
+            $points[] = $latitude . ' ' . $longitude;
+        }
+        $statement = $this->source_pdo->prepare(
+            'INSERT INTO oversized_srid_route VALUES (1, ST_GeomFromText(?, 4326))'
+        );
+        $statement->execute(['LINESTRING(' . implode(',', $points) . ')']);
+        $source_value = $this->source_pdo
+            ->query('SELECT CAST(route AS BINARY) FROM oversized_srid_route')
+            ->fetchColumn();
+        $this->assertIsString($source_value);
+
+        $sql = $this->exportWithResumeAfterEveryFragment([
+            'batch_size' => 1,
+            'max_statement_size' => 8 * 1024,
+            'tables_to_process' => ['oversized_srid_route'],
+        ]);
+
+        try {
+            $this->executeDump($sql, 'test_empty_geometry_mysql_target');
+            $this->fail('The cross-engine import should stop before applying oversized SRID 4326 bytes.');
+        } catch (RuntimeException $error) {
+            $message = $error->getMessage();
+            $this->assertStringContainsString('[SPATIAL_AXIS_ORDER_UNSAFE]', $message);
+            $this->assertStringContainsString('Table: `oversized_srid_route`', $message);
+            $this->assertStringContainsString('Row: `id` = 1', $message);
+            $this->assertStringContainsString('Column: `route` LINESTRING', $message);
+            $this->assertStringContainsString('SRID: 4326', $message);
+            $this->assertStringContainsString(
+                'Stored value: ' . number_format(strlen($source_value)) . ' bytes',
+                $message
+            );
+            $this->assertStringContainsString('SHA-256: ' . hash('sha256', $source_value), $message);
+            $this->assertStringContainsString('The row was not inserted.', $message);
+        }
+
+        $target_pdo = $this->connectTarget('test_empty_geometry_mysql_target');
+        $target_pdo->exec('USE `test_empty_geometry_mysql_target`');
+        $this->assertSame(
+            0,
+            (int) $target_pdo->query('SELECT COUNT(*) FROM oversized_srid_route')->fetchColumn()
         );
     }
 
