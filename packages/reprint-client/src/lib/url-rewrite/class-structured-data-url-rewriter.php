@@ -20,11 +20,12 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * 4. Leaf text → StructuredBlockMarkupUrlProcessor (block_markup hint)
  *    or CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules (default)
  *
- * HTML is never auto-detected — the caller must explicitly pass
+ * Top-level HTML is never auto-detected — the caller must explicitly pass
  * content_type='block_markup' for values known to contain HTML/block markup.
  * The hint propagates through recursive calls so that leaf strings inside
  * serialized PHP, JSON, or base64 eventually reach the same block-markup
- * parser.
+ * parser. Strings extracted from namespaced block-comment JSON infer HTML and
+ * CSS because no builder-specific schema is available there.
  */
 class StructuredDataUrlRewriter
 {
@@ -438,7 +439,7 @@ class StructuredDataUrlRewriter
      *
      * TODO: Migrate these changes back into the php-toolkit repo
      */
-    private function rewrite_urls( string $content, string $content_type ): string {
+    private function rewrite_urls( string $content, string $content_type, bool $resolve_relative_urls = true ): string {
         // $this->parsed_mapping is built once in the constructor and reused
         // here on every call, avoiding a fresh round of WPURL::parse() per
         // leaf value.
@@ -447,8 +448,19 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
-                $p = new StructuredBlockMarkupUrlProcessor( $content, $base_url );
+                $p = new StructuredBlockMarkupUrlProcessor(
+                    $content,
+                    $resolve_relative_urls ? $base_url : null
+                );
                 while ( $p->next_token() ) {
+                    if ( '#comment' === $p->get_token_type() ) {
+                        $comment_text           = $p->get_modifiable_text();
+                        $rewritten_comment_text = $this->rewrite_namespaced_block_comment_json( $comment_text );
+                        if ( $rewritten_comment_text !== $comment_text ) {
+                            $p->set_modifiable_text( $rewritten_comment_text );
+                        }
+                    }
+
                     $token_type = $p->get_token_type() ?? '';
                     while ( $p->next_url_in_current_token() ) {
                         $raw_url = $p->get_raw_url();
@@ -519,6 +531,81 @@ class StructuredDataUrlRewriter
                 trigger_error('rewrite_urls() requires either block_markup or plain_text to be provided', E_USER_WARNING);
                 return $content;
         }
+    }
+
+    /**
+     * Rewrite one string found inside another structured value.
+     *
+     * PHP serialization and JSON are detected by rewrite() and validated by
+     * their parsers. An opening HTML tag or CSS url() selects block-markup
+     * handling. Unknown strings retain the enclosing value's content type.
+     */
+    private function rewrite_nested_string( string $value, string $fallback_content_type ): string {
+        $trimmed_value = ltrim( $value );
+        if (
+            preg_match( '/^<[a-z][a-z0-9:-]*(?:\s|\/?>)/i', $trimmed_value )
+            || false !== stripos( $value, 'url(' )
+        ) {
+            // The format is inferred, so do not reinterpret `#`, `/about`, or
+            // other relative values against the configured source URL.
+            return $this->rewrite_urls( $value, self::BLOCK_MARKUP, false );
+        }
+
+        return $this->rewrite( $value, $fallback_content_type );
+    }
+
+    /**
+     * Rewrite JSON attributes in a namespaced WordPress block comment.
+     *
+     * The bundled block parser currently treats names such as `wp:divi/text`
+     * as ordinary comments. Restrict this fallback to that exact namespaced
+     * shape and let JsonStringIterator decide whether the attribute text is
+     * valid JSON.
+     */
+    private function rewrite_namespaced_block_comment_json( string $comment_text ): string {
+        if ( ! $this->value_might_contain_source_domain( $comment_text ) ) {
+            return $comment_text;
+        }
+
+        if ( ! preg_match(
+            '/^(\s*wp:[a-z0-9_-]+\/[a-z0-9_-]+\s+)(\{.*\})(\s*\/?\s*)$/is',
+            $comment_text,
+            $matches
+        ) ) {
+            return $comment_text;
+        }
+
+        $iterator = new JsonStringIterator( $matches[2] );
+        if ( $iterator->is_malformed() ) {
+            return $comment_text;
+        }
+
+        while ( $iterator->next_value() ) {
+            $original  = $iterator->get_value();
+            $rewritten = $this->rewrite_nested_string( $original, self::PLAIN_TEXT );
+            if ( $rewritten !== $original ) {
+                $iterator->set_value( $rewritten );
+            }
+        }
+
+        $rewritten_json = $iterator->get_result();
+        // Avoid normalizing the escape forms commonly used by block markup.
+        foreach ( [ '<' => '003c', '>' => '003e', '&' => '0026', '\\"' => '0022' ] as $literal => $hex ) {
+            if ( false !== strpos( $matches[2], '\\u' . $hex ) ) {
+                $rewritten_json = str_replace( $literal, '\\u' . $hex, $rewritten_json );
+            } elseif ( false !== strpos( $matches[2], '\\u' . strtoupper( $hex ) ) ) {
+                $rewritten_json = str_replace( $literal, '\\u' . strtoupper( $hex ), $rewritten_json );
+            }
+        }
+        if ( false !== strpos( $matches[2], '\\/' ) ) {
+            $rewritten_json = str_replace( '/', '\\/', $rewritten_json );
+        }
+
+        if ( $rewritten_json === $matches[2] ) {
+            return $comment_text;
+        }
+
+        return $matches[1] . $rewritten_json . $matches[3];
     }
 
     /**

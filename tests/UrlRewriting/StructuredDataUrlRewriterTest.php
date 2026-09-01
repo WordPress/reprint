@@ -416,6 +416,52 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://new-site.com/page', $result);
     }
 
+    public function testBlockMarkupRewritesHtmlNestedInDiviBlockAttributes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:divi/text {"module":{"content":{"innerContent":{"desktop":{"value":"\u003cp\u003eRead \u003ca href=\u0022https:\/\/old-site.com\/about\/\u0022\u003emore\u003c\/a\u003e.\u003c\/p\u003e"}}}}} /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+
+        $this->assertSame(str_replace('old-site.com', 'new-site.com', $input), $result);
+    }
+
+    public function testNamespacedBlockAttributeStringsReuseStructuredFormatInference(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com' => 'https://much-longer.example',
+        ]);
+        $attributes = [
+            'module' => [
+                'values' => [
+                    'html' => '<a href="#">Top</a><a href="https://old-site.com/html">HTML</a>',
+                    'json' => '{"url":"https://old-site.com/json"}',
+                    'css' => 'background-image: url(https://old-site.com/css.jpg)',
+                    'serialized' => serialize(['url' => 'https://old-site.com/serialized']),
+                    'text' => 'Read https://old-site.com/text',
+                ],
+            ],
+        ];
+        $input = '<!-- wp:example/widget '
+            . json_encode($attributes, JSON_HEX_TAG | JSON_HEX_AMP)
+            . ' /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+
+        $this->assertStringNotContainsString('old-site.com', $result);
+        $this->assertSame(1, preg_match('/<!-- wp:example\/widget (.*) \/-->/', $result, $matches));
+        $rewritten_attributes = json_decode($matches[1], true);
+        $values = $rewritten_attributes['module']['values'];
+        $this->assertSame(
+            '<a href="#">Top</a><a href="https://much-longer.example/html">HTML</a>',
+            $values['html']
+        );
+        $this->assertSame('https://much-longer.example/json', json_decode($values['json'], true)['url']);
+        $this->assertSame('background-image: url(https://much-longer.example/css.jpg)', $values['css']);
+        $this->assertSame('https://much-longer.example/serialized', unserialize($values['serialized'])['url']);
+        $this->assertSame('Read https://much-longer.example/text', $values['text']);
+    }
+
     public function testBlockMarkupUsesCautiousRewriterForOpaqueUrlContexts(): void
     {
         $rewriter = $this->createRewriter();

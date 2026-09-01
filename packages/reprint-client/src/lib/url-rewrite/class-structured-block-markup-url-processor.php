@@ -27,9 +27,11 @@ use WordPress\DataLiberation\URL\WPURL;
  *
  * @method bool set_bookmark(string $name)
  * @method bool release_bookmark(string $name)
+ * @method string get_modifiable_text()
  * @method mixed get_attribute(string $name)
  * @method string|null get_tag()
  * @method bool set_attribute(string $name, mixed $value)
+ * @method bool set_modifiable_text(string $text)
  * @property array<string, WP_HTML_Span> $bookmarks
  * @property array<int|string, WP_HTML_Text_Replacement> $lexical_updates
  */
