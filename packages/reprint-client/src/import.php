@@ -12525,19 +12525,23 @@ class ImportClient
             $this->state->active_resumable_command->completion_state;
 
         /**
-         * state.json records where an interrupted pull can restart, so it must
-         * be written after every completed unit of work. progress.json is only
-         * a status snapshot for external tools to poll. It does not need to be
-         * rewritten at every state checkpoint.
+         * save_state() writes two files for different readers:
          *
-         * A 30,000-file pull produced 30,179 checkpoints. progress.json was
-         * only about 185 bytes, but writing it atomically at every checkpoint
-         * also meant 30,179 temporary-file writes and renames. Limit active
-         * status updates by elapsed time because polling readers care how old
-         * the snapshot is, while checkpoint frequency varies with the number
-         * and size of files. One update per second keeps the snapshot recent
-         * without repeating that filesystem work. Cleared, partial, and
-         * complete states are still written immediately.
+         * 1. state.json tells the next PHP process where to resume. Write it
+         *    after every completed unit of work so a stopped pull can continue.
+         * 2. progress.json tells a polling UI what the pull is doing. The UI
+         *    needs a recent update, but it does not need every checkpoint.
+         *
+         * In a test with 30,000 files, save_state() ran 30,179 times. Each
+         * progress.json update wrote about 185 bytes to a temporary file and
+         * renamed that file over the old copy. Updating once per checkpoint
+         * therefore caused 30,179 writes and 30,179 renames.
+         *
+         * Limit active progress updates to once per second. Time is the useful
+         * limit because the UI cares how old its status is, and the number of
+         * checkpoints per second changes with the files being pulled. Write a
+         * cleared, partial, or complete state immediately because the command
+         * may not save another checkpoint afterward.
          */
         if (
             $completion_state !== "in_progress"
