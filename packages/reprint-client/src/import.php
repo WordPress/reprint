@@ -194,6 +194,8 @@ class ImportClient
     // Change this UUID whenever the progress-table schema changes.
     private const DATABASE_IMPORT_POSITION_TABLE =
         self::DATABASE_IMPORT_POSITION_TABLE_PREFIX . "49acb118-a97a-45c7-814d-8e670db7f6b4";
+    private const DATABASE_IMPORT_SPATIAL_STAGING_TABLE =
+        self::DATABASE_IMPORT_POSITION_TABLE_PREFIX . "spatial";
     private const SQL_GROUP_MARKER = "-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 ";
 
     /**
@@ -8701,6 +8703,15 @@ class ImportClient
                 false,
                 'db-pull',
             );
+            if ($this->max_allowed_packet === null) {
+                $packet_result = $mysql_conn->query(
+                    "SELECT @@max_allowed_packet AS max_allowed_packet"
+                );
+                $this->max_allowed_packet = (int) $packet_result->fetchColumn();
+                $packet_result->closeCursor();
+                $this->get_state()->max_allowed_packet = $this->max_allowed_packet;
+                $this->save_state();
+            }
             if ($starts_mysql_output) {
                 // Keep the mysql-start stage until the old target position is gone.
                 // If this process stops before save_state(), the next process
@@ -9158,6 +9169,8 @@ class ImportClient
     private function reset_database_import_position(DatabaseConnection $database): void
     {
         $table = self::DATABASE_IMPORT_POSITION_TABLE;
+        $spatial_staging_table = self::DATABASE_IMPORT_SPATIAL_STAGING_TABLE;
+        $database->exec("DROP TABLE IF EXISTS `{$spatial_staging_table}`");
         $query = "DELETE FROM `{$table}` WHERE `id` = 1";
         $database->exec($query);
     }
@@ -9306,10 +9319,29 @@ class ImportClient
             return;
         }
 
-        // Large values are written by UPDATE statements which append pieces.
-        // A non-transactional table may keep one piece, so repeating the UPDATE
-        // could append those bytes twice.
-        if (!empty($cursor_data["oversized_queue"])) {
+        if ( ( $cursor_data["state"] ?? null ) === "stage_oversized_spatial" ) {
+            // No INSERT for this source row has been emitted in this phase.
+            // Only the transactional helper table has changed. Each chunk has
+            // its own primary key, so replay replaces it instead of appending it.
+            return;
+        }
+
+        // Large text and binary values append pieces directly to the target
+        // row. A non-transactional table may keep one piece, so repeating that
+        // UPDATE could append those bytes twice. Spatial pieces go into a
+        // separate staging rows keyed by chunk number, and the final
+        // INSERT reads the complete value and is safe to repeat.
+        $has_direct_oversized_update = false;
+        foreach ($cursor_data["oversized_queue"] ?? [] as $oversized_value) {
+            if (
+                !is_array($oversized_value) ||
+                !array_key_exists("spatial_staging_id", $oversized_value)
+            ) {
+                $has_direct_oversized_update = true;
+                break;
+            }
+        }
+        if ($has_direct_oversized_update) {
             throw new RuntimeException(
                 "Cannot continue {$command} in target table `{$current_table}` because {$engine} may have " .
                 "already appended part of a large value. Run {$command} --abort to rebuild the target."

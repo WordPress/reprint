@@ -245,6 +245,84 @@ class EmptyGeometryTest extends TestCase {
         }
     }
 
+    /** @dataProvider targetDatabaseProvider */
+    public function testOversizedSpatialValueRoundTripsToRealTargets(string $target): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE oversized_route (' .
+            'id INT PRIMARY KEY, route LINESTRING NOT NULL, ' .
+            'SPATIAL INDEX route_index (route))'
+        );
+        $points = [];
+        for ($point = 0; $point < 3000; ++$point) {
+            $latitude = ($point % 179) - 89;
+            $longitude = ($point % 359) - 179;
+            $points[] = $latitude . ' ' . $longitude;
+        }
+        $statement = $this->source_pdo->prepare(
+            'INSERT INTO oversized_route VALUES (1, ST_GeomFromText(?, 4326))'
+        );
+        $statement->execute(['LINESTRING(' . implode(',', $points) . ')']);
+        $source_value = $this->source_pdo
+            ->query('SELECT CAST(route AS BINARY) FROM oversized_route')
+            ->fetchColumn();
+
+        $sql = $this->exportWithResumeAfterEveryFragment([
+            'batch_size' => 1,
+            'max_statement_size' => 8 * 1024,
+            'tables_to_process' => ['oversized_route'],
+        ]);
+        $target_pdo = $this->executeDump($sql, $target);
+        $target_value = $target_pdo
+            ->query('SELECT CAST(route AS BINARY) FROM oversized_route')
+            ->fetchColumn();
+
+        $this->assertSame($source_value, $target_value);
+        $this->assertSame(
+            0,
+            (int) $target_pdo
+                ->query(
+                    "SELECT COUNT(*) FROM information_schema.tables " .
+                    "WHERE table_schema = DATABASE() " .
+                    "AND table_name = '__reprint_db_pull_progress_spatial'"
+                )
+                ->fetchColumn()
+        );
+    }
+
+    /** @dataProvider targetDatabaseProvider */
+    public function testOversizedSpatialValuePassesCheckConstraintOnFirstInsert(string $target): void
+    {
+        $this->source_pdo->exec(
+            'CREATE TABLE constrained_oversized_route (' .
+            'id INT PRIMARY KEY, route LINESTRING NOT NULL, ' .
+            'CONSTRAINT route_has_more_than_two_points CHECK (ST_NumPoints(route) > 2))'
+        );
+        $points = [];
+        for ($point = 0; $point < 3000; ++$point) {
+            $points[] = $point . ' ' . $point;
+        }
+        $statement = $this->source_pdo->prepare(
+            'INSERT INTO constrained_oversized_route VALUES (1, ST_GeomFromText(?))'
+        );
+        $statement->execute(['LINESTRING(' . implode(',', $points) . ')']);
+        $source_value = $this->source_pdo
+            ->query('SELECT CAST(route AS BINARY) FROM constrained_oversized_route')
+            ->fetchColumn();
+
+        $sql = $this->exportWithResumeAfterEveryFragment([
+            'batch_size' => 1,
+            'max_statement_size' => 8 * 1024,
+            'tables_to_process' => ['constrained_oversized_route'],
+        ]);
+        $target_pdo = $this->executeDump($sql, $target);
+        $target_value = $target_pdo
+            ->query('SELECT CAST(route AS BINARY) FROM constrained_oversized_route')
+            ->fetchColumn();
+
+        $this->assertSame($source_value, $target_value);
+    }
+
     public function testNullableAlterPreservesCompleteColumnDefinition(): void
     {
         $column = "location,\n`north";

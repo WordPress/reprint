@@ -1,7 +1,10 @@
 <?php
 
 require_once __DIR__ . '/MySQLDumpProducerTestBase.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
+use Reprint\Importer\Database\PdoDatabaseConnection;
+use WordPress\Reprint\Server\DatabaseRowsReader;
 use WordPress\Reprint\Server\MySQLDumpProducer;
 
 /**
@@ -297,30 +300,370 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $producer->next_sql_fragment();
     }
 
-    /** Geometry cannot be built from an empty value and partial byte strings. */
-    public function testOversizedGeometryIsRejectedBeforeInvalidSqlIsEmitted(): void
+    /**
+     * Geometry bytes use durable binary staging until the complete value is valid.
+     *
+     * @dataProvider oversizedSpatialColumnProvider
+     */
+    public function testOversizedGeometryRoundTripsAcrossBoundedStatements(
+        string $column_type,
+        string $wkt_format
+    ): void
     {
         $this->pdo->exec("
             CREATE TABLE oversized_geometry_value (
                 id INT PRIMARY KEY,
-                content GEOMETRY
+                content {$column_type} NOT NULL,
+                SPATIAL INDEX content_index (content)
             )
         ");
         $points = [];
         for ($point = 0; $point < 3000; ++$point) {
+            $latitude = ($point % 179) - 89;
+            $longitude = ($point % 359) - 179;
+            $points[] = $latitude . ' ' . $longitude;
+        }
+        $coordinates = implode(',', $points);
+        $closed_coordinates = $coordinates . ',' . $points[0];
+        $wkt = sprintf($wkt_format, $coordinates, $closed_coordinates);
+        $statement = $this->pdo->prepare(
+            "INSERT INTO oversized_geometry_value VALUES (1, ST_GeomFromText(?, 4326))"
+        );
+        $statement->execute([$wkt]);
+
+        $source_value = $this->pdo
+            ->query('SELECT CAST(content AS BINARY) FROM oversized_geometry_value')
+            ->fetchColumn();
+        $max_statement_size = 10 * 1024;
+        $options = [
+            'max_statement_size' => $max_statement_size,
+            'batch_size' => 1,
+        ];
+        $producer = $this->createProducer($options);
+        $fragments = [];
+        for ($step = 0; $step < 200; ++$step) {
+            if (!$producer->next_sql_fragment()) {
+                break;
+            }
+            $fragments[] = $producer->get_sql_fragment();
+            if (!$producer->is_finished()) {
+                $options['cursor'] = $producer->get_reentrancy_cursor();
+                $producer = $this->createProducer($options);
+            }
+        }
+
+        $this->assertTrue($producer->is_finished());
+        foreach ($fragments as $fragment) {
+            $this->assertLessThanOrEqual($max_statement_size, strlen($fragment));
+        }
+        $sql = implode("\n", $fragments);
+        $this->assertStringNotContainsString('ST_GeomFromText(', $sql);
+        $this->assertStringContainsString(
+            'REPLACE INTO `__reprint_db_pull_progress_spatial` (`id`, `chunk_number`, `value`)',
+            $sql
+        );
+        $this->assertStringContainsString(
+            '(1,CONCAT((SELECT `value` FROM `__reprint_db_pull_progress_spatial` ' .
+                'WHERE `id` = 1 AND `chunk_number` = 0)',
+            $sql
+        );
+        $this->assertLessThan(
+            strpos($sql, 'INSERT INTO `oversized_geometry_value`'),
+            strpos($sql, 'REPLACE INTO `__reprint_db_pull_progress_spatial`')
+        );
+        $this->assertSame(
+            1,
+            preg_match(
+                "/REPLACE INTO `__reprint_db_pull_progress_spatial` " .
+                    "\\(`id`, `chunk_number`, `value`\\) VALUES " .
+                    "\\(1, 0, FROM_BASE64\\('[A-Za-z0-9+\\/=]+'\\)\\);/",
+                $sql,
+                $first_chunk,
+                PREG_OFFSET_CAPTURE
+            )
+        );
+        $first_chunk_sql = $first_chunk[0][0];
+        $first_chunk_offset = $first_chunk[0][1];
+        $sql = substr_replace(
+            $sql,
+            $first_chunk_sql . "\n" . $first_chunk_sql,
+            $first_chunk_offset,
+            strlen($first_chunk_sql)
+        );
+
+        $import_pdo = $this->executeDumpInNewDatabase($sql);
+        $imported_value = $import_pdo
+            ->query('SELECT CAST(content AS BINARY) FROM oversized_geometry_value')
+            ->fetchColumn();
+        $this->assertSame($source_value, $imported_value);
+        $this->assertSame(
+            0,
+            (int) $import_pdo
+                ->query(
+                    "SELECT COUNT(*) FROM information_schema.tables " .
+                    "WHERE table_schema = DATABASE() " .
+                    "AND table_name = '__reprint_db_pull_progress_spatial'"
+                )
+                ->fetchColumn()
+        );
+    }
+
+    public static function oversizedSpatialColumnProvider(): array
+    {
+        return [
+            'geometry' => ['GEOMETRY', 'LINESTRING(%s)'],
+            'linestring' => ['LINESTRING', 'LINESTRING(%s)'],
+            'polygon' => ['POLYGON', 'POLYGON((%2$s))'],
+            'multipoint' => ['MULTIPOINT', 'MULTIPOINT(%s)'],
+            'multilinestring' => ['MULTILINESTRING', 'MULTILINESTRING((%s))'],
+            'multipolygon' => ['MULTIPOLYGON', 'MULTIPOLYGON(((%2$s)))'],
+            'geometrycollection' => [
+                'GEOMETRYCOLLECTION',
+                'GEOMETRYCOLLECTION(LINESTRING(%s))',
+            ],
+        ];
+    }
+
+    public function testOrderedRowQueryOmitsSpatialValueAboveItsInlineLimit(): void
+    {
+        $this->pdo->exec(
+            'CREATE TABLE deferred_spatial_value (' .
+            'id INT PRIMARY KEY, route LINESTRING NOT NULL)'
+        );
+        $points = [];
+        for ($point = 0; $point < 1000; ++$point) {
             $points[] = $point . ' ' . $point;
         }
-        $line_string = 'LINESTRING(' . implode(',', $points) . ')';
         $statement = $this->pdo->prepare(
-            "INSERT INTO oversized_geometry_value VALUES (1, ST_GeomFromText(?))"
+            'INSERT INTO deferred_spatial_value VALUES (1, ST_GeomFromText(?))'
         );
-        $statement->execute([$line_string]);
+        $statement->execute(['LINESTRING(' . implode(',', $points) . ')']);
+        $expected_length = (int) $this->pdo
+            ->query(
+                'SELECT OCTET_LENGTH(CAST(route AS BINARY)) FROM deferred_spatial_value'
+            )
+            ->fetchColumn();
 
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage(
-            'cannot use UPDATE ... CONCAT() chunks for data type GEOMETRY'
+        $reader = new DatabaseRowsReader($this->pdo, [
+            'tables_to_process' => ['deferred_spatial_value'],
+            'maximum_inline_spatial_bytes' => 1024,
+        ]);
+        $this->assertTrue($reader->move_to_next_table());
+        $this->assertTrue($reader->next_record());
+
+        $this->assertNull($reader->get_current_record()['route']);
+        $this->assertSame(
+            $expected_length,
+            $reader->get_current_spatial_value_length('route')
         );
-        $this->getDumpSQL(['max_statement_size' => 10 * 1024]);
+    }
+
+    public function testSpatialValueAboveTargetPacketLimitStopsBeforeStaging(): void
+    {
+        $this->pdo->exec(
+            'CREATE TABLE spatial_value_above_target_packet (' .
+            'id INT PRIMARY KEY, route LINESTRING NOT NULL)'
+        );
+        $points = [];
+        for ($point = 0; $point < 2000; ++$point) {
+            $points[] = $point . ' ' . $point;
+        }
+        $statement = $this->pdo->prepare(
+            'INSERT INTO spatial_value_above_target_packet VALUES (1, ST_GeomFromText(?))'
+        );
+        $statement->execute(['LINESTRING(' . implode(',', $points) . ')']);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('but the target max_allowed_packet is 16384 bytes');
+
+        $this->collectAllFragments($this->createProducer([
+            'max_statement_size' => 8 * 1024,
+            'target_max_allowed_packet' => 16 * 1024,
+        ]));
+    }
+
+    public function testMultipleOversizedSpatialColumnsReuseOneStagingTable(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE multiple_spatial_values (
+                id INT PRIMARY KEY,
+                route LINESTRING NOT NULL,
+                routes MULTILINESTRING NOT NULL,
+                payload LONGBLOB NOT NULL
+            )
+        ");
+        $points = [];
+        for ($point = 0; $point < 2000; ++$point) {
+            $latitude = ($point % 179) - 89;
+            $longitude = ($point % 359) - 179;
+            $points[] = $latitude . ' ' . $longitude;
+        }
+        $coordinates = implode(',', $points);
+        $statement = $this->pdo->prepare(
+            "INSERT INTO multiple_spatial_values VALUES (" .
+            "1, ST_GeomFromText(?, 4326), ST_GeomFromText(?, 4326), ?)"
+        );
+        $statement->execute([
+            'LINESTRING(' . $coordinates . ')',
+            'MULTILINESTRING((' . $coordinates . '))',
+            str_repeat('mixed spatial and binary ', 4000),
+        ]);
+        $statement = $this->pdo->prepare(
+            "INSERT INTO multiple_spatial_values VALUES (" .
+            "2, ST_GeomFromText(?), ST_GeomFromText(?), ?)"
+        );
+        $statement->execute([
+            'LINESTRING(0 0,1 1)',
+            'MULTILINESTRING((0 0,1 1))',
+            'row after staged values',
+        ]);
+        $source_row = $this->pdo
+            ->query(
+                'SELECT id, CAST(route AS BINARY) AS route, ' .
+                'CAST(routes AS BINARY) AS routes, payload ' .
+                'FROM multiple_spatial_values ORDER BY id'
+            )
+            ->fetchAll();
+
+        $options = ['max_statement_size' => 8 * 1024];
+        $producer = $this->createProducer($options);
+        $fragments = [];
+        while ($producer->next_sql_fragment()) {
+            $fragments[] = $producer->get_sql_fragment();
+            if (!$producer->is_finished()) {
+                $options['cursor'] = $producer->get_reentrancy_cursor();
+                $producer = $this->createProducer($options);
+            }
+        }
+        $sql = implode("\n", $fragments);
+        $this->assertSame(
+            1,
+            substr_count($sql, 'CREATE TABLE IF NOT EXISTS `__reprint_db_pull_progress_spatial`')
+        );
+        $this->assertGreaterThan(
+            2,
+            substr_count($sql, 'REPLACE INTO `__reprint_db_pull_progress_spatial`')
+        );
+
+        $import_pdo = $this->executeDumpInNewDatabase($sql);
+        $imported_row = $import_pdo
+            ->query(
+                'SELECT id, CAST(route AS BINARY) AS route, ' .
+                'CAST(routes AS BINARY) AS routes, payload ' .
+                'FROM multiple_spatial_values ORDER BY id'
+            )
+            ->fetchAll();
+        $this->assertSame($source_row, $imported_row);
+    }
+
+    public function testMyIsamResumeAcceptsStagedSpatialChunks(): void
+    {
+        $this->pdo->exec(
+            'CREATE TABLE myisam_spatial_resume (' .
+            'id INT PRIMARY KEY, content GEOMETRY NOT NULL) ENGINE=MyISAM'
+        );
+        $client = ( new ReflectionClass(ImportClient::class) )->newInstanceWithoutConstructor();
+        $assert_resume = new ReflectionMethod(
+            ImportClient::class,
+            'assert_mysql_import_can_repeat_next_group'
+        );
+        $assert_resume->setAccessible(true);
+        $cursor = [
+            'state' => 'emit_oversized_update',
+            'current_table' => 'myisam_spatial_resume',
+            'oversized_queue' => [[
+                'column' => 'content',
+                'data_type' => 'GEOMETRY',
+                'byte_offset' => 8192,
+                'total_length' => 16384,
+                'spatial_staging_id' => 1,
+                'chunk_number' => 1,
+            ]],
+        ];
+        $database = new PdoDatabaseConnection($this->pdo);
+
+        $this->assertNull($assert_resume->invoke(
+            $client,
+            $database,
+            base64_encode(json_encode($cursor)),
+            'db-pull'
+        ));
+
+        $cursor['state'] = 'stage_oversized_spatial';
+        array_unshift($cursor['oversized_queue'], [
+            'column' => 'label',
+            'data_type' => 'LONGBLOB',
+            'byte_offset' => 0,
+            'total_length' => 16384,
+        ]);
+        $this->assertNull($assert_resume->invoke(
+            $client,
+            $database,
+            base64_encode(json_encode($cursor)),
+            'db-pull'
+        ));
+        array_shift($cursor['oversized_queue']);
+        $cursor['state'] = 'emit_oversized_update';
+
+        unset($cursor['oversized_queue'][0]['spatial_staging_id']);
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('may have already appended part of a large value');
+        $assert_resume->invoke(
+            $client,
+            $database,
+            base64_encode(json_encode($cursor)),
+            'db-pull'
+        );
+    }
+
+    public function testStartingNewImportDropsSavedSpatialStagingTable(): void
+    {
+        $staging_table = '__reprint_db_pull_progress_spatial';
+        $this->pdo->exec(
+            "CREATE TABLE `{$staging_table}` (" .
+            '`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY, `value` LONGBLOB NOT NULL)'
+        );
+        $client_reflection = new ReflectionClass(ImportClient::class);
+        $client = $client_reflection->newInstanceWithoutConstructor();
+        $database = new PdoDatabaseConnection($this->pdo);
+        $create_position_table = $client_reflection->getMethod(
+            'create_database_import_position_table'
+        );
+        $create_position_table->setAccessible(true);
+        $create_position_table->invoke($client, $database);
+        $position_table = $client_reflection->getConstant(
+            'DATABASE_IMPORT_POSITION_TABLE'
+        );
+        $this->assertIsString($position_table);
+        $cursor = base64_encode(json_encode([]));
+        $statement = $this->pdo->prepare(
+            "REPLACE INTO `{$position_table}` " .
+            '(`id`, `source_hash`, `source_cursor`, `file_byte_offset`) ' .
+            "VALUES (1, REPEAT('a', 64), ?, 0)"
+        );
+        $statement->execute([$cursor]);
+
+        $reset_position = $client_reflection->getMethod(
+            'reset_database_import_position'
+        );
+        $reset_position->setAccessible(true);
+        $reset_position->invoke($client, $database);
+
+        $this->assertSame(
+            0,
+            (int) $this->pdo
+                ->query(
+                    "SELECT COUNT(*) FROM information_schema.tables " .
+                    "WHERE table_schema = DATABASE() AND table_name = '{$staging_table}'"
+                )
+                ->fetchColumn()
+        );
+        $this->assertSame(
+            0,
+            (int) $this->pdo
+                ->query("SELECT COUNT(*) FROM `{$position_table}`")
+                ->fetchColumn()
+        );
     }
 
     /**
@@ -358,8 +701,8 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $this->assertEquals('small value', $row['small_col']);
     }
 
-    /** Combined values must fail before an over-limit fragment is formatted. */
-    public function testCombinedValuesAbovePartBodyLimitThrowBeforeFormatting(): void
+    /** Combined values may use one bounded update apiece. */
+    public function testCombinedValuesAbovePartBodyLimitUseBoundedUpdates(): void
     {
         $this->pdo->exec("
             CREATE TABLE combined_fragment_limit (
@@ -376,11 +719,21 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         );
         $stmt->execute([$blob1, $blob2]);
 
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('cannot fit the SQL size limits');
-        $this->expectExceptionMessage('SQL part body limit is 16777216 bytes');
-
-        $this->getDumpSQL(['max_statement_size' => 64 * 1024 * 1024]);
+        $fragments = $this->collectAllFragments($this->createProducer([
+            'max_statement_size' => 64 * 1024 * 1024,
+        ]));
+        foreach ($fragments as $fragment) {
+            $this->assertLessThanOrEqual(
+                MySQLDumpProducer::MAX_SQL_PART_BODY_BYTES,
+                strlen($fragment)
+            );
+        }
+        $target = $this->executeDumpInNewDatabase(implode("\n", $fragments));
+        $row = $target
+            ->query('SELECT blob1, blob2 FROM combined_fragment_limit WHERE id = 1')
+            ->fetch();
+        $this->assertSame($blob1, $row['blob1']);
+        $this->assertSame($blob2, $row['blob2']);
     }
 
     /** Text and binary chunks must both stay below the packet target. */
