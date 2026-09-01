@@ -6737,6 +6737,7 @@ class ImportClient
             ? new SpatialSridGuard(
                 $connection,
                 (string) ( $this->get_state()->get('preflight.database.version') ?? '' ),
+                $this->source_uses_spatial_reference_definitions(),
                 $connection_label,
             )
             : null;
@@ -8729,6 +8730,7 @@ class ImportClient
             $spatial_srid_guard = new SpatialSridGuard(
                 $mysql_conn,
                 (string) ( $this->get_state()->get('preflight.database.version') ?? '' ),
+                $this->source_uses_spatial_reference_definitions(),
                 $mysql_connection_label,
             );
             if ($starts_mysql_output) {
@@ -9143,6 +9145,19 @@ class ImportClient
                 " bytes) — incomplete export?"
             );
         }
+    }
+
+    private function source_uses_spatial_reference_definitions(): ?bool
+    {
+        $value = $this->get_state()->get(
+            'preflight.database.uses_spatial_reference_definitions'
+        );
+        if ($value === null || is_bool($value)) {
+            return $value;
+        }
+        throw new RuntimeException(
+            'Source preflight returned an invalid spatial reference rule mode.'
+        );
     }
 
     private function lock_database_import_target(

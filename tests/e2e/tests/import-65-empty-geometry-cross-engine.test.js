@@ -469,7 +469,7 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
                 assert.match(firstOutput, /Column: `location`, SRID 4326/);
                 assert.match(firstOutput, /Source: MariaDB/);
                 assert.match(firstOutput, /Target: MySQL/);
-                assert.match(firstOutput, /The row was not inserted\./);
+                assert.match(firstOutput, /The INSERT batch was not executed\./);
 
                 const resumed = run();
                 assert.notEqual(resumed.exitCode, 0, 'Resume skipped the unsupported spatial row.');

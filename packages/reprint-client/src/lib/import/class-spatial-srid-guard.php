@@ -13,6 +13,7 @@ class SpatialSridGuard {
 
     private DatabaseConnection $database;
     private string $source_database_version;
+    private ?bool $source_uses_srs_definitions;
     private string $target_connection_label;
     private string $target_database_version;
     private ?bool $target_uses_srs_definitions = null;
@@ -20,10 +21,12 @@ class SpatialSridGuard {
     public function __construct(
         DatabaseConnection $database,
         string $source_database_version,
+        ?bool $source_uses_srs_definitions,
         string $target_connection_label
     ) {
         $this->database = $database;
         $this->source_database_version = $source_database_version;
+        $this->source_uses_srs_definitions = $source_uses_srs_definitions;
         $this->target_connection_label = $target_connection_label;
 
         $result = $database->query('SELECT VERSION() AS version');
@@ -42,10 +45,15 @@ class SpatialSridGuard {
     public function assert_statement_supported(string $sql): void
     {
         $context = $this->read_context($sql);
-        if (
-            $context === null ||
-            $context['source_uses_srs_definitions'] === $this->target_uses_srs_definitions()
-        ) {
+        if ($context === null) {
+            return;
+        }
+        if ($this->source_uses_srs_definitions === null) {
+            throw new RuntimeException(
+                'The source preflight did not report spatial reference rules. Run preflight and pull again.'
+            );
+        }
+        if ($this->source_uses_srs_definitions === $this->target_uses_srs_definitions()) {
             return;
         }
 
@@ -62,7 +70,7 @@ class SpatialSridGuard {
             'They may assign different meanings to the first and second coordinates.',
             'Reprint does not currently transform coordinates.',
             '',
-            'The row was not inserted.',
+            'The INSERT batch was not executed.',
             'Convert the source data to SRID 0, transform it for the target, or migrate this table separately.',
         ]);
 
@@ -99,22 +107,21 @@ class SpatialSridGuard {
             throw new RuntimeException('The nonzero SRID marker has no closing comment token.');
         }
         $context = json_decode(substr($sql, $context_start, $context_end - $context_start), true);
-        if (!is_array($context) || array_keys($context) !== ['d', 'm']) {
+        if (!is_array($context) || array_keys($context) !== ['row_b64']) {
             throw new RuntimeException('The nonzero SRID marker has an invalid object shape.');
         }
-        if (!is_bool($context['d']) || !is_string($context['m'])) {
+        if (!is_string($context['row_b64'])) {
             throw new RuntimeException('The nonzero SRID marker has invalid fields.');
         }
-        $row_details = base64_decode($context['m'], true);
+        $row_details = base64_decode($context['row_b64'], true);
         if (
             !is_string($row_details) ||
             $row_details === '' ||
-            base64_encode($row_details) !== $context['m']
+            base64_encode($row_details) !== $context['row_b64']
         ) {
             throw new RuntimeException('The nonzero SRID marker contains invalid row details.');
         }
         return [
-            'source_uses_srs_definitions' => $context['d'],
             'row_details' => $row_details,
         ];
     }

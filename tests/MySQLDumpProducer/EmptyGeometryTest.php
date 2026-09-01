@@ -326,7 +326,7 @@ class EmptyGeometryTest extends TestCase {
             $this->assertStringContainsString('Table: `oversized_srid_route`', $message);
             $this->assertStringContainsString('Row: `id` = 1', $message);
             $this->assertStringContainsString('Column: `route`, SRID 4326', $message);
-            $this->assertStringContainsString('The row was not inserted.', $message);
+            $this->assertStringContainsString('The INSERT batch was not executed.', $message);
         }
 
         $target_pdo = $this->connectTarget('test_empty_geometry_mysql_target');
@@ -576,7 +576,7 @@ class EmptyGeometryTest extends TestCase {
         }
     }
 
-    public function testNonzeroSridRowHasVersionedContextAndItsOwnInsert(): void
+    public function testNonzeroSridRowsMarkTheirExistingInsertBatch(): void
     {
         $this->source_pdo->exec(
             'CREATE TABLE isolated_srid (id INT PRIMARY KEY, location POINT)'
@@ -585,7 +585,8 @@ class EmptyGeometryTest extends TestCase {
             "INSERT INTO isolated_srid VALUES " .
             "(1, ST_GeomFromText('POINT(1 1)', 0)), " .
             "(2, ST_GeomFromText('POINT(2 2)', 4326)), " .
-            "(3, ST_GeomFromText('POINT(3 3)', 0))"
+            "(3, ST_GeomFromText('POINT(3 3)', 0)), " .
+            "(4, ST_GeomFromText('POINT(4 4)', 3857))"
         );
 
         $sql = $this->exportWithResumeAfterEveryFragment([
@@ -593,21 +594,22 @@ class EmptyGeometryTest extends TestCase {
             'tables_to_process' => ['isolated_srid'],
         ]);
 
-        $this->assertSame(3, substr_count($sql, 'INSERT INTO `isolated_srid`'));
+        $this->assertSame(1, substr_count($sql, 'INSERT INTO `isolated_srid`'));
         $this->assertSame(1, substr_count($sql, MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX));
         $matched = preg_match(
             '/' . preg_quote(MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX, '/') .
             preg_quote(MySQLDumpProducer::NONZERO_SRID_CONTEXT_VERSION, '/') . ' ' .
-            '(\{[^\r\n]+\}) \*\/\nINSERT INTO `isolated_srid`/s',
+            '(\{[^\r\n]+\}) \*\//',
             $sql,
             $matches
         );
         $this->assertSame(1, $matched);
         $context = json_decode($matches[1], true);
-        $this->assertSame(false, $context['d']);
-        $row_details = base64_decode($context['m'], true);
+        $this->assertSame(['row_b64'], array_keys($context));
+        $row_details = base64_decode($context['row_b64'], true);
         $this->assertStringContainsString('Row: `id` = 2', $row_details);
         $this->assertStringContainsString('Column: `location`, SRID 4326', $row_details);
+        $this->assertStringNotContainsString('Row: `id` = 4', $row_details);
     }
 
     public function testMysql8SourceToMariaDbTargetStopsNonzeroSrid(): void
@@ -645,6 +647,7 @@ class EmptyGeometryTest extends TestCase {
         $guard = new SpatialSridGuard(
             new PdoDatabaseConnection($mariadb_target),
             $source_version,
+            true,
             'engine=mysql db=test_empty_geometry_source'
         );
         $query_stream = new WP_MySQL_FastQueryStream();
@@ -669,26 +672,33 @@ class EmptyGeometryTest extends TestCase {
             'CREATE TABLE same_engine_srid (id INT PRIMARY KEY, location POINT)'
         );
         $this->source_pdo->exec(
-            "INSERT INTO same_engine_srid VALUES (9, ST_GeomFromText('POINT(7 8)', 4326))"
+            "INSERT INTO same_engine_srid VALUES " .
+            "(9, ST_GeomFromText('POINT(7 8)', 4326)), " .
+            "(10, ST_GeomFromText('POINT(9 10)', 3857))"
         );
-        $source_hex = $this->source_pdo
-            ->query('SELECT HEX(CAST(location AS BINARY)) FROM same_engine_srid')
-            ->fetchColumn();
+        $source_rows = $this->source_pdo
+            ->query(
+                'SELECT id, HEX(CAST(location AS BINARY)) AS geometry, ' .
+                'ST_SRID(location) AS srid FROM same_engine_srid ORDER BY id'
+            )
+            ->fetchAll(PDO::FETCH_ASSOC);
         $sql = $this->exportWithResumeAfterEveryFragment([
+            'batch_size' => 10,
             'tables_to_process' => ['same_engine_srid'],
         ]);
+        $this->assertSame(1, substr_count($sql, 'INSERT INTO `same_engine_srid`'));
+        $this->assertSame(1, substr_count($sql, MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX));
 
         $target = $this->executeDump(
             $sql,
             'test_empty_geometry_mariadb_same_engine_srid_target'
         );
         $this->assertSame(
-            $source_hex,
-            $target->query('SELECT HEX(CAST(location AS BINARY)) FROM same_engine_srid')->fetchColumn()
-        );
-        $this->assertSame(
-            4326,
-            (int) $target->query('SELECT ST_SRID(location) FROM same_engine_srid')->fetchColumn()
+            $source_rows,
+            $target->query(
+                'SELECT id, HEX(CAST(location AS BINARY)) AS geometry, ' .
+                'ST_SRID(location) AS srid FROM same_engine_srid ORDER BY id'
+            )->fetchAll(PDO::FETCH_ASSOC)
         );
     }
 
@@ -873,6 +883,7 @@ class EmptyGeometryTest extends TestCase {
         $guard = new SpatialSridGuard(
             $connection,
             (string) $this->source_pdo->query('SELECT VERSION()')->fetchColumn(),
+            $this->usesSpatialReferenceDefinitions($this->source_pdo),
             "engine=mysql db={$database}"
         );
         $query_stream = new WP_MySQL_FastQueryStream();
@@ -885,6 +896,15 @@ class EmptyGeometryTest extends TestCase {
             $target_pdo->exec($query);
         }
         return $target_pdo;
+    }
+
+    private function usesSpatialReferenceDefinitions(PDO $database): bool
+    {
+        return (int) $database->query(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES " .
+            "WHERE TABLE_SCHEMA = 'information_schema' " .
+            "AND TABLE_NAME = 'ST_SPATIAL_REFERENCE_SYSTEMS'"
+        )->fetchColumn() > 0;
     }
 
     private function initializeTargetDatabase(string $database): PDO

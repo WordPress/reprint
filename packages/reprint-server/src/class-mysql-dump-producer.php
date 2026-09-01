@@ -64,7 +64,7 @@ class MySQLDumpProducer
 
     private const SPATIAL_STAGING_TABLE = "__reprint_db_pull_progress_spatial";
 
-    /** Starts versioned source-row context for one nonzero-SRID INSERT. */
+    /** Starts versioned context for an INSERT containing a nonzero SRID. */
     public const NONZERO_SRID_COMMENT_PREFIX =
         "/* REPRINT: nonzero spatial SRID ";
 
@@ -161,8 +161,8 @@ class MySQLDumpProducer
     /** @var string[] Spatial columns waiting for their nullable ALTER TABLE. */
     private $pending_nullable_spatial_columns = [];
 
-    /** @var bool|null Whether the source interprets SRIDs through registered SRS definitions. */
-    private $source_uses_srs_definitions = null;
+    /** @var bool Whether the open INSERT already contains nonzero-SRID context. */
+    private $current_insert_has_nonzero_srid_context = false;
 
     /**
      * @param object $db Database connection — either a real PDO (MySQL) or a
@@ -325,6 +325,7 @@ class MySQLDumpProducer
     private function emit_insert_header()
     {
         $this->rows_in_batch = 0;
+        $this->current_insert_has_nonzero_srid_context = false;
         $reader_cursor_before_current_record = $this->reader_cursor_before_retained_record;
         if ($this->row_reader->get_current_record() === null) {
             $reader_cursor_before_current_record = $this->row_reader->get_cursor_state();
@@ -343,10 +344,10 @@ class MySQLDumpProducer
             $this->state = self::STATE_EMIT_NULLABLE_SPATIAL_COLUMNS;
             return false;
         }
-        $nonzero_srid_comment_size = strlen(
-            $this->format_nonzero_srid_comment($current_record)
-        );
-        $has_nonzero_srid_context = $nonzero_srid_comment_size > 0;
+        $nonzero_srid_comment = $this->format_nonzero_srid_comment($current_record);
+        $nonzero_srid_prefix = $nonzero_srid_comment === ''
+            ? ''
+            : $nonzero_srid_comment . "\n";
 
         $column_list = implode(
             ",",
@@ -357,9 +358,7 @@ class MySQLDumpProducer
 
         $header = "INSERT INTO " . $this->row_reader->quote_identifier($this->row_reader->get_current_table()) . " ({$column_list}) VALUES\n";
         $this->current_statement_size = strlen($header) + strlen($this->on_duplicate_key()) + 1;
-        if ($has_nonzero_srid_context) {
-            $this->current_statement_size += $nonzero_srid_comment_size + 1;
-        }
+        $this->current_statement_size += strlen($nonzero_srid_prefix);
 
         $current_record_ends_query_batch = $this->row_reader->is_current_record_at_query_batch_boundary();
         $first_row_sql = $this->format_row_for_insert(
@@ -381,6 +380,7 @@ class MySQLDumpProducer
 
         $this->reader_cursor_before_retained_record = null;
         $this->rows_in_batch = 1;
+        $this->current_insert_has_nonzero_srid_context = $nonzero_srid_comment !== '';
 
         // Oversized updates require closing this INSERT with a semicolon so the
         // subsequent UPDATE statements are syntactically separate.
@@ -390,13 +390,11 @@ class MySQLDumpProducer
         if (
             $current_record_ends_query_batch ||
             $this->rows_in_batch >= $this->row_reader->get_batch_size() ||
-            $has_zero_byte_spatial_value ||
-            $has_nonzero_srid_context
+            $has_zero_byte_spatial_value
         ) {
             $this->finish_insert_batch(
-                $header . $first_row_sql,
-                $has_oversized,
-                $has_nonzero_srid_context ? $current_record : null
+                $header . $nonzero_srid_prefix . $first_row_sql,
+                $has_oversized
             );
             $this->row_reader->clear_current_record();
             return true;
@@ -404,12 +402,14 @@ class MySQLDumpProducer
 
         $this->row_reader->clear_current_record();
         if ($has_oversized) {
-            $sql = $header . $first_row_sql . $this->on_duplicate_key() . ';';
+            $sql = $header . $nonzero_srid_prefix . $first_row_sql .
+                $this->on_duplicate_key() . ';';
             $this->current_sql_fragment = $sql;
             $this->current_statement_size = 0;
+            $this->current_insert_has_nonzero_srid_context = false;
             $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
         } else {
-            $sql = $header . $first_row_sql;
+            $sql = $header . $nonzero_srid_prefix . $first_row_sql;
             $this->current_sql_fragment = $sql;
             $this->state = self::STATE_EMIT_ROW;
         }
@@ -424,6 +424,7 @@ class MySQLDumpProducer
         if (!$this->row_reader->next_record()) {
             $this->current_sql_fragment = $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
+            $this->current_insert_has_nonzero_srid_context = false;
             $this->state = self::STATE_NEXT_TABLE;
             return true;
         }
@@ -437,24 +438,30 @@ class MySQLDumpProducer
             $this->current_sql_fragment = $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
             $this->rows_in_batch = 0;
+            $this->current_insert_has_nonzero_srid_context = false;
             $this->state = self::STATE_EMIT_NULLABLE_SPATIAL_COLUMNS;
             return true;
         }
 
-        if (
-            $this->has_zero_byte_spatial_value() ||
-            $this->get_nonzero_srid_values($this->row_reader->get_current_record()) !== []
-        ) {
-            // Keep a zero-byte or nonzero-SRID row in its own INSERT so the
-            // importer can rewrite or stop that exact row.
+        if ($this->has_zero_byte_spatial_value()) {
+            // MariaDB needs this row's INSERT column list to omit its
+            // zero-byte geometry. Close the preceding multi-row INSERT and
+            // retain the row for a one-row INSERT after this fragment.
             $this->reader_cursor_before_retained_record = $reader_cursor_before_current_record;
             $this->current_sql_fragment = $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
             $this->rows_in_batch = 0;
+            $this->current_insert_has_nonzero_srid_context = false;
             $this->state = self::STATE_START_INSERT;
             return true;
         }
 
+        $nonzero_srid_comment = $this->current_insert_has_nonzero_srid_context
+            ? ''
+            : $this->format_nonzero_srid_comment($this->row_reader->get_current_record());
+        $row_prefix = $nonzero_srid_comment === ''
+            ? ','
+            : ",\n" . $nonzero_srid_comment . "\n";
         $row_tuple_bytes = $this->estimate_formatted_row_tuple_bytes(
             $this->row_reader->get_current_record()
         );
@@ -463,7 +470,7 @@ class MySQLDumpProducer
             self::MAX_SQL_PART_BODY_BYTES
         );
         if (
-            $this->current_statement_size + 1 + $row_tuple_bytes >
+            $this->current_statement_size + strlen($row_prefix) + $row_tuple_bytes >
                 $maximum_insert_statement_bytes
         ) {
             // This row fits as the first row of another INSERT, but not in the
@@ -473,6 +480,7 @@ class MySQLDumpProducer
             $this->current_sql_fragment = $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
             $this->rows_in_batch = 0;
+            $this->current_insert_has_nonzero_srid_context = false;
             $this->state = self::STATE_START_INSERT;
             return true;
         }
@@ -487,10 +495,15 @@ class MySQLDumpProducer
             $this->current_sql_fragment = $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
             $this->rows_in_batch = 0;
+            $this->current_insert_has_nonzero_srid_context = false;
             $this->state = self::STATE_STAGE_OVERSIZED_SPATIAL;
             return true;
         }
-        $this->current_statement_size += strlen($row_sql) + 1;
+        $row_fragment = $row_prefix . $row_sql;
+        $this->current_statement_size += strlen($row_fragment);
+        if ($nonzero_srid_comment !== '') {
+            $this->current_insert_has_nonzero_srid_context = true;
+        }
         $this->row_reader->clear_current_record();
         $this->rows_in_batch++;
 
@@ -501,16 +514,17 @@ class MySQLDumpProducer
             $current_record_ends_query_batch ||
             $this->rows_in_batch >= $this->row_reader->get_batch_size()
         ) {
-            $this->finish_insert_batch("," . $row_sql, $has_oversized);
+            $this->finish_insert_batch($row_fragment, $has_oversized);
             return true;
         }
 
         if ($has_oversized) {
-            $this->current_sql_fragment = "," . $row_sql . $this->on_duplicate_key() . ';';
+            $this->current_sql_fragment = $row_fragment . $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
+            $this->current_insert_has_nonzero_srid_context = false;
             $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
         } else {
-            $this->current_sql_fragment = "," . $row_sql;
+            $this->current_sql_fragment = $row_fragment;
         }
 
         return true;
@@ -602,16 +616,11 @@ class MySQLDumpProducer
     }
 
     /** Finishes an INSERT batch at its bounded row limit. */
-    private function finish_insert_batch($sql, $has_oversized, $nonzero_srid_row = null)
+    private function finish_insert_batch($sql, $has_oversized)
     {
-        $statement = $sql . $this->on_duplicate_key() . ';';
-        $nonzero_srid_comment = $nonzero_srid_row === null
-            ? ''
-            : $this->format_nonzero_srid_comment($nonzero_srid_row);
-        $this->current_sql_fragment = $nonzero_srid_comment === ''
-            ? $statement
-            : $nonzero_srid_comment . "\n" . $statement;
+        $this->current_sql_fragment = $sql . $this->on_duplicate_key() . ';';
         $this->current_statement_size = 0;
+        $this->current_insert_has_nonzero_srid_context = false;
         if ($has_oversized) {
             $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
         } else {
@@ -768,6 +777,7 @@ class MySQLDumpProducer
             $this->reader_cursor_before_retained_record = null;
             $this->nullable_spatial_columns = [];
             $this->pending_nullable_spatial_columns = [];
+            $this->current_insert_has_nonzero_srid_context = false;
         }
         return $has_table;
     }
@@ -800,6 +810,8 @@ class MySQLDumpProducer
         }
         $cursor_data["state"] = $this->state;
         $cursor_data["rows_in_batch"] = $this->rows_in_batch;
+        $cursor_data["current_insert_has_nonzero_srid_context"] =
+            $this->current_insert_has_nonzero_srid_context;
         /**
          * Tracking for rows that are larger than max_allowed_packet or
          * max_statement_size.
@@ -925,6 +937,15 @@ class MySQLDumpProducer
                 );
             }
             $this->rows_in_batch = (int) $this->rows_in_batch;
+            $current_insert_has_nonzero_srid_context =
+                $cursor_data["current_insert_has_nonzero_srid_context"] ?? false;
+            if (!is_bool($current_insert_has_nonzero_srid_context)) {
+                throw new \InvalidArgumentException(
+                    "Invalid cursor: current_insert_has_nonzero_srid_context must be boolean"
+                );
+            }
+            $this->current_insert_has_nonzero_srid_context =
+                $current_insert_has_nonzero_srid_context;
 
             $encoded_queue = $cursor_data["oversized_queue"] ?? [];
             $this->oversized_queue = $this->decode_oversized_queue_from_cursor($encoded_queue);
@@ -1500,7 +1521,7 @@ class MySQLDumpProducer
         return $values;
     }
 
-    /** Marks one exact nonzero-SRID row without parsing its INSERT at the target. */
+    /** Marks the first nonzero-SRID row in an INSERT without target-side SQL parsing. */
     private function format_nonzero_srid_comment($row)
     {
         $spatial_values = $this->get_nonzero_srid_values($row);
@@ -1539,10 +1560,10 @@ class MySQLDumpProducer
             $row_details[] = 'Column: ' . $this->row_reader->quote_identifier($spatial_value[0]) .
                 ', SRID ' . $spatial_value[1];
         }
-        // This comment counts toward the SQL statement limit, so keep its field names compact.
+        // The marker counts toward the SQL statement limit, so it names only
+        // the first affected row in this INSERT.
         $context = [
-            'd' => $this->source_uses_srs_definitions(),
-            'm' => base64_encode(implode("\n", $row_details)),
+            'row_b64' => base64_encode(implode("\n", $row_details)),
         ];
         $context_json = json_encode($context);
         if ($context_json === false) {
@@ -1551,25 +1572,6 @@ class MySQLDumpProducer
         return self::NONZERO_SRID_COMMENT_PREFIX .
             self::NONZERO_SRID_CONTEXT_VERSION . ' ' .
             $context_json . ' */';
-    }
-
-    /** Returns whether this database interprets SRIDs through registered definitions. */
-    private function source_uses_srs_definitions()
-    {
-        if ($this->source_uses_srs_definitions !== null) {
-            return $this->source_uses_srs_definitions;
-        }
-        $result = $this->db->query(
-            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES " .
-            "WHERE TABLE_SCHEMA = 'information_schema' " .
-            "AND TABLE_NAME = 'ST_SPATIAL_REFERENCE_SYSTEMS'"
-        );
-        $count = $result->fetchColumn();
-        if (!is_numeric($count)) {
-            throw new \RuntimeException('The source database returned no spatial reference capability.');
-        }
-        $this->source_uses_srs_definitions = (int) $count > 0;
-        return $this->source_uses_srs_definitions;
     }
 
     /** Returns the exact SQL bytes used by one formatted VALUES tuple. */

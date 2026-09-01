@@ -366,7 +366,7 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $this->assertIsArray($context);
         $this->assertStringContainsString(
             'Column: `content`, SRID 4326',
-            base64_decode($context['m'], true)
+            base64_decode($context['row_b64'], true)
         );
         $this->assertStringNotContainsString('ST_GeomFromText(', $sql);
         $this->assertStringContainsString(

@@ -14,10 +14,10 @@ class SpatialSridGuardTest extends TestCase {
 
     public function testStopsNonzeroSridWhenTargetUsesDifferentSrsRules(): void
     {
-        $guard = $this->guard(true, '8.0.46');
+        $guard = $this->guard(false, true, '8.0.46');
 
         try {
-            $guard->assert_statement_supported($this->markedPointInsert(false, 42, 4326));
+            $guard->assert_statement_supported($this->markedPointInsert(42, 4326));
             $this->fail('Different source and target SRS rules should stop the INSERT.');
         } catch (RuntimeException $error) {
             $message = $error->getMessage();
@@ -27,32 +27,32 @@ class SpatialSridGuardTest extends TestCase {
             $this->assertStringContainsString('Table: `maps`', $message);
             $this->assertStringContainsString('Row: `id` = 42', $message);
             $this->assertStringContainsString('Column: `location`, SRID 4326', $message);
-            $this->assertStringContainsString('The row was not inserted.', $message);
+            $this->assertStringContainsString('The INSERT batch was not executed.', $message);
         }
     }
 
     public function testStopsTheOppositeSrsRuleCombination(): void
     {
-        $guard = $this->guard(false, '10.11.18-MariaDB', '8.0.46');
+        $guard = $this->guard(true, false, '10.11.18-MariaDB', '8.0.46');
 
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('[SPATIAL_AXIS_ORDER_UNSAFE]');
-        $guard->assert_statement_supported($this->markedPointInsert(true, 42, 4326));
+        $guard->assert_statement_supported($this->markedPointInsert(42, 4326));
     }
 
     public function testAllowsNonzeroSridWhenSourceAndTargetUseTheSameSrsRules(): void
     {
-        $this->guard(false, '10.11.18-MariaDB')
-            ->assert_statement_supported($this->markedPointInsert(false, 1, 999999));
-        $this->guard(true, '8.0.46', '8.0.45')
-            ->assert_statement_supported($this->markedPointInsert(true, 2, 4326));
+        $this->guard(false, false, '10.11.18-MariaDB')
+            ->assert_statement_supported($this->markedPointInsert(1, 999999));
+        $this->guard(true, true, '8.0.46', '8.0.45')
+            ->assert_statement_supported($this->markedPointInsert(2, 4326));
 
         $this->addToAssertionCount(2);
     }
 
     public function testIgnoresOrdinaryStatements(): void
     {
-        $guard = $this->guard(true, '8.0.46');
+        $guard = $this->guard(null, true, '8.0.46');
         $guard->assert_statement_supported(
             "INSERT INTO `maps` (`id`,`location`) VALUES (1,NULL);"
         );
@@ -70,31 +70,38 @@ class SpatialSridGuardTest extends TestCase {
             MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX .
                 MySQLDumpProducer::NONZERO_SRID_CONTEXT_VERSION . ' ',
             MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX . 'v2 ',
-            $this->markedPointInsert(false, 42, 4326)
+            $this->markedPointInsert(42, 4326)
         );
 
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('unsupported context version v2');
-        $this->guard(true, '8.0.46')->assert_statement_supported($sql);
+        $this->guard(false, true, '8.0.46')->assert_statement_supported($sql);
     }
 
     public function testRejectsInvalidMarkerFields(): void
     {
         $sql = $this->markedStatement([
-            'd' => false,
             'wrong' => base64_encode('Table: `maps`'),
         ]);
 
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('invalid object shape');
-        $this->guard(true, '8.0.46')->assert_statement_supported($sql);
+        $this->guard(false, true, '8.0.46')->assert_statement_supported($sql);
     }
 
-    private function markedPointInsert(bool $source_uses_srs_definitions, int $id, int $srid): string
+    public function testRequiresSourceRulesOnlyForAMarkedStatement(): void
+    {
+        $guard = $this->guard(null, true, '8.0.46');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('source preflight did not report spatial reference rules');
+        $guard->assert_statement_supported($this->markedPointInsert(42, 4326));
+    }
+
+    private function markedPointInsert(int $id, int $srid): string
     {
         return $this->markedStatement([
-            'd' => $source_uses_srs_definitions,
-            'm' => base64_encode(
+            'row_b64' => base64_encode(
                 "Table: `maps`\n" .
                 "Row: `id` = {$id}\n" .
                 "Column: `location`, SRID {$srid}"
@@ -104,13 +111,15 @@ class SpatialSridGuardTest extends TestCase {
 
     private function markedStatement(array $context): string
     {
-        return MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX .
+        return "INSERT INTO `maps` (`id`,`location`) VALUES (1,NULL),\n" .
+            MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX .
             MySQLDumpProducer::NONZERO_SRID_CONTEXT_VERSION . ' ' .
             json_encode($context) . " */\n" .
-            "INSERT INTO `maps` (`id`,`location`) VALUES (42,NULL);";
+            "(42,NULL),(99,NULL);";
     }
 
     private function guard(
+        ?bool $source_uses_srs_definitions,
         bool $target_uses_srs_definitions,
         string $target_version,
         string $source_version = '10.11.18-MariaDB'
@@ -142,6 +151,11 @@ class SpatialSridGuardTest extends TestCase {
                 throw new RuntimeException('Unexpected target metadata query: ' . $sql);
             }
         };
-        return new SpatialSridGuard($database, $source_version, 'test target');
+        return new SpatialSridGuard(
+            $database,
+            $source_version,
+            $source_uses_srs_definitions,
+            'test target'
+        );
     }
 }
