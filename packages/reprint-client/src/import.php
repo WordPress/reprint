@@ -12525,12 +12525,19 @@ class ImportClient
             $this->state->active_resumable_command->completion_state;
 
         /**
-         * A 30,000-file pull saved state 30,179 times. Replacing the roughly
-         * 185-byte progress.json at every checkpoint wrote only 5.3 MiB of
-         * payload, but also performed 30,179 temporary-file writes and
-         * renames. Keep state.json durable at every checkpoint while limiting
-         * this status file's recurring filesystem work to once per second.
-         * Cleared, partial, and complete states are always written immediately.
+         * state.json records where an interrupted pull can restart, so it must
+         * be written after every completed unit of work. progress.json is only
+         * a status snapshot for external tools to poll. It does not need to be
+         * rewritten at every state checkpoint.
+         *
+         * A 30,000-file pull produced 30,179 checkpoints. progress.json was
+         * only about 185 bytes, but writing it atomically at every checkpoint
+         * also meant 30,179 temporary-file writes and renames. Limit active
+         * status updates by elapsed time because polling readers care how old
+         * the snapshot is, while checkpoint frequency varies with the number
+         * and size of files. One update per second keeps the snapshot recent
+         * without repeating that filesystem work. Cleared, partial, and
+         * complete states are still written immediately.
          */
         if (
             $completion_state !== "in_progress"
