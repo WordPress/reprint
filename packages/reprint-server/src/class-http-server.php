@@ -6,13 +6,6 @@ use InvalidArgumentException;
 
 require_once __DIR__ . '/utils.php';
 
-if (!class_exists('WordPress\\Reprint\\Server\\ResourceBudget', false)) {
-    require_once __DIR__ . '/class-resource-budget.php';
-}
-if (!class_exists(PushConfigurationException::class, false)) {
-    require_once __DIR__ . '/class-push-configuration-exception.php';
-}
-
 /**
  * HTTP dispatcher for the Reprint Server API.
  */
@@ -57,9 +50,6 @@ final class HTTPServer {
             try {
                 if (!is_array($options['push'])) {
                     throw new InvalidArgumentException('The push HTTP server option must be an array.');
-                }
-                if (!class_exists(PushEndpoints::class, false)) {
-                    require_once __DIR__ . '/class-push-endpoints.php';
                 }
                 $this->push_endpoints = new PushEndpoints($options['push']);
             } catch (InvalidArgumentException $exception) {

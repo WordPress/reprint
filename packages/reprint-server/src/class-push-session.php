@@ -11,13 +11,6 @@ use Throwable;
 
 require_once __DIR__ . '/utils.php';
 
-if (!class_exists(MultipartProcessor::class, false)) {
-    require_once __DIR__ . '/class-multipart-processor.php';
-}
-if (!class_exists(PushException::class, false)) {
-    require_once __DIR__ . '/class-push-exception.php';
-}
-
 /**
  * Receives push work privately, then commits its deletes and files directly.
  *

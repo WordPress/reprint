@@ -6,7 +6,7 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Verifies that requiring export.php does not authenticate requests
- * or terminate the process — it only registers functions and classes.
+ * or terminate the process — it prepares endpoint functions without dispatching.
  *
  * Tests run in subprocesses because export.php registers shutdown and
  * error handlers at module level.
@@ -33,23 +33,25 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertStringContainsString('endpoint-handlers-loaded', $result['output']);
     }
 
-    public function testRequiringExportPhpKeepsResourceBudgetLoadedByAnotherPackageCopy(): void
+    public function testRequiringExportPhpKeepsClassesLoadedByAnotherPackageCopy(): void
     {
-        $resource_budget_path = realpath(
-            __DIR__ . '/../packages/reprint-server/src/class-resource-budget.php'
-        );
-        $this->assertNotFalse($resource_budget_path, 'class-resource-budget.php must exist');
         $export_path = realpath(self::EXPORT_PATH);
         $this->assertNotFalse($export_path, 'export.php must exist');
 
-        $tmp_dir = sys_get_temp_dir() . '/reprint-server-resource-budget-test-' . uniqid('', true);
+        $tmp_dir = sys_get_temp_dir() . '/reprint-server-class-loading-test-' . uniqid('', true);
         mkdir($tmp_dir, 0755, true);
-        $first_copy_path = $tmp_dir . '/class-resource-budget.php';
-        copy($resource_budget_path, $first_copy_path);
+        $first_copy_paths = [];
+        foreach (['class-resource-budget.php', 'class-gzip-output-stream.php'] as $filename) {
+            $source_path = realpath(__DIR__ . '/../packages/reprint-server/src/' . $filename);
+            $this->assertNotFalse($source_path, "{$filename} must exist");
+            $first_copy_paths[] = $tmp_dir . '/' . $filename;
+            copy($source_path, $tmp_dir . '/' . $filename);
+        }
 
         try {
             $result = $this->runPhpCode(
-                "<?php\nrequire base64_decode('" . base64_encode($first_copy_path) . "', true);\n"
+                "<?php\nrequire base64_decode('" . base64_encode($first_copy_paths[0]) . "', true);\n"
+                . "require base64_decode('" . base64_encode($first_copy_paths[1]) . "', true);\n"
                 . "require base64_decode('" . base64_encode($export_path) . "', true);\n"
                 . "echo 'endpoint-handlers-loaded';\n"
             );
@@ -57,9 +59,46 @@ final class ExportLibraryLoadTest extends TestCase {
             $this->assertSame(0, $result['status'], $result['output']);
             $this->assertSame('endpoint-handlers-loaded', trim($result['output']));
         } finally {
-            unlink($first_copy_path);
+            foreach ($first_copy_paths as $first_copy_path) {
+                unlink($first_copy_path);
+            }
             rmdir($tmp_dir);
         }
+    }
+
+    public function testServerClassesRelyOnComposerInsteadOfManualClassFileLoads(): void
+    {
+        $source_directory = __DIR__ . '/../packages/reprint-server/src';
+        $manual_class_loads = [];
+
+        foreach (glob($source_directory . '/*.php') ?: [] as $path) {
+            $source = file_get_contents($path);
+            $this->assertNotFalse($source, basename($path) . ' must be readable');
+            $tokens = token_get_all($source);
+            foreach ($tokens as $index => $token) {
+                if (!is_array($token) || !in_array($token[0], [T_REQUIRE, T_REQUIRE_ONCE], true)) {
+                    continue;
+                }
+
+                $statement = '';
+                for ($cursor = $index + 1; isset($tokens[$cursor]); ++$cursor) {
+                    $statement_token = $tokens[$cursor];
+                    $statement .= is_array($statement_token) ? $statement_token[1] : $statement_token;
+                    if ($statement_token === ';') {
+                        break;
+                    }
+                }
+                if (strpos($statement, 'class-') !== false) {
+                    $manual_class_loads[] = basename($path) . ':' . $token[2];
+                }
+            }
+        }
+
+        $this->assertSame(
+            [],
+            $manual_class_loads,
+            'Server classes must resolve through Composer: ' . implode(', ', $manual_class_loads)
+        );
     }
 
     public function testNormalizePathListKeepsTheFilesystemRoot(): void

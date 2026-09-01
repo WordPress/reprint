@@ -24,11 +24,6 @@ use function WordPress\Reprint\Server\trim_right_slash;
 use function WordPress\Reprint\Server\wp_join_unix_paths;
 
 require_once __DIR__ . '/utils.php';
-if (!class_exists('WordPress\\Reprint\\Server\\ResourceBudget', false)) {
-    require_once __DIR__ . '/class-resource-budget.php';
-}
-require_once __DIR__ . '/class-gzip-output-stream.php';
-require_once __DIR__ . '/class-file-index-processor.php';
 
 // Capture any accidental output before headers are set so we can discard it
 // when switching to streaming mode later.
@@ -316,8 +311,6 @@ function create_sqlite_pdo_adapter()
         throw new RuntimeException('SQLite export requires the PDO extension.');
     }
 
-    require_once __DIR__ . "/class-sqlite-driver-pdo.php";
-
     $driver = null;
     $raw_pdo = null;
 
@@ -387,8 +380,6 @@ function create_wpdb_pdo_adapter()
 {
     global $wpdb;
 
-    require_once __DIR__ . "/class-wpdb-driver-pdo.php";
-
     // Guard against a clobbered/half-initialized $wpdb: isset() alone passes
     // for non-object scalars, which would fatal inside the adapter constructor.
     if (!isset($wpdb) || !is_object($wpdb)) {
@@ -398,10 +389,6 @@ function create_wpdb_pdo_adapter()
     }
 
     return new WpdbDriverPDO($wpdb);
-}
-
-if (!class_exists(HTTPServer::class, false)) {
-    require_once __DIR__ . "/class-http-server.php";
 }
 
 /**
@@ -612,9 +599,6 @@ if (getenv('SITE_EXPORT_TEST_MODE')) {
         }
     }
 }
-
-require_once __DIR__ . "/class-mysql-dump-producer.php";
-require_once __DIR__ . "/class-file-tree-producer.php";
 
 /**
  * Prepares the PHP environment for streaming by disabling output buffering,
