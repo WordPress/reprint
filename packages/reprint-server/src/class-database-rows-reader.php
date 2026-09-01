@@ -271,6 +271,21 @@ class DatabaseRowsReader {
         return $this->current_spatial_value_lengths[$column] ?? null;
     }
 
+    /**
+     * Returns byte lengths for every spatial value in the retained row.
+     *
+     * The row query already records this map while fetching spatial values. Its
+     * keys can therefore drive row-level spatial checks without scanning every
+     * table column again.
+     *
+     * @return array<string,int|null> Byte lengths keyed by spatial column name;
+     *         SQL NULL is represented by null.
+     */
+    public function get_current_spatial_value_lengths()
+    {
+        return $this->current_spatial_value_lengths;
+    }
+
     /** Returns the four-byte SRID prefix retained for an omitted spatial value. */
     public function get_current_oversized_spatial_value_prefix($column)
     {

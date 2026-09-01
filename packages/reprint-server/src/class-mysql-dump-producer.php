@@ -1520,11 +1520,7 @@ class MySQLDumpProducer
     private function get_nonzero_srid_values($row)
     {
         $values = [];
-        foreach ($this->row_reader->get_current_column_names() as $column) {
-            if (!$this->row_reader->is_spatial_type($this->row_reader->get_data_type($column))) {
-                continue;
-            }
-            $byte_length = $this->row_reader->get_current_spatial_value_length($column);
+        foreach ($this->row_reader->get_current_spatial_value_lengths() as $column => $byte_length) {
             $value = $row[$column] ?? null;
             if ($byte_length === null || $byte_length === 0) {
                 continue;
