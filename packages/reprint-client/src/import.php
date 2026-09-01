@@ -425,7 +425,7 @@ class ImportClient
     private $hmac_client = null;
 
     /**
-     * @var int|null MySQL max_allowed_packet value for the target database connection.
+     * @var int|null Target max_allowed_packet ceiling sent to the exporter.
      * Passed to the server so it can split SQL statements to fit within this limit.
      */
     private $max_allowed_packet = null;
@@ -1089,9 +1089,8 @@ class ImportClient
             $this->filter = $this->get_state()->filter;
         }
 
-        // Persist max_allowed_packet in state so it survives across invocations.
-        // The client sends this to the server so SQL statements are capped to a
-        // size the client's MySQL instance can actually accept.
+        // Persist a configured packet ceiling across resume invocations.
+        // Direct MySQL output queries the live target when none was configured.
         if (isset($options["max_allowed_packet"])) {
             $this->max_allowed_packet = (int) $options["max_allowed_packet"];
             $this->get_state()->max_allowed_packet = $this->max_allowed_packet;
@@ -3025,8 +3024,8 @@ class ImportClient
                 ],
             ];
 
-            // Tell the server about the client's max_allowed_packet so it can
-            // cap SQL statements to a size the client can actually apply.
+            // Tell the server about the target max_allowed_packet so it can
+            // cap SQL statements to a size the target can actually apply.
             if ($this->max_allowed_packet !== null) {
                 $params["max_allowed_packet"] = $this->max_allowed_packet;
             }
@@ -8709,8 +8708,6 @@ class ImportClient
                 );
                 $this->max_allowed_packet = (int) $packet_result->fetchColumn();
                 $packet_result->closeCursor();
-                $this->get_state()->max_allowed_packet = $this->max_allowed_packet;
-                $this->save_state();
             }
             if ($starts_mysql_output) {
                 // Keep the mysql-start stage until the old target position is gone.
@@ -12955,7 +12952,7 @@ if (
             'target' => 'max_allowed_packet',
             'placeholder' => 'SIZE',
             'cast' => 'size',
-            'help' => 'Client max_allowed_packet (e.g. 16M, 64M)',
+            'help' => 'Target max_allowed_packet override (e.g. 16M, 64M)',
             'commands' => ['pull-db', 'db-pull'],
         ],
         [
