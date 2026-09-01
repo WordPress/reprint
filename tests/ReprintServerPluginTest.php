@@ -11,10 +11,14 @@ declare(strict_types=1);
  * deleted together with compat.php.
  */
 
+use function WordPress\Reprint\Server\Plugin\change_connection_token;
+use function WordPress\Reprint\Server\Plugin\change_push_access;
+use function WordPress\Reprint\Server\Plugin\get_configuration_state;
 use function WordPress\Reprint\Server\Plugin\get_connection_token;
 use function WordPress\Reprint\Server\Plugin\get_managed_push_enabled;
 use function WordPress\Reprint\Server\Plugin\get_push_authorization_error;
 use function WordPress\Reprint\Server\Plugin\is_push_authorized;
+use function WordPress\Reprint\Server\Plugin\register_connection_token_setting;
 use function WordPress\Reprint\Server\Plugin\update_connection_token;
 use function WordPress\Reprint\Server\Plugin\update_push_authorization;
 use function WordPress\Reprint\Server\Plugin\verify_hmac;
@@ -50,7 +54,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testPluginRegistersConnectionTokenOptionForCoreSettingsRestEndpoint(): void
     {
-        Site_Export_Plugin::get_instance()->register_settings();
+        register_connection_token_setting();
 
         $setting = $GLOBALS['reprint_server_registered_settings'][CONNECTION_TOKEN_OPTION] ?? null;
         $this->assertNotNull($setting);
@@ -163,7 +167,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
     {
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'token-a';
         $this->assertTrue(update_push_authorization(true));
-        Site_Export_Plugin::get_instance()->register_settings();
+        register_connection_token_setting();
 
         update_option(CONNECTION_TOKEN_OPTION, 'token-b');
         update_option(CONNECTION_TOKEN_OPTION, 'token-a');
@@ -176,7 +180,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
     {
         file_put_contents(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE, "<?php return 'token-a';\n");
         $this->assertTrue(update_push_authorization(true));
-        Site_Export_Plugin::get_instance()->register_settings();
+        register_connection_token_setting();
 
         unlink(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE);
         $this->assertFalse(is_push_authorized());
@@ -191,7 +195,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'option-token-a';
         file_put_contents(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE, "<?php return 'file-token';\n");
         $this->assertTrue(update_push_authorization(true));
-        Site_Export_Plugin::get_instance()->register_settings();
+        register_connection_token_setting();
 
         update_option(CONNECTION_TOKEN_OPTION, 'option-token-b');
 
@@ -200,6 +204,27 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
             $GLOBALS['reprint_server_test_options'][PUSH_AUTHORIZATION_OPTION]
         );
         $this->assertTrue(is_push_authorized());
+    }
+
+    /**
+     * Enabling push without a connection token must stay a failure notice.
+     *
+     * The extracted operation reports this as not_configured, where the
+     * inlined update_push_authorization() call simply returned false.
+     */
+    public function testPushAccessFormWithoutAConnectionTokenReportsFailure(): void
+    {
+        $_POST = [
+            'site_export_save_push_access' => '1',
+            'site_export_push_enabled' => '1',
+        ];
+
+        Site_Export_Plugin::get_instance()->handle_settings_save();
+
+        $codes = array_column($GLOBALS['reprint_server_settings_errors'], 'code');
+        $this->assertContains('push_access_save_failed', $codes);
+        $this->assertNotContains('push_access_saved', $codes);
+        $this->assertFalse(is_push_authorized());
     }
 
     public function testPushAccessFormAuthorizesTheCurrentConnectionToken(): void
@@ -254,5 +279,84 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('Push access is managed by your hosting provider.', $html);
         $this->assertStringContainsString('name="site_export_push_enabled" value="1" checked disabled', $html);
         $this->assertStringNotContainsString('name="site_export_save_push_access"', $html);
+    }
+
+    public function testConnectionTokenOperationReturnsExplicitOutcomes(): void
+    {
+        $this->assertSame('saved', change_connection_token('new-token'));
+        $this->assertSame('unchanged', change_connection_token('new-token'));
+
+        $GLOBALS['reprint_server_fail_option_updates'][] = CONNECTION_TOKEN_OPTION;
+        $this->assertSame('storage_failure', change_connection_token('other-token'));
+    }
+
+    public function testConfigurationIntegrationRegistersOutsideTheAdministratorAdapter(): void
+    {
+        $init_hooks = $GLOBALS['reprint_server_test_actions']['init'] ?? [];
+        $update_hooks = $GLOBALS['reprint_server_test_actions']['update_option_' . CONNECTION_TOKEN_OPTION] ?? [];
+        $add_hooks = $GLOBALS['reprint_server_test_actions']['add_option_' . CONNECTION_TOKEN_OPTION] ?? [];
+
+        $this->assertNotEmpty($init_hooks);
+        $this->assertSame(
+            'WordPress\\Reprint\\Server\\Plugin\\register_connection_token_setting',
+            $init_hooks[0]['callback']
+        );
+        $this->assertNotEmpty($update_hooks);
+        $this->assertSame(
+            'WordPress\\Reprint\\Server\\Plugin\\revoke_push_authorization_after_connection_token_change',
+            $update_hooks[0]['callback']
+        );
+        $this->assertNotEmpty($add_hooks);
+        $this->assertSame(
+            'WordPress\\Reprint\\Server\\Plugin\\revoke_push_authorization_after_connection_token_added',
+            $add_hooks[0]['callback']
+        );
+    }
+
+    public function testPushAccessOperationAuthorizesTheCurrentConnectionToken(): void
+    {
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
+
+        $this->assertSame('saved', change_push_access(true));
+        $this->assertSame(
+            hash('sha256', 'current-token'),
+            $GLOBALS['reprint_server_test_options'][PUSH_AUTHORIZATION_OPTION]
+        );
+        $this->assertTrue(is_push_authorized());
+    }
+
+    public function testPushAccessOperationReturnsExplicitOutcomes(): void
+    {
+        $this->assertSame('not_configured', change_push_access(true));
+
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
+        $this->assertSame('saved', change_push_access(true));
+        $this->assertSame('unchanged', change_push_access(true));
+
+        putenv('REPRINT_SERVER_PUSH_ENABLED=false');
+        $this->assertSame('managed', change_push_access(false));
+    }
+
+    public function testPushAccessOperationReportsStorageFailure(): void
+    {
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
+        $GLOBALS['reprint_server_fail_option_updates'][] = PUSH_AUTHORIZATION_OPTION;
+
+        $this->assertSame('storage_failure', change_push_access(true));
+        $this->assertFalse(is_push_authorized());
+    }
+
+    public function testConfigurationStateDescribesTheEffectiveConnection(): void
+    {
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
+
+        $configuration = get_configuration_state();
+
+        $this->assertSame('current-token', $configuration['stored_connection_token']);
+        $this->assertTrue($configuration['is_configured']);
+        $this->assertFalse($configuration['has_connection_token_file']);
+        $this->assertTrue($configuration['push_supported']);
+        $this->assertNull($configuration['managed_push_enabled']);
+        $this->assertFalse($configuration['push_enabled']);
     }
 }
