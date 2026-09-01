@@ -25,7 +25,7 @@ require_once __DIR__ . '/compat.php';
 \reprint_server_compat_adopt_legacy_constants();
 
 if (!defined(__NAMESPACE__ . '\\VERSION')) {
-    define(__NAMESPACE__ . '\\VERSION', '0.10.7-dev');
+    define(__NAMESPACE__ . '\\VERSION', '0.10.8-dev');
 }
 if (!defined(__NAMESPACE__ . '\\PLUGIN_DIR')) {
     define(__NAMESPACE__ . '\\PLUGIN_DIR', plugin_dir_path(__FILE__));
