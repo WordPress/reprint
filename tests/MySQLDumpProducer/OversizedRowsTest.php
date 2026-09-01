@@ -358,27 +358,15 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         }
         $sql = implode("\n", $fragments);
         $marker_pattern = '/' .
-            preg_quote(MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX, '/') .
-            preg_quote(MySQLDumpProducer::SPATIAL_STATEMENT_CONTEXT_VERSION, '/') .
-            ' (\{[^\r\n]+\}) ([A-Za-z0-9+\/=]+) \*\//';
+            preg_quote(MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX, '/') .
+            preg_quote(MySQLDumpProducer::NONZERO_SRID_CONTEXT_VERSION, '/') .
+            ' (\{[^\r\n]+\}) \*\//';
         $this->assertSame(1, preg_match($marker_pattern, $sql, $marker));
         $context = json_decode($marker[1], true);
         $this->assertIsArray($context);
-        $type_code = array_search(
-            strtoupper($column_type),
-            MySQLDumpProducer::SPATIAL_TYPE_BY_CODE,
-            true
-        );
-        $this->assertIsString($type_code);
-        $this->assertSame(
-            [[
-                base64_encode('content'),
-                $type_code,
-                4326,
-                strlen($source_value),
-                hash('sha256', $source_value),
-            ]],
-            $context['v']
+        $this->assertStringContainsString(
+            'Column: `content`, SRID 4326',
+            base64_decode($context['m'], true)
         );
         $this->assertStringNotContainsString('ST_GeomFromText(', $sql);
         $this->assertStringContainsString(
@@ -481,11 +469,8 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
             $reader->get_current_spatial_value_length('route')
         );
         $this->assertSame(
-            [
-                'prefix' => substr($expected_value, 0, 4),
-                'hash' => hash('sha256', $expected_value),
-            ],
-            $reader->get_current_oversized_spatial_value_context('route')
+            substr($expected_value, 0, 4),
+            $reader->get_current_oversized_spatial_value_prefix('route')
         );
     }
 

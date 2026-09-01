@@ -18,7 +18,7 @@ use Reprint\Importer\DatabaseUrlRewriteProcessor;
 use Reprint\Importer\NullableSpatialColumnStatementRewriter;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\Pull\PullFailureReportedException;
-use Reprint\Importer\SpatialStatementDiagnostics;
+use Reprint\Importer\SpatialSridGuard;
 use Reprint\Importer\State\DatabaseApplyCommandState;
 use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
 use Reprint\Importer\State\DatabaseTableIndexState;
@@ -6733,8 +6733,8 @@ class ImportClient
             true,
             'db-apply',
         );
-        $spatial_statement_diagnostics = $target_engine === 'mysql'
-            ? new SpatialStatementDiagnostics(
+        $spatial_srid_guard = $target_engine === 'mysql'
+            ? new SpatialSridGuard(
                 $connection,
                 (string) ( $this->get_state()->get('preflight.database.version') ?? '' ),
                 $connection_label,
@@ -6857,8 +6857,7 @@ class ImportClient
                     $group["byte_offset"],
                     $target_engine,
                     $stmt_rewriter,
-                    $spatial_statement_diagnostics,
-                    $byte_offset,
+                    $spatial_srid_guard,
                 );
 
                 $statements_executed += $group_statement_count;
@@ -6984,8 +6983,7 @@ class ImportClient
         ?int $next_file_byte_offset,
         string $target_engine,
         ?SqlStatementRewriter $stmt_rewriter = null,
-        ?SpatialStatementDiagnostics $spatial_statement_diagnostics = null,
-        ?int $current_file_byte_offset = null
+        ?SpatialSridGuard $spatial_srid_guard = null
     ): int {
         $nullable_spatial_column_rewriter = new NullableSpatialColumnStatementRewriter(
             $connection
@@ -6997,11 +6995,8 @@ class ImportClient
             $statement_count = 0;
             while ($query_stream->next_query()) {
                 $query = $query_stream->get_query();
-                $spatial_inspection = $spatial_statement_diagnostics !== null
-                    ? $spatial_statement_diagnostics->inspect($query)
-                    : null;
-                if ($spatial_statement_diagnostics !== null) {
-                    $spatial_statement_diagnostics->assert_supported($spatial_inspection);
+                if ($spatial_srid_guard !== null) {
+                    $spatial_srid_guard->assert_statement_supported($query);
                 }
                 $query = $nullable_spatial_column_rewriter->rewrite($query) ?? $query;
                 if ($stmt_rewriter !== null) {
@@ -7010,30 +7005,7 @@ class ImportClient
                 // The exporter applies its packet-size cap to each statement.
                 // Keep each MySQL command within that cap even when one
                 // resumable group contains several complete statements.
-                try {
-                    $connection->exec($query);
-                } catch (PDOException $error) {
-                    if ($spatial_statement_diagnostics === null || $spatial_inspection === null) {
-                        throw $error;
-                    }
-                    $spatial_failure = $spatial_statement_diagnostics->describe_target_failure(
-                        $error,
-                        $spatial_inspection,
-                        $statement_count + 1,
-                        $current_file_byte_offset,
-                        $query,
-                    );
-                    if ($spatial_failure === null) {
-                        throw $error;
-                    }
-                    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Detailed CLI diagnostic, never HTML output.
-                    throw new RuntimeException(
-                        $spatial_failure,
-                        0,
-                        $error,
-                    );
-                    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-                }
+                $connection->exec($query);
                 ++$statement_count;
             }
             if ($statement_count === 0) {
@@ -8685,7 +8657,7 @@ class ImportClient
 
         $sql_handle = null;
         $mysql_conn = null;
-        $spatial_statement_diagnostics = null;
+        $spatial_srid_guard = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
         $session_setup_file = wp_join_unix_paths(
@@ -8754,7 +8726,7 @@ class ImportClient
                 $this->get_state()->max_allowed_packet = $this->max_allowed_packet;
                 $this->save_state();
             }
-            $spatial_statement_diagnostics = new SpatialStatementDiagnostics(
+            $spatial_srid_guard = new SpatialSridGuard(
                 $mysql_conn,
                 (string) ( $this->get_state()->get('preflight.database.version') ?? '' ),
                 $mysql_connection_label,
@@ -8853,7 +8825,7 @@ class ImportClient
                     &$sql_handle,
                     $mysql_conn,
                     &$sql_buffer,
-                    $spatial_statement_diagnostics,
+                    $spatial_srid_guard,
                     $session_setup_file,
                     &$sql_bytes_written,
                     $context,
@@ -8962,7 +8934,7 @@ class ImportClient
                                         null,
                                         'mysql',
                                         null,
-                                        $spatial_statement_diagnostics,
+                                        $spatial_srid_guard,
                                     );
                                     $sql_buffer = "";
                                 }

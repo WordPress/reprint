@@ -425,17 +425,25 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
             });
         }
 
-        async function expectSpatialFailure({ table, target, setup, code, details }) {
+        it('stops MariaDB to MySQL 8 SRID 4326 before changing coordinate meaning', async () => {
+            const table = 'zz_axis_order_failure';
             const source = await createMysqlConnection(getDbName(site));
             const failureTarget = {
-                ...target,
-                database: `${target.database}_${table}`,
+                ...mysql8Target,
+                database: `${mysql8Target.database}_${table}`,
             };
             const tempDirectory = createTempDir(`e2e-spatial-failure-${table}`);
             tempDirectories.push(tempDirectory);
             try {
                 await source.query(`DROP TABLE IF EXISTS \`${table}\``);
-                await setup(source, table);
+                await source.query(
+                    `CREATE TABLE \`${table}\` (`
+                    + '`id` INT PRIMARY KEY, `location` POINT) ENGINE=InnoDB'
+                );
+                await source.query(
+                    `INSERT INTO \`${table}\` VALUES `
+                    + "(42, ST_GeomFromText('POINT(7 8)', 4326))"
+                );
 
                 const admin = await targetConnection(failureTarget);
                 try {
@@ -455,15 +463,17 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
                 const first = run();
                 assert.notEqual(first.exitCode, 0, 'The unsupported spatial row was imported.');
                 const firstOutput = `${first.stderr}\n${first.stdout}`;
-                assert.match(firstOutput, new RegExp(`\\[${code}\\]`));
-                for (const detail of details) {
-                    assert.match(firstOutput, detail);
-                }
-                assert.match(firstOutput, /The target cursor did not advance\./);
+                assert.match(firstOutput, /\[SPATIAL_AXIS_ORDER_UNSAFE\]/);
+                assert.match(firstOutput, /Table: `zz_axis_order_failure`/);
+                assert.match(firstOutput, /Row: `id` = 42/);
+                assert.match(firstOutput, /Column: `location`, SRID 4326/);
+                assert.match(firstOutput, /Source: MariaDB/);
+                assert.match(firstOutput, /Target: MySQL/);
+                assert.match(firstOutput, /The row was not inserted\./);
 
                 const resumed = run();
                 assert.notEqual(resumed.exitCode, 0, 'Resume skipped the unsupported spatial row.');
-                assert.match(`${resumed.stderr}\n${resumed.stdout}`, new RegExp(`\\[${code}\\]`));
+                assert.match(`${resumed.stderr}\n${resumed.stdout}`, /\[SPATIAL_AXIS_ORDER_UNSAFE\]/);
 
                 const targetDatabase = await targetConnection(failureTarget, failureTarget.database);
                 try {
@@ -485,87 +495,6 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
                     // Keep cleanup from hiding the test failure.
                 }
             }
-        }
-
-        it('stops MariaDB to MySQL 8 SRID 4326 before changing coordinate meaning', async () => {
-            await expectSpatialFailure({
-                table: 'zz_axis_order_failure',
-                target: mysql8Target,
-                setup: async (source, table) => {
-                    await source.query(
-                        `CREATE TABLE \`${table}\` (`
-                        + '`id` INT PRIMARY KEY, `location` POINT) ENGINE=InnoDB'
-                    );
-                    await source.query(
-                        `INSERT INTO \`${table}\` VALUES `
-                        + "(42, ST_GeomFromText('POINT(7 8)', 4326))"
-                    );
-                },
-                code: 'SPATIAL_AXIS_ORDER_UNSAFE',
-                details: [
-                    /Table: `zz_axis_order_failure`/,
-                    /Row: `id` = 42/,
-                    /Column: `location` POINT/,
-                    /SRID: 4326/,
-                    /Source: MariaDB/,
-                    /Target: MySQL/,
-                ],
-            });
-        });
-
-        it('names an SRID which is absent from the MySQL 8 registry', async () => {
-            await expectSpatialFailure({
-                table: 'zz_unknown_srid_failure',
-                target: mysql8Target,
-                setup: async (source, table) => {
-                    await source.query(
-                        `CREATE TABLE \`${table}\` (`
-                        + '`id` INT PRIMARY KEY, `location` POINT) ENGINE=InnoDB'
-                    );
-                    await source.query(
-                        `INSERT INTO \`${table}\` VALUES `
-                        + "(73, ST_GeomFromText('POINT(7 8)', 999999))"
-                    );
-                },
-                code: 'SPATIAL_SRID_UNKNOWN',
-                details: [
-                    /Table: `zz_unknown_srid_failure`/,
-                    /Row: `id` = 73/,
-                    /Column: `location` POINT/,
-                    /SRID: 999999/,
-                    /ST_SPATIAL_REFERENCE_SYSTEMS/,
-                ],
-            });
-        });
-
-        it('names the CHECK which rejects a normalized zero-byte value', async () => {
-            await expectSpatialFailure({
-                table: 'zz_spatial_check_failure',
-                target: mysql8Target,
-                setup: async (source, table) => {
-                    await source.query(
-                        `CREATE TABLE \`${table}\` (`
-                        + '`id` INT PRIMARY KEY) ENGINE=InnoDB'
-                    );
-                    await source.query(`INSERT INTO \`${table}\` VALUES (17)`);
-                    await source.query(
-                        `ALTER TABLE \`${table}\` ADD COLUMN \`location\` POINT NOT NULL`
-                    );
-                    await source.query(
-                        `ALTER TABLE \`${table}\` ADD CONSTRAINT \`location_required\` `
-                        + 'CHECK (`location` IS NOT NULL)'
-                    );
-                },
-                code: 'SPATIAL_ROW_REJECTED',
-                details: [
-                    /Table: `zz_spatial_check_failure`/,
-                    /Row: `id` = 17/,
-                    /Column candidate: `location` POINT \(zero bytes converted to SQL NULL\)/,
-                    /location_required/,
-                    /SHOW CREATE TABLE `zz_spatial_check_failure`/,
-                    /The target did not report which value caused the failure\./,
-                ],
-            });
         });
     },
 );

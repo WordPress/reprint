@@ -91,14 +91,14 @@ class DatabaseRowsReader {
     /** @var array<string,int|null> Byte lengths for spatial values in the retained row. */
     private $current_spatial_value_lengths = [];
 
-    /** @var array<string,array{prefix:string|null,hash:string|null}> */
-    private $current_oversized_spatial_value_contexts = [];
+    /** @var array<string,string|null> Four-byte SRID prefixes for omitted spatial values. */
+    private $current_oversized_spatial_value_prefixes = [];
 
     /** @var array<string,string> Internal length aliases keyed by spatial column name. */
     private $spatial_length_aliases = [];
 
-    /** @var array<string,array{prefix:string,hash:string}> */
-    private $spatial_context_aliases = [];
+    /** @var array<string,string> Internal SRID-prefix aliases keyed by spatial column name. */
+    private $spatial_prefix_aliases = [];
 
     /** @var array<string,list<array{column:string,value:string}>> Row exclusions keyed by table. */
     private $exclude_rows_by_table = [];
@@ -262,7 +262,7 @@ class DatabaseRowsReader {
         $this->current_row = null;
         $this->current_row_ends_query_batch = false;
         $this->current_spatial_value_lengths = [];
-        $this->current_oversized_spatial_value_contexts = [];
+        $this->current_oversized_spatial_value_prefixes = [];
     }
 
     /** Returns the retained spatial value length, or null for SQL NULL. */
@@ -271,10 +271,10 @@ class DatabaseRowsReader {
         return $this->current_spatial_value_lengths[$column] ?? null;
     }
 
-    /** Returns the bounded context retained for an omitted spatial value. */
-    public function get_current_oversized_spatial_value_context($column)
+    /** Returns the four-byte SRID prefix retained for an omitted spatial value. */
+    public function get_current_oversized_spatial_value_prefix($column)
     {
-        return $this->current_oversized_spatial_value_contexts[$column] ?? null;
+        return $this->current_oversized_spatial_value_prefixes[$column] ?? null;
     }
 
     /**
@@ -503,9 +503,8 @@ class DatabaseRowsReader {
                 ) {
                     $length_alias = $this->get_spatial_length_alias($column);
                     $quoted_length_alias = $this->quote_identifier($length_alias);
-                    $context_aliases = $this->get_spatial_context_aliases($column);
-                    $quoted_prefix_alias = $this->quote_identifier($context_aliases['prefix']);
-                    $quoted_hash_alias = $this->quote_identifier($context_aliases['hash']);
+                    $prefix_alias = $this->get_spatial_prefix_alias($column);
+                    $quoted_prefix_alias = $this->quote_identifier($prefix_alias);
                     $binary_value = "CAST({$quoted_column} AS BINARY)";
                     $select_parts[] =
                         "CASE WHEN OCTET_LENGTH({$binary_value}) <= " .
@@ -517,10 +516,6 @@ class DatabaseRowsReader {
                         "CASE WHEN OCTET_LENGTH({$binary_value}) > " .
                         $this->maximum_inline_spatial_bytes .
                         " THEN LEFT({$binary_value}, 4) ELSE NULL END AS {$quoted_prefix_alias}";
-                    $select_parts[] =
-                        "CASE WHEN OCTET_LENGTH({$binary_value}) > " .
-                        $this->maximum_inline_spatial_bytes .
-                        " THEN SHA2({$binary_value}, 256) ELSE NULL END AS {$quoted_hash_alias}";
                     continue;
                 }
                 if (
@@ -560,13 +555,13 @@ class DatabaseRowsReader {
         return $alias;
     }
 
-    /** Returns internal context aliases which cannot collide with real columns. */
-    private function get_spatial_context_aliases($column)
+    /** Returns an internal SRID-prefix alias which cannot collide with real columns. */
+    private function get_spatial_prefix_alias($column)
     {
-        if (isset($this->spatial_context_aliases[$column])) {
-            return $this->spatial_context_aliases[$column];
+        if (isset($this->spatial_prefix_aliases[$column])) {
+            return $this->spatial_prefix_aliases[$column];
         }
-        $index = count($this->spatial_context_aliases);
+        $index = count($this->spatial_prefix_aliases);
         $lowercase_column_names = array_map(
             "strtolower",
             array_keys($this->current_column_types)
@@ -575,22 +570,15 @@ class DatabaseRowsReader {
             $prefix_alias = "__reprint_internal_spatial_prefix_{$index}";
             ++$index;
         } while (in_array(strtolower($prefix_alias), $lowercase_column_names, true));
-        do {
-            $hash_alias = "__reprint_internal_spatial_hash_{$index}";
-            ++$index;
-        } while (in_array(strtolower($hash_alias), $lowercase_column_names, true));
-        $this->spatial_context_aliases[$column] = [
-            'prefix' => $prefix_alias,
-            'hash' => $hash_alias,
-        ];
-        return $this->spatial_context_aliases[$column];
+        $this->spatial_prefix_aliases[$column] = $prefix_alias;
+        return $prefix_alias;
     }
 
     /** Removes internal spatial metadata fields from one fetched row. */
     private function extract_spatial_value_metadata($record)
     {
         $this->current_spatial_value_lengths = [];
-        $this->current_oversized_spatial_value_contexts = [];
+        $this->current_oversized_spatial_value_prefixes = [];
         foreach ($this->spatial_length_aliases as $column => $alias) {
             if (!array_key_exists($alias, $record)) {
                 throw new \RuntimeException(
@@ -602,20 +590,14 @@ class DatabaseRowsReader {
                 : (int) $record[$alias];
             unset($record[$alias]);
         }
-        foreach ($this->spatial_context_aliases as $column => $aliases) {
-            if (
-                !array_key_exists($aliases['prefix'], $record) ||
-                !array_key_exists($aliases['hash'], $record)
-            ) {
+        foreach ($this->spatial_prefix_aliases as $column => $alias) {
+            if (!array_key_exists($alias, $record)) {
                 throw new \RuntimeException(
-                    "Spatial context fields are missing from the database row."
+                    "A spatial SRID-prefix field is missing from the database row."
                 );
             }
-            $this->current_oversized_spatial_value_contexts[$column] = [
-                'prefix' => $record[$aliases['prefix']],
-                'hash' => $record[$aliases['hash']],
-            ];
-            unset($record[$aliases['prefix']], $record[$aliases['hash']]);
+            $this->current_oversized_spatial_value_prefixes[$column] = $record[$alias];
+            unset($record[$alias]);
         }
         return $record;
     }
@@ -771,9 +753,9 @@ class DatabaseRowsReader {
             $this->current_row = null;
             $this->current_row_ends_query_batch = false;
             $this->current_spatial_value_lengths = [];
-            $this->current_oversized_spatial_value_contexts = [];
+            $this->current_oversized_spatial_value_prefixes = [];
             $this->spatial_length_aliases = [];
-            $this->spatial_context_aliases = [];
+            $this->spatial_prefix_aliases = [];
         }
         return (bool) $this->current_table;
     }

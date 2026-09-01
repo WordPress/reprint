@@ -146,9 +146,7 @@ class MysqliDatabaseConnection implements DatabaseConnection {
     {
         $database = $this->get_database();
         return new PDOException(
-            "The target database {$operation} failed " .
-                "(errno {$database->errno}, SQLSTATE {$database->sqlstate}): " .
-                $database->error,
+            "The target database {$operation} failed: {$database->error}",
             $database->errno,
         );
     }
@@ -210,9 +208,7 @@ class MysqliDatabaseConnection implements DatabaseConnection {
         } catch (mysqli_sql_exception $error) {
             // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Database errors are CLI text.
             throw new PDOException(
-                "The target database {$operation} failed " .
-                    "(errno {$error->getCode()}, SQLSTATE " .
-                    $this->get_database()->sqlstate . '): ' . $error->getMessage(),
+                "The target database {$operation} failed: {$error->getMessage()}",
                 $error->getCode(),
                 $error,
             );

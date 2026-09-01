@@ -7,7 +7,7 @@ require_once __DIR__ . '/../../packages/reprint-client/src/lib/import/load.php';
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Database\PdoDatabaseConnection;
 use Reprint\Importer\NullableSpatialColumnStatementRewriter;
-use Reprint\Importer\SpatialStatementDiagnostics;
+use Reprint\Importer\SpatialSridGuard;
 use WordPress\Reprint\Server\MySQLDumpProducer;
 
 /**
@@ -155,11 +155,6 @@ class EmptyGeometryTest extends TestCase {
             MySQLDumpProducer::ZERO_BYTE_SPATIAL_VALUE_COMMENT,
             $sql
         );
-        $this->assertStringContainsString(
-            MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX,
-            $sql
-        );
-
         $target_pdo = $this->executeDump($sql, $target);
         $this->assertSame(
             strpos($target, 'mariadb') !== false ? 0 : 1,
@@ -330,13 +325,7 @@ class EmptyGeometryTest extends TestCase {
             $this->assertStringContainsString('[SPATIAL_AXIS_ORDER_UNSAFE]', $message);
             $this->assertStringContainsString('Table: `oversized_srid_route`', $message);
             $this->assertStringContainsString('Row: `id` = 1', $message);
-            $this->assertStringContainsString('Column: `route` LINESTRING', $message);
-            $this->assertStringContainsString('SRID: 4326', $message);
-            $this->assertStringContainsString(
-                'Stored value: ' . number_format(strlen($source_value)) . ' bytes',
-                $message
-            );
-            $this->assertStringContainsString('SHA-256: ' . hash('sha256', $source_value), $message);
+            $this->assertStringContainsString('Column: `route`, SRID 4326', $message);
             $this->assertStringContainsString('The row was not inserted.', $message);
         }
 
@@ -481,20 +470,8 @@ class EmptyGeometryTest extends TestCase {
         try {
             $this->executeDump($sql, $target);
             $this->fail('The target CHECK constraint should reject the normalized NULL.');
-        } catch (RuntimeException $error) {
-            $this->assertStringContainsString('[SPATIAL_ROW_REJECTED]', $error->getMessage());
-            $this->assertStringContainsString('Table: `constrained_geometry`', $error->getMessage());
-            $this->assertStringContainsString('Row: `id` = 1', $error->getMessage());
-            $this->assertStringContainsString(
-                'Column candidate: `location` POINT (zero bytes converted to SQL NULL)',
-                $error->getMessage()
-            );
+        } catch (PDOException $error) {
             $this->assertStringContainsString('location_required', $error->getMessage());
-            $this->assertStringContainsString('The target cursor did not advance.', $error->getMessage());
-            $this->assertStringContainsString(
-                'The target did not report which value caused the failure.',
-                $error->getMessage()
-            );
         }
 
         $target_pdo = $this->connectTarget($target);
@@ -573,36 +550,6 @@ class EmptyGeometryTest extends TestCase {
         );
     }
 
-    public function testUnknownSridStopsMariaDbToMySqlImportWithSourceRowContext(): void
-    {
-        $this->source_pdo->exec(
-            'CREATE TABLE unknown_srid (id INT PRIMARY KEY, location POINT)'
-        );
-        $this->source_pdo->exec(
-            "INSERT INTO unknown_srid VALUES (73, ST_GeomFromText('POINT(7 8)', 999999))"
-        );
-        $sql = $this->exportWithResumeAfterEveryFragment([
-            'tables_to_process' => ['unknown_srid'],
-        ]);
-
-        try {
-            $this->executeDump($sql, 'test_empty_geometry_mysql_unknown_srid_target');
-            $this->fail('The MySQL target should reject a source SRID absent from its registry.');
-        } catch (RuntimeException $error) {
-            $message = $error->getMessage();
-            $this->assertStringContainsString('[SPATIAL_SRID_UNKNOWN]', $message);
-            $this->assertStringContainsString('Table: `unknown_srid`', $message);
-            $this->assertStringContainsString('Row: `id` = 73', $message);
-            $this->assertStringContainsString('Column: `location` POINT', $message);
-            $this->assertStringContainsString('SRID: 999999', $message);
-            $this->assertStringContainsString('The row was not inserted.', $message);
-        }
-
-        $target_pdo = $this->connectTarget('test_empty_geometry_mysql_unknown_srid_target');
-        $target_pdo->exec('USE `test_empty_geometry_mysql_unknown_srid_target`');
-        $this->assertSame(0, (int) $target_pdo->query('SELECT COUNT(*) FROM unknown_srid')->fetchColumn());
-    }
-
     public function testNonzeroSridStopsCrossEngineImportBeforeCoordinateMeaningCanChange(): void
     {
         $this->source_pdo->exec(
@@ -625,7 +572,7 @@ class EmptyGeometryTest extends TestCase {
             $this->assertStringContainsString('Target: MySQL', $message);
             $this->assertStringContainsString('Table: `axis_order`', $message);
             $this->assertStringContainsString('Row: `id` = 42', $message);
-            $this->assertStringContainsString('SRID: 4326', $message);
+            $this->assertStringContainsString('Column: `location`, SRID 4326', $message);
         }
     }
 
@@ -647,28 +594,20 @@ class EmptyGeometryTest extends TestCase {
         ]);
 
         $this->assertSame(3, substr_count($sql, 'INSERT INTO `isolated_srid`'));
-        $this->assertSame(
-            1,
-            substr_count($sql, MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX)
-        );
+        $this->assertSame(1, substr_count($sql, MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX));
         $matched = preg_match(
-            '/' . preg_quote(MySQLDumpProducer::SPATIAL_STATEMENT_COMMENT_PREFIX, '/') .
-            preg_quote(MySQLDumpProducer::SPATIAL_STATEMENT_CONTEXT_VERSION, '/') . ' ' .
-            '(\{[^\r\n]+\}) ([A-Za-z0-9+\/=]{44}) \*\/\n' .
-            '(INSERT INTO `isolated_srid`.*?;)/s',
+            '/' . preg_quote(MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX, '/') .
+            preg_quote(MySQLDumpProducer::NONZERO_SRID_CONTEXT_VERSION, '/') . ' ' .
+            '(\{[^\r\n]+\}) \*\/\nINSERT INTO `isolated_srid`/s',
             $sql,
             $matches
         );
         $this->assertSame(1, $matched);
-        $context_json = $matches[1];
-        $context = json_decode($context_json, true);
+        $context = json_decode($matches[1], true);
         $this->assertSame(false, $context['d']);
-        $this->assertSame(base64_encode('2'), $context['k'][0][2]);
-        $this->assertSame(4326, $context['v'][0][2]);
-        $this->assertSame(
-            base64_encode(hash('sha256', $context_json . "\n" . $matches[3], true)),
-            $matches[2]
-        );
+        $row_details = base64_decode($context['m'], true);
+        $this->assertStringContainsString('Row: `id` = 2', $row_details);
+        $this->assertStringContainsString('Column: `location`, SRID 4326', $row_details);
     }
 
     public function testMysql8SourceToMariaDbTargetStopsNonzeroSrid(): void
@@ -703,7 +642,7 @@ class EmptyGeometryTest extends TestCase {
             $mysql_source->exec("DROP DATABASE IF EXISTS `{$database}`");
         }
 
-        $diagnostics = new SpatialStatementDiagnostics(
+        $guard = new SpatialSridGuard(
             new PdoDatabaseConnection($mariadb_target),
             $source_version,
             'engine=mysql db=test_empty_geometry_source'
@@ -712,13 +651,8 @@ class EmptyGeometryTest extends TestCase {
         $query_stream->append_sql($sql);
         $query_stream->mark_input_complete();
         while ($query_stream->next_query()) {
-            $inspection = $diagnostics->inspect($query_stream->get_query());
-            if ($inspection === null) {
-                continue;
-            }
             try {
-                $diagnostics->assert_supported($inspection);
-                $this->fail('Expected different SRS behavior to stop the INSERT.');
+                $guard->assert_statement_supported($query_stream->get_query());
             } catch (RuntimeException $error) {
                 $this->assertStringContainsString('[SPATIAL_AXIS_ORDER_UNSAFE]', $error->getMessage());
                 $this->assertStringContainsString('Source: MySQL', $error->getMessage());
@@ -936,7 +870,7 @@ class EmptyGeometryTest extends TestCase {
 
         $connection = new PdoDatabaseConnection($target_pdo);
         $rewriter = new NullableSpatialColumnStatementRewriter($connection);
-        $diagnostics = new SpatialStatementDiagnostics(
+        $guard = new SpatialSridGuard(
             $connection,
             (string) $this->source_pdo->query('SELECT VERSION()')->fetchColumn(),
             "engine=mysql db={$database}"
@@ -946,33 +880,9 @@ class EmptyGeometryTest extends TestCase {
         $query_stream->mark_input_complete();
         while ($query_stream->next_query()) {
             $query = $query_stream->get_query();
-            $inspection = $diagnostics->inspect($query);
-            $diagnostics->assert_supported($inspection);
+            $guard->assert_statement_supported($query);
             $query = $rewriter->rewrite($query) ?? $query;
-            try {
-                $target_pdo->exec($query);
-            } catch (PDOException $error) {
-                if ($inspection === null) {
-                    throw $error;
-                }
-                $spatial_failure = $diagnostics->describe_target_failure(
-                    $error,
-                    $inspection,
-                    1,
-                    null,
-                    $query
-                );
-                if ($spatial_failure === null) {
-                    throw $error;
-                }
-                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Test reproduces the importer CLI diagnostic.
-                throw new RuntimeException(
-                    $spatial_failure,
-                    0,
-                    $error
-                );
-                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-            }
+            $target_pdo->exec($query);
         }
         return $target_pdo;
     }
