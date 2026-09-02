@@ -138,7 +138,13 @@ class Base64ValueScanner
             return strpos($value, 'http') !== false;
         }
 
-        return self::encoded_payload_could_decode_to_http_scheme($this->entries[$this->cursor]['encoded_value']);
+        return self::encoded_text_could_decode_to_http_scheme($this->entries[$this->cursor]['encoded_value']);
+    }
+
+    /** Return the Base64 payload at the current cursor without decoding it. */
+    public function get_encoded_payload(): string
+    {
+        return $this->entries[$this->cursor]['encoded_value'];
     }
 
     /**
@@ -318,11 +324,18 @@ class Base64ValueScanner
         }
     }
 
-    private static function encoded_payload_could_decode_to_http_scheme(string $payload): bool
+    /**
+     * Return whether Base64 text may decode to a lowercase http or https scheme.
+     *
+     * The four fragments cover both schemes at every possible three-byte
+     * alignment. A match may be incidental, but a real lowercase scheme cannot
+     * be rejected before decoding.
+     */
+    public static function encoded_text_could_decode_to_http_scheme(string $encoded_text): bool
     {
-        return strpos($payload, 'aHR0') !== false
-            || strpos($payload, 'dHA6') !== false
-            || strpos($payload, 'dHBz') !== false
-            || strpos($payload, 'dHRw') !== false;
+        return strpos($encoded_text, 'aHR0') !== false
+            || strpos($encoded_text, 'dHA6') !== false
+            || strpos($encoded_text, 'dHBz') !== false
+            || strpos($encoded_text, 'dHRw') !== false;
     }
 }

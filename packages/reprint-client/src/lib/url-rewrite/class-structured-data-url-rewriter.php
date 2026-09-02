@@ -1,6 +1,7 @@
 <?php
 
 use WordPress\DataLiberation\URL\WPURL;
+use WordPress\DataLiberation\Shortcode\ShortcodeProcessor;
 
 use function WordPress\DataLiberation\URL\is_child_url_of;
 /**
@@ -17,7 +18,9 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
  * 3. Base64 → decode, recurse on decoded content, re-encode if changed
- * 4. Leaf text → StructuredBlockMarkupUrlProcessor (block_markup hint)
+ * 4. Shortcode markup → ShortcodeProcessor (block_markup hint), including
+ *    builder-specific body codecs selected by shortcode tag
+ * 5. Leaf text → StructuredBlockMarkupUrlProcessor (block_markup hint)
  *    or CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules (default)
  *
  * Top-level HTML is never auto-detected — the caller must explicitly pass
@@ -70,6 +73,15 @@ class StructuredDataUrlRewriter
     /** @var string Cache namespace for this rewriter's URL mapping. */
     private string $mapping_cache_key;
 
+    /** @var array<string, callable(string): string> Shortcode tag => encoded-body rewriter. */
+    private array $shortcode_body_rewriters;
+
+    /** @var array<string, array<string, array{rewrite: callable(string): string, hides_url: bool}>> */
+    private array $shortcode_attribute_rewriters;
+
+    /** @var array<string, true> Shortcode tags whose registered codecs may hide URLs. */
+    private array $shortcode_tags_with_hidden_urls;
+
     /**
      * Rewrites keyed by an entire value; hits only on an exact repeat.
      *
@@ -91,6 +103,27 @@ class StructuredDataUrlRewriter
     public function __construct(array $url_mapping)
     {
         $this->cautious_url_base_rewrite_mapping = new CautiousURLBaseRewriteMapping($url_mapping);
+        $wpbakery_url_rewriter = new WPBakeryUrlRewriter(
+            function (string $value): string {
+                return $this->rewrite($value, self::BLOCK_MARKUP);
+            },
+            function (string $value): string {
+                return $this->rewrite_urls($value, self::PLAIN_TEXT);
+            }
+        );
+        $this->shortcode_body_rewriters = $wpbakery_url_rewriter->get_shortcode_body_rewriters();
+        $this->shortcode_attribute_rewriters = $wpbakery_url_rewriter->get_shortcode_attribute_rewriters();
+        $this->shortcode_tags_with_hidden_urls = array_fill_keys(
+            array_keys($this->shortcode_body_rewriters),
+            true
+        );
+        foreach ($this->shortcode_attribute_rewriters as $shortcode_tag => $attribute_rewriters) {
+            foreach ($attribute_rewriters as $attribute_rewriter) {
+                if ($attribute_rewriter['hides_url']) {
+                    $this->shortcode_tags_with_hidden_urls[$shortcode_tag] = true;
+                }
+            }
+        }
 
         // Extract unique source domains for the quick-reject check.
         $domains = [];
@@ -153,10 +186,16 @@ class StructuredDataUrlRewriter
         }
 
         // Quick-reject values without an HTML URL attribute, a literal source
-        // domain, or an encoding marker which may hide a source-domain byte.
-        // This avoids constructing the structured parsers for most values.
+        // domain, an encoding marker which may hide a source-domain byte, or a
+        // registered shortcode codec which may hide a complete URL. This avoids
+        // constructing the structured parsers for most values.
         if (!$this->maybe_contains_rewritable_urls($value)) {
-            return $value;
+            if (
+                self::BLOCK_MARKUP !== $content_type
+                || !$this->value_might_contain_hidden_shortcode_url($value)
+            ) {
+                return $value;
+            }
         }
 
         // Performance guard: avoid constructing the serialized-PHP parser for
@@ -208,12 +247,255 @@ class StructuredDataUrlRewriter
         // Base64ValueScanner in SqlStatementRewriter — this block
         // was for base64-within-base64 nesting which is rare in practice.
 
+        $original_value = $value;
+        if ($content_type === self::BLOCK_MARKUP) {
+            $value = $this->rewrite_shortcode_markup($value);
+        }
+
         $rewritten_value = $this->rewrite_urls($value, $content_type);
         if ($cache_key !== null) {
-            $this->set_cached_value_rewrite($cache_key, $content_type, $value, $rewritten_value);
+            $this->set_cached_value_rewrite($cache_key, $content_type, $original_value, $rewritten_value);
         }
 
         return $rewritten_value;
+    }
+
+    /**
+     * Rewrite shortcode attributes and bodies without parsing their bytes as HTML.
+     *
+     * Attribute values receive the generic cautious URL-base replacement. Body
+     * decoding is selected separately from the shortcode tag, so an unknown
+     * builder's body remains opaque until its storage format is known.
+     * Rewriting attributes before HTML tokenization also keeps literal HTML in
+     * an attribute from being serialized as tags with different quote bytes.
+     */
+    private function rewrite_shortcode_markup(string $value): string
+    {
+        if (strpos($value, '[') === false) {
+            return $value;
+        }
+
+        $known_body_tokens = $this->value_might_contain_known_shortcode_body($value)
+            ? $this->find_known_shortcode_body_tokens($value)
+            : array();
+        $shortcodes = new ShortcodeProcessor($value);
+
+        while ($shortcodes->next_token()) {
+            if ($shortcodes->get_token_type() === ShortcodeProcessor::TOKEN_TEXT) {
+                $token_start = $shortcodes->get_token_start();
+                if ($token_start === null || !isset($known_body_tokens[$token_start])) {
+                    continue;
+                }
+
+                $body = $shortcodes->get_modifiable_text();
+                if ($body === null) {
+                    continue;
+                }
+                $rewritten_body = $this->rewrite_known_shortcode_body(
+                    $known_body_tokens[$token_start],
+                    $body
+                );
+                if ($rewritten_body !== $body) {
+                    $shortcodes->set_modifiable_text($rewritten_body);
+                }
+                continue;
+            }
+
+            if ($shortcodes->is_escaped()) {
+                continue;
+            }
+
+            $shortcode_tag = $shortcodes->get_tag();
+            if ($shortcode_tag === null) {
+                continue;
+            }
+
+            if ($shortcodes->is_tag_closer()) {
+                continue;
+            }
+
+            while ($shortcodes->next_attribute()) {
+                $attribute_value = $shortcodes->get_attribute_value();
+                if ($attribute_value === null) {
+                    continue;
+                }
+
+                $attribute_name = $shortcodes->get_attribute_name();
+                $shortcode_tag_key = strtolower($shortcode_tag);
+                $attribute_name_key = $attribute_name !== null
+                    ? strtolower($attribute_name)
+                    : null;
+                if (
+                    $attribute_name_key !== null
+                    && isset($this->shortcode_attribute_rewriters[$shortcode_tag_key][$attribute_name_key])
+                ) {
+                    $rewritten_attribute_value = (
+                        $this->shortcode_attribute_rewriters[$shortcode_tag_key][$attribute_name_key]['rewrite']
+                    )($attribute_value);
+                } else {
+                    $rewritten_attribute_value = $this->rewrite_urls(
+                        $attribute_value,
+                        self::PLAIN_TEXT
+                    );
+                }
+                if ($rewritten_attribute_value !== $attribute_value) {
+                    $shortcodes->set_attribute_value($rewritten_attribute_value);
+                }
+            }
+        }
+
+        return $shortcodes->get_updated_text();
+    }
+
+    public function value_might_contain_hidden_shortcode_url(string $value): bool
+    {
+        if (strpos($value, '[') === false) {
+            return false;
+        }
+
+        foreach ($this->shortcode_tags_with_hidden_urls as $shortcode_tag => $unused) {
+            if (stripos($value, '[' . $shortcode_tag) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Return decoded shortcode prefixes whose registered codecs may hide URLs.
+     *
+     * @return list<string>
+     */
+    public function get_shortcode_prefixes_that_may_hide_urls(): array
+    {
+        $prefixes = array();
+        foreach ($this->shortcode_tags_with_hidden_urls as $shortcode_tag => $unused) {
+            $prefixes[] = '[' . $shortcode_tag;
+        }
+
+        return $prefixes;
+    }
+
+    private function value_might_contain_known_shortcode_body(string $value): bool
+    {
+        foreach (array_keys($this->shortcode_body_rewriters) as $shortcode_tag) {
+            if (stripos($value, '[' . $shortcode_tag) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Find single text tokens enclosed by a matched known shortcode pair.
+     *
+     * A known encoded body containing nested shortcode tokens stays opaque.
+     * This keeps the body codec from receiving only part of its stored value.
+     *
+     * @return array<int, string> Text token byte offset => enclosing tag.
+     */
+    private function find_known_shortcode_body_tokens(string $value): array
+    {
+        $shortcodes = new ShortcodeProcessor($value);
+        $open_shortcodes = array();
+        $known_body_tokens = array();
+
+        while ($shortcodes->next_token()) {
+            if ($shortcodes->get_token_type() === ShortcodeProcessor::TOKEN_TEXT) {
+                if ($open_shortcodes === array()) {
+                    continue;
+                }
+
+                $index = count($open_shortcodes) - 1;
+                if (!$open_shortcodes[$index]['has_known_body_codec']) {
+                    continue;
+                }
+                if ($open_shortcodes[$index]['body_token_start'] !== null) {
+                    $open_shortcodes[$index]['body_is_complete'] = false;
+                    continue;
+                }
+
+                $open_shortcodes[$index]['body_token_start'] = $shortcodes->get_token_start();
+                continue;
+            }
+
+            if ($shortcodes->is_escaped()) {
+                if ($open_shortcodes !== array()) {
+                    $open_shortcodes[count($open_shortcodes) - 1]['body_is_complete'] = false;
+                }
+                continue;
+            }
+
+            $shortcode_tag = $shortcodes->get_tag();
+            if ($shortcode_tag === null) {
+                continue;
+            }
+
+            if ($shortcodes->is_tag_closer()) {
+                $matching_index = null;
+                for ($index = count($open_shortcodes) - 1; $index >= 0; $index--) {
+                    if ($open_shortcodes[$index]['tag'] !== $shortcode_tag) {
+                        continue;
+                    }
+
+                    $matching_index = $index;
+                    break;
+                }
+                if ($matching_index === null) {
+                    if ($open_shortcodes !== array()) {
+                        $open_shortcodes[count($open_shortcodes) - 1]['body_is_complete'] = false;
+                    }
+                    continue;
+                }
+
+                $closed_shortcode = $open_shortcodes[$matching_index];
+                array_splice($open_shortcodes, $matching_index);
+                if (
+                    $closed_shortcode['has_known_body_codec']
+                    && $closed_shortcode['body_is_complete']
+                    && $closed_shortcode['body_token_start'] !== null
+                ) {
+                    $known_body_tokens[$closed_shortcode['body_token_start']] = $shortcode_tag;
+                }
+                continue;
+            }
+
+            if ($open_shortcodes !== array()) {
+                $open_shortcodes[count($open_shortcodes) - 1]['body_is_complete'] = false;
+            }
+            if ($shortcodes->has_self_closing_flag()) {
+                continue;
+            }
+
+            $open_shortcodes[] = array(
+                'tag'                  => $shortcode_tag,
+                'has_known_body_codec' => $this->has_known_shortcode_body_codec($shortcode_tag),
+                'body_token_start'     => null,
+                'body_is_complete'     => true,
+            );
+        }
+
+        return $known_body_tokens;
+    }
+
+    private function has_known_shortcode_body_codec(string $shortcode_tag): bool
+    {
+        return isset($this->shortcode_body_rewriters[strtolower($shortcode_tag)]);
+    }
+
+    /**
+     * Rewrite a body only when its site builder defines the body's codec.
+     */
+    private function rewrite_known_shortcode_body(string $shortcode_tag, string $body): string
+    {
+        $shortcode_tag = strtolower($shortcode_tag);
+        if (!isset($this->shortcode_body_rewriters[$shortcode_tag])) {
+            return $body;
+        }
+
+        return ( $this->shortcode_body_rewriters[$shortcode_tag] )( $body );
     }
 
     /**
@@ -447,21 +729,25 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
+                $may_contain_json_script = false !== stripos( $content, '<script' );
                 $p = new StructuredBlockMarkupUrlProcessor(
                     $content,
                     $resolve_relative_urls ? $base_url : null
                 );
                 while ( $p->next_token() ) {
                     $parsed_nested_block_attributes = false;
-                    $block_comment_may_contain_source_domain = false;
+                    $block_comment_may_hide_rewritable_url = false;
                     $block_comment_text = '';
                     if ( '#block-comment' === $p->get_token_type() ) {
                         $block_comment_text = $p->get_modifiable_text();
-                        $block_comment_may_contain_source_domain = $this->value_might_contain_source_domain( $block_comment_text );
+                        $block_comment_may_hide_rewritable_url =
+                            $this->value_might_contain_source_domain( $block_comment_text )
+                            || $this->value_might_contain_hidden_shortcode_url( $block_comment_text );
                     }
-                    if ( $block_comment_may_contain_source_domain ) {
-                        // The fast check includes supported encoding markers;
-                        // the parsed string leaves decide whether a URL exists.
+                    if ( $block_comment_may_hide_rewritable_url ) {
+                        // The fast check includes supported encoding markers
+                        // and registered shortcode signals. Parsed string
+                        // leaves still decide whether a URL exists.
                         $block_attributes = $p->get_block_attributes();
                         // A Unicode-escaped quote leaves an alphanumeric byte
                         // immediately before a raw URL. The cautious scanner
@@ -479,6 +765,35 @@ class StructuredDataUrlRewriter
                             $rewritten_block_attributes = $this->rewrite_inferred_block_attribute_values( $block_attributes );
                             if ( $rewritten_block_attributes !== $block_attributes ) {
                                 $p->set_block_attributes( $rewritten_block_attributes );
+                            }
+                        }
+                    }
+
+                    // A JSON media type makes the script body safe to parse as
+                    // JSON. Other script bodies keep the cautious byte scan.
+                    if (
+                        $may_contain_json_script
+                        && '#tag' === $p->get_token_type()
+                        && ! $p->is_tag_closer()
+                        && 'SCRIPT' === $p->get_tag()
+                    ) {
+                        $script_type = $p->get_attribute('type');
+                        if (is_string($script_type)) {
+                            $script_media_type = strtolower(trim(explode(';', $script_type, 2)[0]));
+                            if (
+                                preg_match(
+                                    '/\Aapplication\/(?:[a-z0-9!#$&^_.+-]+\+)?json\z/',
+                                    $script_media_type
+                                ) === 1
+                            ) {
+                                $script_body = $p->get_modifiable_text();
+                                $rewritten_script_body = $this->rewrite(
+                                    $script_body,
+                                    self::BLOCK_MARKUP
+                                );
+                                if ($rewritten_script_body !== $script_body) {
+                                    $p->set_modifiable_text($rewritten_script_body);
+                                }
                             }
                         }
                     }
@@ -556,7 +871,6 @@ class StructuredDataUrlRewriter
                 return $content;
         }
     }
-
     /**
      * Rewrite every string in a block attribute array.
      *
@@ -611,17 +925,21 @@ class StructuredDataUrlRewriter
      * in HTML, CSS, JSON, shortcodes, and plain text. Parsing those values
      * again only changes their encoding and makes Divi imports slower.
      *
-     * Parsing is still needed when an escape or character reference may hide
-     * part of the host, or when serialized PHP length fields must be updated.
-     * A JSON value may contain serialized PHP at a deeper level, so its raw
-     * text is also checked for a serialization token. Non-ASCII values keep
-     * the structured path because the cautious raw-token pass supports ASCII
-     * and punycode domains, but not literal Unicode domains.
+     * Parsing is still needed when an escape, character reference, or registered
+     * shortcode codec may hide part or all of the URL, or when serialized PHP
+     * length fields must be updated. A JSON value may contain serialized PHP at
+     * a deeper level, so its raw text is also checked for a serialization token.
+     * Non-ASCII values keep the structured path because the cautious raw-token
+     * pass supports ASCII and punycode domains, but not literal Unicode domains.
      *
      * These are coarse signals, not proof of a content type. The format
      * hierarchy below still validates PHP serialization and JSON before use.
      */
     private function nested_block_string_needs_format_inference( string $value ): bool {
+        if ( $this->value_might_contain_hidden_shortcode_url( $value ) ) {
+            return true;
+        }
+
         if ( ! $this->maybe_contains_rewritable_urls( $value ) ) {
             return false;
         }
@@ -668,10 +986,19 @@ class StructuredDataUrlRewriter
         if ( $starts_with_html_opening_tag ) {
             // The format is inferred, so do not reinterpret `#`, `/about`, or
             // other relative values against the configured source URL.
+            $value = $this->rewrite_shortcode_markup( $value );
             return $this->rewrite_urls( $value, self::BLOCK_MARKUP, false );
         }
 
-        // 3. The coarse existing JSON gate checks only whether the first
+        // 3. A shortcode and a JSON array can both begin with `[`. Keep a
+        // valid JSON array for the JSON parser unless shortcode rewriting
+        // actually changes it.
+        $rewritten_shortcode_markup = $this->rewrite_shortcode_markup( $value );
+        if ( $rewritten_shortcode_markup !== $value ) {
+            return $this->rewrite( $rewritten_shortcode_markup, self::PLAIN_TEXT );
+        }
+
+        // 4. The coarse existing JSON gate checks only whether the first
         // non-whitespace byte is `{`, `[`, or `"`. JsonStringIterator then
         // validates the complete value before rewriting nested strings.
         $could_be_json_with_strings = $this->could_be_json_with_strings( $value );
@@ -679,14 +1006,14 @@ class StructuredDataUrlRewriter
             return $this->rewrite( $value, self::PLAIN_TEXT );
         }
 
-        // 4. `url(` can occur in prose or code which is not CSS. Keep this
+        // 5. `url(` can occur in prose or code which is not CSS. Keep this
         // broad, naive hint after the complete PHP, HTML, and JSON shapes.
         $contains_css_url_function = false !== stripos( $value, 'url(' );
         if ( $contains_css_url_function ) {
             return $this->rewrite_urls( $value, self::BLOCK_MARKUP, false );
         }
 
-        // 5. Unknown strings receive only the cautious plain-text scan.
+        // 6. Unknown strings receive the cautious plain-text scan.
         return $this->rewrite( $value, self::PLAIN_TEXT );
     }
 

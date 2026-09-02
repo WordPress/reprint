@@ -28,6 +28,7 @@ describe('Import: URL Rewriting', () => {
     // readable string literals.
     const SOURCE_DOMAIN = new URL(getSiteUrl(site)).origin;
     const TARGET_DOMAIN = 'https://target.example.com';
+    const encodeWPBakeryValue = (value) => Buffer.from(encodeURIComponent(value)).toString('base64');
     // These shapes come from the WPBakery and Divi records in the site-builder
     // markup report. The URLs use this test site's origin so db-apply can map
     // them, but the surrounding shortcode grammar is kept intact. In
@@ -84,26 +85,47 @@ describe('Import: URL Rewriting', () => {
             expected: '[vc_column_text]<input type="hidden" value="{&quot;url&quot;:&quot;https:\\/\\/target.example.com\\/hero.jpg&quot;}">[/vc_column_text]',
             rendered: '<div data-e2e-shortcode="vc_column_text"><input type="hidden" value="{&quot;url&quot;:&quot;https:\\/\\/target.example.com\\/hero.jpg&quot;}"></div>',
         },
+        {
+            name: 'WPBakery table with percent-encoded HTML and URL',
+            slug: 'url-rewrite-wpbakery-percent-encoded-table',
+            input: '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22http%3A%2F%2F127.0.0.1%3A8108%2Fwp-content%2Fuploads%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
+            expected: '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22https%3A%2F%2Ftarget.example.com%2Fwp-content%2Fuploads%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
+            rendered: '<div data-e2e-shortcode="vc_table">Download,<a href="https://target.example.com/wp-content/uploads/manual.pdf">Link</a></div>',
+        },
+        {
+            name: 'WPBakery raw HTML with a Base64-encoded link',
+            slug: 'url-rewrite-wpbakery-base64-html',
+            input: '[vc_raw_html]PGEgaHJlZj0iaHR0cDovLzEyNy4wLjAuMTo4MTA4L21hbnVhbC5wZGYiPk1hbnVhbDwvYT4=[/vc_raw_html]',
+            expected: '[vc_raw_html]PGEgaHJlZj0iaHR0cHM6Ly90YXJnZXQuZXhhbXBsZS5jb20vbWFudWFsLnBkZiI+TWFudWFsPC9hPg==[/vc_raw_html]',
+            rendered: '<a href="https://target.example.com/manual.pdf">Manual</a>',
+        },
+        {
+            name: 'WPBakery raw JS with URL-encoded Base64 content',
+            slug: 'url-rewrite-wpbakery-base64-js',
+            input: `[vc_raw_js]${encodeWPBakeryValue('<script>window.reprintUrl="http://127.0.0.1:8108/app.js";</script>')}[/vc_raw_js]`,
+            expected: `[vc_raw_js]${encodeWPBakeryValue('<script>window.reprintUrl="https://target.example.com/app.js";</script>')}[/vc_raw_js]`,
+            rendered: '<script>window.reprintUrl="https://target.example.com/app.js";</script>',
+        },
+        {
+            name: 'WPBakery Google Maps safe iframe attribute',
+            slug: 'url-rewrite-wpbakery-safe-map',
+            input: `[vc_gmaps link="#E-8_${encodeWPBakeryValue('<iframe src="http://127.0.0.1:8108/map"></iframe>')}"]`,
+            expected: `[vc_gmaps link="#E-8_${encodeWPBakeryValue('<iframe src="https://target.example.com/map"></iframe>')}"]`,
+            rendered: '<iframe src="https://target.example.com/map"></iframe>',
+        },
+        {
+            name: 'WPBakery button with a pipe-delimited link attribute',
+            slug: 'url-rewrite-wpbakery-button-link',
+            input: '[vc_btn title="Manual" link="url:http%3A%2F%2F127.0.0.1%3A8108%2Fmanual.pdf|title:Read%20it|target:%20_blank|"]',
+            expected: '[vc_btn title="Manual" link="url:https%3A%2F%2Ftarget.example.com%2Fmanual.pdf|title:Read%20it|target:%20_blank|"]',
+            rendered: '<a data-e2e-shortcode="vc_btn" href="https://target.example.com/manual.pdf">Manual</a>',
+        },
     ];
 
     // These are useful failures, not descriptions of current behavior. A
     // migration user would reasonably expect each URL to move, but the URL is
     // hidden behind an encoding layer the cautious processor does not decode.
     const SITE_BUILDER_EXPECTED_FAILURES = [
-        {
-            name: 'WPBakery table with percent-encoded HTML and URL',
-            slug: 'url-rewrite-wpbakery-percent-encoded-table',
-            input: '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22http%3A%2F%2F127.0.0.1%3A8108%2Fwp-content%2Fuploads%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
-            expected: '[vc_table allow_html="1"]Download,%3Ca%20href%3D%22http%3A%2F%2Ftarget.example.com%2Fwp-content%2Fuploads%2Fmanual.pdf%22%3ELink%3C%2Fa%3E[/vc_table]',
-            rendered: '<div data-e2e-shortcode="vc_table">Download,<a href="http://target.example.com/wp-content/uploads/manual.pdf">Link</a></div>',
-        },
-        {
-            name: 'WPBakery raw HTML with a Base64-encoded link',
-            slug: 'url-rewrite-wpbakery-base64-html',
-            input: '[vc_raw_html]PGEgaHJlZj0iaHR0cDovLzEyNy4wLjAuMTo4MTA4L21hbnVhbC5wZGYiPk1hbnVhbDwvYT4=[/vc_raw_html]',
-            expected: '[vc_raw_html]PGEgaHJlZj0iaHR0cDovL3RhcmdldC5leGFtcGxlLmNvbS9tYW51YWwucGRmIj5NYW51YWw8L2E+[/vc_raw_html]',
-            rendered: '<a href="http://target.example.com/manual.pdf">Manual</a>',
-        },
         {
             name: 'percent-encoded redirect URL in a shortcode attribute',
             slug: 'url-rewrite-percent-encoded-query-url',
@@ -149,7 +171,28 @@ function reprint_e2e_table_shortcode($attributes, $content = null) {
 }
 
 function reprint_e2e_raw_html_shortcode($attributes, $content = null) {
-    return (string) base64_decode((string) $content, true);
+    return rawurldecode((string) base64_decode((string) $content, true));
+}
+
+function reprint_e2e_safe_shortcode($attributes) {
+    $value = isset($attributes['link']) ? (string) $attributes['link'] : '';
+    if (0 !== strncmp($value, '#E-8_', 5)) {
+        return '';
+    }
+
+    return rawurldecode((string) base64_decode(substr($value, 5), true));
+}
+
+function reprint_e2e_button_shortcode($attributes) {
+    $link = isset($attributes['link']) ? (string) $attributes['link'] : '';
+    $url = '';
+    foreach (explode('|', $link) as $field) {
+        if (0 === strncmp($field, 'url:', 4)) {
+            $url = rawurldecode(substr($field, 4));
+        }
+    }
+
+    return '<a data-e2e-shortcode="vc_btn" href="' . esc_url($url) . '">' . esc_html((string) ($attributes['title'] ?? '')) . '</a>';
 }
 
 foreach (['vc_row', 'vc_column', 'vc_column_text', 'et_pb_section'] as $shortcode) {
@@ -160,6 +203,9 @@ foreach (['vc_video', 'dipl_image_card'] as $shortcode) {
 }
 add_shortcode('vc_table', 'reprint_e2e_table_shortcode');
 add_shortcode('vc_raw_html', 'reprint_e2e_raw_html_shortcode');
+add_shortcode('vc_raw_js', 'reprint_e2e_raw_html_shortcode');
+add_shortcode('vc_gmaps', 'reprint_e2e_safe_shortcode');
+add_shortcode('vc_btn', 'reprint_e2e_button_shortcode');
 register_block_type('reprint/e2e-shortcode', [
     'render_callback' => static function ($attributes) {
         return do_shortcode((string) ($attributes['shortcode'] ?? ''));

@@ -26,6 +26,9 @@ class SqlStatementRewriter
 {
     private StructuredDataUrlRewriter $url_rewriter;
 
+    /** Base64 fragments which signal a shortcode codec that may hide URLs. */
+    private string $encoded_shortcode_signal_pattern;
+
     /** @var array<string, array<string, string>> full_table_name => [column_name => content_type] */
     private array $db_columns_with_block_markup;
 
@@ -61,6 +64,24 @@ class SqlStatementRewriter
     public function __construct(StructuredDataUrlRewriter $url_rewriter, string $table_prefix = 'wp_', array $extra_db_columns_with_block_markup = [])
     {
         $this->url_rewriter = $url_rewriter;
+        $encoded_shortcode_signals = array();
+        foreach ($url_rewriter->get_shortcode_prefixes_that_may_hide_urls() as $shortcode_prefix) {
+            for ($alignment = 0; $alignment < 3; $alignment++) {
+                $skip = $alignment === 0 ? 0 : 3 - $alignment;
+                $signal_length = strlen($shortcode_prefix) - $skip;
+                $signal_length -= $signal_length % 3;
+                if ($signal_length < 3) {
+                    continue;
+                }
+
+                $encoded_shortcode_signals[] = base64_encode(
+                    substr($shortcode_prefix, $skip, $signal_length)
+                );
+            }
+        }
+        $this->encoded_shortcode_signal_pattern = '~(?:'
+            . implode('|', array_map('preg_quote', $encoded_shortcode_signals))
+            . ')~';
 
         // Merge WP defaults with consumer hints (both keyed by suffix),
         // then prepend the table prefix to build full table names.
@@ -82,10 +103,10 @@ class SqlStatementRewriter
     /**
      * Rewrite URLs in a SQL statement.
      *
-     * NOTE: base64-encoded values that do not contain the string "http" are
-     * skipped entirely — column resolution and the StructuredDataUrlRewriter
-     * pipeline are never run for them. This means URLs stored in base64
-     * without an http/https scheme will not be rewritten.
+     * NOTE: base64-encoded values that contain neither the string "http" nor
+     * a shortcode codec which may hide URLs are skipped entirely. Column
+     * resolution and the StructuredDataUrlRewriter pipeline are never run for
+     * those values.
      *
      * @param string $sql The SQL statement.
      * @return string The modified SQL statement.
@@ -97,8 +118,9 @@ class SqlStatementRewriter
             return $sql;
         }
 
-        // Quick check: if none of the base64 encodings of "http" appear in
-        // the statement, no value can carry a rewritable URL.
+        // Quick check: if none of the base64 encodings of "http" or a shortcode
+        // codec which may hide URLs appear in the statement, no value can carry
+        // a rewritable URL known to this rewriter.
         //
         // base64 encodes 3 source bytes into 4 output chars, so the encoding
         // of "http://" or "https://" depends on which byte boundary the
@@ -119,15 +141,19 @@ class SqlStatementRewriter
         // 15 MB dump). On URL-heavy dumps the four strpos calls hit on the
         // first match and stay within measurement noise.
         //
+        // Some shortcode codecs are the exception: a body or attribute codec
+        // may hide the URL under one or more encoding layers.
+        // SqlStatementRewriter derives matching Base64 signals from the
+        // structured rewriter's codec registry, so adding another hidden codec
+        // does not require a second list in this SQL layer.
+        //
         // False positives are tolerable — they cost an extra rewrite pass
         // that finds nothing. False negatives would silently leave URLs
         // un-rewritten; the four prefixes above are the minimum set that
-        // covers every alignment×scheme combination, so no real URL escapes.
+        // covers every alignment×scheme combination.
         if (
-            strpos($sql, 'aHR0') === false
-            && strpos($sql, 'dHA6') === false
-            && strpos($sql, 'dHBz') === false
-            && strpos($sql, 'dHRw') === false
+            !Base64ValueScanner::encoded_text_could_decode_to_http_scheme($sql)
+            && !$this->encoded_text_might_contain_hidden_shortcode_url($sql)
         ) {
             return $sql;
         }
@@ -186,17 +212,18 @@ class SqlStatementRewriter
     /** Rewrite one decoded database value with the same column rules as rewrite(). */
     public function rewrite_value(string $value, string $table, ?string $column): string
     {
-        if (strpos($value, 'http') === false) {
-            return $value;
-        }
-
-        if (!$this->url_rewriter->value_might_contain_source_domain($value)) {
-            return $value;
-        }
-
         $content_type = $column !== null
             ? $this->get_content_type($table, $column)
             : null;
+        if (
+            strpos($value, 'http') === false
+            && (
+                $content_type !== StructuredDataUrlRewriter::BLOCK_MARKUP
+                || !$this->url_rewriter->value_might_contain_hidden_shortcode_url($value)
+            )
+        ) {
+            return $value;
+        }
 
         // Rewrite URLs in the value. Known block-markup columns go through
         // the structured block parser so alternate URL spellings (for example
@@ -223,20 +250,6 @@ class SqlStatementRewriter
     private function rewrite_with_scanner(Base64ValueScanner $scanner, ?array $value_to_column_map): string
     {
         while ($scanner->next_value()) {
-            if (!$scanner->encoded_payload_could_contain_http_scheme()) {
-                continue;
-            }
-
-            $value = $scanner->get_value();
-
-            if (strpos($value, 'http') === false) {
-                continue;
-            }
-
-            if (!$this->url_rewriter->value_might_contain_source_domain($value)) {
-                continue;
-            }
-
             // Determine content type hint for this column.
             $column_name = null;
             if ($value_to_column_map !== null) {
@@ -245,6 +258,22 @@ class SqlStatementRewriter
                     $scanner->get_match_offset()
                 );
             }
+
+            $content_type = $column_name !== null
+                ? $this->get_content_type($value_to_column_map['table'], $column_name)
+                : null;
+            if (!$scanner->encoded_payload_could_contain_http_scheme()) {
+                if (
+                    $content_type !== StructuredDataUrlRewriter::BLOCK_MARKUP
+                    || !$this->encoded_text_might_contain_hidden_shortcode_url(
+                        $scanner->get_encoded_payload()
+                    )
+                ) {
+                    continue;
+                }
+            }
+
+            $value = $scanner->get_value();
 
             $rewritten = $this->rewrite_value(
                 $value,
@@ -259,6 +288,19 @@ class SqlStatementRewriter
         }
 
         return $scanner->get_result();
+    }
+
+    /**
+     * Return whether Base64 text may decode to a shortcode codec which hides URLs.
+     *
+     * Each signal contains only complete three-byte groups from the shortcode
+     * prefix. This makes one signal stable for each possible byte alignment of
+     * the prefix inside the decoded value. A match may be incidental, but a
+     * real registered prefix cannot be rejected before Base64 decoding.
+     */
+    private function encoded_text_might_contain_hidden_shortcode_url(string $encoded_text): bool
+    {
+        return preg_match($this->encoded_shortcode_signal_pattern, $encoded_text) === 1;
     }
 
     /**
