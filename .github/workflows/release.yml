@@ -65,7 +65,7 @@ jobs:
       - name: Build reprint.phar
         run: ./bin/build-reprint-phar.sh
 
-      - name: Install exporter plugin build dependencies
+      - name: Install Reprint Server plugin build dependencies
         run: composer install --no-dev --no-interaction --prefer-dist --working-dir=tools/php56-build
 
       - name: Stamp plugin version from git tag
@@ -80,7 +80,7 @@ jobs:
       # reprint-exporter-wp/ instead of upgrading it. The source directory is
       # reprint-server-wp/; only the artifact keeps the legacy name.
       - name: Build reprint-exporter-wp.zip
-        run: ./bin/build-exporter-plugin.sh
+        run: ./bin/build-server-plugin.sh
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3

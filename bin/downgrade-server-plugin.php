@@ -13,7 +13,7 @@ $autoload = $tool_root . '/vendor/autoload.php';
 $rector = $tool_root . '/vendor/bin/rector';
 
 if ($argc !== 2) {
-    fail('Usage: php bin/downgrade-exporter-plugin.php <staging-root>');
+    fail('Usage: php bin/downgrade-server-plugin.php <staging-root>');
 }
 if (!is_file($autoload) || !is_file($rector)) {
     fail('Install the PHP 5.6 build tool with: composer install --no-dev --working-dir=tools/php56-build');
@@ -36,7 +36,7 @@ $paths = [
 ];
 foreach ($paths as $path) {
     if (!file_exists($path)) {
-        fail(sprintf('The exporter staging tree is incomplete. Missing %s.', $path));
+        fail(sprintf('The Reprint Server staging tree is incomplete. Missing %s.', $path));
     }
     $source_path = $project_root . substr($path, strlen($staging_root));
     if (realpath($path) === realpath($source_path)) {
@@ -66,7 +66,7 @@ try {
     fail($throwable->getMessage());
 }
 
-echo "Generated exporter PHP contains none of the unsupported syntax checked by the PHP 5.6 build.\n";
+echo "Generated Reprint Server PHP contains none of the unsupported syntax checked by the PHP 5.6 build.\n";
 
 /**
  * @param string[] $paths Files and directories to inspect.
