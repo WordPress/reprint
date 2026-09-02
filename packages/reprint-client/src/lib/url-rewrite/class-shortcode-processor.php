@@ -571,8 +571,8 @@ class ShortcodeProcessor {
 	 *
 	 * Existing quotes are retained when possible. An unquoted value gains
 	 * quotes only when the replacement cannot be represented unquoted. The
-	 * method refuses values containing both quote delimiters when quoting is
-	 * required, because WordPress shortcode syntax has no reliable quote escape.
+	 * method refuses values containing both unescaped quote delimiters when
+	 * quoting is required.
 	 *
 	 * @param string $value Replacement attribute value.
 	 * @return bool Whether the update was enqueued.
@@ -589,9 +589,9 @@ class ShortcodeProcessor {
 		$quote  = $attribute['quote'];
 
 		if ( null !== $quote ) {
-			if ( false !== strpos( $value, $quote ) ) {
+			if ( $this->contains_unescaped_quote( $value, $quote ) ) {
 				$alternate_quote = '"' === $quote ? "'" : '"';
-				if ( false !== strpos( $value, $alternate_quote ) ) {
+				if ( $this->contains_unescaped_quote( $value, $alternate_quote ) ) {
 					return false;
 				}
 
@@ -612,9 +612,9 @@ class ShortcodeProcessor {
 			}
 
 			if ( $requires_quotes ) {
-				if ( false === strpos( $value, '"' ) ) {
+				if ( ! $this->contains_unescaped_quote( $value, '"' ) ) {
 					$text = '"' . $value . '"';
-				} elseif ( false === strpos( $value, "'" ) ) {
+				} elseif ( ! $this->contains_unescaped_quote( $value, "'" ) ) {
 					$text = "'" . $value . "'";
 				} else {
 					return false;
@@ -630,6 +630,32 @@ class ShortcodeProcessor {
 		);
 
 		return true;
+	}
+
+	/**
+	 * Returns whether a value contains a quote not escaped by a backslash.
+	 *
+	 * @param string $value Value to inspect.
+	 * @param string $quote Single or double quote delimiter.
+	 * @return bool Whether an unescaped delimiter was found.
+	 */
+	private function contains_unescaped_quote( string $value, string $quote ): bool {
+		$consecutive_backslashes = 0;
+		$length                  = strlen( $value );
+		for ( $at = 0; $at < $length; ++$at ) {
+			if ( '\\' === $value[ $at ] ) {
+				++$consecutive_backslashes;
+				continue;
+			}
+
+			if ( $quote === $value[ $at ] && 0 === $consecutive_backslashes % 2 ) {
+				return true;
+			}
+
+			$consecutive_backslashes = 0;
+		}
+
+		return false;
 	}
 
 	/**

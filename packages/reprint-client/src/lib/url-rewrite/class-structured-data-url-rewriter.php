@@ -79,8 +79,8 @@ class StructuredDataUrlRewriter
     /** @var array<string, array<string, array{rewrite: callable(string): string, hides_url: bool}>> */
     private array $shortcode_attribute_rewriters;
 
-    /** @var string[] Base64 fragments that signal a shortcode codec which may hide URLs. */
-    private array $encoded_shortcode_signals;
+    /** Base64 fragments which signal a shortcode codec that may hide URLs. */
+    private string $encoded_shortcode_signal_pattern;
 
     /**
      * Rewrites keyed by an entire value; hits only on an exact repeat.
@@ -165,7 +165,7 @@ class StructuredDataUrlRewriter
                 'url' => $wpbakery_link_attribute_rewriter,
             ),
         );
-        $this->encoded_shortcode_signals = array();
+        $encoded_shortcode_signals = array();
         $shortcode_tags_with_hidden_urls = array_fill_keys(
             array_keys($this->shortcode_body_rewriters),
             true
@@ -187,11 +187,14 @@ class StructuredDataUrlRewriter
                     continue;
                 }
 
-                $this->encoded_shortcode_signals[] = base64_encode(
+                $encoded_shortcode_signals[] = base64_encode(
                     substr($shortcode_prefix, $skip, $signal_length)
                 );
             }
         }
+        $this->encoded_shortcode_signal_pattern = '~(?:'
+            . implode('|', array_map('preg_quote', $encoded_shortcode_signals))
+            . ')~';
 
         // Extract unique source domains for the quick-reject check.
         $domains = [];
@@ -257,13 +260,13 @@ class StructuredDataUrlRewriter
         // domain, an encoding marker which may hide a source-domain byte, or a
         // registered shortcode codec which may hide a complete URL. This avoids
         // constructing the structured parsers for most values.
-        $block_markup_may_hide_shortcode_url = self::BLOCK_MARKUP === $content_type
-            && $this->value_might_contain_hidden_shortcode_url($value);
-        if (
-            !$block_markup_may_hide_shortcode_url
-            && !$this->maybe_contains_rewritable_urls($value)
-        ) {
-            return $value;
+        if (!$this->maybe_contains_rewritable_urls($value)) {
+            if (
+                self::BLOCK_MARKUP !== $content_type
+                || !$this->value_might_contain_hidden_shortcode_url($value)
+            ) {
+                return $value;
+            }
         }
 
         // Performance guard: avoid constructing the serialized-PHP parser for
@@ -417,6 +420,10 @@ class StructuredDataUrlRewriter
 
     public function value_might_contain_hidden_shortcode_url(string $value): bool
     {
+        if (strpos($value, '[') === false) {
+            return false;
+        }
+
         foreach ($this->shortcode_attribute_rewriters as $shortcode_tag => $attribute_rewriters) {
             foreach ($attribute_rewriters as $attribute_rewriter) {
                 if (
@@ -452,13 +459,7 @@ class StructuredDataUrlRewriter
      */
     public function encoded_text_might_contain_hidden_shortcode_url(string $encoded_text): bool
     {
-        foreach ($this->encoded_shortcode_signals as $signal) {
-            if (strpos($encoded_text, $signal) !== false) {
-                return true;
-            }
-        }
-
-        return false;
+        return preg_match($this->encoded_shortcode_signal_pattern, $encoded_text) === 1;
     }
 
     /**
@@ -940,6 +941,7 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
+                $may_contain_json_script = false !== stripos( $content, '<script' );
                 $p = new StructuredBlockMarkupUrlProcessor(
                     $content,
                     $resolve_relative_urls ? $base_url : null
@@ -982,7 +984,8 @@ class StructuredDataUrlRewriter
                     // A JSON media type makes the script body safe to parse as
                     // JSON. Other script bodies keep the cautious byte scan.
                     if (
-                        '#tag' === $p->get_token_type()
+                        $may_contain_json_script
+                        && '#tag' === $p->get_token_type()
                         && ! $p->is_tag_closer()
                         && 'SCRIPT' === $p->get_tag()
                     ) {
@@ -1195,6 +1198,7 @@ class StructuredDataUrlRewriter
         if ( $starts_with_html_opening_tag ) {
             // The format is inferred, so do not reinterpret `#`, `/about`, or
             // other relative values against the configured source URL.
+            $value = $this->rewrite_shortcode_markup( $value );
             return $this->rewrite_urls( $value, self::BLOCK_MARKUP, false );
         }
 

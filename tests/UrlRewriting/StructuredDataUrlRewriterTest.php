@@ -753,6 +753,29 @@ class StructuredDataUrlRewriterTest extends TestCase
         );
     }
 
+    public function testWPBakeryEncodedShortcodeInsideHtmlInNamespacedBlockAttribute(): void
+    {
+        $rewriter = $this->createRewriter();
+        $old_html = '<a href="https://old-site.com/manual.pdf">Manual</a>';
+        $new_html = '<a href="https://new-site.com/manual.pdf">Manual</a>';
+        $old_value = '<div>[vc_raw_html]' . base64_encode($old_html) . '[/vc_raw_html]</div>';
+        $new_value = '<div>[vc_raw_html]' . base64_encode($new_html) . '[/vc_raw_html]</div>';
+        $input = '<!-- wp:divi/code '
+            . json_encode([
+                'module' => [
+                    'content' => [
+                        'value' => $old_value,
+                    ],
+                ],
+            ])
+            . ' /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $rewritten_attributes = $this->getBlockAttributes($result, 'wp:divi/code');
+
+        $this->assertSame($new_value, $rewritten_attributes['module']['content']['value']);
+    }
+
     /**
      * Extensions may put one structured string inside another. Re-enter the
      * existing JSON and serialized-PHP parsers at every level instead of
@@ -1231,6 +1254,15 @@ class StructuredDataUrlRewriterTest extends TestCase
         ]);
         $input = '<!-- wp:shortcode -->[builder_heading text="<a href=\'http://127.0.0.1:8108/manual.pdf\'>Download</a>" layout="wide"]<!-- /wp:shortcode -->';
         $expected = '<!-- wp:shortcode -->[builder_heading text="<a href=\'https://target.example.com/manual.pdf\'>Download</a>" layout="wide"]<!-- /wp:shortcode -->';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    public function testRewritesJsonLikeShortcodeAttributeWithoutChangingEscapedQuotes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '[builder data="{\"url\":\"https://old-site.com/file\",\"label\":\"it\'s here\"}"]';
+        $expected = '[builder data="{\"url\":\"https://new-site.com/file\",\"label\":\"it\'s here\"}"]';
 
         $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
     }

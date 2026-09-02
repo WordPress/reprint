@@ -65,4 +65,23 @@ class ShortcodeProcessorTest extends TestCase {
             $processor->get_updated_text()
         );
     }
+
+    public function testAttributeUpdateKeepsEscapedDelimiterBytes(): void
+    {
+        $input = '[builder data="{\"url\":\"https://old.example/file\",\"label\":\"it\'s here\"}"]';
+        $processor = new ShortcodeProcessor($input);
+
+        $this->assertTrue($processor->next_shortcode('builder'));
+        $this->assertTrue($processor->next_attribute());
+        $this->assertTrue(
+            $processor->set_attribute_value(
+                '{\"url\":\"https://new.example/file\",\"label\":\"it\'s here\"}'
+            )
+        );
+
+        $this->assertSame(
+            '[builder data="{\"url\":\"https://new.example/file\",\"label\":\"it\'s here\"}"]',
+            $processor->get_updated_text()
+        );
+    }
 }

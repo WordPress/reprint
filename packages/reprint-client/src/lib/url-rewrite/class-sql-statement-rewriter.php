@@ -131,10 +131,7 @@ class SqlStatementRewriter
         // un-rewritten; the four prefixes above are the minimum set that
         // covers every alignment×scheme combination.
         if (
-            strpos($sql, 'aHR0') === false
-            && strpos($sql, 'dHA6') === false
-            && strpos($sql, 'dHBz') === false
-            && strpos($sql, 'dHRw') === false
+            !Base64ValueScanner::encoded_text_could_decode_to_http_scheme($sql)
             && !$this->url_rewriter->encoded_text_might_contain_hidden_shortcode_url($sql)
         ) {
             return $sql;
@@ -197,10 +194,13 @@ class SqlStatementRewriter
         $content_type = $column !== null
             ? $this->get_content_type($table, $column)
             : null;
-        $might_contain_hidden_shortcode_url = $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
-            && $this->url_rewriter->value_might_contain_hidden_shortcode_url($value);
-
-        if (strpos($value, 'http') === false && !$might_contain_hidden_shortcode_url) {
+        if (
+            strpos($value, 'http') === false
+            && (
+                $content_type !== StructuredDataUrlRewriter::BLOCK_MARKUP
+                || !$this->url_rewriter->value_might_contain_hidden_shortcode_url($value)
+            )
+        ) {
             return $value;
         }
 
@@ -241,16 +241,15 @@ class SqlStatementRewriter
             $content_type = $column_name !== null
                 ? $this->get_content_type($value_to_column_map['table'], $column_name)
                 : null;
-            $encoded_payload_might_contain_hidden_shortcode_url =
-                $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
-                && $this->url_rewriter->encoded_text_might_contain_hidden_shortcode_url(
-                    $scanner->get_encoded_payload()
-                );
-            if (
-                !$scanner->encoded_payload_could_contain_http_scheme()
-                && !$encoded_payload_might_contain_hidden_shortcode_url
-            ) {
-                continue;
+            if (!$scanner->encoded_payload_could_contain_http_scheme()) {
+                if (
+                    $content_type !== StructuredDataUrlRewriter::BLOCK_MARKUP
+                    || !$this->url_rewriter->encoded_text_might_contain_hidden_shortcode_url(
+                        $scanner->get_encoded_payload()
+                    )
+                ) {
+                    continue;
+                }
             }
 
             $value = $scanner->get_value();
