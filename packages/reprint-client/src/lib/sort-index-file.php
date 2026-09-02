@@ -12,9 +12,10 @@ require_once __DIR__ . '/external-merge-sort.php';
  * Sort an index file by path and remove duplicate entries.
  *
  * The fast path prepends a hex-encoded sort key to each line, shells out to
- * `sort(1)`, then strips the keys. This handles arbitrarily large files with
- * no PHP memory pressure. When exec() is unavailable or the command fails,
- * the fallback uses an external merge sort with bounded memory.
+ * `sort(1)` with a fixed memory buffer and one worker, then strips the keys.
+ * Larger sorts spill to disk beside the index. When exec() is unavailable or
+ * the command fails, the fallback uses an external merge sort with bounded
+ * memory.
  * Paths may be remote absolute paths or local relative paths.
  *
  * Duplicates arise from overlapping symlink targets that index the same
@@ -63,9 +64,8 @@ function sort_index_file(string $path): bool
 
     $tmp = $path . '.sorted';
 
-    // Fast path: shell out to `sort` for O(n log n) with no memory pressure.
-    // If anything goes wrong, fall through to the pure-PHP external merge
-    // sort below.
+    // Fast path: shell out to `sort` for O(n log n) with a fixed memory buffer.
+    // If anything goes wrong, fall through to the pure-PHP external merge sort.
     if (try_exec_sort_index_file($path, $tmp, $parse_index_path)) {
         return true;
     }
@@ -140,7 +140,9 @@ function try_exec_sort_index_file(
     fclose($output);
 
     $command =
-        "LC_ALL=C sort -t '\t' -k1,1 " .
+        'LC_ALL=C sort -S 32M --parallel=1 -T ' .
+        escapeshellarg(dirname($path)) .
+        " -t '\t' -k1,1 " .
         escapeshellarg($keyed) .
         ' > ' .
         escapeshellarg($sorted_keyed);

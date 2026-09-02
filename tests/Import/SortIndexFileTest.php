@@ -29,7 +29,7 @@ final class SortIndexFileTest extends TestCase
         parent::tearDown();
     }
 
-    public function testSystemSortMatchesExternalMergeSortWhenAvailable(): void
+    public function testSystemSortLimitsBufferAndParallelismWhenAvailable(): void
     {
         if (!function_exists('exec') || !is_executable('/usr/bin/sort')) {
             $this->markTestSkipped('The system sort command is unavailable.');
@@ -43,7 +43,7 @@ final class SortIndexFileTest extends TestCase
         mkdir($sort_directory);
         file_put_contents(
             $sort_directory . '/sort',
-            "#!/bin/sh\nprintf attempted > " . escapeshellarg($attempt_file)
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > " . escapeshellarg($attempt_file)
                 . "\nexec /usr/bin/sort \"$@\"\n"
         );
         chmod($sort_directory . '/sort', 0755);
@@ -70,7 +70,18 @@ final class SortIndexFileTest extends TestCase
         );
         $sorter->sort($external_sort_path);
 
-        $this->assertFileExists($attempt_file);
+        $arguments = file($attempt_file, FILE_IGNORE_NEW_LINES);
+        $this->assertIsArray($arguments);
+        $buffer_size_option = array_search('-S', $arguments, true);
+        $this->assertIsInt($buffer_size_option);
+        $this->assertSame('32M', $arguments[$buffer_size_option + 1]);
+        $this->assertContains('--parallel=1', $arguments);
+        $temporary_directory_option = array_search('-T', $arguments, true);
+        $this->assertIsInt($temporary_directory_option);
+        $this->assertSame(
+            $this->temporary_directory,
+            $arguments[$temporary_directory_option + 1]
+        );
         $this->assertSame(
             file_get_contents($external_sort_path),
             file_get_contents($system_sort_path)
