@@ -159,13 +159,11 @@ class StructuredDataUrlRewriter
             return $value;
         }
 
-        $could_be_php_serialization = $this->could_be_php_serialization_with_strings($value);
-
         // Performance guard: avoid constructing the serialized-PHP parser for
         // ordinary URL strings and block markup. The parser still owns
         // validation once entered; this gate only skips first-byte shapes that
         // cannot expose serialized string values for rewriting.
-        if ($could_be_php_serialization) {
+        if ($this->could_be_php_serialization_with_strings($value)) {
             $p = new PhpSerializationProcessor($value);
             if (!$p->is_malformed()) {
                 while ($p->next_value()) {
@@ -187,8 +185,7 @@ class StructuredDataUrlRewriter
         // strings and block markup. JsonStringIterator still owns validation
         // once entered; this gate only skips first non-whitespace bytes that
         // cannot start a JSON value containing string leaves.
-        $could_be_json_with_strings = $this->could_be_json_with_strings($value);
-        if ($could_be_json_with_strings) {
+        if ($this->could_be_json_with_strings($value)) {
             $iter = new JsonStringIterator($value);
             if (!$iter->is_malformed()) {
                 while ($iter->next_value()) {
@@ -373,6 +370,8 @@ class StructuredDataUrlRewriter
             }
         }
 
+        // `\u` may be a JSON Unicode escape, and `&` may start an HTML
+        // character reference. Either can hide bytes of the source domain.
         return strpos($value, '\\u') !== false || strpos($value, '&') !== false;
     }
 
