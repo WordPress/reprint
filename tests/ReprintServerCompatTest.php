@@ -14,6 +14,8 @@ declare(strict_types=1);
  * September 2026, as it should no longer be relevant by then.
  */
 
+use WordPress\Reprint\Server\Plugin\SettingsPage;
+
 use const WordPress\Reprint\Server\Plugin\CONNECTION_TOKEN_OPTION;
 use const WordPress\Reprint\Server\Plugin\PUSH_AUTHORIZATION_OPTION;
 
@@ -57,7 +59,7 @@ final class ReprintServerCompatTest extends ReprintServerPluginTestCase
         // lib.php later in the request, where the listener revoking
         // authorization for the appearing connection token runs during the
         // migration.
-        Site_Export_Plugin::get_instance();
+        \WordPress\Reprint\Server\Plugin\SettingsPage::get_instance();
         $GLOBALS['reprint_server_test_options']['site_export_secret'] = 'legacy-token';
         $GLOBALS['reprint_server_test_options']['site_export_push_authorized_token_fingerprint'] =
             hash('sha256', 'legacy-token');
@@ -99,8 +101,8 @@ final class ReprintServerCompatTest extends ReprintServerPluginTestCase
         $this->assertFalse(function_exists('WordPress\\Reprint\\Server\\Plugin\\get_shared_secret'));
         $this->assertTrue(function_exists('_site_export_handle_api_request'));
         $this->assertTrue(function_exists('_site_export_get_shared_secret'));
-        $this->assertTrue(class_exists('Site_Export_Plugin'));
-        $this->assertFalse(class_exists('WordPress\\Reprint\\Server\\Plugin\\SettingsPage'));
+        $this->assertFalse(class_exists('Site_Export_Plugin'));
+        $this->assertTrue(class_exists('WordPress\\Reprint\\Server\\Plugin\\SettingsPage'));
     }
 
     public function testLegacyOptionsMigrateWithoutChangingTheirValues(): void
@@ -164,7 +166,7 @@ final class ReprintServerCompatTest extends ReprintServerPluginTestCase
     /**
      * Every released constant must keep resolving to its canonical value.
      *
-     * Driven off compat.php's own map, so an entry cannot be added there
+     * Driven off compat.php's own map so a new entry there cannot be added
      * without being covered here.
      */
     public function testEveryReleasedConstantMirrorsItsCanonicalCounterpart(): void
@@ -190,8 +192,8 @@ final class ReprintServerCompatTest extends ReprintServerPluginTestCase
     }
 
     /**
-     * Every released function must still exist and operate on the same state
-     * as the canonical runtime API, rather than merely being declared.
+     * Every released function must still exist and delegate to the canonical
+     * runtime API rather than carrying its own copy of the behaviour.
      */
     public function testEveryReleasedFunctionDelegatesToTheCanonicalRuntimeApi(): void
     {
@@ -222,6 +224,8 @@ final class ReprintServerCompatTest extends ReprintServerPluginTestCase
             );
         }
 
+        // Spot-check that the wrappers read and write the same state as the
+        // canonical API, rather than merely existing.
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'released-token';
         $this->assertSame('released-token', _site_export_get_shared_secret());
         $this->assertSame('released-token', _site_export_get_option_secret());
@@ -242,25 +246,28 @@ final class ReprintServerCompatTest extends ReprintServerPluginTestCase
     }
 
     /**
-     * A platform that still defines SITE_EXPORT_* from a must-use plugin keeps
-     * its values: the canonical constants adopt them.
+     * A platform which still defines SITE_EXPORT_* from a must-use plugin keeps
+     * its values: the canonical constants are adopted from the released ones.
      *
      * Runs in a subprocess because constants cannot be redefined in-process,
-     * and the shared harness deliberately seeds only the canonical names.
+     * and the canonical suite deliberately seeds only the canonical names.
      */
     public function testPlatformDefinedLegacyConstantsAreAdoptedAsCanonical(): void
     {
         $lib_path = realpath(__DIR__ . '/../reprint-server-wp/lib.php');
         $this->assertNotFalse($lib_path, 'lib.php must exist');
+        $plugin_directory = dirname($lib_path) . '/';
 
         $php_code = '<?php' . "\n"
             . 'define(\'ABSPATH\', __DIR__ . \'/\');' . "\n"
+            . 'define(\'SITE_EXPORT_PLUGIN_DIR\', '
+            . var_export($plugin_directory, true) . ');' . "\n"
             . 'define(\'SITE_EXPORT_SECRET_FILE\', \'/platform/token.php\');' . "\n"
             . 'define(\'SITE_EXPORT_SECRET_OPTION\', \'platform_token_option\');' . "\n"
             . 'define(\'SITE_EXPORT_TIMESTAMP_TOLERANCE\', 42);' . "\n"
             . 'function plugin_dir_path($file) { return dirname($file) . \'/\'; }' . "\n"
             . 'require ' . var_export($lib_path, true) . ';' . "\n"
-            . 'echo json_encode([' . "\n"
+            . 'echo json_encode(['. "\n"
             . '    \'token_file\' => constant(\'WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\CONNECTION_TOKEN_FILE\'),' . "\n"
             . '    \'token_option\' => constant(\'WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\CONNECTION_TOKEN_OPTION\'),' . "\n"
             . '    \'tolerance\' => constant(\'WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\TIMESTAMP_TOLERANCE\'),' . "\n"

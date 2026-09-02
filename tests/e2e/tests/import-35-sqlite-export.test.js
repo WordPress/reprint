@@ -123,7 +123,7 @@ async function ensureSqliteSite(site, pluginVersion) {
             );
             rmSync(join(siteDir, '.maintenance'), { force: true });
 
-            // Activate the site-export plugin.
+            // Activate the Reprint Server plugin.
             execSync(
                 `php /tmp/wp-cli.phar plugin activate site-export` +
                 ` --path=${JSON.stringify(siteDir)}` +

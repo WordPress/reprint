@@ -86,9 +86,17 @@ push is authorized again. Managed sites show the effective state as read-only
 in WordPress admin. Custom authentication does not bypass this authorization
 gate.
 
+The bundled settings page is available at **Tools > Reprint Server**. It uses
+the WordPress Settings API for the connection token and a separate authenticated
+administrator action for push access. The page is an adapter over the shared
+configuration functions; it does not own the token or push-authorization rules.
+
 ## Using as a library
 
-The export engine can be embedded in another PHP project without the WordPress plugin wrapper. Require `lib.php` instead of `index.php` — it defines constants and functions but does not handle any HTTP requests or check any URLs.
+The export engine can be embedded in another PHP project or WordPress plugin
+without the bundled plugin wrapper. Require `lib.php` instead of `index.php`.
+It defines constants and functions but does not handle requests, check URLs,
+register WordPress hooks, add administrator pages, or install activation hooks.
 
 ```php
 use function WordPress\Reprint\Server\Plugin\error;
@@ -101,7 +109,7 @@ require_once '/path/to/reprint-server-wp/lib.php';
 
 // Route however you like — lib.php doesn't check URLs.
 if ($myRouter->matches('/export')) {
-    // Use default HMAC authentication (reads secret.php when present,
+    // Use default HMAC authentication (reads the connection token from secret.php when present,
     // otherwise falls back to the site option):
     handle_api_request();
 
@@ -133,10 +141,11 @@ require_once '/path/to/reprint-server-wp/wordpress/configuration.php';
 register_wordpress_configuration();
 ```
 
-The embedding plugin may then use the namespaced `get_configuration_state()`,
+The embedding plugin may use the namespaced `get_configuration_state()`,
 `change_connection_token()`, and `change_push_access()` operations to render
 and process its own administrator surface. It should not require
-`wordpress/site-export.php` unless it explicitly wants the bundled page.
+`wordpress/reprint-server.php` unless it explicitly wants the bundled
+**Tools > Reprint Server** page.
 
 `lib.php` defines these constants in `WordPress\Reprint\Server\Plugin`
 (using WordPress's `plugin_dir_path`):

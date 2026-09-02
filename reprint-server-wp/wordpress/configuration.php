@@ -19,7 +19,8 @@ function register_wordpress_configuration(): void {
     }
     $registered = true;
 
-    add_action('init', __NAMESPACE__ . '\\register_connection_token_setting');
+    add_action('admin_init', __NAMESPACE__ . '\\register_connection_token_setting');
+    add_action('rest_api_init', __NAMESPACE__ . '\\register_connection_token_setting');
     add_action(
         'update_option_' . CONNECTION_TOKEN_OPTION,
         __NAMESPACE__ . '\\revoke_push_authorization_after_connection_token_change',
@@ -34,10 +35,10 @@ function register_wordpress_configuration(): void {
     );
 }
 
-/** Register the option so core's /wp/v2/settings endpoint can update it. */
+/** Register the connection token for the Settings and REST APIs. */
 function register_connection_token_setting(): void {
     register_setting(
-        'general',
+        'reprint_server',
         CONNECTION_TOKEN_OPTION,
         [
             'type' => 'string',

@@ -1,7 +1,7 @@
 /**
- * Test 47: WordPress plugin authentication
+ * Test 47: Reprint Server plugin authentication
  *
- * Installs the site-export plugin in a stock WordPress site — no custom
+ * Installs the Reprint Server plugin in a stock WordPress site — no custom
  * setup, no afterCreate hooks — and verifies the default authentication
  * behaviour via HTTP.
  *
@@ -18,7 +18,7 @@ import {
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
-describe('Import: WordPress plugin authentication', () => {
+describe('Import: Reprint Server plugin authentication', () => {
     const site = 'plugin-auth';
 
     beforeAll(async () => {
@@ -39,24 +39,24 @@ describe('Import: WordPress plugin authentication', () => {
             'Response must include an error message');
     });
 
-    it('rejects requests signed with the wrong secret', async () => {
+    it('rejects requests signed with the wrong connection token', async () => {
         const url = new URL(getSiteUrl(site));
         url.searchParams.set('endpoint', 'preflight');
         url.searchParams.set('directory', getSiteDir(site));
 
-        const wrongClient = createHmacClient('not-the-right-secret');
+        const clientWithWrongConnectionToken = createHmacClient('not-the-right-connection-token');
         const response = await fetch(url.toString(), {
-            headers: wrongClient.getAuthHeaders(''),
+            headers: clientWithWrongConnectionToken.getAuthHeaders(''),
         });
         assert.equal(response.status, 403,
-            'Request signed with wrong secret must be rejected with 403');
+            'Request signed with the wrong connection token must be rejected with 403');
 
         const body = await response.json();
         assert.ok(body.error,
             'Response must include an error message');
     });
 
-    it('accepts requests signed with the correct secret', async () => {
+    it('accepts requests signed with the correct connection token', async () => {
         const response = await apiRequest(site, 'preflight', {
             directory: getSiteDir(site),
         });
