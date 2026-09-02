@@ -88,7 +88,7 @@ describe('Import: Request Cutoff', () => {
         // source. It is test setup rather than site content.
         const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         assertTreesMatch(getSiteDir(site), importedRoot, {
-            exclude: ['wp-content/plugins/site-export/test-hooks.php'],
+            exclude: ['wp-content/plugins/reprint-server/test-hooks.php'],
         });
     });
 

@@ -109,7 +109,7 @@ describe('Import: Pull with an open_basedir boundary', { timeout: 180000 }, () =
         const importedWpContent = join(importedSiteDir, 'wp-content');
         assert.ok(existsSync(importedWpContent), `Expected ${importedWpContent} to exist`);
         assert.equal(
-            readFileSync(join(importedWpContent, 'plugins', 'site-export', 'secret.php'), 'utf-8'),
+            readFileSync(join(importedWpContent, 'plugins', 'reprint-server', 'secret.php'), 'utf-8'),
             `<?php return '${getSiteSecret(site)}';\n`,
         );
         assert.ok(!existsSync(join(importedSiteDir, 'wp-load.php')),

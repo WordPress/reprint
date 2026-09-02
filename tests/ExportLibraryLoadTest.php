@@ -257,14 +257,36 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertTrue($state['configuration']);
     }
 
-    /**
-     * @return array {
-     *     Export runner result.
-     *
-     *     @type string $output Captured output.
-     * }
-     * @phpstan-return array{output:string}
-     */
+    public function testCanonicalTestModeLoadsTheCanonicalPluginHookPath(): void
+    {
+        $tmp_dir = sys_get_temp_dir() . '/reprint-server-test-hook-' . uniqid('', true);
+        $canonical_hook_directory = $tmp_dir . '/wp-content/plugins/reprint-server';
+        mkdir($canonical_hook_directory, 0755, true);
+        file_put_contents(
+            $canonical_hook_directory . '/test-hooks.php',
+            "<?php function reprint_server_test_hook_marker(): void { echo 'canonical'; }\n"
+        );
+
+        $export_path = realpath(self::EXPORT_PATH);
+        $this->assertNotFalse($export_path, 'export.php must exist');
+
+        try {
+            $php_code = '<?php' . "\n"
+                . 'putenv(\'REPRINT_SERVER_TEST_MODE=1\');' . "\n"
+                . 'require base64_decode(\'' . base64_encode($export_path) . '\', true);' . "\n"
+                . '_e2e_load_test_hooks_if_needed([\'directory\' => base64_decode(\''
+                . base64_encode($tmp_dir) . '\', true)]);' . "\n"
+                . 'reprint_server_test_hook_marker();' . "\n";
+
+            $result = $this->runPhpCode($php_code);
+
+            $this->assertSame(0, $result['status'], $result['output']);
+            $this->assertSame('canonical', trim($result['output']));
+        } finally {
+            $this->removePath($tmp_dir);
+        }
+    }
+
     private function runExportWith(string $setup_script): array
     {
         $export_path = realpath(self::EXPORT_PATH);
