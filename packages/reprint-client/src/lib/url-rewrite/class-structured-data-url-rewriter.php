@@ -142,10 +142,6 @@ class StructuredDataUrlRewriter
             $content_type = self::PLAIN_TEXT;
         }
 
-        if (!$this->maybe_contains_rewritable_urls($value)) {
-            return $value;
-        }
-
         $cache_key = null;
         if (strlen($value) <= self::VALUE_REWRITE_CACHE_MAX_INPUT_BYTES) {
             $cache_key = sha1($content_type . "\0" . $value);
@@ -154,6 +150,13 @@ class StructuredDataUrlRewriter
             if ($cached !== null) {
                 return $cached;
             }
+        }
+
+        // Quick-reject values without an HTML URL attribute, a literal source
+        // domain, or an encoding marker which may hide a source-domain byte.
+        // This avoids constructing the structured parsers for most values.
+        if (!$this->maybe_contains_rewritable_urls($value)) {
+            return $value;
         }
 
         $could_be_php_serialization = $this->could_be_php_serialization_with_strings($value);
