@@ -11648,11 +11648,11 @@ class ImportClient
         }
 
         // ── Wordfence block page ─────────────────────────────────
-        if ($http_code === 503 && $looks_like_wordfence_block_page) {
+        if (($http_code === 503 || $http_code === 200) && $looks_like_wordfence_block_page) {
             return [
                 'code' => 'WORDFENCE_BLOCKED',
                 'message' =>
-                    "Wordfence blocked this machine (HTTP 503). Its request " .
+                    "Wordfence blocked this machine (HTTP {$http_code}). Its request " .
                     "limit or another firewall rule stopped Reprint.\n\n" .
                     "Wait for a temporary block to expire, then resume. If it " .
                     "keeps happening, ask the site administrator to raise the " .
@@ -11830,7 +11830,10 @@ class ImportClient
                 // HTTP 200 but body isn't valid JSON — likely an HTML page
                 // from a site that doesn't have the exporter installed.
                 $diagnosis = $this->diagnose_http_error(200, $body);
-                if ($diagnosis['code'] === 'HTML_RESPONSE') {
+                if (
+                    $diagnosis['code'] === 'HTML_RESPONSE' ||
+                    $diagnosis['code'] === 'WORDFENCE_BLOCKED'
+                ) {
                     $json_error = $this->format_diagnosed_error($diagnosis);
                     $error_code = $diagnosis['code'];
                 } else {
