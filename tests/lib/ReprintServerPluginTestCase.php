@@ -13,6 +13,8 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 
+use function WordPress\Reprint\Server\Plugin\register_wordpress_configuration;
+
 if (!defined('ABSPATH')) {
     define('ABSPATH', __DIR__ . '/');
 }
@@ -45,6 +47,7 @@ $GLOBALS['reprint_server_test_options'] = [];
 $GLOBALS['reprint_server_registered_settings'] = [];
 $GLOBALS['reprint_server_settings_errors'] = [];
 $GLOBALS['reprint_server_test_actions'] = [];
+$GLOBALS['reprint_server_fail_option_updates'] = [];
 
 if (!function_exists('plugin_dir_path')) {
     function plugin_dir_path(string $file): string {
@@ -64,6 +67,10 @@ if (!function_exists('get_option')) {
 
 if (!function_exists('update_option')) {
     function update_option(string $name, $value, $autoload = null): bool {
+        if (in_array($name, $GLOBALS['reprint_server_fail_option_updates'], true)) {
+            return false;
+        }
+
         if (!array_key_exists($name, $GLOBALS['reprint_server_test_options'])) {
             $GLOBALS['reprint_server_test_options'][$name] = $value;
             foreach ($GLOBALS['reprint_server_test_actions']['add_option_' . $name] ?? [] as $action) {
@@ -246,6 +253,8 @@ if (!function_exists('esc_html')) {
 // phpcs:enable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound
 
 require_once __DIR__ . '/../../reprint-server-wp/lib.php';
+require_once __DIR__ . '/../../reprint-server-wp/wordpress/configuration.php';
+register_wordpress_configuration();
 require_once __DIR__ . '/../../reprint-server-wp/wordpress/site-export.php';
 abstract class ReprintServerPluginTestCase extends TestCase
 {
@@ -278,6 +287,7 @@ abstract class ReprintServerPluginTestCase extends TestCase
         $GLOBALS['reprint_server_test_options'] = [];
         $GLOBALS['reprint_server_registered_settings'] = [];
         $GLOBALS['reprint_server_settings_errors'] = [];
+        $GLOBALS['reprint_server_fail_option_updates'] = [];
         $_SERVER = [];
         $_FILES = [];
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Test resets request globals.

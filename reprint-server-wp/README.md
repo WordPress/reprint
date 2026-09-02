@@ -120,6 +120,24 @@ if ($myRouter->matches('/export')) {
 Platform configuration. Direct `lib.php` embedders pass them as the function's
 array argument and do not use the WordPress filter.
 
+An embedding WordPress plugin which wants the option-backed connection token
+and its push-authorization revocation hooks may opt into that integration
+without loading the bundled administrator:
+
+```php
+use function WordPress\Reprint\Server\Plugin\register_wordpress_configuration;
+
+require_once '/path/to/reprint-server-wp/lib.php';
+require_once '/path/to/reprint-server-wp/wordpress/configuration.php';
+
+register_wordpress_configuration();
+```
+
+The embedding plugin may then use the namespaced `get_configuration_state()`,
+`change_connection_token()`, and `change_push_access()` operations to render
+and process its own administrator surface. It should not require
+`wordpress/site-export.php` unless it explicitly wants the bundled page.
+
 `lib.php` defines these constants in `WordPress\Reprint\Server\Plugin`
 (using WordPress's `plugin_dir_path`):
 
