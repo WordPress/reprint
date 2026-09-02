@@ -213,6 +213,50 @@ final class ExportLibraryLoadTest extends TestCase {
         );
     }
 
+    public function testPluginLibraryDefinesEmbeddingFacadeWithoutRegisteringWordPressHooks(): void
+    {
+        $lib_path = realpath(__DIR__ . '/../reprint-server-wp/lib.php');
+        $this->assertNotFalse($lib_path, 'lib.php must exist');
+        $configuration_path = realpath(__DIR__ . '/../reprint-server-wp/wordpress/configuration.php');
+        $this->assertNotFalse($configuration_path, 'configuration.php must exist');
+
+        $php_code = <<<'PHP'
+        <?php
+        define('ABSPATH', __DIR__ . '/');
+        $registered_hooks = [];
+        function plugin_dir_path($file) {
+            return dirname($file) . '/';
+        }
+        function add_action($hook_name, $callback, $priority = 10, $accepted_args = 1) {
+            global $registered_hooks;
+            $registered_hooks[] = $hook_name;
+        }
+        PHP;
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Builds isolated test source.
+        $php_code .= "\nrequire " . var_export($lib_path, true) . ";\n";
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Builds isolated test source.
+        $php_code .= "require " . var_export($configuration_path, true) . ";\n";
+        $php_code .= <<<'PHP'
+        echo json_encode([
+            'hooks' => $registered_hooks,
+            'handler' => function_exists('_site_export_handle_api_request'),
+            'canonical_handler' => function_exists('WordPress\\Reprint\\Server\\Plugin\\handle_api_request'),
+            'configuration' => function_exists(
+                'WordPress\\Reprint\\Server\\Plugin\\get_configuration_state'
+            ),
+        ]);
+        PHP;
+
+        $result = $this->runPhpCode($php_code);
+
+        $this->assertSame(0, $result['status'], $result['output']);
+        $state = json_decode(trim($result['output']), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame([], $state['hooks']);
+        $this->assertTrue($state['handler']);
+        $this->assertTrue($state['canonical_handler']);
+        $this->assertTrue($state['configuration']);
+    }
+
     /**
      * @return array {
      *     Export runner result.

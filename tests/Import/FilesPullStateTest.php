@@ -184,6 +184,188 @@ class FilesPullStateTest extends TestCase
         }
     }
 
+    public function testSavingStateDoesNotReadTheRemoteIndex()
+    {
+        $client = $this->getMockBuilder(\ImportClient::class)
+            ->setConstructorArgs([
+                'http://fake.url',
+                $this->stateDir,
+                $this->filesystem_root,
+            ])
+            ->onlyMethods(['remote_index_entry_count'])
+            ->getMock();
+        $client->expects($this->never())
+            ->method('remote_index_entry_count');
+
+        $client->save_state();
+    }
+
+    public function testSavingStateThrottlesOnlyInProgressProgressFileWrites()
+    {
+        $client = $this->getMockBuilder(\ImportClient::class)
+            ->setConstructorArgs([
+                'http://fake.url',
+                $this->stateDir,
+                $this->filesystem_root,
+            ])
+            ->onlyMethods(['write_progress_file'])
+            ->getMock();
+        $written_completion_states = [];
+        $client->method('write_progress_file')
+            ->willReturnCallback(function () use (
+                $client,
+                &$written_completion_states
+            ): void {
+                $written_completion_states[] =
+                    $client->get_state()
+                        ->active_resumable_command
+                        ->completion_state;
+            });
+
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection->getProperty('last_progress_file_write')
+            ->setValue($client, microtime(true));
+        $client->get_state()->active_resumable_command->completion_state =
+            'in_progress';
+        $client->save_state();
+
+        $client->get_state()->active_resumable_command->completion_state = null;
+        $client->save_state();
+
+        $client->get_state()->active_resumable_command->completion_state =
+            'partial';
+        $client->save_state();
+
+        $client->get_state()->active_resumable_command->completion_state =
+            'complete';
+        $client->save_state();
+
+        $this->assertSame(
+            [null, 'partial', 'complete'],
+            $written_completion_states
+        );
+    }
+
+    public function testSavingStateRefreshesInProgressProgressAfterThrottle()
+    {
+        $client = $this->getMockBuilder(\ImportClient::class)
+            ->setConstructorArgs([
+                'http://fake.url',
+                $this->stateDir,
+                $this->filesystem_root,
+            ])
+            ->onlyMethods(['write_progress_file'])
+            ->getMock();
+        $client->expects($this->once())
+            ->method('write_progress_file');
+
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection->getProperty('last_progress_file_write')
+            ->setValue($client, microtime(true) - 1.1);
+        $client->get_state()->active_resumable_command->completion_state =
+            'in_progress';
+
+        $client->save_state();
+    }
+
+    public function testShutdownFlushesTheLatestProgressFile()
+    {
+        if (
+            !function_exists('pcntl_fork')
+            || !function_exists('pcntl_waitpid')
+            || !function_exists('posix_kill')
+            || !defined('SIGKILL')
+            || !defined('SIGTERM')
+        ) {
+            $this->markTestSkipped('Shutdown progress coverage requires PCNTL and POSIX.');
+        }
+
+        $child_pid = pcntl_fork();
+        if ($child_pid === -1) {
+            $this->fail('Failed to fork the shutdown progress test.');
+        }
+        if ($child_pid === 0) {
+            $client = $this->makeClient();
+            $reflection = new \ReflectionClass(\ImportClient::class);
+            $null_output = fopen('/dev/null', 'w');
+            if ($null_output === false) {
+                exit(2);
+            }
+            $reflection->getProperty('progress_fd')
+                ->setValue($client, $null_output);
+            $reflection->getProperty('progress')
+                ->setValue($client, new \TerminalProgress(false, $null_output));
+
+            $command = $client->get_state()->active_resumable_command;
+            $command->command_name = 'files-pull';
+            $command->completion_state = 'in_progress';
+            $command->current_stage = 'index';
+            $client->write_progress_file();
+
+            $command->current_stage = 'fetch';
+            $client->handle_shutdown(SIGTERM);
+            exit(1);
+        }
+
+        pcntl_waitpid($child_pid, $child_status);
+        $this->assertTrue(pcntl_wifsignaled($child_status));
+        $this->assertSame(SIGKILL, pcntl_wtermsig($child_status));
+
+        $progress = json_decode(
+            file_get_contents($this->stateDir . '/progress.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertSame('in_progress', $progress['status']);
+        $this->assertSame('fetch', $progress['phase']);
+    }
+
+    public function testBrokenProgressOutputFlushesTheLatestProgressFile()
+    {
+        if (!function_exists('pcntl_fork') || !function_exists('pcntl_waitpid')) {
+            $this->markTestSkipped('Broken-pipe progress coverage requires PCNTL.');
+        }
+
+        $child_pid = pcntl_fork();
+        if ($child_pid === -1) {
+            $this->fail('Failed to fork the broken-pipe progress test.');
+        }
+        if ($child_pid === 0) {
+            $client = $this->makeClient();
+            $command = $client->get_state()->active_resumable_command;
+            $command->command_name = 'files-pull';
+            $command->completion_state = 'in_progress';
+            $command->current_stage = 'index';
+            $client->write_progress_file();
+
+            $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+            if ($sockets === false) {
+                exit(2);
+            }
+            fclose($sockets[0]);
+            $reflection = new \ReflectionClass(\ImportClient::class);
+            $reflection->getProperty('progress_fd')
+                ->setValue($client, $sockets[1]);
+            $command->current_stage = 'fetch';
+            $client->output_progress(['status' => 'in_progress'], true);
+            exit(1);
+        }
+
+        pcntl_waitpid($child_pid, $child_status);
+        $this->assertTrue(pcntl_wifexited($child_status));
+        $this->assertSame(0, pcntl_wexitstatus($child_status));
+
+        $progress = json_decode(
+            file_get_contents($this->stateDir . '/progress.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertSame('in_progress', $progress['status']);
+        $this->assertSame('fetch', $progress['phase']);
+    }
+
     /**
      * After --abort, the state should not be "complete".
      */

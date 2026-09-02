@@ -18,6 +18,7 @@ function host_analyzer_registry(): array
     return [
         'wpcloud' => WpcloudHostAnalyzer::class,
         'siteground' => SitegroundHostAnalyzer::class,
+        'wpengine' => WpengineHostAnalyzer::class,
     ];
 }
 

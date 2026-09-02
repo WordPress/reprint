@@ -357,6 +357,17 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
             $this->assertLessThanOrEqual($max_statement_size, strlen($fragment));
         }
         $sql = implode("\n", $fragments);
+        $marker_pattern = '/' .
+            preg_quote(MySQLDumpProducer::NONZERO_SRID_COMMENT_PREFIX, '/') .
+            preg_quote(MySQLDumpProducer::NONZERO_SRID_CONTEXT_VERSION, '/') .
+            ' (\{[^\r\n]+\}) \*\//';
+        $this->assertSame(1, preg_match($marker_pattern, $sql, $marker));
+        $context = json_decode($marker[1], true);
+        $this->assertIsArray($context);
+        $this->assertSame(
+            [['column' => 'content', 'srid' => 4326]],
+            $context['spatial_columns']
+        );
         $this->assertStringNotContainsString('ST_GeomFromText(', $sql);
         $this->assertStringContainsString(
             'REPLACE INTO `__reprint_db_pull_progress_spatial` (`id`, `chunk_number`, `value`)',
@@ -438,11 +449,12 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
             'INSERT INTO deferred_spatial_value VALUES (1, ST_GeomFromText(?))'
         );
         $statement->execute(['LINESTRING(' . implode(',', $points) . ')']);
-        $expected_length = (int) $this->pdo
+        $expected_value = $this->pdo
             ->query(
-                'SELECT OCTET_LENGTH(CAST(route AS BINARY)) FROM deferred_spatial_value'
+                'SELECT CAST(route AS BINARY) FROM deferred_spatial_value'
             )
             ->fetchColumn();
+        $this->assertIsString($expected_value);
 
         $reader = new DatabaseRowsReader($this->pdo, [
             'tables_to_process' => ['deferred_spatial_value'],
@@ -453,8 +465,12 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
 
         $this->assertNull($reader->get_current_record()['route']);
         $this->assertSame(
-            $expected_length,
+            strlen($expected_value),
             $reader->get_current_spatial_value_length('route')
+        );
+        $this->assertSame(
+            substr($expected_value, 0, 4),
+            $reader->get_current_oversized_spatial_value_prefix('route')
         );
     }
 

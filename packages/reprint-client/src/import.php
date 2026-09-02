@@ -18,6 +18,7 @@ use Reprint\Importer\DatabaseUrlRewriteProcessor;
 use Reprint\Importer\NullableSpatialColumnStatementRewriter;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\Pull\PullFailureReportedException;
+use Reprint\Importer\SpatialSridGuard;
 use Reprint\Importer\State\DatabaseApplyCommandState;
 use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
 use Reprint\Importer\State\DatabaseTableIndexState;
@@ -260,7 +261,10 @@ class ImportClient
      */
     private $last_progress_output = 0;
 
-    /** @var float Minimum seconds between progress output lines. */
+    /** @var float Timestamp of the last successful progress.json write. */
+    private $last_progress_file_write = 0;
+
+    /** @var float Minimum seconds between recurring progress reports. */
     private $progress_throttle = 1.0;
 
     /** @var string Retained filesystem-root snapshot for this remote state directory. */
@@ -425,7 +429,7 @@ class ImportClient
     private $hmac_client = null;
 
     /**
-     * @var int|null MySQL max_allowed_packet value for the target database connection.
+     * @var int|null Target max_allowed_packet ceiling sent to the exporter.
      * Passed to the server so it can split SQL statements to fit within this limit.
      */
     private $max_allowed_packet = null;
@@ -1089,9 +1093,8 @@ class ImportClient
             $this->filter = $this->get_state()->filter;
         }
 
-        // Persist max_allowed_packet in state so it survives across invocations.
-        // The client sends this to the server so SQL statements are capped to a
-        // size the client's MySQL instance can actually accept.
+        // Persist a configured packet ceiling across resume invocations.
+        // Direct MySQL output queries the live target when none was configured.
         if (isset($options["max_allowed_packet"])) {
             $this->max_allowed_packet = (int) $options["max_allowed_packet"];
             $this->get_state()->max_allowed_packet = $this->max_allowed_packet;
@@ -1176,7 +1179,7 @@ class ImportClient
 
         $this->initialize_tuner($options);
 
-        // Initialize HMAC authentication if a shared secret was provided.
+        // Initialize HMAC authentication if a connection token was provided.
         // When set, every outgoing HTTP request will include X-Auth-Signature,
         // X-Auth-Nonce, and X-Auth-Timestamp headers so the export API can verify
         // the caller without a SECRET_KEY in the URL.
@@ -1644,7 +1647,7 @@ class ImportClient
      * @param array $options {
      *     Parsed files-push options and context.
      *
-     *     @type string $secret             HMAC shared secret.
+     *     @type string $secret             HMAC connection token.
      *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
      *     @type string $progress           Progress output mode: auto, tty, or jsonl.
      *     @type array  $files_push_context Optional context already validated by the CLI entry point.
@@ -2115,7 +2118,7 @@ class ImportClient
      * @param array $options {
      *     Parsed files-push options.
      *
-     *     @type string $secret     HMAC shared secret.
+     *     @type string $secret     HMAC connection token.
      *     @type bool   $force_http Whether the operator allowed a plain-HTTP target.
      * }
      * @phpstan-param array<string,mixed> $options
@@ -3025,8 +3028,8 @@ class ImportClient
                 ],
             ];
 
-            // Tell the server about the client's max_allowed_packet so it can
-            // cap SQL statements to a size the client can actually apply.
+            // Tell the server about the target max_allowed_packet so it can
+            // cap SQL statements to a size the target can actually apply.
             if ($this->max_allowed_packet !== null) {
                 $params["max_allowed_packet"] = $this->max_allowed_packet;
             }
@@ -6732,6 +6735,14 @@ class ImportClient
             true,
             'db-apply',
         );
+        $spatial_srid_guard = $target_engine === 'mysql'
+            ? new SpatialSridGuard(
+                $connection,
+                (string) ( $this->get_state()->get('preflight.database.version') ?? '' ),
+                $this->source_uses_spatial_reference_definitions(),
+                $connection_label,
+            )
+            : null;
         $sql_handle = fopen($sql_file, "r");
         if (!$sql_handle) {
             $connection->close();
@@ -6849,6 +6860,7 @@ class ImportClient
                     $group["byte_offset"],
                     $target_engine,
                     $stmt_rewriter,
+                    $spatial_srid_guard,
                 );
 
                 $statements_executed += $group_statement_count;
@@ -6973,7 +6985,8 @@ class ImportClient
         string $next_cursor,
         ?int $next_file_byte_offset,
         string $target_engine,
-        ?SqlStatementRewriter $stmt_rewriter = null
+        ?SqlStatementRewriter $stmt_rewriter = null,
+        ?SpatialSridGuard $spatial_srid_guard = null
     ): int {
         $nullable_spatial_column_rewriter = new NullableSpatialColumnStatementRewriter(
             $connection
@@ -6985,6 +6998,9 @@ class ImportClient
             $statement_count = 0;
             while ($query_stream->next_query()) {
                 $query = $query_stream->get_query();
+                if ($spatial_srid_guard !== null) {
+                    $spatial_srid_guard->assert_statement_supported($query);
+                }
                 $query = $nullable_spatial_column_rewriter->rewrite($query) ?? $query;
                 if ($stmt_rewriter !== null) {
                     $query = $stmt_rewriter->rewrite($query);
@@ -8644,6 +8660,7 @@ class ImportClient
 
         $sql_handle = null;
         $mysql_conn = null;
+        $spatial_srid_guard = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
         $session_setup_file = wp_join_unix_paths(
@@ -8698,7 +8715,7 @@ class ImportClient
                 "db" => $this->mysql_database,
                 "use_host_port" => $this->mysql_port === null,
             ];
-            [$mysql_conn] = $this->create_target_database_connection(
+            [$mysql_conn, $mysql_connection_label] = $this->create_target_database_connection(
                 $mysql_target,
                 false,
                 'db-pull',
@@ -8709,9 +8726,13 @@ class ImportClient
                 );
                 $this->max_allowed_packet = (int) $packet_result->fetchColumn();
                 $packet_result->closeCursor();
-                $this->get_state()->max_allowed_packet = $this->max_allowed_packet;
-                $this->save_state();
             }
+            $spatial_srid_guard = new SpatialSridGuard(
+                $mysql_conn,
+                (string) ( $this->get_state()->get('preflight.database.version') ?? '' ),
+                $this->source_uses_spatial_reference_definitions(),
+                $mysql_connection_label,
+            );
             if ($starts_mysql_output) {
                 // Keep the mysql-start stage until the old target position is gone.
                 // If this process stops before save_state(), the next process
@@ -8806,6 +8827,7 @@ class ImportClient
                     &$sql_handle,
                     $mysql_conn,
                     &$sql_buffer,
+                    $spatial_srid_guard,
                     $session_setup_file,
                     &$sql_bytes_written,
                     $context,
@@ -8891,6 +8913,7 @@ class ImportClient
                                     // Broken pipe — save state and exit cleanly so the
                                     // pipe reader (e.g. `mysql`) can finish on its own.
                                     $this->save_state();
+                                    $this->write_progress_file();
                                     exit(0);
                                 }
                                 $sql_bytes_written += $bytes;
@@ -8913,6 +8936,8 @@ class ImportClient
                                         $cursor,
                                         null,
                                         'mysql',
+                                        null,
+                                        $spatial_srid_guard,
                                     );
                                     $sql_buffer = "";
                                 }
@@ -9121,6 +9146,19 @@ class ImportClient
                 " bytes) — incomplete export?"
             );
         }
+    }
+
+    private function source_uses_spatial_reference_definitions(): ?bool
+    {
+        $value = $this->get_state()->get(
+            'preflight.database.uses_spatial_reference_definitions'
+        );
+        if ($value === null || is_bool($value)) {
+            return $value;
+        }
+        throw new RuntimeException(
+            'Source preflight returned an invalid spatial reference rule mode.'
+        );
     }
 
     private function lock_database_import_target(
@@ -11540,8 +11578,8 @@ class ImportClient
                     'message' =>
                         "No --secret was provided. The remote site requires " .
                         "authentication.\n\n" .
-                        "Pass --secret=YOUR_SECRET using the same secret " .
-                        "configured in the Reprint Server plugin on the remote site.",
+                        "Pass --secret=YOUR_SECRET using the same connection " .
+                        "token configured under Tools > Reprint Server on the remote site.",
                 ];
             }
 
@@ -11564,9 +11602,8 @@ class ImportClient
                 return [
                     'code' => 'AUTH_SECRET_MISMATCH',
                     'message' =>
-                        "Wrong shared secret. The --secret value does not match " .
-                        "the one configured in the Reprint Server plugin settings " .
-                        "(wp-admin → Reprint Server).",
+                        "Wrong connection token. The --secret value does not match " .
+                        "the one configured under Tools > Reprint Server in wp-admin.",
                 ];
             }
 
@@ -12504,7 +12541,6 @@ class ImportClient
             throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->pull_state_file}");
         }
 
-        $remote_index_entry_count = $this->remote_index_entry_count();
         $files_pulled = $this->files_pulled; // Completed in this run
         $has_cursor =
             !empty($state["active_resumable_command"]["remote_cursor"] ?? null) ||
@@ -12514,15 +12550,42 @@ class ImportClient
 
         $this->audit_log(
             sprintf(
-                "SAVE CURSOR | remote_index_entries=%d | completed_this_run=%d | %s",
-                $remote_index_entry_count,
+                "SAVE CURSOR | completed_this_run=%d | %s",
                 $files_pulled,
                 $cursor_info,
             ),
             false,
         );
 
-        $this->write_progress_file();
+        $completion_state =
+            $this->state->active_resumable_command->completion_state;
+
+        /**
+         * save_state() writes two files for different readers:
+         *
+         * 1. state.json tells the next PHP process where to resume. Write it
+         *    after every completed unit of work so a stopped pull can continue.
+         * 2. progress.json tells a polling UI what the pull is doing. The UI
+         *    needs a recent update, but it does not need every checkpoint.
+         *
+         * In a test with 30,000 files, save_state() ran 30,179 times. Each
+         * progress.json update wrote about 185 bytes to a temporary file and
+         * renamed that file over the old copy. Updating once per checkpoint
+         * therefore caused 30,179 writes and 30,179 renames.
+         *
+         * Limit active progress updates to once per second. Time is the useful
+         * limit because the UI cares how old its status is, and the number of
+         * checkpoints per second changes with the files being pulled. Write a
+         * cleared, partial, or complete state immediately because the command
+         * may not save another checkpoint afterward.
+         */
+        if (
+            $completion_state !== "in_progress"
+            || microtime(true) - $this->last_progress_file_write >=
+                $this->progress_throttle
+        ) {
+            $this->write_progress_file();
+        }
     }
 
     /**
@@ -12557,8 +12620,11 @@ class ImportClient
             return; // Best-effort — don't crash the pull over a progress file
         }
         $tmp = $this->progress_file . ".tmp";
-        if (file_put_contents($tmp, $json) !== false) {
-            rename($tmp, $this->progress_file);
+        if (
+            file_put_contents($tmp, $json) !== false
+            && rename($tmp, $this->progress_file)
+        ) {
+            $this->last_progress_file_write = microtime(true);
         }
     }
 
@@ -12636,6 +12702,9 @@ class ImportClient
         // Save current state (with timeout protection)
         try {
             $this->save_state();
+            // The process is about to be killed, so do not leave the final
+            // in-progress snapshot behind the one-second throttle.
+            $this->write_progress_file();
             $this->progress->show_lifecycle_line("✓ State saved successfully\n");
             $this->output_progress([
                 "type" => "state_saved",
@@ -12697,6 +12766,7 @@ class ImportClient
             if ($written === false) {
                 // Broken pipe — save state and exit cleanly
                 $this->save_state();
+                $this->write_progress_file();
                 exit(0);
             }
             @flush();
@@ -12806,7 +12876,7 @@ if (
             'type' => 'value',
             'target' => 'secret',
             'placeholder' => 'TOKEN',
-            'help' => 'HMAC shared secret for export API authentication',
+            'help' => 'HMAC connection token for export API authentication',
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
@@ -12955,7 +13025,7 @@ if (
             'target' => 'max_allowed_packet',
             'placeholder' => 'SIZE',
             'cast' => 'size',
-            'help' => 'Client max_allowed_packet (e.g. 16M, 64M)',
+            'help' => 'Target max_allowed_packet override (e.g. 16M, 64M)',
             'commands' => ['pull-db', 'db-pull'],
         ],
         [
@@ -13522,11 +13592,11 @@ if (
         echo "  2. Go to Plugins → Add New Plugin → Upload Plugin\n";
         echo "  3. Upload reprint-exporter-wp.zip and activate Reprint Server\n";
         echo "\n";
-        echo "{$bold}Step 3: Configure the shared secret{$reset}\n";
+        echo "{$bold}Step 3: Configure the connection token{$reset}\n";
         echo "\n";
-        echo "  1. In wp-admin, go to Reprint Server (in the sidebar)\n";
-        echo "  2. Enter a shared secret and save\n";
-        echo "  3. Use the same secret with reprint:\n";
+        echo "  1. In wp-admin, go to Tools → Reprint Server\n";
+        echo "  2. Enter a connection token and save\n";
+        echo "  3. Pass the same token to reprint with --secret:\n";
         echo "\n";
         echo "     {$dim}php reprint.phar preflight https://your-site.com \\\n";
         echo "       --secret=YOUR_SECRET \\\n";

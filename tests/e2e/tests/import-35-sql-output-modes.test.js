@@ -10,7 +10,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, compareDatabases, createMysqlConnection,
-    pullStateDirectory,
+    pullStateDirectory, readAuditLog,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -48,7 +48,10 @@ describe('Import: SQL Output Modes', () => {
                 `${getSiteUrl(site)}&directory=${getSiteDir(site)}`,
                 tempDir, 'db-pull', {
                     secret: getSiteSecret(site),
-                    extraArgs: ['--sql-output=stdout'],
+                    extraArgs: [
+                        '--sql-output=stdout',
+                        '--max-allowed-packet=1M',
+                    ],
                     skipPreflight: true,
                 },
             );
@@ -64,11 +67,23 @@ describe('Import: SQL Output Modes', () => {
             // No db.sql should be on disk
             assert.ok(!existsSync(join(tempDir, 'db.sql')),
                 'Expected no db.sql file when using --sql-output=stdout');
+
+            const stateFile = join(
+                pullStateDirectory(
+                    tempDir,
+                    `${getSiteUrl(site)}&directory=${getSiteDir(site)}`,
+                ),
+                'state.json',
+            );
+            const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+            assert.equal(state.max_allowed_packet, 1024 * 1024,
+                'Stdout output must save the configured packet value');
         });
     });
 
     describe('--sql-output=mysql', () => {
         let tempDir;
+        let targetMaxAllowedPacket;
         const importDb = 'e2e_basic_import_35_mysql';
 
         beforeAll(async () => {
@@ -76,6 +91,10 @@ describe('Import: SQL Output Modes', () => {
             const conn = await createMysqlConnection();
             await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
             await conn.query(`CREATE DATABASE \`${importDb}\``);
+            const [packetRows] = await conn.query(
+                'SELECT @@max_allowed_packet AS max_allowed_packet'
+            );
+            targetMaxAllowedPacket = Number(packetRows[0].max_allowed_packet);
             await conn.end();
         });
 
@@ -97,6 +116,7 @@ describe('Import: SQL Output Modes', () => {
                         '--mysql-host=127.0.0.1',
                         '--mysql-user=e2e_admin',
                         '--mysql-password=e2e_password',
+                        `--max-allowed-packet=${targetMaxAllowedPacket + 1}`,
                     ],
                 },
             );
@@ -114,7 +134,7 @@ describe('Import: SQL Output Modes', () => {
                 `counts=${JSON.stringify(comparison.rowCounts)}`);
         });
 
-        it('state file records sql_output mode', () => {
+        it('records and sends the configured packet limit', () => {
             const stateFile = join(
                 pullStateDirectory(
                     tempDir,
@@ -126,6 +146,17 @@ describe('Import: SQL Output Modes', () => {
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.sql_output, 'mysql',
                 `Expected sql_output=mysql in state, got ${state.sql_output}`);
+            assert.equal(
+                state.max_allowed_packet,
+                targetMaxAllowedPacket + 1,
+                'Direct MySQL output must save the configured packet value',
+            );
+            assert.ok(
+                readAuditLog(tempDir).includes(
+                    `"max_allowed_packet":${targetMaxAllowedPacket + 1}`
+                ),
+                'The SQL request must contain the configured packet value',
+            );
         });
     });
 });

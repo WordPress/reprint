@@ -1835,6 +1835,7 @@ function endpoint_preflight(array $config): array
         "connected" => false,
         "can_query" => false,
         "version" => null,
+        "uses_spatial_reference_definitions" => null,
         "db_charset" => null,
         "db_collation" => null,
         "server_charset" => null,
@@ -1905,6 +1906,20 @@ function endpoint_preflight(array $config): array
                 $version = $mysql->query("SELECT VERSION()")->fetchColumn();
                 $db["version"] = $version !== false ? (string) $version : null;
                 $db["can_query"] = true;
+
+                try {
+                    $count = $mysql->query(
+                        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES " .
+                            "WHERE TABLE_SCHEMA = 'information_schema' " .
+                            "AND TABLE_NAME = 'ST_SPATIAL_REFERENCE_SYSTEMS'"
+                    )->fetchColumn();
+                    if (is_numeric($count)) {
+                        $db["uses_spatial_reference_definitions"] = (int) $count > 0;
+                    }
+                } catch (Exception $e) {
+                    // SQLite and older compatible adapters have no MySQL SRS registry.
+                    $db["uses_spatial_reference_definitions"] = null;
+                }
 
                 $table_prefix = $db["wp"]["table_prefix"];
                 if ($table_prefix === null || $table_prefix === "") {

@@ -25,7 +25,7 @@ require_once __DIR__ . '/compat.php';
 \reprint_server_compat_adopt_legacy_constants();
 
 if (!defined(__NAMESPACE__ . '\\VERSION')) {
-    define(__NAMESPACE__ . '\\VERSION', '0.10.7-dev');
+    define(__NAMESPACE__ . '\\VERSION', '0.10.8-dev');
 }
 if (!defined(__NAMESPACE__ . '\\PLUGIN_DIR')) {
     define(__NAMESPACE__ . '\\PLUGIN_DIR', plugin_dir_path(__FILE__));
@@ -100,7 +100,7 @@ function push_is_supported(): bool {
 }
 
 /** Resolves dot segments in a slash-delimited path without touching the filesystem. */
-function _site_export_normalize_path(string $path): string {
+function normalize_path(string $path): string {
     $parts = explode('/', $path);
     $resolved = [];
     foreach ($parts as $part) {
@@ -315,7 +315,7 @@ function update_push_authorization(bool $enabled): bool {
  * multipart boundaries internally so the client can't predict the exact
  * byte stream — but it CAN hash the logical content before encoding.
  *
- * Signature = HMAC-SHA256(nonce + timestamp + SHA256(body), secret)
+ * Signature = HMAC-SHA256(nonce + timestamp + SHA256(body), connection token)
  *
  * The client sends X-Auth-Content-Hash = SHA256(body).  The server
  * independently hashes what it received and checks both that the hash
@@ -571,7 +571,7 @@ function handle_api_request(array $options = []): void {
                 );
             }
             $docroot = $canonical_docroot === '/' ? '/' : rtrim($canonical_docroot, '/\\');
-            $lexical_docroot = _site_export_normalize_path(str_replace('\\', '/', $configured_docroot));
+            $lexical_docroot = normalize_path(str_replace('\\', '/', $configured_docroot));
             $reprint_directory = $options['reprint_directory'] ?? (
                 dirname($docroot) . '/.reprint-' . substr(hash('sha256', $docroot), 0, 12)
             );
@@ -588,7 +588,7 @@ function handle_api_request(array $options = []): void {
                 // symlinked plugin into its outside target and omit protection.
                 $registered_plugin_file = str_replace('\\', '/', plugin_basename(PLUGIN_DIR . 'index.php'));
                 $registered_plugin_directory = dirname($registered_plugin_file);
-                $logical_plugin_directory = _site_export_normalize_path(
+                $logical_plugin_directory = normalize_path(
                     str_replace('\\', '/', (string) WP_PLUGIN_DIR)
                     . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
                 );
@@ -610,7 +610,7 @@ function handle_api_request(array $options = []): void {
                     // path survives a final symlink to the outside target.
                     $canonical_wordpress_plugin_directory = realpath( (string) WP_PLUGIN_DIR );
                     if ($canonical_wordpress_plugin_directory !== false) {
-                        $logical_plugin_directory_from_canonical_parent = _site_export_normalize_path(
+                        $logical_plugin_directory_from_canonical_parent = normalize_path(
                             str_replace('\\', '/', $canonical_wordpress_plugin_directory)
                             . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
                         );

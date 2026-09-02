@@ -511,4 +511,40 @@ class ProductionDropInRemovalTest extends TestCase
         );
     }
 
+    // ---- WP Engine-specific tests ----
+
+    public function testWpengineRemovesPlatformMuPluginsAndPreservesCustomMuPlugins(): void
+    {
+        $this->writeState([
+            'webhost' => 'wpengine',
+            'preflight' => [
+                'data' => [
+                    'runtime' => [
+                        'document_root' => '',
+                        'env_names' => [],
+                        'ini_get_all' => [],
+                    ],
+                    'filesystem' => ['directories' => []],
+                    'wp_detect' => ['roots' => []],
+                ],
+            ],
+        ]);
+
+        $mu_plugins = $this->fsRoot . '/wp-content/mu-plugins';
+        mkdir($mu_plugins . '/wpengine-common', 0755, true);
+        mkdir($mu_plugins . '/wpe-update-source-selector', 0755, true);
+        file_put_contents($mu_plugins . '/mu-plugin.php', "<?php // WP Engine loader\n");
+        file_put_contents($mu_plugins . '/stop-long-comments.php', "<?php // WP Engine comment guard\n");
+        file_put_contents($mu_plugins . '/my-custom-plugin.php', "<?php // custom\n");
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        $this->assertDirectoryDoesNotExist($mu_plugins . '/wpengine-common');
+        $this->assertDirectoryDoesNotExist($mu_plugins . '/wpe-update-source-selector');
+        $this->assertFileDoesNotExist($mu_plugins . '/mu-plugin.php');
+        $this->assertFileDoesNotExist($mu_plugins . '/stop-long-comments.php');
+        $this->assertFileExists($mu_plugins . '/my-custom-plugin.php');
+    }
 }

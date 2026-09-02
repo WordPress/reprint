@@ -242,7 +242,7 @@ describe('Import: SiteGround plugin stripping', () => {
             const flatDir = join(tempDir, 'flattened');
             assert.ok(
                 existsSync(join(flatDir, 'wp-content', 'plugins', 'site-export')),
-                'site-export plugin should still exist after apply-runtime',
+                'Reprint Server plugin should still exist after apply-runtime',
             );
         });
     });
