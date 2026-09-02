@@ -29,7 +29,7 @@ final class SortIndexFileTest extends TestCase
         parent::tearDown();
     }
 
-    public function testSystemSortMatchesExternalMergeSortWhenAvailable(): void
+    public function testSystemSortLimitsBufferAndParallelismWhenAvailable(): void
     {
         if (!function_exists('exec') || !is_executable('/usr/bin/sort')) {
             $this->markTestSkipped('The system sort command is unavailable.');
@@ -43,7 +43,7 @@ final class SortIndexFileTest extends TestCase
         mkdir($sort_directory);
         file_put_contents(
             $sort_directory . '/sort',
-            "#!/bin/sh\nprintf attempted > " . escapeshellarg($attempt_file)
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > " . escapeshellarg($attempt_file)
                 . "\nexec /usr/bin/sort \"$@\"\n"
         );
         chmod($sort_directory . '/sort', 0755);
@@ -70,10 +70,110 @@ final class SortIndexFileTest extends TestCase
         );
         $sorter->sort($external_sort_path);
 
-        $this->assertFileExists($attempt_file);
+        $arguments = file($attempt_file, FILE_IGNORE_NEW_LINES);
+        $this->assertIsArray($arguments);
+        $buffer_size_option = array_search('-S', $arguments, true);
+        $this->assertIsInt($buffer_size_option);
+        $this->assertSame('32M', $arguments[$buffer_size_option + 1]);
+        $this->assertContains('--parallel=1', $arguments);
+        $temporary_directory_option = array_search('-T', $arguments, true);
+        $this->assertIsInt($temporary_directory_option);
+        $this->assertSame(
+            $this->temporary_directory,
+            $arguments[$temporary_directory_option + 1]
+        );
         $this->assertSame(
             file_get_contents($external_sort_path),
             file_get_contents($system_sort_path)
+        );
+    }
+
+    public function testSystemSortCompletesInsideTheCiMemoryLimit(): void
+    {
+        if (getenv('GITHUB_ACTIONS') !== 'true' || PHP_VERSION_ID < 80400) {
+            $this->markTestSkipped('The constrained-memory sort runs once in the PHPUnit CI matrix.');
+        }
+
+        $docker_path_output = [];
+        $docker_path_exit_code = 0;
+        exec('command -v docker', $docker_path_output, $docker_path_exit_code);
+        $this->assertSame(0, $docker_path_exit_code, 'The PHPUnit workflow must provide Docker.');
+        $docker_path = $docker_path_output[0] ?? '';
+        $this->assertNotSame('', $docker_path, 'The PHPUnit workflow must provide Docker.');
+
+        $docker_image_output = [];
+        $docker_image_exit_code = 0;
+        exec(
+            escapeshellarg($docker_path) . ' image inspect mariadb:10.11 2>/dev/null',
+            $docker_image_output,
+            $docker_image_exit_code
+        );
+        $this->assertSame(
+            0,
+            $docker_image_exit_code,
+            'The PHPUnit workflow must provide its mariadb:10.11 service image.'
+        );
+
+        $path = $this->temporary_directory . '/constrained-memory-index.jsonl';
+        $input = fopen($path, 'w');
+        $this->assertIsResource($input);
+        $path_prefix = '/wp-content/uploads/';
+        $path_suffix = '-' . str_repeat('x', 180) . '.jpg';
+        for ($index = 100000; $index >= 1; --$index) {
+            fwrite(
+                $input,
+                $this->index_line(
+                    $path_prefix . sprintf('%08d', $index) . $path_suffix,
+                    $index
+                ) . "\n"
+            );
+        }
+        fclose($input);
+        $input_size = filesize($path);
+        $this->assertIsInt($input_size);
+
+        // The PHPUnit workflow already pulls this image for its MariaDB
+        // service. Run only GNU sort in a 64 MiB cgroup so the limit includes
+        // the complete child process, as it does on a constrained host.
+        $sort_directory = $this->temporary_directory . '/memory-limited-sort-bin';
+        mkdir($sort_directory);
+        file_put_contents(
+            $sort_directory . '/sort',
+            "#!/bin/sh\nexec " . escapeshellarg($docker_path)
+                . " run --rm --network=none"
+                . " --memory=64m --memory-swap=64m"
+                . ' -v ' . escapeshellarg(
+                    $this->temporary_directory . ':' . $this->temporary_directory
+                )
+                . " --entrypoint /usr/bin/sort mariadb:10.11 \"$@\"\n"
+        );
+        chmod($sort_directory . '/sort', 0755);
+
+        $original_path = getenv('PATH');
+        putenv('PATH=' . $sort_directory . ':' . $original_path);
+        try {
+            $this->assertTrue(
+                try_exec_sort_index_file(
+                    $path,
+                    $path . '.sorted',
+                    fn(string $line): ?string => $this->index_path_from_line($line)
+                ),
+                'GNU sort must complete while the child process is limited to 64 MiB.'
+            );
+        } finally {
+            putenv('PATH=' . $original_path);
+        }
+
+        $sorted_input = fopen($path, 'r');
+        $this->assertIsResource($sorted_input);
+        $first_line = fgets($sorted_input);
+        fclose($sorted_input);
+
+        $this->assertSame($input_size, filesize($path));
+        $this->assertIsString($first_line);
+        $this->assertSame(
+            $path_prefix . '00000001' . $path_suffix,
+            $this->index_path_from_line($first_line)
         );
     }
 
