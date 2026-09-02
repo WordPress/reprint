@@ -15,25 +15,26 @@ Many shared hosts (SiteGround, GoDaddy, etc.) block direct PHP execution inside 
 
 ### How it works
 
-The plugin file (`index.php`) is `include`'d by WordPress during its plugin loading loop — this happens *before* the `plugins_loaded` hook fires, making it the earliest interception point available to a regular plugin.
+The plugin file (`index.php`) is `include`'d by WordPress during its plugin loading loop. It detects Reprint requests there, but waits until `template_redirect` to answer them so other active plugins can inspect the request first.
 
 When a request arrives at `https://example.com/?reprint-api`, the plugin:
 
 1. Detects `$_GET['reprint-api']` during plugin file load
-2. Reverts WordPress error display settings (`display_errors`, `html_errors`) that `wp_debug_mode()` may have turned on
-3. Clears any output buffering WordPress started
-4. Sets up error handlers, HMAC auth, and runs the export endpoint
-5. Calls `exit` — WordPress never finishes booting
+2. Registers the Reprint handler at the end of `template_redirect`
+3. Lets WordPress load the remaining plugins and run their earlier request checks
+4. Reverts WordPress error display settings (`display_errors`, `html_errors`) that `wp_debug_mode()` may have turned on
+5. Clears any output buffering WordPress started
+6. Sets up error handlers, HMAC auth, and runs the export endpoint
+7. Calls `exit` before WordPress selects or renders a theme template
 
-This gives us a clean execution environment while using WordPress's front controller as the entry point.
+This uses WordPress's front controller while allowing security plugins to enforce their normal request rules.
 
 ### Platform configuration
 
 The bundled WordPress entry point passes the result of the
 `reprint_server_api_options` filter to the request handler. A platform must
-register this filter before the regular Reprint Server plugin file loads;
-registering it on `plugins_loaded` is too late. A must-use plugin is the usual
-place to register it:
+register this filter before `template_redirect`. A must-use plugin is the
+usual place to register it:
 
 ```php
 add_filter('reprint_server_api_options', static function (array $options): array {

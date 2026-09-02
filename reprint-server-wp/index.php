@@ -15,30 +15,36 @@ require_once __DIR__ . '/compat.php';
 reprint_server_compat_normalize_legacy_request();
 require_once __DIR__ . '/lib.php';
 
-// Intercept Reprint Server API requests as early as possible.
-// WordPress loads plugin files before firing `plugins_loaded`,
-// so this runs before almost anything else in the WordPress stack.
+// Detect the API request while the plugin file loads, then answer it after
+// other plugins have run their normal request checks. Security plugins such
+// as Wordfence apply request limits during `template_redirect`.
 // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- This only selects API request routing.
 if (isset($_GET['reprint-api'])) {
-    /**
-     * Filters the endpoint configuration supplied by the WordPress plugin.
-     *
-     * Platforms must register this filter before regular plugins load, for
-     * example from a must-use plugin.
-     *
-     * @param array $reprint_server_api_options Endpoint configuration overrides.
-     */
-    $reprint_server_api_options = apply_filters('reprint_server_api_options', []);
-    if (!is_array($reprint_server_api_options)) {
-        \WordPress\Reprint\Server\Plugin\push_error(
-            503,
-            'not_configured',
-            'The reprint_server_api_options filter must return an array; observed '
-            . gettype($reprint_server_api_options) . '.'
-        );
-    }
-    \WordPress\Reprint\Server\Plugin\handle_api_request($reprint_server_api_options);
-    exit;
+    add_action(
+        'template_redirect',
+        static function() {
+            /**
+             * Filters the endpoint configuration supplied by the WordPress plugin.
+             *
+             * Platforms must register this filter before `template_redirect`,
+             * for example from a must-use plugin.
+             *
+             * @param array $reprint_server_api_options Endpoint configuration overrides.
+             */
+            $reprint_server_api_options = apply_filters('reprint_server_api_options', []);
+            if (!is_array($reprint_server_api_options)) {
+                \WordPress\Reprint\Server\Plugin\push_error(
+                    503,
+                    'not_configured',
+                    'The reprint_server_api_options filter must return an array; observed '
+                    . gettype($reprint_server_api_options) . '.'
+                );
+            }
+            \WordPress\Reprint\Server\Plugin\handle_api_request($reprint_server_api_options);
+            exit;
+        },
+        PHP_INT_MAX
+    );
 }
 
 // Register the option-backed configuration, then the settings page.

@@ -213,6 +213,60 @@ final class ExportLibraryLoadTest extends TestCase {
         );
     }
 
+    public function testPluginEntrypointDefersApiRequestUntilTemplateRedirect(): void
+    {
+        $entrypoint_path = realpath(__DIR__ . '/../reprint-server-wp/index.php');
+        $this->assertNotFalse($entrypoint_path, 'Plugin entrypoint must exist');
+        $entrypoint_path_encoded = base64_encode($entrypoint_path);
+
+        $php_code = <<<PHP
+        <?php
+        define('ABSPATH', __DIR__ . '/');
+        \$_GET['reprint-api'] = true;
+        \$GLOBALS['registered_actions'] = [];
+        function plugin_dir_path(string \$file): string {
+            return dirname(\$file) . '/';
+        }
+        function add_action(string \$hook_name, \$callback, int \$priority = 10, int \$accepted_args = 1): void {
+            \$GLOBALS['registered_actions'][\$hook_name][] = [
+                'priority' => \$priority,
+                'accepted_args' => \$accepted_args,
+            ];
+        }
+        function add_filter(string \$hook_name, \$callback, int \$priority = 10, int \$accepted_args = 1): void {}
+        function apply_filters(string \$hook_name, \$value) {
+            return \$value;
+        }
+        function do_action(string \$hook_name): void {}
+        function get_option(string \$name, \$default = false) {
+            return \$default;
+        }
+        function update_option(string \$name, \$value, \$autoload = null): bool {
+            return true;
+        }
+        function delete_option(string \$name): bool {
+            return true;
+        }
+        function register_activation_hook(string \$file, \$callback): void {}
+        require base64_decode('{$entrypoint_path_encoded}', true);
+        echo json_encode(\$GLOBALS['registered_actions']['template_redirect'] ?? [], JSON_THROW_ON_ERROR);
+        PHP;
+
+        $result = $this->runPhpCode($php_code);
+
+        $this->assertSame(0, $result['status'], $result['output']);
+        $template_redirect_actions = json_decode(
+            trim($result['output']),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertSame(
+            [['priority' => PHP_INT_MAX, 'accepted_args' => 1]],
+            $template_redirect_actions
+        );
+    }
+
     public function testPluginLibraryDefinesEmbeddingFacadeWithoutRegisteringWordPressHooks(): void
     {
         $lib_path = realpath(__DIR__ . '/../reprint-server-wp/lib.php');
