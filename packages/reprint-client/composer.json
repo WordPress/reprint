@@ -9,8 +9,8 @@
     "require": {
         "php": ">=7.4",
         "ext-pdo": "*",
-        "wp-php-toolkit/data-liberation": "^0.8.0",
-        "wp-php-toolkit/html": "^0.8.0",
+        "wp-php-toolkit/data-liberation": "^0.9.1",
+        "wp-php-toolkit/html": "^0.9.1",
         "wp-php-toolkit/reprint-server": "*@dev"
     },
     "bin": [

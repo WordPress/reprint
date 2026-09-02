@@ -20,11 +20,12 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * 4. Leaf text → StructuredBlockMarkupUrlProcessor (block_markup hint)
  *    or CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules (default)
  *
- * HTML is never auto-detected — the caller must explicitly pass
+ * Top-level HTML is never auto-detected — the caller must explicitly pass
  * content_type='block_markup' for values known to contain HTML/block markup.
  * The hint propagates through recursive calls so that leaf strings inside
  * serialized PHP, JSON, or base64 eventually reach the same block-markup
- * parser.
+ * parser. Strings found in block attributes use naive syntax hints because no
+ * builder-specific schema is available there.
  */
 class StructuredDataUrlRewriter
 {
@@ -151,10 +152,9 @@ class StructuredDataUrlRewriter
             }
         }
 
-        // Quick-reject: if the value doesn't contain href=", src=", or any
-        // source domain, there's nothing to rewrite. This avoids expensive
-        // parsing (serialized PHP, JSON, block markup) for the vast majority
-        // of values that don't contain any rewritable URLs.
+        // Quick-reject values without an HTML URL attribute, a literal source
+        // domain, or an encoding marker which may hide a source-domain byte.
+        // This avoids constructing the structured parsers for most values.
         if (!$this->maybe_contains_rewritable_urls($value)) {
             return $value;
         }
@@ -220,21 +220,17 @@ class StructuredDataUrlRewriter
      * Quick-reject check: returns false when the value certainly doesn't
      * contain any rewritable URLs, avoiding expensive parsing.
      *
-     * A value is considered potentially rewritable if it contains:
-     * - href=" or src=" (HTML attributes that carry URLs), OR
-     * - any source domain from the url_mapping (bare URL occurrences)
+     * A value is considered potentially rewritable if it contains an HTML URL
+     * attribute, a literal source domain, or an encoding marker which may hide
+     * a source-domain byte.
      */
     private function maybe_contains_rewritable_urls(string $value): bool
     {
         if (stripos($value, 'href=') !== false || stripos($value, 'src=') !== false) {
             return true;
         }
-        foreach ($this->source_domains as $domain) {
-            if (stripos($value, $domain) !== false) {
-                return true;
-            }
-        }
-        return false;
+
+        return $this->value_might_contain_source_domain($value);
     }
 
     /**
@@ -356,9 +352,11 @@ class StructuredDataUrlRewriter
     }
 
     /**
-     * Return whether a decoded value may contain one of the configured source
-     * domains. This intentionally checks hosts instead of full source URLs so
-     * escaped spellings of `://` in block markup or JSON do not matter.
+     * Return whether a decoded value may expose a configured source domain.
+     *
+     * Check literal hosts first. A JSON Unicode escape or HTML character
+     * reference may hide a host byte, so their coarse markers also require
+     * parsing. The format parsers still decide whether either marker is valid.
      */
     public function value_might_contain_source_domain(string $value): bool
     {
@@ -372,7 +370,9 @@ class StructuredDataUrlRewriter
             }
         }
 
-        return false;
+        // `\u` may be a JSON Unicode escape, and `&` may start an HTML
+        // character reference. Either can hide bytes of the source domain.
+        return strpos($value, '\\u') !== false || strpos($value, '&') !== false;
     }
 
     private function get_cached_url_rewrite(string $cache_key)
@@ -438,7 +438,7 @@ class StructuredDataUrlRewriter
      *
      * TODO: Migrate these changes back into the php-toolkit repo
      */
-    private function rewrite_urls( string $content, string $content_type ): string {
+    private function rewrite_urls( string $content, string $content_type, bool $resolve_relative_urls = true ): string {
         // $this->parsed_mapping is built once in the constructor and reused
         // here on every call, avoiding a fresh round of WPURL::parse() per
         // leaf value.
@@ -447,8 +447,42 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
-                $p = new StructuredBlockMarkupUrlProcessor( $content, $base_url );
+                $p = new StructuredBlockMarkupUrlProcessor(
+                    $content,
+                    $resolve_relative_urls ? $base_url : null
+                );
                 while ( $p->next_token() ) {
+                    $parsed_nested_block_attributes = false;
+                    $block_comment_may_contain_source_domain = false;
+                    $block_comment_text = '';
+                    if ( '#block-comment' === $p->get_token_type() ) {
+                        $block_comment_text = $p->get_modifiable_text();
+                        $block_comment_may_contain_source_domain = $this->value_might_contain_source_domain( $block_comment_text );
+                    }
+                    if ( $block_comment_may_contain_source_domain ) {
+                        // The fast check includes supported encoding markers;
+                        // the parsed string leaves decide whether a URL exists.
+                        $block_attributes = $p->get_block_attributes();
+                        // A Unicode-escaped quote leaves an alphanumeric byte
+                        // immediately before a raw URL. The cautious scanner
+                        // rejects that boundary, so parse the decoded value.
+                        $block_comment_uses_unicode_escaped_quotes = false !== stripos( $block_comment_text, '\\u0022' )
+                            || false !== stripos( $block_comment_text, '\\u0027' );
+                        if (
+                            is_array( $block_attributes )
+                            && (
+                                $block_comment_uses_unicode_escaped_quotes
+                                || $this->block_attribute_values_need_format_inference( $block_attributes )
+                            )
+                        ) {
+                            $parsed_nested_block_attributes = true;
+                            $rewritten_block_attributes = $this->rewrite_inferred_block_attribute_values( $block_attributes );
+                            if ( $rewritten_block_attributes !== $block_attributes ) {
+                                $p->set_block_attributes( $rewritten_block_attributes );
+                            }
+                        }
+                    }
+
                     $token_type = $p->get_token_type() ?? '';
                     while ( $p->next_url_in_current_token() ) {
                         $raw_url = $p->get_raw_url();
@@ -495,7 +529,9 @@ class StructuredDataUrlRewriter
                             $this->set_cached_url_rewrite($url_cache_key, $cache_value);
                         }
                     }
-                    $p->replace_url_bases_in_current_token( $this->cautious_url_base_rewrite_mapping );
+                    if ( ! $parsed_nested_block_attributes ) {
+                        $p->replace_url_bases_in_current_token( $this->cautious_url_base_rewrite_mapping );
+                    }
                 }
 
                 return $p->get_updated_html();
@@ -519,6 +555,139 @@ class StructuredDataUrlRewriter
                 trigger_error('rewrite_urls() requires either block_markup or plain_text to be provided', E_USER_WARNING);
                 return $content;
         }
+    }
+
+    /**
+     * Rewrite every string in a block attribute array.
+     *
+     * BlockMarkupProcessor has already parsed and validated the block-comment
+     * JSON. Arrays can contain more arrays, so visit them recursively. Leave
+     * numbers, booleans, and null values unchanged.
+     *
+     * @param array<int|string, mixed> $values Block attribute values.
+     * @return array<int|string, mixed> Rewritten block attribute values.
+     */
+    private function rewrite_inferred_block_attribute_values( array $values ): array {
+        foreach ( $values as $key => $value ) {
+            if ( is_array( $value ) ) {
+                $values[ $key ] = $this->rewrite_inferred_block_attribute_values( $value );
+            } elseif ( is_string( $value ) ) {
+                $values[ $key ] = $this->rewrite_inferred_block_attribute_string( $value );
+            }
+        }
+
+        return $values;
+    }
+
+    /**
+     * Return whether any nested string needs its enclosing format parsed.
+     *
+     * When one string needs parsing, all strings in that block are rewritten
+     * through the same attribute tree. This avoids mixing a re-encoded block
+     * comment with raw byte replacements queued against its old byte offsets.
+     * Most Divi blocks only contain literal ASCII URLs, so they stay on the
+     * existing raw-token path and avoid the expensive recursive rewrite.
+     *
+     * @param array<int|string, mixed> $values Block attribute values.
+     */
+    private function block_attribute_values_need_format_inference( array $values ): bool {
+        foreach ( $values as $value ) {
+            if ( is_array( $value ) ) {
+                if ( $this->block_attribute_values_need_format_inference( $value ) ) {
+                    return true;
+                }
+            } elseif ( is_string( $value ) && $this->nested_block_string_needs_format_inference( $value ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Return whether a nested block string needs its enclosing format parsed.
+     *
+     * The cautious raw-token pass already handles literal ASCII source hosts
+     * in HTML, CSS, JSON, shortcodes, and plain text. Parsing those values
+     * again only changes their encoding and makes Divi imports slower.
+     *
+     * Parsing is still needed when an escape or character reference may hide
+     * part of the host, or when serialized PHP length fields must be updated.
+     * A JSON value may contain serialized PHP at a deeper level, so its raw
+     * text is also checked for a serialization token. Non-ASCII values keep
+     * the structured path because the cautious raw-token pass supports ASCII
+     * and punycode domains, but not literal Unicode domains.
+     *
+     * These are coarse signals, not proof of a content type. The format
+     * hierarchy below still validates PHP serialization and JSON before use.
+     */
+    private function nested_block_string_needs_format_inference( string $value ): bool {
+        if ( ! $this->maybe_contains_rewritable_urls( $value ) ) {
+            return false;
+        }
+
+        if ( $this->could_be_php_serialization_with_strings( $value ) ) {
+            return true;
+        }
+
+        if ( false !== strpos( $value, '\\u' ) || false !== strpos( $value, '&' ) ) {
+            return true;
+        }
+
+        $contains_serialized_value = 1 === preg_match( '/(?:a|s|O|C):\d+:/', $value );
+        if ( $this->could_be_json_with_strings( $value ) && $contains_serialized_value ) {
+            return true;
+        }
+
+        return 1 === preg_match( '/[^\x00-\x7F]/', $value );
+    }
+
+    /**
+     * Guess how to rewrite one string found inside block attribute JSON.
+     *
+     * This is deliberately naive. These checks do not establish what the
+     * string means. Their order only tries the stronger, more likely formats
+     * before the broad CSS substring check. The PHP and JSON parsers still
+     * validate those two guesses before changing nested values.
+     */
+    private function rewrite_inferred_block_attribute_string( string $value ): string {
+        // 1. Serialized PHP is a complete outer format. Check it before HTML,
+        // JSON, or CSS that may appear inside one of its string values. The
+        // coarse existing gate checks only the first `a`, `s`, `O`, or `C`
+        // byte. PhpSerializationProcessor then validates the complete value.
+        $could_be_php_serialization = $this->could_be_php_serialization_with_strings( $value );
+        if ( $could_be_php_serialization ) {
+            return $this->rewrite( $value, self::PLAIN_TEXT );
+        }
+
+        // 2. This only recognizes strings which begin with an opening tag. It
+        // misses HTML preceded by prose and may classify displayed code as HTML.
+        $trimmed_value = ltrim( $value );
+        $html_opening_tag_pattern      = '/^<[a-z][a-z0-9:-]*(?:\s|\/?>)/i';
+        $starts_with_html_opening_tag  = 1 === preg_match( $html_opening_tag_pattern, $trimmed_value );
+        if ( $starts_with_html_opening_tag ) {
+            // The format is inferred, so do not reinterpret `#`, `/about`, or
+            // other relative values against the configured source URL.
+            return $this->rewrite_urls( $value, self::BLOCK_MARKUP, false );
+        }
+
+        // 3. The coarse existing JSON gate checks only whether the first
+        // non-whitespace byte is `{`, `[`, or `"`. JsonStringIterator then
+        // validates the complete value before rewriting nested strings.
+        $could_be_json_with_strings = $this->could_be_json_with_strings( $value );
+        if ( $could_be_json_with_strings ) {
+            return $this->rewrite( $value, self::PLAIN_TEXT );
+        }
+
+        // 4. `url(` can occur in prose or code which is not CSS. Keep this
+        // broad, naive hint after the complete PHP, HTML, and JSON shapes.
+        $contains_css_url_function = false !== stripos( $value, 'url(' );
+        if ( $contains_css_url_function ) {
+            return $this->rewrite_urls( $value, self::BLOCK_MARKUP, false );
+        }
+
+        // 5. Unknown strings receive only the cautious plain-text scan.
+        return $this->rewrite( $value, self::PLAIN_TEXT );
     }
 
     /**

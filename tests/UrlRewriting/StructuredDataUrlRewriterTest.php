@@ -175,6 +175,18 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame('https://new-site.com/api', json_decode($result, true));
     }
 
+    public function testJsonDecodesEscapedSourceHostBeforeUrlMatching(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '{"url":"https:\u002f\u002fold\u002dsite\u002ecom\u002fpage"}';
+
+        $this->assertStringNotContainsString('old-site.com', $input);
+
+        $result = json_decode($rewriter->rewrite($input), true);
+
+        $this->assertSame('https://new-site.com/page', $result['url']);
+    }
+
     public function testJsonOutputUsesUnescapedSlashes(): void
     {
         $rewriter = $this->createRewriter();
@@ -246,6 +258,21 @@ class StructuredDataUrlRewriterTest extends TestCase
         $unserialized = unserialize($result);
         $decoded = json_decode($unserialized['config'], true);
         $this->assertSame('https://new-site.com/api', $decoded['link']);
+    }
+
+    public function testSerializedPhpReachesJsonWithEscapedSourceHost(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = serialize([
+            'json' => '{"url":"https:\u002f\u002fold\u002dsite\u002ecom\u002fpage"}',
+        ]);
+
+        $this->assertStringNotContainsString('old-site.com', $input);
+
+        $result = unserialize($rewriter->rewrite($input));
+        $decoded_json = json_decode($result['json'], true);
+
+        $this->assertSame('https://new-site.com/page', $decoded_json['url']);
     }
 
     public function testSerializedPhpWithNoUrlsIsUnchanged(): void
@@ -414,6 +441,523 @@ class StructuredDataUrlRewriterTest extends TestCase
         $input = '<a href="https://old-site.com/page">Link</a>';
         $result = $rewriter->rewrite($input, 'block_markup');
         $this->assertStringContainsString('https://new-site.com/page', $result);
+    }
+
+    public function testBlockMarkupRewritesHtmlNestedInDiviBlockAttributes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:divi/text {"module":{"content":{"innerContent":{"desktop":{"value":"\u003cp\u003eRead \u003ca href=\u0022https:\/\/old-site.com\/about\/\u0022\u003emore\u003c\/a\u003e.\u003c\/p\u003e"}}}}} /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+
+        $this->assertStringNotContainsString('old-site.com', $result);
+        $this->assertSame(1, preg_match('/<!-- wp:divi\/text (.*) \/-->/', $result, $matches));
+        $rewritten_attributes = json_decode($matches[1], true);
+        $this->assertSame(
+            '<p>Read <a href="https://new-site.com/about/">more</a>.</p>',
+            $rewritten_attributes['module']['content']['innerContent']['desktop']['value']
+        );
+    }
+
+    public function testLiteralDiviUrlUsesRawRewriteWithoutReencodingBlockJson(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com' => 'https://much-longer.example',
+        ]);
+        $input = '<!-- wp:divi/text { "module": { "content": { "value": "<a href=\"https:\/\/old-site.com\/about\">Read</a>" } } } /-->';
+        $expected = str_replace('old-site.com', 'much-longer.example', $input);
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    public function testNamespacedBlockAttributeStringsReuseStructuredFormatInference(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com' => 'https://much-longer.example',
+        ]);
+        $attributes = [
+            'module' => [
+                'values' => [
+                    'html' => '<a href="#">Top</a><a href="https://old-site.com/html">HTML</a>',
+                    'json' => '{"url":"https://old-site.com/json"}',
+                    'css' => 'background-image: url(https://old-site.com/css.jpg)',
+                    'serialized' => serialize(['url' => 'https://old-site.com/serialized']),
+                    'serialized_css' => serialize([
+                        'css' => 'background-image: url(https://old-site.com/serialized-css.jpg)',
+                    ]),
+                    'text' => 'Read https://old-site.com/text',
+                ],
+            ],
+        ];
+        $input = '<!-- wp:example/widget '
+            . json_encode($attributes, JSON_HEX_TAG | JSON_HEX_AMP)
+            . ' /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+
+        $this->assertStringNotContainsString('old-site.com', $result);
+        $this->assertSame(1, preg_match('/<!-- wp:example\/widget (.*) \/-->/', $result, $matches));
+        $rewritten_attributes = json_decode($matches[1], true);
+        $values = $rewritten_attributes['module']['values'];
+        $this->assertSame(
+            '<a href="#">Top</a><a href="https://much-longer.example/html">HTML</a>',
+            $values['html']
+        );
+        $this->assertSame('https://much-longer.example/json', json_decode($values['json'], true)['url']);
+        $this->assertSame('background-image: url(https://much-longer.example/css.jpg)', $values['css']);
+        $this->assertSame('https://much-longer.example/serialized', unserialize($values['serialized'])['url']);
+        $this->assertSame(
+            'background-image: url(https://much-longer.example/serialized-css.jpg)',
+            unserialize($values['serialized_css'])['css']
+        );
+        $this->assertSame('Read https://much-longer.example/text', $values['text']);
+    }
+
+    public function testNestedJsonIsCheckedBeforeTheBroadCssHint(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com' => 'https://much-longer.example',
+        ]);
+        $serialized_css = serialize([
+            'css' => 'background:url(https://old-site.com/value)',
+        ]);
+        $json = json_encode([
+            'serialized_css' => $serialized_css,
+        ], JSON_UNESCAPED_SLASHES);
+        $input = '<!-- wp:example/widget '
+            . json_encode(['module' => ['value' => $json]], JSON_UNESCAPED_SLASHES)
+            . ' /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+
+        $this->assertSame(1, preg_match('/<!-- wp:example\/widget (.*) \/-->/', $result, $matches));
+        $rewritten_attributes = json_decode($matches[1], true);
+        $rewritten_json = json_decode($rewritten_attributes['module']['value'], true);
+        $this->assertSame(
+            'background:url(https://much-longer.example/value)',
+            unserialize($rewritten_json['serialized_css'])['css']
+        );
+    }
+
+    /**
+     * Divi 5 stores values under element, part, option, breakpoint, and state
+     * objects. It also uses arrays for values such as font styles and gradient
+     * stops. Walk the whole tree without changing JSON scalars which cannot
+     * hold URLs.
+     */
+    public function testDiviResponsiveAttributeTreeRewritesStringLeavesAndPreservesOtherJsonTypes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $attributes = [
+            'module' => [
+                'decoration' => [
+                    'background' => [
+                        'desktop' => [
+                            'value' => [
+                                'image' => [
+                                    'url' => 'https://old-site.com/uploads/desktop.jpg',
+                                ],
+                                'gradient' => [
+                                    'stops' => [
+                                        ['color' => '#ffffff', 'position' => 0],
+                                        ['color' => '#000000', 'position' => 100],
+                                    ],
+                                ],
+                            ],
+                            'hover' => [
+                                'image' => [
+                                    'url' => 'https://old-site.com/uploads/hover.jpg',
+                                ],
+                            ],
+                        ],
+                        'tablet' => [
+                            'value' => [
+                                'image' => [
+                                    'url' => 'https://old-site.com/uploads/tablet.jpg',
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            'image' => [
+                'innerContent' => [
+                    'desktop' => [
+                        'value' => [
+                            'src' => 'https://old-site.com/uploads/content.jpg',
+                            'id' => 123,
+                            'enabled' => true,
+                            'opacity' => 0.75,
+                            'caption' => null,
+                        ],
+                    ],
+                ],
+            ],
+            'title' => [
+                'decoration' => [
+                    'font' => [
+                        'font' => [
+                            'desktop' => [
+                                'value' => [
+                                    'style' => ['italic', 'underline'],
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ];
+        $input = '<!-- wp:divi/image '
+            . json_encode($attributes, JSON_UNESCAPED_SLASHES)
+            . ' /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $rewritten_attributes = $this->getBlockAttributes($result, 'wp:divi/image');
+
+        $this->assertSame(
+            'https://new-site.com/uploads/desktop.jpg',
+            $rewritten_attributes['module']['decoration']['background']['desktop']['value']['image']['url']
+        );
+        $this->assertSame(
+            'https://new-site.com/uploads/hover.jpg',
+            $rewritten_attributes['module']['decoration']['background']['desktop']['hover']['image']['url']
+        );
+        $this->assertSame(
+            'https://new-site.com/uploads/tablet.jpg',
+            $rewritten_attributes['module']['decoration']['background']['tablet']['value']['image']['url']
+        );
+        $this->assertSame(
+            'https://new-site.com/uploads/content.jpg',
+            $rewritten_attributes['image']['innerContent']['desktop']['value']['src']
+        );
+        $this->assertSame(
+            $attributes['module']['decoration']['background']['desktop']['value']['gradient']['stops'],
+            $rewritten_attributes['module']['decoration']['background']['desktop']['value']['gradient']['stops']
+        );
+        $rewritten_image_value = $rewritten_attributes['image']['innerContent']['desktop']['value'];
+        $this->assertSame(123, $rewritten_image_value['id']);
+        $this->assertTrue($rewritten_image_value['enabled']);
+        $this->assertSame(0.75, $rewritten_image_value['opacity']);
+        $this->assertNull($rewritten_image_value['caption']);
+        $this->assertSame(
+            ['italic', 'underline'],
+            $rewritten_attributes['title']['decoration']['font']['font']['desktop']['value']['style']
+        );
+    }
+
+    /**
+     * A Divi code value can hold HTML, JSON in a script element, CSS, and
+     * JavaScript at the same time. Only complete source URLs are changed.
+     */
+    public function testDiviCodeContentRewritesUrlsAcrossEmbeddedLanguages(): void
+    {
+        $rewriter = $this->createRewriter();
+        $code = '<div data-api="https://old-site.com/api">Testing</div>'
+            . '<script type="application/json">'
+            . '[{"absolute":"https://old-site.com/from-json","count":2}]'
+            . '</script>'
+            . '<script>window.asset = "https://old-site.com/from-javascript.js";</script>'
+            . '<style>.hero{background-image:url("https://old-site.com/from-css.jpg")}</style>';
+        $input = '<!-- wp:divi/code '
+            . json_encode([
+                'content' => [
+                    'innerContent' => [
+                        'desktop' => ['value' => $code],
+                    ],
+                ],
+            ], JSON_UNESCAPED_SLASHES)
+            . ' /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $rewritten_attributes = $this->getBlockAttributes($result, 'wp:divi/code');
+        $rewritten_code = $rewritten_attributes['content']['innerContent']['desktop']['value'];
+
+        $this->assertStringNotContainsString('old-site.com', $rewritten_code);
+        $this->assertStringContainsString('data-api="https://new-site.com/api"', $rewritten_code);
+        $this->assertStringContainsString('https://new-site.com/from-json', $rewritten_code);
+        $this->assertStringContainsString('https://new-site.com/from-javascript.js', $rewritten_code);
+        $this->assertStringContainsString('https://new-site.com/from-css.jpg', $rewritten_code);
+    }
+
+    public function testDiviHtmlEntityHostRewritesWithoutLiteralSourceHostBytes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:divi/text '
+            . json_encode([
+                'content' => [
+                    'innerContent' => [
+                        'desktop' => [
+                            'value' => '<a href="https://old&#45;site.com/entity-host">Entity host</a>',
+                        ],
+                    ],
+                ],
+            ], JSON_UNESCAPED_SLASHES)
+            . ' /-->';
+
+        $this->assertStringNotContainsString('old-site.com', $input);
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $rewritten_attributes = $this->getBlockAttributes($result, 'wp:divi/text');
+
+        $this->assertSame(
+            '<a href="https://new-site.com/entity-host">Entity host</a>',
+            $rewritten_attributes['content']['innerContent']['desktop']['value']
+        );
+    }
+
+    /**
+     * Extensions may put one structured string inside another. Re-enter the
+     * existing JSON and serialized-PHP parsers at every level instead of
+     * stopping after the first valid outer format.
+     */
+    public function testDiviAttributeRewritesJsonInsideSerializedPhpInsideJson(): void
+    {
+        $rewriter = $this->createRewriter();
+        $deepest_json = json_encode([
+            'html' => '<a href="https://old-site.com/deep-html">Deep HTML</a>',
+            'css' => 'background:url(https://old-site.com/deep-css.jpg)',
+            'plain' => 'Read https://old-site.com/deep-text',
+            'unchanged_scalars' => [7, 1.5, true, false, null],
+        ], JSON_UNESCAPED_SLASHES);
+        $serialized_php = serialize(['payload' => $deepest_json]);
+        $outer_json = json_encode(['serialized' => $serialized_php], JSON_UNESCAPED_SLASHES);
+        $input = '<!-- wp:divi/text '
+            . json_encode([
+                'content' => [
+                    'advanced' => [
+                        'extensionPayload' => [
+                            'desktop' => ['value' => $outer_json],
+                        ],
+                    ],
+                ],
+            ], JSON_UNESCAPED_SLASHES)
+            . ' /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $rewritten_attributes = $this->getBlockAttributes($result, 'wp:divi/text');
+        $rewritten_outer_json = json_decode(
+            $rewritten_attributes['content']['advanced']['extensionPayload']['desktop']['value'],
+            true
+        );
+        $rewritten_serialized_php = unserialize($rewritten_outer_json['serialized']);
+        $rewritten_deepest_json = json_decode($rewritten_serialized_php['payload'], true);
+
+        $this->assertSame(
+            '<a href="https://new-site.com/deep-html">Deep HTML</a>',
+            $rewritten_deepest_json['html']
+        );
+        $this->assertSame(
+            'background:url(https://new-site.com/deep-css.jpg)',
+            $rewritten_deepest_json['css']
+        );
+        $this->assertSame('Read https://new-site.com/deep-text', $rewritten_deepest_json['plain']);
+        $this->assertSame([7, 1.5, true, false, null], $rewritten_deepest_json['unchanged_scalars']);
+    }
+
+    /**
+     * Divi parent and child modules are nested block comments, rather than a
+     * child block serialized as a JSON string. Each block still needs its own
+     * attribute tree rewritten.
+     */
+    public function testNestedDiviParentAndChildBlocksRewriteIndependently(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:divi/section {"module":{"decoration":{"background":{"desktop":{"value":{"image":{"url":"https://old-site.com/section.jpg"}}}}}}} -->'
+            . '<!-- wp:divi/row -->'
+            . '<!-- wp:divi/text {"content":{"innerContent":{"desktop":{"value":"<p><a href=\"https://old-site.com/child\">Child</a></p>"}}}} /-->'
+            . '<!-- /wp:divi/row -->'
+            . '<!-- /wp:divi/section -->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+
+        $this->assertStringNotContainsString('old-site.com', $result);
+        $section_attributes = $this->getBlockAttributes($result, 'wp:divi/section');
+        $text_attributes = $this->getBlockAttributes($result, 'wp:divi/text');
+        $this->assertSame(
+            'https://new-site.com/section.jpg',
+            $section_attributes['module']['decoration']['background']['desktop']['value']['image']['url']
+        );
+        $this->assertSame(
+            '<p><a href="https://new-site.com/child">Child</a></p>',
+            $text_attributes['content']['innerContent']['desktop']['value']
+        );
+    }
+
+    #[DataProvider('diviInferredStringCases')]
+    public function testDiviStringInferenceCoversRealisticFormats(string $input_value, string $expected_value): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:divi/text '
+            . json_encode([
+                'content' => [
+                    'advanced' => [
+                        'extensionPayload' => [
+                            'desktop' => ['value' => $input_value],
+                        ],
+                    ],
+                ],
+            ], JSON_UNESCAPED_SLASHES)
+            . ' /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $rewritten_attributes = $this->getBlockAttributes($result, 'wp:divi/text');
+
+        $this->assertSame(
+            $expected_value,
+            $rewritten_attributes['content']['advanced']['extensionPayload']['desktop']['value']
+        );
+    }
+
+    /**
+     * @return array<string, array{0:string, 1:string}>
+     */
+    public static function diviInferredStringCases(): array
+    {
+        return [
+            'HTML with encoded query data' => [
+                '<p><a href="https://old-site.com/page?next=https%3A%2F%2Fold-site.com%2Finside">Link</a></p>',
+                '<p><a href="https://new-site.com/page?next=https%3A%2F%2Fold-site.com%2Finside">Link</a></p>',
+            ],
+            'HTML custom element' => [
+                '<divi-card data-src="https://old-site.com/card.jpg"></divi-card>',
+                '<divi-card data-src="https://new-site.com/card.jpg"></divi-card>',
+            ],
+            'rich text begins with prose before its first tag' => [
+                'Introduction <p><a href="https://old-site.com/after-prose">Read more</a></p>',
+                'Introduction <p><a href="https://new-site.com/after-prose">Read more</a></p>',
+            ],
+            'JSON object' => [
+                '{"url":"https://old-site.com/object"}',
+                '{"url":"https://new-site.com/object"}',
+            ],
+            'JSON array' => [
+                '["https://old-site.com/first",{"url":"https://old-site.com/second"},3,true,null]',
+                '["https://new-site.com/first",{"url":"https://new-site.com/second"},3,true,null]',
+            ],
+            'JSON string scalar' => [
+                '"https://old-site.com/scalar"',
+                '"https://new-site.com/scalar"',
+            ],
+            'CSS with case and quoted URL' => [
+                '.hero{background-image:URL("https://old-site.com/hero.jpg")}',
+                '.hero{background-image:URL("https://new-site.com/hero.jpg")}',
+            ],
+            'serialized PHP array' => [
+                serialize(['url' => 'https://old-site.com/serialized-array']),
+                serialize(['url' => 'https://new-site.com/serialized-array']),
+            ],
+            'serialized PHP object' => [
+                serialize( (object) ['url' => 'https://old-site.com/serialized-object'] ),
+                serialize( (object) ['url' => 'https://new-site.com/serialized-object'] ),
+            ],
+            'Divi 4 shortcode retained by a converted module' => [
+                '[et_pb_image src="https:\/\/old-site.com\/legacy.jpg"]',
+                '[et_pb_image src="https:\/\/new-site.com\/legacy.jpg"]',
+            ],
+            'plain text' => [
+                'Download https://old-site.com/guide.pdf.',
+                'Download https://new-site.com/guide.pdf.',
+            ],
+            'malformed JSON falls back to cautious text' => [
+                '{"url":"https://old-site.com/incomplete"',
+                '{"url":"https://new-site.com/incomplete"',
+            ],
+            'malformed serialization falls back to cautious text' => [
+                's:999:"https://old-site.com/incomplete";',
+                's:999:"https://new-site.com/incomplete";',
+            ],
+            'JSON Unicode escape inside the source host' => [
+                '{"url":"https:\/\/old\u002dsite.com\/unicode-host"}',
+                '{"url":"https://new-site.com/unicode-host"}',
+            ],
+            'HTML character reference inside the source host' => [
+                '<a href="https://old&#45;site.com/entity-host">Entity host</a>',
+                '<a href="https://new-site.com/entity-host">Entity host</a>',
+            ],
+        ];
+    }
+
+    public function testDiviBlockRewritesRecursivelyEncodedJsonWithoutLiteralSourceHostBytes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $encoded_url = '"https:\u002f\u002fold\u002dsite\u002ecom\u002fdeep"';
+        $nested_json = json_encode([
+            'payload' => json_encode([
+                'url' => $encoded_url,
+            ], JSON_UNESCAPED_SLASHES),
+        ], JSON_UNESCAPED_SLASHES);
+        $input = '<!-- wp:divi/text '
+            . json_encode([
+                'content' => [
+                    'advanced' => [
+                        'extensionPayload' => [
+                            'desktop' => ['value' => $nested_json],
+                        ],
+                    ],
+                ],
+            ], JSON_UNESCAPED_SLASHES)
+            . ' /-->';
+
+        $this->assertStringNotContainsString('old-site.com', $input);
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $rewritten_attributes = $this->getBlockAttributes($result, 'wp:divi/text');
+        $rewritten_outer_json = json_decode(
+            $rewritten_attributes['content']['advanced']['extensionPayload']['desktop']['value'],
+            true
+        );
+        $rewritten_inner_json = json_decode($rewritten_outer_json['payload'], true);
+
+        $this->assertSame('"https://new-site.com/deep"', $rewritten_inner_json['url']);
+    }
+
+    /**
+     * These cases describe known misses in the naive inference. The test
+     * passes when the unsupported URL stays unchanged. This makes each miss
+     * visible without making the whole suite red.
+     */
+    #[DataProvider('knownDiviInferenceLimitationCases')]
+    public function testKnownDiviInferenceLimitationsRemainUnchanged(string $input_value): void
+    {
+        $rewriter = $this->createRewriter();
+        $advanced_attributes = [
+            'extensionPayload' => [
+                'desktop' => ['value' => $input_value],
+            ],
+        ];
+        $input = '<!-- wp:divi/text '
+            . json_encode([
+                'content' => [
+                    'advanced' => $advanced_attributes,
+                ],
+            ], JSON_UNESCAPED_SLASHES)
+            . ' /-->';
+
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $rewritten_attributes = $this->getBlockAttributes($result, 'wp:divi/text');
+
+        $this->assertSame(
+            $input_value,
+            $rewritten_attributes['content']['advanced']['extensionPayload']['desktop']['value']
+        );
+    }
+
+    /**
+     * @return array<string, array{0:string, 1?:bool}>
+     */
+    public static function knownDiviInferenceLimitationCases(): array
+    {
+        return [
+            'relative HTML URL has no safe source base' => [
+                '<a href="/about">About</a>',
+            ],
+            'base64 payload is not decoded' => [
+                base64_encode('{"url":"https://old-site.com/base64"}'),
+            ],
+            'CSS escape splits the source host bytes' => [
+                '.hero{background:url(https://old\\2d site.com/css-escape.jpg)}',
+            ],
+        ];
     }
 
     public function testBlockMarkupUsesCautiousRewriterForOpaqueUrlContexts(): void
@@ -784,6 +1328,12 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertFalse(
             $rewriter->value_might_contain_source_domain('<a href="https://other-site.com/page">Link</a>')
         );
+        $this->assertTrue(
+            $rewriter->value_might_contain_source_domain('{"url":"https://old\u002dsite.com/page"}')
+        );
+        $this->assertTrue(
+            $rewriter->value_might_contain_source_domain('<a href="https://old&#45;site.com/page">Link</a>')
+        );
     }
 
     // --- cache bounds ---
@@ -927,5 +1477,31 @@ class StructuredDataUrlRewriterTest extends TestCase
                 $this->assertIsNotObject($part, 'The URL cache must hold no live object graph.');
             }
         }
+    }
+
+    /**
+     * Read one block's parsed attribute object from rewritten markup.
+     *
+     * Using the production block processor here avoids adding another test
+     * regex for namespaced block names and block-comment JSON.
+     *
+     * @return array<int|string, mixed> Parsed block attributes.
+     */
+    private function getBlockAttributes(string $markup, string $block_name): array
+    {
+        $processor = new StructuredBlockMarkupUrlProcessor($markup);
+        while ($processor->next_token()) {
+            if (
+                '#block-comment' === $processor->get_token_type()
+                && $block_name === $processor->get_block_name()
+            ) {
+                $attributes = $processor->get_block_attributes();
+                if (is_array($attributes)) {
+                    return $attributes;
+                }
+            }
+        }
+
+        $this->fail("Expected to find parsed attributes for block {$block_name}.");
     }
 }
