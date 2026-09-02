@@ -64,7 +64,7 @@ final class FileIndexNamedRootTest extends TestCase
         );
     }
 
-    public function testFollowedTargetOutsideConfiguredRootsCanStartAnIndex(): void
+    public function testFollowedTargetOutsideConfiguredRootsIndexesOnlyTheTarget(): void
     {
         $site = $this->tempDir . '/site';
         $shared = $this->tempDir . '/shared';
@@ -78,8 +78,9 @@ final class FileIndexNamedRootTest extends TestCase
             $this->root($site . '/theme', $target, 'symlink'),
         ], $target);
 
-        $this->assertContains($site . '/theme', array_column($entries, 'path'));
-        $this->assertContains($target . '/style.css', array_column($entries, 'path'));
+        $paths = array_column($entries, 'path');
+        $this->assertNotContains($site . '/theme', $paths);
+        $this->assertContains($target . '/style.css', $paths);
     }
 
     public function testParentSymlinkIsEmittedAtRequestedPathAndFileAtResolvedPath(): void

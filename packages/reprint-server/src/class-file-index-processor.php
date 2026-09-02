@@ -95,7 +95,8 @@ final class FileIndexProcessor {
     private $closed = false;
 
     /**
-     * Starts a traversal at the requested root and schedules the other roots.
+     * Starts a traversal at the requested root. A configured start also
+     * schedules the other configured roots.
      *
      * @param FileIndexRoot[] $roots       Structured roots scheduled for this index.
      * @param FileIndexRoot   $start_root  Root scheduled first. It may be an
@@ -127,20 +128,25 @@ final class FileIndexProcessor {
 
         $configured_directories = self::resolved_directory_roots($roots, $follow_symlinks);
 
-        // Visit the requested directory first, followed by every other root in
-        // stable byte order. Stable ordering makes a cursor independent of the
-        // order in which configuration discovered the additional roots.
+        // The initial request starts at a configured root and visits every
+        // configured root. A request which follows an external directory
+        // symlink must visit only that target, or each link would also repeat
+        // the complete configured traversal.
         $ordered_roots = [$start_root];
-        $extra_roots = [];
-        foreach ($roots as $root) {
-            if ($root["requested_path"] !== $start_root["requested_path"]) {
-                $extra_roots[] = $root;
+        if ($start_root_is_configured) {
+            $extra_roots = [];
+            foreach ($roots as $root) {
+                if ($root["requested_path"] !== $start_root["requested_path"]) {
+                    $extra_roots[] = $root;
+                }
             }
+            // Stable ordering makes a cursor independent of the order in
+            // which configuration discovered the additional roots.
+            usort($extra_roots, static function (array $left, array $right): int {
+                return strcmp($left["requested_path"], $right["requested_path"]);
+            });
+            $ordered_roots = array_merge($ordered_roots, $extra_roots);
         }
-        usort($extra_roots, static function (array $left, array $right): int {
-            return strcmp($left["requested_path"], $right["requested_path"]);
-        });
-        $ordered_roots = array_merge($ordered_roots, $extra_roots);
 
         // A selected directory symlink has two responsibilities: emit its
         // requested link entry and traverse its resolved target. Keep the

@@ -53,7 +53,7 @@ final class FileIndexFilePathRootTest extends TestCase
         $this->assertContains($pluginsPath . '/hello/hello.php', $paths);
     }
 
-    public function testEndpointIndexesAFollowedTargetOutsideTheConfiguredRoot(): void
+    public function testEndpointIndexesOnlyTheFollowedTargetOutsideTheConfiguredRoot(): void
     {
         $site = $this->tempDir . '/site';
         $shared = $this->tempDir . '/shared';
@@ -65,7 +65,7 @@ final class FileIndexFilePathRootTest extends TestCase
         $target = (string) realpath($shared . '/theme');
         $paths = $this->runFileIndex([$site . '/theme'], $target);
 
-        $this->assertContains($site . '/theme', $paths);
+        $this->assertNotContains($site . '/theme', $paths);
         $this->assertContains($target . '/style.css', $paths);
     }
 
