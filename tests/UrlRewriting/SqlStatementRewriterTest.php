@@ -1,5 +1,6 @@
 <?php
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../vendor/autoload.php';
@@ -212,13 +213,27 @@ class SqlStatementRewriterTest extends TestCase
     public function testPostContentRewritesUrlsThroughRegisteredWPBakeryCodecs(): void
     {
         $rewriter = $this->createRewriter();
+        $encode_wpbakery = static function (string $value): string {
+            return strtr(
+                rawurlencode($value),
+                ['%21' => '!', '%27' => "'", '%28' => '(', '%29' => ')', '%2A' => '*']
+            );
+        };
         $old_html = '<a href="https://old-site.com/manual.pdf">Manual</a>';
         $new_html = '<a href="https://new-site.com/manual.pdf">Manual</a>';
         $old_map = '<iframe src="https://old-site.com/map"></iframe>';
         $new_map = '<iframe src="https://new-site.com/map"></iframe>';
         $old_javascript = '<script>window.reprintUrl="https://old-site.com/app.js";</script>';
         $new_javascript = '<script>window.reprintUrl="https://new-site.com/app.js";</script>';
+        $old_table_cell = '<a href="https&#58;&#47;&#47;old-site&#46;com&#47;manual.pdf"'
+            . ' data-meta="{&quot;src&quot;:&quot;https:\/\/old-site.com\/manual.pdf&quot;}">Manual</a>';
+        $new_table_cell = '<a href="https://new-site.com/manual.pdf"'
+            . ' data-meta="{&quot;src&quot;:&quot;https:\/\/new-site.com\/manual.pdf&quot;}">Manual</a>';
         $cases = [
+            'Easy Tables HTML character references and JSON escapes' => [
+                '[vc_table allow_html="1"][bg#fff]Download,' . $encode_wpbakery($old_table_cell) . '[/vc_table]',
+                '[vc_table allow_html="1"][bg#fff]Download,' . $encode_wpbakery($new_table_cell) . '[/vc_table]',
+            ],
             'Raw HTML' => [
                 '[vc_raw_html]' . base64_encode($old_html) . '[/vc_raw_html]',
                 '[vc_raw_html]' . base64_encode($new_html) . '[/vc_raw_html]',
@@ -258,6 +273,150 @@ class SqlStatementRewriterTest extends TestCase
                 $this->assertSame($prefix . $expected, $prepared['params'][1]);
             }
         }
+    }
+
+    #[DataProvider('wpbakeryRawHtmlStructuredMarkupProvider')]
+    public function testPostContentRewritesStructuredMarkupInsideWPBakeryRawHtml(
+        string $old_html,
+        string $expected_html
+    ): void
+    {
+        $rewriter = $this->createRewriter();
+        $encode_wpbakery = static function (string $value): string {
+            return strtr(
+                rawurlencode($value),
+                ['%21' => '!', '%27' => "'", '%28' => '(', '%29' => ')', '%2A' => '*']
+            );
+        };
+        $stored_bodies = [
+            'literal Base64 body' => [
+                base64_encode($old_html),
+                base64_encode($expected_html),
+            ],
+            'URL-encoded Base64 body' => [
+                base64_encode($encode_wpbakery($old_html)),
+                base64_encode($encode_wpbakery($expected_html)),
+            ],
+        ];
+
+        foreach ($stored_bodies as $storage_name => [$stored_body, $expected_stored_body]) {
+            $content = '[vc_raw_html]' . $stored_body . '[/vc_raw_html]';
+            $expected = '[vc_raw_html]' . $expected_stored_body . '[/vc_raw_html]';
+            for ($alignment = 0; $alignment < 3; $alignment++) {
+                $prefix = str_repeat('x', $alignment);
+                $sql = sprintf(
+                    "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('%s'));",
+                    base64_encode($prefix . $content)
+                );
+
+                $this->assertSame(
+                    $prefix . $expected,
+                    $this->collectValues($rewriter->rewrite($sql))[0],
+                    $storage_name . ' at SQL Base64 alignment ' . $alignment
+                );
+
+                $prepared = $rewriter->build_sqlite_prepared_insert($sql);
+                $this->assertNotNull($prepared);
+                $this->assertSame($prefix . $expected, $prepared['params'][1]);
+            }
+        }
+    }
+
+    /**
+     * @return array<string, array{0:string, 1:string}>
+     */
+    public static function wpbakeryRawHtmlStructuredMarkupProvider(): array
+    {
+        return [
+            'numeric HTML character references in an href' => [
+                '<a href="https&#58;&#47;&#47;old-site&#46;com&#47;visit-us&#47;">Visit</a>',
+                '<a href="https://new-site.com/visit-us/">Visit</a>',
+            ],
+            'entity-quoted JSON with JSON-escaped slashes in an attribute' => [
+                '<a href="/visit-us/" data-analytics="{&quot;dest&quot;:&quot;https:\/\/old-site.com\/weddings\/&quot;}">Visit</a>',
+                '<a href="/visit-us/" data-analytics="{&quot;dest&quot;:&quot;https:\/\/new-site.com\/weddings\/&quot;}">Visit</a>',
+            ],
+            'JSON slash escapes and escaped HTML in a script element' => [
+                '<script type="application/json">{"url":"https:\/\/old-site.com\/visit-us\/","html":"<a href=\"https:\/\/old-site.com\/about\/\">About<\/a>"}</script>',
+                '<script type="application/json">{"url":"https:\/\/new-site.com\/visit-us\/","html":"<a href=\"https:\/\/new-site.com\/about\/\">About<\/a>"}</script>',
+            ],
+            'CSS escaped slashes, a protocol-relative URL, and entity quotes' => [
+                '<style>.hero{background:url(https\:\/\/old-site.com\/hero.jpg)} @import url(//old-site.com/theme.css);</style>'
+                    . '<div style="background:url(&quot;https://old-site.com/card.jpg&quot;)">Card</div>',
+                '<style>.hero{background:url(https\:\/\/new-site.com\/hero.jpg)} @import url(//new-site.com/theme.css);</style>'
+                    . '<div style="background:url(&quot;https://new-site.com/card.jpg&quot;)">Card</div>',
+            ],
+            'JavaScript strings, split pieces, and a URL constructor' => [
+                '<script>var links={'
+                    . 'canonical:"https:\/\/old-site.com\/",'
+                    . "about:'https:'+'//'+'old-site.com'+'/'+'about'+'/',"
+                    . 'menu:new URL("/menu/","https://old-site.com").href'
+                    . '};</script>',
+                '<script>var links={'
+                    . 'canonical:"https:\/\/new-site.com\/",'
+                    . "about:'https:'+'//'+'new-site.com'+'/'+'about'+'/',"
+                    . 'menu:new URL("/menu/","https://new-site.com").href'
+                    . '};</script>',
+            ],
+            'form action and bare URL in an HTML comment' => [
+                '<form action="https://old-site.com/menu/" method="get"></form>'
+                    . '<!-- source page: https://old-site.com/our-story/ -->',
+                '<form action="https://new-site.com/menu/" method="get"></form>'
+                    . '<!-- source page: https://new-site.com/our-story/ -->',
+            ],
+        ];
+    }
+
+    #[DataProvider('wpbakeryRawHtmlKnownFailureProvider')]
+    public function testKnownFailuresInsideWPBakeryRawHtml(
+        string $old_html,
+        string $expected_html,
+        string $reason
+    ): void
+    {
+        $rewriter = $this->createRewriter();
+        $content = '[vc_raw_html]' . base64_encode($old_html) . '[/vc_raw_html]';
+        $expected = '[vc_raw_html]' . base64_encode($expected_html) . '[/vc_raw_html]';
+        $sql = sprintf(
+            "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('%s'));",
+            base64_encode($content)
+        );
+
+        $result = $this->collectValues($rewriter->rewrite($sql))[0];
+        if ($result !== $expected) {
+            $this->markTestIncomplete($reason);
+        }
+
+        $this->assertSame($expected, $result);
+    }
+
+    /**
+     * @return array<string, array{0:string, 1:string, 2:string}>
+     */
+    public static function wpbakeryRawHtmlKnownFailureProvider(): array
+    {
+        return [
+            'JavaScript regex literal' => [
+                '<script>var urlPattern = /https:\/\/old-site.com\/weddings-and-celebrations\/\//;</script>',
+                '<script>var urlPattern = /https:\/\/new-site.com\/weddings-and-celebrations\/\//;</script>',
+                'The cautious scanner skips a URL immediately after a JavaScript regex delimiter.',
+            ],
+            'JSON Unicode slash escapes' => [
+                '<script type="application/json">{"url":"https:\u002F\u002Fold-site.com\u002Fvisit-us\u002F"}</script>',
+                '<script type="application/json">{"url":"https:\u002F\u002Fnew-site.com\u002Fvisit-us\u002F"}</script>',
+                'The cautious scanner does not decode JSON Unicode escapes around a URL.',
+            ],
+            'double-encoded HTML character references' => [
+                '<a href="https&amp;#58;&amp;#47;&amp;#47;old-site&amp;#46;com&amp;#47;visit-us&amp;#47;">Visit</a>',
+                '<a href="https&amp;#58;&amp;#47;&amp;#47;new-site&amp;#46;com&amp;#47;visit-us&amp;#47;">Visit</a>',
+                'The HTML processor decodes one character-reference layer, not two.',
+            ],
+            'percent-encoded URL inside otherwise literal HTML' => [
+                '<a href="https%3A%2F%2Fold-site.com%2Fvisit-us%2F">Visit</a>',
+                '<a href="https%3A%2F%2Fnew-site.com%2Fvisit-us%2F">Visit</a>',
+                'The WPBakery codec currently mistakes an encoded URL for an encoded whole body.',
+            ],
+        ];
     }
 
     public function testUnknownColumnUsesPlainTextUrlScanning(): void
