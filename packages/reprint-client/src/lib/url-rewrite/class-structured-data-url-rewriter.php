@@ -79,8 +79,8 @@ class StructuredDataUrlRewriter
     /** @var array<string, array<string, array{rewrite: callable(string): string, hides_url: bool}>> */
     private array $shortcode_attribute_rewriters;
 
-    /** Base64 fragments which signal a shortcode codec that may hide URLs. */
-    private string $encoded_shortcode_signal_pattern;
+    /** @var array<string, true> Shortcode tags whose registered codecs may hide URLs. */
+    private array $shortcode_tags_with_hidden_urls;
 
     /**
      * Rewrites keyed by an entire value; hits only on an exact repeat.
@@ -113,36 +113,17 @@ class StructuredDataUrlRewriter
         );
         $this->shortcode_body_rewriters = $wpbakery_url_rewriter->get_shortcode_body_rewriters();
         $this->shortcode_attribute_rewriters = $wpbakery_url_rewriter->get_shortcode_attribute_rewriters();
-        $encoded_shortcode_signals = array();
-        $shortcode_tags_with_hidden_urls = array_fill_keys(
+        $this->shortcode_tags_with_hidden_urls = array_fill_keys(
             array_keys($this->shortcode_body_rewriters),
             true
         );
         foreach ($this->shortcode_attribute_rewriters as $shortcode_tag => $attribute_rewriters) {
             foreach ($attribute_rewriters as $attribute_rewriter) {
                 if ($attribute_rewriter['hides_url']) {
-                    $shortcode_tags_with_hidden_urls[$shortcode_tag] = true;
+                    $this->shortcode_tags_with_hidden_urls[$shortcode_tag] = true;
                 }
             }
         }
-        foreach (array_keys($shortcode_tags_with_hidden_urls) as $shortcode_tag) {
-            $shortcode_prefix = '[' . $shortcode_tag;
-            for ($alignment = 0; $alignment < 3; $alignment++) {
-                $skip = $alignment === 0 ? 0 : 3 - $alignment;
-                $signal_length = strlen($shortcode_prefix) - $skip;
-                $signal_length -= $signal_length % 3;
-                if ($signal_length < 3) {
-                    continue;
-                }
-
-                $encoded_shortcode_signals[] = base64_encode(
-                    substr($shortcode_prefix, $skip, $signal_length)
-                );
-            }
-        }
-        $this->encoded_shortcode_signal_pattern = '~(?:'
-            . implode('|', array_map('preg_quote', $encoded_shortcode_signals))
-            . ')~';
 
         // Extract unique source domains for the quick-reject check.
         $domains = [];
@@ -372,18 +353,28 @@ class StructuredDataUrlRewriter
             return false;
         }
 
-        foreach ($this->shortcode_attribute_rewriters as $shortcode_tag => $attribute_rewriters) {
-            foreach ($attribute_rewriters as $attribute_rewriter) {
-                if (
-                    $attribute_rewriter['hides_url']
-                    && stripos($value, '[' . $shortcode_tag) !== false
-                ) {
-                    return true;
-                }
+        foreach ($this->shortcode_tags_with_hidden_urls as $shortcode_tag => $unused) {
+            if (stripos($value, '[' . $shortcode_tag) !== false) {
+                return true;
             }
         }
 
-        return $this->value_might_contain_known_shortcode_body($value);
+        return false;
+    }
+
+    /**
+     * Return decoded shortcode prefixes whose registered codecs may hide URLs.
+     *
+     * @return list<string>
+     */
+    public function get_shortcode_prefixes_that_may_hide_urls(): array
+    {
+        $prefixes = array();
+        foreach ($this->shortcode_tags_with_hidden_urls as $shortcode_tag => $unused) {
+            $prefixes[] = '[' . $shortcode_tag;
+        }
+
+        return $prefixes;
     }
 
     private function value_might_contain_known_shortcode_body(string $value): bool
@@ -395,19 +386,6 @@ class StructuredDataUrlRewriter
         }
 
         return false;
-    }
-
-    /**
-     * Return whether Base64 text may decode to a registered shortcode body.
-     *
-     * Each signal contains only complete three-byte groups from the shortcode
-     * prefix. This makes one signal stable for each possible byte alignment of
-     * the prefix inside the decoded value. A match may be incidental, but a
-     * real registered prefix cannot be rejected before Base64 decoding.
-     */
-    public function encoded_text_might_contain_hidden_shortcode_url(string $encoded_text): bool
-    {
-        return preg_match($this->encoded_shortcode_signal_pattern, $encoded_text) === 1;
     }
 
     /**

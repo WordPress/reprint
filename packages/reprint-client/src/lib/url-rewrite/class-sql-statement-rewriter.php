@@ -26,6 +26,9 @@ class SqlStatementRewriter
 {
     private StructuredDataUrlRewriter $url_rewriter;
 
+    /** Base64 fragments which signal a shortcode codec that may hide URLs. */
+    private string $encoded_shortcode_signal_pattern;
+
     /** @var array<string, array<string, string>> full_table_name => [column_name => content_type] */
     private array $db_columns_with_block_markup;
 
@@ -61,6 +64,24 @@ class SqlStatementRewriter
     public function __construct(StructuredDataUrlRewriter $url_rewriter, string $table_prefix = 'wp_', array $extra_db_columns_with_block_markup = [])
     {
         $this->url_rewriter = $url_rewriter;
+        $encoded_shortcode_signals = array();
+        foreach ($url_rewriter->get_shortcode_prefixes_that_may_hide_urls() as $shortcode_prefix) {
+            for ($alignment = 0; $alignment < 3; $alignment++) {
+                $skip = $alignment === 0 ? 0 : 3 - $alignment;
+                $signal_length = strlen($shortcode_prefix) - $skip;
+                $signal_length -= $signal_length % 3;
+                if ($signal_length < 3) {
+                    continue;
+                }
+
+                $encoded_shortcode_signals[] = base64_encode(
+                    substr($shortcode_prefix, $skip, $signal_length)
+                );
+            }
+        }
+        $this->encoded_shortcode_signal_pattern = '~(?:'
+            . implode('|', array_map('preg_quote', $encoded_shortcode_signals))
+            . ')~';
 
         // Merge WP defaults with consumer hints (both keyed by suffix),
         // then prepend the table prefix to build full table names.
@@ -122,9 +143,9 @@ class SqlStatementRewriter
         //
         // Some shortcode codecs are the exception: a body or attribute codec
         // may hide the URL under one or more encoding layers.
-        // StructuredDataUrlRewriter derives matching Base64 signals from the
-        // same codec registry, so adding another hidden codec does not require
-        // a second list in this SQL layer.
+        // SqlStatementRewriter derives matching Base64 signals from the
+        // structured rewriter's codec registry, so adding another hidden codec
+        // does not require a second list in this SQL layer.
         //
         // False positives are tolerable — they cost an extra rewrite pass
         // that finds nothing. False negatives would silently leave URLs
@@ -132,7 +153,7 @@ class SqlStatementRewriter
         // covers every alignment×scheme combination.
         if (
             !Base64ValueScanner::encoded_text_could_decode_to_http_scheme($sql)
-            && !$this->url_rewriter->encoded_text_might_contain_hidden_shortcode_url($sql)
+            && !$this->encoded_text_might_contain_hidden_shortcode_url($sql)
         ) {
             return $sql;
         }
@@ -244,7 +265,7 @@ class SqlStatementRewriter
             if (!$scanner->encoded_payload_could_contain_http_scheme()) {
                 if (
                     $content_type !== StructuredDataUrlRewriter::BLOCK_MARKUP
-                    || !$this->url_rewriter->encoded_text_might_contain_hidden_shortcode_url(
+                    || !$this->encoded_text_might_contain_hidden_shortcode_url(
                         $scanner->get_encoded_payload()
                     )
                 ) {
@@ -267,6 +288,19 @@ class SqlStatementRewriter
         }
 
         return $scanner->get_result();
+    }
+
+    /**
+     * Return whether Base64 text may decode to a shortcode codec which hides URLs.
+     *
+     * Each signal contains only complete three-byte groups from the shortcode
+     * prefix. This makes one signal stable for each possible byte alignment of
+     * the prefix inside the decoded value. A match may be incidental, but a
+     * real registered prefix cannot be rejected before Base64 decoding.
+     */
+    private function encoded_text_might_contain_hidden_shortcode_url(string $encoded_text): bool
+    {
+        return preg_match($this->encoded_shortcode_signal_pattern, $encoded_text) === 1;
     }
 
     /**
