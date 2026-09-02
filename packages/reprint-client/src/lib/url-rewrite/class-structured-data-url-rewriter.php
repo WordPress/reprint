@@ -142,6 +142,10 @@ class StructuredDataUrlRewriter
             $content_type = self::PLAIN_TEXT;
         }
 
+        if (!$this->maybe_contains_rewritable_urls($value)) {
+            return $value;
+        }
+
         $cache_key = null;
         if (strlen($value) <= self::VALUE_REWRITE_CACHE_MAX_INPUT_BYTES) {
             $cache_key = sha1($content_type . "\0" . $value);
@@ -150,10 +154,6 @@ class StructuredDataUrlRewriter
             if ($cached !== null) {
                 return $cached;
             }
-        }
-
-        if (!$this->maybe_contains_rewritable_urls($value)) {
-            return $value;
         }
 
         $could_be_php_serialization = $this->could_be_php_serialization_with_strings($value);
@@ -450,13 +450,29 @@ class StructuredDataUrlRewriter
                     $resolve_relative_urls ? $base_url : null
                 );
                 while ( $p->next_token() ) {
-                    $block_comment_may_contain_source_domain = '#block-comment' === $p->get_token_type()
-                        && $this->value_might_contain_source_domain( $p->get_modifiable_text() );
+                    $parsed_nested_block_attributes = false;
+                    $block_comment_may_contain_source_domain = false;
+                    if ( '#block-comment' === $p->get_token_type() ) {
+                        $block_comment_text = $p->get_modifiable_text();
+                        $block_comment_may_contain_source_domain = $this->value_might_contain_source_domain( $block_comment_text );
+                    }
                     if ( $block_comment_may_contain_source_domain ) {
                         // The fast check includes supported encoding markers;
                         // the parsed string leaves decide whether a URL exists.
                         $block_attributes = $p->get_block_attributes();
-                        if ( is_array( $block_attributes ) ) {
+                        // A Unicode-escaped quote leaves an alphanumeric byte
+                        // immediately before a raw URL. The cautious scanner
+                        // rejects that boundary, so parse the decoded value.
+                        $block_comment_uses_unicode_escaped_quotes = false !== stripos( $block_comment_text, '\\u0022' )
+                            || false !== stripos( $block_comment_text, '\\u0027' );
+                        if (
+                            is_array( $block_attributes )
+                            && (
+                                $block_comment_uses_unicode_escaped_quotes
+                                || $this->block_attribute_values_need_format_inference( $block_attributes )
+                            )
+                        ) {
+                            $parsed_nested_block_attributes = true;
                             $rewritten_block_attributes = $this->rewrite_inferred_block_attribute_values( $block_attributes );
                             if ( $rewritten_block_attributes !== $block_attributes ) {
                                 $p->set_block_attributes( $rewritten_block_attributes );
@@ -510,7 +526,9 @@ class StructuredDataUrlRewriter
                             $this->set_cached_url_rewrite($url_cache_key, $cache_value);
                         }
                     }
-                    $p->replace_url_bases_in_current_token( $this->cautious_url_base_rewrite_mapping );
+                    if ( ! $parsed_nested_block_attributes ) {
+                        $p->replace_url_bases_in_current_token( $this->cautious_url_base_rewrite_mapping );
+                    }
                 }
 
                 return $p->get_updated_html();
@@ -556,6 +574,69 @@ class StructuredDataUrlRewriter
         }
 
         return $values;
+    }
+
+    /**
+     * Return whether any nested string needs its enclosing format parsed.
+     *
+     * When one string needs parsing, all strings in that block are rewritten
+     * through the same attribute tree. This avoids mixing a re-encoded block
+     * comment with raw byte replacements queued against its old byte offsets.
+     * Most Divi blocks only contain literal ASCII URLs, so they stay on the
+     * existing raw-token path and avoid the expensive recursive rewrite.
+     *
+     * @param array<int|string, mixed> $values Block attribute values.
+     */
+    private function block_attribute_values_need_format_inference( array $values ): bool {
+        foreach ( $values as $value ) {
+            if ( is_array( $value ) ) {
+                if ( $this->block_attribute_values_need_format_inference( $value ) ) {
+                    return true;
+                }
+            } elseif ( is_string( $value ) && $this->nested_block_string_needs_format_inference( $value ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Return whether a nested block string needs its enclosing format parsed.
+     *
+     * The cautious raw-token pass already handles literal ASCII source hosts
+     * in HTML, CSS, JSON, shortcodes, and plain text. Parsing those values
+     * again only changes their encoding and makes Divi imports slower.
+     *
+     * Parsing is still needed when an escape or character reference may hide
+     * part of the host, or when serialized PHP length fields must be updated.
+     * A JSON value may contain serialized PHP at a deeper level, so its raw
+     * text is also checked for a serialization token. Non-ASCII values keep
+     * the structured path because the cautious raw-token pass supports ASCII
+     * and punycode domains, but not literal Unicode domains.
+     *
+     * These are coarse signals, not proof of a content type. The format
+     * hierarchy below still validates PHP serialization and JSON before use.
+     */
+    private function nested_block_string_needs_format_inference( string $value ): bool {
+        if ( ! $this->maybe_contains_rewritable_urls( $value ) ) {
+            return false;
+        }
+
+        if ( $this->could_be_php_serialization_with_strings( $value ) ) {
+            return true;
+        }
+
+        if ( false !== strpos( $value, '\\u' ) || false !== strpos( $value, '&' ) ) {
+            return true;
+        }
+
+        $contains_serialized_value = 1 === preg_match( '/(?:a|s|O|C):\d+:/', $value );
+        if ( $this->could_be_json_with_strings( $value ) && $contains_serialized_value ) {
+            return true;
+        }
+
+        return 1 === preg_match( '/[^\x00-\x7F]/', $value );
     }
 
     /**

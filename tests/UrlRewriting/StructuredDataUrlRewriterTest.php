@@ -459,6 +459,17 @@ class StructuredDataUrlRewriterTest extends TestCase
         );
     }
 
+    public function testLiteralDiviUrlUsesRawRewriteWithoutReencodingBlockJson(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com' => 'https://much-longer.example',
+        ]);
+        $input = '<!-- wp:divi/text { "module": { "content": { "value": "<a href=\"https:\/\/old-site.com\/about\">Read</a>" } } } /-->';
+        $expected = str_replace('old-site.com', 'much-longer.example', $input);
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
     public function testNamespacedBlockAttributeStringsReuseStructuredFormatInference(): void
     {
         $rewriter = $this->createRewriter([
