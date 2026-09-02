@@ -679,6 +679,31 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://new-site.com/from-css.jpg', $rewritten_code);
     }
 
+    #[DataProvider('nonJsonScriptTypeProvider')]
+    public function testDoesNotParseJsonLookingScriptBodiesWithoutAJsonMediaType(
+        string $opening_tag
+    ): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = $opening_tag
+            . '{"url":"https:\u002F\u002Fold-site.com\u002Fvisit-us\u002F"}'
+            . '</script>';
+
+        $this->assertSame($input, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    /**
+     * @return array<string, array{0:string}>
+     */
+    public static function nonJsonScriptTypeProvider(): array
+    {
+        return [
+            'missing type' => ['<script>'],
+            'JavaScript media type' => ['<script type="text/javascript">'],
+            'JSONP media type' => ['<script type="application/jsonp">'],
+        ];
+    }
+
     public function testDiviHtmlEntityHostRewritesWithoutLiteralSourceHostBytes(): void
     {
         $rewriter = $this->createRewriter();

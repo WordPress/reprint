@@ -332,13 +332,29 @@ class SqlStatementRewriterTest extends TestCase
                 '<a href="https&#58;&#47;&#47;old-site&#46;com&#47;visit-us&#47;">Visit</a>',
                 '<a href="https://new-site.com/visit-us/">Visit</a>',
             ],
+            'percent escapes in a URL path and query' => [
+                '<a href="https://old-site.com/files/My%20Manual.pdf?next=%2Fvisit-us%2F">Manual</a>',
+                '<a href="https://new-site.com/files/My%20Manual.pdf?next=%2Fvisit-us%2F">Manual</a>',
+            ],
             'entity-quoted JSON with JSON-escaped slashes in an attribute' => [
                 '<a href="/visit-us/" data-analytics="{&quot;dest&quot;:&quot;https:\/\/old-site.com\/weddings\/&quot;}">Visit</a>',
                 '<a href="/visit-us/" data-analytics="{&quot;dest&quot;:&quot;https:\/\/new-site.com\/weddings\/&quot;}">Visit</a>',
             ],
             'JSON slash escapes and escaped HTML in a script element' => [
                 '<script type="application/json">{"url":"https:\/\/old-site.com\/visit-us\/","html":"<a href=\"https:\/\/old-site.com\/about\/\">About<\/a>"}</script>',
-                '<script type="application/json">{"url":"https:\/\/new-site.com\/visit-us\/","html":"<a href=\"https:\/\/new-site.com\/about\/\">About<\/a>"}</script>',
+                '<script type="application/json">{"url":"https://new-site.com/visit-us/","html":"<a href=\"https://new-site.com/about/\">About</a>"}</script>',
+            ],
+            'JSON Unicode slash escapes in an application/json script element' => [
+                '<script type="application/json">{"url":"https:\u002F\u002Fold-site.com\u002Fvisit-us\u002F"}</script>',
+                '<script type="application/json">{"url":"https://new-site.com/visit-us/"}</script>',
+            ],
+            'JSON Unicode slash escapes in an application/ld+json script element' => [
+                '<script type="application/ld+json; charset=utf-8">'
+                    . '{"@context":"https:\/\/schema.org","url":"https:\u002F\u002Fold-site.com\u002Fvisit-us\u002F"}'
+                    . '</script>',
+                '<script type="application/ld+json; charset=utf-8">'
+                    . '{"@context":"https://schema.org","url":"https://new-site.com/visit-us/"}'
+                    . '</script>',
             ],
             'CSS escaped slashes, a protocol-relative URL, and entity quotes' => [
                 '<style>.hero{background:url(https\:\/\/old-site.com\/hero.jpg)} @import url(//old-site.com/theme.css);</style>'
@@ -400,11 +416,6 @@ class SqlStatementRewriterTest extends TestCase
                 '<script>var urlPattern = /https:\/\/old-site.com\/weddings-and-celebrations\/\//;</script>',
                 '<script>var urlPattern = /https:\/\/new-site.com\/weddings-and-celebrations\/\//;</script>',
                 'The cautious scanner skips a URL immediately after a JavaScript regex delimiter.',
-            ],
-            'JSON Unicode slash escapes' => [
-                '<script type="application/json">{"url":"https:\u002F\u002Fold-site.com\u002Fvisit-us\u002F"}</script>',
-                '<script type="application/json">{"url":"https:\u002F\u002Fnew-site.com\u002Fvisit-us\u002F"}</script>',
-                'The cautious scanner does not decode JSON Unicode escapes around a URL.',
             ],
             'double-encoded HTML character references' => [
                 '<a href="https&amp;#58;&amp;#47;&amp;#47;old-site&amp;#46;com&amp;#47;visit-us&amp;#47;">Visit</a>',

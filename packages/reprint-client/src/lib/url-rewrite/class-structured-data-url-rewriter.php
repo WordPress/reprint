@@ -979,6 +979,34 @@ class StructuredDataUrlRewriter
                         }
                     }
 
+                    // A JSON media type makes the script body safe to parse as
+                    // JSON. Other script bodies keep the cautious byte scan.
+                    if (
+                        '#tag' === $p->get_token_type()
+                        && ! $p->is_tag_closer()
+                        && 'SCRIPT' === $p->get_tag()
+                    ) {
+                        $script_type = $p->get_attribute('type');
+                        if (is_string($script_type)) {
+                            $script_media_type = strtolower(trim(explode(';', $script_type, 2)[0]));
+                            if (
+                                preg_match(
+                                    '/\Aapplication\/(?:[a-z0-9!#$&^_.+-]+\+)?json\z/',
+                                    $script_media_type
+                                ) === 1
+                            ) {
+                                $script_body = $p->get_modifiable_text();
+                                $rewritten_script_body = $this->rewrite(
+                                    $script_body,
+                                    self::BLOCK_MARKUP
+                                );
+                                if ($rewritten_script_body !== $script_body) {
+                                    $p->set_modifiable_text($rewritten_script_body);
+                                }
+                            }
+                        }
+                    }
+
                     $token_type = $p->get_token_type() ?? '';
                     while ( $p->next_url_in_current_token() ) {
                         $raw_url = $p->get_raw_url();
