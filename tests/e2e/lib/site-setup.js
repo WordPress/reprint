@@ -25,12 +25,12 @@ const DB_PASS = REGISTRY.dbPass;
 const WP_VERSION = process.env.E2E_WORDPRESS_VERSION || REGISTRY.wpVersion;
 const WP_CLI_PHP_BINARY = process.env.E2E_WP_CLI_PHP_BINARY || 'php';
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const EXPORTER_PROJECT_ROOT = process.env.E2E_EXPORTER_PROJECT_ROOT || PROJECT_ROOT;
-// E2E_EXPORTER_PROJECT_ROOT may point at a historical checkout that predates
+const SERVER_PROJECT_ROOT = process.env.E2E_SERVER_PROJECT_ROOT || PROJECT_ROOT;
+// E2E_SERVER_PROJECT_ROOT may point at a historical checkout that predates
 // the reprint-server-wp rename.
-const PLUGIN_SRC = existsSync(join(EXPORTER_PROJECT_ROOT, 'reprint-server-wp'))
-    ? join(EXPORTER_PROJECT_ROOT, 'reprint-server-wp')
-    : join(EXPORTER_PROJECT_ROOT, 'reprint-exporter-wp');
+const PLUGIN_SRC = existsSync(join(SERVER_PROJECT_ROOT, 'reprint-server-wp'))
+    ? join(SERVER_PROJECT_ROOT, 'reprint-server-wp')
+    : join(SERVER_PROJECT_ROOT, 'reprint-exporter-wp');
 const WP_TARBALL = `/tmp/wordpress-${WP_VERSION}.tar.gz`;
 const WP_TEMPLATE = '/tmp/wordpress-template';
 const WP_READY = '/tmp/wordpress-template/.wp-ready';
@@ -253,13 +253,13 @@ export async function ensureSite(name, options = {}) {
     // Copy the built plugin bundle, including its bundled Composer vendor tree.
     cpSync(
         PLUGIN_SRC,
-        join(siteDir, 'wp-content', 'plugins', 'site-export'),
+        join(siteDir, 'wp-content', 'plugins', 'reprint-server'),
         { recursive: true }
     );
 
     // Write secret.php after copying the plugin bundle so the target directory exists.
     writeFileSync(
-        join(siteDir, 'wp-content', 'plugins', 'site-export', 'secret.php'),
+        join(siteDir, 'wp-content', 'plugins', 'reprint-server', 'secret.php'),
         `<?php return '${secret}';\n`
     );
     log('Files copied');
@@ -281,7 +281,7 @@ export async function ensureSite(name, options = {}) {
         log('wp core install done');
 
         // Activate the Reprint Server plugin so WordPress loads index.php on requests.
-        wpPluginActivate(siteDir, 'site-export');
+        wpPluginActivate(siteDir, 'reprint-server');
 
         // Run customDb hook to add extra tables on top of real WP
         if (options.customDb) {

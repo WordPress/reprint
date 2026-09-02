@@ -25,7 +25,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: importer-phar
+          name: client-phar
           path: reprint.phar
 
   build-server-plugin:
@@ -56,7 +56,7 @@ jobs:
     # Keep the existing source E2E rows running if only the Reprint Server
     # artifact build fails. The PHP 5.6 row will fail when its artifact is absent.
     if: ${{ always() && !cancelled() && needs['build-phar'].result == 'success' }}
-    name: E2E (exporter PHP ${{ matrix.exporter_php }}, importer PHP ${{ matrix.importer_php }})
+    name: E2E (server PHP ${{ matrix.server_php }}, client PHP ${{ matrix.client_php }})
     needs: [build-phar, build-server-plugin]
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -64,25 +64,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - exporter_php: '5.6'
-            importer_php: '8.2'
+          - server_php: '5.6'
+            client_php: '8.2'
             wordpress_version: '6.2.9'
-          - exporter_php: '7.2'
-            importer_php: '8.2'
-          - exporter_php: '7.4'
-            importer_php: '7.4'
-          - exporter_php: '8.0'
-            importer_php: '8.0'
-          - exporter_php: '8.1'
-            importer_php: '8.1'
-          - exporter_php: '8.2'
-            importer_php: '8.2'
-          - exporter_php: '8.3'
-            importer_php: '8.3'
-          - exporter_php: '8.4'
-            importer_php: '8.4'
-          - exporter_php: '8.5'
-            importer_php: '8.5'
+          - server_php: '7.2'
+            client_php: '8.2'
+          - server_php: '7.4'
+            client_php: '7.4'
+          - server_php: '8.0'
+            client_php: '8.0'
+          - server_php: '8.1'
+            client_php: '8.1'
+          - server_php: '8.2'
+            client_php: '8.2'
+          - server_php: '8.3'
+            client_php: '8.3'
+          - server_php: '8.4'
+            client_php: '8.4'
+          - server_php: '8.5'
+            client_php: '8.5'
 
     steps:
       - uses: actions/checkout@v5
@@ -91,33 +91,33 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: importer-phar
+          name: client-phar
 
       - uses: actions/download-artifact@v4
-        if: matrix.exporter_php == '5.6'
+        if: matrix.server_php == '5.6'
         with:
           name: server-plugin
           path: ${{ runner.temp }}/server-plugin-download
 
       - name: Extract generated Reprint Server plugin
-        if: matrix.exporter_php == '5.6'
+        if: matrix.server_php == '5.6'
         run: |
           artifact_root="$RUNNER_TEMP/generated-server-plugin"
           mkdir -p "$artifact_root/reprint-server-wp"
           unzip -q \
             "$RUNNER_TEMP/server-plugin-download/reprint-exporter-wp.zip" \
             -d "$artifact_root/reprint-server-wp"
-          echo "E2E_EXPORTER_PROJECT_ROOT=$artifact_root" >> "$GITHUB_ENV"
+          echo "E2E_SERVER_PROJECT_ROOT=$artifact_root" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Setup importer PHP
-        if: matrix.importer_php != matrix.exporter_php
+      - name: Setup client PHP
+        if: matrix.client_php != matrix.server_php
         uses: shivammathur/setup-php@v2
         with:
-          php-version: ${{ matrix.importer_php }}
+          php-version: ${{ matrix.client_php }}
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
           coverage: none
 
@@ -126,22 +126,22 @@ jobs:
       # because every Launchpad endpoint flakes regularly.
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: ${{ matrix.exporter_php }}
+          php-version: ${{ matrix.server_php }}
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
           coverage: none
 
       - name: Setup infrastructure
-        run: tests/e2e/ci/setup-infrastructure.sh "${{ matrix.exporter_php }}"
+        run: tests/e2e/ci/setup-infrastructure.sh "${{ matrix.server_php }}"
 
       - name: Start Oracle MySQL 8 target
-        if: matrix.exporter_php == '8.2'
+        if: matrix.server_php == '8.2'
         run: tests/e2e/ci/start-mysql8-target.sh
 
-      - name: Restore importer PHP and Composer for CLI tools
-        if: matrix.exporter_php == '5.6'
+      - name: Restore client PHP and Composer for CLI tools
+        if: matrix.server_php == '5.6'
         uses: shivammathur/setup-php@v2
         with:
-          php-version: ${{ matrix.importer_php }}
+          php-version: ${{ matrix.client_php }}
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
           coverage: none
 
@@ -155,8 +155,8 @@ jobs:
       - name: Provision basic site and smoke-test API
         env:
           E2E_WORDPRESS_VERSION: ${{ matrix.wordpress_version }}
-          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
-          IMPORTER_PHP: php${{ matrix.importer_php }}
+          CLIENT_PATH: ${{ github.workspace }}/reprint.phar
+          CLIENT_PHP: php${{ matrix.client_php }}
         working-directory: tests/e2e
         run: |
           # Download WP-CLI (normally done by Vitest globalSetup, but we need it here)
@@ -172,14 +172,14 @@ jobs:
           console.log("Basic site provisioned");
           NODESCRIPT
 
-          # Quick smoke test: use the importer CLI to hit the export API.
+          # Quick smoke test: use the client CLI to hit the export API.
           SECRET="test-secret-basic"
           BASE="http://127.0.0.1:8081/?reprint-api"
           DIR="/srv/e2e-sites/basic"
           STATE_DIR="/tmp/e2e-smoke-state"
           FS_ROOT="/tmp/e2e-smoke-fs"
 
-          # Warm up the export endpoint before any time-boxed importer command.
+          # Warm up the export endpoint before any time-boxed client command.
           # ensureSite only provisions files + DB via wp-cli; the first HTTP
           # request still pays the full PHP-FPM cold start (worker spawn, WP
           # bootstrap, Composer autoload, export.php require). Poll until the
@@ -202,37 +202,37 @@ jobs:
             exit 1
           fi
 
-          if [ "${{ matrix.exporter_php }}" = "5.6" ]; then
+          if [ "${{ matrix.server_php }}" = "5.6" ]; then
             # API dispatch exits before index.php loads the plugin's WordPress
             # admin-registration file. A regular page request covers that path
             # with the PHP 5.6 FPM worker too. The API warmup accepts any HTTP
             # response, so it does not prove that a regular WordPress request
             # is ready yet. Retry transient HTTP failures while keeping a
             # lasting plugin-load failure fatal.
-            echo "=== Loading WordPress with the exporter on PHP 5.6 ==="
+            echo "=== Loading WordPress with the server on PHP 5.6 ==="
             curl --retry 10 --retry-delay 1 --retry-connrefused \
               -fsS -o /dev/null -m 30 "http://127.0.0.1:8081/"
           fi
 
-          if [ "$IMPORTER_PHP" = "php7.4" ] || [ "$IMPORTER_PHP" = "php8.0" ]; then
-            echo "=== Importer files-push PHP version gate ==="
+          if [ "$CLIENT_PHP" = "php7.4" ] || [ "$CLIENT_PHP" = "php8.0" ]; then
+            echo "=== Client files-push PHP version gate ==="
             PUSH_STATE_DIR="/tmp/e2e-files-push-version-state"
             PUSH_FS_ROOT="/tmp/e2e-files-push-version-files"
-            PUSH_PROBE="files-push-version-${{ matrix.importer_php }}"
+            PUSH_PROBE="files-push-version-${{ matrix.client_php }}"
             rm -rf "$PUSH_STATE_DIR" "$PUSH_FS_ROOT"
             mkdir -p "$PUSH_FS_ROOT"
             PUSH_REMOTE_URL="${BASE}&directory=${DIR}&version_gate_probe=${PUSH_PROBE}"
             # Seed the mandatory preflight, then clear that setup request so the
             # access-log assertion below covers only files-push.
-            "$IMPORTER_PHP" "$IMPORTER_PATH" preflight "$PUSH_REMOTE_URL" --state-dir="${PUSH_STATE_DIR}" --fs-root="${PUSH_FS_ROOT}" --secret="${SECRET}" >/dev/null
+            "$CLIENT_PHP" "$CLIENT_PATH" preflight "$PUSH_REMOTE_URL" --state-dir="${PUSH_STATE_DIR}" --fs-root="${PUSH_FS_ROOT}" --secret="${SECRET}" >/dev/null
             sudo truncate -s 0 /var/log/nginx/access.log
             set +e
-            files_push_version_output="$("$IMPORTER_PHP" "$IMPORTER_PATH" files-push "$PUSH_REMOTE_URL" --state-dir="${PUSH_STATE_DIR}" --fs-root="${PUSH_FS_ROOT}" --secret="${SECRET}" --force-http 2>&1)"
+            files_push_version_output="$("$CLIENT_PHP" "$CLIENT_PATH" files-push "$PUSH_REMOTE_URL" --state-dir="${PUSH_STATE_DIR}" --fs-root="${PUSH_FS_ROOT}" --secret="${SECRET}" --force-http 2>&1)"
             files_push_version_status=$?
             set -e
             if [ "$files_push_version_status" -ne 1 ]; then
               echo "$files_push_version_output"
-              echo "Expected files-push to exit 1 on ${IMPORTER_PHP}; got ${files_push_version_status}"
+              echo "Expected files-push to exit 1 on ${CLIENT_PHP}; got ${files_push_version_status}"
               exit 1
             fi
             echo "$files_push_version_output" | grep -F 'reprint push requires PHP 8.1 or newer'
@@ -247,10 +247,10 @@ jobs:
             fi
           fi
 
-          echo "=== Importer preflight ==="
+          echo "=== Client preflight ==="
           # The shell timeout is deliberately larger than curl's own 30s
           # CURLOPT_TIMEOUT so a stalled request produces a clean, diagnosable
-          # curl error the importer can report — rather than an uncatchable
+          # curl error the client can report — rather than an uncatchable
           # SIGTERM at the exact 30s boundary (the old exit-124 flake). Retry a
           # few times so a single transient stall doesn't fail the whole job,
           # mirroring the files-pull loop below.
@@ -258,7 +258,7 @@ jobs:
           preflight_attempt=0
           while [ "$preflight_status" -ne 0 ] && [ "$preflight_attempt" -lt 3 ]; do
             preflight_attempt=$((preflight_attempt + 1))
-            preflight_output="$(timeout 45 "$IMPORTER_PHP" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" && preflight_status=0 || preflight_status=$?
+            preflight_output="$(timeout 45 "$CLIENT_PHP" "$CLIENT_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" && preflight_status=0 || preflight_status=$?
             echo "$preflight_output" | head -50
             if [ "$preflight_status" -ne 0 ]; then
               echo "preflight failed (exit ${preflight_status}); retrying (attempt ${preflight_attempt})"
@@ -270,30 +270,30 @@ jobs:
             exit "$preflight_status"
           fi
 
-          if [ "${{ matrix.exporter_php }}" = "5.6" ]; then
-            echo "=== Exporter push endpoint PHP version gate ==="
-            PUSH_STATE_DIR="/tmp/e2e-exporter-push-version-state"
-            PUSH_FS_ROOT="/tmp/e2e-exporter-push-version-files"
+          if [ "${{ matrix.server_php }}" = "5.6" ]; then
+            echo "=== Server push endpoint PHP version gate ==="
+            PUSH_STATE_DIR="/tmp/e2e-server-push-version-state"
+            PUSH_FS_ROOT="/tmp/e2e-server-push-version-files"
             mkdir -p "$PUSH_FS_ROOT"
             printf 'push must stay disabled on PHP 5.6\n' > "$PUSH_FS_ROOT/probe.txt"
-            "$IMPORTER_PHP" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="$PUSH_STATE_DIR" --fs-root="$PUSH_FS_ROOT" --secret="$SECRET" >/dev/null
+            "$CLIENT_PHP" "$CLIENT_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="$PUSH_STATE_DIR" --fs-root="$PUSH_FS_ROOT" --secret="$SECRET" >/dev/null
             set +e
-            exporter_push_output="$("$IMPORTER_PHP" "$IMPORTER_PATH" files-push "${BASE}&directory=${DIR}" --state-dir="$PUSH_STATE_DIR" --fs-root="$PUSH_FS_ROOT" --secret="$SECRET" --force-http 2>&1)"
-            exporter_push_status=$?
+            server_push_output="$("$CLIENT_PHP" "$CLIENT_PATH" files-push "${BASE}&directory=${DIR}" --state-dir="$PUSH_STATE_DIR" --fs-root="$PUSH_FS_ROOT" --secret="$SECRET" --force-http 2>&1)"
+            server_push_status=$?
             set -e
-            if [ "$exporter_push_status" -ne 1 ]; then
-              echo "$exporter_push_output"
-              echo "Expected the PHP 5.6 exporter to reject files-push; got ${exporter_push_status}"
+            if [ "$server_push_status" -ne 1 ]; then
+              echo "$server_push_output"
+              echo "Expected the PHP 5.6 server to reject files-push; got ${server_push_status}"
               exit 1
             fi
-            echo "$exporter_push_output" | grep -F 'Push endpoints require PHP 7.2 or newer'
+            echo "$server_push_output" | grep -F 'Push endpoints require PHP 7.2 or newer'
           fi
 
-          echo "=== Importer files-pull ==="
+          echo "=== Client files-pull ==="
           # One files-pull invocation has no wall-clock self-limit on the CLI
           # (max_execution_time is 0), so on a slow runner it can still be
           # mid-download when the shell `timeout` fires and SIGTERMs it
-          # (exit 124). That is a resumable state — the importer saves its
+          # (exit 124). That is a resumable state — the client saves its
           # cursor on SIGTERM — so resume and retry, exactly like a normal
           # partial (exit 2). A forward-progress check on a timeout keeps a
           # genuine stall from looping silently to the attempt cap.
@@ -304,7 +304,7 @@ jobs:
           while { [ "$files_pull_status" -eq 2 ] || [ "$files_pull_status" -eq 124 ]; } \
                 && [ "$files_pull_attempt" -lt "$files_pull_max_attempts" ]; do
             files_pull_attempt=$((files_pull_attempt + 1))
-            files_pull_output="$(timeout 60 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" && files_pull_status=0 || files_pull_status=$?
+            files_pull_output="$(timeout 60 "$CLIENT_PHP" "$CLIENT_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" && files_pull_status=0 || files_pull_status=$?
             echo "$files_pull_output" | head -50
             files_pull_count="$(find "$FS_ROOT" -type f 2>/dev/null | wc -l | tr -d ' ')"
             if [ "$files_pull_status" -eq 2 ]; then
@@ -327,22 +327,22 @@ jobs:
           fi
 
       - name: Run full pull from PHP 5.6 site
-        if: matrix.exporter_php == '5.6'
+        if: matrix.server_php == '5.6'
         env:
-          E2E_EXPECTED_EXPORTER_PHP_VERSION: ${{ matrix.exporter_php }}
+          E2E_EXPECTED_SERVER_PHP_VERSION: ${{ matrix.server_php }}
           E2E_WORDPRESS_VERSION: ${{ matrix.wordpress_version }}
-          E2E_WP_CLI_PHP_BINARY: php${{ matrix.importer_php }}
-          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
-          PHP_BINARY: php${{ matrix.importer_php }}
+          E2E_WP_CLI_PHP_BINARY: php${{ matrix.client_php }}
+          CLIENT_PATH: ${{ github.workspace }}/reprint.phar
+          PHP_BINARY: php${{ matrix.client_php }}
         working-directory: tests/e2e
         run: npx vitest run tests/import-46-pull-basic.test.js --test-timeout=180000
 
       - name: Run E2E tests
-        if: matrix.exporter_php != '5.6' && matrix.exporter_php != '7.2'
+        if: matrix.server_php != '5.6' && matrix.server_php != '7.2'
         env:
-          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
+          CLIENT_PATH: ${{ github.workspace }}/reprint.phar
         working-directory: tests/e2e
-        # Individual importer subprocesses have their own tighter timeouts;
+        # Individual client subprocesses have their own tighter timeouts;
         # the Vitest budget must cover slow PHP-FPM matrix runs.
         run: npx vitest run --test-timeout=120000
 
@@ -358,7 +358,7 @@ jobs:
           echo "--- Nginx config test ---"
           sudo nginx -t 2>&1 || true
           echo "--- PHP-FPM journal ---"
-          sudo journalctl -u "php${{ matrix.exporter_php }}-fpm" --no-pager -n 30 2>/dev/null || true
+          sudo journalctl -u "php${{ matrix.server_php }}-fpm" --no-pager -n 30 2>/dev/null || true
           echo "--- Nginx journal ---"
           sudo journalctl -u nginx --no-pager -n 30 2>/dev/null || true
           echo "--- MariaDB journal ---"

@@ -390,7 +390,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         );
 
         assertTreesMatch(getSiteDir(site), localSiteRoot(mirrorTempDir), {
-            exclude: ['wp-content/plugins/site-export/test-hooks.php'],
+            exclude: ['wp-content/plugins/reprint-server/test-hooks.php'],
         });
         assert.ok(
             !existsSync(join(localSiteRoot(mirrorTempDir), 'test-data', 'local-only')),

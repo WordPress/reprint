@@ -43,7 +43,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: importer-phar-pr
+          name: client-phar-pr
           path: reprint.phar
 
   build-trunk-phar:
@@ -77,7 +77,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: importer-phar-trunk
+          name: client-phar-trunk
           path: reprint.phar
 
   bench:
@@ -108,13 +108,13 @@ jobs:
       - name: Download PR phar
         uses: actions/download-artifact@v4
         with:
-          name: importer-phar-pr
+          name: client-phar-pr
           path: phars/pr
 
       - name: Download trunk phar
         uses: actions/download-artifact@v4
         with:
-          name: importer-phar-trunk
+          name: client-phar-trunk
           path: phars/trunk
 
       - uses: actions/setup-node@v4
@@ -150,12 +150,12 @@ jobs:
       - name: Bench PR
         working-directory: tests/e2e
         env:
-          IMPORTER_PATH: ${{ github.workspace }}/phars/pr/reprint.phar
+          CLIENT_PATH: ${{ github.workspace }}/phars/pr/reprint.phar
           BENCH_LABEL: pr
           BENCH_JSON_OUT: bench-pr.json
           BENCH_MD_OUT: bench-pr.md
           BENCH_STAGES: ${{ steps.stages.outputs.stages }}
-          E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}
+          E2E_SERVER_PROJECT_ROOT: ${{ github.workspace }}
           # Keep the PHP.wasm SQLite benchmark large enough to exercise the
           # parser without pushing a PR check into the workflow timeout.
           BENCH_SEED_POSTS: '10000'
@@ -174,15 +174,15 @@ jobs:
       - name: Bench trunk
         working-directory: tests/e2e
         env:
-          IMPORTER_PATH: ${{ github.workspace }}/phars/trunk/reprint.phar
+          CLIENT_PATH: ${{ github.workspace }}/phars/trunk/reprint.phar
           BENCH_LABEL: trunk
           BENCH_JSON_OUT: bench-trunk.json
           BENCH_MD_OUT: bench-trunk.md
           BENCH_STAGES: ${{ steps.stages.outputs.stages }}
-          E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}
+          E2E_SERVER_PROJECT_ROOT: ${{ github.workspace }}
           BENCH_SEED_POSTS: '10000'
           BENCH_SEED_POSTMETA: '25000'
-          BENCH_PREFLIGHT_IMPORTER_PATH: ${{ github.workspace }}/phars/pr/reprint.phar
+          BENCH_PREFLIGHT_CLIENT_PATH: ${{ github.workspace }}/phars/pr/reprint.phar
           BENCH_PLAYGROUND_PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
           PLAYGROUND_PHP_USE_WASM_RUNNER: '1'
           PLAYGROUND_PHP_VERSION: '8.3'

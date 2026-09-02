@@ -32,7 +32,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
     const progressTable = '__reprint_db_pull_progress_49acb118-a97a-45c7-814d-8e670db7f6b4';
     const targetDb = `${getDbName(site)}_import`;
     const projectRoot = join(import.meta.dirname, '..', '..', '..');
-    const importerPath = process.env.IMPORTER_PATH
+    const clientPath = process.env.CLIENT_PATH
         || join(projectRoot, 'packages', 'reprint-client', 'bin', 'reprint-client');
     const phpBinary = process.env.PHP_BINARY || 'php';
     let tempDir;
@@ -70,7 +70,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
     function spawnDatabasePull() {
         const output = { stdout: '', stderr: '' };
         const childProcess = spawn(phpBinary, [
-            importerPath,
+            clientPath,
             'db-pull',
             importUrl(),
             `--state-dir=${tempDir}`,
@@ -94,7 +94,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
     function spawnDatabaseApply(stateDir) {
         const output = { stdout: '', stderr: '' };
         const childProcess = spawn(phpBinary, [
-            importerPath,
+            clientPath,
             'db-apply',
             importUrl(),
             `--state-dir=${stateDir}`,

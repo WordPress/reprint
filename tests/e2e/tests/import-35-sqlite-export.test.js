@@ -125,7 +125,7 @@ async function ensureSqliteSite(site, pluginVersion) {
 
             // Activate the Reprint Server plugin.
             execSync(
-                `php /tmp/wp-cli.phar plugin activate site-export` +
+                `php /tmp/wp-cli.phar plugin activate reprint-server` +
                 ` --path=${JSON.stringify(siteDir)}` +
                 allowRoot,
                 { timeout: 30000, stdio: 'pipe' },

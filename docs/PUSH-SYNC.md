@@ -71,9 +71,10 @@ change from stranding a partial commit and its maintenance marker.
 Personal consent stores only the current connection token's SHA-256
 fingerprint. Rotating the token therefore revokes push access. A hosting
 provider may override local consent by defining the boolean
-`SITE_EXPORT_PUSH_ENABLED` constant before active plugins load or by setting
-the environment variable of the same name. Managed `true` enables push and
-managed `false` hard-disables push without abandoning durable commit recovery.
+`WordPress\Reprint\Server\Plugin\PUSH_ENABLED` constant before active plugins
+load or by setting `REPRINT_SERVER_PUSH_ENABLED` in the environment. Managed
+`true` enables push and managed `false` hard-disables push without abandoning
+durable commit recovery.
 
 ## Change detection: local machine compared against itself
 
@@ -221,7 +222,7 @@ request can resume from a durable checkpoint instead of repeating a delete.
 
 ## The push session
 
-`Site_Export_Push_Session` stores each session at
+`WordPress\Reprint\Server\PushSession` stores each session at
 `<reprint-directory>/.reprint/push/<push-session-id>/`. `push.json` is the
 push identity and policy plus whether the work-delete stream is complete.
 `commit.json` holds the bounded commit cursor. Both are atomically replaced
@@ -299,8 +300,9 @@ cursor before continuing.
 
 The WordPress plugin passes the platform-supplied `docroot` to push endpoints,
 defaulting to the web server's `DOCUMENT_ROOT`. A platform supplies the complete
-trusted API-options array through the early `site_export_api_options` filter; a
-direct embedder passes the same array to `_site_export_handle_api_request()`.
+trusted API-options array through the early `reprint_server_api_options` filter;
+a direct embedder passes the same array to
+`WordPress\Reprint\Server\Plugin\handle_api_request()`.
 The document-root path must resolve to an existing directory. `ABSPATH` remains
 the default only for pull endpoints because it may point at a separate shared
 WordPress core tree. Push work lives in a document-root-specific private

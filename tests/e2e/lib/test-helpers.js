@@ -16,7 +16,7 @@ const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
 
 const SITE_ROOT = REGISTRY.siteRoot;
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
+const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
@@ -244,7 +244,7 @@ export function runImporter(url, outputDir, command, options = {}) {
 
     function runImporterOnce(cmd, extraArgs = []) {
         const args = [
-            IMPORTER_PATH,
+            CLIENT_PATH,
             cmd,
             url,
             `--state-dir=${outputDir}`,
@@ -560,7 +560,7 @@ export async function compareDatabases(sourceDb, importDb) {
  * Write a test-hooks.php file for a site.
  */
 export function writeTestHooks(siteName, phpCode) {
-    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'site-export', 'test-hooks.php');
+    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'reprint-server', 'test-hooks.php');
     const code = `<?php
 // PHP hooks and Node assertions can touch this file at the same time. Write
 // the complete next JSON value beside the old one, then replace it in one
@@ -592,7 +592,7 @@ ${phpCode}
  * Remove test-hooks.php for a site.
  */
 export function removeTestHooks(siteName) {
-    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'site-export', 'test-hooks.php');
+    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'reprint-server', 'test-hooks.php');
     try {
         execSync(`sudo rm -f ${JSON.stringify(hookPath)}`);
     } catch {

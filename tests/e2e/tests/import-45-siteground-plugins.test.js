@@ -22,7 +22,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
+const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 
 describe('Import: SiteGround plugin stripping', () => {
     const site = 'siteground-plugins';
@@ -179,8 +179,8 @@ describe('Import: SiteGround plugin stripping', () => {
             );
             // Confirm non-SG plugins survived.
             assert.ok(
-                raw.includes('site-export'),
-                `active_plugins should still contain site-export, got: ${raw}`,
+                raw.includes('reprint-server'),
+                `active_plugins should still contain reprint-server, got: ${raw}`,
             );
         });
 
@@ -208,7 +208,7 @@ describe('Import: SiteGround plugin stripping', () => {
                 `flat-docroot failed:\n${flatResult.stderr}`);
 
             execFileSync('php', [
-                IMPORTER_PATH,
+                CLIENT_PATH,
                 'apply-runtime',
                 importUrl(),
                 `--state-dir=${tempDir}`,
@@ -241,7 +241,7 @@ describe('Import: SiteGround plugin stripping', () => {
         it('unrelated plugins are preserved on disk', () => {
             const flatDir = join(tempDir, 'flattened');
             assert.ok(
-                existsSync(join(flatDir, 'wp-content', 'plugins', 'site-export')),
+                existsSync(join(flatDir, 'wp-content', 'plugins', 'reprint-server')),
                 'Reprint Server plugin should still exist after apply-runtime',
             );
         });

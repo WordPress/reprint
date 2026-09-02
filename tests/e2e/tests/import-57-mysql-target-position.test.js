@@ -33,7 +33,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
     const previousProgressTable = '__reprint_db_pull_progress_11111111-2222-4333-8444-555555555555';
     const targetDb = `${getDbName(site)}_import`;
     const projectRoot = join(import.meta.dirname, '..', '..', '..');
-    const importerPath = process.env.IMPORTER_PATH
+    const clientPath = process.env.CLIENT_PATH
         || join(projectRoot, 'packages', 'reprint-client', 'bin', 'reprint-client');
     const phpBinary = process.env.PHP_BINARY || 'php';
     const activeChildren = new Set();
@@ -65,7 +65,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
     function spawnDatabasePull() {
         const output = { stdout: '', stderr: '' };
         const childProcess = spawn(phpBinary, [
-            importerPath,
+            clientPath,
             'db-pull',
             importUrl(),
             `--state-dir=${tempDir}`,

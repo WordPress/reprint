@@ -1,5 +1,5 @@
 /**
- * HMAC authentication client for Site Export API.
+ * HMAC authentication client for the Reprint Server API.
  * JavaScript implementation matching the PHP Site_Export_HMAC_Client.
  *
  * Signature = HMAC-SHA256(nonce + timestamp + SHA256(body), secret)

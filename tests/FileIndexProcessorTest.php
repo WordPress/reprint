@@ -8,21 +8,47 @@ use function WordPress\Reprint\Server\relative_path_under;
 
 require_once dirname(__DIR__) . '/packages/reprint-server/src/class-file-index-processor.php';
 
+$GLOBALS['reprint_server_directory_scan_hook_calls'] = 0;
+if (!function_exists('_e2e_call_hook')) {
+    // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Production test-hook stub.
+    function _e2e_call_hook(string $name, array &$arguments = []): void
+    {
+        if ($name === 'test_hook_during_dir_scan' && isset($arguments[1])) {
+            ++$GLOBALS['reprint_server_directory_scan_hook_calls'];
+        }
+    }
+}
+
+// phpcs:ignore Universal.Files.SeparateFunctionsFromOO.Mixed -- Test stub mirrors the production hook.
 final class FileIndexProcessorTest extends TestCase {
 
     private string $tempDir;
+
+    /** @var string|false */
+    private $originalCanonicalTestMode;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/file-index-processor-' . uniqid();
         mkdir($this->tempDir, 0755, true);
+        $this->originalCanonicalTestMode = getenv('REPRINT_SERVER_TEST_MODE');
+        putenv('REPRINT_SERVER_TEST_MODE');
+        $GLOBALS['reprint_server_directory_scan_hook_calls'] = 0;
     }
 
     protected function tearDown(): void
     {
         $this->deleteTree($this->tempDir);
+        $this->restoreEnvironment('REPRINT_SERVER_TEST_MODE', $this->originalCanonicalTestMode);
         parent::tearDown();
+    }
+
+    public function testCanonicalTestModeRunsDirectoryScanHook(): void
+    {
+        putenv('REPRINT_SERVER_TEST_MODE=1');
+
+        $this->assertDirectoryScanHookRuns();
     }
 
     public function testResumeAfterEveryStepMatchesOneOpenProcessor(): void
@@ -476,6 +502,33 @@ final class FileIndexProcessorTest extends TestCase {
             $followSymlinks,
             $storagePath
         );
+    }
+
+    private function assertDirectoryScanHookRuns(): void
+    {
+        $docroot = $this->tempDir . '/test-mode-site';
+        mkdir($docroot, 0755, true);
+        file_put_contents($docroot . '/index.php', '<?php');
+        $processor = $this->startProcessor([$docroot], $docroot, false, '');
+
+        try {
+            $this->assertTrue($processor->next_index_step());
+            $this->assertGreaterThan(0, $GLOBALS['reprint_server_directory_scan_hook_calls']);
+        } finally {
+            $processor->close();
+        }
+    }
+
+    /**
+     * @param string|false $value Original environment value.
+     */
+    private function restoreEnvironment(string $name, $value): void
+    {
+        if ($value === false) {
+            putenv($name);
+            return;
+        }
+        putenv($name . '=' . $value);
     }
 
     /**
