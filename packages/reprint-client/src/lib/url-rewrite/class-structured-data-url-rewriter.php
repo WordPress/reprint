@@ -103,68 +103,16 @@ class StructuredDataUrlRewriter
     public function __construct(array $url_mapping)
     {
         $this->cautious_url_base_rewrite_mapping = new CautiousURLBaseRewriteMapping($url_mapping);
-        $this->shortcode_body_rewriters = array(
-            'vc_table'    => array($this, 'rewrite_wpbakery_table_body'),
-            'vc_raw_html' => array($this, 'rewrite_wpbakery_raw_code_body'),
-            'vc_raw_js'   => array($this, 'rewrite_wpbakery_raw_code_body'),
+        $wpbakery_url_rewriter = new WPBakeryUrlRewriter(
+            function (string $value): string {
+                return $this->rewrite($value, self::BLOCK_MARKUP);
+            },
+            function (string $value): string {
+                return $this->rewrite_urls($value, self::PLAIN_TEXT);
+            }
         );
-        $wpbakery_link_attribute_rewriter = array(
-            'rewrite'   => array($this, 'rewrite_wpbakery_link_attribute'),
-            'hides_url' => false,
-        );
-        $wpbakery_safe_attribute_rewriter = array(
-            'rewrite'   => array($this, 'rewrite_wpbakery_safe_attribute'),
-            'hides_url' => true,
-        );
-        $this->shortcode_attribute_rewriters = array(
-            'vc_btn'            => array(
-                'link' => $wpbakery_link_attribute_rewriter,
-                'url'  => $wpbakery_link_attribute_rewriter,
-            ),
-            'vc_button2'        => array(
-                'link' => $wpbakery_link_attribute_rewriter,
-                'url'  => $wpbakery_link_attribute_rewriter,
-            ),
-            'vc_cta_button2'    => array(
-                'link' => $wpbakery_link_attribute_rewriter,
-            ),
-            'vc_custom_heading' => array(
-                'link' => $wpbakery_link_attribute_rewriter,
-                'url'  => $wpbakery_link_attribute_rewriter,
-            ),
-            'vc_gallery'        => array(
-                'custom_links' => $wpbakery_safe_attribute_rewriter,
-                'custom_srcs'  => $wpbakery_safe_attribute_rewriter,
-            ),
-            'vc_gmaps'          => array(
-                'link' => $wpbakery_safe_attribute_rewriter,
-            ),
-            'vc_gitem_image'    => array(
-                'url' => $wpbakery_link_attribute_rewriter,
-            ),
-            'vc_gitem_zone'     => array(
-                'url' => $wpbakery_link_attribute_rewriter,
-            ),
-            'vc_gitem_zone_a'   => array(
-                'url' => $wpbakery_link_attribute_rewriter,
-            ),
-            'vc_gitem_zone_b'   => array(
-                'url' => $wpbakery_link_attribute_rewriter,
-            ),
-            'vc_icon'           => array(
-                'link' => $wpbakery_link_attribute_rewriter,
-                'url'  => $wpbakery_link_attribute_rewriter,
-            ),
-            'vc_images_carousel' => array(
-                'custom_links' => $wpbakery_safe_attribute_rewriter,
-            ),
-            'vc_posts_slider'   => array(
-                'custom_links' => $wpbakery_safe_attribute_rewriter,
-            ),
-            'vc_single_image'   => array(
-                'url' => $wpbakery_link_attribute_rewriter,
-            ),
-        );
+        $this->shortcode_body_rewriters = $wpbakery_url_rewriter->get_shortcode_body_rewriters();
+        $this->shortcode_attribute_rewriters = $wpbakery_url_rewriter->get_shortcode_attribute_rewriters();
         $encoded_shortcode_signals = array();
         $shortcode_tags_with_hidden_urls = array_fill_keys(
             array_keys($this->shortcode_body_rewriters),
@@ -570,144 +518,6 @@ class StructuredDataUrlRewriter
         }
 
         return ( $this->shortcode_body_rewriters[$shortcode_tag] )( $body );
-    }
-
-    /**
-     * Rewrite WPBakery Easy Tables cells without changing table delimiters.
-     *
-     * Easy Tables URL-encodes each cell while leaving `,` and `|` as table
-     * delimiters. Optional leading cell-style markers stay outside the encoded
-     * value and must be copied unchanged.
-     */
-    private function rewrite_wpbakery_table_body(string $body): string
-    {
-        $parts = preg_split('/([,|])/', $body, -1, PREG_SPLIT_DELIM_CAPTURE);
-        if ($parts === false) {
-            return $body;
-        }
-
-        foreach ($parts as $index => $cell) {
-            if ($cell === ',' || $cell === '|') {
-                continue;
-            }
-
-            $prefix_length = 0;
-            if (preg_match('/\A(?:\[[^\]\r\n]*\])*/', $cell, $matches) === 1) {
-                $prefix_length = strlen($matches[0]);
-            }
-            $encoded_content = substr($cell, $prefix_length);
-            if (preg_match('/%[0-9A-Fa-f]{2}/', $encoded_content) !== 1) {
-                continue;
-            }
-
-            $decoded_content = rawurldecode($encoded_content);
-            $rewritten_content = $this->rewrite($decoded_content, self::BLOCK_MARKUP);
-            if ($rewritten_content === $decoded_content) {
-                continue;
-            }
-
-            $parts[$index] = substr($cell, 0, $prefix_length)
-                . $this->encode_wpbakery_url_component($rewritten_content);
-        }
-
-        return implode('', $parts);
-    }
-
-    /**
-     * Rewrite either form of a WPBakery Raw HTML or Raw JS body.
-     *
-     * Both elements use textarea_raw_html, which stores Base64 content. Values
-     * saved by its editor control add URL encoding inside the Base64 layer. The
-     * rewritten body uses the same form.
-     */
-    private function rewrite_wpbakery_raw_code_body(string $body): string
-    {
-        $decoded_body = base64_decode($body, true);
-        if ($decoded_body === false || base64_encode($decoded_body) !== $body) {
-            return $body;
-        }
-
-        $uses_url_encoding = preg_match(
-            '/%(?:3c|3e|5b|5d)|https?%3a%2f%2f/i',
-            $decoded_body
-        ) === 1;
-        $decoded_content = $uses_url_encoding
-            ? rawurldecode($decoded_body)
-            : $decoded_body;
-        $rewritten_content = $this->rewrite($decoded_content, self::BLOCK_MARKUP);
-        if ($rewritten_content === $decoded_content) {
-            return $body;
-        }
-
-        if ($uses_url_encoding) {
-            $rewritten_content = $this->encode_wpbakery_url_component($rewritten_content);
-        }
-
-        return base64_encode($rewritten_content);
-    }
-
-    /**
-     * Rewrite a WPBakery textarea_safe or exploded_textarea_safe attribute.
-     *
-     * These controls store `#E-8_`, followed by Base64-encoded, URL-encoded
-     * content. The rewritten value keeps that wrapper and encoding order.
-     */
-    private function rewrite_wpbakery_safe_attribute(string $value): string
-    {
-        $prefix = '#E-8_';
-        if (strncmp($value, $prefix, strlen($prefix)) !== 0) {
-            return $value;
-        }
-
-        $encoded_content = substr($value, strlen($prefix));
-        $decoded_content = base64_decode($encoded_content, true);
-        if ($decoded_content === false || base64_encode($decoded_content) !== $encoded_content) {
-            return $value;
-        }
-
-        $decoded_content = rawurldecode($decoded_content);
-        $rewritten_content = $this->rewrite($decoded_content, self::BLOCK_MARKUP);
-        if ($rewritten_content === $decoded_content) {
-            return $value;
-        }
-
-        return $prefix . base64_encode($this->encode_wpbakery_url_component($rewritten_content));
-    }
-
-    /**
-     * Rewrite the URL field in a WPBakery vc_link attribute.
-     *
-     * The control stores URL-encoded fields separated by pipes, for example
-     * `url:https%3A%2F%2Fexample.com|title:Read|target:%20_blank|`.
-     */
-    private function rewrite_wpbakery_link_attribute(string $value): string
-    {
-        $fields = explode('|', $value);
-        foreach ($fields as $index => $field) {
-            if (strncmp($field, 'url:', 4) !== 0) {
-                continue;
-            }
-
-            $encoded_url = substr($field, 4);
-            $decoded_url = rawurldecode($encoded_url);
-            $rewritten_url = $this->rewrite_urls($decoded_url, self::PLAIN_TEXT);
-            if ($rewritten_url === $decoded_url) {
-                continue;
-            }
-
-            $fields[$index] = 'url:' . $this->encode_wpbakery_url_component($rewritten_url);
-        }
-
-        return implode('|', $fields);
-    }
-
-    private function encode_wpbakery_url_component(string $value): string
-    {
-        return str_replace(
-            array('%21', '%27', '%28', '%29', '%2A'),
-            array('!', "'", '(', ')', '*'),
-            rawurlencode($value)
-        );
     }
 
     /**

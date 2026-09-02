@@ -25,6 +25,7 @@ if (!class_exists(\WordPress\DataLiberation\Shortcode\ShortcodeProcessor::class)
 
 // Scans structured block markup and uses the cautious processor for opaque tokens.
 require_once __DIR__ . '/class-structured-block-markup-url-processor.php';
+require_once __DIR__ . '/class-wpbakery-url-rewriter.php';
 
 // Depend on the iterators above
 require_once __DIR__ . '/class-structured-data-url-rewriter.php';
