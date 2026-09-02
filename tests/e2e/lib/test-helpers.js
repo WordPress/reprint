@@ -16,7 +16,7 @@ const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
 
 const SITE_ROOT = REGISTRY.siteRoot;
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
+const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
@@ -244,7 +244,7 @@ export function runImporter(url, outputDir, command, options = {}) {
 
     function runImporterOnce(cmd, extraArgs = []) {
         const args = [
-            IMPORTER_PATH,
+            CLIENT_PATH,
             cmd,
             url,
             `--state-dir=${outputDir}`,

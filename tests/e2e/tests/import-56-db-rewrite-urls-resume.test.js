@@ -17,7 +17,7 @@ import {
 } from '../lib/test-helpers.js';
 
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const IMPORTER_PATH = process.env.IMPORTER_PATH || join(
+const CLIENT_PATH = process.env.CLIENT_PATH || join(
     PROJECT_ROOT,
     'packages',
     'reprint-client',
@@ -245,7 +245,7 @@ describeWithSignals(
 
         function startRewrite(extraArgs) {
             const child = spawn(PHP_BINARY, [
-                IMPORTER_PATH,
+                CLIENT_PATH,
                 'db-rewrite-urls',
                 `--state-dir=${tempDir}`,
                 '--progress=jsonl',

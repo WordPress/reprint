@@ -25,7 +25,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: importer-phar-playground
+          name: client-phar-playground
           path: reprint.phar
 
   e2e-playground:
@@ -48,7 +48,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: importer-phar-playground
+          name: client-phar-playground
 
       - uses: actions/setup-node@v4
         with:
@@ -57,7 +57,7 @@ jobs:
           cache-dependency-path: tests/e2e/package-lock.json
 
       # The export side still needs real PHP-FPM + nginx.
-      # Use PHP 8.2 for the server; the importer runs under PHP.wasm.
+      # Use PHP 8.2 for the server; the client runs under PHP.wasm.
       # PHP comes from the runner's pre-cached toolcache via this
       # action; we don't try to apt-install ondrej/php ourselves
       # because every Launchpad endpoint flakes regularly.
@@ -100,7 +100,7 @@ jobs:
 
       - name: Provision basic site and smoke-test API
         env:
-          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
+          CLIENT_PATH: ${{ github.workspace }}/reprint.phar
           PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
         working-directory: tests/e2e
         run: |
@@ -117,7 +117,7 @@ jobs:
           console.log("Basic site provisioned");
           NODESCRIPT
 
-          # Quick smoke test: use the Playground CLI PHP to run the importer
+          # Quick smoke test: use the Playground CLI PHP to run the client
           SECRET="test-secret-basic"
           BASE="http://127.0.0.1:8081/?reprint-api"
           DIR="/srv/e2e-sites/basic"
@@ -141,12 +141,12 @@ jobs:
             exit 1
           fi
 
-          echo "=== Playground CLI importer preflight ==="
-          timeout 120 "$PHP_BINARY" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+          echo "=== Playground CLI client preflight ==="
+          timeout 120 "$PHP_BINARY" "$CLIENT_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
 
       - name: Run E2E tests
         env:
-          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
+          CLIENT_PATH: ${{ github.workspace }}/reprint.phar
           PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
         working-directory: tests/e2e
         # Run every test file once across four runners because each WASM PHP

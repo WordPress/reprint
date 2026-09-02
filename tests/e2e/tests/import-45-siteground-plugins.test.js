@@ -22,7 +22,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
+const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 
 describe('Import: SiteGround plugin stripping', () => {
     const site = 'siteground-plugins';
@@ -208,7 +208,7 @@ describe('Import: SiteGround plugin stripping', () => {
                 `flat-docroot failed:\n${flatResult.stderr}`);
 
             execFileSync('php', [
-                IMPORTER_PATH,
+                CLIENT_PATH,
                 'apply-runtime',
                 importUrl(),
                 `--state-dir=${tempDir}`,

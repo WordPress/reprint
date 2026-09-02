@@ -142,8 +142,8 @@ jobs:
               cd host/tests/e2e
               sudo rm -rf /srv/e2e-sites/large-directory /srv/e2e-sites/large-single-file
               sudo rm -f /tmp/e2e-site-large-directory.lock /tmp/e2e-site-large-single-file.lock
-              IMPORTER_PATH="$GITHUB_WORKSPACE/src-historical/reprint.phar" \
-              E2E_EXPORTER_PROJECT_ROOT="$GITHUB_WORKSPACE/src-historical" \
+              CLIENT_PATH="$GITHUB_WORKSPACE/src-historical/reprint.phar" \
+              E2E_SERVER_PROJECT_ROOT="$GITHUB_WORKSPACE/src-historical" \
               BENCH_LABEL=backfill \
               BENCH_JSON_OUT="$GITHUB_WORKSPACE/bench.json" \
               BENCH_MD_OUT="$GITHUB_WORKSPACE/bench.md" \

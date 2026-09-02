@@ -20,7 +20,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
+const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 const itWhenRustExtensionConfigured = process.env.WP_MYSQL_PARSER_EXTENSION_MANIFEST ? it : it.skip;
 
 describe('Import: Playground CLI runtime', () => {
@@ -104,7 +104,7 @@ describe('Import: Playground CLI runtime', () => {
 
     it('apply-runtime generates playground-cli files', () => {
         execFileSync(PHP_BINARY, [
-            IMPORTER_PATH,
+            CLIENT_PATH,
             'apply-runtime',
             importUrl(),
             `--state-dir=${tempDir}`,

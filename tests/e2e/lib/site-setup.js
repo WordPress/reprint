@@ -25,12 +25,12 @@ const DB_PASS = REGISTRY.dbPass;
 const WP_VERSION = process.env.E2E_WORDPRESS_VERSION || REGISTRY.wpVersion;
 const WP_CLI_PHP_BINARY = process.env.E2E_WP_CLI_PHP_BINARY || 'php';
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
-const EXPORTER_PROJECT_ROOT = process.env.E2E_EXPORTER_PROJECT_ROOT || PROJECT_ROOT;
-// E2E_EXPORTER_PROJECT_ROOT may point at a historical checkout that predates
+const SERVER_PROJECT_ROOT = process.env.E2E_SERVER_PROJECT_ROOT || PROJECT_ROOT;
+// E2E_SERVER_PROJECT_ROOT may point at a historical checkout that predates
 // the reprint-server-wp rename.
-const PLUGIN_SRC = existsSync(join(EXPORTER_PROJECT_ROOT, 'reprint-server-wp'))
-    ? join(EXPORTER_PROJECT_ROOT, 'reprint-server-wp')
-    : join(EXPORTER_PROJECT_ROOT, 'reprint-exporter-wp');
+const PLUGIN_SRC = existsSync(join(SERVER_PROJECT_ROOT, 'reprint-server-wp'))
+    ? join(SERVER_PROJECT_ROOT, 'reprint-server-wp')
+    : join(SERVER_PROJECT_ROOT, 'reprint-exporter-wp');
 const WP_TARBALL = `/tmp/wordpress-${WP_VERSION}.tar.gz`;
 const WP_TEMPLATE = '/tmp/wordpress-template';
 const WP_READY = '/tmp/wordpress-template/.wp-ready';
