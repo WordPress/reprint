@@ -452,6 +452,7 @@ class StructuredDataUrlRewriter
                 while ( $p->next_token() ) {
                     $parsed_nested_block_attributes = false;
                     $block_comment_may_contain_source_domain = false;
+                    $block_comment_text = '';
                     if ( '#block-comment' === $p->get_token_type() ) {
                         $block_comment_text = $p->get_modifiable_text();
                         $block_comment_may_contain_source_domain = $this->value_might_contain_source_domain( $block_comment_text );
