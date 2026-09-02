@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# Builds the PHP 5.6-compatible WordPress exporter plugin ZIP from the typed
+# Builds the PHP 5.6-compatible Reprint Server WordPress plugin ZIP from the typed
 # source tree. The source checkout is never rewritten; all downgrade work is
 # confined to a temporary staging directory.
 #
 # Usage:
-#   ./bin/build-exporter-plugin.sh
-#   ./bin/build-exporter-plugin.sh /path/to/reprint-exporter-wp.zip
+#   ./bin/build-server-plugin.sh
+#   ./bin/build-server-plugin.sh /path/to/reprint-exporter-wp.zip
 #
 set -euo pipefail
 
@@ -27,12 +27,12 @@ for command_name in php composer zip; do
 done
 
 if [ ! -x "$PROJECT_ROOT/tools/php56-build/vendor/bin/rector" ]; then
-    echo "Error: exporter build dependencies are missing." >&2
+    echo "Error: Reprint Server build dependencies are missing." >&2
     echo "Run: composer install --no-dev --working-dir=tools/php56-build" >&2
     exit 1
 fi
 
-BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/reprint-exporter-build.XXXXXX")"
+BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/reprint-server-build.XXXXXX")"
 trap 'rm -rf "$BUILD_ROOT"' EXIT
 
 mkdir -p \
@@ -49,7 +49,7 @@ rm -f \
     "$BUILD_ROOT/reprint-server-wp/composer.lock" \
     "$BUILD_ROOT/reprint-server-wp/secret.php"
 
-php "$PROJECT_ROOT/bin/downgrade-exporter-plugin.php" "$BUILD_ROOT"
+php "$PROJECT_ROOT/bin/downgrade-server-plugin.php" "$BUILD_ROOT"
 
 # The Composer packages describe the typed source requirement. Only the
 # generated plugin distribution advertises and resolves for PHP 5.6.
