@@ -467,6 +467,11 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
         $this->assertIsArray($cursorData);
         $this->assertArrayHasKey("current_table", $cursorData);
         $this->assertArrayHasKey("state", $cursorData);
+        $this->assertArrayHasKey("progress", $cursorData);
+        $this->assertSame(
+            ['done', 'total'],
+            array_keys($cursorData['progress']['tables'])
+        );
         $this->assertArrayNotHasKey("current_row", $cursorData);
         $this->assertArrayNotHasKey("current_row_ends_query_batch", $cursorData);
         $this->assertArrayNotHasKey("current_column_names", $cursorData);

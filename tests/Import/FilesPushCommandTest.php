@@ -399,6 +399,7 @@ final class FilesPushCommandTest extends TestCase
             'items' => null,
             'bytes' => null,
             'current_file' => null,
+            'current_table' => null,
         ], $progress['progress']);
         $this->assertSame('error', $progress['status']);
         $audit = (string) file_get_contents($this->stateDirectory . '/audit.log');
