@@ -11399,11 +11399,15 @@ class ImportClient
     /**
      * Check for cURL errors after curl_exec and record timeout state.
      *
+     * @param mixed $ch                      The completed cURL handle.
+     * @param int    $response_bytes_received Bytes fed to write callback so far.
+     * @param bool   $completion_seen         Whether a completion chunk was already parsed.
+     *
      * @throws CurlTimeoutException          When the request times out.
      * @throws TransientInterruptionException When the response ends early.
      * @throws RuntimeException              For every other cURL error.
      */
-    private function check_curl_error($ch): void
+    private function check_curl_error($ch, int $response_bytes_received = 0, bool $completion_seen = false): void
     {
         $error_number = curl_errno($ch);
         if (!$error_number) {
@@ -11421,15 +11425,27 @@ class ImportClient
         $this->last_curl_errno = $error_number;
         $this->last_curl_timeout = $error_number === $timeout_error_number;
 
+        $response_details = [
+            'response_bytes_received' => $response_bytes_received,
+            'http_code' => (int) curl_getinfo($ch, CURLINFO_HTTP_CODE),
+            'curl_errno' => $error_number,
+            'curl_error' => $error_message !== '' ? $error_message : null,
+            'protocol' => $protocol,
+            'request_seconds' => (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME),
+            'completion_seen' => $completion_seen,
+        ];
+
         if ($this->last_curl_timeout) {
             throw new CurlTimeoutException(
                 "cURL error over {$protocol}: {$error_message}",
+                $response_details,
             );
         }
 
         if (in_array($error_number, self::TRANSIENT_CURL_ERROR_NUMBERS, true)) {
             throw new TransientInterruptionException(
                 "cURL error ({$error_number}) over {$protocol}: {$error_message}",
+                $response_details,
             );
         }
 
@@ -11489,6 +11505,9 @@ class ImportClient
      * cursor did not move, the counter increments. After
      * MAX_CONSECUTIVE_INTERRUPTED_RESPONSES with no progress, the runner stops.
      *
+     * Logs exception's response details so an operator can tell a slow stall
+     * apart from a transport failure without reproducing it.
+     *
      * @param string                           $phase         Human-readable phase name.
      * @param ?string                          $cursor_before Cursor at request start.
      * @param ?string                          $cursor_after  Last durable cursor.
@@ -11508,12 +11527,22 @@ class ImportClient
 
         $count = $this->get_state()->consecutive_interrupted_responses;
 
+        $response_details = $exception->get_response_details();
         $this->audit_log(
             "TEMPORARY REQUEST FAILURE | {$phase} | " .
                 "consecutive_interrupted_responses={$count}/" .
                 self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES .
                 " | cursor_moved=" .
                 ($cursor_after !== $cursor_before ? "yes" : "no") .
+                " | response_bytes_received=" . ($response_details['response_bytes_received'] ?? 0) .
+                " | http_code=" . ($response_details['http_code'] ?? 0) .
+                " | curl_errno=" . ($response_details['curl_errno'] ?? 0) .
+                " | curl_error=" . ($response_details['curl_error'] ?? "none") .
+                " | protocol=" . ($response_details['protocol'] ?? "unknown") .
+                " | request_seconds=" . (isset($response_details['request_seconds'])
+                    ? round((float) $response_details['request_seconds'], 3)
+                    : "unknown") .
+                " | completion_seen=" . (!empty($response_details['completion_seen']) ? "yes" : "no") .
                 " | " . $exception->getMessage(),
             true,
         );
@@ -12125,19 +12154,20 @@ class ImportClient
         $this->audit_log("Executing curl request...", false);
         $this->output_progress(["debug" => "Waiting for server response..."]);
         $result = curl_exec($ch);
+        $response_protocol = self::describe_curl_http_version(
+            (int) curl_getinfo($ch, CURLINFO_HTTP_VERSION),
+        );
         $this->audit_log(
             "curl_exec completed, result=" .
                 ($result === false ? "false" : "true") .
                 " | protocol=" .
-                self::describe_curl_http_version(
-                    (int) curl_getinfo($ch, CURLINFO_HTTP_VERSION),
-                ),
+                $response_protocol,
             false,
         );
 
         try {
             try {
-                $this->check_curl_error($ch);
+                $this->check_curl_error($ch, $bytes_received, $context->saw_completion);
             } catch (RuntimeException $curl_error) {
                 if ($endpoint !== null) {
                     $this->handle_tuner_error($endpoint, [
@@ -12162,6 +12192,16 @@ class ImportClient
         }
         $context->response_stats["ttfb"] = $ttfb;
         $context->response_stats["total_time"] = $total_time;
+
+        $response_details = [
+            'response_bytes_received' => $bytes_received,
+            'http_code' => (int) $http_code,
+            'curl_errno' => 0,
+            'curl_error' => null,
+            'protocol' => $response_protocol,
+            'request_seconds' => $total_time,
+            'completion_seen' => $context->saw_completion,
+        ];
 
         if ($http_code !== 200) {
             if ($endpoint !== null) {
@@ -12193,7 +12233,7 @@ class ImportClient
 
             if ($this->is_potentially_transient_http_error($http_code, $error_body)) {
                 // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This exception is rendered only as CLI text.
-                throw new TransientInterruptionException($error_msg);
+                throw new TransientInterruptionException($error_msg, $response_details);
             }
 
             throw new RuntimeException($error_msg);
@@ -12204,12 +12244,14 @@ class ImportClient
             throw new TransientInterruptionException(
                 "Invalid response: missing multipart boundary. " .
                     ($snippet !== "" ? "Body: {$snippet}" : ""),
+                $response_details,
             );
         }
 
         if (!$context->saw_completion) {
             throw new TransientInterruptionException(
                 "Invalid response: missing completion chunk from server.",
+                $response_details,
             );
         }
     }
