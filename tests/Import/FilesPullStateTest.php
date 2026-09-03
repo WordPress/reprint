@@ -417,6 +417,9 @@ class FilesPullStateTest extends TestCase
 
         // Step 2: new client, try run_files_pull
         [$client2, $reflection2] = $this->prepareClient();
+        $progress_stream = fopen('php://memory', 'w+b');
+        $this->assertIsResource($progress_stream);
+        $reflection2->getProperty('progress_fd')->setValue($client2, $progress_stream);
 
         try {
             $reflection2->getMethod('run_files_pull')->invoke($client2);
@@ -431,6 +434,16 @@ class FilesPullStateTest extends TestCase
             "After abort + re-run, the sync should start fresh, not report 'already complete'",
         );
         $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
+        rewind($progress_stream);
+        $starting_progress = json_decode(
+            trim( (string) fgets($progress_stream) ),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        fclose($progress_stream);
+        $this->assertSame('starting', $starting_progress['event']);
+        $this->assertSame('Indexing files', $starting_progress['message']);
     }
 
     // ---------------------------------------------------------------
