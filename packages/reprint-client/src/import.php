@@ -190,6 +190,13 @@ class ImportClient
     public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl'];
 
     private const PROGRESS_SCHEMA_VERSION = 1;
+
+    /** Stable progress-screen keys used when a phase has no reported counters. */
+    private const EMPTY_PROGRESS_DETAILS = [
+        'items' => null,
+        'bytes' => null,
+        'current_file' => null,
+    ];
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const DATABASE_IMPORT_POSITION_TABLE_PREFIX = "__reprint_db_pull_progress_";
@@ -2116,7 +2123,7 @@ class ImportClient
      */
     private function files_push_progress_details(array $sender_progress): array
     {
-        $progress = $this->empty_progress_details();
+        $progress = self::EMPTY_PROGRESS_DETAILS;
         if (isset($sender_progress['files_done'], $sender_progress['files_total'])) {
             $progress['items'] = [
                 'unit' => 'local_paths',
@@ -6329,7 +6336,7 @@ class ImportClient
     private function database_rewrite_progress_details(
         int $records_processed
     ): array {
-        $progress = $this->empty_progress_details();
+        $progress = self::EMPTY_PROGRESS_DETAILS;
         $progress['items'] = [
             'unit' => 'records',
             'done' => $records_processed,
@@ -7095,7 +7102,7 @@ class ImportClient
         int $bytes_read,
         int $bytes_total
     ): array {
-        $progress = $this->empty_progress_details();
+        $progress = self::EMPTY_PROGRESS_DETAILS;
         $progress['items'] = [
             'unit' => 'statements',
             'done' => $statements_executed,
@@ -9125,7 +9132,7 @@ class ImportClient
                             $sql_progress .= " / " . $this->format_bytes($db_bytes_est);
                         }
                         $this->progress->show_progress_line($sql_progress, $sql_fraction);
-                        $progress = $this->empty_progress_details();
+                        $progress = self::EMPTY_PROGRESS_DETAILS;
                         $progress['bytes'] = [
                             'done' => $sql_bytes_written,
                             // INFORMATION_SCHEMA only supplies a rough estimate,
@@ -10676,7 +10683,7 @@ class ImportClient
     ): array {
         $files_done = ($this->fetch_list_done ?? 0) + $this->files_pulled;
         $files_total = $this->fetch_list_total;
-        $progress = $this->empty_progress_details();
+        $progress = self::EMPTY_PROGRESS_DETAILS;
         $progress['items'] = [
             'unit' => 'files',
             'done' => $files_done,
@@ -12816,6 +12823,9 @@ class ImportClient
 
         // Derive phase from the state's stage field
         $phase = $state->active_resumable_command->current_stage;
+        $progress_details_are_current =
+            $this->progress_details_command === $command
+            && $this->progress_details_phase === $phase;
 
         $payload = [
             "schema_version" => self::PROGRESS_SCHEMA_VERSION,
@@ -12824,10 +12834,13 @@ class ImportClient
             "command" => $command,
             "status" => $status,
             "phase" => $phase,
-            "message" => $this->progress_details_are_current()
+            "message" => $progress_details_are_current
                 ? $this->progress_message
                 : null,
-            "progress" => $this->current_progress_details(),
+            "progress" => $progress_details_are_current
+                && $this->progress_details !== null
+                    ? $this->progress_details
+                    : self::EMPTY_PROGRESS_DETAILS,
             "error" => $error,
             "error_code" => $error !== null ? $this->last_error_code : null,
             "reason" => null,
@@ -12852,53 +12865,6 @@ class ImportClient
         }
     }
 
-    /**
-     * Returns the latest counters only while their command and phase are current.
-     *
-     * @return array {
-     *     Stable progress-screen counters.
-     *
-     *     @type array|null $items        Counted work items.
-     *     @type array|null $bytes        Operation-wide byte progress.
-     *     @type array|null $current_file Current file byte progress.
-     * }
-     */
-    private function current_progress_details(): array
-    {
-        if ($this->progress_details !== null && $this->progress_details_are_current()) {
-            return $this->progress_details;
-        }
-        return $this->empty_progress_details();
-    }
-
-    /** Returns whether the remembered progress record still describes this phase. */
-    private function progress_details_are_current(): bool
-    {
-        $active_command = $this->state->active_resumable_command;
-        return $this->progress_details_command === $active_command->command_name
-            && $this->progress_details_phase === $active_command->current_stage;
-    }
-
-    /**
-     * Returns progress-screen counters for a phase with no known totals yet.
-     *
-     * @return array {
-     *     Empty progress-screen counters.
-     *
-     *     @type null $items        No counted work items.
-     *     @type null $bytes        No operation-wide byte progress.
-     *     @type null $current_file No current file byte progress.
-     * }
-     */
-    private function empty_progress_details(): array
-    {
-        return [
-            'items' => null,
-            'bytes' => null,
-            'current_file' => null,
-        ];
-    }
-
     /** Atomically replaces progress.json with one complete snapshot. */
     private function write_progress_payload(array $payload): void
     {
@@ -12916,40 +12882,6 @@ class ImportClient
             && rename($tmp, $this->progress_file)
         ) {
             $this->last_progress_file_write = microtime(true);
-        }
-    }
-
-    /**
-     * Remembers the progress-screen fields carried by one JSONL record.
-     *
-     * @param array<string,mixed> $data Progress record.
-     */
-    private function remember_progress_record(array $data): void
-    {
-        $has_message = isset($data['message']) && is_string($data['message']);
-        $has_progress = isset($data['progress']) && is_array($data['progress']);
-        if (!$has_message && !$has_progress) {
-            return;
-        }
-
-        $active_command = $this->state->active_resumable_command;
-        $command = $active_command->command_name;
-        $phase = $active_command->current_stage;
-
-        if (
-            $command !== $this->progress_details_command
-            || $phase !== $this->progress_details_phase
-        ) {
-            $this->progress_details = null;
-            $this->progress_message = null;
-        }
-        $this->progress_details_command = $command;
-        $this->progress_details_phase = $phase;
-        if ($has_message) {
-            $this->progress_message = $data['message'];
-        }
-        if ($has_progress) {
-            $this->progress_details = $data['progress'];
         }
     }
 
@@ -13072,7 +13004,30 @@ class ImportClient
         if (isset($data['progress']) && is_array($data['progress'])) {
             $data['schema_version'] = self::PROGRESS_SCHEMA_VERSION;
         }
-        $this->remember_progress_record($data);
+        // progress.json may reuse these fields only while the state still
+        // names the same command and phase as this JSONL record.
+        $has_message = isset($data['message']) && is_string($data['message']);
+        $has_progress = isset($data['progress']) && is_array($data['progress']);
+        if ($has_message || $has_progress) {
+            $active_command = $this->state->active_resumable_command;
+            $command = $active_command->command_name;
+            $phase = $active_command->current_stage;
+            if (
+                $command !== $this->progress_details_command
+                || $phase !== $this->progress_details_phase
+            ) {
+                $this->progress_details = null;
+                $this->progress_message = null;
+            }
+            $this->progress_details_command = $command;
+            $this->progress_details_phase = $phase;
+            if ($has_message) {
+                $this->progress_message = $data['message'];
+            }
+            if ($has_progress) {
+                $this->progress_details = $data['progress'];
+            }
+        }
         if (($data['command'] ?? null) !== 'files-push') {
             $this->write_progress_file_if_due();
         }
