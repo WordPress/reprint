@@ -3396,7 +3396,7 @@ class ImportClient
                     "command" => "files-pull",
                     "delta" => true,
                     "index_size" => $remote_index_entry_count,
-                    "message" => "Starting files-pull (delta, {$remote_index_entry_count} remote index entries)",
+                    "message" => "Indexing files",
                 ], true);
             } else {
                 $this->audit_log(
@@ -3409,7 +3409,7 @@ class ImportClient
                     "type" => "lifecycle",
                     "event" => "starting",
                     "command" => "files-pull",
-                    "message" => "Starting files-pull",
+                    "message" => "Indexing files",
                 ], true);
             }
         }
