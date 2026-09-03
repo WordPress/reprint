@@ -2041,13 +2041,7 @@ class ImportClient
                 $message = 'Planning file changes';
                 break;
             case 'pushing_paths':
-                $files_done = $sender_progress['files_done'];
-                $files_total = $sender_progress['files_total'];
-                $message = sprintf(
-                    'Uploading — %s / %s files',
-                    number_format($files_done),
-                    number_format($files_total)
-                );
+                $message = 'Uploading files';
                 break;
             case 'pushing_deletes':
                 $message = 'Uploading deleted paths';
@@ -10682,13 +10676,6 @@ class ImportClient
     ): array {
         $files_done = ($this->fetch_list_done ?? 0) + $this->files_pulled;
         $files_total = $this->fetch_list_total;
-        $message = $files_total !== null
-            ? sprintf(
-                "Downloading — %s / %s files",
-                number_format($files_done),
-                number_format($files_total)
-            )
-            : sprintf("Downloading — %s files", number_format($files_done));
         $progress = $this->empty_progress_details();
         $progress['items'] = [
             'unit' => 'files',
@@ -10711,7 +10698,7 @@ class ImportClient
             'command' => 'files-pull',
             'phase' => 'fetch',
             'files_done' => $files_done,
-            'message' => $message,
+            'message' => 'Downloading files',
             'progress' => $progress,
         ];
         if ($files_total !== null) {

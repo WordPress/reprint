@@ -687,7 +687,7 @@ to the current phase are `null` instead of disappearing:
   "command": "files-pull",
   "status": "in_progress",
   "phase": "fetch",
-  "message": "Downloading — 41 / 83 files",
+  "message": "Downloading files",
   "progress": {
     "items": {
       "unit": "files",
@@ -717,7 +717,7 @@ to the current phase are `null` instead of disappearing:
 | `command`        | `string \| null`  | Current command name (`preflight`, `files-pull`, `db-pull`, etc.). |
 | `status`         | `string`          | Command status. Common values are `in_progress`, `partial`, `complete`, `error`, and `aborted`; files-push also uses `interrupted`, `restart`, and `failed`. |
 | `phase`          | `string \| null`  | Durable phase within the command, such as `index`, `diff`, `fetch`, or `sql`. |
-| `message`        | `string \| null`  | Short text suitable for the main progress label. |
+| `message`        | `string \| null`  | Short action text suitable for the main progress label. Read numeric progress from `progress` instead of parsing this text. |
 | `progress`       | `object`          | Stable progress-screen counters described below. |
 | `error`          | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
 | `error_code`     | `string \| null`  | Machine-readable error code when one is available. |

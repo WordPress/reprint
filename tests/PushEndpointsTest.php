@@ -3080,7 +3080,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNotEmpty($upload_progress_records);
         $this->assertSame(0, $upload_progress_records[0]['files_done'] ?? null);
         $this->assertSame(4, $upload_progress_records[0]['files_total'] ?? null);
-        $this->assertSame('Uploading — 0 / 4 files', $upload_progress_records[0]['message'] ?? null);
+        $this->assertSame('Uploading files', $upload_progress_records[0]['message'] ?? null);
         $this->assertSame(1, $upload_progress_records[0]['schema_version'] ?? null);
         $this->assertSame([
             'unit' => 'local_paths',

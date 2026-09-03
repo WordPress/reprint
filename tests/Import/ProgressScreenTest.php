@@ -96,6 +96,7 @@ class ProgressScreenTest extends TestCase {
             ],
         ];
         $this->assertSame(1, $jsonl_record['schema_version']);
+        $this->assertSame('Downloading files', $jsonl_record['message']);
         $this->assertSame($expected, $jsonl_record['progress']);
         $this->assertSame([
             'schema_version',
@@ -113,6 +114,7 @@ class ProgressScreenTest extends TestCase {
             'ts',
         ], array_keys($progress_file));
         $this->assertSame(1, $progress_file['schema_version']);
+        $this->assertSame('Downloading files', $progress_file['message']);
         $this->assertSame($expected, $progress_file['progress']);
         fclose($context->file_handle);
     }
