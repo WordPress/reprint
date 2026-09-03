@@ -541,6 +541,78 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     /**
+     * A broken compressed response may be specific to one request or network
+     * path. Treat it as interrupted so the saved cursor can repeat the last
+     * unconfirmed part, while the existing no-progress limit prevents a loop.
+     */
+    public function testInvalidGzipResponseIsTransient()
+    {
+        $script = $this->tempDir . '/invalid-gzip.php';
+        file_put_contents($script, <<<'PHP'
+<?php
+$server = stream_socket_server("tcp://127.0.0.1:0", $errno, $errstr);
+if (!$server) {
+    exit(1);
+}
+echo stream_socket_get_name($server, false) . "\n";
+$connection = stream_socket_accept($server, 10);
+if ($connection) {
+    $body = hex2bin('1f8b0800000000000003070000000000000000');
+    fwrite(
+        $connection,
+        "HTTP/1.1 200 OK\r\n" .
+        "Content-Encoding: gzip\r\n" .
+        "Content-Length: " . strlen($body) . "\r\n" .
+        "Connection: close\r\n\r\n" .
+        $body
+    );
+    fclose($connection);
+}
+fclose($server);
+PHP);
+
+        $server = proc_open(
+            sprintf('%s %s', escapeshellarg(PHP_BINARY), escapeshellarg($script)),
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+        );
+        $this->assertIsResource($server, 'The stub server should start');
+        $address_line = fgets($pipes[1]);
+        $this->assertIsString($address_line);
+        $address = trim($address_line);
+        $this->assertMatchesRegularExpression('/^127\.0\.0\.1:\d+$/', $address);
+        $url = "http://{$address}/";
+
+        try {
+            $curl = curl_init($url);
+            curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($curl, CURLOPT_ENCODING, 'gzip, deflate');
+            curl_setopt($curl, CURLOPT_TIMEOUT, 10);
+            curl_exec($curl);
+
+            $this->assertSame(
+                61,
+                curl_errno($curl),
+                'The stub server should make cURL report CURLE_BAD_CONTENT_ENCODING',
+            );
+
+            [$client, $reflection] = $this->prepareClient();
+            $checkCurlError = $reflection->getMethod('check_curl_error');
+
+            try {
+                $checkCurlError->invoke($client, $curl);
+                $this->fail('An invalid gzip response should have thrown');
+            } catch (TransientInterruptionException $e) {
+                $this->assertStringContainsString('(61)', $e->getMessage());
+            }
+
+            curl_close($curl);
+        } finally {
+            proc_close($server);
+        }
+    }
+
+    /**
      * A failure that will reproduce on the next request must stay fatal.
      * Connecting to a closed port yields CURLE_COULDNT_CONNECT (7), which is
      * deliberately absent from TRANSIENT_CURL_ERROR_NUMBERS.
