@@ -291,18 +291,25 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             $this->pullStateDirectory . '/fetch-list.jsonl',
             FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES
         );
-        $fetchPaths = array_map(
-            static function (string $line): string {
-                $entry = json_decode($line, true);
-                return base64_decode($entry['path'], true);
+        $fetchEntries = array_map(
+            static function (string $line): array {
+                return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
             },
             $fetchListLines
+        );
+        $fetchPaths = array_map(
+            static function (array $entry): string {
+                return base64_decode($entry['path'], true);
+            },
+            $fetchEntries
         );
 
         $this->assertSame(
             ['/wp-content/themes/flavor/style.css'],
             $fetchPaths
         );
+        $this->assertSame('file', $fetchEntries[0]['type']);
+        $this->assertSame(100, $fetchEntries[0]['size']);
         $this->assertStringContainsString(
             base64_encode('/wp-content/uploads/photo.jpg'),
             file_get_contents($this->pullStateDirectory . '/remote-index.next.jsonl')

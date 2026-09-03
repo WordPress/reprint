@@ -3080,7 +3080,18 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNotEmpty($upload_progress_records);
         $this->assertSame(0, $upload_progress_records[0]['files_done'] ?? null);
         $this->assertSame(4, $upload_progress_records[0]['files_total'] ?? null);
-        $this->assertSame('Uploading — 0 / 4 files', $upload_progress_records[0]['message'] ?? null);
+        $this->assertSame('Uploading files', $upload_progress_records[0]['message'] ?? null);
+        $this->assertSame(1, $upload_progress_records[0]['schema_version'] ?? null);
+        $this->assertSame([
+            'unit' => 'local_paths',
+            'done' => 0,
+            'total' => 4,
+        ], $upload_progress_records[0]['progress']['items'] ?? null);
+        $this->assertSame(0, $upload_progress_records[0]['progress']['bytes']['done'] ?? null);
+        $this->assertSame(
+            strlen($initial_contents) + strlen('delete me later'),
+            $upload_progress_records[0]['progress']['bytes']['total'] ?? null
+        );
         $push_state_directory = $this->filesPushStateDirectory($state_directory);
         $this->assertSame($initial_contents, file_get_contents($this->docroot . '/nested/multi-chunk.bin'));
         $this->assertSame('delete me later', file_get_contents($this->docroot . '/delete-later.txt'));
@@ -3102,12 +3113,33 @@ final class PushEndpointsTest extends TestCase {
             JSON_THROW_ON_ERROR
         );
         $this->assertSame(
-            ['command', 'status', 'phase', 'reason', 'detail', 'files_done', 'files_total', 'ts'],
+            [
+                'schema_version',
+                'step',
+                'steps',
+                'command',
+                'status',
+                'phase',
+                'message',
+                'progress',
+                'error',
+                'error_code',
+                'reason',
+                'detail',
+                'ts',
+            ],
             array_keys($progress)
         );
+        $this->assertSame(1, $progress['schema_version']);
         $this->assertSame('complete', $progress['status']);
-        $this->assertSame(4, $progress['files_done']);
-        $this->assertSame(4, $progress['files_total']);
+        $this->assertSame([
+            'unit' => 'local_paths',
+            'done' => 4,
+            'total' => 4,
+        ], $progress['progress']['items']);
+        $this->assertNull($progress['progress']['bytes']);
+        $this->assertNull($progress['progress']['current_file']);
+        $this->assertNull($progress['progress']['current_table']);
         $audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringNotContainsString(self::SECRET, $audit . $initial['output']);
         $this->assertStringNotContainsString('cursor', $audit . json_encode($progress));

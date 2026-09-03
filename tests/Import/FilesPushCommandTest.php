@@ -377,9 +377,30 @@ final class FilesPushCommandTest extends TestCase
             JSON_THROW_ON_ERROR
         );
         $this->assertSame(
-            ['command', 'status', 'phase', 'reason', 'detail', 'ts'],
+            [
+                'schema_version',
+                'step',
+                'steps',
+                'command',
+                'status',
+                'phase',
+                'message',
+                'progress',
+                'error',
+                'error_code',
+                'reason',
+                'detail',
+                'ts',
+            ],
             array_keys($progress)
         );
+        $this->assertSame(1, $progress['schema_version']);
+        $this->assertSame([
+            'items' => null,
+            'bytes' => null,
+            'current_file' => null,
+            'current_table' => null,
+        ], $progress['progress']);
         $this->assertSame('error', $progress['status']);
         $audit = (string) file_get_contents($this->stateDirectory . '/audit.log');
         $this->assertSame(1, substr_count($audit, 'ERROR files-push'));

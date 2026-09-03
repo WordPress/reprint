@@ -172,11 +172,34 @@ Direct MySQL output keeps incomplete SQL only in memory while one importer proce
 
 ### Progress Tracking
 
-During the file fetch phase, progress and heartbeat records include `files_done` (cumulative across restarts, derived from fetch list byte offset + current batch count) and `files_total` (total fetch list entries, fixed after the diff phase). Both are emitted together only when the fetch list exists.
+`progress.json` has one versioned progress-screen shape across commands. Active
+updates are limited to one atomic replacement per second; terminal updates are
+immediate. JSONL records that carry screen progress use the same nested
+`progress` object. Its `items` member reports counted units, `bytes` reports the
+current byte-bounded phase, `current_file` reports base64 path plus file byte
+progress during files-pull, and `current_table` reports table row progress
+during db-pull.
 
-During files-push, progress records include `files_done` and `files_total` together after planning. The completed count advances only at target-confirmed request boundaries and survives resume.
+During the file fetch phase, progress and heartbeat records keep the legacy
+`files_done` and `files_total` fields and also report them through
+`progress.items`. The current file byte count changes while one large file is
+streaming, even before the completed file count advances. File and byte totals
+cover the paths selected by this pull, so a delta pull counts only changed
+paths.
 
-Interactive non-verbose files-push output uses one stage-weighted progress bar for the complete lifecycle. The percentage precedes a label which changes only at major lifecycle stages; while pushing local paths, target-confirmed file bytes appear beside the planned file byte total. These terminal-only details are not added to JSONL or `progress.json`.
+During db-pull SQL streaming, `progress.items` counts selected base tables and
+`current_table` reports rows processed against the row estimate saved by
+db-index. The estimate is marked by `rows_total_is_estimate`.
+
+During files-push, progress records include `files_done` and `files_total`
+together after planning. The nested object reports those target-confirmed local
+paths and the current phase's durable byte position. Both survive resume.
+
+Interactive non-verbose files-push output uses one stage-weighted progress bar
+for the complete lifecycle. The percentage precedes a label which changes only
+at major lifecycle stages; while pushing local paths, target-confirmed file
+bytes appear beside the planned file byte total. Machine output reports the raw
+counts rather than the terminal-only stage-weighted percentage.
 
 Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl` for that invocation. `auto` uses terminal output on a TTY and JSONL otherwise; `tty` and `jsonl` force either presentation without changing command state. Explicit `tty` and `jsonl` modes cannot be combined with `--verbose`.
 

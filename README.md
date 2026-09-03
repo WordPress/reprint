@@ -676,41 +676,106 @@ Pass `--step=N` and `--steps=N` to your `import.php` calls to embed the pipeline
 the progress file. For example, a four-step pipeline would pass `--step=1 --steps=4` for the
 preflight, `--step=2 --steps=4` for db-index, and so on.
 
-The file contains a flat JSON object:
+The file uses one versioned shape for every command. Fields that do not apply
+to the current phase are `null` instead of disappearing:
 
 ```json
 {
+  "schema_version": 1,
   "step": 2,
   "steps": 4,
   "command": "files-pull",
   "status": "in_progress",
-  "phase": "index",
+  "phase": "fetch",
+  "message": "Downloading files",
+  "progress": {
+    "items": {
+      "unit": "files",
+      "done": 41,
+      "total": 83
+    },
+    "bytes": {
+      "done": 7340032,
+      "total": 52428800
+    },
+    "current_file": {
+      "path_b64": "L3dwLWNvbnRlbnQvdXBsb2Fkcy9sYXJnZS56aXA=",
+      "bytes_done": 5242880,
+      "bytes_total": 20971520
+    },
+    "current_table": null
+  },
   "error": null,
+  "error_code": null,
+  "reason": null,
+  "detail": null,
   "ts": 1707600000.123
 }
 ```
 
-| Field     | Type              | Description |
-|-----------|-------------------|-------------|
-| `step`    | `int \| null`     | Current pipeline step (1-indexed). `null` when `--step` is not passed. |
-| `steps`   | `int \| null`     | Total pipeline steps. `null` when `--steps` is not passed. |
-| `command` | `string \| null`  | Current command name (`preflight`, `files-pull`, `db-pull`, etc.). |
-| `status`  | `string`          | One of `in_progress`, `partial`, `complete`, `error`, `aborted`. |
-| `phase`   | `string \| null`  | Sub-phase within the command (e.g. `index`, `diff`, `fetch`), or `null`. Derived from the internal state's `stage` field. |
-| `error`   | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
-| `ts`      | `float`           | Unix timestamp with microsecond precision (`microtime(true)`). |
+| Field            | Type              | Description |
+|------------------|-------------------|-------------|
+| `schema_version` | `int`             | Version of this documented progress-screen shape. Currently `1`. |
+| `step`           | `int \| null`     | Current pipeline step (1-indexed). `null` when `--step` is not passed. |
+| `steps`          | `int \| null`     | Total pipeline steps. `null` when `--steps` is not passed. |
+| `command`        | `string \| null`  | Current command name (`preflight`, `files-pull`, `db-pull`, etc.). |
+| `status`         | `string`          | Command status. Common values are `in_progress`, `partial`, `complete`, `error`, and `aborted`; files-push also uses `interrupted`, `restart`, and `failed`. |
+| `phase`          | `string \| null`  | Durable phase within the command, such as `index`, `diff`, `fetch`, or `sql`. |
+| `message`        | `string \| null`  | Short action text suitable for the main progress label. Read numeric progress from `progress` instead of parsing this text. |
+| `progress`       | `object`          | Stable progress-screen counters described below. |
+| `error`          | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
+| `error_code`     | `string \| null`  | Machine-readable error code when one is available. |
+| `reason`         | `string \| null`  | Files-push terminal reason when one is available. |
+| `detail`         | `string \| null`  | Files-push terminal detail when one is available. |
+| `ts`             | `float`           | Unix timestamp with microsecond precision (`microtime(true)`). |
 
-During the file fetch phase, progress and heartbeat records also include
-structured file counters:
+`progress.items` is either `null` or `{ "unit", "done", "total" }`.
+The unit says what is counted: `files`, `tables`, `local_paths`, `records`, or
+`statements`. `total` is `null` when Reprint cannot know the total before
+finishing the work. `progress.bytes` is either `null` or `{ "done", "total" }`
+for the current byte-bounded phase. `progress.current_file` is either `null` or
+`{ "path_b64", "bytes_done", "bytes_total" }`. The path is base64 because
+filesystem names are arbitrary bytes. During a file fetch, the item and byte
+totals cover the paths selected by the current pull. A delta pull therefore
+reports only changed paths. The byte total adds regular-file content sizes;
+directories and symlinks add zero bytes.
 
-| Field         | Type           | Description |
-|---------------|----------------|-------------|
-| `files_done`  | `int`          | Files already processed (cumulative across restarts). Derived from the fetch list byte offset plus the current batch count. |
-| `files_total` | `int`          | Total non-empty entries in the fetch list. Fixed once the diff phase completes. |
+During `db-pull`, `progress.items` counts imported tables and
+`progress.current_table` reports row progress for the active table. MySQL's
+table row count is an estimate, so `rows_total_is_estimate` is always `true`:
 
-Both fields are emitted together only when the fetch list exists — they
-are absent during the index and diff phases. `files_done` grows monotonically
-up to `files_total` and survives exit-code-2 restarts.
+```json
+{
+  "command": "db-pull",
+  "phase": "sql",
+  "message": "Downloading SQL dump",
+  "progress": {
+    "items": {
+      "unit": "tables",
+      "done": 2,
+      "total": 12
+    },
+    "bytes": {
+      "done": 500100,
+      "total": null
+    },
+    "current_file": null,
+    "current_table": {
+      "name": "wp_posts",
+      "rows_done": 500,
+      "rows_total": 12000,
+      "rows_total_is_estimate": true
+    }
+  }
+}
+```
+
+Reprint replaces `progress.json` atomically at most once per second while a
+command is active. A terminal, partial, cleared, or error state is written
+immediately. A polling UI can therefore read this file without parsing JSONL.
+The JSONL records that report screen progress carry the same `schema_version`
+and nested `progress` object, while their event-specific top-level fields stay
+available for existing consumers.
 
 Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl`. The
 default `auto` mode uses terminal progress when its output stream is a TTY and
@@ -739,13 +804,13 @@ offsets, target-confirmed counts and byte offsets, and phase milestones advance
 the bar. The percentage describes lifecycle progress, not elapsed time or an
 estimated completion time.
 
-These terminal-only details do not change machine output. The JSONL
-presentation emits `push_progress` records. After planning completes, those
-records, the final result, and `progress.json` include `files_done` and
-`files_total` together. `files_total` is the number of local paths selected by
-the plan; `files_done` advances only after the target confirms the request
-containing each path, and both counts survive exit-code-2 restarts. The fields
-are absent while the plan is still being built.
+The JSONL presentation emits `push_progress` records. After planning completes,
+their legacy `files_done` and `files_total` fields remain available. The same
+counts also appear in `progress.items` with the `local_paths` unit. During a
+byte-bounded files-push phase, `progress.bytes` reports the durable byte
+position and total. The final result and `progress.json` use the same nested
+progress object. Target-confirmed counts and byte positions survive
+exit-code-2 restarts.
 
 #### `<remote-state-directory>/pull/state.json` — the pull state store
 
