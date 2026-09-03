@@ -3139,6 +3139,7 @@ final class PushEndpointsTest extends TestCase {
         ], $progress['progress']['items']);
         $this->assertNull($progress['progress']['bytes']);
         $this->assertNull($progress['progress']['current_file']);
+        $this->assertNull($progress['progress']['current_table']);
         $audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringNotContainsString(self::SECRET, $audit . $initial['output']);
         $this->assertStringNotContainsString('cursor', $audit . json_encode($progress));

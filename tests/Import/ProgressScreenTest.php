@@ -42,6 +42,8 @@ class ProgressScreenTest extends TestCase {
         $reflection = new \ReflectionClass($client);
         $reflection->getProperty('fetch_list_done')->setValue($client, 3);
         $reflection->getProperty('fetch_list_total')->setValue($client, 10);
+        $reflection->getProperty('fetch_list_bytes_done')->setValue($client, 1024);
+        $reflection->getProperty('fetch_list_bytes_total')->setValue($client, 30 * 1024 * 1024);
         $progress_stream = fopen('php://memory', 'w+b');
         $this->assertIsResource($progress_stream);
         $reflection->getProperty('progress_fd')->setValue($client, $progress_stream);
@@ -88,12 +90,16 @@ class ProgressScreenTest extends TestCase {
                 'done' => 3,
                 'total' => 10,
             ],
-            'bytes' => null,
+            'bytes' => [
+                'done' => 1536,
+                'total' => 30 * 1024 * 1024,
+            ],
             'current_file' => [
                 'path_b64' => base64_encode($remote_path),
                 'bytes_done' => 512,
                 'bytes_total' => 20 * 1024 * 1024,
             ],
+            'current_table' => null,
         ];
         $this->assertSame(1, $jsonl_record['schema_version']);
         $this->assertSame('Downloading files', $jsonl_record['message']);
@@ -150,6 +156,47 @@ class ProgressScreenTest extends TestCase {
         fclose($progress_stream);
     }
 
+    public function testDatabaseProgressCombinesExporterCursorWithTableEstimate(): void
+    {
+        $client = $this->make_client();
+        file_put_contents(
+            $this->state_directory . '/db-tables.jsonl',
+            json_encode(['name' => 'wp_posts', 'rows' => 12000]) . "\n"
+        );
+        $cursor = base64_encode(json_encode([
+            'progress' => [
+                'tables' => ['done' => 2, 'total' => 12],
+                'current_table' => [
+                    'name' => 'wp_posts',
+                    'rows_done' => 500,
+                ],
+            ],
+        ]));
+
+        $progress = ( new \ReflectionClass($client) )
+            ->getMethod('database_pull_progress_details')
+            ->invoke($client, $cursor, 500100);
+
+        $this->assertSame([
+            'items' => [
+                'unit' => 'tables',
+                'done' => 2,
+                'total' => 12,
+            ],
+            'bytes' => [
+                'done' => 500100,
+                'total' => null,
+            ],
+            'current_file' => null,
+            'current_table' => [
+                'name' => 'wp_posts',
+                'rows_done' => 500,
+                'rows_total' => 12000,
+                'rows_total_is_estimate' => true,
+            ],
+        ], $progress);
+    }
+
     private function make_client(): \ImportClient
     {
         return new \ImportClient(
@@ -172,6 +219,7 @@ class ProgressScreenTest extends TestCase {
                     'total' => null,
                 ],
                 'current_file' => null,
+                'current_table' => null,
             ],
         ];
     }

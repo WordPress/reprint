@@ -67,7 +67,8 @@ class FetchListProgressTest extends TestCase
      */
     private function writeFetchList(
         int $count,
-        ?string $fetchListFilePath = null
+        ?string $fetchListFilePath = null,
+        bool $includeSizes = false
     ): string
     {
         $fetchListFilePath =
@@ -77,7 +78,12 @@ class FetchListProgressTest extends TestCase
         for ($i = 0; $i < $count; $i++) {
             fwrite(
                 $fetchListFileHandle,
-                json_encode(["path" => base64_encode("/file-{$i}.txt")]) . "\n"
+                json_encode(
+                    array_merge(
+                        ["path" => base64_encode("/file-{$i}.txt")],
+                        $includeSizes ? ["type" => "file", "size" => ( $i + 1 ) * 100] : []
+                    )
+                ) . "\n"
             );
         }
         fclose($fetchListFileHandle);
@@ -194,6 +200,69 @@ class FetchListProgressTest extends TestCase
         $counters = $this->readCounters($client, $reflection);
         $this->assertSame(100, $counters['total']);
         $this->assertSame(40, $counters['done']);
+    }
+
+    public function testResumedDownloadReportsSelectedFileByteTotals()
+    {
+        $listFile = $this->writeFetchList(4, null, true);
+        $offset = $this->byteOffsetAfterLines($listFile, 2);
+
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "fetch",
+            ],
+            "fetch" => [
+                "offset" => $offset,
+                "next_offset" => $offset,
+                "batch_file" => null,
+                "batch_entries" => 0,
+                "cursor" => null,
+            ],
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        try {
+            $reflection->getMethod('fetch_files_from_list')->invoke($client, $listFile);
+        } catch (\Exception $e) {
+            $this->assertNotSame('', $e->getMessage());
+        }
+
+        $this->assertSame(
+            1000,
+            $reflection->getProperty('fetch_list_bytes_total')->getValue($client)
+        );
+        $this->assertSame(
+            300,
+            $reflection->getProperty('fetch_list_bytes_done')->getValue($client)
+        );
+    }
+
+    public function testOldFetchListKeepsByteTotalsUnknown()
+    {
+        $listFile = $this->writeFetchList(4);
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "fetch",
+            ],
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        try {
+            $reflection->getMethod('fetch_files_from_list')->invoke($client, $listFile);
+        } catch (\Exception $e) {
+            $this->assertNotSame('', $e->getMessage());
+        }
+
+        $this->assertNull(
+            $reflection->getProperty('fetch_list_bytes_total')->getValue($client)
+        );
+        $this->assertNull(
+            $reflection->getProperty('fetch_list_bytes_done')->getValue($client)
+        );
     }
 
     public function testDoneNeverExceedsTotal()

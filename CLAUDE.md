@@ -176,13 +176,20 @@ Direct MySQL output keeps incomplete SQL only in memory while one importer proce
 updates are limited to one atomic replacement per second; terminal updates are
 immediate. JSONL records that carry screen progress use the same nested
 `progress` object. Its `items` member reports counted units, `bytes` reports the
-current byte-bounded phase, and `current_file` reports base64 path plus file byte
-progress during files-pull.
+current byte-bounded phase, `current_file` reports base64 path plus file byte
+progress during files-pull, and `current_table` reports table row progress
+during db-pull.
 
 During the file fetch phase, progress and heartbeat records keep the legacy
 `files_done` and `files_total` fields and also report them through
 `progress.items`. The current file byte count changes while one large file is
-streaming, even before the completed file count advances.
+streaming, even before the completed file count advances. File and byte totals
+cover the paths selected by this pull, so a delta pull counts only changed
+paths.
+
+During db-pull SQL streaming, `progress.items` counts selected base tables and
+`current_table` reports rows processed against the row estimate saved by
+db-index. The estimate is marked by `rows_total_is_estimate`.
 
 During files-push, progress records include `files_done` and `files_total`
 together after planning. The nested object reports those target-confirmed local

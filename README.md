@@ -694,12 +694,16 @@ to the current phase are `null` instead of disappearing:
       "done": 41,
       "total": 83
     },
-    "bytes": null,
+    "bytes": {
+      "done": 7340032,
+      "total": 52428800
+    },
     "current_file": {
       "path_b64": "L3dwLWNvbnRlbnQvdXBsb2Fkcy9sYXJnZS56aXA=",
       "bytes_done": 5242880,
       "bytes_total": 20971520
-    }
+    },
+    "current_table": null
   },
   "error": null,
   "error_code": null,
@@ -726,12 +730,45 @@ to the current phase are `null` instead of disappearing:
 | `ts`             | `float`           | Unix timestamp with microsecond precision (`microtime(true)`). |
 
 `progress.items` is either `null` or `{ "unit", "done", "total" }`.
-The unit says what is counted: `files`, `local_paths`, `records`, or
+The unit says what is counted: `files`, `tables`, `local_paths`, `records`, or
 `statements`. `total` is `null` when Reprint cannot know the total before
 finishing the work. `progress.bytes` is either `null` or `{ "done", "total" }`
 for the current byte-bounded phase. `progress.current_file` is either `null` or
 `{ "path_b64", "bytes_done", "bytes_total" }`. The path is base64 because
-filesystem names are arbitrary bytes.
+filesystem names are arbitrary bytes. During a file fetch, the item and byte
+totals cover the paths selected by the current pull. A delta pull therefore
+reports only changed paths. The byte total adds regular-file content sizes;
+directories and symlinks add zero bytes.
+
+During `db-pull`, `progress.items` counts imported tables and
+`progress.current_table` reports row progress for the active table. MySQL's
+table row count is an estimate, so `rows_total_is_estimate` is always `true`:
+
+```json
+{
+  "command": "db-pull",
+  "phase": "sql",
+  "message": "Downloading SQL dump",
+  "progress": {
+    "items": {
+      "unit": "tables",
+      "done": 2,
+      "total": 12
+    },
+    "bytes": {
+      "done": 500100,
+      "total": null
+    },
+    "current_file": null,
+    "current_table": {
+      "name": "wp_posts",
+      "rows_done": 500,
+      "rows_total": 12000,
+      "rows_total_is_estimate": true
+    }
+  }
+}
+```
 
 Reprint replaces `progress.json` atomically at most once per second while a
 command is active. A terminal, partial, cleared, or error state is written

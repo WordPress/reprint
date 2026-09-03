@@ -826,6 +826,28 @@ class MySQLDumpProducer
             $cursor_data["current_column_names_hash"] = $current_column_names_hash;
         }
         $cursor_data["state"] = $this->state;
+        $tables_total = (int) ( $cursor_data["tables_total"] ?? 0 );
+        $current_table_number = $cursor_data["current_table_number"] ?? null;
+        $tables_done = 0;
+        $progress_current_table = null;
+        if ($this->state === self::STATE_FINISHED || $this->state === self::STATE_EMIT_FOOTER) {
+            $tables_done = $tables_total;
+        } elseif ($this->state === self::STATE_NEXT_TABLE) {
+            $tables_done = $current_table_number === null ? 0 : $current_table_number;
+        } elseif ($current_table_number !== null) {
+            $tables_done = $current_table_number - 1;
+            $progress_current_table = [
+                "name" => $cursor_data["current_table"],
+                "rows_done" => (int) ( $cursor_data["current_table_rows_processed"] ?? 0 ),
+            ];
+        }
+        $cursor_data["progress"] = [
+            "tables" => [
+                "done" => $tables_done,
+                "total" => $tables_total,
+            ],
+            "current_table" => $progress_current_table,
+        ];
         $cursor_data["rows_in_batch"] = $this->rows_in_batch;
         $cursor_data["current_insert_has_nonzero_srid_context"] =
             $this->current_insert_has_nonzero_srid_context;

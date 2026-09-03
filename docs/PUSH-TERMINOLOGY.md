@@ -459,6 +459,9 @@ use the same nested progress object. `files_total` is the selected local-path
 count. `files_done` is the target-confirmed local-path count, so an open,
 failed, or canceled request does not advance it. Both counts survive resume.
 
+The shared progress object also reserves `current_file` for files-pull and
+`current_table` for db-pull. They are `null` during files-push.
+
 Files-push lifecycle lines use these command-first names verbatim: `START
 files-push`, `RESUME files-push`, `PHASE files-push`, `PARTIAL files-push`,
 `INTERRUPTED files-push`, `COMPLETE files-push`, `RESTART files-push`, `FAILED
