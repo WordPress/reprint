@@ -216,6 +216,7 @@ class ImportClient
         52, // CURLE_GOT_NOTHING  — empty response
         55, // CURLE_SEND_ERROR   — peer reset while the request body was uploading
         56, // CURLE_RECV_ERROR   — connection reset / receive failure
+        61, // CURLE_BAD_CONTENT_ENCODING — invalid compressed response body
         // HTTP/2 framing layer; reachable only when h2 is negotiated.
         16, // CURLE_HTTP2        — HTTP/2 connection framing error (GOAWAY)
         92, // CURLE_HTTP2_STREAM — HTTP/2 stream reset by the server (RST_STREAM)
