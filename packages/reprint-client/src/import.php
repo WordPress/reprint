@@ -6986,7 +6986,7 @@ class ImportClient
                     "bytes_read" => $byte_offset,
                     "bytes_total" => $sql_file_size,
                     "pct" => $apply_fraction === null ? 0 : round($apply_fraction * 100, 1),
-                    "message" => $progress_message,
+                    "message" => "Applying SQL",
                     "progress" => $this->database_apply_progress_details(
                         $statements_executed,
                         $byte_offset,
@@ -9141,7 +9141,7 @@ class ImportClient
                         $this->output_progress([
                             'command' => 'db-pull',
                             'phase' => 'sql',
-                            'message' => $sql_progress,
+                            'message' => 'Downloading SQL dump',
                             'progress' => $progress,
                         ]);
 
