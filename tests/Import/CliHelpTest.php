@@ -185,6 +185,22 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--target-pass=PASS', $output);
     }
 
+    public function testRemoveHostFilesHelpDescribesFilesystemOnlyCleanup(): void
+    {
+        $output = $this->runHelp('remove-host-files');
+
+        $this->assertStringContainsString(
+            'Usage: reprint remove-host-files <remote-reprint-api-url>',
+            $output
+        );
+        $this->assertStringContainsString('does not generate runtime configuration', $output);
+        $this->assertStringContainsString('does not change the database', $output);
+        $this->assertStringContainsString('--fs-root=DIR', $output);
+        $this->assertStringContainsString('--flat-document-root=DIR', $output);
+        $this->assertStringNotContainsString('--runtime', $output);
+        $this->assertStringNotContainsString('--output-dir', $output);
+    }
+
     public function testPullMetadataRejectsAnInvocationWithoutARemoteReprintApiUrl(): void
     {
         $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';

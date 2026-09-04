@@ -157,6 +157,18 @@ class ProductionDropInRemovalTest extends TestCase
         }
     }
 
+    private function runRemoveHostFiles(\ImportClient $client): void
+    {
+        ob_start();
+        try {
+            $this->callPrivate($client, 'run_remove_host_files', [[
+                'flat_document_root' => $this->fsRoot,
+            ]]);
+        } finally {
+            ob_end_clean();
+        }
+    }
+
     /**
      * Create the production drop-in files that WpcloudHostAnalyzer declares
      * for removal, so we can verify they get deleted.
@@ -546,5 +558,59 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertFileDoesNotExist($mu_plugins . '/mu-plugin.php');
         $this->assertFileDoesNotExist($mu_plugins . '/stop-long-comments.php');
         $this->assertFileExists($mu_plugins . '/my-custom-plugin.php');
+    }
+
+    public function testRemoveHostFilesNeedsNoRuntimeConfiguration(): void
+    {
+        $this->writeState([
+            'webhost' => 'wpengine',
+            'preflight' => [
+                'data' => [
+                    'runtime' => [
+                        'document_root' => '',
+                        'env_names' => [],
+                        'ini_get_all' => [],
+                    ],
+                    'filesystem' => ['directories' => []],
+                    'wp_detect' => ['roots' => []],
+                ],
+            ],
+        ]);
+
+        $mu_plugins = $this->fsRoot . '/wp-content/mu-plugins';
+        $directories = [
+            'wpengine-common',
+            'force-strong-passwords',
+            'wpe-cache-plugin',
+            'wpe-update-source-selector',
+            'wpe-wp-sign-on-plugin',
+        ];
+        foreach ($directories as $directory) {
+            mkdir($mu_plugins . '/' . $directory, 0755, true);
+        }
+        $files = [
+            'mu-plugin.php',
+            'slt-force-strong-passwords.php',
+            'stop-long-comments.php',
+            'wpe-cache-plugin.php',
+            'wpe-update-source-selector.php',
+            'wpe-wp-sign-on-plugin.php',
+            'wpengine-security-auditor.php',
+        ];
+        foreach ($files as $file) {
+            file_put_contents($mu_plugins . '/' . $file, "<?php // WP Engine\n");
+        }
+        file_put_contents($mu_plugins . '/my-custom-plugin.php', "<?php // custom\n");
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runRemoveHostFiles($client);
+
+        foreach (array_merge($directories, $files) as $entry) {
+            $this->assertFileDoesNotExist($mu_plugins . '/' . $entry);
+            $this->assertDirectoryDoesNotExist($mu_plugins . '/' . $entry);
+        }
+        $this->assertFileExists($mu_plugins . '/my-custom-plugin.php');
+        $this->assertFileDoesNotExist($this->outputDir . '/runtime.php');
     }
 }

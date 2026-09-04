@@ -240,6 +240,18 @@ It can be interrupted and resumed at any time — just re-run the same command:
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
+If the integration supplies its own target runtime, remove source-host files
+after `files-pull` and before starting the destination site:
+
+```bash
+php reprint.phar remove-host-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
+```
+
+This uses the host detected during `preflight` and removes only the files
+declared by that host's analyzer. It does not generate runtime configuration or
+change the database. Use `--flat-document-root` instead of `--fs-root` when the
+pulled files have been flattened into the document root.
+
 The command returns one of three exit codes:
 
 - 0: sync completed

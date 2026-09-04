@@ -184,6 +184,7 @@ class ImportClient
         "flat-docroot",
         "merge-wp-content",
         "apply-runtime",
+        "remove-host-files",
     ];
 
     /** Progress output modes accepted by every command. */
@@ -1253,6 +1254,10 @@ class ImportClient
         }
         if ($command === "apply-runtime") {
             $this->run_apply_runtime($options);
+            return;
+        }
+        if ($command === "remove-host-files") {
+            $this->run_remove_host_files($options);
             return;
         }
         if ($command === "db-apply") {
@@ -4685,6 +4690,55 @@ class ImportClient
     }
 
     /**
+     * Remove host-specific files from a pulled site without generating a runtime.
+     *
+     * Hosting integrations use this command when they provide their own target
+     * runtime. The host analyzer still decides which paths are safe to remove.
+     */
+    public function run_remove_host_files(array $options): void
+    {
+        $entry = $this->get_state()->preflight_record();
+        if (!is_array($entry) || empty($entry["data"])) {
+            throw new RuntimeException(
+                "remove-host-files requires a prior preflight run. " .
+                "Run 'preflight' first to capture the remote site's environment."
+            );
+        }
+
+        $preflight_data = $entry["data"];
+        $webhost = $this->get_state()->webhost ?? "other";
+        $flat_document_root = $options["flat_document_root"] ?? null;
+        $local_document_root = $this->resolve_local_document_root(
+            $preflight_data,
+            $flat_document_root,
+        );
+        $manifest = host_analyzer_for($webhost)->analyze($preflight_data);
+        $summary = $this->remove_manifest_paths(
+            $manifest,
+            $preflight_data,
+            $local_document_root,
+            !empty($flat_document_root),
+            "REMOVE-HOST-FILES",
+        );
+
+        $this->get_state()->apply->remote_paths_removed_from_local_site = $manifest->paths_to_remove;
+        $this->save_state();
+
+        $this->output_progress([
+            "status" => "complete",
+            "command" => "remove-host-files",
+            "webhost" => $webhost,
+            "webhost_source" => $manifest->source,
+            "paths_removed" => $manifest->paths_to_remove,
+            "message" => "remove-host-files complete",
+        ]);
+
+        $this->progress->show_lifecycle_line(
+            "\nSource host: {$webhost}\n\n" . implode("\n", $summary) . "\n"
+        );
+    }
+
+    /**
      * Generate runtime configuration for the pulled site.
      *
      * Reads the detected webhost from state (set during preflight), runs the
@@ -4794,42 +4848,13 @@ class ImportClient
         // (used as-is) or --fs-root (prefixed with the remote document_root).
         // Mutual exclusion is already enforced at the CLI level.
         $flat_document_root = $options["flat_document_root"] ?? null;
-
-        if (!empty($flat_document_root)) {
-            // --flat-document-root: used directly as the web root.
-            $raw_local_document_root = trim_right_slash($flat_document_root);
-        } else {
-            // --fs-root: the raw download directory. The remote site's
-            // document_root tells us where the web root lived on the
-            // source server. Files are downloaded preserving the full
-            // remote absolute path, so the local document root is --fs-root +
-            // document_root.
-            $remote_doc_root = $this->clean_preflight_path(
-                $preflight_data["runtime"]["document_root"] ?? null,
-            );
-
-            if ($remote_doc_root !== null) {
-                $raw_local_document_root = wp_join_unix_paths(
-                    $this->filesystem_root,
-                    $remote_doc_root
-                );
-            } else {
-                $raw_local_document_root = $this->filesystem_root;
-            }
-
-            if (!is_dir($raw_local_document_root)) {
-                throw new RuntimeException(
-                    "Local document root does not exist: {$raw_local_document_root}\n" .
-                    "The remote document_root was: {$remote_doc_root}\n" .
-                    "If you used flat-docroot, pass the flattened directory " .
-                    "with --flat-document-root instead of --fs-root."
-                );
-            }
-        }
+        $local_document_root = $this->resolve_local_document_root(
+            $preflight_data,
+            $flat_document_root,
+        );
 
         // Resolve to absolute paths so generated files work from any cwd.
         $abs_output_dir = realpath($output_dir) ?: $output_dir;
-        $local_document_root = realpath($raw_local_document_root) ?: $raw_local_document_root;
 
         if (!is_dir($abs_output_dir)) {
             if (!mkdir($abs_output_dir, 0755, true)) {
@@ -4961,23 +4986,16 @@ class ImportClient
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
         }
 
-        // Remove production drop-ins and mu-plugins that would crash
-        // the local site.  The host analyzer declares these — they
-        // depend on infrastructure (Memcached servers, multisite APIs)
-        // not available outside the original hosting environment.
-        foreach ($manifest->paths_to_remove as $rel_path) {
-            $full_path = wp_join_unix_paths($local_document_root, $rel_path);
-            if (!file_exists($full_path) && !is_link($full_path)) {
-                continue;
-            }
-            if (is_dir($full_path) && !is_link($full_path)) {
-                self::rmdir_recursive($full_path);
-            } else {
-                unlink($full_path);
-            }
-            $summary[] = "Removed production drop-in: {$rel_path}";
-            $this->audit_log("APPLY-RUNTIME | removed {$rel_path} (production-only)");
-        }
+        $summary = array_merge(
+            $summary,
+            $this->remove_manifest_paths(
+                $manifest,
+                $preflight_data,
+                $local_document_root,
+                !empty($flat_document_root),
+                "APPLY-RUNTIME",
+            ),
+        );
 
         foreach ($summary as $line) {
             $this->audit_log("APPLY-RUNTIME | {$line}");
@@ -5020,6 +5038,96 @@ class ImportClient
             $human_summary .= "{$line}\n";
         }
         $this->progress->show_lifecycle_line($human_summary);
+    }
+
+    /**
+     * Resolve the local document root from raw or flattened pulled files.
+     *
+     * @param array       $preflight_data       Saved preflight response.
+     * @param string|null $flat_document_root   Flattened document root, when used.
+     * @return string Local document root.
+     */
+    private function resolve_local_document_root(
+        array $preflight_data,
+        ?string $flat_document_root
+    ): string {
+        if (!empty($flat_document_root)) {
+            return realpath(trim_right_slash($flat_document_root))
+                ?: trim_right_slash($flat_document_root);
+        }
+
+        // The raw download preserves the remote absolute path below
+        // --fs-root, so append the remote document_root to find the site.
+        $remote_doc_root = $this->clean_preflight_path(
+            $preflight_data["runtime"]["document_root"] ?? null,
+        );
+        $raw_local_document_root = $remote_doc_root !== null
+            ? wp_join_unix_paths($this->filesystem_root, $remote_doc_root)
+            : $this->filesystem_root;
+
+        if (!is_dir($raw_local_document_root)) {
+            throw new RuntimeException(
+                "Local document root does not exist: {$raw_local_document_root}\n" .
+                "The remote document_root was: {$remote_doc_root}\n" .
+                "If you used flat-docroot, pass the flattened directory " .
+                "with --flat-document-root instead of --fs-root."
+            );
+        }
+
+        return realpath($raw_local_document_root) ?: $raw_local_document_root;
+    }
+
+    /**
+     * Remove paths declared by a host analyzer.
+     *
+     * @param RuntimeManifest $manifest             Host paths to remove.
+     * @param array           $preflight_data        Saved preflight response.
+     * @param string          $local_document_root   Local site document root.
+     * @param bool            $is_flat_document_root Whether the root is flattened.
+     * @param string          $audit_prefix          Command name for audit entries.
+     * @return string[] Human-readable removal summaries.
+     */
+    private function remove_manifest_paths(
+        RuntimeManifest $manifest,
+        array $preflight_data,
+        string $local_document_root,
+        bool $is_flat_document_root,
+        string $audit_prefix
+    ): array {
+        $summary = [];
+        foreach ($manifest->paths_to_remove as $rel_path) {
+            $full_path = wp_join_unix_paths($local_document_root, $rel_path);
+
+            // Raw pulls preserve custom WPMU_PLUGIN_DIR paths below --fs-root.
+            // A flattened root exposes that directory at the standard
+            // wp-content/mu-plugins path through flat-docroot.
+            if (!$is_flat_document_root && strpos($rel_path, 'wp-content/mu-plugins/') === 0) {
+                $mu_plugins_dir = $this->clean_preflight_path(
+                    $preflight_data['database']['wp']['paths_urls']['mu_plugins_dir'] ?? null,
+                );
+                if ($mu_plugins_dir !== null) {
+                    $mu_plugin_relative_path = substr($rel_path, strlen('wp-content/mu-plugins/'));
+                    $full_path = wp_join_unix_paths(
+                        $this->filesystem_root,
+                        $mu_plugins_dir,
+                        $mu_plugin_relative_path,
+                    );
+                }
+            }
+
+            if (!file_exists($full_path) && !is_link($full_path)) {
+                continue;
+            }
+            if (is_dir($full_path) && !is_link($full_path)) {
+                self::rmdir_recursive($full_path);
+            } else {
+                unlink($full_path);
+            }
+            $summary[] = "Removed production drop-in: {$rel_path}";
+            $this->audit_log("{$audit_prefix} | removed {$rel_path} (production-only)");
+        }
+
+        return $summary;
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.
@@ -12886,7 +12994,7 @@ if (
             'placeholder' => 'DIR',
             'help' => 'Local directory read from or written to for site files',
             'help_section' => 'required',
-            'commands' => ['apply-runtime'],
+            'commands' => ['apply-runtime', 'remove-host-files'],
             'aliases' => ['docroot'],
         ],
 
@@ -12932,7 +13040,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls', 'flat-docroot', 'merge-wp-content', 'apply-runtime', 'remove-host-files'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -13262,7 +13370,7 @@ if (
             'target' => 'flat_document_root',
             'placeholder' => 'DIR',
             'help' => 'Flattened layout directory (used as-is)',
-            'commands' => ['apply-runtime'],
+            'commands' => ['apply-runtime', 'remove-host-files'],
             'aliases' => ['flattened-docroot'],
         ],
         [
@@ -14072,6 +14180,30 @@ if (
                 "  reprint merge-wp-content https://example.com --state-dir=./state \\\n" .
                 "    --fs-root=./files --from=./site/wp-content\n",
         ],
+        "remove-host-files" => [
+            "level" => "low",
+            "short" => "Remove source-host files before starting the destination site",
+            "usage" =>
+                "reprint remove-host-files <remote-reprint-api-url> --state-dir=DIR " .
+                "(--fs-root=DIR|--flat-document-root=DIR)",
+            "description" =>
+                "Removes files declared by the detected source host's analyzer, such as " .
+                "hosting-specific drop-ins and mu-plugins.\n" .
+                "\n" .
+                "This command only changes the pulled filesystem. It does not generate " .
+                "runtime configuration. It does not change the database.\n" .
+                "\n" .
+                "The remote Reprint API URL selects the saved preflight data and state; " .
+                "no network calls are made.\n",
+            "extra" =>
+                "Pass --fs-root for the raw download directory (the remote document_root " .
+                "path is appended automatically), or --flat-document-root for a " .
+                "flattened layout.\n" .
+                "\n" .
+                "Example:\n" .
+                "  reprint remove-host-files https://example.com --state-dir=./state \\\n" .
+                "    --fs-root=./files\n",
+        ],
         "apply-runtime" => [
             "level" => "low",
             "short" => "Generate server config and prepare the site to run locally",
@@ -14250,7 +14382,8 @@ if (
         exit(1);
     }
 
-    // apply-runtime accepts --flat-document-root as an alternative to --fs-root.
+    // apply-runtime and remove-host-files accept --flat-document-root as an
+    // alternative to --fs-root.
     $flat_document_root = $options["flat_document_root"] ?? null;
     $reprint_selected_remote_state_directory = null;
     if ($command === 'db-rewrite-urls') {
