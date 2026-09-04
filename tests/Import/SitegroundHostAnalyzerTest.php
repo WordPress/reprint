@@ -62,7 +62,6 @@ class SitegroundHostAnalyzerTest extends TestCase
     {
         $score = \SitegroundHostAnalyzer::score($this->sitegroundPreflight());
 
-        // Two sg-* plugins → 0.9
         $this->assertGreaterThanOrEqual(0.5, $score);
     }
 
@@ -90,13 +89,26 @@ class SitegroundHostAnalyzerTest extends TestCase
         $this->assertSame(0.0, $score);
     }
 
+    public function testScoreRejectsUnrelatedPluginsWithSgPrefix(): void
+    {
+        $preflight = $this->sitegroundPreflight();
+        $preflight['wp_content']['roots'][0]['plugins'] = [
+            ['name' => 'sg-customer-tools', 'type' => 'dir'],
+            ['name' => 'sg-example-plugin', 'type' => 'dir'],
+        ];
+
+        $this->assertSame(0.0, \SitegroundHostAnalyzer::score($preflight));
+    }
+
     public function testAnalyzePopulatesPathsToRemove(): void
     {
         $analyzer = new \SitegroundHostAnalyzer();
         $manifest = $analyzer->analyze($this->sitegroundPreflight());
 
-        $this->assertContains('wp-content/plugins/sg-cachepress', $manifest->paths_to_remove);
-        $this->assertContains('wp-content/plugins/sg-security', $manifest->paths_to_remove);
+        $this->assertSame(
+            ['wp-content/plugins/sg-cachepress'],
+            $manifest->paths_to_remove,
+        );
     }
 
     public function testAnalyzeSetsSourceToSiteground(): void

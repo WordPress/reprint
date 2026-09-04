@@ -19,6 +19,18 @@ function host_analyzer_registry(): array
         'wpcloud' => WpcloudHostAnalyzer::class,
         'siteground' => SitegroundHostAnalyzer::class,
         'wpengine' => WpengineHostAnalyzer::class,
+        'kinsta' => KinstaHostAnalyzer::class,
+        'pantheon' => PantheonHostAnalyzer::class,
+        'ionos' => IonosHostAnalyzer::class,
+        'pressable' => PressableHostAnalyzer::class,
+        'godaddy' => GodaddyHostAnalyzer::class,
+        'bluehost' => BluehostHostAnalyzer::class,
+        'hostgator' => HostgatorHostAnalyzer::class,
+        'hostinger' => HostingerHostAnalyzer::class,
+        'nexcess' => NexcessHostAnalyzer::class,
+        'rocketnet' => RocketnetHostAnalyzer::class,
+        'spinupwp' => SpinupwpHostAnalyzer::class,
+        'wpvip' => WpVipHostAnalyzer::class,
     ];
 }
 
