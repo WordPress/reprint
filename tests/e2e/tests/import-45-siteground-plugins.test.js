@@ -4,10 +4,8 @@
  * Simulates a SiteGround hosting environment where sg-cachepress and
  * sg-security are installed and active.  Verifies that after the full
  * import pipeline (preflight -> files-pull -> db-pull -> db-apply ->
- * apply-runtime), both plugins are:
- *   1. Deactivated in the target database during db-apply
- *   2. Removed from the local filesystem during apply-runtime
- *   3. Unrelated plugins are preserved
+ * apply-runtime), sg-cachepress is removed while the portable sg-security
+ * plugin and unrelated plugins are preserved.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -134,7 +132,7 @@ describe('Import: SiteGround plugin stripping', () => {
         assert.ok(existsSync(join(tempDir, 'db.sql')), 'db.sql should exist');
     });
 
-    describe('db-apply deactivates SG plugins', () => {
+    describe('db-apply removes only the host-bound SG plugin', () => {
         beforeAll(async () => {
             // Create the target database before db-apply connects to it.
             const importDb = `${getDbName(site)}_import`;
@@ -158,7 +156,7 @@ describe('Import: SiteGround plugin stripping', () => {
             assert.equal(result.exitCode, 0, `db-apply failed:\n${result.stderr}`);
         });
 
-        it('sg plugins are removed from active_plugins', () => {
+        it('removes sg-cachepress and preserves sg-security in active_plugins', () => {
             const importDb = `${getDbName(site)}_import`;
 
             // Query using PHP to use the same MySQL driver as the importer.
@@ -174,8 +172,8 @@ describe('Import: SiteGround plugin stripping', () => {
                 `active_plugins should not contain sg-cachepress, got: ${raw}`,
             );
             assert.ok(
-                !raw.includes('sg-security'),
-                `active_plugins should not contain sg-security, got: ${raw}`,
+                raw.includes('sg-security'),
+                `active_plugins should still contain sg-security, got: ${raw}`,
             );
             // Confirm non-SG plugins survived.
             assert.ok(
@@ -184,20 +182,20 @@ describe('Import: SiteGround plugin stripping', () => {
             );
         });
 
-        it('audit log records the deactivations', () => {
+        it('audit log records only the sg-cachepress deactivation', () => {
             const auditLog = readFileSync(join(tempDir, 'audit.log'), 'utf-8');
             assert.ok(
                 auditLog.includes('deactivated plugin') && auditLog.includes('sg-cachepress'),
                 'audit log should record sg-cachepress deactivation',
             );
             assert.ok(
-                auditLog.includes('deactivated plugin') && auditLog.includes('sg-security'),
-                'audit log should record sg-security deactivation',
+                !auditLog.includes('deactivated plugin sg-security/sg-security.php'),
+                'audit log should not record sg-security deactivation',
             );
         });
     });
 
-    describe('apply-runtime removes SG plugin files', () => {
+    describe('apply-runtime removes only the host-bound SG plugin files', () => {
         beforeAll(() => {
             const flatDir = join(tempDir, 'flattened');
             const flatResult = runImporter(importUrl(), tempDir, 'flat-docroot', {
@@ -230,11 +228,11 @@ describe('Import: SiteGround plugin stripping', () => {
             );
         });
 
-        it('sg-security directory is removed from disk', () => {
+        it('sg-security directory is preserved on disk', () => {
             const flatDir = join(tempDir, 'flattened');
             assert.ok(
-                !existsSync(join(flatDir, 'wp-content', 'plugins', 'sg-security')),
-                'sg-security directory should not exist after apply-runtime',
+                existsSync(join(flatDir, 'wp-content', 'plugins', 'sg-security')),
+                'sg-security directory should still exist after apply-runtime',
             );
         });
 
