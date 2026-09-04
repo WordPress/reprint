@@ -435,7 +435,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertDirectoryDoesNotExist($sgCacheDir);
     }
 
-    public function testSitegroundPreservesPortableSgSecurityDirectory(): void
+    public function testSitegroundRemovesSgSecurityDirectory(): void
     {
         $this->writeSitegroundState();
         $this->createSitegroundPlugins();
@@ -447,7 +447,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
-        $this->assertDirectoryExists($sgSecurityDir);
+        $this->assertDirectoryDoesNotExist($sgSecurityDir);
     }
 
     public function testSitegroundPreservesUnrelatedPlugins(): void
@@ -481,8 +481,8 @@ class ProductionDropInRemovalTest extends TestCase
             'removed wp-content/plugins/sg-cachepress (production-only)',
             $auditLog,
         );
-        $this->assertStringNotContainsString(
-            'wp-content/plugins/sg-security',
+        $this->assertStringContainsString(
+            'removed wp-content/plugins/sg-security (production-only)',
             $auditLog,
         );
     }
@@ -505,7 +505,7 @@ class ProductionDropInRemovalTest extends TestCase
             'wp-content/plugins/sg-cachepress',
             $state['apply']['remote_paths_removed_from_local_site'],
         );
-        $this->assertNotContains(
+        $this->assertContains(
             'wp-content/plugins/sg-security',
             $state['apply']['remote_paths_removed_from_local_site'],
         );

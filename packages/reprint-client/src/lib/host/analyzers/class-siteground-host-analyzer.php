@@ -44,10 +44,9 @@ class SitegroundHostAnalyzer implements HostAnalyzer
         $manifest->php_ini = extract_php_ini($preflight_data);
         $manifest->constants = extract_constants($preflight_data);
 
-        // Speed Optimizer's dynamic cache needs SiteGround infrastructure.
-        // Security Optimizer works on other hosts, so keep it installed.
         $manifest->paths_to_remove = [
             'wp-content/plugins/sg-cachepress',
+            'wp-content/plugins/sg-security',
         ];
 
         return $manifest;

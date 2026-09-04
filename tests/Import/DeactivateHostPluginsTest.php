@@ -91,15 +91,15 @@ class DeactivateHostPluginsTest extends TestCase
         $this->assertSame(
             [
                 'sg-cachepress/sg-cachepress.php',
+                'sg-security/sg-security.php',
             ],
             $result,
-            'expected only the SiteGround cache plugin to be reported as deactivated',
+            'expected the SiteGround plugins to be reported as deactivated',
         );
 
         $remaining = unserialize($this->fetchOption($database, 'active_plugins'));
         $this->assertSame(
             [
-                'sg-security/sg-security.php',
                 'sg-cachepress-extra/sg-cachepress-extra.php',
                 'woocommerce/woocommerce.php',
                 'akismet/akismet.php',

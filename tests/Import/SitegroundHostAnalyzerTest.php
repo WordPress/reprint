@@ -106,7 +106,10 @@ class SitegroundHostAnalyzerTest extends TestCase
         $manifest = $analyzer->analyze($this->sitegroundPreflight());
 
         $this->assertSame(
-            ['wp-content/plugins/sg-cachepress'],
+            [
+                'wp-content/plugins/sg-cachepress',
+                'wp-content/plugins/sg-security',
+            ],
             $manifest->paths_to_remove,
         );
     }
