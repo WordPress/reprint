@@ -240,16 +240,16 @@ class PlatformFilesHostAnalyzerTest extends TestCase {
     }
 
     /**
-     * @dataProvider portablePluginProvider
+     * @dataProvider sharedPluginNameProvider
      *
-     * @param string[] $plugins Normal plugins which can occur on many hosts.
+     * @param string[] $plugins Plugin names which can occur on many hosts.
      */
-    public function testPortablePluginsDoNotSelectAHost(array $plugins): void
+    public function testSharedPluginNamesDoNotSelectAHost(array $plugins): void
     {
         $this->assertSame('other', \detect_host($this->preflight($plugins, [])));
     }
 
-    public static function portablePluginProvider(): array
+    public static function sharedPluginNameProvider(): array
     {
         return [
             'DreamPress connectors' => [['nginx-helper', 'redis-cache']],
