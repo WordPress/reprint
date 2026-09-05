@@ -36,6 +36,9 @@ class DatabaseRowsReader {
      */
     private $current_offset = 0;
 
+    /** @var int Rows returned from the current table. */
+    private $current_table_rows_processed = 0;
+
     /** @var string|null */
     private $current_table = null;
 
@@ -50,7 +53,7 @@ class DatabaseRowsReader {
      */
     private $rows_fetched_from_current_query = 0;
 
-    /** @var array */
+    /** @var array|null */
     private $tables_to_process;
 
     /**
@@ -216,6 +219,7 @@ class DatabaseRowsReader {
         } else {
             ++$this->current_offset;
         }
+        ++$this->current_table_rows_processed;
 
         $this->current_row = $record;
         if ($this->rows_fetched_from_current_query >= $this->batch_size) {
@@ -370,6 +374,9 @@ class DatabaseRowsReader {
      *     @type array|null  $current_pk_columns  Current primary key columns.
      *     @type array|null  $last_pk_values      Encoded primary key values.
      *     @type int         $current_offset      Offset for a table without a primary key.
+     *     @type int         $current_table_rows_processed Rows returned from the current table.
+     *     @type int|null    $current_table_number One-based position of the current table.
+     *     @type int         $tables_total        Number of tables selected for export.
      *     @type array|null  $current_row         Encoded retained record.
      *     @type bool        $current_row_ends_query_batch Whether the retained record ends its query batch.
      *     @type array|null  $current_column_names Current column names.
@@ -377,11 +384,19 @@ class DatabaseRowsReader {
      */
     public function get_cursor_state()
     {
+        $current_table_index = $this->current_table === null
+            ? false
+            : array_search($this->current_table, $this->tables_to_process ?? [], true);
         return [
             "current_table" => $this->current_table,
             "current_pk_columns" => $this->current_pk_columns,
             "last_pk_values" => $this->encode_database_values_for_cursor($this->last_pk_values),
             "current_offset" => $this->current_offset,
+            "current_table_rows_processed" => $this->current_table_rows_processed,
+            "current_table_number" => $current_table_index === false
+                ? null
+                : $current_table_index + 1,
+            "tables_total" => count($this->tables_to_process ?? []),
             "current_row" => $this->encode_database_values_for_cursor($this->current_row),
             "current_row_ends_query_batch" => $this->current_row_ends_query_batch,
             "current_column_names" => $this->current_column_names,
@@ -413,6 +428,22 @@ class DatabaseRowsReader {
             );
         }
         $this->current_offset = (int) $this->current_offset;
+        $this->current_table_rows_processed = $cursor_data["current_table_rows_processed"] ?? 0;
+        if (
+            !is_int($this->current_table_rows_processed)
+            && !is_float($this->current_table_rows_processed)
+        ) {
+            throw new \InvalidArgumentException(
+                "Invalid cursor: current_table_rows_processed must be numeric, got " .
+                gettype($this->current_table_rows_processed)
+            );
+        }
+        $this->current_table_rows_processed = (int) $this->current_table_rows_processed;
+        if ($this->current_table_rows_processed < 0) {
+            throw new \InvalidArgumentException(
+                "Invalid cursor: current_table_rows_processed must not be negative"
+            );
+        }
         $this->current_row = $this->decode_database_values_from_cursor(
             $cursor_data["current_row"] ?? null
         );
@@ -763,6 +794,7 @@ class DatabaseRowsReader {
             $this->current_pk_columns = $this->get_primary_key_columns($this->current_table);
             $this->last_pk_values = null;
             $this->current_offset = 0;
+            $this->current_table_rows_processed = 0;
             $this->current_column_types = $this->get_column_types($this->current_table);
             $this->current_column_names = array_keys($this->current_column_types);
             $this->current_row = null;

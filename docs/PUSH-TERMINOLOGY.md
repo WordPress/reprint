@@ -451,11 +451,16 @@ counts. The CLI maps that snapshot onto labels and stage weights. PushPlan and
 PushFilesSender do not calculate terminal percentages or choose output format.
 
 The JSONL presentation emits `push_progress` records. `files_done` and
-`files_total` appear together after planning in those records, the final
-result, and `progress.json`; they are absent while the plan is still being
-built. `files_total` is the selected local-path count.
-`files_done` is the target-confirmed local-path count, so an open, failed, or
-canceled request does not advance it. Both counts survive resume.
+`files_total` appear together after planning in those records and remain as
+legacy top-level fields. The same values appear in `progress.items` with the
+`local_paths` unit. `progress.bytes` reports the durable byte position and
+total for the current byte-bounded phase. The final result and `progress.json`
+use the same nested progress object. `files_total` is the selected local-path
+count. `files_done` is the target-confirmed local-path count, so an open,
+failed, or canceled request does not advance it. Both counts survive resume.
+
+The shared progress object also reserves `current_file` for files-pull and
+`current_table` for db-pull. They are `null` during files-push.
 
 Files-push lifecycle lines use these command-first names verbatim: `START
 files-push`, `RESUME files-push`, `PHASE files-push`, `PARTIAL files-push`,

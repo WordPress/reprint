@@ -2,6 +2,7 @@
 
 use PHPUnit\Framework\TestCase;
 use WordPress\Reprint\Server\DatabaseRowsReader;
+use WordPress\Reprint\Server\MySQLDumpProducer;
 
 require_once __DIR__ . '/../../lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php';
 
@@ -51,6 +52,58 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
             ['ID' => 1, 'post_content' => 'https://old.example/one'],
             $reader->get_current_record()
         );
+    }
+
+    public function testCursorCountsRowsAndTablesAcrossResume(): void
+    {
+        $database = $this->open_database();
+        $reader = new DatabaseRowsReader($database, ['batch_size' => 1]);
+        $reader->initialize_tables_to_process();
+        $this->assertTrue($reader->move_to_next_table());
+        $this->assertTrue($reader->next_record());
+
+        $cursor = $reader->get_cursor_state();
+        $this->assertSame(1, $cursor['tables_total']);
+        $this->assertSame(1, $cursor['current_table_number']);
+        $this->assertSame(1, $cursor['current_table_rows_processed']);
+
+        $resumed = new DatabaseRowsReader($database, ['batch_size' => 1]);
+        $this->assertTrue($resumed->restore_cursor_state($cursor));
+        $this->assertTrue($resumed->next_record());
+        $this->assertSame(
+            2,
+            $resumed->get_cursor_state()['current_table_rows_processed']
+        );
+    }
+
+    public function testProducerCursorReportsCurrentAndCompletedTableProgress(): void
+    {
+        $producer = new MySQLDumpProducer($this->open_database(), ['batch_size' => 1]);
+        $active_table_progress = null;
+        while ($producer->next_sql_fragment()) {
+            $cursor = json_decode($producer->get_reentrancy_cursor(), true);
+            if ($cursor['progress']['current_table'] !== null) {
+                $active_table_progress = $cursor['progress'];
+            }
+        }
+
+        $this->assertNotNull($active_table_progress);
+        $this->assertSame(
+            ['done' => 0, 'total' => 1],
+            $active_table_progress['tables']
+        );
+        $this->assertSame('wp_posts', $active_table_progress['current_table']['name']);
+        $this->assertGreaterThanOrEqual(
+            1,
+            $active_table_progress['current_table']['rows_done']
+        );
+
+        $complete_cursor = json_decode($producer->get_reentrancy_cursor(), true);
+        $this->assertSame(
+            ['done' => 1, 'total' => 1],
+            $complete_cursor['progress']['tables']
+        );
+        $this->assertNull($complete_cursor['progress']['current_table']);
     }
 
     public function testReleasesTheReadResultAtTheBatchBoundary(): void
