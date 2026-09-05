@@ -7247,8 +7247,22 @@ class ImportClient
         }
 
         $table_prefix = $this->get_state()->get('preflight.database.wp.table_prefix');
+        $options_table_name = $table_prefix . 'options';
+        $options_table_exists = false;
+        $tables = $database->query('SHOW TABLES');
+        while (( $table_name = $tables->fetchColumn() ) !== false) {
+            if ($table_name === $options_table_name) {
+                $options_table_exists = true;
+                break;
+            }
+        }
+        $tables->closeCursor();
+        if (!$options_table_exists) {
+            return [];
+        }
+
         // Quote the table name to prevent SQL injection from a crafted prefix.
-        $options_table = '`' . str_replace('`', '``', $table_prefix . 'options') . '`';
+        $options_table = '`' . str_replace('`', '``', $options_table_name) . '`';
 
         $row = $database->query(
             "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"

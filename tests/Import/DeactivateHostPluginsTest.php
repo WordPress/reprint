@@ -235,6 +235,28 @@ class DeactivateHostPluginsTest extends TestCase
         $this->assertSame([], $result);
     }
 
+    /**
+     * @dataProvider targetProvider
+     */
+    public function testReturnsEmptyWhenOptionsTableMissing(string $engine): void
+    {
+        $database = $this->createDatabase($engine);
+
+        $this->writeState([
+            'webhost' => 'other',
+            'preflight' => [
+                'data' => [
+                    'database' => ['wp' => ['table_prefix' => 'wp_']],
+                ],
+            ],
+        ]);
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+
+        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$database]);
+        $this->assertSame([], $result);
+    }
+
     // ---- helpers ----
 
     private function createDatabase(string $engine): DatabaseConnection
