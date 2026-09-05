@@ -11,7 +11,7 @@ use function WordPress\Reprint\Server\trim_right_slash;
  * tree under /srv/htdocs/. After flat-docroot, the local layout uses a
  * __wp__ directory for core.
  *
- * The export only ships original-size uploads, so the manifest declares a
+ * The export only ships original-size uploads, so the configuration declares a
  * route for thumbnail-sized image URLs. The target runtime decides how to
  * implement the handler.
  */
@@ -70,12 +70,12 @@ class WpcloudHostAnalyzer implements HostAnalyzer
         return min($score, 1.0);
     }
 
-    public function analyze(array $preflight_data): RuntimeManifest
+    public function analyze(array $preflight_data): RuntimeConfiguration
     {
-        $manifest = new RuntimeManifest('wpcloud');
-        $manifest->php_ini = extract_php_ini($preflight_data);
-        $manifest->constants = $this->build_constants($preflight_data);
-        $manifest->server_vars = [
+        $configuration = new RuntimeConfiguration('wpcloud');
+        $configuration->php_ini = extract_php_ini($preflight_data);
+        $configuration->constants = $this->build_constants($preflight_data);
+        $configuration->server_vars = [
             // WP Cloud uses a __wp__ directory for WordPress core. After
             // flat-docroot, it lives at {fs-root}/__wp__/.
             'WP_DIR' => '{fs-root}/__wp__/',
@@ -85,28 +85,19 @@ class WpcloudHostAnalyzer implements HostAnalyzer
         // references sized variants like image-768x768.jpeg that don't exist
         // on disk. Declare a route so the target runtime can generate them
         // on-the-fly from the originals.
-        $manifest->routes[] = [
+        $configuration->routes[] = [
             'handler' => 'wpcloud-thumbnail-generator',
             'path_pattern' => '/wp-content/uploads/.*-\d+x\d+\.\w+$',
             'condition' => 'file_not_found',
             'description' => 'Generate missing WordPress thumbnail sizes from originals using GD',
         ];
 
-        // WP Cloud's object-cache.php and advanced-cache.php talk to a
-        // Memcached server that does not exist locally. These generic names
-        // can belong to another cache implementation, so remove them only
-        // when the source was identified as WP Cloud.
-        $manifest->paths_to_remove = [
-            'wp-content/object-cache.php',
-            'wp-content/advanced-cache.php',
-        ];
-
         // auto_prepend_file on Atomic points to /scripts/env.php — a
         // directory outside the WordPress roots.  Record it so that
         // files-pull downloads it and the runtime applier can mount it.
-        $manifest->extra_directories = $this->detect_extra_directories($preflight_data);
+        $configuration->extra_directories = $this->detect_extra_directories($preflight_data);
 
-        return $manifest;
+        return $configuration;
     }
 
     /**

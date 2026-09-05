@@ -8,7 +8,7 @@ require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
  * Verify that run_apply_runtime removes paths declared in the runtime
- * manifest and logs each removal.
+ * excluded-plugin list and logs each removal.
  */
 class ProductionDropInRemovalTest extends TestCase
 {
@@ -396,7 +396,7 @@ class ProductionDropInRemovalTest extends TestCase
             $this->preflightWithoutWpcloudSignals('/var/www/html'),
         ));
 
-        foreach (\source_host_paths_to_remove() as $relative_path) {
+        foreach (array_column(\excluded_plugins([]), 'local_path') as $relative_path) {
             $source_host_path = $this->fsRoot . '/' . $relative_path;
             if (substr($relative_path, -4) === '.php') {
                 $parent_directory = dirname($source_host_path);
@@ -419,7 +419,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
-        foreach (\source_host_paths_to_remove() as $relative_path) {
+        foreach (array_column(\excluded_plugins([]), 'local_path') as $relative_path) {
             $source_host_path = $this->fsRoot . '/' . $relative_path;
             if (substr($relative_path, -4) === '.php') {
                 $this->assertFileDoesNotExist($source_host_path);
@@ -434,7 +434,7 @@ class ProductionDropInRemovalTest extends TestCase
             true,
         );
         $this->assertSame(
-            \source_host_paths_to_remove(),
+            array_column(\excluded_plugins([]), 'local_path'),
             $state['apply']['remote_paths_removed_from_local_site'],
         );
     }

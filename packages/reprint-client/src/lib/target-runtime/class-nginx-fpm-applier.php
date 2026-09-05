@@ -17,7 +17,7 @@ use function WordPress\Filesystem\wp_join_unix_paths;
  */
 class NginxFpmApplier implements RuntimeApplier
 {
-    public function apply(RuntimeManifest $manifest, string $filesystem_root, string $output_dir, array $options = []): array
+    public function apply(RuntimeConfiguration $configuration, string $filesystem_root, string $output_dir, array $options = []): array
     {
         $host = $options['host'] ?? 'localhost';
         $port = (int) ($options['port'] ?? 80);
@@ -26,13 +26,13 @@ class NginxFpmApplier implements RuntimeApplier
 
         // 1. Write runtime.php
         $runtime_path = wp_join_unix_paths($output_dir, 'runtime.php');
-        $runtime = generate_runtime_php($manifest, $filesystem_root);
+        $runtime = generate_runtime_php($configuration, $filesystem_root);
         write_runtime_file($runtime_path, $runtime);
         $summary[] = "Wrote {$runtime_path}";
 
         // 2. Write nginx.conf (includes auto_prepend_file + INI directives)
         $nginx_conf_path = wp_join_unix_paths($output_dir, 'nginx.conf');
-        $nginx_conf = $this->generate_nginx_conf($manifest, $filesystem_root, $runtime_path, $host, $port);
+        $nginx_conf = $this->generate_nginx_conf($configuration, $filesystem_root, $runtime_path, $host, $port);
         write_runtime_file($nginx_conf_path, $nginx_conf);
         $summary[] = "Wrote {$nginx_conf_path}";
 
@@ -53,7 +53,7 @@ class NginxFpmApplier implements RuntimeApplier
      * so no .user.ini is needed in the fs-root.
      */
     private function generate_nginx_conf(
-        RuntimeManifest $manifest,
+        RuntimeConfiguration $configuration,
         string $filesystem_root,
         string $runtime_path,
         string $host,
@@ -87,7 +87,7 @@ class NginxFpmApplier implements RuntimeApplier
         // .user.ini, but without writing anything to the fs-root.
         $php_values = [];
         $php_values[] = "auto_prepend_file={$runtime_path}";
-        foreach ($manifest->php_ini as $key => $value) {
+        foreach ($configuration->php_ini as $key => $value) {
             $php_values[] = "{$key}={$value}";
         }
 

@@ -80,15 +80,16 @@ class WpengineHostAnalyzerTest extends TestCase {
         $this->assertSame(0.0, \WpengineHostAnalyzer::score($preflight));
     }
 
-    public function testAnalyzeListsAmbiguousWpenginePaths(): void
+    public function testWpenginePathsAreExcludedFromTheImport(): void
     {
-        $manifest = ( new \WpengineHostAnalyzer() )->analyze($this->wpenginePreflight([]));
+        $preflight = $this->wpenginePreflight([
+            'document_root' => '/nas/content/live/example',
+        ]);
+        $excluded_plugins = \excluded_plugins($preflight);
 
-        $this->assertSame([
-            'wp-content/advanced-cache.php',
-            'wp-content/object-cache.php',
-            'wp-content/mu-plugins/mu-plugin.php',
-        ], $manifest->paths_to_remove);
-        $this->assertSame('wpengine', $manifest->source);
+        $excluded_local_paths = array_column($excluded_plugins, 'local_path');
+        $this->assertContains('wp-content/advanced-cache.php', $excluded_local_paths);
+        $this->assertContains('wp-content/object-cache.php', $excluded_local_paths);
+        $this->assertContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
     }
 }

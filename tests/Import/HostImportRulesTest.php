@@ -7,8 +7,8 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/load.php';
 
-class HostRuntimeManifestTest extends TestCase {
-    public function testRegistryContainsOnlyHostsWithRuntimeSpecificBehavior(): void
+class HostImportRulesTest extends TestCase {
+    public function testRegistryContainsOnlyHostsWithCurrentPreflightRules(): void
     {
         $this->assertSame(
             [
@@ -58,9 +58,9 @@ class HostRuntimeManifestTest extends TestCase {
         $this->assertSame('other', \detect_host($preflight_data));
     }
 
-    public function testRuntimeManifestListsEverySourceHostPathRemovedFromAllImports(): void
+    public function testListsEveryPluginExcludedFromAllImports(): void
     {
-        $manifest = \runtime_manifest_for($this->preflight([], []));
+        $excluded_plugins = \excluded_plugins($this->preflight([], []));
 
         $this->assertSame(
             [
@@ -122,11 +122,11 @@ class HostRuntimeManifestTest extends TestCase {
                 'wp-content/mu-plugins/wpcomsh-dev',
                 'wp-content/mu-plugins/wpcomsh-loader.php',
             ],
-            $manifest->paths_to_remove,
+            array_column($excluded_plugins, 'local_path'),
         );
     }
 
-    public function testWpcloudRuntimeAndWpengineCleanupAreAppliedIndependently(): void
+    public function testWpcloudRuntimeAndWpengineExclusionsAreAppliedIndependently(): void
     {
         $preflight_data = $this->preflight(
             [],
@@ -154,31 +154,92 @@ class HostRuntimeManifestTest extends TestCase {
 
         $this->assertSame('wpcloud', \detect_host($preflight_data));
 
-        $manifest = \runtime_manifest_for($preflight_data);
-        $this->assertSame('wpcloud', $manifest->source);
-        $this->assertSame('{fs-root}/__wp__/', $manifest->server_vars['WP_DIR']);
-        $this->assertSame('{fs-root}/wp-content/themes', $manifest->constants['THEMES_PATH_BASE']);
-        $this->assertContains('/scripts', $manifest->extra_directories);
+        $configuration = \runtime_configuration_for($preflight_data);
+        $this->assertSame('wpcloud', $configuration->source);
+        $this->assertSame('{fs-root}/__wp__/', $configuration->server_vars['WP_DIR']);
+        $this->assertSame('{fs-root}/wp-content/themes', $configuration->constants['THEMES_PATH_BASE']);
+        $this->assertContains('/scripts', $configuration->extra_directories);
         $this->assertContains(
             'wpcloud-thumbnail-generator',
-            array_column($manifest->routes, 'handler'),
+            array_column($configuration->routes, 'handler'),
         );
-        $this->assertContains('wp-content/object-cache.php', $manifest->paths_to_remove);
-        $this->assertContains('wp-content/advanced-cache.php', $manifest->paths_to_remove);
-        $this->assertContains('wp-content/mu-plugins/mu-plugin.php', $manifest->paths_to_remove);
+        $excluded_local_paths = array_column(\excluded_plugins($preflight_data), 'local_path');
+        $this->assertContains('wp-content/object-cache.php', $excluded_local_paths);
+        $this->assertContains('wp-content/advanced-cache.php', $excluded_local_paths);
+        $this->assertContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
+    }
+
+    public function testExcludedPluginSourcePathsUseDirectoriesReportedByPreflight(): void
+    {
+        $preflight_data = $this->preflight([], []);
+        $preflight_data['runtime']['document_root'] = '/nas/content/live/example';
+        $preflight_data['database']['wp']['paths_urls'] = [
+            'abspath' => '/opt/wordpress/',
+            'content_dir' => '/srv/content',
+            'plugins_dir' => '/srv/custom-plugins',
+            'mu_plugins_dir' => '/srv/custom-mu-plugins',
+        ];
+
+        $excluded_plugins = [];
+        foreach (\excluded_plugins($preflight_data) as $excluded_plugin) {
+            $excluded_plugins[$excluded_plugin['local_path']] = $excluded_plugin;
+        }
+
+        $this->assertSame(
+            '/srv/custom-plugins/sg-cachepress',
+            $excluded_plugins['wp-content/plugins/sg-cachepress']['source_path'],
+        );
+        $this->assertSame(
+            '/srv/custom-mu-plugins/wpengine-common',
+            $excluded_plugins['wp-content/mu-plugins/wpengine-common']['source_path'],
+        );
+        $this->assertSame(
+            '/srv/content/object-cache.php',
+            $excluded_plugins['wp-content/object-cache.php']['source_path'],
+        );
+        $this->assertSame(
+            'sg-cachepress',
+            $excluded_plugins['wp-content/plugins/sg-cachepress']['regular_plugin_directory'],
+        );
+        $this->assertNull(
+            $excluded_plugins['wp-content/mu-plugins/wpengine-common']['regular_plugin_directory'],
+        );
+    }
+
+    public function testExcludedPluginSourcePathsFallBackToWordpressAbsolutePath(): void
+    {
+        $preflight_data = $this->preflight([], []);
+        $preflight_data['database']['wp']['paths_urls'] = [
+            'abspath' => '/opt/wordpress/',
+        ];
+
+        $excluded_plugins = [];
+        foreach (\excluded_plugins($preflight_data) as $excluded_plugin) {
+            $excluded_plugins[$excluded_plugin['local_path']] = $excluded_plugin;
+        }
+
+        $this->assertSame(
+            '/opt/wordpress/wp-content/plugins/sg-cachepress',
+            $excluded_plugins['wp-content/plugins/sg-cachepress']['source_path'],
+        );
+        $this->assertSame(
+            '/opt/wordpress/wp-content/mu-plugins/wpcomsh',
+            $excluded_plugins['wp-content/mu-plugins/wpcomsh']['source_path'],
+        );
     }
 
     public function testNamedHostPluginsUseDefaultRuntimeBehavior(): void
     {
         $preflight_data = $this->preflight(['sg-cachepress', 'sg-security'], []);
 
-        $manifest = \runtime_manifest_for($preflight_data);
+        $configuration = \runtime_configuration_for($preflight_data);
 
-        $this->assertSame('other', $manifest->source);
-        $this->assertSame(['memory_limit' => '256M'], $manifest->php_ini);
-        $this->assertContains('wp-content/plugins/sg-cachepress', $manifest->paths_to_remove);
-        $this->assertNotContains('wp-content/object-cache.php', $manifest->paths_to_remove);
-        $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $manifest->paths_to_remove);
+        $this->assertSame('other', $configuration->source);
+        $this->assertSame(['memory_limit' => '256M'], $configuration->php_ini);
+        $excluded_local_paths = array_column(\excluded_plugins($preflight_data), 'local_path');
+        $this->assertContains('wp-content/plugins/sg-cachepress', $excluded_local_paths);
+        $this->assertNotContains('wp-content/object-cache.php', $excluded_local_paths);
+        $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
     }
 
     /**

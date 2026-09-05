@@ -5,6 +5,7 @@
  * Registry, detection logic, and shared preflight extraction helpers.
  */
 
+use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\trim_right_slash;
 
@@ -44,41 +45,24 @@ function detect_host(array $preflight_data): string
 }
 
 /**
- * Build the runtime manifest for a local import.
+ * Build the target runtime configuration for a local import.
  *
- * WP Cloud runtime behavior and WP Engine cleanup are detected independently.
- * Every manifest also includes the named source-host paths removed from all
- * local imports.
+ * @param array $preflight_data The preflight response data.
  */
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the existing host helper names.
-function runtime_manifest_for(array $preflight_data): RuntimeManifest
+function runtime_configuration_for(array $preflight_data): RuntimeConfiguration
 {
     $matching_hosts = matching_host_analyzer_scores($preflight_data);
-    $is_wpcloud = isset($matching_hosts['wpcloud']);
-    $is_wpengine = isset($matching_hosts['wpengine']);
 
-    if ($is_wpcloud) {
-        $manifest = ( new WpcloudHostAnalyzer() )->analyze($preflight_data);
-    } elseif ($is_wpengine) {
-        $manifest = ( new WpengineHostAnalyzer() )->analyze($preflight_data);
+    if (isset($matching_hosts['wpcloud'])) {
+        $configuration = ( new WpcloudHostAnalyzer() )->analyze($preflight_data);
+    } elseif (isset($matching_hosts['wpengine'])) {
+        $configuration = ( new WpengineHostAnalyzer() )->analyze($preflight_data);
     } else {
-        $manifest = ( new DefaultHostAnalyzer() )->analyze($preflight_data);
+        $configuration = ( new DefaultHostAnalyzer() )->analyze($preflight_data);
     }
 
-    if ($is_wpcloud && $is_wpengine) {
-        $wpengine_manifest = ( new WpengineHostAnalyzer() )->analyze($preflight_data);
-        $manifest->paths_to_remove = array_merge(
-            $manifest->paths_to_remove,
-            $wpengine_manifest->paths_to_remove,
-        );
-    }
-
-    $manifest->paths_to_remove = array_values(array_unique(array_merge(
-        source_host_paths_to_remove(),
-        $manifest->paths_to_remove,
-    )));
-
-    return $manifest;
+    return $configuration;
 }
 
 /**
@@ -102,14 +86,24 @@ function matching_host_analyzer_scores(array $preflight_data): array
 }
 
 /**
- * Source-host paths removed from every local import.
+ * Resolve plugins, MU plugins, and drop-ins excluded from a local import.
  *
- * @return string[]
+ * Named plugin paths are excluded from every import. Generic drop-ins are
+ * included only when current preflight paths identify WP Cloud or WP Engine.
+ * Source paths use the actual WordPress directories reported by preflight,
+ * including custom plugin and MU-plugin locations.
+ *
+ * @param array $preflight_data The preflight response data.
+ * @return array<int, array{
+ *     source_path: string|null,
+ *     local_path: string,
+ *     regular_plugin_directory: string|null
+ * }>
  */
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the existing host helper names.
-function source_host_paths_to_remove(): array
+function excluded_plugins(array $preflight_data): array
 {
-    return [
+    $local_paths = [
         // Plugins commonly installed or recommended by several hosts.
         'wp-content/plugins/nginx-helper',
         'wp-content/plugins/redis-cache',
@@ -203,6 +197,66 @@ function source_host_paths_to_remove(): array
         'wp-content/mu-plugins/wpcomsh-dev',
         'wp-content/mu-plugins/wpcomsh-loader.php',
     ];
+
+    $matching_hosts = matching_host_analyzer_scores($preflight_data);
+    // WP Cloud and WP Engine cache drop-ins talk to platform services which
+    // are unavailable locally. These generic filenames can belong to another
+    // cache implementation, so exclude them only for a current host match.
+    if (isset($matching_hosts['wpcloud']) || isset($matching_hosts['wpengine'])) {
+        $local_paths[] = 'wp-content/object-cache.php';
+        $local_paths[] = 'wp-content/advanced-cache.php';
+    }
+    // mu-plugin.php is WP Engine's loader, but its name is otherwise generic.
+    if (isset($matching_hosts['wpengine'])) {
+        $local_paths[] = 'wp-content/mu-plugins/mu-plugin.php';
+    }
+
+    $paths_urls = $preflight_data['database']['wp']['paths_urls'] ?? [];
+    $clean_absolute_directory = static function ($path): ?string {
+        if (!is_string($path) || $path === '' || $path[0] !== '/') {
+            return null;
+        }
+        return trim_right_slash($path);
+    };
+    $wordpress_absolute_path = $clean_absolute_directory($paths_urls['abspath'] ?? null);
+    $content_directory = $clean_absolute_directory($paths_urls['content_dir'] ?? null);
+    if ($content_directory === null && $wordpress_absolute_path !== null) {
+        $content_directory = wp_join_unix_paths($wordpress_absolute_path, 'wp-content');
+    }
+    $plugins_directory = $clean_absolute_directory($paths_urls['plugins_dir'] ?? null);
+    $mu_plugins_directory = $clean_absolute_directory($paths_urls['mu_plugins_dir'] ?? null);
+    if ($content_directory !== null) {
+        $plugins_directory = $plugins_directory
+            ?? wp_join_unix_paths($content_directory, 'plugins');
+        $mu_plugins_directory = $mu_plugins_directory
+            ?? wp_join_unix_paths($content_directory, 'mu-plugins');
+    }
+
+    $excluded_plugins = [];
+    foreach (array_values(array_unique($local_paths)) as $local_path) {
+        $source_directory = $content_directory;
+        $path_within_source_directory = substr($local_path, strlen('wp-content/'));
+        $regular_plugin_directory = null;
+
+        if (strpos($local_path, 'wp-content/plugins/') === 0) {
+            $source_directory = $plugins_directory;
+            $path_within_source_directory = substr($local_path, strlen('wp-content/plugins/'));
+            $regular_plugin_directory = $path_within_source_directory;
+        } elseif (strpos($local_path, 'wp-content/mu-plugins/') === 0) {
+            $source_directory = $mu_plugins_directory;
+            $path_within_source_directory = substr($local_path, strlen('wp-content/mu-plugins/'));
+        }
+
+        $excluded_plugins[] = [
+            'source_path' => $source_directory === null
+                ? null
+                : wp_join_unix_paths($source_directory, $path_within_source_directory),
+            'local_path' => $local_path,
+            'regular_plugin_directory' => $regular_plugin_directory,
+        ];
+    }
+
+    return $excluded_plugins;
 }
 
 /**

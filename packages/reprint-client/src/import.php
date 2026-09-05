@@ -91,10 +91,10 @@ require_once __DIR__ . '/lib/database/load.php';
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
 
-// Load host analyzers (produce a runtime manifest from preflight data)
+// Load host analyzers (produce a runtime configuration from preflight data)
 require_once __DIR__ . '/lib/host/load.php';
 
-// Load target runtime appliers (consume a manifest, write server config)
+// Load target runtime appliers (consume runtime configuration, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
 
 require_once __DIR__ . '/lib/merge/load.php';
@@ -420,6 +420,17 @@ class ImportClient
      */
     private $pull_excluded_files_with_path_prefixes = [];
 
+    /**
+     * Plugins, MU plugins, and drop-ins omitted from this import.
+     *
+     * @var array<int, array{
+     *     source_path: string|null,
+     *     local_path: string,
+     *     regular_plugin_directory: string|null
+     * }>
+     */
+    private $excluded_plugins = [];
+
     /** @var string[]|null Memoized get_selected_paths_pulled_before() result. */
     private $selected_paths_pulled_before = null;
 
@@ -689,6 +700,8 @@ class ImportClient
             $this->pull_excluded_files_with_path_prefixes =
                 $this->resolve_remote_paths($excluded_raw, "exclude");
         }
+        $preflight_data = $this->get_state()->preflight_record()["data"] ?? [];
+        $this->excluded_plugins = excluded_plugins($preflight_data);
 
         if ($assert_remap) {
             $this->assert_resolved_path_mappings_consistent();
@@ -4639,7 +4652,7 @@ class ImportClient
         $database = $preflight_data["database"] ?? [];
         $wordpress = $database["wp"] ?? [];
         $paths_urls = $wordpress["paths_urls"] ?? [];
-        $runtime_manifest = runtime_manifest_for($preflight_data);
+        $runtime_configuration = runtime_configuration_for($preflight_data);
 
         return [
             "hasCompletedOnce" => $pull->has_completed_once,
@@ -4660,7 +4673,7 @@ class ImportClient
                     $preflight_data["wp_detect"]["roots"] ?? [],
                     "path"
                 ),
-                "extraDirectories" => $runtime_manifest->extra_directories,
+                "extraDirectories" => $runtime_configuration->extra_directories,
             ],
         ];
     }
@@ -4686,8 +4699,8 @@ class ImportClient
      * Generate runtime configuration for the pulled site.
      *
      * Reads the detected webhost from state (set during preflight), runs the
-     * appropriate host analyzer to produce a runtime manifest, then applies
-     * it using the chosen runtime applier. The manifest captures what the
+     * appropriate host analyzer to produce a runtime configuration, then applies
+     * it using the chosen runtime applier. The configuration captures what the
      * remote site needs (constants, INI directives, error handlers);
      * the applier writes the files the target server needs to fulfill those
      * requirements.
@@ -4838,35 +4851,34 @@ class ImportClient
             $abs_output_dir = realpath($abs_output_dir);
         }
 
-        // Step 1: Build a manifest from preflight data and the paths excluded
-        // from every local import.
-        $manifest = runtime_manifest_for($preflight_data);
-        $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data);
+        // Step 1: Build the target runtime configuration from preflight data.
+        $configuration = runtime_configuration_for($preflight_data);
+        $this->maybe_enable_remote_upload_proxy($configuration, $preflight_data);
 
-        // Step 1b: Merge the target database configuration into the manifest.
+        // Step 1b: Add the target database settings.
         // It decides the DB_* constants and, for SQLite targets, the database
         // integration plugin setup.
         $target_engine = $target["engine"];
         if ($target_engine === "mysql") {
-            $manifest->constants["DB_NAME"] = $target["db"];
-            $manifest->constants["DB_USER"] = $target["user"];
-            $manifest->constants["DB_PASSWORD"] = $target["pass"];
+            $configuration->constants["DB_NAME"] = $target["db"];
+            $configuration->constants["DB_USER"] = $target["user"];
+            $configuration->constants["DB_PASSWORD"] = $target["pass"];
             $host_value = $target["host"];
             if ($target["port"] !== 3306) {
                 $host_value .= ":" . $target["port"];
             }
-            $manifest->constants["DB_HOST"] = $host_value;
+            $configuration->constants["DB_HOST"] = $host_value;
             // runtime.php defines DB_* before wp-config.php loads, which
             // causes "Constant already defined" warnings. Flag this so the
             // generated runtime.php installs a handler to suppress them.
-            $manifest->has_db_constants = true;
+            $configuration->has_db_constants = true;
         } elseif ($target_engine === "sqlite") {
             $sqlite_path = $target["sqlite_path"];
-            $manifest->constants["DB_NAME"] = $target["db"];
+            $configuration->constants["DB_NAME"] = $target["db"];
             // The SQLite integration still requires a non-empty DB_NAME
             // for its MySQL information-schema emulation, even though the
             // physical database location comes from DB_DIR/DB_FILE.
-            $manifest->has_db_constants = true;
+            $configuration->has_db_constants = true;
             if ($sqlite_path !== null) {
                 $db_dir = rtrim(dirname($sqlite_path), '/') . '/';
                 $db_file = basename($sqlite_path);
@@ -4874,7 +4886,7 @@ class ImportClient
                 $db_dir = '{fs-root}/wp-content/database/';
                 $db_file = '.ht.sqlite';
             }
-            $manifest->sqlite = [
+            $configuration->sqlite = [
                 'plugin_source' => resolve_sqlite_integration_plugin_path(),
                 'plugin_dir' => '',  // resolved after copy_sqlite_plugin()
                 'db_dir' => $db_dir,
@@ -4882,7 +4894,7 @@ class ImportClient
             ];
         }
 
-        $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
+        $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$configuration->source}, webhost={$webhost})");
 
         // Resolve host and port for the target server. If not provided on
         // the CLI, derive from the first URL rewrite target (saved by
@@ -4938,29 +4950,32 @@ class ImportClient
         // Step 2b: For SQLite targets, copy the integration plugin into the
         // output directory BEFORE the applier runs, so generate_runtime_php()
         // can embed the resolved plugin path in the lazy-loader code.
-        if ($manifest->sqlite !== null) {
+        if ($configuration->sqlite !== null) {
             $copied_plugin = copy_sqlite_plugin(
-                $manifest->sqlite['plugin_source'],
+                $configuration->sqlite['plugin_source'],
                 $abs_output_dir,
             );
             // Replace the source path with the copied-to path so the
             // generated runtime.php points to the output directory.
-            $manifest->sqlite['plugin_dir'] = $copied_plugin;
+            $configuration->sqlite['plugin_dir'] = $copied_plugin;
             // Resolve {fs-root} in db_dir now that we have the real path.
-            $manifest->sqlite['db_dir'] = resolve_runtime_placeholders(
-                $manifest->sqlite['db_dir'],
+            $configuration->sqlite['db_dir'] = resolve_runtime_placeholders(
+                $configuration->sqlite['db_dir'],
                 $local_document_root,
             );
         }
 
-        $summary = $applier->apply($manifest, $local_document_root, $abs_output_dir, $applier_options);
+        $summary = $applier->apply($configuration, $local_document_root, $abs_output_dir, $applier_options);
 
-        if ($manifest->sqlite !== null) {
+        if ($configuration->sqlite !== null) {
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
         }
 
-        // Remove paths excluded from the local site by the runtime manifest.
-        foreach ($manifest->paths_to_remove as $rel_path) {
+        // A previous import or pre-existing local tree may already contain an
+        // excluded plugin. File download filtering cannot remove that copy.
+        $excluded_plugins = excluded_plugins($preflight_data);
+        $excluded_local_paths = array_column($excluded_plugins, 'local_path');
+        foreach ($excluded_local_paths as $rel_path) {
             $full_path = wp_join_unix_paths($local_document_root, $rel_path);
             if (!file_exists($full_path) && !is_link($full_path)) {
                 continue;
@@ -4979,7 +4994,7 @@ class ImportClient
         }
 
         // Persist which paths were removed so callers can inspect state.
-        $this->get_state()->apply->remote_paths_removed_from_local_site = $manifest->paths_to_remove;
+        $this->get_state()->apply->remote_paths_removed_from_local_site = $excluded_local_paths;
         $this->save_state();
 
         // Read the structured start config if the applier wrote one.
@@ -4991,17 +5006,17 @@ class ImportClient
             $start_config = json_decode(file_get_contents($start_config_path), true);
         }
 
-        // Output the summary and manifest as structured JSON for callers,
+        // Output the summary and runtime details as structured JSON for callers,
         // or print the human-readable terminal summary.
         $this->output_progress([
             "status" => "complete",
             "command" => "apply-runtime",
             "runtime" => $runtime,
             "webhost" => $webhost,
-            "webhost_source" => $manifest->source,
+            "webhost_source" => $configuration->source,
             "target_engine" => $target_engine,
-            "paths_removed" => $manifest->paths_to_remove,
-            "extra_directories" => $manifest->extra_directories,
+            "paths_removed" => $excluded_local_paths,
+            "extra_directories" => $configuration->extra_directories,
             "start_config" => $start_config,
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
@@ -5190,7 +5205,7 @@ class ImportClient
      * - files-pull is still incomplete
      * - the essential-files preset is active
      */
-    private function maybe_enable_remote_upload_proxy(RuntimeManifest $manifest, array $preflight_data): void
+    private function maybe_enable_remote_upload_proxy(RuntimeConfiguration $configuration, array $preflight_data): void
     {
         if (!$this->should_enable_remote_upload_proxy()) {
             return;
@@ -5205,15 +5220,15 @@ class ImportClient
             return;
         }
 
-        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL"] = $base_url;
+        $configuration->constants["REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL"] = $base_url;
         $pull_state_directory =
             realpath($this->pull_state_directory)
             ?: $this->pull_state_directory;
-        $manifest->constants["REPRINT_PULL_STATE_FILE"] = wp_join_unix_paths(
+        $configuration->constants["REPRINT_PULL_STATE_FILE"] = wp_join_unix_paths(
             trim_right_slash($pull_state_directory),
             "state.json"
         );
-        $manifest->routes[] = [
+        $configuration->routes[] = [
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
             "condition" => "file_not_found",
@@ -6921,13 +6936,11 @@ class ImportClient
         DatabaseConnection $connection,
         array $options
     ): void {
-        // The runtime manifest declares paths_to_remove; any entry under
-        // wp-content/plugins/ means that plugin will be deleted from disk
-        // during apply-runtime. Remove it from active_plugins now, while the
-        // database connection is still open, so WordPress won't complain
-        // about missing plugin files. We skip deactivate_plugins() because the
-        // plugin files will be gone by the time WordPress boots; firing
-        // deactivation hooks into absent code is pointless.
+        // Remove excluded regular plugins from active_plugins now, while the
+        // database connection is still open. Their files are omitted from the
+        // download, and any older local copy is removed during apply-runtime.
+        // We skip deactivate_plugins() because WordPress has not booted and the
+        // excluded plugin code may already be absent.
         $deactivated = $this->deactivate_host_plugins($connection);
         foreach ($deactivated as $basename) {
             $this->audit_log("DB-APPLY | deactivated plugin {$basename} (source-host)");
@@ -7159,22 +7172,19 @@ class ImportClient
     /**
      * Deactivate source-host plugins in the target database.
      *
-     * Looks at the runtime manifest's paths_to_remove for entries under
-     * wp-content/plugins/ and removes matching basenames from the
-     * active_plugins option. Runs at the end of db-apply while the target
-     * connection is still open.
+     * Uses the regular plugin directory names calculated from preflight and
+     * removes matching basenames from active_plugins. Runs at the end of
+     * db-apply while the target connection is still open.
      *
      * @return string[]  Plugin basenames actually removed.
      */
     private function deactivate_host_plugins(DatabaseConnection $database): array
     {
         $preflight_data = $this->get_state()->preflight_record()["data"] ?? [];
-        $manifest = runtime_manifest_for($preflight_data);
-
         $plugin_dirs = [];
-        foreach ($manifest->paths_to_remove as $rel_path) {
-            if (preg_match('#^wp-content/plugins/([^/]+)$#', $rel_path, $m)) {
-                $plugin_dirs[] = $m[1];
+        foreach (excluded_plugins($preflight_data) as $excluded_plugin) {
+            if ($excluded_plugin['regular_plugin_directory'] !== null) {
+                $plugin_dirs[] = $excluded_plugin['regular_plugin_directory'];
             }
         }
 
@@ -7823,6 +7833,15 @@ class ImportClient
                         $path,
                         "index batch path",
                     );
+                    foreach ($this->excluded_plugins as $excluded_plugin) {
+                        $excluded_source_path = $excluded_plugin['source_path'];
+                        if (
+                            $excluded_source_path !== null
+                            && path_is_same_as_or_descendant_of($path, $excluded_source_path)
+                        ) {
+                            continue 2;
+                        }
+                    }
                     $ctime = (int) ($item["ctime"] ?? 0);
                     $size = (int) ($item["size"] ?? 0);
                     $type = (string) ($item["type"] ?? "file");
@@ -9817,11 +9836,12 @@ class ImportClient
     /**
      * Refuse to resume a files-pull after changing its path selection.
      *
-     * --include determines the next remote index traversal, while --exclude determines
-     * which entries enter the later fetch list. Keep both fixed for the complete
-     * in-progress lifecycle rather than allowing a resumed stage to cross a path-
-     * selection boundary. Completed runs may use a different selection because the
-     * remote index is intentionally a union across them.
+     * --include determines the next remote index traversal. --exclude and the
+     * excluded plugin source paths determine which index entries are retained.
+     * Keep all three fixed for the complete in-progress lifecycle rather than
+     * allowing a resumed stage to cross a path-selection boundary. Completed
+     * runs may use a different selection because the remote index is
+     * intentionally a union across them.
      */
     private function assert_files_pull_path_selection_unchanged_while_resuming(bool $has_progress): void
     {
@@ -9834,8 +9854,8 @@ class ImportClient
 
         if ($previous !== $fingerprint) {
             throw new RuntimeException(
-                "Cannot change --include or --exclude while resuming files-pull. " .
-                    "Use the original path selections, or use --abort to start a new files-pull.",
+                "Cannot resume files-pull because its file path selection changed. " .
+                    "Use --abort to start a new files-pull.",
             );
         }
     }
@@ -9851,6 +9871,11 @@ class ImportClient
     {
         $excluded_path_prefixes = $this->pull_excluded_files_with_path_prefixes;
         sort($excluded_path_prefixes, SORT_STRING);
+        $excluded_plugin_source_paths = array_values(array_filter(
+            array_column($this->excluded_plugins, 'source_path'),
+            'is_string',
+        ));
+        sort($excluded_plugin_source_paths, SORT_STRING);
 
         return hash(
             "sha256",
@@ -9858,6 +9883,7 @@ class ImportClient
                 [
                     "only_path_prefixes" => $this->pull_only_files_with_path_prefixes,
                     "excluded_path_prefixes" => $excluded_path_prefixes,
+                    "excluded_plugin_source_paths" => $excluded_plugin_source_paths,
                 ],
                 JSON_UNESCAPED_SLASHES
             ),

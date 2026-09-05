@@ -148,7 +148,7 @@ class DeactivateHostPluginsTest extends TestCase
         $this->createWpOptionsTable($database);
 
         $source_host_plugin_paths = array_filter(
-            \source_host_paths_to_remove(),
+            array_column(\excluded_plugins([]), 'local_path'),
             static function (string $path): bool {
                 return strpos($path, 'wp-content/plugins/') === 0;
             },
@@ -192,8 +192,8 @@ class DeactivateHostPluginsTest extends TestCase
      */
     public function testReturnsEmptyWhenNoHostPluginsUnderPluginsDir(string $engine): void
     {
-        // The active list contains no plugin directory declared by the
-        // runtime manifest, so the value must be untouched.
+        // The active list contains no excluded plugin directory, so the value
+        // must be untouched.
         $database = $this->createDatabase($engine);
         $this->createWpOptionsTable($database);
         $serialized = serialize(['akismet/akismet.php']);

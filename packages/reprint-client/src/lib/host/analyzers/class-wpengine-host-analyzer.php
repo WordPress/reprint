@@ -32,20 +32,12 @@ class WpengineHostAnalyzer implements HostAnalyzer {
         return 0.0;
     }
 
-    public function analyze(array $preflight_data): RuntimeManifest
+    public function analyze(array $preflight_data): RuntimeConfiguration
     {
-        $manifest = new RuntimeManifest('wpengine');
-        $manifest->php_ini = extract_php_ini($preflight_data);
-        $manifest->constants = extract_constants($preflight_data);
+        $configuration = new RuntimeConfiguration('wpengine');
+        $configuration->php_ini = extract_php_ini($preflight_data);
+        $configuration->constants = extract_constants($preflight_data);
 
-        // These generic paths can belong to another cache implementation, so
-        // remove them only when the source was identified as WP Engine.
-        $manifest->paths_to_remove = [
-            'wp-content/advanced-cache.php',
-            'wp-content/object-cache.php',
-            'wp-content/mu-plugins/mu-plugin.php',
-        ];
-
-        return $manifest;
+        return $configuration;
     }
 }

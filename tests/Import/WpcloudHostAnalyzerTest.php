@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/class-runtime-manifest.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/class-runtime-configuration.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/interface-host-analyzer.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/functions.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/analyzers/class-wpcloud-host-analyzer.php';
@@ -48,15 +48,18 @@ class WpcloudHostAnalyzerTest extends TestCase
         return array_replace_recursive($defaults, $overrides);
     }
 
-    public function testAnalyzeListsAmbiguousWpcloudPaths(): void
+    public function testWpcloudPathsAreExcludedFromTheImport(): void
     {
-        $analyzer = new \WpcloudHostAnalyzer();
-        $manifest = $analyzer->analyze($this->wpcloudPreflight());
+        $excluded_plugins = \excluded_plugins($this->wpcloudPreflight());
 
-        $this->assertSame([
+        $this->assertContains(
             'wp-content/object-cache.php',
+            array_column($excluded_plugins, 'local_path'),
+        );
+        $this->assertContains(
             'wp-content/advanced-cache.php',
-        ], $manifest->paths_to_remove);
+            array_column($excluded_plugins, 'local_path'),
+        );
     }
 
     public function testAnalyzeDetectsExtraDirectoryFromAutoPrependFile(): void
@@ -70,9 +73,9 @@ class WpcloudHostAnalyzerTest extends TestCase
         ]);
 
         $analyzer = new \WpcloudHostAnalyzer();
-        $manifest = $analyzer->analyze($preflight);
+        $configuration = $analyzer->analyze($preflight);
 
-        $this->assertContains('/scripts', $manifest->extra_directories);
+        $this->assertContains('/scripts', $configuration->extra_directories);
     }
 
     public function testAnalyzeDetectsExtraDirectoryFromAutoAppendFile(): void
@@ -86,9 +89,9 @@ class WpcloudHostAnalyzerTest extends TestCase
         ]);
 
         $analyzer = new \WpcloudHostAnalyzer();
-        $manifest = $analyzer->analyze($preflight);
+        $configuration = $analyzer->analyze($preflight);
 
-        $this->assertContains('/logging', $manifest->extra_directories);
+        $this->assertContains('/logging', $configuration->extra_directories);
     }
 
     public function testAnalyzeDeduplicatesExtraDirectories(): void
@@ -103,11 +106,11 @@ class WpcloudHostAnalyzerTest extends TestCase
         ]);
 
         $analyzer = new \WpcloudHostAnalyzer();
-        $manifest = $analyzer->analyze($preflight);
+        $configuration = $analyzer->analyze($preflight);
 
         // Both point to /scripts — should appear only once.
-        $this->assertCount(1, $manifest->extra_directories);
-        $this->assertSame(['/scripts'], $manifest->extra_directories);
+        $this->assertCount(1, $configuration->extra_directories);
+        $this->assertSame(['/scripts'], $configuration->extra_directories);
     }
 
     public function testAnalyzeIgnoresEmptyIniValues(): void
@@ -122,9 +125,9 @@ class WpcloudHostAnalyzerTest extends TestCase
         ]);
 
         $analyzer = new \WpcloudHostAnalyzer();
-        $manifest = $analyzer->analyze($preflight);
+        $configuration = $analyzer->analyze($preflight);
 
-        $this->assertEmpty($manifest->extra_directories);
+        $this->assertEmpty($configuration->extra_directories);
     }
 
     public function testAnalyzeIgnoresRelativeIniPaths(): void
@@ -138,9 +141,9 @@ class WpcloudHostAnalyzerTest extends TestCase
         ]);
 
         $analyzer = new \WpcloudHostAnalyzer();
-        $manifest = $analyzer->analyze($preflight);
+        $configuration = $analyzer->analyze($preflight);
 
-        $this->assertEmpty($manifest->extra_directories);
+        $this->assertEmpty($configuration->extra_directories);
     }
 
     public function testAnalyzeIgnoresRootSlashOnly(): void
@@ -154,28 +157,28 @@ class WpcloudHostAnalyzerTest extends TestCase
         ]);
 
         $analyzer = new \WpcloudHostAnalyzer();
-        $manifest = $analyzer->analyze($preflight);
+        $configuration = $analyzer->analyze($preflight);
 
         // dirname('/env.php') is '/' — should be ignored.
-        $this->assertEmpty($manifest->extra_directories);
+        $this->assertEmpty($configuration->extra_directories);
     }
 
     public function testAnalyzeDeclaresThumbnailerRoute(): void
     {
         $analyzer = new \WpcloudHostAnalyzer();
-        $manifest = $analyzer->analyze($this->wpcloudPreflight());
+        $configuration = $analyzer->analyze($this->wpcloudPreflight());
 
-        $handlers = array_column($manifest->routes, 'handler');
+        $handlers = array_column($configuration->routes, 'handler');
         $this->assertContains('wpcloud-thumbnail-generator', $handlers);
     }
 
     public function testAnalyzeSetsWpDirServerVar(): void
     {
         $analyzer = new \WpcloudHostAnalyzer();
-        $manifest = $analyzer->analyze($this->wpcloudPreflight());
+        $configuration = $analyzer->analyze($this->wpcloudPreflight());
 
-        $this->assertArrayHasKey('WP_DIR', $manifest->server_vars);
-        $this->assertSame('{fs-root}/__wp__/', $manifest->server_vars['WP_DIR']);
+        $this->assertArrayHasKey('WP_DIR', $configuration->server_vars);
+        $this->assertSame('{fs-root}/__wp__/', $configuration->server_vars['WP_DIR']);
     }
 
     public function testExtractConstantsTreatsASiblingPrefixAsOutsideAbspath(): void

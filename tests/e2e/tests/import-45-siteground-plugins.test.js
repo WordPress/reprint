@@ -2,11 +2,12 @@
  * Test 45: Global removal of SiteGround plugins
  *
  * Installs and activates sg-cachepress and sg-security on an ordinary source
- * site. Verifies that after the full
+ * site. Verifies that the plugins are omitted from file downloads and after
+ * the full
  * import pipeline (preflight -> files-pull -> db-pull -> db-apply ->
  * apply-runtime), both plugins are:
- *   1. Deactivated in the target database during db-apply
- *   2. Removed from the local filesystem during apply-runtime
+ *   1. Omitted from the local filesystem during files-pull
+ *   2. Deactivated in the target database during db-apply
  *   3. Unrelated plugins are preserved
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -17,7 +18,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    getDbName, createMysqlConnection, pullStateDirectory,
+    getDbName, createMysqlConnection, pullStateDirectory, fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -119,11 +120,25 @@ describe('Import: global removal of SiteGround plugins', () => {
             `Expected webhost 'other', got '${state.webhost}'`);
     });
 
-    it('files-pull downloads the site', () => {
+    it('files-pull omits the excluded plugins', () => {
         const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `files-pull failed:\n${result.stderr}`);
+
+        const pulledSite = join(fsRootDir(tempDir), getSiteDir(site));
+        assert.ok(
+            !existsSync(join(pulledSite, 'wp-content', 'plugins', 'sg-cachepress')),
+            'sg-cachepress should not be downloaded',
+        );
+        assert.ok(
+            !existsSync(join(pulledSite, 'wp-content', 'plugins', 'sg-security')),
+            'sg-security should not be downloaded',
+        );
+        assert.ok(
+            existsSync(join(pulledSite, 'wp-content', 'plugins', 'reprint-server')),
+            'unlisted plugins should still be downloaded',
+        );
     });
 
     it('db-pull downloads the SQL dump', () => {
@@ -206,6 +221,14 @@ describe('Import: global removal of SiteGround plugins', () => {
             });
             assert.equal(flatResult.exitCode, 0,
                 `flat-docroot failed:\n${flatResult.stderr}`);
+
+            // Simulate copies left by an older import. Download filtering
+            // cannot remove files which already exist locally.
+            for (const plugin of ['sg-cachepress', 'sg-security']) {
+                const pluginDir = join(flatDir, 'wp-content', 'plugins', plugin);
+                mkdirSync(pluginDir, { recursive: true });
+                writeFileSync(join(pluginDir, `${plugin}.php`), '<?php // stale local copy');
+            }
 
             execFileSync('php', [
                 CLIENT_PATH,
