@@ -257,7 +257,7 @@ class DiagnoseHttpErrorTest extends TestCase
             $this->assertTrue(
                 $this->isPotentiallyTransientHttpError(
                     $http_code,
-                    '<!doctype html><title>Temporary Cloudflare response</title>',
+                    '<!doctype html><title>Temporary reverse-proxy response</title>',
                 ),
                 "HTTP {$http_code} should be potentially transient",
             );
@@ -266,7 +266,7 @@ class DiagnoseHttpErrorTest extends TestCase
             $this->assertFalse(
                 $this->isPotentiallyTransientHttpError(
                     $http_code,
-                    '<!doctype html><title>Cloudflare configuration error</title>',
+                    '<!doctype html><title>Reverse-proxy configuration error</title>',
                 ),
                 "HTTP {$http_code} should remain fatal",
             );

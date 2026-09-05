@@ -239,11 +239,12 @@ class ImportClient
         502, // Bad Gateway
         503, // Service Unavailable
         504, // Gateway Timeout
-        520, // Cloudflare received an unknown response from the origin
-        521, // Cloudflare could not connect to the origin
-        522, // Cloudflare timed out connecting to the origin
-        523, // Cloudflare could not reach the origin
-        524, // Cloudflare timed out waiting for the origin response
+        // Non-standard reverse-proxy origin failures, most often from Cloudflare.
+        520, // Unknown origin response
+        521, // Origin refused the connection
+        522, // Origin connection timed out
+        523, // Origin could not be reached
+        524, // Origin response timed out
     ];
 
     /** @var string Remote Reprint API URL. */
