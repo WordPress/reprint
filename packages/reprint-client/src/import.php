@@ -2916,26 +2916,13 @@ class ImportClient
         }
 
         // 3. Protocol version
-        $remote_ver = $this->get_state()->remote_protocol_version ?? null;
-        if ($remote_ver === null) {
-            $proto_ok = false;
-            $proto_detail = "Remote export plugin does not report a protocol version. Update the export plugin.";
-        } elseif ($remote_ver < PULL_PROTOCOL_VERSION) {
-            $proto_ok = false;
-            $proto_detail = "Remote protocol v{$remote_ver} does not match client protocol v" . PULL_PROTOCOL_VERSION . ". Update the export plugin.";
-        } elseif ($remote_ver > PULL_PROTOCOL_VERSION) {
-            $proto_ok = false;
-            $proto_detail = "Remote protocol v{$remote_ver} does not match client protocol v" . PULL_PROTOCOL_VERSION . ". Update the Reprint client.";
-        } else {
-            $proto_ok = true;
-            $proto_detail = "remote v{$remote_ver}, client v" . PULL_PROTOCOL_VERSION;
-        }
+        $protocol_check = $this->preflight_protocol_check();
         $checks[] = [
             "label" => "Protocol compatible",
-            "pass" => $proto_ok,
-            "detail" => $proto_detail,
+            "pass" => $protocol_check['pass'],
+            "detail" => $protocol_check['detail'],
         ];
-        if (!$proto_ok) {
+        if (!$protocol_check['pass']) {
             $all_pass = false;
         }
 
@@ -3009,6 +2996,46 @@ class ImportClient
 
         $this->write_progress_file($all_pass ? null : "Preflight assertions failed");
         exit($all_pass ? 0 : 1);
+    }
+
+    /**
+     * Compare the export plugin's wire protocol with this client.
+     *
+     * @return array {
+     *     Protocol compatibility result.
+     *
+     *     @type bool   $pass   Whether the protocol versions match.
+     *     @type string $detail Human-readable version detail or update instruction.
+     * }
+     */
+    public function preflight_protocol_check(): array
+    {
+        $remote_protocol_version = $this->get_state()->remote_protocol_version;
+        if ($remote_protocol_version === null) {
+            return [
+                'pass' => false,
+                'detail' => 'Remote export plugin does not report a protocol version. Update the export plugin.',
+            ];
+        }
+        if ($remote_protocol_version < PULL_PROTOCOL_VERSION) {
+            return [
+                'pass' => false,
+                'detail' => "Remote protocol v{$remote_protocol_version} does not match client protocol v" .
+                    PULL_PROTOCOL_VERSION . '. Update the export plugin.',
+            ];
+        }
+        if ($remote_protocol_version > PULL_PROTOCOL_VERSION) {
+            return [
+                'pass' => false,
+                'detail' => "Remote protocol v{$remote_protocol_version} does not match client protocol v" .
+                    PULL_PROTOCOL_VERSION . '. Update the Reprint client.',
+            ];
+        }
+
+        return [
+            'pass' => true,
+            'detail' => "remote v{$remote_protocol_version}, client v" . PULL_PROTOCOL_VERSION,
+        ];
     }
 
     /**
@@ -4900,21 +4927,12 @@ class ImportClient
         // the CLI, derive from the first URL rewrite target (saved by
         // db-apply). This way the dev server listens on the same address
         // the database was rewritten to.
-        $host = $options["host"] ?? null;
-        $port = $options["port"] ?? null;
-        if ($host === null || $port === null) {
-            $rewrite_map = $this->get_state()->apply->rewrite_url ?? [];
-            $first_target = !empty($rewrite_map) ? reset($rewrite_map) : null;
-            if (is_string($first_target)) {
-                $parsed = parse_url($first_target);
-                if ($host === null) {
-                    $host = $parsed["host"] ?? null;
-                }
-                if ($port === null && isset($parsed["port"])) {
-                    $port = $parsed["port"];
-                }
-            }
-        }
+        $runtime_address = resolve_runtime_host_and_port(
+            $options,
+            $this->get_state()->apply->rewrite_url ?? [],
+        );
+        $host = $runtime_address['host'];
+        $port = $runtime_address['port'];
 
         // Resolve the path to WordPress's index.php. On standard hosts it
         // lives in the filesystem root. On WPCloud the ABSPATH is a different
@@ -13744,7 +13762,7 @@ if (
                 "  1. Preflight — probe the remote site environment\n" .
                 "  2. Files     — download all remote files into --fs-root\n" .
                 "  3. Database  — download the SQL dump\n" .
-                "  4. Apply     — apply SQL to a local database (if --target-db)\n" .
+                "  4. Apply     — apply SQL to SQLite by default, or to a configured database\n" .
                 "  5. Flatten   — reassemble into standard WP layout (if --flatten-to)\n" .
                 "  6. Runtime   — generate server config (default: php-builtin)\n" .
                 "  7. Start     — launch the selected runtime when supported\n" .
@@ -13757,7 +13775,7 @@ if (
                 "so you can pass just the site URL.\n",
             "extra" =>
                 "Examples:\n" .
-                "  # Download files and database without applying SQL:\n" .
+                "  # Full local clone with default SQLite and URL rewriting:\n" .
                 "  reprint pull https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files\n" .
                 "\n" .

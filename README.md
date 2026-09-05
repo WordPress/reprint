@@ -25,8 +25,9 @@ That's it. Reprint will:
 1. **Preflight** the remote site (check connectivity, detect WordPress version and hosting environment)
 2. **Download all files** (themes, plugins, uploads, core) into `--fs-root`
 3. **Download the database** as a SQL dump
-4. **Generate server config** for PHP's built-in server
-5. **Start the local server** and print the URL
+4. **Import the database** into SQLite and rewrite the source site URLs to `http://localhost:8881`
+5. **Generate server config** for PHP's built-in server
+6. **Start the local server** and print the URL
 
 The output looks like:
 
@@ -59,7 +60,9 @@ Pulling example.com
 
 ### Options
 
-**Database import** — add target database options and reprint will also import the SQL with URL rewriting:
+**Database target and site URL** — the bare command imports into SQLite and
+rewrites both source URL schemes to `http://localhost:8881`. Pass target
+options to use MySQL or choose a different local URL:
 
 ```bash
 # MySQL

@@ -374,6 +374,9 @@ class Pull
             $this->print_stage_header($stage);
 
             try {
+                if ($i === $start_index && $stage !== 'preflight') {
+                    $this->assert_protocol_compatible(true);
+                }
                 $this->run_stage($stage, $options, $step, $total);
             } catch (\Exception $e) {
                 $this->report_failure($command, $stage, $stages, $i, $e);
@@ -421,6 +424,7 @@ class Pull
                     $this->client->exit_code = 1;
                     throw new RuntimeException($preflight["error"] ?? "Preflight check failed");
                 }
+                $this->assert_protocol_compatible();
                 $summary = null;
                 $data = $preflight["data"] ?? null;
                 if (is_array($data)) {
@@ -487,6 +491,34 @@ class Pull
                     $state->active_resumable_command->command_name !== 'db-apply' ||
                     $state->active_resumable_command->completion_state !== 'complete'
                 ) {
+                    $database_apply_started =
+                        $state->active_resumable_command->command_name === 'db-apply' &&
+                        in_array(
+                            $state->active_resumable_command->completion_state,
+                            ['in_progress', 'partial'],
+                            true,
+                        ) &&
+                        in_array(
+                            $state->active_resumable_command->current_stage,
+                            ['sql', 'database-cleanup'],
+                            true,
+                        );
+                    if (
+                        !$database_apply_started &&
+                        isset($options['runtime']) &&
+                        $options['runtime'] === 'php-builtin' &&
+                        empty($options['new_site_url']) &&
+                        empty($options['rewrite_url'])
+                    ) {
+                        $runtime_address = resolve_runtime_host_and_port($options, []);
+                        $host = $runtime_address['host'] ?? PhpBuiltinApplier::DEFAULT_HOST;
+                        $port = $runtime_address['port'] ?? PhpBuiltinApplier::DEFAULT_PORT;
+                        $options['new_site_url'] = sprintf(
+                            'http://%s:%d',
+                            $host,
+                            $port,
+                        );
+                    }
                     $this->run_until_complete('db-apply', function () use ($options) {
                         $this->client->run_db_apply($options);
                     });
@@ -508,6 +540,23 @@ class Pull
             case 'start':
                 $this->start_server($options);
                 break;
+        }
+    }
+
+    /**
+     * Stop before a pipeline stage uses state from an incompatible exporter.
+     */
+    private function assert_protocol_compatible(bool $resuming = false): void
+    {
+        $protocol_check = $this->client->preflight_protocol_check();
+        if (!$protocol_check['pass']) {
+            $this->client->exit_code = 1;
+            $detail = $protocol_check['detail'];
+            if ($resuming) {
+                $detail .= ' Then rerun this command with --abort and start it again.';
+            }
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Remote compatibility detail is CLI text.
+            throw new RuntimeException($detail);
         }
     }
 
@@ -906,8 +955,12 @@ class Pull
             );
         }
 
-        $host = $options['host'] ?? 'localhost';
-        $port = (int) ($options['port'] ?? 8881);
+        $runtime_address = resolve_runtime_host_and_port(
+            $options,
+            $this->client->get_state()->apply->rewrite_url ?? [],
+        );
+        $host = $runtime_address['host'] ?? PhpBuiltinApplier::DEFAULT_HOST;
+        $port = $runtime_address['port'] ?? PhpBuiltinApplier::DEFAULT_PORT;
         $url = "http://{$host}:{$port}";
 
         // Mark pull complete BEFORE the server blocks so killing the
