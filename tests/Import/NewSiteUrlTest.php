@@ -58,6 +58,25 @@ class NewSiteUrlTest extends TestCase
         return $options;
     }
 
+    /** A selected subsite moves without rewriting the old network's home page. */
+    public function testMultisiteUsesSelectedSiteAndAssetUrls(): void
+    {
+        $client = new \ImportClient('https://network.test/shop/?reprint-api', $this->tempDir, $this->tempDir . '/fs-root');
+        $client->get_state()->set_preflight_record(['data' => ['database' => ['wp' => ['multisite' => [
+            'enabled' => true,
+            'selection' => [
+                'site_id' => 7, 'network_id' => 1, 'base_prefix' => 'wp_',
+                'home_url' => 'https://network.test/shop', 'site_url' => 'https://network.test/shop',
+                'content_url' => 'https://network.test/wp-content',
+                'uploads_url' => 'https://network.test/wp-content/uploads/sites/7',
+            ],
+        ]]]]]);
+        $options = $this->callResolve($client, ['new_site_url' => 'http://localhost:9000', 'network_admin' => 'chosen']);
+        $mapping = array_column($options['rewrite_url'], 1, 0);
+        $this->assertArrayNotHasKey('https://network.test', $mapping);
+        $this->assertSame('http://localhost:9000', $mapping['https://network.test/shop']);
+    }
+
     public function testDerivesHttpAndHttpsFromHttpsUrl(): void
     {
         $client = new \ImportClient(

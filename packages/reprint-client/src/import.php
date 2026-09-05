@@ -19,6 +19,7 @@ use Reprint\Importer\NullableSpatialColumnStatementRewriter;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\Pull\PullFailureReportedException;
 use Reprint\Importer\SpatialSridGuard;
+use Reprint\Importer\MultisiteTarget;
 use Reprint\Importer\State\DatabaseApplyCommandState;
 use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
 use Reprint\Importer\State\DatabaseTableIndexState;
@@ -93,6 +94,7 @@ require_once __DIR__ . '/lib/url-rewrite/load.php';
 
 // Load host analyzers (produce a runtime manifest from preflight data)
 require_once __DIR__ . '/lib/host/load.php';
+require_once __DIR__ . '/lib/class-multisite-target.php';
 
 // Load target runtime appliers (consume a manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
@@ -2570,6 +2572,10 @@ class ImportClient
             $this->audit_log("USER-AGENT BLOCKED | {$ua}", false);
         }
 
+        if (!empty($payload['database']['wp']['multisite']['enabled'])
+            && empty($payload['database']['wp']['multisite']['selection'])) {
+            throw new RuntimeException('Update the remote Reprint Server before pulling a multisite site; it does not provide selected-site metadata.');
+        }
         $entry = [
             "timestamp" => time(),
             "url" => $url,
@@ -4427,7 +4433,10 @@ class ImportClient
                 "message" => "Downloading table metadata",
             ]);
 
-            $this->fetch_database_index();
+            // Whole-network table sizes do not estimate this selected site's rows.
+            if (empty($this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'])) {
+                $this->fetch_database_index();
+            }
 
             // Interrupted response during db-index — state already saved, exit partial.
             if (($this->get_state()->active_resumable_command->completion_state ?? null) === "partial") {
@@ -4896,6 +4905,8 @@ class ImportClient
 
         $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
 
+        $multisite_target = $this->get_multisite_target();
+
         // Resolve host and port for the target server. If not provided on
         // the CLI, derive from the first URL rewrite target (saved by
         // db-apply). This way the dev server listens on the same address
@@ -4904,7 +4915,9 @@ class ImportClient
         $port = $options["port"] ?? null;
         if ($host === null || $port === null) {
             $rewrite_map = $this->get_state()->apply->rewrite_url ?? [];
-            $first_target = !empty($rewrite_map) ? reset($rewrite_map) : null;
+            $first_target = $multisite_target !== null
+                ? $multisite_target->get_site_url()
+                : ( !empty($rewrite_map) ? reset($rewrite_map) : null );
             if (is_string($first_target)) {
                 $parsed = parse_url($first_target);
                 if ($host === null) {
@@ -4933,6 +4946,19 @@ class ImportClient
             ) ?: '';
         } else {
             $wordpress_index_php = wp_join_unix_paths($local_document_root, 'index.php');
+        }
+
+        if ($multisite_target !== null) {
+            if ($target['engine'] !== 'mysql' || $wordpress_index_php === '') {
+                throw new InvalidArgumentException('The selected multisite runtime requires its imported WordPress files and a MySQL target.');
+            }
+            $config_path = dirname($wordpress_index_php) . '/wp-config.php';
+            $config = $multisite_target->get_wp_config($target);
+            if (file_put_contents($config_path . '.reprint-tmp', $config) !== strlen($config)
+                || !rename($config_path . '.reprint-tmp', $config_path)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, not HTML.
+                throw new RuntimeException('Could not write the target network configuration: ' . $config_path);
+            }
         }
 
         // Step 2: Runtime applier writes server-specific config files.
@@ -6266,6 +6292,20 @@ class ImportClient
             return;
         }
 
+        $selection = $this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null;
+        if (is_array($selection)) {
+            $target = new MultisiteTarget(
+                $selection,
+                $options['new_site_url'],
+                $options['network_admin'] ?? $this->get_state()->apply->network_admin ?? ''
+            );
+            $options['rewrite_url'] = $options['rewrite_url'] ?? [];
+            foreach ($target->get_url_mapping() as $source_url => $target_url) {
+                $options['rewrite_url'][] = [$source_url, $target_url];
+            }
+            return;
+        }
+
         $parsed_url = parse_url($this->remote_reprint_api_url);
         if (!$parsed_url || !isset($parsed_url['scheme'], $parsed_url['host'])) {
             if ($this->remote_reprint_api_url === '') {
@@ -6625,6 +6665,18 @@ class ImportClient
             $url_mapping = $apply_state->rewrite_url;
         }
 
+        $selection = $this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null;
+        $network_admin = $options['network_admin'] ?? ( $has_unfinished_apply ? $apply_state->network_admin : null );
+        if (is_array($selection)) {
+            if ($target['engine'] !== 'mysql') {
+                throw new InvalidArgumentException('A selected multisite pull currently requires a MySQL target.');
+            }
+            if ($is_resume && $network_admin !== $apply_state->network_admin) {
+                throw new InvalidArgumentException('Cannot change --network-admin while resuming db-apply.');
+            }
+            new MultisiteTarget($selection, $url_mapping[rtrim($selection['home_url'], '/')] ?? '', $network_admin ?? '');
+        }
+
         if ($is_resume) {
             $resume_message = "Resuming db-apply from the position saved in the target database";
             $this->audit_log(
@@ -6645,6 +6697,7 @@ class ImportClient
             $this->get_state()->active_resumable_command->current_stage = "database-start";
             $this->get_state()->active_resumable_command->remote_cursor = null;
             $this->get_state()->apply = new DatabaseApplyCommandState();
+            $this->get_state()->apply->network_admin = $network_admin;
             if (!empty($url_mapping)) {
                 $this->get_state()->apply->rewrite_url = $url_mapping;
             }
@@ -6780,6 +6833,10 @@ class ImportClient
             }
 
             if (!$is_resume) {
+                $multisite_target = $this->get_multisite_target();
+                if ($multisite_target !== null) {
+                    $multisite_target->assert_empty_database($connection);
+                }
                 // Keep database-start until the old target cursor is gone. A new
                 // process which stops here repeats this reset before any SQL.
                 $this->reset_database_import_position($connection);
@@ -6958,6 +7015,11 @@ class ImportClient
             $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
         }
 
+        $multisite_target = $this->get_multisite_target();
+        if ($multisite_target !== null) {
+            $multisite_target->configure_database($connection);
+        }
+
         $this->remove_database_import_position_table($connection);
 
         $statements_executed = $this->get_state()->apply->statements_executed;
@@ -6979,6 +7041,21 @@ class ImportClient
         }
         $this->progress->show_lifecycle_line(
             "db-apply complete ({$statements_executed} statements executed)\n",
+        );
+    }
+
+    /** Reconstructs the target from persisted apply choices, including cleanup resumes. */
+    private function get_multisite_target(): ?MultisiteTarget
+    {
+        $selection = $this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null;
+        if (!is_array($selection)) {
+            return null;
+        }
+        $apply = $this->get_state()->apply;
+        return new MultisiteTarget(
+            $selection,
+            $apply->rewrite_url[rtrim($selection['home_url'], '/')] ?? '',
+            $apply->network_admin ?? ''
         );
     }
 
@@ -11084,6 +11161,7 @@ class ImportClient
                 }
             }
         }
+        $params["multisite_mode"] = "one-site-network-v1";
         $params["endpoint"] = $endpoint;
         if ($cursor) {
             // Also include cursor in query params as a fallback when headers are stripped.
@@ -13203,6 +13281,14 @@ if (
             'argument_labels' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
             'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
+        ],
+        [
+            'name' => 'network-admin',
+            'type' => 'value-or-next',
+            'target' => 'network_admin',
+            'placeholder' => 'LOGIN',
+            'help' => 'Imported user who will administer the new one-site network',
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'new-site-url',

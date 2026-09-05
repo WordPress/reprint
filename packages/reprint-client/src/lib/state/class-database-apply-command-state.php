@@ -9,6 +9,9 @@ namespace Reprint\Importer\State;
  */
 class DatabaseApplyCommandState {
 
+    /** @var string|null Explicit imported user selected to administer a one-site network. */
+    public ?string $network_admin = null;
+
     /** @var int SQL statements successfully executed. */
     public int $statements_executed = 0;
 
@@ -45,6 +48,8 @@ class DatabaseApplyCommandState {
     public static function from_array(array $data): self
     {
         $state = new self();
+        $data += ['network_admin' => null];
+        $state->network_admin = $data['network_admin'];
         \reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->statements_executed = $data['statements_executed'];
         $state->bytes_read = $data['bytes_read'];
@@ -63,6 +68,7 @@ class DatabaseApplyCommandState {
     public function to_array(): array
     {
         return [
+            'network_admin' => $this->network_admin,
             'statements_executed' => $this->statements_executed,
             'bytes_read' => $this->bytes_read,
             'rewrite_url' => $this->rewrite_url,

@@ -24,6 +24,7 @@ namespace WordPress\Reprint\Server\Plugin;
  *     @type string $home_url Selected home URL.
  *     @type string $site_url Selected WordPress URL.
  *     @type string $content_url Shared content URL.
+ *     @type string[] $sibling_urls Other site URLs retained in cross-site links.
  * }
  */
 function get_multisite_export_context(): array {
@@ -67,6 +68,17 @@ function get_multisite_export_context(): array {
         }
     }
 
+    $sibling_urls = [];
+    foreach ($wpdb->get_results($wpdb->prepare(
+        "SELECT domain, path FROM {$wpdb->blogs} WHERE site_id = %d AND blog_id <> %d",
+        $network_id,
+        $site_id
+    )) as $sibling) {
+        foreach (['http', 'https'] as $scheme) {
+            $sibling_urls[] = $scheme . '://' . $sibling->domain . rtrim($sibling->path, '/');
+        }
+    }
+
     return [
         'site_id' => $site_id,
         'network_id' => $network_id,
@@ -79,5 +91,6 @@ function get_multisite_export_context(): array {
         'home_url' => get_option('home'),
         'site_url' => get_option('siteurl'),
         'content_url' => content_url(),
+        'sibling_urls' => $sibling_urls,
     ];
 }
