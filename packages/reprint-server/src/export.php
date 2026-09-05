@@ -1554,6 +1554,23 @@ function file_index_parent_symlink(string $requested_path): ?array
  */
 function endpoint_preflight(array $config): array
 {
+    $preflight_response_format = $config["preflight_response_format"] ?? null;
+    if (
+        $preflight_response_format !== null &&
+        $preflight_response_format !== "multipart"
+    ) {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception text is not HTML output.
+        throw new InvalidArgumentException(
+            sprintf(
+                "preflight_response_format must be multipart when present; observed %s.",
+                is_string($preflight_response_format)
+                    ? $preflight_response_format
+                    : gettype($preflight_response_format)
+            )
+        );
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+    }
+
     // -- Resolve filesystem roots --
     // Determine which directories to scan: either from the client-provided
     // "directory" config, or by auto-detecting from cwd/DOCUMENT_ROOT/__DIR__.
@@ -2557,12 +2574,40 @@ function endpoint_preflight(array $config): array
     ];
 
     header("Content-Type: application/json");
-    $json = json_encode($response);
-    if ($json === false) {
+    $preflight_json = json_encode($response);
+    if ($preflight_json === false) {
         http_response_code(500);
         echo '{"error":"Failed to serialize preflight response: ' . json_last_error_msg() . '"}';
+    } elseif ($preflight_response_format === "multipart") {
+        // A host-level preview-domain filter may rewrite ordinary JSON output.
+        // Multipart endpoints remove those output buffers, and base64 keeps the
+        // complete preflight part opaque to any later text replacement.
+        prepare_streaming_response();
+        ['gz' => $gzip_stream, 'boundary' => $boundary] = begin_multipart_stream();
+        $preflight_base64 = base64_encode($preflight_json);
+        $gzip_stream->write(
+            "--{$boundary}\r\n" .
+            "Content-Type: application/octet-stream\r\n" .
+            "Content-Length: " . strlen($preflight_base64) . "\r\n" .
+            "Content-Transfer-Encoding: base64\r\n" .
+            "X-Chunk-Type: preflight\r\n" .
+            "\r\n"
+        );
+        $gzip_stream->write($preflight_base64);
+        $gzip_stream->write(
+            "\r\n" .
+            "--{$boundary}\r\n" .
+            "Content-Type: application/octet-stream\r\n" .
+            "Content-Length: 0\r\n" .
+            "X-Chunk-Type: completion\r\n" .
+            "X-Status: complete\r\n" .
+            "\r\n" .
+            "\r\n" .
+            "--{$boundary}--\r\n"
+        );
+        $gzip_stream->finish();
     } else {
-        echo $json;
+        echo $preflight_json;
     }
 
     return [

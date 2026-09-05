@@ -2541,17 +2541,22 @@ class ImportClient
      */
     public function run_preflight(): void
     {
-        $url = $this->build_url("preflight", null, []);
+        // Multipart responses bypass host-level preview-domain output filters.
+        // The complete preflight part is also base64 so later text replacement
+        // cannot change URLs or domain names embedded in paths.
+        $url = $this->build_url("preflight", null, [
+            "preflight_response_format" => "multipart",
+        ]);
         $this->audit_log("PREFLIGHT REQUEST | {$url}", false);
 
-        // Try each User-Agent until one gets a JSON response.
+        // Try each User-Agent until one gets a preflight response.
         // Some WAFs block certain UAs (e.g. browser UAs with custom auth
         // headers), so we cycle through candidates and remember the winner.
         $result = null;
         $payload = null;
         foreach (self::USER_AGENTS as $ua) {
             $this->get_state()->user_agent = $ua;
-            $result = $this->fetch_json($url);
+            $result = $this->fetch_preflight($url);
             $payload = $result["json"] ?? null;
             if ($payload !== null) {
                 $this->audit_log("USER-AGENT OK | {$ua}", false);
@@ -11532,7 +11537,7 @@ class ImportClient
 
     /**
      * Diagnose an HTTP error and return a user-friendly message with
-     * actionable advice. Used by fetch_json() and fetch_streaming() to
+     * actionable advice. Used by fetch_preflight() and fetch_streaming() to
      * turn opaque "HTTP 403" messages into something a non-expert can
      * act on.
      *
@@ -11748,9 +11753,10 @@ class ImportClient
     }
 
     /**
-     * Fetch a JSON response for a lightweight request (non-streaming).
+     * Fetch a multipart preflight response or a plain JSON response from an
+     * older server.
      */
-    private function fetch_json(string $url): array
+    private function fetch_preflight(string $url): array
     {
         $this->reset_request_error_state();
 
@@ -11760,8 +11766,10 @@ class ImportClient
         apply_curl_proxy_from_environment($ch);
         apply_curl_ca_bundle($ch);
 
+        $response_content_type = null;
+
         $headers = [
-            ...$this->get_base_headers("application/json"),
+            ...$this->get_base_headers("multipart/mixed, application/json"),
             ...($this->get_hmac_headers()),
         ];
 
@@ -11777,6 +11785,14 @@ class ImportClient
             CURLOPT_ENCODING => "gzip, deflate",
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (
+                &$response_content_type
+            ) {
+                if (stripos($header_line, "Content-Type:") === 0) {
+                    $response_content_type = trim(substr($header_line, 13));
+                }
+                return strlen($header_line);
+            },
             CURLOPT_NOPROGRESS => false,
             CURLOPT_PROGRESSFUNCTION =>
                 function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
@@ -11819,6 +11835,141 @@ class ImportClient
                 "json" => null,
                 "error" => $this->format_diagnosed_error($diagnosis),
                 "error_code" => $diagnosis['code'],
+            ];
+        }
+
+        $boundary = null;
+        $is_multipart = is_string($response_content_type) &&
+            stripos($response_content_type, "multipart/") === 0;
+        if (
+            $is_multipart &&
+            preg_match(
+                '/boundary=(?:"([^"]+)"|([^;,\\s]+))/i',
+                $response_content_type,
+                $boundary_match,
+            )
+        ) {
+            $boundary = $boundary_match[1] !== ""
+                ? $boundary_match[1]
+                : $boundary_match[2];
+        }
+
+        // Some hosts strip the Content-Type header. The server boundary has a
+        // fixed prefix, so the first body line is a strict fallback.
+        if (
+            $boundary === null &&
+            is_string($body) &&
+            strncmp($body, "--boundary-", 11) === 0
+        ) {
+            $line_end = strpos($body, "\n");
+            if ($line_end !== false) {
+                $boundary_line = rtrim(substr($body, 0, $line_end), "\r\n");
+                $boundary = substr($boundary_line, 2);
+                $is_multipart = true;
+            }
+        }
+
+        if ($is_multipart) {
+            if ($boundary === null || $boundary === "") {
+                return [
+                    "ok" => false,
+                    "http_code" => $http_code,
+                    "elapsed" => $elapsed,
+                    "body" => $body,
+                    "json" => null,
+                    "error" => "Invalid preflight response: the multipart boundary is missing.",
+                    "error_code" => "INVALID_MULTIPART",
+                ];
+            }
+
+            $preflight_base64 = null;
+            $current_part_body = "";
+            $saw_completion = false;
+            try {
+                $parser = new \Reprint\Importer\Protocol\MultipartStreamParser(
+                    $boundary,
+                    function ($event) use (
+                        &$preflight_base64,
+                        &$current_part_body,
+                        &$saw_completion
+                    ) {
+                        $headers = $event["headers"];
+                        $chunk_type = $headers["x-chunk-type"] ?? "";
+                        if ($event["type"] === "body") {
+                            $current_part_body .= $event["data"];
+                            return;
+                        }
+
+                        if ($chunk_type === "preflight") {
+                            if ($preflight_base64 !== null) {
+                                throw new RuntimeException(
+                                    "Invalid preflight response: more than one preflight part was received.",
+                                );
+                            }
+                            $preflight_base64 = $current_part_body;
+                        } elseif ($chunk_type === "completion") {
+                            if ( ( $headers["x-status"] ?? "" ) !== "complete" ) {
+                                throw new RuntimeException(
+                                    "Invalid preflight response: the completion status is not complete.",
+                                );
+                            }
+                            $saw_completion = true;
+                        } else {
+                            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The remote part type is rendered only as CLI text.
+                            throw new RuntimeException(
+                                "Invalid preflight response: unexpected multipart part " .
+                                    ( $chunk_type === "" ? "without X-Chunk-Type." : "type {$chunk_type}." ),
+                            );
+                            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+                        }
+                        $current_part_body = "";
+                    },
+                );
+                $parser->feed( (string) $body);
+
+                if ($preflight_base64 === null) {
+                    throw new RuntimeException(
+                        "Invalid preflight response: the preflight part is missing.",
+                    );
+                }
+                if (!$saw_completion) {
+                    throw new RuntimeException(
+                        "Invalid preflight response: the completion part is missing.",
+                    );
+                }
+
+                $preflight_json = base64_decode($preflight_base64, true);
+                if ($preflight_json === false) {
+                    throw new RuntimeException(
+                        "The preflight response contains invalid base64.",
+                    );
+                }
+                $json = json_decode($preflight_json, true);
+                if (!is_array($json)) {
+                    throw new RuntimeException(
+                        "The base64-decoded preflight response is not valid JSON data.",
+                    );
+                }
+            } catch (RuntimeException $e) {
+                return [
+                    "ok" => false,
+                    "http_code" => $http_code,
+                    "elapsed" => $elapsed,
+                    "body" => $body,
+                    "json" => null,
+                    "error" => $e->getMessage(),
+                    "error_code" => "INVALID_MULTIPART",
+                ];
+            }
+
+            return [
+                "ok" => true,
+                "http_code" => $http_code,
+                "elapsed" => $elapsed,
+                "body" => $body,
+                "json" => $json,
+                "error" => null,
+                "error_code" => null,
             ];
         }
 
