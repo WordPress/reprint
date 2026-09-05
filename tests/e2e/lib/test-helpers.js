@@ -735,8 +735,7 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
  * preview-domain response filter leaves domain strings unchanged.
  */
 function isJsonApiResponseContentType(contentType) {
-    return contentType.includes('application/json')
-        || contentType.includes('application/octet-stream');
+    return contentType.includes('application/octet-stream');
 }
 
 function setApiRequestParameter(url, parameter, value) {
