@@ -68,6 +68,59 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertSame('/', $roots[0]['root']);
     }
 
+    public function testPreflightCanStreamTheCompleteResponseAsOneBase64Part(): void
+    {
+        $export_path = realpath(self::EXPORT_PATH);
+        $this->assertNotFalse($export_path, 'export.php must exist');
+        $domain_path = '/home/users/example/mausool.com';
+        $export_path_encoded = base64_encode($export_path);
+        $domain_path_encoded = base64_encode($domain_path);
+
+        $result = $this->runPhpCode(
+            "<?php\nrequire base64_decode('{$export_path_encoded}', true);\n"
+            . "endpoint_preflight(["
+            . "'directory' => base64_decode('{$domain_path_encoded}', true), "
+            . "'preflight_response_format' => 'multipart'"
+            . "]);\n"
+        );
+
+        $this->assertSame(0, $result['status']);
+        $output = strncmp($result['output'], "\x1f\x8b", 2) === 0
+            ? gzdecode($result['output'])
+            : $result['output'];
+        $this->assertIsString($output);
+        $this->assertStringNotContainsString('mausool.com', $output);
+        $boundary_line_end = strpos($output, "\r\n");
+        $this->assertNotFalse($boundary_line_end);
+        $boundary = substr($output, 2, $boundary_line_end - 2);
+        $preflight_body_marker = "X-Chunk-Type: preflight\r\n\r\n";
+        $preflight_body_start = strpos($output, $preflight_body_marker);
+        $this->assertNotFalse($preflight_body_start);
+        $preflight_body_start += strlen($preflight_body_marker);
+        $preflight_body_end = strpos(
+            $output,
+            "\r\n--{$boundary}\r\n",
+            $preflight_body_start
+        );
+        $this->assertNotFalse($preflight_body_end);
+        $preflight_base64 = substr(
+            $output,
+            $preflight_body_start,
+            $preflight_body_end - $preflight_body_start
+        );
+        $preflight_json = base64_decode($preflight_base64, true);
+        $this->assertIsString($preflight_json);
+        $preflight = json_decode($preflight_json, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertStringContainsString(
+            $domain_path,
+            $preflight['filesystem']['error']
+        );
+        $this->assertStringContainsString(
+            "X-Chunk-Type: completion\r\nX-Status: complete\r\n",
+            $output
+        );
+    }
+
     public function testPluginRuntimeLoaderSkipsAutoloadAlreadyLoadedThroughSymlinkedPluginDirectory(): void
     {
         $tmp_dir = sys_get_temp_dir() . '/reprint-server-runtime-loader-test-' . uniqid('', true);
