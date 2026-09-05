@@ -8,7 +8,4 @@ class SpinupwpHostAnalyzer extends PlatformFilesHostAnalyzer {
             'plugins' => ['spinupwp' => 'dir'],
         ],
     ];
-    protected const PATHS_TO_REMOVE = [
-        'wp-content/plugins/spinupwp',
-    ];
 }

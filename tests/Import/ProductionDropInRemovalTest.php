@@ -304,19 +304,19 @@ class ProductionDropInRemovalTest extends TestCase
         $auditLog = file_get_contents($this->stateDir . '/audit.log');
 
         $this->assertStringContainsString(
-            'removed wp-content/object-cache.php (production-only)',
+            'removed wp-content/object-cache.php (source-host)',
             $auditLog,
         );
         $this->assertStringContainsString(
-            'removed wp-content/advanced-cache.php (production-only)',
+            'removed wp-content/advanced-cache.php (source-host)',
             $auditLog,
         );
         $this->assertStringContainsString(
-            'removed wp-content/mu-plugins/wpcomsh (production-only)',
+            'removed wp-content/mu-plugins/wpcomsh (source-host)',
             $auditLog,
         );
         $this->assertStringContainsString(
-            'removed wp-content/mu-plugins/wpcomsh-loader.php (production-only)',
+            'removed wp-content/mu-plugins/wpcomsh-loader.php (source-host)',
             $auditLog,
         );
     }
@@ -346,7 +346,7 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testNonWpcloudHostPreservesUnlistedDropIn(): void
     {
-        // A shared object-cache.php is not in the global plugin path list.
+        // A shared object-cache.php is not in the global source-host path list.
         $this->writeState([
             'webhost' => 'other',
             'preflight' => [
@@ -374,7 +374,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertFileExists($wpContent . '/object-cache.php');
     }
 
-    public function testEveryImportRemovesTheGlobalSourceHostPluginList(): void
+    public function testEveryImportRemovesTheGlobalSourceHostPathList(): void
     {
         $this->writeState([
             'webhost' => 'other',
@@ -391,10 +391,19 @@ class ProductionDropInRemovalTest extends TestCase
             ],
         ]);
 
-        foreach (\source_host_plugin_paths_to_remove() as $relative_path) {
-            $plugin_path = $this->fsRoot . '/' . $relative_path;
-            mkdir($plugin_path, 0755, true);
-            file_put_contents($plugin_path . '/plugin.php', "<?php // Source-host plugin\n");
+        foreach (\source_host_paths_to_remove() as $relative_path) {
+            $source_host_path = $this->fsRoot . '/' . $relative_path;
+            if (substr($relative_path, -4) === '.php') {
+                $parent_directory = dirname($source_host_path);
+                if (!is_dir($parent_directory)) {
+                    mkdir($parent_directory, 0755, true);
+                }
+                file_put_contents($source_host_path, "<?php // Source-host file\n");
+                continue;
+            }
+
+            mkdir($source_host_path, 0755, true);
+            file_put_contents($source_host_path . '/plugin.php', "<?php // Source-host plugin\n");
         }
 
         $unlisted_plugin = $this->fsRoot . '/wp-content/plugins/woocommerce';
@@ -405,8 +414,13 @@ class ProductionDropInRemovalTest extends TestCase
         $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
-        foreach (\source_host_plugin_paths_to_remove() as $relative_path) {
-            $this->assertDirectoryDoesNotExist($this->fsRoot . '/' . $relative_path);
+        foreach (\source_host_paths_to_remove() as $relative_path) {
+            $source_host_path = $this->fsRoot . '/' . $relative_path;
+            if (substr($relative_path, -4) === '.php') {
+                $this->assertFileDoesNotExist($source_host_path);
+                continue;
+            }
+            $this->assertDirectoryDoesNotExist($source_host_path);
         }
         $this->assertDirectoryExists($unlisted_plugin);
 
@@ -415,7 +429,7 @@ class ProductionDropInRemovalTest extends TestCase
             true,
         );
         $this->assertSame(
-            \source_host_plugin_paths_to_remove(),
+            \source_host_paths_to_remove(),
             $state['apply']['remote_paths_removed_from_local_site'],
         );
     }
@@ -523,11 +537,11 @@ class ProductionDropInRemovalTest extends TestCase
         $auditLog = file_get_contents($this->stateDir . '/audit.log');
 
         $this->assertStringContainsString(
-            'removed wp-content/plugins/sg-cachepress (production-only)',
+            'removed wp-content/plugins/sg-cachepress (source-host)',
             $auditLog,
         );
         $this->assertStringContainsString(
-            'removed wp-content/plugins/sg-security (production-only)',
+            'removed wp-content/plugins/sg-security (source-host)',
             $auditLog,
         );
     }

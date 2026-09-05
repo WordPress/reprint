@@ -11,8 +11,4 @@ class KinstaHostAnalyzer extends PlatformFilesHostAnalyzer {
             ],
         ],
     ];
-    protected const PATHS_TO_REMOVE = [
-        'wp-content/mu-plugins/kinsta-mu-plugins.php',
-        'wp-content/mu-plugins/kinsta-mu-plugins',
-    ];
 }

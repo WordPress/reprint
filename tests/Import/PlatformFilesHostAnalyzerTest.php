@@ -11,17 +11,13 @@ class PlatformFilesHostAnalyzerTest extends TestCase {
     /**
      * @dataProvider detectedHostProvider
      *
-     * @param string[] $plugins             Regular plugin entry names.
-     * @param string[] $mu_plugins          MU-plugin entry names.
-     * @param string[] $expected_removals   Paths removed from the imported site.
-     * @param string[] $preserved_fragments Path fragments which must not be removed.
+     * @param string[] $plugins    Regular plugin entry names.
+     * @param string[] $mu_plugins MU-plugin entry names.
      */
-    public function testDetectsHostAndListsOnlyItsPlatformFiles(
+    public function testDetectsHostAndBuildsRuntimeManifest(
         string $expected_host,
         array $plugins,
-        array $mu_plugins,
-        array $expected_removals,
-        array $preserved_fragments = []
+        array $mu_plugins
     ): void {
         $preflight_data = $this->preflight($plugins, $mu_plugins);
 
@@ -30,13 +26,7 @@ class PlatformFilesHostAnalyzerTest extends TestCase {
         $manifest = \host_analyzer_for($expected_host)->analyze($preflight_data);
         $this->assertSame($expected_host, $manifest->source);
         $this->assertSame(['memory_limit' => '256M'], $manifest->php_ini);
-        $this->assertSame($expected_removals, $manifest->paths_to_remove);
-
-        foreach ($preserved_fragments as $preserved_fragment) {
-            foreach ($manifest->paths_to_remove as $path_to_remove) {
-                $this->assertStringNotContainsString($preserved_fragment, $path_to_remove);
-            }
-        }
+        $this->assertSame([], $manifest->paths_to_remove);
     }
 
     public static function detectedHostProvider(): array
@@ -46,125 +36,66 @@ class PlatformFilesHostAnalyzerTest extends TestCase {
                 'kinsta',
                 [],
                 ['kinsta-mu-plugins.php', 'kinsta-mu-plugins'],
-                [
-                    'wp-content/mu-plugins/kinsta-mu-plugins.php',
-                    'wp-content/mu-plugins/kinsta-mu-plugins',
-                ],
             ],
             'Pantheon loader and directory' => [
                 'pantheon',
                 [],
                 ['loader.php', 'pantheon-mu-plugin'],
-                [
-                    'wp-content/mu-plugins/pantheon-mu-plugin',
-                ],
             ],
             'IONOS core loader and directory' => [
                 'ionos',
                 ['ionos-essentials', 'ionos-wpdev-caddy'],
                 ['ionos-core.php', 'ionos-core'],
-                [
-                    'wp-content/mu-plugins/ionos-core.php',
-                    'wp-content/mu-plugins/ionos-core',
-                    'wp-content/mu-plugins/stretch-extra.php',
-                    'wp-content/mu-plugins/stretch-extra',
-                    'wp-content/plugins/ionos-essentials',
-                    'wp-content/plugins/ionos-wpdev-caddy',
-                ],
             ],
             'IONOS shared platform loader and directory' => [
                 'ionos',
                 [],
                 ['stretch-extra.php', 'stretch-extra'],
-                [
-                    'wp-content/mu-plugins/ionos-core.php',
-                    'wp-content/mu-plugins/ionos-core',
-                    'wp-content/mu-plugins/stretch-extra.php',
-                    'wp-content/mu-plugins/stretch-extra',
-                    'wp-content/plugins/ionos-essentials',
-                    'wp-content/plugins/ionos-wpdev-caddy',
-                ],
             ],
             'Pressable cache and sign-on plugins' => [
                 'pressable',
                 ['pressable-cache-management', 'pressable-onepress-login'],
                 ['pcm-extend-batcache.php', 'my-customer-plugin.php'],
-                [
-                    'wp-content/mu-plugins/pcm-extend-batcache.php',
-                    'wp-content/mu-plugins/pcm-exclude-pages-from-batcache.php',
-                    'wp-content/plugins/pressable-cache-management',
-                    'wp-content/plugins/pressable-onepress-login',
-                ],
-                ['my-customer-plugin.php'],
             ],
             'GoDaddy system plugin' => [
                 'godaddy',
                 [],
                 ['gd-system-plugin.php', 'gd-system-plugin'],
-                [
-                    'wp-content/mu-plugins/gd-system-plugin.php',
-                    'wp-content/mu-plugins/gd-system-plugin',
-                ],
             ],
             'Bluehost control plugin' => [
                 'bluehost',
                 ['bluehost-wordpress-plugin'],
                 ['endurance-page-cache.php', 'customer-tools.php'],
-                [
-                    'wp-content/plugins/bluehost-wordpress-plugin',
-                    'wp-content/mu-plugins/endurance-page-cache.php',
-                    'wp-content/mu-plugins/endurance-browser-cache.php',
-                ],
-                ['customer-tools.php'],
             ],
             'HostGator control plugin' => [
                 'hostgator',
                 ['wp-plugin-hostgator'],
                 ['endurance-page-cache.php'],
-                [
-                    'wp-content/plugins/wp-plugin-hostgator',
-                    'wp-content/mu-plugins/endurance-page-cache.php',
-                    'wp-content/mu-plugins/endurance-browser-cache.php',
-                ],
             ],
             'Hostinger control plugin' => [
                 'hostinger',
                 ['hostinger', 'hostinger-easy-onboarding'],
                 ['hostinger-mu-plugin.php'],
-                [
-                    'wp-content/plugins/hostinger',
-                    'wp-content/plugins/hostinger-easy-onboarding',
-                    'wp-content/mu-plugins/hostinger-mu-plugin.php',
-                ],
             ],
             'Nexcess MAPPS loader and directory' => [
                 'nexcess',
                 [],
                 ['nexcess-mapps.php', 'nexcess-mapps', 'customer-loader.php'],
-                [
-                    'wp-content/mu-plugins/nexcess-mapps.php',
-                    'wp-content/mu-plugins/nexcess-mapps',
-                ],
-                ['customer-loader.php'],
             ],
             'Rocket.net cache plugin' => [
                 'rocketnet',
                 [],
                 ['cdn-cache-management.php'],
-                ['wp-content/mu-plugins/cdn-cache-management.php'],
             ],
             'SpinupWP control plugin' => [
                 'spinupwp',
                 ['spinupwp'],
                 [],
-                ['wp-content/plugins/spinupwp'],
             ],
             'WordPress VIP platform MU directory' => [
                 'wpvip',
                 [],
                 ['vip-go-mu-plugins', 'client-mu-plugins'],
-                ['wp-content/mu-plugins/vip-go-mu-plugins'],
-                ['client-mu-plugins'],
             ],
         ];
     }
@@ -239,7 +170,7 @@ class PlatformFilesHostAnalyzerTest extends TestCase {
         }
     }
 
-    public function testRuntimeManifestListsEveryPluginRemovedFromAllImports(): void
+    public function testRuntimeManifestListsEverySourceHostPathRemovedFromAllImports(): void
     {
         $manifest = \runtime_manifest_for('other', $this->preflight([], []));
 
@@ -255,9 +186,74 @@ class PlatformFilesHostAnalyzerTest extends TestCase {
                 'wp-content/plugins/a2-optimized-wp',
                 'wp-content/plugins/boldgrid-backup',
                 'wp-content/plugins/litespeed-cache',
+                'wp-content/mu-plugins/kinsta-mu-plugins.php',
+                'wp-content/mu-plugins/kinsta-mu-plugins',
+                'wp-content/mu-plugins/pantheon-mu-plugin',
+                'wp-content/mu-plugins/ionos-core.php',
+                'wp-content/mu-plugins/ionos-core',
+                'wp-content/mu-plugins/stretch-extra.php',
+                'wp-content/mu-plugins/stretch-extra',
+                'wp-content/plugins/ionos-essentials',
+                'wp-content/plugins/ionos-wpdev-caddy',
+                'wp-content/mu-plugins/pcm-extend-batcache.php',
+                'wp-content/mu-plugins/pcm-exclude-pages-from-batcache.php',
+                'wp-content/plugins/pressable-cache-management',
+                'wp-content/plugins/pressable-onepress-login',
+                'wp-content/mu-plugins/gd-system-plugin.php',
+                'wp-content/mu-plugins/gd-system-plugin',
+                'wp-content/plugins/bluehost-wordpress-plugin',
+                'wp-content/mu-plugins/endurance-page-cache.php',
+                'wp-content/mu-plugins/endurance-browser-cache.php',
+                'wp-content/plugins/wp-plugin-hostgator',
+                'wp-content/plugins/hostinger',
+                'wp-content/plugins/hostinger-easy-onboarding',
+                'wp-content/mu-plugins/hostinger-mu-plugin.php',
+                'wp-content/mu-plugins/nexcess-mapps.php',
+                'wp-content/mu-plugins/nexcess-mapps',
+                'wp-content/mu-plugins/cdn-cache-management.php',
+                'wp-content/plugins/spinupwp',
+                'wp-content/mu-plugins/vip-go-mu-plugins',
+                'wp-content/mu-plugins/wpengine-common',
+                'wp-content/mu-plugins/slt-force-strong-passwords.php',
+                'wp-content/mu-plugins/force-strong-passwords',
+                'wp-content/mu-plugins/stop-long-comments.php',
+                'wp-content/mu-plugins/wpe-cache-plugin',
+                'wp-content/mu-plugins/wpe-cache-plugin.php',
+                'wp-content/mu-plugins/wpe-update-source-selector',
+                'wp-content/mu-plugins/wpe-update-source-selector.php',
+                'wp-content/mu-plugins/wpe-wp-sign-on-plugin',
+                'wp-content/mu-plugins/wpe-wp-sign-on-plugin.php',
+                'wp-content/mu-plugins/wpengine-security-auditor.php',
+                'wp-content/plugins/sg-cachepress',
+                'wp-content/plugins/sg-security',
+                'wp-content/mu-plugins/wpcomsh',
+                'wp-content/mu-plugins/wpcomsh-dev',
+                'wp-content/mu-plugins/wpcomsh-loader.php',
             ],
             $manifest->paths_to_remove,
         );
+    }
+
+    public function testRuntimeManifestRemovesStaleVendorPathsFromAnotherHost(): void
+    {
+        $preflight_data = $this->preflight(
+            [],
+            ['kinsta-mu-plugins.php', 'kinsta-mu-plugins', 'wpe-cache-plugin.php'],
+        );
+
+        $this->assertSame('kinsta', \detect_host($preflight_data));
+
+        $manifest = \runtime_manifest_for('kinsta', $preflight_data);
+        $this->assertContains(
+            'wp-content/mu-plugins/kinsta-mu-plugins.php',
+            $manifest->paths_to_remove,
+        );
+        $this->assertContains(
+            'wp-content/mu-plugins/wpe-cache-plugin.php',
+            $manifest->paths_to_remove,
+        );
+        $this->assertNotContains('wp-content/object-cache.php', $manifest->paths_to_remove);
+        $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $manifest->paths_to_remove);
     }
 
     /**

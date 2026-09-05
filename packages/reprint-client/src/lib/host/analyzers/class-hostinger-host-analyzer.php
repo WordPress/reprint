@@ -8,9 +8,4 @@ class HostingerHostAnalyzer extends PlatformFilesHostAnalyzer {
             'plugins' => ['hostinger' => 'dir'],
         ],
     ];
-    protected const PATHS_TO_REMOVE = [
-        'wp-content/plugins/hostinger',
-        'wp-content/plugins/hostinger-easy-onboarding',
-        'wp-content/mu-plugins/hostinger-mu-plugin.php',
-    ];
 }

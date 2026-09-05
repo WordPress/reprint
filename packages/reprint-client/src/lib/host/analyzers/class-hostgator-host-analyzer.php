@@ -8,9 +8,4 @@ class HostgatorHostAnalyzer extends PlatformFilesHostAnalyzer {
             'plugins' => ['wp-plugin-hostgator' => 'dir'],
         ],
     ];
-    protected const PATHS_TO_REMOVE = [
-        'wp-content/plugins/wp-plugin-hostgator',
-        'wp-content/mu-plugins/endurance-page-cache.php',
-        'wp-content/mu-plugins/endurance-browser-cache.php',
-    ];
 }

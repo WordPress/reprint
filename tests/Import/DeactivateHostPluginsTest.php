@@ -147,12 +147,18 @@ class DeactivateHostPluginsTest extends TestCase
         $database = $this->createDatabase($engine);
         $this->createWpOptionsTable($database);
 
+        $source_host_plugin_paths = array_filter(
+            \source_host_paths_to_remove(),
+            static function (string $path): bool {
+                return strpos($path, 'wp-content/plugins/') === 0;
+            },
+        );
         $source_host_plugins = array_map(
             static function (string $path): string {
                 $plugin_directory = basename($path);
                 return $plugin_directory . '/plugin.php';
             },
-            \source_host_plugin_paths_to_remove(),
+            $source_host_plugin_paths,
         );
         $this->insertOption(
             $database,

@@ -4962,8 +4962,7 @@ class ImportClient
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
         }
 
-        // Remove source-host plugins and platform files excluded from the
-        // local site by the runtime manifest.
+        // Remove paths excluded from the local site by the runtime manifest.
         foreach ($manifest->paths_to_remove as $rel_path) {
             $full_path = wp_join_unix_paths($local_document_root, $rel_path);
             if (!file_exists($full_path) && !is_link($full_path)) {
@@ -4974,8 +4973,8 @@ class ImportClient
             } else {
                 unlink($full_path);
             }
-            $summary[] = "Removed production drop-in: {$rel_path}";
-            $this->audit_log("APPLY-RUNTIME | removed {$rel_path} (production-only)");
+            $summary[] = "Removed source-host path: {$rel_path}";
+            $this->audit_log("APPLY-RUNTIME | removed {$rel_path} (source-host)");
         }
 
         foreach ($summary as $line) {
@@ -6934,7 +6933,7 @@ class ImportClient
         // deactivation hooks into absent code is pointless.
         $deactivated = $this->deactivate_host_plugins($connection);
         foreach ($deactivated as $basename) {
-            $this->audit_log("DB-APPLY | deactivated plugin {$basename} (host-specific)");
+            $this->audit_log("DB-APPLY | deactivated plugin {$basename} (source-host)");
         }
 
         // Drop plugins whose URL builders break when the site URL has a non-/
@@ -7161,7 +7160,7 @@ class ImportClient
     }
 
     /**
-     * Deactivate host-specific plugins in the target database.
+     * Deactivate source-host plugins in the target database.
      *
      * Looks at the runtime manifest's paths_to_remove for entries under
      * wp-content/plugins/ and removes matching basenames from the
@@ -7183,7 +7182,7 @@ class ImportClient
             }
         }
 
-        return $this->deactivate_plugins_by_dir($database, $plugin_dirs, "host-specific");
+        return $this->deactivate_plugins_by_dir($database, $plugin_dirs, "source-host");
     }
 
     /**
@@ -7196,9 +7195,8 @@ class ImportClient
      * carries a path component like WordPress Playground's
      * `/scope:<slug>/` iframe scope.
      *
-     * wpcomsh has the same shape but lives on WP Cloud, where
-     * WpcloudHostAnalyzer's paths_to_remove already feeds it through
-     * deactivate_host_plugins().
+     * wpcomsh has the same shape but lives under mu-plugins, where the global
+     * source-host path list removes it from disk before WordPress boots.
      *
      * Skipped when the new site URL is empty or has no path beyond `/`.
      *
@@ -14092,8 +14090,8 @@ if (
                 "(--fs-root=DIR|--flat-document-root=DIR) [options]",
             "description" =>
                 "Generates server configuration (runtime.php, nginx.conf or start.sh)\n" .
-                "from preflight data and removes production-only drop-ins and mu-plugins\n" .
-                "that would crash outside the original host.\n" .
+                "from preflight data and removes listed source-host plugins, MU plugins,\n" .
+                "and drop-ins that should not run locally.\n" .
                 "\n" .
                 "Embeds the target database in runtime.php: the one named by the\n" .
                 "--target-* options, or the one db-apply connected to.\n" .

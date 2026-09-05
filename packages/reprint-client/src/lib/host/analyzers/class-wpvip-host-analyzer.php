@@ -8,7 +8,4 @@ class WpVipHostAnalyzer extends PlatformFilesHostAnalyzer {
             'mu_plugins' => ['vip-go-mu-plugins' => 'dir'],
         ],
     ];
-    protected const PATHS_TO_REMOVE = [
-        'wp-content/mu-plugins/vip-go-mu-plugins',
-    ];
 }

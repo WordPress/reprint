@@ -3,8 +3,8 @@
  * Host analyzer for WP Engine.
  *
  * WP Engine installs platform MU plugins for caching, updates, sign-on,
- * security logging, and its wp-admin integration. The analyzer removes them
- * after a site moves away from WP Engine.
+ * security logging, and its wp-admin integration. Those named platform files
+ * are removed from every local import.
  */
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Host analyzers use established global class names.
 class WpengineHostAnalyzer implements HostAnalyzer {
@@ -63,25 +63,12 @@ class WpengineHostAnalyzer implements HostAnalyzer {
         $manifest->php_ini = extract_php_ini($preflight_data);
         $manifest->constants = extract_constants($preflight_data);
 
-        // WP Engine tells sites moving to another host to remove its cache
-        // drop-ins and platform MU plugins. The cache and update-source files
-        // extend that published list with the current layout reported by a
-        // WP Engine site.
+        // These generic paths can belong to another cache implementation, so
+        // remove them only when the source was identified as WP Engine.
         $manifest->paths_to_remove = [
             'wp-content/advanced-cache.php',
             'wp-content/object-cache.php',
             'wp-content/mu-plugins/mu-plugin.php',
-            'wp-content/mu-plugins/wpengine-common',
-            'wp-content/mu-plugins/slt-force-strong-passwords.php',
-            'wp-content/mu-plugins/force-strong-passwords',
-            'wp-content/mu-plugins/stop-long-comments.php',
-            'wp-content/mu-plugins/wpe-cache-plugin',
-            'wp-content/mu-plugins/wpe-cache-plugin.php',
-            'wp-content/mu-plugins/wpe-update-source-selector',
-            'wp-content/mu-plugins/wpe-update-source-selector.php',
-            'wp-content/mu-plugins/wpe-wp-sign-on-plugin',
-            'wp-content/mu-plugins/wpe-wp-sign-on-plugin.php',
-            'wp-content/mu-plugins/wpengine-security-auditor.php',
         ];
 
         return $manifest;

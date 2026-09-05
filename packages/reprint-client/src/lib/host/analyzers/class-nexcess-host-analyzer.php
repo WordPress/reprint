@@ -11,8 +11,4 @@ class NexcessHostAnalyzer extends PlatformFilesHostAnalyzer {
             ],
         ],
     ];
-    protected const PATHS_TO_REMOVE = [
-        'wp-content/mu-plugins/nexcess-mapps.php',
-        'wp-content/mu-plugins/nexcess-mapps',
-    ];
 }

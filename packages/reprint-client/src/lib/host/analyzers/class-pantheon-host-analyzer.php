@@ -11,7 +11,4 @@ class PantheonHostAnalyzer extends PlatformFilesHostAnalyzer {
             ],
         ],
     ];
-    protected const PATHS_TO_REMOVE = [
-        'wp-content/mu-plugins/pantheon-mu-plugin',
-    ];
 }

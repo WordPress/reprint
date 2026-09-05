@@ -67,8 +67,8 @@ class RuntimeManifest
 
     /**
      * Paths relative to the fs-root that should be removed after
-     * flattening. These include source-host plugins excluded from every
-     * local import and platform files declared by a detected host analyzer.
+     * flattening. These include named source-host paths excluded from every
+     * local import and ambiguous paths declared by a detected host analyzer.
      *
      * Each entry is a relative path like 'wp-content/object-cache.php'
      * or 'wp-content/mu-plugins/wpcomsh'.  Directories are removed

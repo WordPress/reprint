@@ -8,9 +8,4 @@ class BluehostHostAnalyzer extends PlatformFilesHostAnalyzer {
             'plugins' => ['bluehost-wordpress-plugin' => 'dir'],
         ],
     ];
-    protected const PATHS_TO_REMOVE = [
-        'wp-content/plugins/bluehost-wordpress-plugin',
-        'wp-content/mu-plugins/endurance-page-cache.php',
-        'wp-content/mu-plugins/endurance-browser-cache.php',
-    ];
 }

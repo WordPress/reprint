@@ -44,11 +44,6 @@ class SitegroundHostAnalyzer implements HostAnalyzer
         $manifest->php_ini = extract_php_ini($preflight_data);
         $manifest->constants = extract_constants($preflight_data);
 
-        $manifest->paths_to_remove = [
-            'wp-content/plugins/sg-cachepress',
-            'wp-content/plugins/sg-security',
-        ];
-
         return $manifest;
     }
 }

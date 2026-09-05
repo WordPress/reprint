@@ -100,18 +100,12 @@ class SitegroundHostAnalyzerTest extends TestCase
         $this->assertSame(0.0, \SitegroundHostAnalyzer::score($preflight));
     }
 
-    public function testAnalyzePopulatesPathsToRemove(): void
+    public function testAnalyzeLeavesVendorPathsToGlobalCleanup(): void
     {
         $analyzer = new \SitegroundHostAnalyzer();
         $manifest = $analyzer->analyze($this->sitegroundPreflight());
 
-        $this->assertSame(
-            [
-                'wp-content/plugins/sg-cachepress',
-                'wp-content/plugins/sg-security',
-            ],
-            $manifest->paths_to_remove,
-        );
+        $this->assertSame([], $manifest->paths_to_remove);
     }
 
     public function testAnalyzeSetsSourceToSiteground(): void

@@ -17,12 +17,4 @@ class IonosHostAnalyzer extends PlatformFilesHostAnalyzer {
             ],
         ],
     ];
-    protected const PATHS_TO_REMOVE = [
-        'wp-content/mu-plugins/ionos-core.php',
-        'wp-content/mu-plugins/ionos-core',
-        'wp-content/mu-plugins/stretch-extra.php',
-        'wp-content/mu-plugins/stretch-extra',
-        'wp-content/plugins/ionos-essentials',
-        'wp-content/plugins/ionos-wpdev-caddy',
-    ];
 }

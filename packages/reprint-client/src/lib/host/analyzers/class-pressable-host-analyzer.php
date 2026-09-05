@@ -15,10 +15,4 @@ class PressableHostAnalyzer extends PlatformFilesHostAnalyzer {
             'mu_plugins' => ['pcm-extend-batcache.php' => 'file'],
         ],
     ];
-    protected const PATHS_TO_REMOVE = [
-        'wp-content/mu-plugins/pcm-extend-batcache.php',
-        'wp-content/mu-plugins/pcm-exclude-pages-from-batcache.php',
-        'wp-content/plugins/pressable-cache-management',
-        'wp-content/plugins/pressable-onepress-login',
-    ];
 }

@@ -11,8 +11,4 @@ class GodaddyHostAnalyzer extends PlatformFilesHostAnalyzer {
             ],
         ],
     ];
-    protected const PATHS_TO_REMOVE = [
-        'wp-content/mu-plugins/gd-system-plugin.php',
-        'wp-content/mu-plugins/gd-system-plugin',
-    ];
 }

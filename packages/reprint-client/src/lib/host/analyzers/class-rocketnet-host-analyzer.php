@@ -8,7 +8,4 @@ class RocketnetHostAnalyzer extends PlatformFilesHostAnalyzer {
             'mu_plugins' => ['cdn-cache-management.php' => 'file'],
         ],
     ];
-    protected const PATHS_TO_REMOVE = [
-        'wp-content/mu-plugins/cdn-cache-management.php',
-    ];
 }

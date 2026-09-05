@@ -89,7 +89,7 @@ class WpengineHostAnalyzerTest extends TestCase {
         $this->assertSame(0.0, \WpengineHostAnalyzer::score($preflight));
     }
 
-    public function testAnalyzeListsWpengineFilesRemovedDuringMigration(): void
+    public function testAnalyzeListsAmbiguousWpenginePaths(): void
     {
         $manifest = ( new \WpengineHostAnalyzer() )->analyze($this->wpenginePreflight([]));
 
@@ -97,17 +97,6 @@ class WpengineHostAnalyzerTest extends TestCase {
             'wp-content/advanced-cache.php',
             'wp-content/object-cache.php',
             'wp-content/mu-plugins/mu-plugin.php',
-            'wp-content/mu-plugins/wpengine-common',
-            'wp-content/mu-plugins/slt-force-strong-passwords.php',
-            'wp-content/mu-plugins/force-strong-passwords',
-            'wp-content/mu-plugins/stop-long-comments.php',
-            'wp-content/mu-plugins/wpe-cache-plugin',
-            'wp-content/mu-plugins/wpe-cache-plugin.php',
-            'wp-content/mu-plugins/wpe-update-source-selector',
-            'wp-content/mu-plugins/wpe-update-source-selector.php',
-            'wp-content/mu-plugins/wpe-wp-sign-on-plugin',
-            'wp-content/mu-plugins/wpe-wp-sign-on-plugin.php',
-            'wp-content/mu-plugins/wpengine-security-auditor.php',
         ], $manifest->paths_to_remove);
         $this->assertSame('wpengine', $manifest->source);
     }

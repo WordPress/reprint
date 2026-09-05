@@ -2,8 +2,8 @@
 /**
  * Shared analyzer for hosts identified by exact plugin inventory entries.
  *
- * Hosts in this family need no runtime emulation. They only remove files which
- * call services available on the source platform but absent from a local site.
+ * Hosts in this family need no runtime emulation. Their exact platform files
+ * identify the source host but are removed from every local import.
  */
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Host analyzers use established global class names.
 abstract class PlatformFilesHostAnalyzer implements HostAnalyzer {
@@ -11,9 +11,6 @@ abstract class PlatformFilesHostAnalyzer implements HostAnalyzer {
 
     /** @var array<int, array<string, array<string, string>>> */
     protected const SIGNAL_SETS = [];
-
-    /** @var string[] */
-    protected const PATHS_TO_REMOVE = [];
 
     /**
      * Match one complete signal set within one WordPress content root.
@@ -56,7 +53,6 @@ abstract class PlatformFilesHostAnalyzer implements HostAnalyzer {
         $manifest = new RuntimeManifest(static::SOURCE);
         $manifest->php_ini = extract_php_ini($preflight_data);
         $manifest->constants = extract_constants($preflight_data);
-        $manifest->paths_to_remove = static::PATHS_TO_REMOVE;
         return $manifest;
     }
 
