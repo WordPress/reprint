@@ -51,7 +51,9 @@ if (!defined(__NAMESPACE__ . '\\TIMESTAMP_TOLERANCE')) {
 /** Sends a JSON error response and terminates. */
 function error(int $code, string $message): void {
     http_response_code($code);
-    header('Content-Type: application/json');
+    // Hostinger preview domains rewrite real domains in application/json
+    // response bodies. Keep the JSON bytes opaque to that response filter.
+    header('Content-Type: application/octet-stream');
     echo json_encode(['error' => $message, 'code' => $code]);
     exit;
 }
@@ -74,7 +76,9 @@ function push_error(int $http_code, string $reason, string $detail): void {
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     header('Pragma: no-cache');
     header('Expires: 0');
-    header('Content-Type: application/json');
+    // Hostinger preview domains rewrite real domains in application/json
+    // response bodies. Keep the JSON bytes opaque to that response filter.
+    header('Content-Type: application/octet-stream');
     echo json_encode([
         'status' => 'rejected',
         'reason' => $reason,
@@ -444,7 +448,9 @@ function handle_api_request(array $options = []): void {
         ];
         error_log('Reprint Server API error: ' . json_encode($error));
         http_response_code(500);
-        @header('Content-Type: application/json');
+        // Hostinger preview domains rewrite real domains in application/json
+        // response bodies. Keep the JSON bytes opaque to that response filter.
+        @header('Content-Type: application/octet-stream');
         echo json_encode($error);
         exit(1);
     });
@@ -457,7 +463,9 @@ function handle_api_request(array $options = []): void {
         ];
         error_log('Reprint Server API exception: ' . json_encode($error));
         http_response_code(500);
-        @header('Content-Type: application/json');
+        // Hostinger preview domains rewrite real domains in application/json
+        // response bodies. Keep the JSON bytes opaque to that response filter.
+        @header('Content-Type: application/octet-stream');
         echo json_encode($error);
         exit(1);
     });
@@ -686,7 +694,9 @@ function handle_api_request(array $options = []): void {
         }
         if (!headers_sent()) {
             http_response_code(400);
-            header('Content-Type: application/json');
+            // Hostinger preview domains rewrite real domains in application/json
+            // response bodies. Keep the JSON bytes opaque to that response filter.
+            header('Content-Type: application/octet-stream');
         }
         echo json_encode([
             'error' => $e->getMessage(),
