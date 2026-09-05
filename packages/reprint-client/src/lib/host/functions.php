@@ -109,6 +109,11 @@ function source_host_paths_to_remove(): array
         'wp-content/plugins/boldgrid-backup',
         'wp-content/plugins/litespeed-cache',
 
+        // Aruba's cache plugin and managed hosting checker.
+        'wp-content/plugins/aruba-hispeed-cache',
+        'wp-content/mu-plugins/aruba-wpchecker.php',
+        'wp-content/mu-plugins/aruba-wpchecker',
+
         // Kinsta's platform MU plugin.
         'wp-content/mu-plugins/kinsta-mu-plugins.php',
         'wp-content/mu-plugins/kinsta-mu-plugins',
