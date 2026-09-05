@@ -195,7 +195,12 @@ function get_option_connection_token(): string {
         return '';
     }
 
-    $connection_token = get_option(CONNECTION_TOKEN_OPTION, '');
+    if (function_exists('is_multisite') && is_multisite() && !function_exists('get_site_option')) {
+        return '';
+    }
+    $connection_token = function_exists('is_multisite') && is_multisite() && function_exists('get_site_option')
+        ? get_site_option(CONNECTION_TOKEN_OPTION, '')
+        : get_option(CONNECTION_TOKEN_OPTION, '');
     return is_string($connection_token) ? $connection_token : '';
 }
 
@@ -203,7 +208,7 @@ function get_option_connection_token(): string {
  * Returns the effective connection token.
  *
  * The legacy secret.php file takes precedence when present; otherwise the
- * site option is used.
+ * site option is used on ordinary sites and the network option on multisite.
  */
 function get_connection_token(): ?string {
     if (has_connection_token_file()) {
@@ -220,6 +225,9 @@ function update_connection_token(string $connection_token): bool {
         return false;
     }
 
+    if (function_exists('is_multisite') && is_multisite() && function_exists('update_site_option')) {
+        return (bool) update_site_option(CONNECTION_TOKEN_OPTION, $connection_token);
+    }
     return (bool) update_option(CONNECTION_TOKEN_OPTION, $connection_token, false);
 }
 
@@ -261,6 +269,9 @@ function is_push_authorized(): bool {
 
 /** Returns the exact push authorization failure, or null when push may start new work. */
 function get_push_authorization_error(): ?string {
+    if (function_exists('is_multisite') && is_multisite()) {
+        return 'Push into a multisite network is not supported. Pull the selected site into a fresh target instead.';
+    }
     $managed_enabled = get_managed_push_enabled();
     if ($managed_enabled !== null) {
         return $managed_enabled
@@ -548,6 +559,10 @@ function handle_api_request(array $options = []): void {
     // -- Dispatch --
     try {
         $server_options = ['default_directory' => ABSPATH];
+        if (function_exists('is_multisite') && is_multisite()) {
+            require_once __DIR__ . '/wordpress/multisite.php';
+            $server_options['multisite'] = get_multisite_export_context();
+        }
         if (HTTPServer::is_push_endpoint($endpoint)) {
             // Push changes the web server's document root. ABSPATH remains the
             // pull default because it may point at a separate shared core tree.

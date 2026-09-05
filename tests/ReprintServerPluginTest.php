@@ -32,6 +32,43 @@ require_once __DIR__ . '/lib/ReprintServerPluginTestCase.php';
 
 final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 {
+    /** A subsite's token cannot grant access to shared network data. */
+    public function testMultisiteUsesOnlyTheNetworkConnectionToken(): void
+    {
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'subsite-token';
+        $this->assertNull(get_connection_token());
+        $this->assertTrue(update_connection_token('network-token'));
+        $this->assertSame('network-token', get_connection_token());
+        $this->assertSame('subsite-token', $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION]);
+    }
+
+    /** A site administrator cannot render the network's connection token. */
+    public function testMultisiteSiteAdministratorCannotReadTheNetworkToken(): void
+    {
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $GLOBALS['reprint_server_test_network_options'][CONNECTION_TOKEN_OPTION] = 'network-token';
+        $this->assertSame('', $this->renderAdminPage());
+        SettingsPage::get_instance()->add_admin_menu();
+        $this->assertNull($GLOBALS['reprint_server_test_menu']);
+    }
+
+    /** The site Settings REST endpoint must not reveal a network credential. */
+    public function testMultisiteDoesNotRegisterTheSiteRestSetting(): void
+    {
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        register_connection_token_setting();
+        $this->assertArrayNotHasKey(CONNECTION_TOKEN_OPTION, $GLOBALS['reprint_server_registered_settings']);
+    }
+
+    /** Pulling a site does not authorize pushing into a live network. */
+    public function testMultisitePushRemainsDisabledEvenWithManagedAccess(): void
+    {
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        putenv('REPRINT_SERVER_PUSH_ENABLED=1');
+        $this->assertFalse(is_push_authorized());
+    }
+
     public function testConnectionTokenFallsBackToOptionWhenSecretFileMissing(): void
     {
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'option-token';
