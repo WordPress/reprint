@@ -259,7 +259,6 @@ class PlatformFilesHostAnalyzerTest extends TestCase {
             'A2 optimizer' => [['a2-optimized-wp']],
             'InMotion plugins' => [['boldgrid-backup', 'w3-total-cache']],
             'GreenGeeks LiteSpeed plugin' => [['litespeed-cache']],
-            'Raidboxes LiteSpeed connector' => [['litespeed-cache']],
             'GridPane cache connectors' => [['nginx-helper', 'redis-cache', 'litespeed-cache']],
         ];
     }
