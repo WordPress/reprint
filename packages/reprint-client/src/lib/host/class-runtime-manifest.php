@@ -1,10 +1,10 @@
 <?php
 /**
- * Settings needed to run an imported site on the target server.
+ * Runtime settings needed to run an imported site on the target server.
  *
  * A host analyzer reads preflight data from the source site and produces a
- * RuntimeConfiguration describing what that site needs to run. A runtime applier
- * reads the configuration and writes the configuration files appropriate for the
+ * RuntimeManifest describing what that site needs to run. A runtime applier
+ * reads the manifest and writes the configuration files appropriate for the
  * target server.
  *
  * It carries only target server setup:
@@ -21,9 +21,9 @@
  * - sqlite:       When non-null, the target uses SQLite instead of MySQL.
  *                 Contains the plugin source path and database file location.
  */
-class RuntimeConfiguration
+class RuntimeManifest
 {
-    /** @var string Source host identifier (e.g. "wpcloud", "siteground") */
+    /** @var string Source host identifier (e.g. "wpcloud", "wpengine", "other") */
     public string $source;
 
     /** @var array<string, string> PHP INI directives */
@@ -55,7 +55,7 @@ class RuntimeConfiguration
     public array $routes = [];
 
     /**
-     * Whether the configuration includes DB_* constants that will collide
+     * Whether the manifest includes DB_* constants that will collide
      * with definitions in wp-config.php.  When true, the generated
      * runtime.php installs a lightweight error handler that silences
      * the "Constant already defined" warnings that occur when

@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/class-runtime-configuration.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/class-runtime-manifest.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/target-runtime/load.php';
 
 class PhpBuiltinRuntimeRoutingTest extends TestCase
@@ -40,9 +40,9 @@ class PhpBuiltinRuntimeRoutingTest extends TestCase
             "<?php echo 'docroot-plugin ' . \$_SERVER['SCRIPT_FILENAME'];\n",
         );
 
-        $configuration = new \RuntimeConfiguration('other');
+        $manifest = new \RuntimeManifest('other');
         $applier = new \PhpBuiltinApplier();
-        $applier->apply($configuration, $this->docRoot, $this->outputDir, [
+        $applier->apply($manifest, $this->docRoot, $this->outputDir, [
             'wordpress_index_php' => $this->coreRoot . '/index.php',
         ]);
     }

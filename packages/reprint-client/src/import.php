@@ -91,10 +91,10 @@ require_once __DIR__ . '/lib/database/load.php';
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
 
-// Load host analyzers (produce a runtime configuration from preflight data)
+// Load host analyzers (produce a runtime manifest from preflight data)
 require_once __DIR__ . '/lib/host/load.php';
 
-// Load target runtime appliers (consume runtime configuration, write server config)
+// Load target runtime appliers (consume a runtime manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
 
 require_once __DIR__ . '/lib/merge/load.php';
@@ -4652,7 +4652,7 @@ class ImportClient
         $database = $preflight_data["database"] ?? [];
         $wordpress = $database["wp"] ?? [];
         $paths_urls = $wordpress["paths_urls"] ?? [];
-        $runtime_configuration = runtime_configuration_for($preflight_data);
+        $runtime_manifest = runtime_manifest_for($preflight_data);
 
         return [
             "hasCompletedOnce" => $pull->has_completed_once,
@@ -4673,7 +4673,7 @@ class ImportClient
                     $preflight_data["wp_detect"]["roots"] ?? [],
                     "path"
                 ),
-                "extraDirectories" => $runtime_configuration->extra_directories,
+                "extraDirectories" => $runtime_manifest->extra_directories,
             ],
         ];
     }
@@ -4696,11 +4696,11 @@ class ImportClient
     }
 
     /**
-     * Generate runtime configuration for the pulled site.
+     * Generate a runtime manifest for the pulled site.
      *
      * Reads the detected webhost from state (set during preflight), runs the
-     * appropriate host analyzer to produce a runtime configuration, then applies
-     * it using the chosen runtime applier. The configuration captures what the
+     * appropriate host analyzer to produce a runtime manifest, then applies
+     * it using the chosen runtime applier. The manifest captures what the
      * remote site needs (constants, INI directives, error handlers);
      * the applier writes the files the target server needs to fulfill those
      * requirements.
@@ -4851,34 +4851,34 @@ class ImportClient
             $abs_output_dir = realpath($abs_output_dir);
         }
 
-        // Step 1: Build the target runtime configuration from preflight data.
-        $configuration = runtime_configuration_for($preflight_data);
-        $this->maybe_enable_remote_upload_proxy($configuration, $preflight_data);
+        // Step 1: Build the runtime manifest from preflight data.
+        $manifest = runtime_manifest_for($preflight_data);
+        $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data);
 
         // Step 1b: Add the target database settings.
         // It decides the DB_* constants and, for SQLite targets, the database
         // integration plugin setup.
         $target_engine = $target["engine"];
         if ($target_engine === "mysql") {
-            $configuration->constants["DB_NAME"] = $target["db"];
-            $configuration->constants["DB_USER"] = $target["user"];
-            $configuration->constants["DB_PASSWORD"] = $target["pass"];
+            $manifest->constants["DB_NAME"] = $target["db"];
+            $manifest->constants["DB_USER"] = $target["user"];
+            $manifest->constants["DB_PASSWORD"] = $target["pass"];
             $host_value = $target["host"];
             if ($target["port"] !== 3306) {
                 $host_value .= ":" . $target["port"];
             }
-            $configuration->constants["DB_HOST"] = $host_value;
+            $manifest->constants["DB_HOST"] = $host_value;
             // runtime.php defines DB_* before wp-config.php loads, which
             // causes "Constant already defined" warnings. Flag this so the
             // generated runtime.php installs a handler to suppress them.
-            $configuration->has_db_constants = true;
+            $manifest->has_db_constants = true;
         } elseif ($target_engine === "sqlite") {
             $sqlite_path = $target["sqlite_path"];
-            $configuration->constants["DB_NAME"] = $target["db"];
+            $manifest->constants["DB_NAME"] = $target["db"];
             // The SQLite integration still requires a non-empty DB_NAME
             // for its MySQL information-schema emulation, even though the
             // physical database location comes from DB_DIR/DB_FILE.
-            $configuration->has_db_constants = true;
+            $manifest->has_db_constants = true;
             if ($sqlite_path !== null) {
                 $db_dir = rtrim(dirname($sqlite_path), '/') . '/';
                 $db_file = basename($sqlite_path);
@@ -4886,7 +4886,7 @@ class ImportClient
                 $db_dir = '{fs-root}/wp-content/database/';
                 $db_file = '.ht.sqlite';
             }
-            $configuration->sqlite = [
+            $manifest->sqlite = [
                 'plugin_source' => resolve_sqlite_integration_plugin_path(),
                 'plugin_dir' => '',  // resolved after copy_sqlite_plugin()
                 'db_dir' => $db_dir,
@@ -4894,7 +4894,7 @@ class ImportClient
             ];
         }
 
-        $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$configuration->source}, webhost={$webhost})");
+        $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
 
         // Resolve host and port for the target server. If not provided on
         // the CLI, derive from the first URL rewrite target (saved by
@@ -4950,24 +4950,24 @@ class ImportClient
         // Step 2b: For SQLite targets, copy the integration plugin into the
         // output directory BEFORE the applier runs, so generate_runtime_php()
         // can embed the resolved plugin path in the lazy-loader code.
-        if ($configuration->sqlite !== null) {
+        if ($manifest->sqlite !== null) {
             $copied_plugin = copy_sqlite_plugin(
-                $configuration->sqlite['plugin_source'],
+                $manifest->sqlite['plugin_source'],
                 $abs_output_dir,
             );
             // Replace the source path with the copied-to path so the
             // generated runtime.php points to the output directory.
-            $configuration->sqlite['plugin_dir'] = $copied_plugin;
+            $manifest->sqlite['plugin_dir'] = $copied_plugin;
             // Resolve {fs-root} in db_dir now that we have the real path.
-            $configuration->sqlite['db_dir'] = resolve_runtime_placeholders(
-                $configuration->sqlite['db_dir'],
+            $manifest->sqlite['db_dir'] = resolve_runtime_placeholders(
+                $manifest->sqlite['db_dir'],
                 $local_document_root,
             );
         }
 
-        $summary = $applier->apply($configuration, $local_document_root, $abs_output_dir, $applier_options);
+        $summary = $applier->apply($manifest, $local_document_root, $abs_output_dir, $applier_options);
 
-        if ($configuration->sqlite !== null) {
+        if ($manifest->sqlite !== null) {
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
         }
 
@@ -5013,10 +5013,10 @@ class ImportClient
             "command" => "apply-runtime",
             "runtime" => $runtime,
             "webhost" => $webhost,
-            "webhost_source" => $configuration->source,
+            "webhost_source" => $manifest->source,
             "target_engine" => $target_engine,
             "paths_removed" => $excluded_local_paths,
-            "extra_directories" => $configuration->extra_directories,
+            "extra_directories" => $manifest->extra_directories,
             "start_config" => $start_config,
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
@@ -5205,7 +5205,7 @@ class ImportClient
      * - files-pull is still incomplete
      * - the essential-files preset is active
      */
-    private function maybe_enable_remote_upload_proxy(RuntimeConfiguration $configuration, array $preflight_data): void
+    private function maybe_enable_remote_upload_proxy(RuntimeManifest $manifest, array $preflight_data): void
     {
         if (!$this->should_enable_remote_upload_proxy()) {
             return;
@@ -5220,15 +5220,15 @@ class ImportClient
             return;
         }
 
-        $configuration->constants["REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL"] = $base_url;
+        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL"] = $base_url;
         $pull_state_directory =
             realpath($this->pull_state_directory)
             ?: $this->pull_state_directory;
-        $configuration->constants["REPRINT_PULL_STATE_FILE"] = wp_join_unix_paths(
+        $manifest->constants["REPRINT_PULL_STATE_FILE"] = wp_join_unix_paths(
             trim_right_slash($pull_state_directory),
             "state.json"
         );
-        $configuration->routes[] = [
+        $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
             "condition" => "file_not_found",

@@ -6,11 +6,11 @@
  *
  * 1. Scores how likely it is that the source site runs on its hosting
  *    platform, based on preflight data (the static score() method).
- * 2. Reads preflight data and produces a RuntimeConfiguration describing
+ * 2. Reads preflight data and produces a RuntimeManifest describing
  *    what the site needs to run (the analyze() method).
  *
- * detect_host() selects the primary source label. runtime_configuration_for()
- * uses that same current-host match to choose the target configuration.
+ * detect_host() selects the primary source label. runtime_manifest_for()
+ * uses that same current-host match to build the runtime manifest.
  * Plugin exclusions are calculated separately by excluded_plugins().
  */
 interface HostAnalyzer
@@ -28,10 +28,10 @@ interface HostAnalyzer
     public static function score(array $preflight_data): float;
 
     /**
-     * Analyze preflight data and produce a runtime configuration.
+     * Analyze preflight data and produce a runtime manifest.
      *
      * @param array $preflight_data The preflight response data.
-     * @return RuntimeConfiguration
+     * @return RuntimeManifest
      */
-    public function analyze(array $preflight_data): RuntimeConfiguration;
+    public function analyze(array $preflight_data): RuntimeManifest;
 }

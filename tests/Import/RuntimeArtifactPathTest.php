@@ -7,7 +7,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/class-runtime-configuration.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/class-runtime-manifest.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/target-runtime/load.php';
 
 class RuntimeArtifactPathTest extends TestCase
@@ -37,7 +37,7 @@ class RuntimeArtifactPathTest extends TestCase
 
         $applier = new \NginxFpmApplier();
         $summary = $applier->apply(
-            new \RuntimeConfiguration('other'),
+            new \RuntimeManifest('other'),
             $this->filesystemRoot,
             $outputDir,
         );
@@ -57,7 +57,7 @@ class RuntimeArtifactPathTest extends TestCase
 
         $applier = new \PhpBuiltinApplier();
         $summary = $applier->apply(
-            new \RuntimeConfiguration('other'),
+            new \RuntimeManifest('other'),
             $this->filesystemRoot,
             $outputDir,
         );
@@ -77,7 +77,7 @@ class RuntimeArtifactPathTest extends TestCase
 
         $applier = new \PlaygroundCliApplier();
         $summary = $applier->apply(
-            new \RuntimeConfiguration('other'),
+            new \RuntimeManifest('other'),
             $this->filesystemRoot,
             $outputDir,
         );

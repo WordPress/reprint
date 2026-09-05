@@ -32,12 +32,12 @@ class WpengineHostAnalyzer implements HostAnalyzer {
         return 0.0;
     }
 
-    public function analyze(array $preflight_data): RuntimeConfiguration
+    public function analyze(array $preflight_data): RuntimeManifest
     {
-        $configuration = new RuntimeConfiguration('wpengine');
-        $configuration->php_ini = extract_php_ini($preflight_data);
-        $configuration->constants = extract_constants($preflight_data);
+        $manifest = new RuntimeManifest('wpengine');
+        $manifest->php_ini = extract_php_ini($preflight_data);
+        $manifest->constants = extract_constants($preflight_data);
 
-        return $configuration;
+        return $manifest;
     }
 }

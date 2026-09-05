@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/class-runtime-configuration.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/class-runtime-manifest.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/target-runtime/load.php';
 
 class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
@@ -64,12 +64,12 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
 
     public function testPlaygroundMountsProxyStateFileIntoVfs(): void
     {
-        $configuration = new \RuntimeConfiguration('other');
-        $configuration->constants['REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL'] =
+        $manifest = new \RuntimeManifest('other');
+        $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL'] =
             'https://source.example/wp-content/uploads';
-        $configuration->constants['REPRINT_PULL_STATE_FILE'] =
+        $manifest->constants['REPRINT_PULL_STATE_FILE'] =
             $this->pullStateFile;
-        $configuration->routes[] = [
+        $manifest->routes[] = [
             'handler' => 'remote-upload-proxy',
             'path_pattern' => '/wp-content/uploads/.*',
             'condition' => 'file_not_found',
@@ -77,7 +77,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         ];
 
         $applier = new \PlaygroundCliApplier();
-        $applier->apply($configuration, $this->fsRoot, $this->outputDir, [
+        $applier->apply($manifest, $this->fsRoot, $this->outputDir, [
             'port' => 9400,
             'wordpress_index_php' => $this->fsRoot . '/index.php',
         ]);
@@ -106,9 +106,9 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
 
     public function testPlaygroundConfigNormalizesATrailingOutputDirectorySlash(): void
     {
-        $configuration = new \RuntimeConfiguration('other');
+        $manifest = new \RuntimeManifest('other');
         $applier = new \PlaygroundCliApplier();
-        $applier->apply($configuration, $this->fsRoot, $this->outputDir . '/', [
+        $applier->apply($manifest, $this->fsRoot, $this->outputDir . '/', [
             'wordpress_index_php' => $this->fsRoot . '/index.php',
         ]);
 

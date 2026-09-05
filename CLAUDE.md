@@ -153,12 +153,12 @@ PHPUnit tests automatically create/drop test databases. The naming convention is
 - Export database: `test_mysql_dump`
 - Import database: `test_mysql_dump_import`
 
-### Runtime Configuration, Host Detection, and Excluded Plugins
+### Runtime Manifest, Host Detection, and Excluded Plugins
 
-The `apply-runtime` command separates source host detection from target runtime configuration. The flow is:
+The `apply-runtime` command separates source host detection from target runtime setup. The flow is:
 
-1. **Host analyzer** (in `packages/reprint-client/src/lib/host/analyzers/`) reads current preflight data and produces a `RuntimeConfiguration` with only the settings needed by the target server: INI directives, constants, server vars, routes, extra directories, and optional SQLite setup.
-2. **Runtime applier** (in `packages/reprint-client/src/lib/target-runtime/`) reads the configuration and generates server-specific configuration files.
+1. **Host analyzer** (in `packages/reprint-client/src/lib/host/analyzers/`) reads current preflight data and produces a `RuntimeManifest` with only the settings needed by the target server: INI directives, constants, server vars, routes, extra directories, and optional SQLite setup.
+2. **Runtime applier** (in `packages/reprint-client/src/lib/target-runtime/`) reads the manifest and generates server-specific configuration files.
 
 The target database is an input to `apply-runtime`: it takes the same `--target-*` options as `db-apply` and falls back, field by field, to what `db-apply` recorded in state, so a caller that keeps its own database can generate a working runtime without ever running `db-apply`.
 
@@ -186,7 +186,7 @@ Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl` for that
   - src/: Core export engine (export.php, producers, HMAC client, utilities)
 - packages/reprint-client/: Packagist client package (previously reprint-importer)
   - src/: Import client and importer runtime support code
-  - src/lib/host/: RuntimeConfiguration and the default, WP Cloud, and WP Engine host analyzers
+  - src/lib/host/: RuntimeManifest and the default, WP Cloud, and WP Engine host analyzers
   - src/lib/target-runtime/: Runtime appliers (NginxFpmApplier, PhpBuiltinApplier, PlaygroundCliApplier)
   - src/lib/url-rewrite/: URL rewriting for db-apply
   - src/lib/mysql-query-stream/: MySQL query stream parser for direct streaming

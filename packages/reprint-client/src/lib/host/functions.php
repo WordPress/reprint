@@ -45,24 +45,24 @@ function detect_host(array $preflight_data): string
 }
 
 /**
- * Build the target runtime configuration for a local import.
+ * Build the runtime manifest for a local import.
  *
  * @param array $preflight_data The preflight response data.
  */
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the existing host helper names.
-function runtime_configuration_for(array $preflight_data): RuntimeConfiguration
+function runtime_manifest_for(array $preflight_data): RuntimeManifest
 {
     $matching_hosts = matching_host_analyzer_scores($preflight_data);
 
     if (isset($matching_hosts['wpcloud'])) {
-        $configuration = ( new WpcloudHostAnalyzer() )->analyze($preflight_data);
+        $manifest = ( new WpcloudHostAnalyzer() )->analyze($preflight_data);
     } elseif (isset($matching_hosts['wpengine'])) {
-        $configuration = ( new WpengineHostAnalyzer() )->analyze($preflight_data);
+        $manifest = ( new WpengineHostAnalyzer() )->analyze($preflight_data);
     } else {
-        $configuration = ( new DefaultHostAnalyzer() )->analyze($preflight_data);
+        $manifest = ( new DefaultHostAnalyzer() )->analyze($preflight_data);
     }
 
-    return $configuration;
+    return $manifest;
 }
 
 /**

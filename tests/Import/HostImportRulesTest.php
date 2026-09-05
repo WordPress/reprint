@@ -154,14 +154,14 @@ class HostImportRulesTest extends TestCase {
 
         $this->assertSame('wpcloud', \detect_host($preflight_data));
 
-        $configuration = \runtime_configuration_for($preflight_data);
-        $this->assertSame('wpcloud', $configuration->source);
-        $this->assertSame('{fs-root}/__wp__/', $configuration->server_vars['WP_DIR']);
-        $this->assertSame('{fs-root}/wp-content/themes', $configuration->constants['THEMES_PATH_BASE']);
-        $this->assertContains('/scripts', $configuration->extra_directories);
+        $manifest = \runtime_manifest_for($preflight_data);
+        $this->assertSame('wpcloud', $manifest->source);
+        $this->assertSame('{fs-root}/__wp__/', $manifest->server_vars['WP_DIR']);
+        $this->assertSame('{fs-root}/wp-content/themes', $manifest->constants['THEMES_PATH_BASE']);
+        $this->assertContains('/scripts', $manifest->extra_directories);
         $this->assertContains(
             'wpcloud-thumbnail-generator',
-            array_column($configuration->routes, 'handler'),
+            array_column($manifest->routes, 'handler'),
         );
         $excluded_local_paths = array_column(\excluded_plugins($preflight_data), 'local_path');
         $this->assertContains('wp-content/object-cache.php', $excluded_local_paths);
@@ -232,10 +232,10 @@ class HostImportRulesTest extends TestCase {
     {
         $preflight_data = $this->preflight(['sg-cachepress', 'sg-security'], []);
 
-        $configuration = \runtime_configuration_for($preflight_data);
+        $manifest = \runtime_manifest_for($preflight_data);
 
-        $this->assertSame('other', $configuration->source);
-        $this->assertSame(['memory_limit' => '256M'], $configuration->php_ini);
+        $this->assertSame('other', $manifest->source);
+        $this->assertSame(['memory_limit' => '256M'], $manifest->php_ini);
         $excluded_local_paths = array_column(\excluded_plugins($preflight_data), 'local_path');
         $this->assertContains('wp-content/plugins/sg-cachepress', $excluded_local_paths);
         $this->assertNotContains('wp-content/object-cache.php', $excluded_local_paths);
