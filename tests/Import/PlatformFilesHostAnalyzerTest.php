@@ -213,6 +213,7 @@ class PlatformFilesHostAnalyzerTest extends TestCase {
                 'wp-content/mu-plugins/cdn-cache-management.php',
                 'wp-content/plugins/spinupwp',
                 'wp-content/mu-plugins/vip-go-mu-plugins',
+                'wp-content/plugins/wp-engine-smart-plugin-manager',
                 'wp-content/mu-plugins/wpengine-common',
                 'wp-content/mu-plugins/slt-force-strong-passwords.php',
                 'wp-content/mu-plugins/force-strong-passwords',

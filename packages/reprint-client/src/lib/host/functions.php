@@ -160,8 +160,10 @@ function source_host_paths_to_remove(): array
         // WordPress VIP's platform MU-plugin package.
         'wp-content/mu-plugins/vip-go-mu-plugins',
 
-        // WP Engine tells sites moving away to remove its platform MU plugins.
-        // The cache and update-source files include its current plugin layout.
+        // WP Engine tells sites moving away to remove its installed plugin and
+        // platform MU plugins. The cache and update-source files include its
+        // current plugin layout.
+        'wp-content/plugins/wp-engine-smart-plugin-manager',
         'wp-content/mu-plugins/wpengine-common',
         'wp-content/mu-plugins/slt-force-strong-passwords.php',
         'wp-content/mu-plugins/force-strong-passwords',
