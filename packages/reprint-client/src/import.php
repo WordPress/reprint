@@ -2571,8 +2571,7 @@ class ImportClient
         }
 
         // Compare the readable WordPress home domain with its base64 copy to
-        // detect response filters which rewrite domain names. Older servers
-        // without the encoded copy remain compatible.
+        // detect response filters which rewrite domain names.
         $domain_error = null;
         $wordpress = null;
         if (is_array($payload)) {
