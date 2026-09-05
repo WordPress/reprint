@@ -253,6 +253,24 @@ class DiagnoseHttpErrorTest extends TestCase
 
     public function testPotentiallyTransientHttpErrorClassification()
     {
+        foreach ([520, 521, 522, 523, 524] as $http_code) {
+            $this->assertTrue(
+                $this->isPotentiallyTransientHttpError(
+                    $http_code,
+                    '<!doctype html><title>Temporary reverse-proxy response</title>',
+                ),
+                "HTTP {$http_code} should be potentially transient",
+            );
+        }
+        foreach ([525, 526, 530] as $http_code) {
+            $this->assertFalse(
+                $this->isPotentiallyTransientHttpError(
+                    $http_code,
+                    '<!doctype html><title>Reverse-proxy configuration error</title>',
+                ),
+                "HTTP {$http_code} should remain fatal",
+            );
+        }
         $this->assertTrue($this->isPotentiallyTransientHttpError(
             400,
             '<!doctype html><title>Temporary upstream response</title>',

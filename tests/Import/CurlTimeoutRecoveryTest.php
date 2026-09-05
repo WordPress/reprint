@@ -234,6 +234,73 @@ class CurlTimeoutRecoveryTest extends TestCase
         );
     }
 
+    public function testSqlDownloadRetriesHttp520AndLogsResponseHeaders()
+    {
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
+            $this->markTestSkipped('HTTP retry coverage requires PHP curl and pcntl.');
+        }
+
+        $cursor = base64_encode('{"table":"wp_posts","pk":42}');
+        $http520 = $this->httpResponse(
+            '520 Web Server Returned an Unknown Error',
+            'text/html',
+            '<!doctype html><title>Temporary origin response</title>',
+            [
+                'Server: cloudflare',
+                'CF-Ray: 1234567890abcdef-WAW',
+                'CF-Error-Type: 52x',
+                'Retry-After: 1',
+                'Set-Cookie: session=do-not-log-me',
+            ],
+        );
+        $boundary = 'http-retry-test';
+        $completion_body = "--{$boundary}\r\n"
+            . "Content-Type: application/octet-stream\r\n"
+            . "Content-Length: 0\r\n"
+            . "X-Chunk-Type: completion\r\n"
+            . "X-Status: complete\r\n"
+            . "\r\n"
+            . "\r\n"
+            . "--{$boundary}--\r\n";
+        $server = $this->startSqlResponseServer([
+            $http520,
+            $this->httpResponse(
+                '200 OK',
+                "multipart/mixed; boundary={$boundary}",
+                $completion_body,
+            ),
+        ], $cursor);
+        $wire_client = $this->prepareWireSqlClient(
+            $server['url'],
+            $cursor,
+        );
+        $client = $wire_client['client'];
+        $reflection = $wire_client['reflection'];
+
+        try {
+            $reflection->getMethod('fetch_sql')->invoke($client);
+        } finally {
+            pcntl_waitpid($server['child_pid'], $status);
+        }
+
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+        $this->assertSame(
+            0,
+            $client->get_state()->consecutive_interrupted_responses,
+        );
+
+        $audit_log = file_get_contents($this->stateDir . '/audit.log');
+        $this->assertIsString($audit_log);
+        $this->assertStringContainsString('HTTP/1.1 520 Web Server Returned an Unknown Error', $audit_log);
+        $this->assertStringContainsString('Server: cloudflare', $audit_log);
+        $this->assertStringContainsString('CF-Ray: 1234567890abcdef-WAW', $audit_log);
+        $this->assertStringContainsString('CF-Error-Type: 52x', $audit_log);
+        $this->assertStringContainsString('Retry-After: 1', $audit_log);
+        $this->assertStringContainsString('Set-Cookie: [redacted]', $audit_log);
+        $this->assertStringNotContainsString('do-not-log-me', $audit_log);
+    }
+
     public function testSqlDownloadPreservesHttp418AfterRetryLimit()
     {
         if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
@@ -861,16 +928,22 @@ PHP);
         );
     }
 
+    /**
+     * @param string[] $additional_headers Additional response header lines.
+     */
     private function httpResponse(
         string $status_line,
         string $content_type,
-        string $body
+        string $body,
+        array $additional_headers = []
     ): string {
-        return "HTTP/1.1 {$status_line}\r\n"
+        $response = "HTTP/1.1 {$status_line}\r\n"
             . "Content-Type: {$content_type}\r\n"
-            . 'Content-Length: ' . strlen($body) . "\r\n"
-            . "Connection: close\r\n\r\n"
-            . $body;
+            . 'Content-Length: ' . strlen($body) . "\r\n";
+        foreach ($additional_headers as $header) {
+            $response .= $header . "\r\n";
+        }
+        return $response . "Connection: close\r\n\r\n" . $body;
     }
 
     /**

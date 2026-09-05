@@ -206,6 +206,9 @@ class ImportClient
      */
     private const MAX_CONSECUTIVE_INTERRUPTED_RESPONSES = 3;
 
+    /** Maximum response header bytes retained for failed request audit logging. */
+    private const MAX_AUDIT_RESPONSE_HEADER_BYTES = 65536;
+
     /**
      * cURL error numbers that can be temporary, often meaning the peer cut the transfer short.
      * We can attempt some retries from these errors before giving up.
@@ -236,6 +239,12 @@ class ImportClient
         502, // Bad Gateway
         503, // Service Unavailable
         504, // Gateway Timeout
+        // Non-standard reverse-proxy origin failures, most often from Cloudflare.
+        520, // Unknown origin response
+        521, // Origin refused the connection
+        522, // Origin connection timed out
+        523, // Origin could not be reached
+        524, // Origin response timed out
     ];
 
     /** @var string Remote Reprint API URL. */
@@ -11898,6 +11907,7 @@ class ImportClient
         $last_progress_check = microtime(true);
         $last_bytes_received = 0;
         $error_body = "";
+        $response_headers = "";
 
         // Build headers to look like a real browser
         $headers = [
@@ -11969,9 +11979,33 @@ class ImportClient
             CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (
                 &$parser,
                 $context,
-                &$current_chunk
+                &$current_chunk,
+                &$response_headers
             ) {
                 $len = strlen($header_line);
+
+                $audit_header_line = rtrim($header_line, "\r\n");
+                if (
+                    preg_match(
+                        '/^(Set-Cookie|Authorization|Proxy-Authorization|X-Auth-[^:]+):/i',
+                        $audit_header_line,
+                        $sensitive_header_match,
+                    )
+                ) {
+                    $audit_header_line = $sensitive_header_match[1] . ': [redacted]';
+                }
+                if (
+                    $audit_header_line !== '' &&
+                    strlen($response_headers) < self::MAX_AUDIT_RESPONSE_HEADER_BYTES
+                ) {
+                    $remaining_header_bytes =
+                        self::MAX_AUDIT_RESPONSE_HEADER_BYTES - strlen($response_headers);
+                    $response_headers .= substr(
+                        $audit_header_line . "\n",
+                        0,
+                        $remaining_header_bytes,
+                    );
+                }
 
                 // Parse Content-Type to extract boundary
                 if (stripos($header_line, "Content-Type:") === 0) {
@@ -12174,10 +12208,16 @@ class ImportClient
                 ]);
             }
 
+            $response_headers_for_log = $response_headers !== ''
+                ? rtrim($response_headers, "\n")
+                : '(none)';
+
             // Log what we received
             $this->audit_log(
                 "HTTP error {$http_code} | error_body length: " .
-                    strlen($error_body),
+                    strlen($error_body) .
+                    " | response_headers:\n" .
+                    $response_headers_for_log,
                 true,
             );
 
