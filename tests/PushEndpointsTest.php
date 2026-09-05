@@ -1373,6 +1373,7 @@ final class PushEndpointsTest extends TestCase {
         $body = curl_exec($handle);
         $this->assertIsString($body);
         $this->assertSame(200, curl_getinfo($handle, CURLINFO_HTTP_CODE), $body);
+        $this->assertSame('application/octet-stream', curl_getinfo($handle, CURLINFO_CONTENT_TYPE));
         curl_close($handle);
 
         $response = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
@@ -1402,6 +1403,7 @@ final class PushEndpointsTest extends TestCase {
             'path' => null,
         ], json_decode($status['body'], true, 512, JSON_THROW_ON_ERROR));
         $this->assertNoCacheHeaders($status['headers']);
+        $this->assertSame(['application/octet-stream'], $status['headers']['content-type'] ?? []);
     }
 
     public function testPushAuthenticationFailureSendsNoCacheHeaders(): void
@@ -1413,6 +1415,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame(403, $authentication_failure['http_code'], $authentication_failure['body']);
         $this->assertSame('auth_failed', json_decode($authentication_failure['body'], true, 512, JSON_THROW_ON_ERROR)['reason']);
         $this->assertNoCacheHeaders($authentication_failure['headers']);
+        $this->assertSame(['application/octet-stream'], $authentication_failure['headers']['content-type'] ?? []);
     }
 
     public function testEndpointGuardsRejectWrongMethodContentTypeAndAuthentication(): void

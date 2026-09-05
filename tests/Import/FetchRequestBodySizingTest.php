@@ -282,6 +282,39 @@ class FetchRequestBodySizingTest extends TestCase
         );
     }
 
+    public function testPreflightAcceptsJsonFromAnOpaqueResponse(): void
+    {
+        $payload = json_encode([
+            'ok' => true,
+            'protocol_version' => 3,
+            'database' => ['wp' => ['wp_version' => '6.0-test']],
+        ]);
+        $response = "HTTP/1.1 200 OK\r\n"
+            . "Content-Type: application/octet-stream\r\n"
+            . "Content-Length: " . strlen($payload) . "\r\n"
+            . "Connection: close\r\n\r\n"
+            . $payload;
+
+        [$url, $pid] = $this->startJsonServer($response);
+
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        \write_current_pull_state($client, []);
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection->getProperty('state')->setValue(
+            $client,
+            $reflection->getMethod('load_state')->invoke($client),
+        );
+        $reflection->getProperty('is_tty')->setValue($client, false);
+
+        $client->run_preflight();
+        pcntl_waitpid($pid, $status);
+
+        $this->assertSame(
+            '6.0-test',
+            $client->get_state()->preflight_record()['data']['database']['wp']['wp_version'],
+        );
+    }
+
     public function testRunningPreflightTightensTheBoundInTheSameRun(): void
     {
         // initialize_tuner() runs before run_preflight(), so until preflight
