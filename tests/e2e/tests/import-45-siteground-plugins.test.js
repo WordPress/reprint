@@ -1,8 +1,8 @@
 /**
- * Test 45: SiteGround host-specific plugin stripping
+ * Test 45: Global removal of SiteGround plugins
  *
- * Simulates a SiteGround hosting environment where sg-cachepress and
- * sg-security are installed and active.  Verifies that after the full
+ * Installs and activates sg-cachepress and sg-security on an ordinary source
+ * site. Verifies that after the full
  * import pipeline (preflight -> files-pull -> db-pull -> db-apply ->
  * apply-runtime), both plugins are:
  *   1. Deactivated in the target database during db-apply
@@ -24,7 +24,7 @@ import { ensureSite } from '../lib/site-setup.js';
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 
-describe('Import: SiteGround plugin stripping', () => {
+describe('Import: global removal of SiteGround plugins', () => {
     const site = 'siteground-plugins';
     let tempDir;
     let runtimeDir;
@@ -105,7 +105,7 @@ describe('Import: SiteGround plugin stripping', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('preflight detects the site as siteground', () => {
+    it('preflight does not classify the host from plugin filenames', () => {
         const result = runImporter(importUrl(), tempDir, 'preflight', {
             secret: getSiteSecret(site),
         });
@@ -115,8 +115,8 @@ describe('Import: SiteGround plugin stripping', () => {
             join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
             'utf-8',
         ));
-        assert.equal(state.webhost, 'siteground',
-            `Expected webhost 'siteground', got '${state.webhost}'`);
+        assert.equal(state.webhost, 'other',
+            `Expected webhost 'other', got '${state.webhost}'`);
     });
 
     it('files-pull downloads the site', () => {
