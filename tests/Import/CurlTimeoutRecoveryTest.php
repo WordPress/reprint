@@ -180,15 +180,18 @@ class CurlTimeoutRecoveryTest extends TestCase
         );
     }
 
-    public function testSqlDownloadRetriesHttp400ThenCompletes()
+    /** @dataProvider potentiallyTransientHttpResponseProvider */
+    public function testSqlDownloadRetriesPotentiallyTransientHttpResponseThenCompletes(
+        string $status_line
+    )
     {
         if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
             $this->markTestSkipped('HTTP retry coverage requires PHP curl and pcntl.');
         }
 
         $cursor = base64_encode('{"table":"wp_posts","pk":42}');
-        $http400 = $this->httpResponse(
-            '400 Bad Request',
+        $temporary_response = $this->httpResponse(
+            $status_line,
             'text/html',
             '<!doctype html><title>Temporary upstream response</title>',
         );
@@ -202,7 +205,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             . "\r\n"
             . "--{$boundary}--\r\n";
         $server = $this->startSqlResponseServer([
-            $http400,
+            $temporary_response,
             $this->httpResponse(
                 '200 OK',
                 "multipart/mixed; boundary={$boundary}",
@@ -232,6 +235,14 @@ class CurlTimeoutRecoveryTest extends TestCase
             $client->last_error_code,
             'A successful repeated request must clear the earlier HTTP error code.',
         );
+    }
+
+    public static function potentiallyTransientHttpResponseProvider(): array
+    {
+        return [
+            'bad request' => ['400 Bad Request'],
+            'misdirected request' => ['421 Misdirected Request'],
+        ];
     }
 
     public function testSqlDownloadRetriesHttp520AndLogsResponseHeaders()

@@ -233,6 +233,7 @@ class ImportClient
         408, // Request Timeout
         413, // Content Too Large (adaptive tuner will adjust)
         418, // Observed when an upstream bot filter replaced a Reprint response
+        421, // Misdirected Request (retry opens a fresh cURL handle)
         425, // Too Early
         429, // Too Many Requests
         500, // Internal Server Error

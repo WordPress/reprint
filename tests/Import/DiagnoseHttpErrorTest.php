@@ -253,6 +253,10 @@ class DiagnoseHttpErrorTest extends TestCase
 
     public function testPotentiallyTransientHttpErrorClassification()
     {
+        $this->assertTrue($this->isPotentiallyTransientHttpError(
+            421,
+            '<!doctype html><title>Misdirected Request</title>',
+        ));
         foreach ([520, 521, 522, 523, 524] as $http_code) {
             $this->assertTrue(
                 $this->isPotentiallyTransientHttpError(
