@@ -2,59 +2,34 @@
 /**
  * Host analyzer for WP Engine.
  *
- * WP Engine installs platform MU plugins for caching, updates, sign-on,
- * security logging, and its wp-admin integration. Those named platform files
- * are removed from every local import.
+ * WP Engine uses platform filesystem roots under /nas/content/live/ and the
+ * older /nas/wp/www/ layout. Unlike installed plugin names, those paths
+ * describe the server which answered preflight rather than files which may
+ * remain after a site moves to another host.
  */
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Host analyzers use established global class names.
 class WpengineHostAnalyzer implements HostAnalyzer {
     /**
-     * Score the WP Engine-specific MU-plugin names reported by preflight.
-     *
-     * One name is kept below the detection threshold because a copied plugin
-     * may remain after an earlier migration. The standard wpengine-common
-     * directory and its mu-plugin.php loader form a strong match together.
+     * Score WP Engine's current and older platform filesystem roots.
      */
     public static function score(array $preflight_data): float
     {
-        $mu_plugin_names = [];
-        foreach ($preflight_data['wp_content']['roots'] ?? [] as $root) {
-            foreach ($root['mu_plugins'] ?? [] as $mu_plugin) {
-                $name = $mu_plugin['name'] ?? null;
-                if (is_string($name)) {
-                    $mu_plugin_names[$name] = true;
-                }
+        $runtime = $preflight_data['runtime'] ?? [];
+        foreach (['document_root', 'script_filename', 'cwd'] as $path_name) {
+            $path = $runtime[$path_name] ?? null;
+            if (!is_string($path)) {
+                continue;
+            }
+
+            if (
+                strncmp($path, '/nas/content/live/', 18) === 0
+                || strncmp($path, '/nas/wp/www/', 12) === 0
+            ) {
+                return 0.9;
             }
         }
 
-        $wpengine_mu_plugin_names = [
-            'wpengine-common',
-            'wpe-cache-plugin',
-            'wpe-cache-plugin.php',
-            'wpe-update-source-selector',
-            'wpe-update-source-selector.php',
-            'wpe-wp-sign-on-plugin',
-            'wpe-wp-sign-on-plugin.php',
-            'wpengine-security-auditor.php',
-        ];
-        $matches = 0;
-        foreach ($wpengine_mu_plugin_names as $wpengine_mu_plugin_name) {
-            if (isset($mu_plugin_names[$wpengine_mu_plugin_name])) {
-                ++$matches;
-            }
-        }
-
-        if (
-            $matches >= 2
-            || (
-                isset($mu_plugin_names['wpengine-common'])
-                && isset($mu_plugin_names['mu-plugin.php'])
-            )
-        ) {
-            return 0.9;
-        }
-
-        return $matches === 1 ? 0.3 : 0.0;
+        return 0.0;
     }
 
     public function analyze(array $preflight_data): RuntimeManifest

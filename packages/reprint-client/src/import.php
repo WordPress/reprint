@@ -4639,10 +4639,7 @@ class ImportClient
         $database = $preflight_data["database"] ?? [];
         $wordpress = $database["wp"] ?? [];
         $paths_urls = $wordpress["paths_urls"] ?? [];
-        $runtime_manifest = runtime_manifest_for(
-            $state->webhost ?? "other",
-            $preflight_data,
-        );
+        $runtime_manifest = runtime_manifest_for($preflight_data);
 
         return [
             "hasCompletedOnce" => $pull->has_completed_once,
@@ -4843,7 +4840,7 @@ class ImportClient
 
         // Step 1: Build a manifest from preflight data and the paths excluded
         // from every local import.
-        $manifest = runtime_manifest_for($webhost, $preflight_data);
+        $manifest = runtime_manifest_for($preflight_data);
         $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data);
 
         // Step 1b: Merge the target database configuration into the manifest.
@@ -7171,9 +7168,8 @@ class ImportClient
      */
     private function deactivate_host_plugins(DatabaseConnection $database): array
     {
-        $webhost = $this->get_state()->webhost ?? "other";
         $preflight_data = $this->get_state()->preflight_record()["data"] ?? [];
-        $manifest = runtime_manifest_for($webhost, $preflight_data);
+        $manifest = runtime_manifest_for($preflight_data);
 
         $plugin_dirs = [];
         foreach ($manifest->paths_to_remove as $rel_path) {

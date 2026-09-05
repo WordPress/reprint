@@ -162,9 +162,9 @@ The `apply-runtime` command separates source host detection from target runtime 
 
 The target database is an input to `apply-runtime`: it takes the same `--target-*` options as `db-apply` and falls back, field by field, to what `db-apply` recorded in state, so a caller that keeps its own database can generate a working runtime without ever running `db-apply`.
 
-The `WpcloudHostAnalyzer` auto-detects WP Cloud production infrastructure that won't work locally: Memcached-backed `object-cache.php`, wpcomsh mu-plugins, and `auto_prepend_file`/`auto_append_file` directories. It populates `paths_to_remove` (stripped after flattening) and `extra_directories` (auto-included in the export file list). The `SitegroundHostAnalyzer` detects SiteGround hosting via `sg-*` plugin prefixes and strips `sg-cachepress` and `sg-security` from disk.
+Named source-host plugin and MU-plugin paths are removed from every local import. They do not select a host because copied files may remain after a site moves between hosts. The remaining analyzers cover behavior which cannot safely apply to every import. `WpcloudHostAnalyzer` configures WP Cloud's directory layout, missing-thumbnail route, external PHP include directories, and generic cache drop-ins. `WpengineHostAnalyzer` removes generic cache drop-ins and its `mu-plugin.php` loader. These two rules are checked independently, so both can apply when both sets of current preflight signals are present.
 
-Entries in `paths_to_remove` under `wp-content/plugins/` also trigger automatic plugin deactivation: at the end of `db-apply`, while the target database connection is still open, the importer instantiates the host analyzer, extracts plugin directory names from `paths_to_remove`, and removes matching entries from the `active_plugins` option. This prevents "plugin file does not exist" warnings in wp-admin. The deactivation is derived from `paths_to_remove` — there is no separate manifest field for it. We skip WordPress's `deactivate_plugins()` because the plugin files will already be gone from disk by the time WordPress boots, so firing deactivation hooks into absent code is pointless.
+Entries in `paths_to_remove` under `wp-content/plugins/` also trigger automatic plugin deactivation: at the end of `db-apply`, while the target database connection is still open, the importer builds the runtime manifest, extracts plugin directory names from `paths_to_remove`, and removes matching entries from the `active_plugins` option. This prevents "plugin file does not exist" warnings in wp-admin. The deactivation is derived from `paths_to_remove` — there is no separate manifest field for it. We skip WordPress's `deactivate_plugins()` because the plugin files will already be gone from disk by the time WordPress boots, so firing deactivation hooks into absent code is pointless.
 
 ### SQL Streaming Crash Recovery
 
@@ -186,7 +186,7 @@ Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl` for that
   - src/: Core export engine (export.php, producers, HMAC client, utilities)
 - packages/reprint-client/: Packagist client package (previously reprint-importer)
   - src/: Import client and importer runtime support code
-  - src/lib/host/: Host analyzers and RuntimeManifest (WpcloudHostAnalyzer, SitegroundHostAnalyzer, DefaultHostAnalyzer)
+  - src/lib/host/: RuntimeManifest and the default, WP Cloud, and WP Engine host analyzers
   - src/lib/target-runtime/: Runtime appliers (NginxFpmApplier, PhpBuiltinApplier, PlaygroundCliApplier)
   - src/lib/url-rewrite/: URL rewriting for db-apply
   - src/lib/mysql-query-stream/: MySQL query stream parser for direct streaming

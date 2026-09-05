@@ -118,6 +118,31 @@ class ProductionDropInRemovalTest extends TestCase
         \write_current_pull_state($this->makeClient(), array_replace_recursive($defaults, $state));
     }
 
+    private function preflightWithoutWpcloudSignals(string $document_root): array
+    {
+        return [
+            'preflight' => [
+                'data' => [
+                    'runtime' => [
+                        'document_root' => $document_root,
+                        'env_names' => ['PATH'],
+                        'ini_get_all' => [],
+                    ],
+                    'filesystem' => [
+                        'directories' => [
+                            ['path' => $document_root, 'exists' => true],
+                        ],
+                    ],
+                    'wp_detect' => [
+                        'roots' => [
+                            ['path' => $document_root],
+                        ],
+                    ],
+                ],
+            ],
+        ];
+    }
+
     private function makeClient(): \ImportClient
     {
         return new \ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot);
@@ -347,20 +372,10 @@ class ProductionDropInRemovalTest extends TestCase
     public function testNonWpcloudHostPreservesUnlistedDropIn(): void
     {
         // A shared object-cache.php is not in the global source-host path list.
-        $this->writeState([
-            'webhost' => 'other',
-            'preflight' => [
-                'data' => [
-                    'runtime' => [
-                        'document_root' => '',
-                        'env_names' => [],
-                        'ini_get_all' => [],
-                    ],
-                    'filesystem' => ['directories' => []],
-                    'wp_detect' => ['roots' => []],
-                ],
-            ],
-        ]);
+        $this->writeState(array_replace_recursive(
+            ['webhost' => 'other'],
+            $this->preflightWithoutWpcloudSignals('/var/www/html'),
+        ));
 
         // Create an object-cache.php that a non-wpcloud host should leave alone.
         $wpContent = $this->fsRoot . '/wp-content';
@@ -376,20 +391,10 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testEveryImportRemovesTheGlobalSourceHostPathList(): void
     {
-        $this->writeState([
-            'webhost' => 'other',
-            'preflight' => [
-                'data' => [
-                    'runtime' => [
-                        'document_root' => '',
-                        'env_names' => [],
-                        'ini_get_all' => [],
-                    ],
-                    'filesystem' => ['directories' => []],
-                    'wp_detect' => ['roots' => []],
-                ],
-            ],
-        ]);
+        $this->writeState(array_replace_recursive(
+            ['webhost' => 'other'],
+            $this->preflightWithoutWpcloudSignals('/var/www/html'),
+        ));
 
         foreach (\source_host_paths_to_remove() as $relative_path) {
             $source_host_path = $this->fsRoot . '/' . $relative_path;
@@ -434,34 +439,31 @@ class ProductionDropInRemovalTest extends TestCase
         );
     }
 
-    // ---- SiteGround-specific tests ----
+    // ---- Globally removed SiteGround paths ----
 
     private function writeSitegroundState(array $overrides = []): void
     {
-        $this->writeState(array_replace_recursive([
-            'webhost' => 'siteground',
-            'preflight' => [
-                'data' => [
-                    'runtime' => [
-                        'document_root' => '',
-                        'env_names' => [],
-                        'ini_get_all' => [],
-                    ],
-                    'filesystem' => ['directories' => []],
-                    'wp_detect' => ['roots' => []],
-                    'wp_content' => [
-                        'roots' => [
-                            [
-                                'plugins' => [
-                                    ['name' => 'sg-cachepress', 'type' => 'dir'],
-                                    ['name' => 'sg-security', 'type' => 'dir'],
+        $this->writeState(array_replace_recursive(
+            ['webhost' => 'siteground'],
+            $this->preflightWithoutWpcloudSignals('/var/www/html'),
+            [
+                'preflight' => [
+                    'data' => [
+                        'wp_content' => [
+                            'roots' => [
+                                [
+                                    'plugins' => [
+                                        ['name' => 'sg-cachepress', 'type' => 'dir'],
+                                        ['name' => 'sg-security', 'type' => 'dir'],
+                                    ],
                                 ],
                             ],
                         ],
                     ],
                 ],
             ],
-        ], $overrides));
+            $overrides,
+        ));
     }
 
     private function createSitegroundPlugins(): void
@@ -574,20 +576,10 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testWpengineRemovesPlatformMuPluginsAndPreservesCustomMuPlugins(): void
     {
-        $this->writeState([
-            'webhost' => 'wpengine',
-            'preflight' => [
-                'data' => [
-                    'runtime' => [
-                        'document_root' => '',
-                        'env_names' => [],
-                        'ini_get_all' => [],
-                    ],
-                    'filesystem' => ['directories' => []],
-                    'wp_detect' => ['roots' => []],
-                ],
-            ],
-        ]);
+        $this->writeState(array_replace_recursive(
+            ['webhost' => 'wpengine'],
+            $this->preflightWithoutWpcloudSignals('/nas/content/live/example'),
+        ));
 
         $mu_plugins = $this->fsRoot . '/wp-content/mu-plugins';
         mkdir($mu_plugins . '/wpengine-common', 0755, true);

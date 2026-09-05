@@ -17,20 +17,7 @@ function host_analyzer_registry(): array
 {
     return [
         'wpcloud' => WpcloudHostAnalyzer::class,
-        'siteground' => SitegroundHostAnalyzer::class,
         'wpengine' => WpengineHostAnalyzer::class,
-        'kinsta' => KinstaHostAnalyzer::class,
-        'pantheon' => PantheonHostAnalyzer::class,
-        'ionos' => IonosHostAnalyzer::class,
-        'pressable' => PressableHostAnalyzer::class,
-        'godaddy' => GodaddyHostAnalyzer::class,
-        'bluehost' => BluehostHostAnalyzer::class,
-        'hostgator' => HostgatorHostAnalyzer::class,
-        'hostinger' => HostingerHostAnalyzer::class,
-        'nexcess' => NexcessHostAnalyzer::class,
-        'rocketnet' => RocketnetHostAnalyzer::class,
-        'spinupwp' => SpinupwpHostAnalyzer::class,
-        'wpvip' => WpVipHostAnalyzer::class,
     ];
 }
 
@@ -43,13 +30,11 @@ function host_analyzer_registry(): array
  */
 function detect_host(array $preflight_data): string
 {
-    $threshold = 0.5;
     $best_host = 'other';
     $best_score = 0.0;
 
-    foreach (host_analyzer_registry() as $name => $class) {
-        $score = $class::score($preflight_data);
-        if ($score >= $threshold && $score > $best_score) {
+    foreach (matching_host_analyzer_scores($preflight_data) as $name => $score) {
+        if ($score > $best_score) {
             $best_host = $name;
             $best_score = $score;
         }
@@ -61,13 +46,33 @@ function detect_host(array $preflight_data): string
 /**
  * Build the runtime manifest for a local import.
  *
- * Every manifest includes source-host paths which are removed from all local
- * imports, followed by ambiguous paths declared for the detected source host.
+ * WP Cloud runtime behavior and WP Engine cleanup are detected independently.
+ * Every manifest also includes the named source-host paths removed from all
+ * local imports.
  */
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the existing host helper names.
-function runtime_manifest_for(string $webhost, array $preflight_data): RuntimeManifest
+function runtime_manifest_for(array $preflight_data): RuntimeManifest
 {
-    $manifest = host_analyzer_for($webhost)->analyze($preflight_data);
+    $matching_hosts = matching_host_analyzer_scores($preflight_data);
+    $is_wpcloud = isset($matching_hosts['wpcloud']);
+    $is_wpengine = isset($matching_hosts['wpengine']);
+
+    if ($is_wpcloud) {
+        $manifest = ( new WpcloudHostAnalyzer() )->analyze($preflight_data);
+    } elseif ($is_wpengine) {
+        $manifest = ( new WpengineHostAnalyzer() )->analyze($preflight_data);
+    } else {
+        $manifest = ( new DefaultHostAnalyzer() )->analyze($preflight_data);
+    }
+
+    if ($is_wpcloud && $is_wpengine) {
+        $wpengine_manifest = ( new WpengineHostAnalyzer() )->analyze($preflight_data);
+        $manifest->paths_to_remove = array_merge(
+            $manifest->paths_to_remove,
+            $wpengine_manifest->paths_to_remove,
+        );
+    }
+
     $manifest->paths_to_remove = array_values(array_unique(array_merge(
         source_host_paths_to_remove(),
         $manifest->paths_to_remove,
@@ -77,15 +82,23 @@ function runtime_manifest_for(string $webhost, array $preflight_data): RuntimeMa
 }
 
 /**
- * Instantiate the right analyzer for a detected host name.
+ * Score every runtime-specific host which reaches the detection threshold.
+ *
+ * @return array<string, float>
  */
-function host_analyzer_for(string $webhost): HostAnalyzer
+// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the existing host helper names.
+function matching_host_analyzer_scores(array $preflight_data): array
 {
-    $registry = host_analyzer_registry();
-    if (isset($registry[$webhost])) {
-        return new $registry[$webhost]();
+    $matching_hosts = [];
+
+    foreach (host_analyzer_registry() as $name => $class) {
+        $score = $class::score($preflight_data);
+        if ($score >= 0.5) {
+            $matching_hosts[$name] = $score;
+        }
     }
-    return new DefaultHostAnalyzer();
+
+    return $matching_hosts;
 }
 
 /**

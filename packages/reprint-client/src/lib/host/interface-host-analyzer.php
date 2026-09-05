@@ -9,8 +9,9 @@
  * 2. Reads preflight data and produces a RuntimeManifest describing
  *    what the site needs to run (the analyze() method).
  *
- * Use HostAnalyzers::detect() to pick the best match from all registered
- * analyzers, and HostAnalyzers::for_host() to instantiate one by name.
+ * detect_host() selects the primary source label. runtime_manifest_for()
+ * applies each runtime rule directly from current preflight data, so either
+ * or both may apply.
  */
 interface HostAnalyzer
 {
