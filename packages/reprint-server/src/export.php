@@ -2317,6 +2317,8 @@ function endpoint_preflight(array $config): array
         }
     }
 
+    // Send the WordPress home URL and a base64 copy of its domain so the
+    // importer can detect response filters which rewrite domain names.
     if ($db["wp"]["wp_load_loaded"] && function_exists("get_option")) {
         $wp_home = get_option("home");
         $db["wp"]["home"] = $wp_home;
