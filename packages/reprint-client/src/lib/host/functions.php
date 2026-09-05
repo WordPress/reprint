@@ -59,6 +59,24 @@ function detect_host(array $preflight_data): string
 }
 
 /**
+ * Build the runtime manifest for a local import.
+ *
+ * Every manifest includes plugin paths which are removed from all local
+ * imports, followed by paths declared for the detected source host.
+ */
+// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the existing host helper names.
+function runtime_manifest_for(string $webhost, array $preflight_data): RuntimeManifest
+{
+    $manifest = host_analyzer_for($webhost)->analyze($preflight_data);
+    $manifest->paths_to_remove = array_values(array_unique(array_merge(
+        source_host_plugin_paths_to_remove(),
+        $manifest->paths_to_remove,
+    )));
+
+    return $manifest;
+}
+
+/**
  * Instantiate the right analyzer for a detected host name.
  */
 function host_analyzer_for(string $webhost): HostAnalyzer
@@ -68,6 +86,28 @@ function host_analyzer_for(string $webhost): HostAnalyzer
         return new $registry[$webhost]();
     }
     return new DefaultHostAnalyzer();
+}
+
+/**
+ * Plugin paths removed from every local import.
+ *
+ * @return string[]
+ */
+// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the existing host helper names.
+function source_host_plugin_paths_to_remove(): array
+{
+    return [
+        'wp-content/plugins/nginx-helper',
+        'wp-content/plugins/redis-cache',
+        'wp-content/plugins/breeze',
+        'wp-content/plugins/object-cache-pro',
+        'wp-content/plugins/wp-rocket',
+        'wp-content/plugins/w3-total-cache',
+        'wp-content/plugins/servebolt-optimizer',
+        'wp-content/plugins/a2-optimized-wp',
+        'wp-content/plugins/boldgrid-backup',
+        'wp-content/plugins/litespeed-cache',
+    ];
 }
 
 /**

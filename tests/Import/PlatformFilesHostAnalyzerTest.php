@@ -239,6 +239,27 @@ class PlatformFilesHostAnalyzerTest extends TestCase {
         }
     }
 
+    public function testRuntimeManifestListsEveryPluginRemovedFromAllImports(): void
+    {
+        $manifest = \runtime_manifest_for('other', $this->preflight([], []));
+
+        $this->assertSame(
+            [
+                'wp-content/plugins/nginx-helper',
+                'wp-content/plugins/redis-cache',
+                'wp-content/plugins/breeze',
+                'wp-content/plugins/object-cache-pro',
+                'wp-content/plugins/wp-rocket',
+                'wp-content/plugins/w3-total-cache',
+                'wp-content/plugins/servebolt-optimizer',
+                'wp-content/plugins/a2-optimized-wp',
+                'wp-content/plugins/boldgrid-backup',
+                'wp-content/plugins/litespeed-cache',
+            ],
+            $manifest->paths_to_remove,
+        );
+    }
+
     /**
      * @dataProvider sharedPluginNameProvider
      *

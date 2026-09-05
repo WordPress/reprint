@@ -4639,9 +4639,10 @@ class ImportClient
         $database = $preflight_data["database"] ?? [];
         $wordpress = $database["wp"] ?? [];
         $paths_urls = $wordpress["paths_urls"] ?? [];
-        $runtime_manifest = host_analyzer_for(
-            $state->webhost ?? "other"
-        )->analyze($preflight_data);
+        $runtime_manifest = runtime_manifest_for(
+            $state->webhost ?? "other",
+            $preflight_data,
+        );
 
         return [
             "hasCompletedOnce" => $pull->has_completed_once,
@@ -4840,9 +4841,9 @@ class ImportClient
             $abs_output_dir = realpath($abs_output_dir);
         }
 
-        // Step 1: Host analyzer produces a manifest from preflight data.
-        $analyzer = host_analyzer_for($webhost);
-        $manifest = $analyzer->analyze($preflight_data);
+        // Step 1: Build a manifest from preflight data and the paths excluded
+        // from every local import.
+        $manifest = runtime_manifest_for($webhost, $preflight_data);
         $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data);
 
         // Step 1b: Merge the target database configuration into the manifest.
@@ -4961,10 +4962,8 @@ class ImportClient
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
         }
 
-        // Remove production drop-ins and mu-plugins that would crash
-        // the local site.  The host analyzer declares these — they
-        // depend on infrastructure (Memcached servers, multisite APIs)
-        // not available outside the original hosting environment.
+        // Remove source-host plugins and platform files excluded from the
+        // local site by the runtime manifest.
         foreach ($manifest->paths_to_remove as $rel_path) {
             $full_path = wp_join_unix_paths($local_document_root, $rel_path);
             if (!file_exists($full_path) && !is_link($full_path)) {
@@ -6926,7 +6925,7 @@ class ImportClient
         DatabaseConnection $connection,
         array $options
     ): void {
-        // The host analyzer declares paths_to_remove; any entry under
+        // The runtime manifest declares paths_to_remove; any entry under
         // wp-content/plugins/ means that plugin will be deleted from disk
         // during apply-runtime. Remove it from active_plugins now, while the
         // database connection is still open, so WordPress won't complain
@@ -7164,7 +7163,7 @@ class ImportClient
     /**
      * Deactivate host-specific plugins in the target database.
      *
-     * Looks at the detected webhost's paths_to_remove for entries under
+     * Looks at the runtime manifest's paths_to_remove for entries under
      * wp-content/plugins/ and removes matching basenames from the
      * active_plugins option. Runs at the end of db-apply while the target
      * connection is still open.
@@ -7174,9 +7173,8 @@ class ImportClient
     private function deactivate_host_plugins(DatabaseConnection $database): array
     {
         $webhost = $this->get_state()->webhost ?? "other";
-        $analyzer = host_analyzer_for($webhost);
         $preflight_data = $this->get_state()->preflight_record()["data"] ?? [];
-        $manifest = $analyzer->analyze($preflight_data);
+        $manifest = runtime_manifest_for($webhost, $preflight_data);
 
         $plugin_dirs = [];
         foreach ($manifest->paths_to_remove as $rel_path) {

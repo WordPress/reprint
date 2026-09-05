@@ -7,8 +7,8 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
- * Verify that run_apply_runtime removes production drop-ins declared in
- * the host analyzer's paths_to_remove manifest field, and logs each removal.
+ * Verify that run_apply_runtime removes paths declared in the runtime
+ * manifest and logs each removal.
  */
 class ProductionDropInRemovalTest extends TestCase
 {
@@ -344,10 +344,9 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertContains('wp-content/mu-plugins/wpcomsh-loader.php', $state['apply']['remote_paths_removed_from_local_site']);
     }
 
-    public function testNonWpcloudHostDoesNotRemoveAnything(): void
+    public function testNonWpcloudHostPreservesUnlistedDropIn(): void
     {
-        // Override webhost to 'other' — the DefaultHostAnalyzer should
-        // produce an empty paths_to_remove.
+        // A shared object-cache.php is not in the global plugin path list.
         $this->writeState([
             'webhost' => 'other',
             'preflight' => [
@@ -373,6 +372,52 @@ class ProductionDropInRemovalTest extends TestCase
         $this->runApplyRuntime($client);
 
         $this->assertFileExists($wpContent . '/object-cache.php');
+    }
+
+    public function testEveryImportRemovesTheGlobalSourceHostPluginList(): void
+    {
+        $this->writeState([
+            'webhost' => 'other',
+            'preflight' => [
+                'data' => [
+                    'runtime' => [
+                        'document_root' => '',
+                        'env_names' => [],
+                        'ini_get_all' => [],
+                    ],
+                    'filesystem' => ['directories' => []],
+                    'wp_detect' => ['roots' => []],
+                ],
+            ],
+        ]);
+
+        foreach (\source_host_plugin_paths_to_remove() as $relative_path) {
+            $plugin_path = $this->fsRoot . '/' . $relative_path;
+            mkdir($plugin_path, 0755, true);
+            file_put_contents($plugin_path . '/plugin.php', "<?php // Source-host plugin\n");
+        }
+
+        $unlisted_plugin = $this->fsRoot . '/wp-content/plugins/woocommerce';
+        mkdir($unlisted_plugin, 0755, true);
+        file_put_contents($unlisted_plugin . '/woocommerce.php', "<?php // WooCommerce\n");
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        foreach (\source_host_plugin_paths_to_remove() as $relative_path) {
+            $this->assertDirectoryDoesNotExist($this->fsRoot . '/' . $relative_path);
+        }
+        $this->assertDirectoryExists($unlisted_plugin);
+
+        $state = json_decode(
+            file_get_contents($client->pull_state_directory . '/state.json'),
+            true,
+        );
+        $this->assertSame(
+            \source_host_plugin_paths_to_remove(),
+            $state['apply']['remote_paths_removed_from_local_site'],
+        );
     }
 
     // ---- SiteGround-specific tests ----
