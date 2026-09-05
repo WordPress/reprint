@@ -48,15 +48,15 @@ class WpcloudHostAnalyzerTest extends TestCase
         return array_replace_recursive($defaults, $overrides);
     }
 
-    public function testAnalyzePopulatesPathsToRemove(): void
+    public function testAnalyzeListsAmbiguousWpcloudPaths(): void
     {
         $analyzer = new \WpcloudHostAnalyzer();
         $manifest = $analyzer->analyze($this->wpcloudPreflight());
 
-        $this->assertContains('wp-content/object-cache.php', $manifest->paths_to_remove);
-        $this->assertContains('wp-content/mu-plugins/wpcomsh', $manifest->paths_to_remove);
-        $this->assertContains('wp-content/mu-plugins/wpcomsh-dev', $manifest->paths_to_remove);
-        $this->assertContains('wp-content/mu-plugins/wpcomsh-loader.php', $manifest->paths_to_remove);
+        $this->assertSame([
+            'wp-content/object-cache.php',
+            'wp-content/advanced-cache.php',
+        ], $manifest->paths_to_remove);
     }
 
     public function testAnalyzeDetectsExtraDirectoryFromAutoPrependFile(): void

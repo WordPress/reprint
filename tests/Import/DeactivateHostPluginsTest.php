@@ -94,7 +94,7 @@ class DeactivateHostPluginsTest extends TestCase
                 'sg-security/sg-security.php',
             ],
             $result,
-            'expected only sg-* entries to be reported as deactivated',
+            'expected the SiteGround plugins to be reported as deactivated',
         );
 
         $remaining = unserialize($this->fetchOption($database, 'active_plugins'));
@@ -142,11 +142,58 @@ class DeactivateHostPluginsTest extends TestCase
     /**
      * @dataProvider targetProvider
      */
+    public function testRemovesGlobalSourceHostPluginsForUnknownHost(string $engine): void
+    {
+        $database = $this->createDatabase($engine);
+        $this->createWpOptionsTable($database);
+
+        $source_host_plugin_paths = array_filter(
+            \source_host_paths_to_remove(),
+            static function (string $path): bool {
+                return strpos($path, 'wp-content/plugins/') === 0;
+            },
+        );
+        $source_host_plugins = array_map(
+            static function (string $path): string {
+                $plugin_directory = basename($path);
+                return $plugin_directory . '/plugin.php';
+            },
+            $source_host_plugin_paths,
+        );
+        $this->insertOption(
+            $database,
+            'active_plugins',
+            serialize(array_merge($source_host_plugins, ['akismet/akismet.php'])),
+        );
+
+        $this->writeState([
+            'webhost' => 'other',
+            'preflight' => [
+                'data' => [
+                    'database' => ['wp' => ['table_prefix' => 'wp_']],
+                ],
+            ],
+        ]);
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+
+        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$database]);
+
+        sort($result);
+        sort($source_host_plugins);
+        $this->assertSame($source_host_plugins, $result);
+
+        $remaining = unserialize($this->fetchOption($database, 'active_plugins'));
+        $this->assertSame(['akismet/akismet.php'], array_values($remaining));
+    }
+
+    /**
+     * @dataProvider targetProvider
+     */
     public function testReturnsEmptyWhenNoHostPluginsUnderPluginsDir(string $engine): void
     {
-        // wpcloud only declares paths under mu-plugins and object-cache.php;
-        // none match wp-content/plugins/, so deactivate should be a no-op
-        // and the active_plugins value must be untouched.
+        // The active list contains no plugin directory declared by the
+        // runtime manifest, so the value must be untouched.
         $database = $this->createDatabase($engine);
         $this->createWpOptionsTable($database);
         $serialized = serialize(['akismet/akismet.php']);
@@ -181,6 +228,28 @@ class DeactivateHostPluginsTest extends TestCase
 
         $this->writeState([
             'webhost' => 'siteground',
+            'preflight' => [
+                'data' => [
+                    'database' => ['wp' => ['table_prefix' => 'wp_']],
+                ],
+            ],
+        ]);
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+
+        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$database]);
+        $this->assertSame([], $result);
+    }
+
+    /**
+     * @dataProvider targetProvider
+     */
+    public function testReturnsEmptyWhenOptionsTableMissing(string $engine): void
+    {
+        $database = $this->createDatabase($engine);
+
+        $this->writeState([
+            'webhost' => 'other',
             'preflight' => [
                 'data' => [
                     'database' => ['wp' => ['table_prefix' => 'wp_']],

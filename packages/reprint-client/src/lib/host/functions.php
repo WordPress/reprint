@@ -19,6 +19,18 @@ function host_analyzer_registry(): array
         'wpcloud' => WpcloudHostAnalyzer::class,
         'siteground' => SitegroundHostAnalyzer::class,
         'wpengine' => WpengineHostAnalyzer::class,
+        'kinsta' => KinstaHostAnalyzer::class,
+        'pantheon' => PantheonHostAnalyzer::class,
+        'ionos' => IonosHostAnalyzer::class,
+        'pressable' => PressableHostAnalyzer::class,
+        'godaddy' => GodaddyHostAnalyzer::class,
+        'bluehost' => BluehostHostAnalyzer::class,
+        'hostgator' => HostgatorHostAnalyzer::class,
+        'hostinger' => HostingerHostAnalyzer::class,
+        'nexcess' => NexcessHostAnalyzer::class,
+        'rocketnet' => RocketnetHostAnalyzer::class,
+        'spinupwp' => SpinupwpHostAnalyzer::class,
+        'wpvip' => WpVipHostAnalyzer::class,
     ];
 }
 
@@ -47,6 +59,24 @@ function detect_host(array $preflight_data): string
 }
 
 /**
+ * Build the runtime manifest for a local import.
+ *
+ * Every manifest includes source-host paths which are removed from all local
+ * imports, followed by ambiguous paths declared for the detected source host.
+ */
+// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the existing host helper names.
+function runtime_manifest_for(string $webhost, array $preflight_data): RuntimeManifest
+{
+    $manifest = host_analyzer_for($webhost)->analyze($preflight_data);
+    $manifest->paths_to_remove = array_values(array_unique(array_merge(
+        source_host_paths_to_remove(),
+        $manifest->paths_to_remove,
+    )));
+
+    return $manifest;
+}
+
+/**
  * Instantiate the right analyzer for a detected host name.
  */
 function host_analyzer_for(string $webhost): HostAnalyzer
@@ -56,6 +86,103 @@ function host_analyzer_for(string $webhost): HostAnalyzer
         return new $registry[$webhost]();
     }
     return new DefaultHostAnalyzer();
+}
+
+/**
+ * Source-host paths removed from every local import.
+ *
+ * @return string[]
+ */
+// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the existing host helper names.
+function source_host_paths_to_remove(): array
+{
+    return [
+        // Plugins commonly installed or recommended by several hosts.
+        'wp-content/plugins/nginx-helper',
+        'wp-content/plugins/redis-cache',
+        'wp-content/plugins/breeze',
+        'wp-content/plugins/object-cache-pro',
+        'wp-content/plugins/wp-rocket',
+        'wp-content/plugins/w3-total-cache',
+        'wp-content/plugins/servebolt-optimizer',
+        'wp-content/plugins/a2-optimized-wp',
+        'wp-content/plugins/boldgrid-backup',
+        'wp-content/plugins/litespeed-cache',
+
+        // Kinsta's platform MU plugin.
+        'wp-content/mu-plugins/kinsta-mu-plugins.php',
+        'wp-content/mu-plugins/kinsta-mu-plugins',
+
+        // Pantheon's platform MU-plugin package. Its generic loader.php remains.
+        'wp-content/mu-plugins/pantheon-mu-plugin',
+
+        // IONOS platform and setup plugins.
+        'wp-content/mu-plugins/ionos-core.php',
+        'wp-content/mu-plugins/ionos-core',
+        'wp-content/mu-plugins/stretch-extra.php',
+        'wp-content/mu-plugins/stretch-extra',
+        'wp-content/plugins/ionos-essentials',
+        'wp-content/plugins/ionos-wpdev-caddy',
+
+        // Pressable cache and dashboard sign-on plugins.
+        'wp-content/mu-plugins/pcm-extend-batcache.php',
+        'wp-content/mu-plugins/pcm-exclude-pages-from-batcache.php',
+        'wp-content/plugins/pressable-cache-management',
+        'wp-content/plugins/pressable-onepress-login',
+
+        // GoDaddy's Managed WordPress system plugin.
+        'wp-content/mu-plugins/gd-system-plugin.php',
+        'wp-content/mu-plugins/gd-system-plugin',
+
+        // Bluehost's control plugin and Endurance cache plugins.
+        'wp-content/plugins/bluehost-wordpress-plugin',
+        'wp-content/mu-plugins/endurance-page-cache.php',
+        'wp-content/mu-plugins/endurance-browser-cache.php',
+
+        // HostGator's control plugin. The shared Endurance files are listed above.
+        'wp-content/plugins/wp-plugin-hostgator',
+
+        // Hostinger's control, onboarding, and setup plugins.
+        'wp-content/plugins/hostinger',
+        'wp-content/plugins/hostinger-easy-onboarding',
+        'wp-content/mu-plugins/hostinger-mu-plugin.php',
+
+        // Nexcess's managed application plugin and loader.
+        'wp-content/mu-plugins/nexcess-mapps.php',
+        'wp-content/mu-plugins/nexcess-mapps',
+
+        // Rocket.net's CDN cache plugin.
+        'wp-content/mu-plugins/cdn-cache-management.php',
+
+        // SpinupWP's server cache plugin.
+        'wp-content/plugins/spinupwp',
+
+        // WordPress VIP's platform MU-plugin package.
+        'wp-content/mu-plugins/vip-go-mu-plugins',
+
+        // WP Engine tells sites moving away to remove its platform MU plugins.
+        // The cache and update-source files include its current plugin layout.
+        'wp-content/mu-plugins/wpengine-common',
+        'wp-content/mu-plugins/slt-force-strong-passwords.php',
+        'wp-content/mu-plugins/force-strong-passwords',
+        'wp-content/mu-plugins/stop-long-comments.php',
+        'wp-content/mu-plugins/wpe-cache-plugin',
+        'wp-content/mu-plugins/wpe-cache-plugin.php',
+        'wp-content/mu-plugins/wpe-update-source-selector',
+        'wp-content/mu-plugins/wpe-update-source-selector.php',
+        'wp-content/mu-plugins/wpe-wp-sign-on-plugin',
+        'wp-content/mu-plugins/wpe-wp-sign-on-plugin.php',
+        'wp-content/mu-plugins/wpengine-security-auditor.php',
+
+        // SiteGround's cache and security plugins.
+        'wp-content/plugins/sg-cachepress',
+        'wp-content/plugins/sg-security',
+
+        // WP Cloud's MU plugins depend on multisite functions and wp.com APIs.
+        'wp-content/mu-plugins/wpcomsh',
+        'wp-content/mu-plugins/wpcomsh-dev',
+        'wp-content/mu-plugins/wpcomsh-loader.php',
+    ];
 }
 
 /**
