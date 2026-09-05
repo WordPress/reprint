@@ -91,7 +91,7 @@ export async function apiRequest(siteName, endpoint, params = {}, options = {}) 
 
     const contentType = response.headers.get('content-type') || '';
 
-    if (contentType.includes('application/json')) {
+    if (isJsonApiResponseContentType(contentType)) {
         return {
             status: response.status,
             json: await response.json(),
@@ -685,7 +685,7 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
 
     const contentType = response.headers.get('content-type') || '';
 
-    if (contentType.includes('application/json')) {
+    if (isJsonApiResponseContentType(contentType)) {
         return {
             status: response.status,
             json: await response.json(),
@@ -726,6 +726,17 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
         text: await response.text(),
         headers: Object.fromEntries(response.headers.entries()),
     };
+}
+
+/**
+ * Return whether a top-level API response carries JSON.
+ *
+ * The server marks top-level JSON as application/octet-stream so Hostinger's
+ * preview-domain response filter leaves domain strings unchanged.
+ */
+function isJsonApiResponseContentType(contentType) {
+    return contentType.includes('application/json')
+        || contentType.includes('application/octet-stream');
 }
 
 function setApiRequestParameter(url, parameter, value) {
