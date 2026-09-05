@@ -287,7 +287,11 @@ class FetchRequestBodySizingTest extends TestCase
         $payload = json_encode([
             'ok' => true,
             'protocol_version' => 3,
-            'database' => ['wp' => ['wp_version' => '6.0-test']],
+            'database' => ['wp' => [
+                'wp_version' => '6.0-test',
+                'home' => 'https://example.com',
+                'home_domain_b64' => base64_encode('example.com'),
+            ]],
         ]);
         $response = "HTTP/1.1 200 OK\r\n"
             . "Content-Type: application/octet-stream\r\n"
@@ -312,6 +316,45 @@ class FetchRequestBodySizingTest extends TestCase
         $this->assertSame(
             '6.0-test',
             $client->get_state()->preflight_record()['data']['database']['wp']['wp_version'],
+        );
+    }
+
+    public function testPreflightRejectsARewrittenPlaintextDomain(): void
+    {
+        $payload = json_encode([
+            'ok' => true,
+            'protocol_version' => 3,
+            'database' => ['wp' => [
+                'home' => 'https://darkorange-emu-198875.hostingersite.com',
+                'home_domain_b64' => base64_encode('my-h-inger-test-site.com'),
+            ]],
+        ]);
+        $response = "HTTP/1.1 200 OK\r\n"
+            . "Content-Type: application/octet-stream\r\n"
+            . "Content-Length: " . strlen($payload) . "\r\n"
+            . "Connection: close\r\n\r\n"
+            . $payload;
+
+        [$url, $pid] = $this->startJsonServer($response);
+
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        \write_current_pull_state($client, []);
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection->getProperty('state')->setValue(
+            $client,
+            $reflection->getMethod('load_state')->invoke($client),
+        );
+        $reflection->getProperty('is_tty')->setValue($client, false);
+
+        $client->run_preflight();
+        pcntl_waitpid($pid, $status);
+
+        $preflight = $client->get_state()->preflight_record();
+        $this->assertFalse($preflight['data']['ok']);
+        $this->assertSame(
+            "The preflight response changed the site domain from 'my-h-inger-test-site.com' "
+                . "to 'darkorange-emu-198875.hostingersite.com'. A host response filter likely rewrote the response body.",
+            $preflight['data']['error'],
         );
     }
 

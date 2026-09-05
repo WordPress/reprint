@@ -2570,6 +2570,36 @@ class ImportClient
             $this->audit_log("USER-AGENT BLOCKED | {$ua}", false);
         }
 
+        $domain_error = null;
+        $wordpress = null;
+        if (is_array($payload)) {
+            $wordpress = $payload["database"]["wp"] ?? null;
+        }
+        if (
+            is_array($wordpress)
+            && array_key_exists("home_domain_b64", $wordpress)
+            && $wordpress["home_domain_b64"] !== null
+        ) {
+            $encoded_domain = $wordpress["home_domain_b64"];
+            $home = $wordpress["home"] ?? null;
+            $plain_domain = is_string($home) ? parse_url($home, PHP_URL_HOST) : null;
+            $decoded_domain = is_string($encoded_domain)
+                ? base64_decode($encoded_domain, true)
+                : false;
+            if (!is_string($plain_domain) || $plain_domain === "" || $decoded_domain === false) {
+                $domain_error = "The preflight response contains an invalid plaintext or base64 site domain.";
+            } elseif ($plain_domain !== $decoded_domain) {
+                $domain_error = "The preflight response changed the site domain from "
+                    . "'{$decoded_domain}' to '{$plain_domain}'. A host response filter likely rewrote the response body.";
+            }
+        }
+        if ($domain_error !== null && is_array($payload)) {
+            // Keep the response available for diagnosis, but make every pull
+            // path reject it before using values which may have been rewritten.
+            $payload["ok"] = false;
+            $payload["error"] = $domain_error;
+        }
+
         $entry = [
             "timestamp" => time(),
             "url" => $url,
@@ -2596,6 +2626,15 @@ class ImportClient
             $this->get_state()->remote_protocol_version = (int) $payload["protocol_version"];
         } else {
             $this->get_state()->remote_protocol_version = null;
+        }
+
+        if ($domain_error !== null) {
+            $this->save_state();
+            $this->audit_log(
+                "PREFLIGHT RESULT | " . json_encode($entry),
+                false,
+            );
+            return;
         }
 
         // Detect webhost environment from preflight data.

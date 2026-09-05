@@ -1378,6 +1378,10 @@ final class PushEndpointsTest extends TestCase {
 
         $response = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
         $this->assertArrayHasKey('ok', $response);
+        $this->assertSame(
+            parse_url($response['database']['wp']['home'], PHP_URL_HOST),
+            base64_decode($response['database']['wp']['home_domain_b64'], true)
+        );
         $this->assertStringNotContainsString('Push endpoints require', $body);
     }
 

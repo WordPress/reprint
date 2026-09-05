@@ -2014,7 +2014,6 @@ function endpoint_preflight(array $config): array
                         $db["wp"]["theme_stylesheet"] = get_option("stylesheet");
                         $db["wp"]["theme_template"] = get_option("template");
                         $db["wp"]["siteurl"] = get_option("siteurl");
-                        $db["wp"]["home"] = get_option("home");
                         // Resolve wp-admin and wp-includes paths.
                         // These are always ABSPATH/wp-admin and ABSPATH/WPINC
                         // by WordPress convention, but on hosts like WP Cloud
@@ -2316,6 +2315,20 @@ function endpoint_preflight(array $config): array
                 $db["error"] = $e->getMessage();
             }
         }
+    }
+
+    if ($db["wp"]["wp_load_loaded"] && function_exists("get_option")) {
+        $wp_home = get_option("home");
+        $db["wp"]["home"] = $wp_home;
+        $wp_home_domain = is_string($wp_home)
+            ? parse_url($wp_home, PHP_URL_HOST)
+            : null;
+        // A response filter may rewrite the plain home URL. The importer
+        // compares its domain with this encoded copy before using the response.
+        $db["wp"]["home_domain_b64"] =
+            is_string($wp_home_domain) && $wp_home_domain !== ""
+                ? base64_encode($wp_home_domain)
+                : null;
     }
 
     // -- WordPress content inventory --
