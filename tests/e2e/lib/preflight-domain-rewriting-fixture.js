@@ -1,8 +1,11 @@
 /**
- * Models a preview proxy which rewrites plain domains in JSON responses but
- * leaves octet-stream responses alone. A test-controlled Content-Type override
- * models the server's former JSON header; the body comes from real WordPress.
- * This is not a complete Hostinger proxy.
+ * Models a host preview: replace the site's domain so links and assets stay
+ * on the preview without changing the stored site URL or waiting for DNS.
+ * For https://example.com/blog, the replacement is example.com, not the full
+ * URL. Like the observed Hostinger filter, this rewrites JSON but leaves
+ * octet-stream responses alone. A test-controlled Content-Type override models
+ * the server's former JSON header; the body comes from real WordPress. This is
+ * not a complete Hostinger proxy.
  */
 import http from 'node:http';
 import { appendFileSync, readFileSync } from 'node:fs';

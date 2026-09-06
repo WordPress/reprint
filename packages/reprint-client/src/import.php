@@ -2570,8 +2570,13 @@ class ImportClient
             $this->audit_log("USER-AGENT BLOCKED | {$ua}", false);
         }
 
-        // Compare the readable WordPress home domain with its base64 copy to
-        // detect response filters which rewrite domain names.
+        // Some hosts, including Hostinger, replace the site's domain in responses
+        // so links and assets work on a preview domain before DNS points at the
+        // host. The stored WordPress home URL stays unchanged, but this rewriting
+        // can also change our JSON. For home=https://example.com:8443/blog, compare
+        // example.com (the hostname, without scheme, port, or path), not the full
+        // site URL, with the decoded server copy. Hostinger's plain-domain
+        // replacement leaves the base64 value unchanged.
         $domain_error = null;
         $wordpress = null;
         if (is_array($payload)) {
