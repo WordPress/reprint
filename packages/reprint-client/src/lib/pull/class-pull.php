@@ -297,6 +297,7 @@ class Pull
                 $state->consecutive_interrupted_responses = 0;
                 $state->current_file = null;
                 $state->current_file_bytes = null;
+                $state->current_css_cursor = null;
                 $state->diff = new FileDiffProgressState();
                 $state->index = new RemoteFileIndexCursorState();
                 $state->fetch = new FetchListProgressState();
@@ -823,6 +824,7 @@ class Pull
         if ($reset_file_transfer_state) {
             $state->current_file = null;
             $state->current_file_bytes = null;
+            $state->current_css_cursor = null;
             $state->diff = new FileDiffProgressState();
             $state->fetch = new FetchListProgressState();
             $state->files_pull_summary = new FilesPullSummaryState();

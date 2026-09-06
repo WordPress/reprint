@@ -17,6 +17,7 @@ require_once __DIR__ . '/class-fast-insert-scanner.php';
 require_once __DIR__ . '/class-sqlite-prepared-insert-builder.php';
 require_once __DIR__ . '/class-cautious-url-base-rewrite-mapping.php';
 require_once __DIR__ . '/class-cautious-url-base-processor-in-text-with-mixed-unknown-escape-rules.php';
+require_once __DIR__ . '/class-css-url-rewrite-stream.php';
 
 // Use the php-toolkit implementation when the installed version provides it.
 if (!class_exists(\WordPress\DataLiberation\Shortcode\ShortcodeProcessor::class)) {
