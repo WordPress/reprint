@@ -6,13 +6,18 @@ The remote Reprint API URL selects the site.
 
 ## Stack
 
-1. Select database tables and shared rows on the source.
-2. Require network access and publish the selected site's source metadata.
+1. Export selected database tables and shared rows through the network-authenticated endpoint.
+2. Let network administrators manage the connection token through WordPress.
 3. Limit file indexing and fetching to shared code and selected uploads.
 4. Configure a fresh target network, URLs, uploads, and network access.
 5. Migrate a populated network through the real HTTP endpoint and CLI.
 
-Each layer has focused tests. The final layer boots WordPress at the target.
+Each layer has an E2E success case and a rejection case, in addition to focused
+tests. The database layer imports the HTTP SQL response into MySQL and rejects
+a cross-site cursor. The admin layer changes a token through the real form and
+rejects a site administrator. The file layer transfers chosen uploads and rejects
+sibling paths. The target layer boots WordPress and rejects a non-empty database.
+The final layer exercises the larger overlapping-network fixture.
 This is a pull into a fresh target, not a merge or a multisite push.
 
 ## Test matrix
