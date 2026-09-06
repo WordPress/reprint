@@ -657,9 +657,9 @@ export function clearHookState(siteName) {
  * Make a file_fetch request with a base64 path record file_list upload.
  * Uses multipart/form-data to upload the file list as a file.
  */
-export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
+export async function apiRequestWithFileList(siteName, filePaths, params = {}, options = {}) {
     const client = createHmacClient(siteName);
-    const url = new URL(getSiteUrl(siteName));
+    const url = new URL(options.url || getSiteUrl(siteName));
     url.searchParams.set('endpoint', 'file_fetch');
     for (const [k, v] of Object.entries(params)) {
         setApiRequestParameter(url, k, v);
