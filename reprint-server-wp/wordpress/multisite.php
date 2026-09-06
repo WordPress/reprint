@@ -2,6 +2,8 @@
 
 namespace WordPress\Reprint\Server\Plugin;
 
+use WordPress\Reprint\Server\MultisiteDatabaseSelection;
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These source validation errors are JSON protocol messages, not HTML.
 
 /**
@@ -51,18 +53,16 @@ function get_multisite_export_context(): array {
         throw new \RuntimeException('Custom multisite uploads are not supported; observed directory: ' . $uploads['basedir']);
     }
 
-    // Match WordPress core's own table lists, including older installations
-    // without blogmeta. A plugin table is reported, never silently omitted.
-    $blog_tables = array_values($wpdb->tables('blog', false));
-    $global_tables = array_values($wpdb->tables('global', false));
-    $global_tables = array_merge($global_tables, ['site', 'sitemeta', 'blogs', 'blogmeta', 'signups', 'registration_log']);
+    // Use the exporter's rules, not $wpdb->tables: plugins can append their
+    // own tables there. A registered plugin table still needs a migration rule.
     foreach ($wpdb->get_col('SHOW TABLES') as $table) {
         if (strpos($table, $base_prefix) !== 0) {
             continue;
         }
         $suffix = substr($table, strlen($base_prefix));
-        $site_suffix = preg_replace('/^[0-9]+_/', '', $suffix);
-        if (!in_array($suffix, $global_tables, true) && !in_array($site_suffix, $blog_tables, true)) {
+        $table_site_id = preg_match('/^([1-9][0-9]*)_/', $suffix, $matches) ? (int) $matches[1] : 1;
+        $selection = new MultisiteDatabaseSelection($base_prefix, $table_site_id, $network_id);
+        if (!$selection->includes_table($table)) {
             throw new \RuntimeException('No multisite migration rule exists for table ' . $table . '. It may contain shared plugin data.');
         }
     }
