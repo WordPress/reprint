@@ -67,6 +67,13 @@ describe('Import: global removal of SiteGround plugins', () => {
                 writeFileSync(join(muPluginsDir, 'pantheon-mu-plugin', 'pantheon.php'),
                     "<?php define('REPRINT_PANTHEON_FIXTURE_LOADED', true);");
 
+                // A site moved away from WP Engine can still have its loader and package.
+                mkdirSync(join(muPluginsDir, 'wpengine-common'), { recursive: true });
+                writeFileSync(join(muPluginsDir, 'mu-plugin.php'),
+                    "<?php require_once __DIR__ . '/wpengine-common/plugin.php';");
+                writeFileSync(join(muPluginsDir, 'wpengine-common', 'plugin.php'),
+                    "<?php // WP Engine package fixture");
+
                 // Activate both plugins via the database so they appear
                 // in active_plugins when the DB is exported.
                 const { createConnection } = await import('mysql2/promise');
@@ -154,6 +161,14 @@ describe('Import: global removal of SiteGround plugins', () => {
         assert.ok(
             existsSync(join(pulledSite, 'wp-content', 'mu-plugins', 'pantheon-mu-plugin', 'pantheon.php')),
             'the package required by the Pantheon loader should still be downloaded',
+        );
+        assert.ok(
+            !existsSync(join(pulledSite, 'wp-content', 'mu-plugins', 'mu-plugin.php')),
+            'the copied WP Engine loader should not be downloaded',
+        );
+        assert.ok(
+            !existsSync(join(pulledSite, 'wp-content', 'mu-plugins', 'wpengine-common')),
+            'the copied WP Engine package should not be downloaded',
         );
     });
 
@@ -245,6 +260,12 @@ describe('Import: global removal of SiteGround plugins', () => {
                 mkdirSync(pluginDir, { recursive: true });
                 writeFileSync(join(pluginDir, `${plugin}.php`), '<?php // stale local copy');
             }
+            const muPluginsDir = join(flatDir, 'wp-content', 'mu-plugins');
+            mkdirSync(join(muPluginsDir, 'wpengine-common'), { recursive: true });
+            writeFileSync(join(muPluginsDir, 'mu-plugin.php'),
+                "<?php require_once __DIR__ . '/wpengine-common/plugin.php';");
+            writeFileSync(join(muPluginsDir, 'wpengine-common', 'plugin.php'),
+                '<?php // stale local WP Engine package');
 
             execFileSync('php', [
                 CLIENT_PATH,
@@ -293,6 +314,20 @@ describe('Import: global removal of SiteGround plugins', () => {
                 echo REPRINT_PANTHEON_FIXTURE_LOADED ? 'loaded' : 'missing';
             `, muPluginsDir], { encoding: 'utf-8', timeout: 10000 });
             assert.equal(output, 'loaded');
+        });
+
+        it('the copied WP Engine loader and package are removed together', () => {
+            const muPluginsDir = join(tempDir, 'flattened', 'wp-content', 'mu-plugins');
+            const output = execFileSync('php', ['-r', `
+                define('WPMU_PLUGIN_DIR', $argv[1]);
+                foreach (glob(WPMU_PLUGIN_DIR . '/*.php') as $plugin) {
+                    require $plugin;
+                }
+                echo 'loaded';
+            `, muPluginsDir], { encoding: 'utf-8', timeout: 10000 });
+            assert.equal(output, 'loaded');
+            assert.ok(!existsSync(join(muPluginsDir, 'mu-plugin.php')));
+            assert.ok(!existsSync(join(muPluginsDir, 'wpengine-common')));
         });
     });
 });

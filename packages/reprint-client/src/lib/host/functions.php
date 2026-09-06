@@ -209,6 +209,19 @@ function excluded_plugins(array $preflight_data): array
     if (isset($matching_hosts['wpengine'])) {
         $local_paths[] = 'wp-content/mu-plugins/mu-plugin.php';
     }
+    // A copied WP Engine loader still requires wpengine-common after the site
+    // moves to another host. Exclude the pair without changing host detection.
+    // A generic mu-plugin.php alone does not identify the WP Engine loader.
+    foreach ($preflight_data['wp_content']['roots'] ?? [] as $root) {
+        $mu_plugin_names = array_column($root['mu_plugins'] ?? [], 'name');
+        if (
+            in_array('mu-plugin.php', $mu_plugin_names, true)
+            && in_array('wpengine-common', $mu_plugin_names, true)
+        ) {
+            $local_paths[] = 'wp-content/mu-plugins/mu-plugin.php';
+            break;
+        }
+    }
 
     $paths_urls = $preflight_data['database']['wp']['paths_urls'] ?? [];
     $clean_absolute_directory = static function ($path): ?string {

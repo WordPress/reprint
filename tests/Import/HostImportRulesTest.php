@@ -241,6 +241,41 @@ class HostImportRulesTest extends TestCase {
         $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
     }
 
+    public function testCopiedWpengineLoaderIsExcludedWithoutSelectingWpengine(): void
+    {
+        $preflight_data = $this->preflight([], ['mu-plugin.php', 'wpengine-common']);
+        $preflight_data['runtime']['document_root'] = '/var/www/html';
+        $preflight_data['database']['wp']['paths_urls']['mu_plugins_dir'] = '/srv/custom-mu-plugins';
+
+        $excluded_plugins = \excluded_plugins($preflight_data);
+
+        $this->assertSame('other', \detect_host($preflight_data));
+        $this->assertSame('other', \runtime_manifest_for($preflight_data)->source);
+        $this->assertContains('/srv/custom-mu-plugins/mu-plugin.php', array_column($excluded_plugins, 'source_path'));
+        $this->assertContains('/srv/custom-mu-plugins/wpengine-common', array_column($excluded_plugins, 'source_path'));
+        $this->assertNotContains('wp-content/object-cache.php', array_column($excluded_plugins, 'local_path'));
+        $this->assertNotContains('wp-content/advanced-cache.php', array_column($excluded_plugins, 'local_path'));
+    }
+
+    public function testUnpairedGenericMuPluginIsNotExcluded(): void
+    {
+        $preflight_data = $this->preflight([], ['mu-plugin.php', 'wpe-cache-plugin']);
+
+        $this->assertNotContains(
+            'wp-content/mu-plugins/mu-plugin.php',
+            array_column(\excluded_plugins($preflight_data), 'local_path'),
+        );
+
+        // A WP Engine package in another site's inventory does not form a pair.
+        $preflight_data['wp_content']['roots'][] = [
+            'mu_plugins' => $this->inventoryEntries(['wpengine-common']),
+        ];
+        $this->assertNotContains(
+            'wp-content/mu-plugins/mu-plugin.php',
+            array_column(\excluded_plugins($preflight_data), 'local_path'),
+        );
+    }
+
     /**
      * Build the part of preflight which host analyzers read.
      *

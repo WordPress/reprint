@@ -608,6 +608,64 @@ class ProductionDropInRemovalTest extends TestCase
 
     // ---- WP Engine-specific tests ----
 
+    public function testCopiedWpengineLoaderDoesNotRequireRemovedPackageAfterCleanup(): void
+    {
+        $state = $this->preflightWithoutWpcloudSignals('/var/www/html');
+        $state['webhost'] = 'other';
+        $state['preflight']['data']['wp_content']['roots'] = [
+            ['mu_plugins' => [
+                ['name' => 'mu-plugin.php', 'type' => 'file'],
+                ['name' => 'wpengine-common', 'type' => 'dir'],
+            ]],
+        ];
+        $this->writeState($state);
+
+        $mu_plugins = $this->fsRoot . '/wp-content/mu-plugins';
+        mkdir($mu_plugins . '/wpengine-common', 0755, true);
+        // WP Engine's loader requires its package even after moving to another host.
+        // https://github.com/Gnovus-Inc/sports-nerd-nonsense/blob/6dbc25ecf0db13c7ea82d81b9d32ea7114589001/wp-content/mu-plugins/mu-plugin.php#L18
+        file_put_contents($mu_plugins . '/mu-plugin.php', "<?php require_once __DIR__ . '/wpengine-common/plugin.php';");
+        file_put_contents($mu_plugins . '/wpengine-common/plugin.php', "<?php // WP Engine package\n");
+        file_put_contents($mu_plugins . '/custom.php', "<?php echo 'custom-plugin-loaded';");
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        ob_start();
+        try {
+            foreach (glob($mu_plugins . '/*.php') as $mu_plugin) {
+                require $mu_plugin;
+            }
+            $this->assertSame('custom-plugin-loaded', ob_get_contents());
+        } finally {
+            ob_end_clean();
+        }
+        $this->assertFileDoesNotExist($mu_plugins . '/mu-plugin.php');
+        $this->assertDirectoryDoesNotExist($mu_plugins . '/wpengine-common');
+    }
+
+    public function testUnpairedGenericMuPluginSurvivesCleanup(): void
+    {
+        $state = $this->preflightWithoutWpcloudSignals('/var/www/html');
+        $state['webhost'] = 'other';
+        $state['preflight']['data']['wp_content']['roots'] = [
+            ['mu_plugins' => [['name' => 'mu-plugin.php', 'type' => 'file']]],
+        ];
+        $this->writeState($state);
+
+        $mu_plugins = $this->fsRoot . '/wp-content/mu-plugins';
+        mkdir($mu_plugins, 0755, true);
+        $custom_plugin = "<?php // Custom MU plugin, not a WP Engine loader.\n";
+        file_put_contents($mu_plugins . '/mu-plugin.php', $custom_plugin);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        $this->assertSame($custom_plugin, file_get_contents($mu_plugins . '/mu-plugin.php'));
+    }
+
     public function testWpengineRemovesPlatformMuPluginsAndPreservesCustomMuPlugins(): void
     {
         $this->writeState(array_replace_recursive(
