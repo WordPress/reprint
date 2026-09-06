@@ -157,6 +157,8 @@ class PullMetadataTest extends TestCase
                         ],
                     ],
                     'runtime' => [
+                        'document_root' => '/srv/htdocs',
+                        'env_names' => ['PRIVACY_MODEL'],
                         'ini_get_all' => [
                             'auto_prepend_file' => '/scripts/env.php',
                         ],

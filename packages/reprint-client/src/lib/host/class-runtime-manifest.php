@@ -1,15 +1,13 @@
 <?php
 /**
- * Runtime manifest — the intermediate representation between host analyzers
- * and runtime appliers.
+ * Runtime settings needed to run an imported site on the target server.
  *
  * A host analyzer reads preflight data from the source site and produces a
  * RuntimeManifest describing what that site needs to run. A runtime applier
  * reads the manifest and writes the configuration files appropriate for the
  * target server.
  *
- * The manifest is pure data — no executable code, no file paths to scripts.
- * It captures:
+ * It carries only target server setup:
  *
  * - php_ini:      INI directives the source site had (memory_limit, etc.)
  * - constants:    PHP constants to define before WordPress boots.
@@ -25,7 +23,7 @@
  */
 class RuntimeManifest
 {
-    /** @var string Source host identifier (e.g. "wpcloud", "siteground") */
+    /** @var string Source host identifier (e.g. "wpcloud", "wpengine", "other") */
     public string $source;
 
     /** @var array<string, string> PHP INI directives */
@@ -64,26 +62,6 @@ class RuntimeManifest
      * wp-config.php tries to redefine the same constants.
      */
     public bool $has_db_constants = false;
-
-    /**
-     * Paths relative to the fs-root that should be removed after
-     * flattening because they depend on production infrastructure not
-     * available locally.  Examples: Memcached-backed object-cache
-     * drop-ins, hosting-specific mu-plugins, hosting-specific plugins.
-     *
-     * Each entry is a relative path like 'wp-content/object-cache.php'
-     * or 'wp-content/mu-plugins/wpcomsh'.  Directories are removed
-     * recursively.  The audit log records every removal.
-     *
-     * Entries under 'wp-content/plugins/' also trigger automatic
-     * deactivation: any active plugin whose basename starts with the
-     * removed directory name is stripped from the active_plugins option
-     * in the target database, preventing "plugin file does not exist"
-     * warnings in wp-admin.
-     *
-     * @var string[]
-     */
-    public array $paths_to_remove = [];
 
     /**
      * Directories outside the WordPress root that must be mounted into

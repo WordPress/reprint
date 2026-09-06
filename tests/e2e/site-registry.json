@@ -194,10 +194,13 @@
       "port": 8141
     },
     "generated-css-assets": {
-      "port": 8142
+      "port": 8150
     },
     "css-download-failures": {
       "port": 8143
+    },
+    "wpengine-plugin-inventory": {
+      "port": 8142
     }
   }
 }
