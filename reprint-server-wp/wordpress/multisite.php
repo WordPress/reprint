@@ -20,6 +20,7 @@ use WordPress\Reprint\Server\MultisiteDatabaseSelection;
  *     @type string $base_prefix Network table prefix, not the selected site's prefix.
  *     @type string $abspath Remote WordPress root.
  *     @type string $content_dir Remote content directory.
+ *     @type string $exporter_dir Reprint plugin directory excluded from the target.
  *     @type string $uploads_dir Remote selected uploads directory.
  *     @type string $uploads_url Selected uploads URL.
  *     @type string $home_url Selected home URL.
@@ -42,6 +43,9 @@ function get_multisite_export_context(): array {
     }
     if (get_site_option('ms_files_rewriting') || defined('UPLOADS') || defined('BLOGUPLOADDIR')) {
         throw new \RuntimeException('Legacy multisite uploads require a separate migration rule; this pull supports modern uploads directories.');
+    }
+    if (rtrim(WP_CONTENT_DIR, '/') !== rtrim(ABSPATH, '/') . '/wp-content') {
+        throw new \RuntimeException('A separate content directory requires a separate multisite migration rule.');
     }
     $uploads = wp_upload_dir(null, false);
     $expected_uploads = WP_CONTENT_DIR . '/uploads' . ( $site_id === 1 ? '' : '/sites/' . $site_id );
@@ -69,6 +73,7 @@ function get_multisite_export_context(): array {
         'base_prefix' => $base_prefix,
         'abspath' => rtrim(ABSPATH, '/'),
         'content_dir' => rtrim(WP_CONTENT_DIR, '/'),
+        'exporter_dir' => rtrim(PLUGIN_DIR, '/'),
         'uploads_dir' => rtrim($uploads['basedir'], '/'),
         'uploads_url' => rtrim($uploads['baseurl'], '/'),
         'home_url' => get_option('home'),

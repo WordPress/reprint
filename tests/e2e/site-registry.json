@@ -201,6 +201,9 @@
     },
     "multisite-admin": {
       "port": 8144
+    },
+    "multisite-files": {
+      "port": 8145
     }
   }
 }

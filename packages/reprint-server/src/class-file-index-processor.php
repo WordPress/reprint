@@ -91,6 +91,9 @@ final class FileIndexProcessor {
     /** @var array|null Directory failure produced by the most recent step. */
     private $directory_error = null;
 
+    /** @var MultisiteFileSelection|null Trusted source file boundaries. */
+    private $multisite_selection;
+
     /** @var bool Whether close() has been called. */
     private $closed = false;
 
@@ -103,16 +106,26 @@ final class FileIndexProcessor {
      *                                      external directory reached by a followed link.
      * @param bool            $follow_symlinks Whether directory symlinks may lead outside the allowed directories.
      * @param string          $storage_path Reprint storage path omitted from the index, or an empty string.
+     * @param MultisiteFileSelection|null $multisite_selection Trusted site file boundaries.
      * @return self New file-index processor.
      */
     public static function start(
         array $roots,
         array $start_root,
         bool $follow_symlinks,
-        string $storage_path
+        string $storage_path,
+        ?MultisiteFileSelection $multisite_selection = null
     ): self {
         $roots = self::validate_roots($roots);
+        if ($multisite_selection !== null) {
+            foreach ($roots as $root) {
+                $multisite_selection->assert_path_allowed($root['requested_path']);
+            }
+        }
         $start_root = self::validate_root($start_root);
+        if ($multisite_selection !== null) {
+            $multisite_selection->assert_path_allowed($start_root['requested_path']);
+        }
         $start_root_is_configured = false;
         foreach ($roots as $root) {
             if ($root["requested_path"] === $start_root["requested_path"]) {
@@ -197,7 +210,8 @@ final class FileIndexProcessor {
             $directory_stack,
             $reported_index_directory,
             $initial_index_entries,
-            $pending_named_roots
+            $pending_named_roots,
+            $multisite_selection
         );
     }
 
@@ -214,9 +228,15 @@ final class FileIndexProcessor {
         array $roots,
         string $cursor_json,
         bool $follow_symlinks,
-        string $storage_path
+        string $storage_path,
+        ?MultisiteFileSelection $multisite_selection = null
     ): self {
         $roots = self::validate_roots($roots);
+        if ($multisite_selection !== null) {
+            foreach ($roots as $root) {
+                $multisite_selection->assert_path_allowed($root['requested_path']);
+            }
+        }
         $configured_directories = self::resolved_directory_roots($roots, $follow_symlinks);
 
         // A cursor is caller-held continuation state. Reject malformed JSON or
@@ -224,6 +244,10 @@ final class FileIndexProcessor {
         $cursor = json_decode($cursor_json, true);
         if (!is_array($cursor)) {
             throw new InvalidArgumentException("Invalid index cursor format");
+        }
+        $selection_identity = $multisite_selection === null ? null : $multisite_selection->get_identity();
+        if (( $cursor['multisite_selection'] ?? null ) !== $selection_identity) {
+            throw new InvalidArgumentException('Cannot resume file index: multisite selection changed.');
         }
         if (!isset($cursor["stack"]) || !is_array($cursor["stack"])) {
             throw new InvalidArgumentException("Index cursor missing stack");
@@ -296,7 +320,8 @@ final class FileIndexProcessor {
             $directory_stack,
             $index_directory,
             [],
-            $pending_named_roots
+            $pending_named_roots,
+            $multisite_selection
         );
     }
 
@@ -367,6 +392,13 @@ final class FileIndexProcessor {
         // Apply component omissions before lstat() and before a directory can
         // enter the stack. Omitted subtrees therefore cost no extra filesystem
         // calls.
+        if ($this->multisite_selection !== null && !$this->multisite_selection->includes_path($path)) {
+            $this->step_status = self::STATUS_SKIPPED;
+            return true;
+        }
+        if ($this->multisite_selection !== null) {
+            $this->multisite_selection->assert_path_allowed($path);
+        }
         if (self::path_has_default_skipped_component($path)) {
             $this->step_status = self::STATUS_SKIPPED;
             return true;
@@ -480,7 +512,11 @@ final class FileIndexProcessor {
         foreach ($this->pending_named_roots as $path_root) {
             $encoded_path_roots[] = base64_encode($path_root);
         }
-        return ["stack" => $encoded_stack, "paths" => $encoded_path_roots];
+        $cursor = ["stack" => $encoded_stack, "paths" => $encoded_path_roots];
+        if ($this->multisite_selection !== null) {
+            $cursor['multisite_selection'] = $this->multisite_selection->get_identity();
+        }
+        return $cursor;
     }
 
     /**
@@ -689,8 +725,18 @@ final class FileIndexProcessor {
         array $directory_stack,
         string $index_directory,
         array $initial_index_entries,
-        array $pending_named_roots = []
+        array $pending_named_roots = [],
+        ?MultisiteFileSelection $multisite_selection = null
     ) {
+        $this->multisite_selection = $multisite_selection;
+        if ($multisite_selection !== null) {
+            foreach ($directory_stack as $frame) {
+                $multisite_selection->assert_path_allowed($frame['dir']);
+            }
+            foreach ($pending_named_roots as $remote_absolute_path) {
+                $multisite_selection->assert_path_allowed($remote_absolute_path);
+            }
+        }
         $this->roots = $roots;
         $this->configured_directories = $configured_directories;
         $this->follow_symlinks = $follow_symlinks;
@@ -718,6 +764,9 @@ final class FileIndexProcessor {
         $frame_index = count($this->directory_stack) - 1;
         $frame = $this->directory_stack[$frame_index];
         $this->current_directory = $frame["dir"];
+        if ($this->multisite_selection !== null) {
+            $this->multisite_selection->assert_path_allowed($this->current_directory);
+        }
 
         // A directory may disappear while it waits on the stack. Remove that
         // frame so a later call continues with its parent or the next root.

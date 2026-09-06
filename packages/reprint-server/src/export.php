@@ -9,6 +9,7 @@ use WordPress\Reprint\Server\GzipOutputStream;
 use WordPress\Reprint\Server\HTTPServer;
 use WordPress\Reprint\Server\MySQLDumpProducer;
 use WordPress\Reprint\Server\MultisiteDatabaseSelection;
+use WordPress\Reprint\Server\MultisiteFileSelection;
 use WordPress\Reprint\Server\PdoConstants;
 use WordPress\Reprint\Server\ResourceBudget;
 use WordPress\Reprint\Server\SqliteDriverPDO;
@@ -2985,6 +2986,7 @@ function endpoint_file_index(
     // requests so path type transitions (symlink/file/dir) are seen correctly.
     clearstatcache(true);
 
+    $multisite_selection = isset($config['_multisite']) ? new MultisiteFileSelection($config['_multisite']) : null;
     $file_index_roots = resolve_file_index_roots($config);
     $batch_size = require_int_range(
         "batch_size",
@@ -3002,7 +3004,8 @@ function endpoint_file_index(
             $file_index_roots,
             $config["cursor"],
             $follow_symlinks,
-            $storage_path
+            $storage_path,
+            $multisite_selection
         );
     } else {
         $list_directory = $config["list_dir"] ?? null;
@@ -3018,7 +3021,8 @@ function endpoint_file_index(
             $file_index_roots,
             $start_root,
             $follow_symlinks,
-            $storage_path
+            $storage_path,
+            $multisite_selection
         );
     }
 
@@ -3359,6 +3363,9 @@ function endpoint_file_fetch(
         $sync_options["cursor"] = $config["cursor"];
     }
 
+    if (isset($config['_multisite'])) {
+        $sync_options['multisite_selection'] = new MultisiteFileSelection($config['_multisite']);
+    }
     $producer = new FileTreeProducer($directories, $sync_options);
     return stream_file_producer(
         $producer,
