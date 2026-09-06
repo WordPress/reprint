@@ -58,6 +58,7 @@ class HostImportRulesTest extends TestCase {
         $this->assertSame('other', \detect_host($preflight_data));
     }
 
+    /** The unconditional list does not include the shared WP Engine loader or package. */
     public function testListsEveryPluginExcludedFromAllImports(): void
     {
         $excluded_plugins = \excluded_plugins($this->preflight([], []));
@@ -140,6 +141,7 @@ class HostImportRulesTest extends TestCase {
         $this->assertContains('wp-content/mu-plugins/mu-plugin.php', $excluded_paths);
     }
 
+    /** Runtime path matches do not replace the public-header check for a shared loader. */
     public function testWpcloudRuntimeAndWpengineExclusionsAreAppliedIndependently(): void
     {
         $preflight_data = $this->preflight(
@@ -183,6 +185,7 @@ class HostImportRulesTest extends TestCase {
         $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
     }
 
+    /** Recognized loaders and packages use the reported custom MU-plugin directory. */
     public function testExcludedPluginSourcePathsUseDirectoriesReportedByPreflight(): void
     {
         $preflight_data = $this->preflight([], ['mu-plugin.php', 'wpengine-common']);
@@ -257,6 +260,7 @@ class HostImportRulesTest extends TestCase {
         $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
     }
 
+    /** The public header identifies a copied loader without changing the current host. */
     public function testCopiedWpengineLoaderIsExcludedWithoutSelectingWpengine(): void
     {
         $preflight_data = $this->preflight([], ['mu-plugin.php', 'wpengine-common']);
