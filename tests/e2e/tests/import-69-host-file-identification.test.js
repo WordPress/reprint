@@ -1,11 +1,11 @@
 /** Exercise real preflight and cleanup with platform, customer, and copied host files. */
 import { describe, it, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { ensureSite } from '../lib/site-setup.js';
-import { getSiteDir, getSiteUrl, pullStateDirectory } from '../lib/test-helpers.js';
+import { apiRequest, getSiteDir, getSiteUrl, pullStateDirectory } from '../lib/test-helpers.js';
 import { withMigratedWordPress } from '../lib/migrated-wordpress.js';
 
 describe('Import: identify host files before removal', () => {
@@ -114,5 +114,31 @@ require_once __DIR__ . '/wpengine-common/bootstrap.php';
             assert.ok(html.includes('CUSTOMER_DEPENDENCY_RUNNING'));
             assert.ok(html.includes('PORTABLE_PLUGIN_RUNNING'));
         });
+    }, 240000);
+
+    it('migrates a working MU plugin whose public name contains Windows-1252 bytes', async () => {
+        const site = sites[2];
+        const sourcePath = join(getSiteDir(site), 'wp-content/mu-plugins/legacy-customer.php');
+        const plugin = Buffer.from(`<?php
+/** Plugin Name: Café customer tools */
+add_action('wp_footer', function () { echo '<p>LEGACY_CUSTOMER_RUNNING</p>'; });
+`, 'latin1');
+        writeFileSync(sourcePath, plugin);
+        try {
+            const source = await fetch(new URL(getSiteUrl(site)).origin);
+            assert.equal(source.status, 200);
+            assert.ok((await source.text()).includes('LEGACY_CUSTOMER_RUNNING'));
+            const preflight = await apiRequest(site, 'preflight');
+            assert.equal(preflight.status, 200, JSON.stringify(preflight.json));
+            const plugins = preflight.json.wp_content.roots.flatMap(root => root.mu_plugins);
+            assert.deepEqual(plugins.find(entry => entry.name === 'legacy-customer.php').headers, []);
+            await withMigratedWordPress(site, ({ flatDirectory, html }) => {
+                assert.deepEqual(readFileSync(join(flatDirectory, 'wp-content/mu-plugins/legacy-customer.php')), plugin);
+                assert.ok(html.includes('LEGACY_CUSTOMER_RUNNING'));
+                assert.deepEqual(readFileSync(sourcePath), plugin);
+            });
+        } finally {
+            unlinkSync(sourcePath);
+        }
     }, 240000);
 });
