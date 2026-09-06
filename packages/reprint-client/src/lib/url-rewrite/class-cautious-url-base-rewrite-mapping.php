@@ -83,7 +83,9 @@ class CautiousURLBaseRewriteMapping {
     private function create_entry(string $source_url, string $target_url): ?array
     {
         $source = $this->get_supported_url_parts($source_url, true);
-        $target = $this->get_supported_url_parts($target_url, false);
+        // An identity mapping protects a subtree from a broader replacement.
+        // It does not introduce a numeric host or a new path into stored text.
+        $target = $this->get_supported_url_parts($target_url, $source_url === $target_url);
         if ($source === null || $target === null) {
             return null;
         }

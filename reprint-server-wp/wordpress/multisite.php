@@ -26,6 +26,9 @@ use WordPress\Reprint\Server\MultisiteDatabaseSelection;
  *     @type string $home_url Selected home URL.
  *     @type string $site_url Selected WordPress URL.
  *     @type string $content_url Shared content URL.
+ *     @type string[] $sibling_urls Other site URLs retained in cross-site links.
+ *     @type int[] $sibling_site_ids Other site IDs whose uploads remain remote.
+ *     @type string $network_content_url Shared network content URL.
  * }
  */
 function get_multisite_export_context(): array {
@@ -67,6 +70,18 @@ function get_multisite_export_context(): array {
         }
     }
 
+    $sibling_urls = [];
+    $sibling_site_ids = [];
+    foreach ($wpdb->get_results($wpdb->prepare(
+        "SELECT blog_id, domain, path FROM {$wpdb->blogs} WHERE blog_id <> %d",
+        $site_id
+    )) as $sibling) {
+        $sibling_site_ids[] = (int) $sibling->blog_id;
+        foreach (['http', 'https'] as $scheme) {
+            $sibling_urls[] = $scheme . '://' . $sibling->domain . rtrim($sibling->path, '/');
+        }
+    }
+
     return [
         'site_id' => $site_id,
         'network_id' => $network_id,
@@ -79,5 +94,8 @@ function get_multisite_export_context(): array {
         'home_url' => get_option('home'),
         'site_url' => get_option('siteurl'),
         'content_url' => content_url(),
+        'sibling_urls' => $sibling_urls,
+        'sibling_site_ids' => $sibling_site_ids,
+        'network_content_url' => network_site_url('/wp-content'),
     ];
 }
