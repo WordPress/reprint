@@ -12,7 +12,6 @@
 class CautiousURLBaseRewriteMapping {
     /**
      * @var array<int, array{
-     *     source_scheme: string,
      *     source_authority: string,
      *     source_path: string,
      *     source_base: string,
@@ -54,7 +53,6 @@ class CautiousURLBaseRewriteMapping {
      * Returns the prepared mappings in longest-source-first order.
      *
      * @return array<int, array{
-     *     source_scheme: string,
      *     source_authority: string,
      *     source_path: string,
      *     source_base: string,
@@ -72,7 +70,6 @@ class CautiousURLBaseRewriteMapping {
 
     /**
      * @return array{
-     *     source_scheme: string,
      *     source_authority: string,
      *     source_path: string,
      *     source_base: string,
@@ -96,7 +93,6 @@ class CautiousURLBaseRewriteMapping {
         $source_path = $source['path'] === '/' ? '' : $source['path'];
 
         return [
-            'source_scheme'    => $source['scheme'],
             'source_authority' => $source['authority'],
             'source_path'      => $source_path,
             'source_base'      => $source['authority'] . $source_path,

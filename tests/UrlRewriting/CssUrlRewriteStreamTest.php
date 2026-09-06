@@ -35,6 +35,7 @@ class CssUrlRewriteStreamTest extends TestCase {
         }
     }
 
+    /** A stylesheet larger than one chunk cannot grow the retained tail. */
     public function testLargeMinifiedCssKeepsOnlyOneUrlPrefixBetweenChunks(): void
     {
         $stream = new CssUrlRewriteStream(['https://old.example' => 'https://new.example']);
@@ -49,6 +50,7 @@ class CssUrlRewriteStreamTest extends TestCase {
         $this->assertSame(str_replace('old.example', 'new.example', $input), $output);
     }
 
+    /** An unrelated URL must not change because its path contains the source host. */
     public function testUnmappedUrlsRelativePathsAndCssBytesRemainUnchanged(): void
     {
         $input = '.a{background:url(../image.png)}'
@@ -57,5 +59,12 @@ class CssUrlRewriteStreamTest extends TestCase {
             . '.d{background:url(https://other.example/old.example/image.png)}';
         $stream = new CssUrlRewriteStream(['https://old.example' => 'https://new.example']);
         $this->assertSame($input, $stream->rewrite_chunk($input, true));
+    }
+    /** Local servers may be addressed by IP rather than a DNS name. */
+    public function testTargetMayUseAnIpAddress(): void
+    {
+        $stream = new CssUrlRewriteStream(['https://old.example' => 'http://127.0.0.1:8881']);
+        $this->assertSame('.a{src:url(http://127.0.0.1:8881/font.woff2)}',
+            $stream->rewrite_chunk('.a{src:url(https://old.example/font.woff2)}', true));
     }
 }

@@ -10,9 +10,8 @@
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Matches the existing URL processor names.
 class CssUrlRewriteStream {
 
-    private CautiousURLBaseRewriteMapping $mapping;
-    /** @var list<string> Bounded URL-prefix patterns, longest source first. */
-    private array $patterns = [];
+    /** @var list<array{pattern:string,scheme:string,authority:string,path:string,source_bytes:int}> */
+    private array $mappings = [];
     private int $lookahead_bytes = 1;
     private string $pending = '';
     private string $previous_byte = '';
@@ -27,23 +26,37 @@ class CssUrlRewriteStream {
      */
     public function __construct(array $url_mapping, ?array $cursor = null)
     {
-        $this->mapping = new CautiousURLBaseRewriteMapping($url_mapping);
-        foreach ($this->mapping->get_entries() as $entry) {
+        foreach ($url_mapping as $source_url => $target_url) {
+            $source = $this->url_parts($source_url);
+            $target = $this->url_parts($target_url);
+            if ($source === null || $target === null) {
+                continue;
+            }
             $slash = '\\\\{0,8}/';
-            $path = str_replace('/', $slash, preg_quote($entry['source_path'], '~'));
+            $path = str_replace('/', $slash, preg_quote($source['path'], '~'));
             // No bare domains or user information: those would allow matches
             // inside unrelated URLs or require unbounded prefix lookahead.
-            $this->patterns[] = '~(?<![A-Za-z0-9._%+\\\\/@-])'
-                . '(?:(?i:' . $entry['source_scheme'] . ')\\\\{0,8}:|(?<!:))'
-                . '(' . $slash . ')\1'
-                . '(?i:' . preg_quote($entry['source_authority'], '~') . ')'
+            $pattern = '~(?<![A-Za-z0-9._%+\\\\/@-])'
+                . '(?:(?<scheme>(?i:' . $source['scheme'] . '))(?<colon>\\\\{0,8}:)|(?<!:))'
+                . '(?<slash>' . $slash . ')\k<slash>'
+                . '(?i:' . preg_quote($source['authority'], '~') . ')'
                 . $path . '(?=$|' . $slash . '|[?# \t\r\n,!;)\]}>"\'])~';
+            $source_bytes = strlen($source['authority'] . $source['path']);
+            $this->mappings[] = [
+                'pattern' => $pattern,
+                'scheme' => $target['scheme'],
+                'authority' => $target['authority'],
+                'path' => $target['path'],
+                'source_bytes' => $source_bytes,
+            ];
             $this->lookahead_bytes = max(
                 $this->lookahead_bytes,
-                5 + 9 + 18 + strlen($entry['source_base'])
-                    + 8 * substr_count($entry['source_path'], '/') + 10
+                5 + 9 + 18 + $source_bytes + 8 * substr_count($source['path'], '/') + 10
             );
         }
+        usort($this->mappings, static function (array $first, array $second): int {
+            return $second['source_bytes'] <=> $first['source_bytes'];
+        });
         if ($cursor !== null) {
             $this->pending = base64_decode($cursor['pending_b64'], true);
             $this->previous_byte = base64_decode($cursor['previous_byte_b64'], true);
@@ -62,27 +75,28 @@ class CssUrlRewriteStream {
         $output = '';
         while ($offset < $limit) {
             $next_match = null;
-            foreach ($this->patterns as $pattern) {
-                if (preg_match($pattern, $text, $matches, PREG_OFFSET_CAPTURE, $offset) === 1
-                    && ( $next_match === null || $matches[0][1] < $next_match[1] )) {
-                    $next_match = $matches[0];
+            $next_mapping = null;
+            foreach ($this->mappings as $mapping) {
+                if (preg_match($mapping['pattern'], $text, $matches, PREG_OFFSET_CAPTURE, $offset) === 1
+                    && ( $next_match === null || $matches[0][1] < $next_match[0][1] )) {
+                    $next_match = $matches;
+                    $next_mapping = $mapping;
                 }
             }
-            if ($next_match === null || $next_match[1] >= $limit) {
+            if ($next_match === null || $next_match[0][1] >= $limit) {
                 $output .= substr($text, $offset, $limit - $offset);
                 $offset = $limit;
                 break;
             }
-            $output .= substr($text, $offset, $next_match[1] - $offset);
-            $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
-                $next_match[0],
-                $this->mapping
-            );
-            while ($processor->next_url()) {
-                $processor->replace_url_base();
+            $output .= substr($text, $offset, $next_match[0][1] - $offset);
+            $colon = $next_match['colon'][0] !== '' ? $next_match['colon'][0] : ':';
+            $slash = $next_match['slash'][0];
+            if ($next_match['scheme'][0] !== '') {
+                $output .= $next_mapping['scheme'] . $colon;
             }
-            $output .= $processor->get_updated_text();
-            $offset = $next_match[1] + strlen($next_match[0]);
+            $output .= $slash . $slash . str_replace(':', $colon, $next_mapping['authority']);
+            $output .= str_replace('/', $slash, $next_mapping['path']);
+            $offset = $next_match[0][1] + strlen($next_match[0][0]);
         }
         $this->previous_byte = $offset > 0 ? $text[$offset - 1] : '';
         $this->pending = substr($text, $offset);
@@ -101,6 +115,39 @@ class CssUrlRewriteStream {
         return [
             'pending_b64' => base64_encode($this->pending),
             'previous_byte_b64' => base64_encode($this->previous_byte),
+        ];
+    }
+    /**
+     * Accept URL bases whose literal bytes are safe in quoted or unquoted CSS.
+     * This includes local IPv4/IPv6 targets; no opaque-text escaping is guessed.
+     *
+     * @return array|null {
+     *     Supported URL base, or null for unsupported syntax.
+     *     @type string $scheme    Lowercase HTTP(S) scheme.
+     *     @type string $authority Host and optional port.
+     *     @type string $path      Initial path without trailing slashes.
+     * }
+     * @phpstan-return array{scheme:string,authority:string,path:string}|null
+     */
+    private function url_parts(string $url): ?array
+    {
+        $parts = parse_url($url);
+        if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])
+            || array_intersect(['user', 'pass', 'query', 'fragment'], array_keys($parts)) !== []) {
+            return null;
+        }
+        $scheme = strtolower($parts['scheme']);
+        $host = $parts['host'];
+        $path = rtrim($parts['path'] ?? '', '/');
+        if (!in_array($scheme, ['http', 'https'], true)
+            || ( preg_match('/^[A-Za-z0-9.-]+$/D', $host) !== 1 && filter_var(trim($host, '[]'), FILTER_VALIDATE_IP) === false )
+            || preg_match('#^[A-Za-z0-9._~%/!$&*+,;=:@-]*$#D', $path) !== 1) {
+            return null;
+        }
+        return [
+            'scheme' => $scheme,
+            'authority' => $host . ( isset($parts['port']) ? ':' . $parts['port'] : '' ),
+            'path' => $path,
         ];
     }
 }

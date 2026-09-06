@@ -18,6 +18,7 @@ class CssFileDownloadTest extends TestCase {
     /** @var resource|null */
     private $server;
 
+    /** Starts the production file endpoints on a private local HTTP server. */
     protected function setUp(): void
     {
         $this->root = sys_get_temp_dir() . '/reprint-css-' . bin2hex(random_bytes(6));
@@ -51,6 +52,7 @@ class CssFileDownloadTest extends TestCase {
         $this->fail('File endpoint did not start: ' . file_get_contents($this->root . '/server.log'));
     }
 
+    /** Stops this test server and removes its temporary files. */
     protected function tearDown(): void
     {
         if (is_resource($this->server)) {
@@ -118,6 +120,7 @@ CODE
         $this->assertStringContainsString('"local_paths_to_push":0', $diff['output']);
     }
 
+    /** Run uninterrupted, then stop on each side of the durable part boundary. */
     public static function checkpoint_boundaries(): array
     {
         return [['none'], ['before'], ['after']];
@@ -132,6 +135,7 @@ CODE
         return ['exit' => proc_close($process), 'output' => file_get_contents($this->root . '/client.log')];
     }
 
+    /** Removes only this test's temporary source, target, and state. */
     private function remove_tree(string $path): void
     {
         if (is_dir($path) && !is_link($path)) {
