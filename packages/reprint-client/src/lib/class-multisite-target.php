@@ -53,6 +53,9 @@ class MultisiteTarget {
         if (filter_var(trim($url['host'], '[]'), FILTER_VALIDATE_IP) !== false) {
             throw new InvalidArgumentException('Use a DNS host name such as localhost for --new-site-url; plain-text URL rewriting does not support numeric target hosts.');
         }
+        if (!preg_match('/^[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$/D', $url['host'])) {
+            throw new InvalidArgumentException('Use an ASCII DNS host name without a trailing dot for --new-site-url; convert international names to their xn-- form. Received host: ' . $url['host'] . '.');
+        }
         if ($network_admin === '') {
             throw new InvalidArgumentException('A multisite pull requires --network-admin=LOGIN naming an imported user who will administer the new network.');
         }

@@ -115,7 +115,7 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
     /** Invalid destinations must fail before opening the target database. */
     public function test_invalid_target_urls_are_rejected(): void
     {
-        foreach (['https://target.test/shop', 'https://target.test/?query=1', 'https://target.test/#fragment', 'ftp://target.test', 'http://127.0.0.1:9000'] as $url) {
+        foreach (['https://target.test/shop', 'https://target.test/?query=1', 'https://target.test/#fragment', 'ftp://target.test', 'http://127.0.0.1:9000', 'https://café.test', 'https://target.test.', 'https://target_test'] as $url) {
             try {
                 new MultisiteTarget(['site_id'=>7, 'network_id'=>1, 'base_prefix'=>'wp_'], $url, 'chosen');
                 $this->fail('Accepted invalid target URL: ' . $url);

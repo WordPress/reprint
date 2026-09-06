@@ -24,7 +24,8 @@ an empty Reprint progress table is allowed. Each apply acquires the target
 database lock before checking or changing tables.
 
 The new site URL must have an HTTP(S) DNS host name (localhost is accepted)
-and no path, query, or fragment. Numeric target hosts are not supported by
+and no path, query, or fragment. Use its ASCII form (xn-- for international
+names), without a trailing dot. Numeric target hosts are not supported by
 the plain-text URL rewriter.
 Use apply-runtime (included in pull) to write the new wp-config.php. Source
 database credentials, salts, Reprint tokens, and custom bootstrap includes
