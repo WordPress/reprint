@@ -195,6 +195,9 @@
     },
     "wpengine-plugin-inventory": {
       "port": 8142
+    },
+    "multisite-database": {
+      "port": 8143
     }
   }
 }

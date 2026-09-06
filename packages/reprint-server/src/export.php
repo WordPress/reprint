@@ -8,6 +8,7 @@ use WordPress\Reprint\Server\FileTreeProducer;
 use WordPress\Reprint\Server\GzipOutputStream;
 use WordPress\Reprint\Server\HTTPServer;
 use WordPress\Reprint\Server\MySQLDumpProducer;
+use WordPress\Reprint\Server\MultisiteDatabaseSelection;
 use WordPress\Reprint\Server\PdoConstants;
 use WordPress\Reprint\Server\ResourceBudget;
 use WordPress\Reprint\Server\SqliteDriverPDO;
@@ -791,6 +792,13 @@ function endpoint_sql_chunk(
     $producer_options = [
         "create_table_query" => $config["create_table_query"] ?? true,
     ];
+
+    if (isset($config['_multisite'])) {
+        $selection = $config['_multisite'];
+        $producer_options['multisite_selection'] = new MultisiteDatabaseSelection(
+            $selection['base_prefix'], $selection['site_id'], $selection['network_id']
+        );
+    }
 
     // -- Cap statement size to packet limits --
     // If the client sent its max_allowed_packet, cap the producer's
@@ -2195,6 +2203,9 @@ function endpoint_preflight(array $config): array
                                     ];
                                 }
                             }
+                        }
+                        if (isset($config['_multisite'])) {
+                            $multisite['selection'] = $config['_multisite'];
                         }
                         $db["wp"]["multisite"] = $multisite;
 

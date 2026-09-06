@@ -107,6 +107,9 @@ class DatabaseRowsReader {
     private $exclude_tables = [];
 
 
+    /** @var MultisiteDatabaseSelection|null Trusted source-side selection. */
+    private $multisite_selection;
+
     /**
      * Initializes the bounded database row reader.
      *
@@ -120,12 +123,23 @@ class DatabaseRowsReader {
      *     @type int|null   $maximum_inline_spatial_bytes Largest spatial value returned inline.
      *     @type array      $exclude_rows        Table, column, and value exclusion rules.
      *     @type string[]   $exclude_tables      Table names to omit from automatic discovery.
+     *     @type MultisiteDatabaseSelection $multisite_selection Selected WordPress site, when present.
      * }
      */
     public function __construct($db, $options = [])
     {
         $this->db = $db;
+        $this->multisite_selection = $options["multisite_selection"] ?? null;
+        if ($this->multisite_selection !== null && !$this->multisite_selection instanceof MultisiteDatabaseSelection) {
+            throw new \InvalidArgumentException("multisite_selection must be a trusted MultisiteDatabaseSelection object.");
+        }
         $this->tables_to_process = $options["tables_to_process"] ?? null;
+        if ($this->multisite_selection !== null && $this->tables_to_process !== null) {
+            $this->tables_to_process = array_values(array_filter(
+                $this->tables_to_process,
+                [$this->multisite_selection, 'includes_table']
+            ));
+        }
         $this->batch_size = max(1, (int) ( $options["batch_size"] ?? 250 ));
         $this->exclude_tables = array_values(array_filter(
             $options["exclude_tables"] ?? [],
@@ -305,7 +319,7 @@ class DatabaseRowsReader {
             );
         }
 
-        $where_parts = [];
+        $where_parts = $this->get_current_row_selection_conditions();
         foreach ($this->current_pk_columns as $column) {
             if (!array_key_exists($column, $primary_key_values)) {
                 throw new \RuntimeException(
@@ -373,11 +387,13 @@ class DatabaseRowsReader {
      *     @type array|null  $current_row         Encoded retained record.
      *     @type bool        $current_row_ends_query_batch Whether the retained record ends its query batch.
      *     @type array|null  $current_column_names Current column names.
+     *     @type string|null $multisite_selection Selected source site and rule version, or null.
      * }
      */
     public function get_cursor_state()
     {
         return [
+            "multisite_selection" => $this->multisite_selection === null ? null : $this->multisite_selection->get_identity(),
             "current_table" => $this->current_table,
             "current_pk_columns" => $this->current_pk_columns,
             "last_pk_values" => $this->encode_database_values_for_cursor($this->last_pk_values),
@@ -396,6 +412,12 @@ class DatabaseRowsReader {
      */
     public function restore_cursor_state($cursor_data)
     {
+        $selection_identity = $this->multisite_selection === null ? null : $this->multisite_selection->get_identity();
+        if (( $cursor_data["multisite_selection"] ?? null ) !== $selection_identity) {
+            throw new \InvalidArgumentException(
+                "Cannot resume this database cursor: the selected multisite site changed. Run db-pull --abort and start again."
+            );
+        }
         $this->current_table = $cursor_data["current_table"] ?? null;
         if ($this->current_table !== null && !is_string($this->current_table)) {
             throw new \InvalidArgumentException(
@@ -469,7 +491,7 @@ class DatabaseRowsReader {
     {
         $query = $this->build_byte_preserving_select_from_current_table();
 
-        $where_conditions = $this->build_row_exclusion_where_conditions();
+        $where_conditions = $this->get_current_row_selection_conditions();
         if ($this->current_pk_columns && count($this->current_pk_columns) > 0) {
             if ($this->last_pk_values) {
                 $where_conditions[] = $this->build_pk_where_clause();
@@ -617,12 +639,20 @@ class DatabaseRowsReader {
         return $record;
     }
 
-    private function build_row_exclusion_where_conditions()
+    /**
+     * Applies the same source-side filters to batches, row reloads, and value chunks.
+     *
+     * @return string[] SQL conditions, each grouped for safe AND composition.
+     */
+    public function get_current_row_selection_conditions(): array
     {
-        if (!$this->current_table || empty($this->exclude_rows_by_table[$this->current_table])) {
-            return [];
-        }
         $conditions = [];
+        if ($this->multisite_selection !== null && $this->current_table !== null) {
+            $conditions[] = '(' . $this->multisite_selection->get_row_condition($this->current_table) . ')';
+        }
+        if (!$this->current_table || empty($this->exclude_rows_by_table[$this->current_table])) {
+            return $conditions;
+        }
         foreach ($this->exclude_rows_by_table[$this->current_table] as $rule) {
             $column = $rule["column"];
             if (!isset($this->current_column_types[$column])) {
@@ -631,7 +661,7 @@ class DatabaseRowsReader {
             $quoted_column = $this->quote_identifier($column);
             $encoded_value = base64_encode($rule["value"]);
             // NULL <> value is UNKNOWN, so preserve NULL explicitly.
-            $conditions[] = "{$quoted_column} IS NULL OR {$quoted_column} <> FROM_BASE64('{$encoded_value}')";
+            $conditions[] = "({$quoted_column} IS NULL OR {$quoted_column} <> FROM_BASE64('{$encoded_value}'))";
         }
         return $conditions;
     }
@@ -801,6 +831,7 @@ class DatabaseRowsReader {
                 isset($values[0], $values[1])
                 && strcasecmp($values[1], "BASE TABLE") === 0
                 && !$excluded
+                && ( $this->multisite_selection === null || $this->multisite_selection->includes_table($values[0]) )
             ) {
                 $this->tables_to_process[] = $values[0];
             }
