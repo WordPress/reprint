@@ -730,7 +730,7 @@ class ProductionDropInRemovalTest extends TestCase
         $state['webhost'] = 'other';
         $state['preflight']['data']['wp_content']['roots'] = [
             ['mu_plugins' => [
-                ['name' => 'mu-plugin.php', 'type' => 'file'],
+                ['name' => 'mu-plugin.php', 'type' => 'file', 'headers' => ['name' => 'WP Engine System']],
                 ['name' => 'wpengine-common', 'type' => 'dir'],
             ]],
         ];
@@ -740,7 +740,7 @@ class ProductionDropInRemovalTest extends TestCase
         mkdir($mu_plugins . '/wpengine-common', 0755, true);
         // WP Engine's loader requires its package even after moving to another host.
         // https://github.com/Gnovus-Inc/sports-nerd-nonsense/blob/6dbc25ecf0db13c7ea82d81b9d32ea7114589001/wp-content/mu-plugins/mu-plugin.php#L18
-        file_put_contents($mu_plugins . '/mu-plugin.php', "<?php require_once __DIR__ . '/wpengine-common/plugin.php';");
+        file_put_contents($mu_plugins . '/mu-plugin.php', "<?php\n/* Plugin Name: WP Engine System */\nrequire_once __DIR__ . '/wpengine-common/plugin.php';");
         file_put_contents($mu_plugins . '/wpengine-common/plugin.php', "<?php // WP Engine package\n");
         file_put_contents($mu_plugins . '/custom.php', "<?php echo 'custom-plugin-loaded';");
 
@@ -784,15 +784,20 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testWpengineRemovesPlatformMuPluginsAndPreservesCustomMuPlugins(): void
     {
-        $this->writeState(array_replace_recursive(
-            ['webhost' => 'wpengine'],
-            $this->preflightWithoutWpcloudSignals('/nas/content/live/example'),
-        ));
+        $state = $this->preflightWithoutWpcloudSignals('/nas/content/live/example');
+        $state['webhost'] = 'wpengine';
+        $state['preflight']['data']['wp_content']['roots'] = [
+            ['mu_plugins' => [[
+                'name' => 'mu-plugin.php', 'type' => 'file',
+                'headers' => ['name' => 'WP Engine System'],
+            ]]],
+        ];
+        $this->writeState($state);
 
         $mu_plugins = $this->fsRoot . '/wp-content/mu-plugins';
         mkdir($mu_plugins . '/wpengine-common', 0755, true);
         mkdir($mu_plugins . '/wpe-update-source-selector', 0755, true);
-        file_put_contents($mu_plugins . '/mu-plugin.php', "<?php // WP Engine loader\n");
+        file_put_contents($mu_plugins . '/mu-plugin.php', "<?php\n/* Plugin Name: WP Engine System */\n");
         file_put_contents($mu_plugins . '/stop-long-comments.php', "<?php // WP Engine comment guard\n");
         file_put_contents($mu_plugins . '/my-custom-plugin.php', "<?php // custom\n");
 

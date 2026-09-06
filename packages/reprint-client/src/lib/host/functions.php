@@ -165,7 +165,6 @@ function excluded_plugins(array $preflight_data): array
         // update-source layout. Its standalone password and comment-policy
         // plugins are portable and stay installed.
         'wp-content/plugins/wp-engine-smart-plugin-manager',
-        'wp-content/mu-plugins/wpengine-common',
         'wp-content/mu-plugins/wpe-cache-plugin',
         'wp-content/mu-plugins/wpe-cache-plugin.php',
         'wp-content/mu-plugins/wpe-update-source-selector',
@@ -188,21 +187,22 @@ function excluded_plugins(array $preflight_data): array
         $local_paths[] = 'wp-content/object-cache.php';
         $local_paths[] = 'wp-content/advanced-cache.php';
     }
-    // mu-plugin.php is WP Engine's loader, but its name is otherwise generic.
-    if (isset($matching_hosts['wpengine'])) {
-        $local_paths[] = 'wp-content/mu-plugins/mu-plugin.php';
-    }
     // A copied WP Engine loader still requires wpengine-common after the site
     // moves to another host. Exclude the pair without changing host detection.
-    // A generic mu-plugin.php alone does not identify the WP Engine loader.
+    // WP Engine documents the WP Engine System display name for this loader.
+    // A customer can also call a file mu-plugin.php, so that name alone must
+    // never authorize removing it. Older exporters without headers leave the
+    // ambiguous loader and its package together, not a missing dependency.
     foreach ($preflight_data['wp_content']['roots'] ?? [] as $root) {
-        $mu_plugin_names = array_column($root['mu_plugins'] ?? [], 'name');
-        if (
-            in_array('mu-plugin.php', $mu_plugin_names, true)
-            && in_array('wpengine-common', $mu_plugin_names, true)
-        ) {
-            $local_paths[] = 'wp-content/mu-plugins/mu-plugin.php';
-            break;
+        foreach ($root['mu_plugins'] ?? [] as $plugin) {
+            $name = $plugin['name'] ?? '';
+            if (( $plugin['type'] ?? '' ) === 'file'
+                && ( $plugin['headers']['name'] ?? '' ) === 'WP Engine System'
+                && is_string($name) && basename($name) === $name
+                && substr($name, -4) === '.php') {
+                $local_paths[] = 'wp-content/mu-plugins/wpengine-common';
+                $local_paths[] = 'wp-content/mu-plugins/' . $name;
+            }
         }
     }
 
