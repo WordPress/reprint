@@ -1,0 +1,92 @@
+{
+  "active_resumable_command": {
+    "command_name": null,
+    "completion_state": null,
+    "current_stage": null,
+    "remote_cursor": null
+  },
+  "preflight": null,
+  "remote_protocol_version": null,
+  "version": null,
+  "webhost": null,
+  "follow_symlinks": true,
+  "files_pull_mode": "catch-up",
+  "local_followed_symlinks_root_fingerprint": null,
+  "fs_root_nonempty_behavior": "error",
+  "filter": "none",
+  "user_agent": null,
+  "max_allowed_packet": null,
+  "resolved_path_mappings_fingerprint": null,
+  "files_pull_path_selection_fingerprint": null,
+  "files_pull_summary": {
+    "files_pulled": 0
+  },
+  "db_index": {
+    "file": null,
+    "tables": 0,
+    "rows_estimated": 0,
+    "bytes": 0,
+    "updated_at": null
+  },
+  "diff": {
+    "index_diff_cursor": {
+      "old_index_byte_offset": 0,
+      "new_index_byte_offset": 0,
+      "preceding_new_index_entry_path_b64": null
+    },
+    "fetch_list_byte_offset": 0,
+    "pull_index_wal_byte_offset": 0
+  },
+  "index": {
+    "cursor": null
+  },
+  "fetch": {
+    "offset": 0,
+    "next_offset": 0,
+    "batch_file": null,
+    "cursor": null,
+    "batch_entries": 0
+  },
+  "current_file": null,
+  "current_file_bytes": null,
+  "sql_bytes": null,
+  "sql_statements_counted": 0,
+  "apply": {
+    "statements_executed": 0,
+    "bytes_read": 0,
+    "rewrite_url": null,
+    "target_engine": null,
+    "target_db": null,
+    "target_host": null,
+    "target_port": null,
+    "target_user": null,
+    "target_pass": null,
+    "target_sqlite_path": null,
+    "remote_paths_removed_from_local_site": []
+  },
+  "database_url_rewrite": {
+    "cursor": null,
+    "records_processed": 0,
+    "records_changed": 0,
+    "tables_started": 0,
+    "current_table": null,
+    "rewrite_url": null,
+    "target": null
+  },
+  "sql_output": null,
+  "mysql_host": null,
+  "mysql_port": null,
+  "mysql_user": null,
+  "mysql_database": null,
+  "consecutive_interrupted_responses": 0,
+  "tuning": {
+    "config": [],
+    "state": []
+  },
+  "pull_pipeline": {
+    "started_by_command": null,
+    "stage_sequence": [],
+    "last_completed_stage": null,
+    "has_completed_once": false
+  }
+}

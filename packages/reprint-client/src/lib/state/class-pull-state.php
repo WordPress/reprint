@@ -74,6 +74,10 @@ class PullState
     public ?string $current_file = null;
     /** @var int|null Expected bytes written to the current file. */
     public ?int $current_file_bytes = null;
+    /** @var array<string,string>|null URL mappings bound to this file index. */
+    public ?array $css_url_mapping = null;
+    /** @var array{pending_b64:string,previous_byte_b64:string}|null Unwritten CSS prefix at the saved file cursor. */
+    public ?array $current_css_cursor = null;
     /** @var int|null Expected SQL file size recorded for crash recovery. */
     public ?int $sql_bytes = null;
     /** @var int SQL statements counted while streaming db.sql. */
@@ -119,7 +123,13 @@ class PullState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $data += ['files_pull_mode' => 'catch-up'];
+        // Older clients copied CSS verbatim. Preserve that choice on resume;
+        // enabling rewriting mid-download would mix raw and rewritten bytes.
+        $data += [
+            'files_pull_mode' => 'catch-up',
+            'css_url_mapping' => [],
+            'current_css_cursor' => null,
+        ];
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
         $state->preflight = $data['preflight'];
@@ -147,6 +157,8 @@ class PullState
         $state->fetch = FetchListProgressState::from_array($data['fetch']);
         $state->current_file = $data['current_file'];
         $state->current_file_bytes = $data['current_file_bytes'];
+        $state->css_url_mapping = $data['css_url_mapping'];
+        $state->current_css_cursor = $data['current_css_cursor'];
         $state->sql_bytes = $data['sql_bytes'];
         $state->sql_statements_counted = $data['sql_statements_counted'];
         $state->apply = DatabaseApplyCommandState::from_array($data['apply']);
@@ -253,6 +265,8 @@ class PullState
             'fetch' => $this->fetch->to_array(),
             'current_file' => $this->current_file,
             'current_file_bytes' => $this->current_file_bytes,
+            'css_url_mapping' => $this->css_url_mapping,
+            'current_css_cursor' => $this->current_css_cursor,
             'sql_bytes' => $this->sql_bytes,
             'sql_statements_counted' => $this->sql_statements_counted,
             'apply' => $this->apply->to_array(),

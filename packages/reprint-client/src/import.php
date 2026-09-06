@@ -715,6 +715,29 @@ class ImportClient
 
         if ($assert_remap) {
             $this->assert_resolved_path_mappings_consistent();
+            $this->resolve_new_site_url_option($options);
+            $url_mapping = [];
+            foreach ($options['rewrite_url'] ?? [] as [$source_url, $target_url]) {
+                $url_mapping[$source_url] = $target_url;
+            }
+            ksort($url_mapping, SORT_STRING);
+            $saved_mapping = $this->get_state()->css_url_mapping;
+            if ($saved_mapping !== null && $url_mapping !== [] && $saved_mapping !== $url_mapping) {
+                throw new RuntimeException(
+                    'Cannot change CSS URL mappings while reusing the remote file index. '
+                    . 'Use the original URL mappings, or a new --state-dir and empty --fs-root.'
+                );
+            }
+            if ($saved_mapping === null) {
+                if ($url_mapping !== [] && is_file($this->remote_index_file) && filesize($this->remote_index_file) > 0) {
+                    throw new RuntimeException(
+                        'CSS URL rewriting requires a fresh file download. '
+                        . 'Use a new --state-dir and empty --fs-root.'
+                    );
+                }
+                $this->get_state()->css_url_mapping = $url_mapping;
+                $this->save_state();
+            }
         }
 
         $this->remote_to_local_path_mapper = null;
@@ -7550,6 +7573,12 @@ class ImportClient
             if ($context->file_handle) {
                 $context->file_path = $tracked_file;
                 $context->file_bytes_written = $tracked_bytes;
+                if ($this->get_state()->current_css_cursor !== null) {
+                    $context->css_url_rewriter = new CssUrlRewriteStream(
+                        $this->get_state()->css_url_mapping ?? [],
+                        $this->get_state()->current_css_cursor
+                    );
+                }
                 $this->audit_log(
                     sprintf(
                         "RESUME FILE | Re-opened %s at %d bytes for continued download",
@@ -7581,11 +7610,11 @@ class ImportClient
             // while file_bytes_written may still lag; at is_streaming_close
             // the bytes are on disk and we force a per-part checkpoint.
             // Snapshot the file boundary before handle_file_chunk() may close
-            // the file so a stop after the close still retains its path and size.
+            // the file so a stop after the close still retains its path. The
+            // context keeps the final size, including the CSS tail written on close.
             $is_streaming_body = !empty($chunk["is_streaming_body"]);
             $is_streaming_close = !empty($chunk["is_streaming_close"]);
             $file_path_at_completed_part = null;
-            $file_bytes_at_completed_part = null;
             if (
                 $is_streaming_close
                 && $context->file_handle
@@ -7597,7 +7626,6 @@ class ImportClient
                     );
                 }
                 $file_path_at_completed_part = $context->file_path;
-                $file_bytes_at_completed_part = $context->file_bytes_written;
             }
 
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
@@ -7682,7 +7710,7 @@ class ImportClient
                         $this->get_state()->current_file =
                             $file_path_at_completed_part;
                         $this->get_state()->current_file_bytes =
-                            $file_bytes_at_completed_part;
+                            $context->file_bytes_written;
                     } elseif ($context->file_handle && $context->file_path) {
                         // Flush to ensure bytes are on disk before saving state.
                         if (!fflush($context->file_handle)) {
@@ -7697,6 +7725,8 @@ class ImportClient
                         $this->get_state()->current_file = null;
                         $this->get_state()->current_file_bytes = null;
                     }
+                    $this->get_state()->current_css_cursor = $context->css_url_rewriter === null
+                        ? null : $context->css_url_rewriter->get_cursor();
                     $this->pull_index_journal->flush();
                     $this->get_state()->fetch->cursor = $cursor;
                     $this->save_state();
@@ -7756,9 +7786,12 @@ class ImportClient
             }
             $this->get_state()->current_file = $context->file_path;
             $this->get_state()->current_file_bytes = $context->file_bytes_written;
+            $this->get_state()->current_css_cursor = $context->css_url_rewriter === null
+                ? null : $context->css_url_rewriter->get_cursor();
         } else {
             $this->get_state()->current_file = null;
             $this->get_state()->current_file_bytes = null;
+            $this->get_state()->current_css_cursor = null;
         }
         $this->save_state();
 
@@ -8327,6 +8360,7 @@ class ImportClient
             // Clear this batch's progress tracking, as it's going to be rebuilt & restarted.
             $this->get_state()->current_file = null;
             $this->get_state()->current_file_bytes = null;
+            $this->get_state()->current_css_cursor = null;
             $this->files_pulled = 0;
         }
 
@@ -10544,14 +10578,26 @@ class ImportClient
                 );
             }
             $context->file_path = $local_absolute_path;
-            $context->file_ctime = (int) ($headers["x-file-ctime"] ?? 0);
             $context->file_bytes_written = 0;  // Reset byte counter for new file
+            $context->css_url_rewriter = null;
+            if (strtolower(pathinfo($path, PATHINFO_EXTENSION)) === 'css' && $this->get_state()->css_url_mapping) {
+                $context->css_url_rewriter = new CssUrlRewriteStream($this->get_state()->css_url_mapping);
+            }
+        }
+
+        // Continuation parts carry the same file metadata. A resumed request
+        // opens the handle without a ctime; restore it before recording the file.
+        if ($context->file_handle && isset($headers['x-file-ctime'])) {
+            $context->file_ctime = (int) $headers['x-file-ctime'];
         }
 
         // Write body data if present
-        if (isset($chunk["body"]) && $chunk["body"] !== "") {
+        if (( isset($chunk["body"]) && $chunk["body"] !== "" ) || ( $is_last && $context->css_url_rewriter !== null )) {
             if ($context->file_handle) {
-                $data = $chunk["body"];
+                $data = $chunk["body"] ?? '';
+                if ($context->css_url_rewriter !== null) {
+                    $data = $context->css_url_rewriter->rewrite_chunk($data, $is_last);
+                }
                 $bytes = fwrite($context->file_handle, $data);
                 if ($bytes === false || $bytes !== strlen($data)) {
                     throw new RuntimeException(
@@ -10605,10 +10651,12 @@ class ImportClient
             $context->file_handle = null;
             $context->file_path = null;
             $context->file_ctime = null;
-            $context->file_bytes_written = 0;
+            $context->css_url_rewriter = null;
+            // Keep the final byte count until the part checkpoint is saved.
             // Clear crash recovery tracking - file is complete
             $this->get_state()->current_file = null;
             $this->get_state()->current_file_bytes = null;
+            $this->get_state()->current_css_cursor = null;
         }
     }
 
@@ -12388,6 +12436,7 @@ class ImportClient
         $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
         $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
         $this->state->resolved_path_mappings_fingerprint = $previous_state->resolved_path_mappings_fingerprint;
+        $this->state->css_url_mapping = $previous_state->css_url_mapping;
         $this->state->pull_pipeline = $previous_state->pull_pipeline;
     }
 
@@ -13289,7 +13338,7 @@ if (
             'target' => 'rewrite_url',
             'argument_labels' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
+            'commands' => ['pull', 'pull-files', 'files-pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
         ],
         [
             'name' => 'new-site-url',
@@ -13297,7 +13346,7 @@ if (
             'target' => 'new_site_url',
             'placeholder' => 'URL',
             'help' => 'New site URL (auto-creates --rewrite-url from export URL origin)',
-            'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
+            'commands' => ['pull', 'pull-files', 'files-pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
         ],
         [
             'name' => 'remap',

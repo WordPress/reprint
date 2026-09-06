@@ -505,6 +505,23 @@ The command returns one of three exit codes:
 - 1: failure
 - 2: partial completion, needs re-running
 
+If the site URL changes, pass `--new-site-url` or `--rewrite-url FROM TO`
+to the first `files-pull` as well. The download rewrites mapped URLs in `.css`
+files, including generated stylesheets under uploads. It preserves the files
+instead of flushing builder caches. `pull` applies its URL mappings to both
+CSS downloads and the database; `pull-files` also accepts these options.
+
+CSS rewriting supports literal HTTP(S), protocol-relative, and slash-escaped
+URL prefixes. It leaves relative URLs, other domains, and other file types
+unchanged. CSS hexadecimal escapes and URLs containing user information are
+not rewritten. Interrupted downloads retain the unfinished URL prefix with
+the file cursor, so a URL split across requests is still rewritten once.
+
+File URL mappings remain bound to the saved remote index. Later downloads
+reuse them when the options are omitted. To use different mappings, start
+with a new state directory and an empty filesystem root. A later `db-apply`
+or `db-rewrite-urls` does not change files already downloaded.
+
 #### Step 5 — Apply the database with domain rewriting.
 
 If the site's domain is changing (e.g. migrating from `https://old-site.com`
