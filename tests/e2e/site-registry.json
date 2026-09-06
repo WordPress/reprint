@@ -195,6 +195,9 @@
     },
     "multisite-database": {
       "port": 8143
+    },
+    "multisite-admin": {
+      "port": 8144
     }
   }
 }
