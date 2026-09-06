@@ -67,6 +67,7 @@ class SettingsPage {
             'This network token can pull any site in this network. Use the selected site’s home URL followed by ?reprint-api. Each pull creates a separate one-site network. Push is not supported.',
             'reprint'
         ) . '</p>';
+        $this->render_configuration_status(get_configuration_state());
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
         echo '<input type="hidden" name="action" value="reprint_server_save_network_token" />';
         wp_nonce_field('reprint_server_save_network_token');
@@ -267,9 +268,15 @@ class SettingsPage {
             $message = '<strong><code>secret.php</code> '
                 . esc_html__('override is active.', 'reprint')
                 . '</strong> '
-                . esc_html__(
-                    'This page and the REST API update only the site option. Remove secret.php to use the stored option value.',
-                    'reprint'
+                . ( is_multisite()
+                    ? esc_html__(
+                        'This page updates only the network option. Remove secret.php to use the stored option value.',
+                        'reprint'
+                    )
+                    : esc_html__(
+                        'This page and the REST API update only the site option. Remove secret.php to use the stored option value.',
+                        'reprint'
+                    )
                 );
             $this->render_notice('warning', $message);
         }
