@@ -20,6 +20,8 @@ class SettingsPage {
 
     private function __construct() {
         add_action('admin_menu', [$this, 'add_admin_menu']);
+        add_action('network_admin_menu', [$this, 'add_network_admin_menu']);
+        add_action('admin_post_reprint_server_save_network_token', [$this, 'handle_network_token_save']);
         add_action('admin_init', [$this, 'register_settings_fields']);
         add_action('admin_post_reprint_server_save_push_access', [$this, 'handle_push_access_save']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
@@ -43,6 +45,54 @@ class SettingsPage {
         );
     }
 
+    /** Network credentials are configured only by network administrators. */
+    public function add_network_admin_menu(): void {
+        $this->page_hook = add_submenu_page(
+            'settings.php',
+            __('Reprint Server', 'reprint'),
+            __('Reprint Server', 'reprint'),
+            'manage_network_options',
+            'reprint-server',
+            [$this, 'render_network_admin_page']
+        );
+    }
+
+    /** Render a network-option form without the site Settings API. */
+    public function render_network_admin_page(): void {
+        if (!is_multisite() || !current_user_can('manage_network_options')) {
+            return;
+        }
+        echo '<div class="wrap"><h1>' . esc_html__('Reprint Server', 'reprint') . '</h1>';
+        echo '<p>' . esc_html__(
+            'This network token can pull any site in this network. Use the selected site’s home URL followed by ?reprint-api. Each pull creates a separate one-site network. Push is not supported.',
+            'reprint'
+        ) . '</p>';
+        $this->render_configuration_status(get_configuration_state());
+        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+        echo '<input type="hidden" name="action" value="reprint_server_save_network_token" />';
+        wp_nonce_field('reprint_server_save_network_token');
+        $this->render_connection_token_field();
+        submit_button();
+        echo '</form></div>';
+    }
+
+    /** Validate network capability and nonce before updating the network token. */
+    public function handle_network_token_save(): void {
+        if (!is_multisite() || !current_user_can('manage_network_options')) {
+            wp_die(esc_html__('You are not allowed to manage this network.', 'reprint'));
+        }
+        check_admin_referer('reprint_server_save_network_token');
+        $connection_token = isset($_POST[CONNECTION_TOKEN_OPTION]) && is_string($_POST[CONNECTION_TOKEN_OPTION])
+            ? sanitize_text_field(wp_unslash($_POST[CONNECTION_TOKEN_OPTION]))
+            : '';
+        $result = change_connection_token($connection_token);
+        if ($result === 'storage_failure') {
+            wp_die(esc_html__('The network connection token could not be saved.', 'reprint'));
+        }
+        wp_safe_redirect(network_admin_url('settings.php?page=reprint-server'));
+        exit;
+    }
+
     /** Register the connection-token section rendered by the Settings API. */
     public function register_settings_fields(): void {
         add_settings_section(
@@ -63,7 +113,9 @@ class SettingsPage {
 
     /** Add the Settings link to the plugin row. */
     public function add_settings_link(array $links): array {
-        $url = admin_url('tools.php?page=reprint-server');
+        $url = is_multisite()
+            ? network_admin_url('settings.php?page=reprint-server')
+            : admin_url('tools.php?page=reprint-server');
         array_unshift(
             $links,
             '<a href="' . esc_url($url) . '">' . esc_html__('Settings', 'reprint') . '</a>'
@@ -137,6 +189,7 @@ class SettingsPage {
     /** Render the bundled Tools page. */
     public function render_admin_page(): void {
         if (is_multisite()) {
+            $this->render_network_admin_page();
             return;
         }
         if (!current_user_can('manage_options')) {
@@ -215,9 +268,15 @@ class SettingsPage {
             $message = '<strong><code>secret.php</code> '
                 . esc_html__('override is active.', 'reprint')
                 . '</strong> '
-                . esc_html__(
-                    'This page and the REST API update only the site option. Remove secret.php to use the stored option value.',
-                    'reprint'
+                . ( is_multisite()
+                    ? esc_html__(
+                        'This page updates only the network option. Remove secret.php to use the stored option value.',
+                        'reprint'
+                    )
+                    : esc_html__(
+                        'This page and the REST API update only the site option. Remove secret.php to use the stored option value.',
+                        'reprint'
+                    )
                 );
             $this->render_notice('warning', $message);
         }
