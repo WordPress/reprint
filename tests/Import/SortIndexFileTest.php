@@ -119,7 +119,7 @@ final class SortIndexFileTest extends TestCase
         $this->assertIsResource($input);
         $path_prefix = '/wp-content/uploads/';
         $path_suffix = '-' . str_repeat('x', 180) . '.jpg';
-        for ($index = 100000; $index >= 1; --$index) {
+        for ($index = 500000; $index >= 1; --$index) {
             fwrite(
                 $input,
                 $this->index_line(
@@ -131,17 +131,22 @@ final class SortIndexFileTest extends TestCase
         fclose($input);
         $input_size = filesize($path);
         $this->assertIsInt($input_size);
+        $this->assertGreaterThan(128 * 1024 * 1024, $input_size);
 
         // The PHPUnit workflow already pulls this image for its MariaDB
-        // service. Run only GNU sort in a 64 MiB cgroup so the limit includes
-        // the complete child process, as it does on a constrained host.
+        // service. The cgroup counts the complete child process and file
+        // cache, not just sort's 32 MiB buffer. Leave cache headroom at
+        // 128 MiB; the input itself exceeds that limit so an in-memory
+        // sort still fails.
+        $container_name = 'reprint-sort-memory-' . uniqid();
         $sort_directory = $this->temporary_directory . '/memory-limited-sort-bin';
         mkdir($sort_directory);
         file_put_contents(
             $sort_directory . '/sort',
             "#!/bin/sh\nexec " . escapeshellarg($docker_path)
-                . " run --rm --network=none"
-                . " --memory=64m --memory-swap=64m"
+                . " run --network=none --name " . escapeshellarg($container_name)
+                . " --memory=128m --memory-swap=128m"
+                . " --env LC_ALL"
                 . ' -v ' . escapeshellarg(
                     $this->temporary_directory . ':' . $this->temporary_directory
                 )
@@ -152,16 +157,25 @@ final class SortIndexFileTest extends TestCase
         $original_path = getenv('PATH');
         putenv('PATH=' . $sort_directory . ':' . $original_path);
         try {
+            $completed = try_exec_sort_index_file(
+                $path,
+                $path . '.sorted',
+                fn(string $line): ?string => $this->index_path_from_line($line)
+            );
+            $container_state = [];
+            exec(
+                escapeshellarg($docker_path) . ' inspect --format ' . escapeshellarg('{{json .State}}')
+                    . ' ' . escapeshellarg($container_name) . ' 2>&1',
+                $container_state
+            );
             $this->assertTrue(
-                try_exec_sort_index_file(
-                    $path,
-                    $path . '.sorted',
-                    fn(string $line): ?string => $this->index_path_from_line($line)
-                ),
-                'GNU sort must complete while the child process is limited to 64 MiB.'
+                $completed,
+                'GNU sort must complete while the child process is limited to 128 MiB. '
+                    . implode("\n", $container_state)
             );
         } finally {
             putenv('PATH=' . $original_path);
+            exec(escapeshellarg($docker_path) . ' rm -f ' . escapeshellarg($container_name) . ' >/dev/null 2>&1');
         }
 
         $sorted_input = fopen($path, 'r');
