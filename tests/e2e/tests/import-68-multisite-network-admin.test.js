@@ -69,6 +69,39 @@ describe('Multisite network token administration over HTTP', () => {
             assert.deepEqual(siteOptions, []);
         } finally { await connection.end(); }
     });
+
+    it('warns that secret.php keeps controlling access after a network token change', async () => {
+        const secretFile = join(getSiteDir(site), 'wp-content/plugins/reprint-server/secret.php');
+        const legacyToken = 'legacy-network-token';
+        const changedToken = 'changed-network-token';
+        execFileSync('sudo', ['tee', secretFile], { input: `<?php return '${legacyToken}';\n`, stdio: ['pipe', 'ignore', 'pipe'] });
+        try {
+            const cookie = await login('admin', 'password');
+            const page = await fetch(settingsUrl, { headers: { Cookie: cookie } });
+            const html = await page.text();
+            assert.equal(page.status, 200, html);
+            assert.ok(html.includes('<code>secret.php</code> override is active.'));
+            assert.ok(html.includes('This page updates only the network option.'));
+            assert.ok(html.includes('Remove secret.php to use the stored option value.'));
+            const nonce = html.match(/name="_wpnonce" value="([^"]+)"/)?.[1];
+            assert.ok(nonce);
+            const save = await fetch(actionUrl, {
+                method: 'POST', redirect: 'manual', headers: { Cookie: cookie },
+                body: new URLSearchParams({ action: 'reprint_server_save_network_token', _wpnonce: nonce, [option]: changedToken }),
+            });
+            assert.equal(save.status, 302, await save.text());
+            const savedPage = await fetch(settingsUrl, { headers: { Cookie: cookie } });
+            const savedHtml = await savedPage.text();
+            assert.ok(savedHtml.includes(`value="${changedToken}"`));
+            assert.ok(savedHtml.includes('<code>secret.php</code> override is active.'));
+            for (const [connectionToken, status] of [[legacyToken, 200], [changedToken, 403]]) {
+                const response = await fetch(`${origin}/shop/?reprint-api&endpoint=preflight&multisite_mode=one-site-network-v1`, {
+                    headers: new HmacClient(connectionToken).getAuthHeaders(''),
+                });
+                assert.equal(response.status, status, await response.text());
+            }
+        } finally { execFileSync('sudo', ['rm', '-f', secretFile]); }
+    });
 });
 
 function resetToken() {
