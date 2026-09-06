@@ -88,7 +88,8 @@ function matching_host_analyzer_scores(array $preflight_data): array
 /**
  * Resolve plugins, MU plugins, and drop-ins excluded from a local import.
  *
- * Named plugin paths are excluded from every import. Generic drop-ins are
+ * Named plugin paths are excluded from every import. WP Engine's shared
+ * loader and package require its public plugin header. Generic drop-ins are
  * included only when current preflight paths identify WP Cloud or WP Engine.
  * Source paths use the actual WordPress directories reported by preflight,
  * including custom plugin and MU-plugin locations.
@@ -175,7 +176,6 @@ function excluded_plugins(array $preflight_data): array
         // platform MU plugins. The cache and update-source files include its
         // current plugin layout.
         'wp-content/plugins/wp-engine-smart-plugin-manager',
-        'wp-content/mu-plugins/wpengine-common',
         'wp-content/mu-plugins/slt-force-strong-passwords.php',
         'wp-content/mu-plugins/force-strong-passwords',
         'wp-content/mu-plugins/stop-long-comments.php',
@@ -205,21 +205,22 @@ function excluded_plugins(array $preflight_data): array
         $local_paths[] = 'wp-content/object-cache.php';
         $local_paths[] = 'wp-content/advanced-cache.php';
     }
-    // mu-plugin.php is WP Engine's loader, but its name is otherwise generic.
-    if (isset($matching_hosts['wpengine'])) {
-        $local_paths[] = 'wp-content/mu-plugins/mu-plugin.php';
-    }
     // A copied WP Engine loader still requires wpengine-common after the site
     // moves to another host. Exclude the pair without changing host detection.
-    // A generic mu-plugin.php alone does not identify the WP Engine loader.
+    // WP Engine documents the WP Engine System display name for this loader.
+    // A customer can also call a file mu-plugin.php, so that name alone must
+    // never authorize removing it. Older exporters without headers leave the
+    // ambiguous loader and its package together, not a missing dependency.
     foreach ($preflight_data['wp_content']['roots'] ?? [] as $root) {
-        $mu_plugin_names = array_column($root['mu_plugins'] ?? [], 'name');
-        if (
-            in_array('mu-plugin.php', $mu_plugin_names, true)
-            && in_array('wpengine-common', $mu_plugin_names, true)
-        ) {
-            $local_paths[] = 'wp-content/mu-plugins/mu-plugin.php';
-            break;
+        foreach ($root['mu_plugins'] ?? [] as $plugin) {
+            $name = $plugin['name'] ?? '';
+            if (( $plugin['type'] ?? '' ) === 'file'
+                && ( $plugin['headers']['name'] ?? '' ) === 'WP Engine System'
+                && is_string($name) && basename($name) === $name
+                && substr($name, -4) === '.php') {
+                $local_paths[] = 'wp-content/mu-plugins/wpengine-common';
+                $local_paths[] = 'wp-content/mu-plugins/' . $name;
+            }
         }
     }
 

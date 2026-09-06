@@ -372,16 +372,18 @@ describe.each([
     });
 });
 
-// Use harmless PHP fixtures, not the real host services. The same complete tree
-// is installed on the source and as stale local files before apply-runtime.
-// Regular plugins have valid plugin headers so WordPress recognizes them.
+/**
+ * Use harmless PHP fixtures, not the real host services. The same complete tree
+ * is installed on the source and as stale local files before apply-runtime.
+ * Regular plugins have valid plugin headers so WordPress recognizes them.
+ */
 function writeExcludedPluginFiles(root, paths) {
     for (const path of paths) {
         const absolutePath = join(root, path);
         if (path.endsWith('.php')) {
             mkdirSync(dirname(absolutePath), { recursive: true });
             const contents = path.endsWith('/mu-plugin.php')
-                ? "<?php require_once __DIR__ . '/wpengine-common/plugin.php';"
+                ? "<?php\n/* Plugin Name: WP Engine System */\nrequire_once __DIR__ . '/wpengine-common/plugin.php';"
                 : '<?php // Source-host MU-plugin fixture';
             writeFileSync(absolutePath, contents);
         } else {

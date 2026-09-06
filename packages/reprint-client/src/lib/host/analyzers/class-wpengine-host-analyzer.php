@@ -15,8 +15,13 @@ class WpengineHostAnalyzer implements HostAnalyzer {
     public static function score(array $preflight_data): float
     {
         $runtime = $preflight_data['runtime'] ?? [];
-        foreach (['document_root', 'script_filename', 'cwd'] as $path_name) {
-            $path = $runtime[$path_name] ?? null;
+        $paths = [
+            $runtime['document_root'] ?? null,
+            $runtime['script_filename'] ?? null,
+            $runtime['cwd'] ?? null,
+            $preflight_data['database']['wp']['paths_urls']['abspath'] ?? null,
+        ];
+        foreach ($paths as $path) {
             if (!is_string($path)) {
                 continue;
             }

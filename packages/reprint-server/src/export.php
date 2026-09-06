@@ -2433,6 +2433,7 @@ function endpoint_preflight(array $config): array
                 $root_entry["mu_plugins"][] = [
                     "name" => $entry,
                     "type" => is_dir($path) ? "dir" : "file",
+                    "headers" => is_file($path) ? reprint_read_preflight_plugin_headers($path) : [],
                 ];
             }
             usort(
@@ -2603,6 +2604,38 @@ function endpoint_preflight(array $config): array
         "status" => $response["ok"] ? "ok" : "error",
         "stats" => $response,
     ];
+}
+
+/**
+ * Read public plugin headers without loading the plugin or returning PHP code.
+ *
+ * WordPress also limits plugin header parsing to the first 8 KiB. The file
+ * contents and arbitrary constants must not enter the preflight response.
+ *
+ * @return array {
+ *     Recognized public metadata, or an empty array when unavailable or not UTF-8.
+ *     @type string $name Plugin Name header, when present.
+ * }
+ */
+function reprint_read_preflight_plugin_headers(string $path): array
+{
+    if (!is_readable($path)) {
+        return [];
+    }
+    $header = file_get_contents($path, false, null, 0, 8192);
+    if ($header === false) {
+        return [];
+    }
+    if (preg_match('/^[ \t\/*#@]*Plugin Name:(.*)$/mi', str_replace("\r", "\n", $header), $matches) !== 1) {
+        return [];
+    }
+    $name = trim(preg_replace('/\s*(?:\*\/|\?>).*/', '', $matches[1]));
+    // PHP comments may use legacy encodings; preflight JSON requires UTF-8.
+    // Omit an unreadable name rather than guessing which encoding it uses.
+    if (preg_match('//u', $name) !== 1) {
+        return [];
+    }
+    return ['name' => $name];
 }
 
 /**

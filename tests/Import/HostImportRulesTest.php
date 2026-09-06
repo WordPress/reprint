@@ -58,6 +58,7 @@ class HostImportRulesTest extends TestCase {
         $this->assertSame('other', \detect_host($preflight_data));
     }
 
+    /** The unconditional list does not include the shared WP Engine loader or package. */
     public function testListsEveryPluginExcludedFromAllImports(): void
     {
         $excluded_plugins = \excluded_plugins($this->preflight([], []));
@@ -104,7 +105,6 @@ class HostImportRulesTest extends TestCase {
                 'wp-content/plugins/spinupwp',
                 'wp-content/mu-plugins/vip-go-mu-plugins',
                 'wp-content/plugins/wp-engine-smart-plugin-manager',
-                'wp-content/mu-plugins/wpengine-common',
                 'wp-content/mu-plugins/slt-force-strong-passwords.php',
                 'wp-content/mu-plugins/force-strong-passwords',
                 'wp-content/mu-plugins/stop-long-comments.php',
@@ -125,6 +125,7 @@ class HostImportRulesTest extends TestCase {
         );
     }
 
+    /** Runtime path matches do not replace the public-header check for a shared loader. */
     public function testWpcloudRuntimeAndWpengineExclusionsAreAppliedIndependently(): void
     {
         $preflight_data = $this->preflight(
@@ -165,12 +166,14 @@ class HostImportRulesTest extends TestCase {
         $excluded_local_paths = array_column(\excluded_plugins($preflight_data), 'local_path');
         $this->assertContains('wp-content/object-cache.php', $excluded_local_paths);
         $this->assertContains('wp-content/advanced-cache.php', $excluded_local_paths);
-        $this->assertContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
+        $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
     }
 
+    /** Recognized loaders and packages use the reported custom MU-plugin directory. */
     public function testExcludedPluginSourcePathsUseDirectoriesReportedByPreflight(): void
     {
-        $preflight_data = $this->preflight([], []);
+        $preflight_data = $this->preflight([], ['mu-plugin.php', 'wpengine-common']);
+        $preflight_data['wp_content']['roots'][0]['mu_plugins'][0]['headers'] = ['name' => 'WP Engine System'];
         $preflight_data['runtime']['document_root'] = '/nas/content/live/example';
         $preflight_data['database']['wp']['paths_urls'] = [
             'abspath' => '/opt/wordpress/',
@@ -241,9 +244,11 @@ class HostImportRulesTest extends TestCase {
         $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
     }
 
+    /** The public header identifies a copied loader without changing the current host. */
     public function testCopiedWpengineLoaderIsExcludedWithoutSelectingWpengine(): void
     {
         $preflight_data = $this->preflight([], ['mu-plugin.php', 'wpengine-common']);
+        $preflight_data['wp_content']['roots'][0]['mu_plugins'][0]['headers'] = ['name' => 'WP Engine System'];
         $preflight_data['runtime']['document_root'] = '/var/www/html';
         $preflight_data['database']['wp']['paths_urls']['mu_plugins_dir'] = '/srv/custom-mu-plugins';
 
@@ -255,6 +260,29 @@ class HostImportRulesTest extends TestCase {
         $this->assertContains('/srv/custom-mu-plugins/wpengine-common', array_column($excluded_plugins, 'source_path'));
         $this->assertNotContains('wp-content/object-cache.php', array_column($excluded_plugins, 'local_path'));
         $this->assertNotContains('wp-content/advanced-cache.php', array_column($excluded_plugins, 'local_path'));
+    }
+
+    /** A shared filename and an unknown header do not identify platform code. */
+    public function testCustomerMuPluginAndPackageAreNotExcludedOnWpengine(): void
+    {
+        $preflight_data = $this->preflight([], ['mu-plugin.php', 'wpengine-common']);
+        $preflight_data['runtime']['document_root'] = '/nas/content/live/example';
+        foreach ([[], ['name' => 'Customer checkout rules']] as $headers) {
+            $preflight_data['wp_content']['roots'][0]['mu_plugins'][0]['headers'] = $headers;
+            $excluded_local_paths = array_column(\excluded_plugins($preflight_data), 'local_path');
+            $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
+            $this->assertNotContains('wp-content/mu-plugins/wpengine-common', $excluded_local_paths);
+        }
+    }
+
+    /** The documented WP Engine System header identifies a renamed loader. */
+    public function testRecognizedLoaderIsExcludedUnderItsActualFilename(): void
+    {
+        $preflight_data = $this->preflight([], ['platform-loader.php', 'wpengine-common']);
+        $preflight_data['wp_content']['roots'][0]['mu_plugins'][0]['headers'] = ['name' => 'WP Engine System'];
+        $excluded_local_paths = array_column(\excluded_plugins($preflight_data), 'local_path');
+        $this->assertContains('wp-content/mu-plugins/platform-loader.php', $excluded_local_paths);
+        $this->assertContains('wp-content/mu-plugins/wpengine-common', $excluded_local_paths);
     }
 
     public function testUnpairedGenericMuPluginIsNotExcluded(): void

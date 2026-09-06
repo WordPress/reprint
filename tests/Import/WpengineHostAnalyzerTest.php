@@ -45,6 +45,14 @@ class WpengineHostAnalyzerTest extends TestCase {
         $this->assertGreaterThanOrEqual(0.5, \WpengineHostAnalyzer::score($preflight));
     }
 
+    /** WordPress can live behind a different nginx entry path. */
+    public function testScoreIdentifiesCurrentWpengineWordpressRoot(): void
+    {
+        $preflight = $this->wpenginePreflight();
+        $preflight['database']['wp']['paths_urls']['abspath'] = '/nas/wp/www/my-site/';
+        $this->assertGreaterThanOrEqual(0.5, \WpengineHostAnalyzer::score($preflight));
+    }
+
     public function testDetectHostReturnsWpengine(): void
     {
         $preflight = $this->wpenginePreflight([
@@ -80,6 +88,7 @@ class WpengineHostAnalyzerTest extends TestCase {
         $this->assertSame(0.0, \WpengineHostAnalyzer::score($preflight));
     }
 
+    /** A current platform path excludes cache drop-ins, not a generic loader without headers. */
     public function testWpenginePathsAreExcludedFromTheImport(): void
     {
         $preflight = $this->wpenginePreflight([
@@ -90,6 +99,6 @@ class WpengineHostAnalyzerTest extends TestCase {
         $excluded_local_paths = array_column($excluded_plugins, 'local_path');
         $this->assertContains('wp-content/advanced-cache.php', $excluded_local_paths);
         $this->assertContains('wp-content/object-cache.php', $excluded_local_paths);
-        $this->assertContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
+        $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
     }
 }
