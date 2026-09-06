@@ -2587,7 +2587,7 @@ function endpoint_preflight(array $config): array
  * contents and arbitrary constants must not enter the preflight response.
  *
  * @return array {
- *     Recognized public metadata, or an empty array for an unreadable file.
+ *     Recognized public metadata, or an empty array when unavailable or not UTF-8.
  *     @type string $name Plugin Name header, when present.
  * }
  */
@@ -2603,7 +2603,13 @@ function reprint_read_preflight_plugin_headers(string $path): array
     if (preg_match('/^[ \t\/*#@]*Plugin Name:(.*)$/mi', str_replace("\r", "\n", $header), $matches) !== 1) {
         return [];
     }
-    return ['name' => trim(preg_replace('/\s*(?:\*\/|\?>).*/', '', $matches[1]))];
+    $name = trim(preg_replace('/\s*(?:\*\/|\?>).*/', '', $matches[1]));
+    // PHP comments may use legacy encodings; preflight JSON requires UTF-8.
+    // Omit an unreadable name rather than guessing which encoding it uses.
+    if (preg_match('//u', $name) !== 1) {
+        return [];
+    }
+    return ['name' => $name];
 }
 
 /**
