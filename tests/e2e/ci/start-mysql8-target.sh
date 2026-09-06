@@ -12,12 +12,16 @@ docker run --detach --name "$container" \
     --publish "127.0.0.1:${port}:3306" \
     mysql:8.0
 
+# The image first starts a socket-only server to initialize the database, then
+# shuts it down. Use TCP so readiness waits for the final server, not that
+# temporary server disappearing between this probe and the version query.
 ready=0
 for _attempt in $(seq 1 60); do
     if docker exec \
         --env MYSQL_PWD="$root_password" \
         "$container" \
-        mysql --user=root --execute='SELECT 1' >/dev/null 2>&1; then
+        mysql --protocol=TCP --host=127.0.0.1 \
+        --user=root --execute='SELECT 1' >/dev/null 2>&1; then
         ready=1
         break
     fi
@@ -34,7 +38,8 @@ version="$({
     docker exec \
         --env MYSQL_PWD="$root_password" \
         "$container" \
-        mysql --user=root --batch --skip-column-names --execute='SELECT VERSION()'
+        mysql --protocol=TCP --host=127.0.0.1 \
+        --user=root --batch --skip-column-names --execute='SELECT VERSION()'
 } 2>/dev/null)"
 if [[ "$version" != 8.0.* ]] || [[ "$version" == *MariaDB* ]]; then
     echo "Expected Oracle MySQL 8.0, got ${version}." >&2
