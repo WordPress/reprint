@@ -57,6 +57,7 @@ class MultisiteSelectionTest extends MySQLDumpProducerTestBase
         $this->create_network();
         $value = str_repeat('selected text ', 800);
         $this->pdo->prepare('UPDATE network_7_posts SET post_title = ?')->execute([$value]);
+        $this->pdo->prepare("UPDATE network_usermeta SET meta_value = ? WHERE umeta_id = 1")->execute([$value]);
         $options = [
             'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
             'max_statement_size' => 2048,
@@ -73,8 +74,33 @@ class MultisiteSelectionTest extends MySQLDumpProducerTestBase
         }
         $target = $this->executeDumpInNewDatabase($sql);
         $this->assertSame($value, $target->query('SELECT post_title FROM network_7_posts')->fetchColumn());
+        $this->assertSame($value, $target->query('SELECT meta_value FROM network_usermeta WHERE umeta_id = 1')->fetchColumn());
         $this->assertGreaterThan(20, $steps);
         $this->assertNotContains('network_8_posts', $target->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
+    }
+
+    /** Removing a content-free member must also stop subsequent source value reads. */
+    public function test_membership_removed_during_oversized_reads_stops_export(): void
+    {
+        $this->create_network();
+        $this->pdo->prepare('UPDATE network_usermeta SET meta_value = ? WHERE umeta_id = 1')
+            ->execute([str_repeat('selected text ', 800)]);
+        $producer = $this->createProducer([
+            'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+            'max_statement_size' => 2048,
+        ]);
+        $started_profile = false;
+        while ($producer->next_sql_fragment()) {
+            if (strpos($producer->get_sql_fragment(), 'UPDATE `network_usermeta`') === 0) {
+                $started_profile = true;
+                break;
+            }
+        }
+        $this->assertTrue($started_profile);
+        $this->pdo->exec("DELETE FROM network_usermeta WHERE user_id = 1 AND meta_key = 'network_7_capabilities'");
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Failed to fetch column substring for oversized row: meta_value');
+        $producer->next_sql_fragment();
     }
 
     /** A client cannot carry its database cursor from site 7 to site 8. */
