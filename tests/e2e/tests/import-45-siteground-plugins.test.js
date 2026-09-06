@@ -372,9 +372,11 @@ describe.each([
     });
 });
 
-// Use harmless PHP fixtures, not the real host services. The same complete tree
-// is installed on the source and as stale local files before apply-runtime.
-// Regular plugins have valid plugin headers so WordPress recognizes them.
+/**
+ * Use harmless PHP fixtures, not the real host services. The same complete tree
+ * is installed on the source and as stale local files before apply-runtime.
+ * Regular plugins have valid plugin headers so WordPress recognizes them.
+ */
 function writeExcludedPluginFiles(root, paths) {
     for (const path of paths) {
         const absolutePath = join(root, path);

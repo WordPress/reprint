@@ -88,6 +88,7 @@ class WpengineHostAnalyzerTest extends TestCase {
         $this->assertSame(0.0, \WpengineHostAnalyzer::score($preflight));
     }
 
+    /** A current platform path excludes cache drop-ins, not a generic loader without headers. */
     public function testWpenginePathsAreExcludedFromTheImport(): void
     {
         $preflight = $this->wpenginePreflight([

@@ -608,6 +608,7 @@ class ProductionDropInRemovalTest extends TestCase
 
     // ---- WP Engine-specific tests ----
 
+    /** Remove a recognized loader with its package so the remaining MU plugins still boot. */
     public function testCopiedWpengineLoaderDoesNotRequireRemovedPackageAfterCleanup(): void
     {
         $state = $this->preflightWithoutWpcloudSignals('/var/www/html');
@@ -666,6 +667,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertSame($custom_plugin, file_get_contents($mu_plugins . '/mu-plugin.php'));
     }
 
+    /** A public header selects the shared loader while unrelated customer code stays. */
     public function testWpengineRemovesPlatformMuPluginsAndPreservesCustomMuPlugins(): void
     {
         $state = $this->preflightWithoutWpcloudSignals('/nas/content/live/example');
