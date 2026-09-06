@@ -88,7 +88,7 @@ final class SortIndexFileTest extends TestCase
         );
     }
 
-    public function testSystemSortCompletesInsideTheCiMemoryLimit(): void
+    public function testSystemSortCompletesInsideTheProcessMemoryLimit(): void
     {
         if (getenv('GITHUB_ACTIONS') !== 'true' || PHP_VERSION_ID < 80400) {
             $this->markTestSkipped('The constrained-memory sort runs once in the PHPUnit CI matrix.');
@@ -134,10 +134,10 @@ final class SortIndexFileTest extends TestCase
         $this->assertGreaterThan(128 * 1024 * 1024, $input_size);
 
         // The PHPUnit workflow already pulls this image for its MariaDB
-        // service. The cgroup counts the complete child process and file
-        // cache, not just sort's 32 MiB buffer. Leave cache headroom at
-        // 128 MiB; the input itself exceeds that limit so an in-memory
-        // sort still fails.
+        // service. Bound the sort process's address space, not the cgroup's
+        // file cache: temporary-file writes also count against a cgroup limit.
+        // The input exceeds 128 MiB, so loading it all into the sort process
+        // still fails. Shared libraries and sort's buffers must fit together.
         $container_name = 'reprint-sort-memory-' . uniqid();
         $sort_directory = $this->temporary_directory . '/memory-limited-sort-bin';
         mkdir($sort_directory);
@@ -145,12 +145,13 @@ final class SortIndexFileTest extends TestCase
             $sort_directory . '/sort',
             "#!/bin/sh\nexec " . escapeshellarg($docker_path)
                 . " run --network=none --name " . escapeshellarg($container_name)
-                . " --memory=128m --memory-swap=128m"
                 . " --env LC_ALL"
                 . ' -v ' . escapeshellarg(
                     $this->temporary_directory . ':' . $this->temporary_directory
                 )
-                . " --entrypoint /usr/bin/sort mariadb:10.11 \"$@\"\n"
+                . " --entrypoint /bin/sh mariadb:10.11 -c "
+                . escapeshellarg('ulimit -v 131072 && exec /usr/bin/sort "$@"')
+                . " sort \"$@\"\n"
         );
         chmod($sort_directory . '/sort', 0755);
 
@@ -170,7 +171,7 @@ final class SortIndexFileTest extends TestCase
             );
             $this->assertTrue(
                 $completed,
-                'GNU sort must complete while the child process is limited to 128 MiB. '
+                'GNU sort must complete with a 128 MiB process address-space limit. '
                     . implode("\n", $container_state)
             );
         } finally {
