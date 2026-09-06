@@ -119,6 +119,15 @@
     "siteground-plugins": {
       "port": 8117
     },
+    "wpengine-recognized-loader": {
+      "port": 8147
+    },
+    "wpengine-customer-loader": {
+      "port": 8148
+    },
+    "wpengine-copied-plugins": {
+      "port": 8149
+    },
     "plugin-auth": {
       "port": 8119
     },
