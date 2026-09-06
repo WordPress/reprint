@@ -70,29 +70,38 @@ class MultisiteTarget {
     public function get_url_mapping(): array
     {
         $source = $this->source;
+        // The first mapping supplies the base for relative links.
         $mapping = [rtrim($source['home_url'], '/') => $this->target_url];
         foreach ($source['sibling_urls'] ?? [] as $url) {
-            $url = rtrim($url, '/');
-            $mapping[$url] = $url;
+            foreach ($this->get_http_url_variants($url) as $sibling_url) {
+                $mapping[$sibling_url] = $sibling_url;
+            }
         }
         foreach (array_unique([$source['content_url'], $source['network_content_url'] ?? $source['content_url']]) as $content_url) {
-            $content_url = rtrim($content_url, '/');
-            $mapping[$content_url] = $this->target_url . '/wp-content';
-            // Shared code moves, but unselected media under that same content
-            // URL stays remote. The selected media root is the more specific rule.
-            $mapping[$content_url . '/uploads'] = $content_url . '/uploads';
-            foreach ($source['sibling_site_ids'] ?? [] as $site_id) {
-                if ($site_id !== 1) {
-                    $sibling_uploads = $content_url . '/uploads/sites/' . $site_id;
-                    $mapping[$sibling_uploads] = $sibling_uploads;
+            foreach ($this->get_http_url_variants($content_url) as $content_url_variant) {
+                $mapping[$content_url_variant] = $this->target_url . '/wp-content';
+                // Shared code moves, but unselected media under that same content
+                // URL stays remote. The selected media root is the more specific rule.
+                $mapping[$content_url_variant . '/uploads'] = $content_url_variant . '/uploads';
+                foreach ($source['sibling_site_ids'] ?? [] as $site_id) {
+                    if ($site_id !== 1) {
+                        $sibling_uploads = $content_url_variant . '/uploads/sites/' . $site_id;
+                        $mapping[$sibling_uploads] = $sibling_uploads;
+                    }
                 }
+                $selected_uploads = $content_url_variant . '/uploads' . ( $source['site_id'] === 1 ? '' : '/sites/' . $source['site_id'] );
+                $mapping[$selected_uploads] = $this->target_url . '/' . $this->get_upload_path();
             }
-            $selected_uploads = $content_url . '/uploads' . ( $source['site_id'] === 1 ? '' : '/sites/' . $source['site_id'] );
-            $mapping[$selected_uploads] = $this->target_url . '/' . $this->get_upload_path();
         }
-        $mapping[rtrim($source['uploads_url'], '/')] = $this->target_url . '/' . $this->get_upload_path();
-        $mapping[rtrim($source['site_url'], '/')] = $this->target_url;
-        $mapping[rtrim($source['home_url'], '/')] = $this->target_url;
+        foreach ([
+            $source['uploads_url'] => $this->target_url . '/' . $this->get_upload_path(),
+            $source['site_url'] => $this->target_url,
+            $source['home_url'] => $this->target_url,
+        ] as $source_url => $target_url) {
+            foreach ($this->get_http_url_variants($source_url) as $source_url_variant) {
+                $mapping[$source_url_variant] = $target_url;
+            }
+        }
         return $mapping;
     }
 
@@ -106,7 +115,7 @@ class MultisiteTarget {
      * Reject existing target tables before any imported DROP TABLE can run.
      *
      * @param string|null $empty_progress_table Reprint's empty progress table,
-     *     allowed only when resuming initialization before any SQL was imported.
+     *     allowed only when resuming before any SQL group was recorded.
      */
     public function assert_empty_database(DatabaseConnection $database, ?string $empty_progress_table = null): void
     {
@@ -130,7 +139,7 @@ class MultisiteTarget {
         $base_prefix = $source['base_prefix'];
         $site_prefix = $base_prefix . ( $source['site_id'] === 1 ? '' : $source['site_id'] . '_' );
         $user = $database->query(
-            "SELECT ID FROM `{$base_prefix}users` WHERE user_login = ?",
+            "SELECT user_login FROM `{$base_prefix}users` WHERE user_login = ?",
             [$this->network_admin]
         )->fetch(\PDO::FETCH_ASSOC);
         if (!$user) {
@@ -157,7 +166,8 @@ class MultisiteTarget {
             'blog_count' => '1',
             'registration' => 'none',
             'ms_files_rewriting' => '0',
-            'site_admins' => serialize([$this->network_admin]),
+            // MySQL may match a different case; WordPress requires the stored spelling.
+            'site_admins' => serialize([$user['user_login']]),
         ] as $name => $value) {
             $database->execute("DELETE FROM `{$base_prefix}sitemeta` WHERE site_id = ? AND meta_key = ?", [$source['network_id'], $name]);
             $database->execute("INSERT INTO `{$base_prefix}sitemeta` (site_id, meta_key, meta_value) VALUES (?, ?, ?)", [$source['network_id'], $name, $value]);
@@ -223,6 +233,20 @@ class MultisiteTarget {
         return $php . '$table_prefix = ' . var_export($this->source['base_prefix'], true) . ";\n"
             . "if (!defined('ABSPATH')) { define('ABSPATH', __DIR__ . '/'); }\n"
             . "require_once ABSPATH . 'wp-settings.php';\n";
+    }
+
+    /**
+     * Stored content may use either scheme after a source switches to HTTPS.
+     *
+     * @return string[] Both schemes with the source's scheme first.
+     */
+    private function get_http_url_variants(string $url): array
+    {
+        $url = rtrim($url, '/');
+        $alternate_url = strpos($url, 'https://') === 0
+            ? 'http://' . substr($url, 8)
+            : 'https://' . substr($url, 7);
+        return [$url, $alternate_url];
     }
 
     /** Keep the source media layout even though the selected site becomes main. */

@@ -6971,6 +6971,11 @@ class ImportClient
                             "db-apply",
                         );
                     }
+                } elseif ($multisite_target !== null) {
+                    // The first SQL group only sets connection options. Without
+                    // its target cursor, this apply has not created application
+                    // tables, even if the local state already says "sql".
+                    $multisite_target->assert_empty_database($connection, self::DATABASE_IMPORT_POSITION_TABLE);
                 }
             }
 

@@ -54,6 +54,64 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
         );
     }
 
+    /** Old HTTP content still moves after HTTPS is enabled, without moving sibling media. */
+    public function test_selected_urls_and_sibling_exclusions_cover_both_schemes(): void
+    {
+        foreach (['http', 'https'] as $source_scheme) {
+            foreach ([1, 7] as $site_id) {
+                $source_origin = $source_scheme . '://network.test';
+                $site_path = $site_id === 1 ? '' : '/shop';
+                $upload_path = '/wp-content/uploads' . ( $site_id === 1 ? '' : '/sites/7' );
+                $sibling_paths = $site_id === 1 ? ['/shop', '/sibling'] : ['', '/sibling'];
+                $sibling_urls = [];
+                foreach (['http', 'https'] as $scheme) {
+                    foreach ($sibling_paths as $path) {
+                        $sibling_urls[] = $scheme . '://network.test' . $path;
+                    }
+                }
+                $source = [
+                    'site_id'=>$site_id, 'network_id'=>1, 'base_prefix'=>'wp_',
+                    'home_url'=>$source_origin . $site_path, 'site_url'=>$source_origin . $site_path,
+                    'content_url'=>$source_origin . $site_path . '/wp-content',
+                    'network_content_url'=>$source_origin . '/wp-content',
+                    'uploads_url'=>$source_origin . $site_path . $upload_path,
+                    'sibling_urls'=>$sibling_urls, 'sibling_site_ids'=>$site_id === 1 ? [7,8] : [1,8],
+                ];
+                foreach (['http://localhost:9000', $source_origin] as $target_url) {
+                    $target = new MultisiteTarget($source, $target_url, 'chosen');
+                    $rewriter = new StructuredDataUrlRewriter($target->get_url_mapping());
+                    foreach (['http', 'https'] as $scheme) {
+                        $origin = $scheme . '://network.test';
+                        $cases = [$origin . $site_path . '/post' => $target_url . '/post'];
+                        foreach (array_unique(['', $site_path]) as $content_path) {
+                            $content_url = $origin . $content_path . '/wp-content';
+                            $cases[$origin . $content_path . $upload_path . '/photo.png'] = $target_url . $upload_path . '/photo.png';
+                            $cases[$content_url . '/plugins/shared/style.css'] = $target_url . '/wp-content/plugins/shared/style.css';
+                            $sibling_media = $content_url . '/uploads/sites/8/photo.png';
+                            $cases[$sibling_media] = $sibling_media;
+                            if ($site_id !== 1) {
+                                $main_media = $content_url . '/uploads/main.png';
+                                $cases[$main_media] = $main_media;
+                            }
+                        }
+                        foreach ($sibling_paths as $path) {
+                            $cases[$origin . $path . '/post'] = $origin . $path . '/post';
+                        }
+                        foreach ($cases as $url => $expected) {
+                            $this->assertSame($expected, $rewriter->rewrite($url), $url);
+                            $this->assertSame('<a href="' . $expected . '">link</a>', $rewriter->rewrite(
+                                '<a href="' . $url . '">link</a>', StructuredDataUrlRewriter::BLOCK_MARKUP
+                            ), $url);
+                        }
+                    }
+                    $this->assertSame('<a href="' . $source_origin . '/sibling/post">link</a>', $rewriter->rewrite(
+                        '<a href="/sibling/post">link</a>', StructuredDataUrlRewriter::BLOCK_MARKUP
+                    ));
+                }
+            }
+        }
+    }
+
     /** Invalid destinations must fail before opening the target database. */
     public function test_invalid_target_urls_are_rejected(): void
     {

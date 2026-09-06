@@ -19,9 +19,9 @@ network setup run before the site is used.
 
 Run the same command again to resume an interrupted apply. After initialization
 starts, keep the same target database, URL replacements, and network administrator.
-Initialization rechecks the target; only an empty Reprint progress table is
-allowed. Each apply acquires the target database lock before checking or changing
-tables.
+Until the target records its first SQL group, resume rechecks the target; only
+an empty Reprint progress table is allowed. Each apply acquires the target
+database lock before checking or changing tables.
 
 The new site URL must have an HTTP(S) DNS host name (localhost is accepted)
 and no path, query, or fragment. Numeric target hosts are not supported by
@@ -37,10 +37,14 @@ core profile fields and the selected site's roles; selected network settings;
 shared core, plugin, theme, language, and mu-plugin code; selected media.
 Users keep their IDs and password hashes, but sessions and application
 passwords do not move. The chosen user becomes the target network administrator.
+The saved administrator name uses the spelling in the imported user record,
+even when MySQL matches a different case in LOGIN.
 
 A non-main site's uploads keep wp-content/uploads/sites/ID after promotion.
 Both existing attachment URLs and new uploads use that path. Links to sibling
 sites remain links to the source network. They do not turn into local pages.
+Both HTTP and HTTPS links to selected pages and media move to the new URL;
+links to sibling pages and media keep their original scheme and address.
 
 ## What needs separate work
 

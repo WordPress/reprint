@@ -35,7 +35,9 @@ This is a pull into a fresh target, not a merge or a multisite push.
 - Main uploads containing sibling sites/ directories; direct fetch bypass.
 - Symlinks and custom uploads must not widen the selected file scope.
 - Source URLs, serialized data, attachment metadata, and bare network domains.
+- HTTP and HTTPS links to selected pages, shared code, and media; sibling links stay remote.
 - Target boot, login, admin, existing media, new media, and network plugin load.
+- Network administrator login supplied with a different case from the imported record.
 - Oversized profiles exported before their membership rows reach the target.
 - Direct MySQL output rejected without changing existing target tables.
 - Target lock contention and process death on both sides of initialization,

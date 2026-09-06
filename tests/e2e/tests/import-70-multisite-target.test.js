@@ -43,7 +43,7 @@ describe('Pull a selected site into a fresh one-site network', () => {
             extraArgs: [
                 '--target-engine=mysql', '--target-host=127.0.0.1',
                 '--target-user=e2e_admin', '--target-pass=e2e_password', `--target-db=${databases[0]}`,
-                `--new-site-url=${targetUrl}`, '--network-admin=shared',
+                `--new-site-url=${targetUrl}`, '--network-admin=SHARED',
                 '--runtime=php-builtin', '--start-runtime=none', `--flatten-to=${join(directory, 'site')}`,
             ],
         });
@@ -55,7 +55,9 @@ describe('Pull a selected site into a fresh one-site network', () => {
                 'multisite' => is_multisite(), 'main' => is_main_site(),
                 'id' => get_current_blog_id(), 'prefix' => $GLOBALS['wpdb']->prefix,
                 'sites' => array_map('intval', get_sites(['fields' => 'ids'])),
-                'admins' => get_super_admins(), 'media' => wp_get_attachment_url(200),
+                'admins' => get_super_admins(),
+                'is_super_admin' => is_super_admin(get_user_by('login', 'shared')->ID),
+                'media' => wp_get_attachment_url(200),
                 'new_url' => $new['url'], 'upload_error' => $new['error'],
             ]);
         `], targetUrl));
@@ -64,6 +66,7 @@ describe('Pull a selected site into a fresh one-site network', () => {
         assert.equal(inspection.id, 7);
         assert.equal(inspection.prefix, 'network_7_');
         assert.deepEqual(inspection.sites, [7]);
+        assert.equal(inspection.is_super_admin, true, 'Use the stored login spelling for network access');
         assert.deepEqual(inspection.admins, ['shared']);
         assert.equal(inspection.upload_error, false);
         assert.ok(inspection.media.startsWith(`${targetUrl}/wp-content/uploads/sites/7/`));
@@ -214,7 +217,7 @@ describe('Pull a selected site into a fresh one-site network', () => {
                 const active = state.active_resumable_command;
                 const priorStage = { 'database-initialize': 'database-start', sql: 'database-initialize', 'database-cleanup': 'sql' };
                 assert.equal(active.current_stage, when === 'after' ? stage : priorStage[stage]);
-                if (stage === 'sql' && when === 'before') {
+                if (stage === 'sql') {
                     const otherDatabase = database + '_other';
                     databases.push(otherDatabase);
                     await connection.query(`CREATE DATABASE \`${otherDatabase}\``);
