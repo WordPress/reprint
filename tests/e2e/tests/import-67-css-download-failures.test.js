@@ -89,6 +89,28 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
         cleanupTempDir(temporaryDirectory);
     });
 
+    it('loads pre-CSS pull state and keeps raw downloads unchanged when new mappings are rejected', () => {
+        // This fixture was serialized by PullState at 6a0746c640f950fbb81df4e976acbbad6a1b3474.
+        // Seed an old checkpoint before starting the CLI; do not edit current saved state.
+        const oldState = readFileSync(join(projectRoot, 'tests/fixtures/pull-state-before-css-rewriting.json'));
+        const stateDirectory = pullStateDirectory(temporaryDirectory, importUrl);
+        mkdirSync(stateDirectory, { recursive: true });
+        writeFileSync(join(stateDirectory, 'state.json'), oldState);
+        const result = runImporter(importUrl, temporaryDirectory, 'files-pull', {
+            secret: getSiteSecret(site), autoResume: false, extraArgs: ['--only', sourcePath],
+        });
+        assert.equal(result.exitCode, 0, result.stdout + result.stderr);
+        const localPath = join(fsRootDir(temporaryDirectory), sourcePath);
+        assert.equal(readFileSync(localPath, 'utf8'), sourceCss);
+        const mapped = runImporter(importUrl, temporaryDirectory, 'files-pull', {
+            secret: getSiteSecret(site), autoResume: false, extraArgs: downloadArguments(),
+        });
+        assert.equal(mapped.exitCode, 1, mapped.stdout + mapped.stderr);
+        assert.match(mapped.stdout + mapped.stderr, /Cannot change CSS URL mappings/);
+        assert.equal(readFileSync(localPath, 'utf8'), sourceCss);
+        assert.equal(readFileSync(sourcePath, 'utf8'), sourceCss);
+    }, 180000);
+
     it('replays a cut-off CSS response without losing or rewriting the boundary URL twice', () => {
         writeHookState(site, { action: 'cutoff', fired: false, release: false });
         const result = runImporter(importUrl, temporaryDirectory, 'files-pull', {

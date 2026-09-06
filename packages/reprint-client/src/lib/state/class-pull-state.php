@@ -123,7 +123,13 @@ class PullState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $data += ['files_pull_mode' => 'catch-up'];
+        // Older clients copied CSS verbatim. Preserve that choice on resume;
+        // enabling rewriting mid-download would mix raw and rewritten bytes.
+        $data += [
+            'files_pull_mode' => 'catch-up',
+            'css_url_mapping' => [],
+            'current_css_cursor' => null,
+        ];
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
         $state->preflight = $data['preflight'];
