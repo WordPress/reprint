@@ -536,6 +536,18 @@ into SQLite through the bundled `sqlite-database-integration` driver.
 
 #### Step 6 — Generate runtime configuration.
 
+`apply-runtime` also checks literal `getenv('NAME')` reads in the downloaded
+`wp-config.php`. If a name is absent from the importing process, it reports
+the name and config path without copying or printing its value. Check whether
+your target web server needs that variable. A fallback in the config, or a
+separate PHP-FPM environment, may already cover it; the warning does not stop
+the migration.
+
+This check does not execute the config. It does not follow includes or resolve
+dynamic variable names. Config files larger than 256 KiB get a manual-check
+warning rather than a partial scan.
+
+
 The downloaded files need server-specific configuration to actually work —
 PHP constants, INI directives, and request handlers that the source host
 relied on. `apply-runtime` reads the preflight data, detects the source

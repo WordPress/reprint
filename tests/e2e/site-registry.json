@@ -155,6 +155,15 @@
     "sqlite-legacy": {
       "port": 8127
     },
+    "config-environment-present": {
+      "port": 8144
+    },
+    "config-environment-missing": {
+      "port": 8145
+    },
+    "config-environment-large": {
+      "port": 8146
+    },
     "mysql-target-cursor-resume": {
       "port": 8128
     },
