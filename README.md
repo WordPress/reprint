@@ -218,6 +218,13 @@ php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" 
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json` under the `preflight` key.
 
+The server also sends a base64 copy of the WordPress home domain. If it differs
+from the domain in the plain home URL, preflight fails and reports both domains.
+This detects host response filters that replace the site's domain with a preview
+domain. Low-level pull commands also reject that mismatch in saved preflight data.
+Older servers that omit the copy, or report `null` because no domain was available,
+remain compatible. The comparison checks the home domain, not every URL in the response.
+
 All other commands check that a preflight has been completed and refuse to start without one.
 
 To run very basic diagnostics that confirms the remote server replied and it has a

@@ -2588,16 +2588,20 @@ class ImportClient
             $decoded_domain = is_string($encoded_domain)
                 ? base64_decode($encoded_domain, true)
                 : false;
-            if (!is_string($plain_domain) || $plain_domain === "" || $decoded_domain === false) {
-                $domain_error = "The preflight response contains an invalid plaintext or base64 site domain.";
+            if (!is_string($plain_domain) || $plain_domain === "") {
+                $domain_error = "The preflight response contains a WordPress home URL without a valid domain: "
+                    . json_encode($home) . ".";
+            } elseif ($decoded_domain === false || $decoded_domain === "") {
+                $domain_error = "The preflight response contains an invalid base64 WordPress home domain: "
+                    . json_encode($encoded_domain) . ".";
             } elseif ($plain_domain !== $decoded_domain) {
                 $domain_error = "The preflight response changed the site domain from "
                     . "'{$decoded_domain}' to '{$plain_domain}'. A host response filter likely rewrote the response body.";
             }
         }
         if ($domain_error !== null && is_array($payload)) {
-            // Keep the response available for diagnosis, but make every pull
-            // path reject it before using values which may have been rewritten.
+            // Keep the response available for diagnosis, but mark it failed so
+            // pulls stop instead of downloading with rewritten URLs.
             $payload["ok"] = false;
             $payload["error"] = $domain_error;
         }
@@ -2609,7 +2613,7 @@ class ImportClient
             "elapsed" => (float) ($result["elapsed"] ?? 0),
             "ok" => is_array($payload) ? ($payload["ok"] ?? null) : null,
             "data" => $payload,
-            "error" => $result["error"] ?? null,
+            "error" => $domain_error ?? $result["error"] ?? null,
             "response_body_preview" => $payload === null && isset($result["body"])
                 ? substr((string) $result["body"], 0, 200)
                 : null,
@@ -2891,6 +2895,11 @@ class ImportClient
             throw new RuntimeException(
                 "No preflight data found. Run 'preflight' or 'preflight-assert' first.",
             );
+        }
+        if (!empty($entry["error"])) {
+            // The client rejected this response; keep it for diagnosis, not downloads.
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error, never HTML.
+            throw new RuntimeException($entry["error"]);
         }
     }
 
