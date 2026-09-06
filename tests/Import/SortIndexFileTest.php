@@ -74,7 +74,7 @@ final class SortIndexFileTest extends TestCase
         $this->assertIsArray($arguments);
         $buffer_size_option = array_search('-S', $arguments, true);
         $this->assertIsInt($buffer_size_option);
-        $this->assertSame('32M', $arguments[$buffer_size_option + 1]);
+        $this->assertSame('8M', $arguments[$buffer_size_option + 1]);
         $this->assertContains('--parallel=1', $arguments);
         $temporary_directory_option = array_search('-T', $arguments, true);
         $this->assertIsInt($temporary_directory_option);
@@ -119,7 +119,7 @@ final class SortIndexFileTest extends TestCase
         $this->assertIsResource($input);
         $path_prefix = '/wp-content/uploads/';
         $path_suffix = '-' . str_repeat('x', 180) . '.jpg';
-        for ($index = 100000; $index >= 1; --$index) {
+        for ($index = 500000; $index >= 1; --$index) {
             fwrite(
                 $input,
                 $this->index_line(
@@ -131,6 +131,7 @@ final class SortIndexFileTest extends TestCase
         fclose($input);
         $input_size = filesize($path);
         $this->assertIsInt($input_size);
+        $this->assertGreaterThan(64 * 1024 * 1024, $input_size);
 
         // The PHPUnit workflow already pulls this image for its MariaDB
         // service. Run only GNU sort in a 64 MiB cgroup so the limit includes

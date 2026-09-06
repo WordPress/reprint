@@ -139,8 +139,9 @@ function try_exec_sort_index_file(
     fclose($input);
     fclose($output);
 
+    // A host's memory limit can also count cached temporary-file data.
     $command =
-        'LC_ALL=C sort -S 32M --parallel=1 -T ' .
+        'LC_ALL=C sort -S 8M --parallel=1 -T ' .
         escapeshellarg(dirname($path)) .
         " -t '\t' -k1,1 " .
         escapeshellarg($keyed) .
