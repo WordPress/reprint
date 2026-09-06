@@ -13,7 +13,9 @@ Run the pull with an empty MySQL target database, --new-site-url, and
 export. This is an explicit grant of access to the new network. Other source
 superadmins are not copied merely because they administer the source network.
 
-The new site URL must have an HTTP(S) host and no path, query, or fragment.
+The new site URL must have an HTTP(S) DNS host name (localhost is accepted)
+and no path, query, or fragment. Numeric target hosts are not supported by
+the plain-text URL rewriter.
 Use apply-runtime (included in pull) to write the new wp-config.php. Source
 database credentials, salts, Reprint tokens, and custom bootstrap includes
 are not used in that configuration.
@@ -35,7 +37,9 @@ sites remain links to the source network. They do not turn into local pages.
 Plugin-defined tables and shared plugin settings need explicit migration rules.
 Unknown tables stop the pull. Unknown network settings and non-core user
 metadata are not copied; plugins that depend on those values need separate
-configuration at the target. Cross-site content references cannot work locally
+configuration at the target. Shared plugin directories are copied in full;
+review plugins that store private data beside their code before migrating.
+Cross-site content references cannot work locally
 when the referenced site was not moved.
 
 This first version rejects legacy blogs.dir uploads, custom upload or content

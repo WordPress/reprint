@@ -2,6 +2,8 @@
 
 namespace WordPress\Reprint\Server\Plugin;
 
+use WordPress\Reprint\Server\MultisiteDatabaseSelection;
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These source validation errors are JSON protocol messages, not HTML.
 
 /**
@@ -25,6 +27,8 @@ namespace WordPress\Reprint\Server\Plugin;
  *     @type string $site_url Selected WordPress URL.
  *     @type string $content_url Shared content URL.
  *     @type string[] $sibling_urls Other site URLs retained in cross-site links.
+ *     @type int[] $sibling_site_ids Other site IDs whose uploads remain remote.
+ *     @type string $network_content_url Shared network content URL.
  * }
  */
 function get_multisite_export_context(): array {
@@ -52,28 +56,27 @@ function get_multisite_export_context(): array {
         throw new \RuntimeException('Custom multisite uploads are not supported; observed directory: ' . $uploads['basedir']);
     }
 
-    // Match WordPress core's own table lists, including older installations
-    // without blogmeta. A plugin table is reported, never silently omitted.
-    $blog_tables = array_values($wpdb->tables('blog', false));
-    $global_tables = array_values($wpdb->tables('global', false));
-    $global_tables = array_merge($global_tables, ['site', 'sitemeta', 'blogs', 'blogmeta', 'signups', 'registration_log']);
+    // Use the exporter's rules, not $wpdb->tables: plugins can append their
+    // own tables there. A registered plugin table still needs a migration rule.
     foreach ($wpdb->get_col('SHOW TABLES') as $table) {
         if (strpos($table, $base_prefix) !== 0) {
             continue;
         }
         $suffix = substr($table, strlen($base_prefix));
-        $site_suffix = preg_replace('/^[0-9]+_/', '', $suffix);
-        if (!in_array($suffix, $global_tables, true) && !in_array($site_suffix, $blog_tables, true)) {
+        $table_site_id = preg_match('/^([1-9][0-9]*)_/', $suffix, $matches) ? (int) $matches[1] : 1;
+        $selection = new MultisiteDatabaseSelection($base_prefix, $table_site_id, $network_id);
+        if (!$selection->includes_table($table)) {
             throw new \RuntimeException('No multisite migration rule exists for table ' . $table . '. It may contain shared plugin data.');
         }
     }
 
     $sibling_urls = [];
+    $sibling_site_ids = [];
     foreach ($wpdb->get_results($wpdb->prepare(
-        "SELECT domain, path FROM {$wpdb->blogs} WHERE site_id = %d AND blog_id <> %d",
-        $network_id,
+        "SELECT blog_id, domain, path FROM {$wpdb->blogs} WHERE blog_id <> %d",
         $site_id
     )) as $sibling) {
+        $sibling_site_ids[] = (int) $sibling->blog_id;
         foreach (['http', 'https'] as $scheme) {
             $sibling_urls[] = $scheme . '://' . $sibling->domain . rtrim($sibling->path, '/');
         }
@@ -92,5 +95,7 @@ function get_multisite_export_context(): array {
         'site_url' => get_option('siteurl'),
         'content_url' => content_url(),
         'sibling_urls' => $sibling_urls,
+        'sibling_site_ids' => $sibling_site_ids,
+        'network_content_url' => network_site_url('/wp-content'),
     ];
 }

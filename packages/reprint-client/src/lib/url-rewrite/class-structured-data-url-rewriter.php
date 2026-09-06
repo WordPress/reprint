@@ -822,7 +822,7 @@ class StructuredDataUrlRewriter
                                 $converted = WPURL::replace_base_url(
                                     $parsed_url,
                                     array(
-                                        'old_base_url' => $base_url,
+                                        'old_base_url' => $mapping['from_url'],
                                         'new_base_url' => $mapping['to_url'],
                                         'raw_url'      => $raw_url,
                                         'is_relative'  => ! WPURL::can_parse($raw_url),

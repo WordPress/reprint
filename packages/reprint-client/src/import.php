@@ -4952,6 +4952,10 @@ class ImportClient
             if ($target['engine'] !== 'mysql' || $wordpress_index_php === '') {
                 throw new InvalidArgumentException('The selected multisite runtime requires its imported WordPress files and a MySQL target.');
             }
+            // flat-docroot links core files to the raw download. Without an
+            // explicit ABSPATH, wp-load.php looks beside that link's target,
+            // where the source wp-config.php was deliberately not copied.
+            $manifest->constants['ABSPATH'] = dirname($wordpress_index_php) . '/';
             $config_path = dirname($wordpress_index_php) . '/wp-config.php';
             $config = $multisite_target->get_wp_config($target);
             if (file_put_contents($config_path . '.reprint-tmp', $config) !== strlen($config)
@@ -6793,11 +6797,12 @@ class ImportClient
             "db.sql\n" . $this->remote_reprint_api_url . "\n" . $encoded_url_mapping,
         );
 
+        $multisite_target = $this->get_multisite_target();
         $target_engine = $target["engine"];
         [$connection, $connection_label] = $this->create_target_database_connection(
             $target,
             true,
-            'db-apply',
+            $multisite_target === null ? 'db-apply' : null,
         );
         $spatial_srid_guard = $target_engine === 'mysql'
             ? new SpatialSridGuard(
@@ -6824,6 +6829,13 @@ class ImportClient
         $byte_offset = 0;
         $statements_executed = 0;
         try {
+            if ($multisite_target !== null) {
+                // Validate before the connection creates Reprint's progress table.
+                if (!$is_resume) {
+                    $multisite_target->assert_empty_database($connection);
+                }
+                $this->create_database_import_position_table($connection);
+            }
             if (
                 $is_resume
                 && $this->get_state()->active_resumable_command->current_stage === "database-cleanup"
@@ -6833,10 +6845,6 @@ class ImportClient
             }
 
             if (!$is_resume) {
-                $multisite_target = $this->get_multisite_target();
-                if ($multisite_target !== null) {
-                    $multisite_target->assert_empty_database($connection);
-                }
                 // Keep database-start until the old target cursor is gone. A new
                 // process which stops here repeats this reset before any SQL.
                 $this->reset_database_import_position($connection);

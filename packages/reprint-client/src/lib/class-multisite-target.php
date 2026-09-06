@@ -31,6 +31,8 @@ class MultisiteTarget {
      *     @type string $site_url Selected WordPress URL.
      *     @type string $content_url Shared content URL.
      *     @type string $uploads_url Selected media URL.
+     *     @type string $network_content_url Shared network content URL.
+     *     @type int[] $sibling_site_ids Other site IDs whose media stays remote.
      *     @type string[] $sibling_urls Other site URLs which must remain remote.
      * }
      */
@@ -47,6 +49,9 @@ class MultisiteTarget {
             || ( isset($url['user']) || isset($url['pass']) ) || isset($url['query']) || isset($url['fragment'])
             || !in_array($url['path'] ?? '', ['', '/'], true)) {
             throw new InvalidArgumentException('A multisite pull requires --new-site-url with an HTTP(S) host and no path, query, or fragment.');
+        }
+        if (filter_var(trim($url['host'], '[]'), FILTER_VALIDATE_IP) !== false) {
+            throw new InvalidArgumentException('Use a DNS host name such as localhost for --new-site-url; plain-text URL rewriting does not support numeric target hosts.');
         }
         if ($network_admin === '') {
             throw new InvalidArgumentException('A multisite pull requires --network-admin=LOGIN naming an imported user who will administer the new network.');
@@ -69,7 +74,21 @@ class MultisiteTarget {
             $url = rtrim($url, '/');
             $mapping[$url] = $url;
         }
-        $mapping[rtrim($source['content_url'], '/')] = $this->target_url . '/wp-content';
+        foreach (array_unique([$source['content_url'], $source['network_content_url'] ?? $source['content_url']]) as $content_url) {
+            $content_url = rtrim($content_url, '/');
+            $mapping[$content_url] = $this->target_url . '/wp-content';
+            // Shared code moves, but unselected media under that same content
+            // URL stays remote. The selected media root is the more specific rule.
+            $mapping[$content_url . '/uploads'] = $content_url . '/uploads';
+            foreach ($source['sibling_site_ids'] ?? [] as $site_id) {
+                if ($site_id !== 1) {
+                    $sibling_uploads = $content_url . '/uploads/sites/' . $site_id;
+                    $mapping[$sibling_uploads] = $sibling_uploads;
+                }
+            }
+            $selected_uploads = $content_url . '/uploads' . ( $source['site_id'] === 1 ? '' : '/sites/' . $source['site_id'] );
+            $mapping[$selected_uploads] = $this->target_url . '/' . $this->get_upload_path();
+        }
         $mapping[rtrim($source['uploads_url'], '/')] = $this->target_url . '/' . $this->get_upload_path();
         $mapping[rtrim($source['site_url'], '/')] = $this->target_url;
         $mapping[rtrim($source['home_url'], '/')] = $this->target_url;
