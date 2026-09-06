@@ -4338,6 +4338,13 @@ class ImportClient
      */
     public function run_db_sync(): void
     {
+        if ($this->sql_output_mode === 'mysql'
+            && !empty($this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'])) {
+            throw new InvalidArgumentException(
+                'A selected multisite export does not support --sql-output=mysql. '
+                . 'Use pull-db with an empty MySQL target, --new-site-url, and --network-admin.'
+            );
+        }
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
         $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
 
@@ -6642,7 +6649,7 @@ class ImportClient
             $has_unfinished_apply
             && !in_array(
                 $current_stage,
-                ["database-start", "sql", "database-cleanup"],
+                ["database-start", "database-initialize", "sql", "database-cleanup"],
                 true,
             )
         ) {
@@ -6661,7 +6668,7 @@ class ImportClient
 
         $apply_state = $this->get_state()->apply;
         $is_resume = $has_unfinished_apply
-            && in_array($current_stage, ["sql", "database-cleanup"], true);
+            && in_array($current_stage, ["database-initialize", "sql", "database-cleanup"], true);
 
         // A resumed apply keeps its URL replacements when the CLI omits them.
         // A fresh apply must not inherit replacements from an older lifecycle.
@@ -6677,6 +6684,18 @@ class ImportClient
             }
             if ($is_resume && $network_admin !== $apply_state->network_admin) {
                 throw new InvalidArgumentException('Cannot change --network-admin while resuming db-apply.');
+            }
+            if ($is_resume) {
+                // The saved empty-database check applies only to this target.
+                foreach (['engine', 'host', 'port', 'db'] as $field) {
+                    if ($target[$field] !== $apply_state->{'target_' . $field}) {
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option values, not HTML.
+                        throw new InvalidArgumentException('Cannot change --target-' . $field . ' while resuming a selected multisite apply; requested ' . $target[$field] . '.');
+                    }
+                }
+                if ($url_mapping !== $apply_state->rewrite_url) {
+                    throw new InvalidArgumentException('Cannot change URL replacements while resuming a selected multisite apply.');
+                }
             }
             new MultisiteTarget($selection, $url_mapping[rtrim($selection['home_url'], '/')] ?? '', $network_admin ?? '');
         }
@@ -6830,9 +6849,17 @@ class ImportClient
         $statements_executed = 0;
         try {
             if ($multisite_target !== null) {
-                // Validate before the connection creates Reprint's progress table.
+                $this->lock_database_import_target($connection, $target['db'], 'db-apply');
                 if (!$is_resume) {
                     $multisite_target->assert_empty_database($connection);
+                    // Save the empty-target check before CREATE TABLE. A process
+                    // dying after creation must not reject its own progress table.
+                    $this->get_state()->active_resumable_command->current_stage = 'database-initialize';
+                    $this->save_state();
+                } elseif ($this->get_state()->active_resumable_command->current_stage === 'database-initialize') {
+                    // Other applications may have filled the target while this
+                    // process was stopped. Only our empty progress table may exist.
+                    $multisite_target->assert_empty_database($connection, self::DATABASE_IMPORT_POSITION_TABLE);
                 }
                 $this->create_database_import_position_table($connection);
             }
@@ -6844,9 +6871,9 @@ class ImportClient
                 return;
             }
 
-            if (!$is_resume) {
-                // Keep database-start until the old target cursor is gone. A new
-                // process which stops here repeats this reset before any SQL.
+            if (!$is_resume || $this->get_state()->active_resumable_command->current_stage === 'database-initialize') {
+                // Keep the initialization stage until the old target cursor is
+                // gone. A process which stops here repeats this reset before SQL.
                 $this->reset_database_import_position($connection);
                 $this->get_state()->active_resumable_command->current_stage = "sql";
                 $this->get_state()->active_resumable_command->remote_cursor = null;

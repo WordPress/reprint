@@ -36,6 +36,10 @@ This is a pull into a fresh target, not a merge or a multisite push.
 - Symlinks and custom uploads must not widen the selected file scope.
 - Source URLs, serialized data, attachment metadata, and bare network domains.
 - Target boot, login, admin, existing media, new media, and network plugin load.
+- Oversized profiles exported before their membership rows reach the target.
+- Direct MySQL output rejected without changing existing target tables.
+- Target lock contention and process death on both sides of initialization,
+  SQL-start, and cleanup state saves; target changes before SQL remain rejected.
 - Source rows and files unchanged after migration.
 
 ## Limits

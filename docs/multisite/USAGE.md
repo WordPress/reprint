@@ -13,6 +13,16 @@ Run the pull with an empty MySQL target database, --new-site-url, and
 export. This is an explicit grant of access to the new network. Other source
 superadmins are not copied merely because they administer the source network.
 
+Direct `db-pull --sql-output=mysql` is rejected for multisite. Use `pull-db`,
+or download with `db-pull` and apply with `db-apply`, so the target checks and
+network setup run before the site is used.
+
+Run the same command again to resume an interrupted apply. After initialization
+starts, keep the same target database, URL replacements, and network administrator.
+Initialization rechecks the target; only an empty Reprint progress table is
+allowed. Each apply acquires the target database lock before checking or changing
+tables.
+
 The new site URL must have an HTTP(S) DNS host name (localhost is accepted)
 and no path, query, or fragment. Numeric target hosts are not supported by
 the plain-text URL rewriter.

@@ -102,10 +102,22 @@ class MultisiteTarget {
         return $this->target_url;
     }
 
-    /** Reject existing target tables before any imported DROP TABLE can run. */
-    public function assert_empty_database(DatabaseConnection $database): void
+    /**
+     * Reject existing target tables before any imported DROP TABLE can run.
+     *
+     * @param string|null $empty_progress_table Reprint's empty progress table,
+     *     allowed only when resuming initialization before any SQL was imported.
+     */
+    public function assert_empty_database(DatabaseConnection $database, ?string $empty_progress_table = null): void
     {
-        $row = $database->query('SHOW TABLES')->fetch(\PDO::FETCH_NUM);
+        $tables = $database->query('SHOW TABLES');
+        $row = $tables->fetch(\PDO::FETCH_NUM);
+        if ($row !== false && $row[0] === $empty_progress_table) {
+            $quoted_table = '`' . str_replace('`', '``', $row[0]) . '`';
+            if ($database->query("SELECT 1 FROM {$quoted_table} LIMIT 1")->fetchColumn() === false) {
+                $row = $tables->fetch(\PDO::FETCH_NUM);
+            }
+        }
         if ($row !== false) {
             throw new InvalidArgumentException('A selected multisite pull requires an empty target database; found table ' . $row[0] . '.');
         }
