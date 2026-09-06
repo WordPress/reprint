@@ -4989,6 +4989,49 @@ class ImportClient
             $this->audit_log("APPLY-RUNTIME | removed {$rel_path} (production-only)");
         }
 
+        // A copied wp-config.php can still read values supplied by its old
+        // host. Report names only; copying those values could expose secrets.
+        $config_paths = [];
+        if (!empty($flat_document_root)) {
+            $config_paths[] = wp_join_unix_paths($local_document_root, 'wp-config.php');
+        } else {
+            foreach ($preflight_data['wp_detect']['roots'] ?? [] as $root) {
+                $remote_config = $this->clean_preflight_path($root['wp_config_path'] ?? null);
+                if ($remote_config !== null) {
+                    $config_paths[] = wp_join_unix_paths($this->filesystem_root, $remote_config);
+                }
+            }
+        }
+        foreach (array_unique($config_paths) as $config_path) {
+            if (!is_file($config_path)) {
+                continue;
+            }
+            // Tokenizing is bounded independently of the size of an unusual
+            // generated config. Do not inspect a prefix and call it complete.
+            $config = file_get_contents($config_path, false, null, 0, 262145);
+            if ($config === false || strlen($config) > 262144) {
+                $message = "Could not inspect {$config_path} within the 256 KiB configuration limit. Check its environment settings manually.";
+                $summary[] = $message;
+                $this->output_progress(['type' => 'warning', 'reason' => 'config_not_inspected', 'message' => $message], true);
+                continue;
+            }
+            foreach (config_environment_names($config) as $name) {
+                if (getenv($name) !== false) {
+                    continue;
+                }
+                $message = "{$config_path} reads {$name}, which is not set in this process. "
+                    . "Check whether the target server needs it; the config may provide a fallback.";
+                $summary[] = $message;
+                $this->output_progress([
+                    'type' => 'warning',
+                    'reason' => 'config_environment_missing',
+                    'variable_name' => $name,
+                    'config_path' => $config_path,
+                    'message' => $message,
+                ], true);
+            }
+        }
+
         foreach ($summary as $line) {
             $this->audit_log("APPLY-RUNTIME | {$line}");
         }

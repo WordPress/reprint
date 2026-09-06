@@ -10,3 +10,5 @@ require_once __DIR__ . '/class-nginx-fpm-applier.php';
 require_once __DIR__ . '/class-php-builtin-applier.php';
 require_once __DIR__ . '/class-playground-cli-applier.php';
 require_once __DIR__ . '/functions.php';
+
+require_once __DIR__ . '/config-environment.php';
