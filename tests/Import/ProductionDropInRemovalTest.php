@@ -7,8 +7,8 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
- * Verify that run_apply_runtime removes production drop-ins declared in
- * the host analyzer's paths_to_remove manifest field, and logs each removal.
+ * Verify that run_apply_runtime removes paths declared in the runtime
+ * excluded-plugin list and logs each removal.
  */
 class ProductionDropInRemovalTest extends TestCase
 {
@@ -116,6 +116,31 @@ class ProductionDropInRemovalTest extends TestCase
         ];
 
         \write_current_pull_state($this->makeClient(), array_replace_recursive($defaults, $state));
+    }
+
+    private function preflightWithoutWpcloudSignals(string $document_root): array
+    {
+        return [
+            'preflight' => [
+                'data' => [
+                    'runtime' => [
+                        'document_root' => $document_root,
+                        'env_names' => ['PATH'],
+                        'ini_get_all' => [],
+                    ],
+                    'filesystem' => [
+                        'directories' => [
+                            ['path' => $document_root, 'exists' => true],
+                        ],
+                    ],
+                    'wp_detect' => [
+                        'roots' => [
+                            ['path' => $document_root],
+                        ],
+                    ],
+                ],
+            ],
+        ];
     }
 
     private function makeClient(): \ImportClient
@@ -304,19 +329,19 @@ class ProductionDropInRemovalTest extends TestCase
         $auditLog = file_get_contents($this->stateDir . '/audit.log');
 
         $this->assertStringContainsString(
-            'removed wp-content/object-cache.php (production-only)',
+            'removed wp-content/object-cache.php (source-host)',
             $auditLog,
         );
         $this->assertStringContainsString(
-            'removed wp-content/advanced-cache.php (production-only)',
+            'removed wp-content/advanced-cache.php (source-host)',
             $auditLog,
         );
         $this->assertStringContainsString(
-            'removed wp-content/mu-plugins/wpcomsh (production-only)',
+            'removed wp-content/mu-plugins/wpcomsh (source-host)',
             $auditLog,
         );
         $this->assertStringContainsString(
-            'removed wp-content/mu-plugins/wpcomsh-loader.php (production-only)',
+            'removed wp-content/mu-plugins/wpcomsh-loader.php (source-host)',
             $auditLog,
         );
     }
@@ -344,24 +369,13 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertContains('wp-content/mu-plugins/wpcomsh-loader.php', $state['apply']['remote_paths_removed_from_local_site']);
     }
 
-    public function testNonWpcloudHostDoesNotRemoveAnything(): void
+    public function testNonWpcloudHostPreservesUnlistedDropIn(): void
     {
-        // Override webhost to 'other' — the DefaultHostAnalyzer should
-        // produce an empty paths_to_remove.
-        $this->writeState([
-            'webhost' => 'other',
-            'preflight' => [
-                'data' => [
-                    'runtime' => [
-                        'document_root' => '',
-                        'env_names' => [],
-                        'ini_get_all' => [],
-                    ],
-                    'filesystem' => ['directories' => []],
-                    'wp_detect' => ['roots' => []],
-                ],
-            ],
-        ]);
+        // A shared object-cache.php is not in the global source-host path list.
+        $this->writeState(array_replace_recursive(
+            ['webhost' => 'other'],
+            $this->preflightWithoutWpcloudSignals('/var/www/html'),
+        ));
 
         // Create an object-cache.php that a non-wpcloud host should leave alone.
         $wpContent = $this->fsRoot . '/wp-content';
@@ -375,34 +389,115 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertFileExists($wpContent . '/object-cache.php');
     }
 
-    // ---- SiteGround-specific tests ----
+    public function testApplyRuntimeKeepsPantheonPackageRequiredByLoader(): void
+    {
+        $this->writeState(array_replace_recursive(
+            ['webhost' => 'other'],
+            $this->preflightWithoutWpcloudSignals('/var/www/html'),
+        ));
+
+        $mu_plugins = $this->fsRoot . '/wp-content/mu-plugins';
+        mkdir($mu_plugins . '/pantheon-mu-plugin', 0755, true);
+        // Pantheon's loader requires this file even outside Pantheon. Keep the
+        // include local to this fixture instead of defining WPMU_PLUGIN_DIR.
+        // https://github.com/pantheon-systems/WordPress/blob/0f9cf0fe60ca08fe5e47e54863b99829bea97542/wp-content/mu-plugins/loader.php#L14-L20
+        file_put_contents(
+            $mu_plugins . '/loader.php',
+            "<?php require_once __DIR__ . '/pantheon-mu-plugin/pantheon.php';",
+        );
+        file_put_contents(
+            $mu_plugins . '/pantheon-mu-plugin/pantheon.php',
+            "<?php echo 'pantheon-package-loaded';",
+        );
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        ob_start();
+        try {
+            require $mu_plugins . '/loader.php';
+            $this->assertSame('pantheon-package-loaded', ob_get_contents());
+        } finally {
+            ob_end_clean();
+        }
+    }
+
+    public function testEveryImportRemovesTheGlobalSourceHostPathList(): void
+    {
+        $this->writeState(array_replace_recursive(
+            ['webhost' => 'other'],
+            $this->preflightWithoutWpcloudSignals('/var/www/html'),
+        ));
+
+        foreach (array_column(\excluded_plugins([]), 'local_path') as $relative_path) {
+            $source_host_path = $this->fsRoot . '/' . $relative_path;
+            if (substr($relative_path, -4) === '.php') {
+                $parent_directory = dirname($source_host_path);
+                if (!is_dir($parent_directory)) {
+                    mkdir($parent_directory, 0755, true);
+                }
+                file_put_contents($source_host_path, "<?php // Source-host file\n");
+                continue;
+            }
+
+            mkdir($source_host_path, 0755, true);
+            file_put_contents($source_host_path . '/plugin.php', "<?php // Source-host plugin\n");
+        }
+
+        $unlisted_plugin = $this->fsRoot . '/wp-content/plugins/woocommerce';
+        mkdir($unlisted_plugin, 0755, true);
+        file_put_contents($unlisted_plugin . '/woocommerce.php', "<?php // WooCommerce\n");
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        foreach (array_column(\excluded_plugins([]), 'local_path') as $relative_path) {
+            $source_host_path = $this->fsRoot . '/' . $relative_path;
+            if (substr($relative_path, -4) === '.php') {
+                $this->assertFileDoesNotExist($source_host_path);
+                continue;
+            }
+            $this->assertDirectoryDoesNotExist($source_host_path);
+        }
+        $this->assertDirectoryExists($unlisted_plugin);
+
+        $state = json_decode(
+            file_get_contents($client->pull_state_directory . '/state.json'),
+            true,
+        );
+        $this->assertSame(
+            array_column(\excluded_plugins([]), 'local_path'),
+            $state['apply']['remote_paths_removed_from_local_site'],
+        );
+    }
+
+    // ---- Globally removed SiteGround paths ----
 
     private function writeSitegroundState(array $overrides = []): void
     {
-        $this->writeState(array_replace_recursive([
-            'webhost' => 'siteground',
-            'preflight' => [
-                'data' => [
-                    'runtime' => [
-                        'document_root' => '',
-                        'env_names' => [],
-                        'ini_get_all' => [],
-                    ],
-                    'filesystem' => ['directories' => []],
-                    'wp_detect' => ['roots' => []],
-                    'wp_content' => [
-                        'roots' => [
-                            [
-                                'plugins' => [
-                                    ['name' => 'sg-cachepress', 'type' => 'dir'],
-                                    ['name' => 'sg-security', 'type' => 'dir'],
+        $this->writeState(array_replace_recursive(
+            ['webhost' => 'siteground'],
+            $this->preflightWithoutWpcloudSignals('/var/www/html'),
+            [
+                'preflight' => [
+                    'data' => [
+                        'wp_content' => [
+                            'roots' => [
+                                [
+                                    'plugins' => [
+                                        ['name' => 'sg-cachepress', 'type' => 'dir'],
+                                        ['name' => 'sg-security', 'type' => 'dir'],
+                                    ],
                                 ],
                             ],
                         ],
                     ],
                 ],
             ],
-        ], $overrides));
+            $overrides,
+        ));
     }
 
     private function createSitegroundPlugins(): void
@@ -478,11 +573,11 @@ class ProductionDropInRemovalTest extends TestCase
         $auditLog = file_get_contents($this->stateDir . '/audit.log');
 
         $this->assertStringContainsString(
-            'removed wp-content/plugins/sg-cachepress (production-only)',
+            'removed wp-content/plugins/sg-cachepress (source-host)',
             $auditLog,
         );
         $this->assertStringContainsString(
-            'removed wp-content/plugins/sg-security (production-only)',
+            'removed wp-content/plugins/sg-security (source-host)',
             $auditLog,
         );
     }
@@ -513,22 +608,70 @@ class ProductionDropInRemovalTest extends TestCase
 
     // ---- WP Engine-specific tests ----
 
+    public function testCopiedWpengineLoaderDoesNotRequireRemovedPackageAfterCleanup(): void
+    {
+        $state = $this->preflightWithoutWpcloudSignals('/var/www/html');
+        $state['webhost'] = 'other';
+        $state['preflight']['data']['wp_content']['roots'] = [
+            ['mu_plugins' => [
+                ['name' => 'mu-plugin.php', 'type' => 'file'],
+                ['name' => 'wpengine-common', 'type' => 'dir'],
+            ]],
+        ];
+        $this->writeState($state);
+
+        $mu_plugins = $this->fsRoot . '/wp-content/mu-plugins';
+        mkdir($mu_plugins . '/wpengine-common', 0755, true);
+        // WP Engine's loader requires its package even after moving to another host.
+        // https://github.com/Gnovus-Inc/sports-nerd-nonsense/blob/6dbc25ecf0db13c7ea82d81b9d32ea7114589001/wp-content/mu-plugins/mu-plugin.php#L18
+        file_put_contents($mu_plugins . '/mu-plugin.php', "<?php require_once __DIR__ . '/wpengine-common/plugin.php';");
+        file_put_contents($mu_plugins . '/wpengine-common/plugin.php', "<?php // WP Engine package\n");
+        file_put_contents($mu_plugins . '/custom.php', "<?php echo 'custom-plugin-loaded';");
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        ob_start();
+        try {
+            foreach (glob($mu_plugins . '/*.php') as $mu_plugin) {
+                require $mu_plugin;
+            }
+            $this->assertSame('custom-plugin-loaded', ob_get_contents());
+        } finally {
+            ob_end_clean();
+        }
+        $this->assertFileDoesNotExist($mu_plugins . '/mu-plugin.php');
+        $this->assertDirectoryDoesNotExist($mu_plugins . '/wpengine-common');
+    }
+
+    public function testUnpairedGenericMuPluginSurvivesCleanup(): void
+    {
+        $state = $this->preflightWithoutWpcloudSignals('/var/www/html');
+        $state['webhost'] = 'other';
+        $state['preflight']['data']['wp_content']['roots'] = [
+            ['mu_plugins' => [['name' => 'mu-plugin.php', 'type' => 'file']]],
+        ];
+        $this->writeState($state);
+
+        $mu_plugins = $this->fsRoot . '/wp-content/mu-plugins';
+        mkdir($mu_plugins, 0755, true);
+        $custom_plugin = "<?php // Custom MU plugin, not a WP Engine loader.\n";
+        file_put_contents($mu_plugins . '/mu-plugin.php', $custom_plugin);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        $this->assertSame($custom_plugin, file_get_contents($mu_plugins . '/mu-plugin.php'));
+    }
+
     public function testWpengineRemovesPlatformMuPluginsAndPreservesCustomMuPlugins(): void
     {
-        $this->writeState([
-            'webhost' => 'wpengine',
-            'preflight' => [
-                'data' => [
-                    'runtime' => [
-                        'document_root' => '',
-                        'env_names' => [],
-                        'ini_get_all' => [],
-                    ],
-                    'filesystem' => ['directories' => []],
-                    'wp_detect' => ['roots' => []],
-                ],
-            ],
-        ]);
+        $this->writeState(array_replace_recursive(
+            ['webhost' => 'wpengine'],
+            $this->preflightWithoutWpcloudSignals('/nas/content/live/example'),
+        ));
 
         $mu_plugins = $this->fsRoot . '/wp-content/mu-plugins';
         mkdir($mu_plugins . '/wpengine-common', 0755, true);
