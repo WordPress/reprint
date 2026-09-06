@@ -201,6 +201,9 @@
     },
     "empty-geometry-cross-engine": {
       "port": 8141
+    },
+    "wpengine-plugin-inventory": {
+      "port": 8142
     }
   }
 }

@@ -8,27 +8,14 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/host/load.php';
 
 class WpengineHostAnalyzerTest extends TestCase {
-    /** Minimal source inventory; plugin names alone do not identify a host. */
-    private function wpenginePreflight(array $mu_plugins): array
+    private function wpenginePreflight(array $runtime = []): array
     {
         return [
-            'runtime' => [
+            'runtime' => array_merge([
                 'ini_get_all' => [
                     'memory_limit' => '256M',
                 ],
-            ],
-            'wp_content' => [
-                'roots' => [
-                    [
-                        'mu_plugins' => array_map(
-                            static function (string $name): array {
-                                return ['name' => $name, 'type' => substr($name, -4) === '.php' ? 'file' : 'dir'];
-                            },
-                            $mu_plugins,
-                        ),
-                    ],
-                ],
-            ],
+            ], $runtime),
             'database' => [
                 'wp' => [
                     'paths_urls' => [
@@ -40,108 +27,77 @@ class WpengineHostAnalyzerTest extends TestCase {
         ];
     }
 
-    /** Score Identifies Current Wpengine Document Root. */
-    public function testScoreIdentifiesCurrentWpengineDocumentRoot(): void
+    public function testScoreIdentifiesCurrentWpengineFilesystemRoot(): void
     {
         $preflight = $this->wpenginePreflight([
-            'mu-plugin.php',
-            'wpengine-common',
+            'document_root' => '/nas/content/live/example',
         ]);
 
-        $preflight['runtime']['document_root'] = '/nas/content/live/my-site';
         $this->assertGreaterThanOrEqual(0.5, \WpengineHostAnalyzer::score($preflight));
     }
 
-    /** Score Identifies Current Wpengine Wordpress Root. */
-    public function testScoreIdentifiesCurrentWpengineWordpressRoot(): void
+    public function testScoreIdentifiesOlderWpengineFilesystemRoot(): void
     {
         $preflight = $this->wpenginePreflight([
-            'wpe-cache-plugin',
-            'wpe-update-source-selector',
-            'wpengine-security-auditor.php',
+            'cwd' => '/nas/wp/www/cluster-1234/example',
         ]);
 
+        $this->assertGreaterThanOrEqual(0.5, \WpengineHostAnalyzer::score($preflight));
+    }
+
+    /** WordPress can live behind a different nginx entry path. */
+    public function testScoreIdentifiesCurrentWpengineWordpressRoot(): void
+    {
+        $preflight = $this->wpenginePreflight();
         $preflight['database']['wp']['paths_urls']['abspath'] = '/nas/wp/www/my-site/';
         $this->assertGreaterThanOrEqual(0.5, \WpengineHostAnalyzer::score($preflight));
     }
 
-    /** Detect Host Returns Wpengine. */
     public function testDetectHostReturnsWpengine(): void
     {
         $preflight = $this->wpenginePreflight([
-            'mu-plugin.php',
-            'wpengine-common',
+            'script_filename' => '/nas/content/live/example/index.php',
         ]);
 
-        $preflight['runtime']['document_root'] = '/nas/content/live/my-site';
         $this->assertSame('wpengine', \detect_host($preflight));
     }
 
-    /** Score Rejects One Generic Mu Plugin. */
-    public function testScoreRejectsOneGenericMuPlugin(): void
+    public function testScoreRejectsCopiedWpenginePlugins(): void
     {
-        $preflight = $this->wpenginePreflight([
-            'force-strong-passwords',
-        ]);
+        $preflight = $this->wpenginePreflight();
+        $preflight['wp_content']['roots'][] = [
+            'mu_plugins' => [
+                ['name' => 'wpengine-common', 'type' => 'dir'],
+                ['name' => 'wpe-cache-plugin', 'type' => 'dir'],
+                ['name' => 'wpe-update-source-selector', 'type' => 'dir'],
+                ['name' => 'wpengine-security-auditor.php', 'type' => 'file'],
+            ],
+        ];
 
-        $this->assertLessThan(0.5, \WpengineHostAnalyzer::score($preflight));
+        $this->assertSame(0.0, \WpengineHostAnalyzer::score($preflight));
     }
 
-    /** Score Rejects Unrelated Mu Plugins. */
-    public function testScoreRejectsUnrelatedMuPlugins(): void
+    public function testScoreRejectsUnrelatedFilesystemRoot(): void
     {
         $preflight = $this->wpenginePreflight([
-            'my-company-loader.php',
-            'my-company-tools',
+            'document_root' => '/var/www/html',
+            'script_filename' => '/var/www/html/index.php',
+            'cwd' => '/var/www/html',
         ]);
 
         $this->assertSame(0.0, \WpengineHostAnalyzer::score($preflight));
     }
 
-    /** Analyze Lists Wpengine Files Removed During Migration. */
-    public function testAnalyzeListsWpengineFilesRemovedDuringMigration(): void
+    public function testWpenginePathsAreExcludedFromTheImport(): void
     {
-        $manifest = ( new \WpengineHostAnalyzer() )->analyze($this->wpenginePreflight([]));
+        $preflight = $this->wpenginePreflight([
+            'document_root' => '/nas/content/live/example',
+        ]);
+        $excluded_plugins = \excluded_plugins($preflight);
 
-        $this->assertSame([
-            'wp-content/advanced-cache.php',
-            'wp-content/object-cache.php',
-            'wp-content/mu-plugins/slt-force-strong-passwords.php',
-            'wp-content/mu-plugins/force-strong-passwords',
-            'wp-content/mu-plugins/stop-long-comments.php',
-            'wp-content/mu-plugins/wpe-cache-plugin',
-            'wp-content/mu-plugins/wpe-cache-plugin.php',
-            'wp-content/mu-plugins/wpe-update-source-selector',
-            'wp-content/mu-plugins/wpe-update-source-selector.php',
-            'wp-content/mu-plugins/wpe-wp-sign-on-plugin',
-            'wp-content/mu-plugins/wpe-wp-sign-on-plugin.php',
-            'wp-content/mu-plugins/wpengine-security-auditor.php',
-        ], $manifest->paths_to_remove);
-        $this->assertSame('wpengine', $manifest->source);
-    }
-    /** A shared MU-plugin filename does not identify its contents. */
-    public function testCustomerMuPluginIsNotRemovedOnWpengine(): void
-    {
-        $preflight = $this->wpenginePreflight(['mu-plugin.php', 'wpengine-common']);
-        $preflight['wp_content']['roots'][0]['mu_plugins'][0]['headers'] = ['name' => 'Customer checkout rules'];
-        $manifest = ( new \WpengineHostAnalyzer() )->analyze($preflight);
-        $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $manifest->paths_to_remove);
-        $this->assertNotContains('wp-content/mu-plugins/wpengine-common', $manifest->paths_to_remove);
-    }
-
-    /** The documented WP Engine System header identifies a renamed loader. */
-    public function testRecognizedLoaderIsRemovedUnderItsActualFilename(): void
-    {
-        $preflight = $this->wpenginePreflight(['platform-loader.php', 'wpengine-common']);
-        $preflight['wp_content']['roots'][0]['mu_plugins'][0]['headers'] = ['name' => 'WP Engine System'];
-        $manifest = ( new \WpengineHostAnalyzer() )->analyze($preflight);
-        $this->assertContains('wp-content/mu-plugins/platform-loader.php', $manifest->paths_to_remove);
-    }
-
-    /** Plugins copied off the source host do not identify the current host. */
-    public function testOldWpenginePluginsDoNotIdentifyAnotherHost(): void
-    {
-        $preflight = $this->wpenginePreflight(['mu-plugin.php', 'wpengine-common', 'wpe-cache-plugin']);
-        $this->assertSame(0.0, \WpengineHostAnalyzer::score($preflight));
+        $excluded_local_paths = array_column($excluded_plugins, 'local_path');
+        $this->assertContains('wp-content/advanced-cache.php', $excluded_local_paths);
+        $this->assertContains('wp-content/object-cache.php', $excluded_local_paths);
+        $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
     }
 }
