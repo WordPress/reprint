@@ -84,12 +84,33 @@ class OnlyFilesPathPrefixTest extends TestCase
         return $this->client(array('database' => array('wp' => array('paths_urls' => $pathsUrls))));
     }
 
+    /**
+     * Build the selection fingerprint for the standard test WordPress paths.
+     *
+     * @param string[] $included Included source path prefixes.
+     * @param string[] $excluded Excluded source path prefixes.
+     */
     private function pathSelectionFingerprint(array $included, array $excluded = array()): string
     {
         sort($excluded, SORT_STRING);
+        $excluded_plugin_source_paths = array_column(
+            \excluded_plugins(array(
+                'database' => array(
+                    'wp' => array(
+                        'paths_urls' => array(
+                            'abspath' => '/var/www/html/',
+                            'content_dir' => '/var/www/html/wp-content',
+                        ),
+                    ),
+                ),
+            )),
+            'source_path'
+        );
+        sort($excluded_plugin_source_paths, SORT_STRING);
         return hash('sha256', json_encode(array(
             'only_path_prefixes' => $included,
             'excluded_path_prefixes' => $excluded,
+            'excluded_plugin_source_paths' => $excluded_plugin_source_paths,
         ), JSON_UNESCAPED_SLASHES));
     }
 
@@ -283,7 +304,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --include or --exclude while resuming files-pull');
+        $this->expectExceptionMessage('Cannot resume files-pull because its file path selection changed');
         $this->call($c, 'assert_files_pull_path_selection_unchanged_while_resuming', array(true));
     }
 
@@ -297,7 +318,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->set($c, 'pull_excluded_files_with_path_prefixes', array('/var/www/html/wp-content/plugins'));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --include or --exclude while resuming files-pull');
+        $this->expectExceptionMessage('Cannot resume files-pull because its file path selection changed');
         $this->call($c, 'assert_files_pull_path_selection_unchanged_while_resuming', array(true));
     }
 
@@ -320,7 +341,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         ));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --include or --exclude while resuming files-pull');
+        $this->expectExceptionMessage('Cannot resume files-pull because its file path selection changed');
         $this->runFilesPull(array('include' => array(':wp-uploads:')));
     }
 
@@ -364,7 +385,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         ));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --include or --exclude while resuming files-pull');
+        $this->expectExceptionMessage('Cannot resume files-pull because its file path selection changed');
         $this->runFilesPull(array('exclude' => array(':wp-uploads:')));
     }
 

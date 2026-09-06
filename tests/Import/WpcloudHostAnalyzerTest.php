@@ -48,15 +48,18 @@ class WpcloudHostAnalyzerTest extends TestCase
         return array_replace_recursive($defaults, $overrides);
     }
 
-    public function testAnalyzePopulatesPathsToRemove(): void
+    public function testWpcloudPathsAreExcludedFromTheImport(): void
     {
-        $analyzer = new \WpcloudHostAnalyzer();
-        $manifest = $analyzer->analyze($this->wpcloudPreflight());
+        $excluded_plugins = \excluded_plugins($this->wpcloudPreflight());
 
-        $this->assertContains('wp-content/object-cache.php', $manifest->paths_to_remove);
-        $this->assertContains('wp-content/mu-plugins/wpcomsh', $manifest->paths_to_remove);
-        $this->assertContains('wp-content/mu-plugins/wpcomsh-dev', $manifest->paths_to_remove);
-        $this->assertContains('wp-content/mu-plugins/wpcomsh-loader.php', $manifest->paths_to_remove);
+        $this->assertContains(
+            'wp-content/object-cache.php',
+            array_column($excluded_plugins, 'local_path'),
+        );
+        $this->assertContains(
+            'wp-content/advanced-cache.php',
+            array_column($excluded_plugins, 'local_path'),
+        );
     }
 
     public function testAnalyzeDetectsExtraDirectoryFromAutoPrependFile(): void
