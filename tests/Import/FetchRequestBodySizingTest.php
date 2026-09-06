@@ -282,12 +282,19 @@ class FetchRequestBodySizingTest extends TestCase
         );
     }
 
-    public function testPreflightAcceptsJsonFromAnOpaqueResponse(): void
+    /**
+     * @dataProvider acceptedPreflightDomainProvider
+     * @param array $wordpress {
+     *     @type string|false $home WordPress home URL, or false when unavailable.
+     *     @type string|null $home_domain_b64 Optional encoded domain, or null when unavailable.
+     * }
+     */
+    public function testPreflightAcceptsJsonFromAnOpaqueResponse(array $wordpress): void
     {
         $payload = json_encode([
             'ok' => true,
             'protocol_version' => 3,
-            'database' => ['wp' => ['wp_version' => '6.0-test']],
+            'database' => ['wp' => $wordpress + ['wp_version' => '6.0-test']],
         ]);
         $response = "HTTP/1.1 200 OK\r\n"
             . "Content-Type: application/octet-stream\r\n"
@@ -309,10 +316,182 @@ class FetchRequestBodySizingTest extends TestCase
         $client->run_preflight();
         pcntl_waitpid($pid, $status);
 
+        $this->assertTrue($client->get_state()->preflight_record()['data']['ok']);
+        $this->assertNull($client->get_state()->preflight_record()['error']);
+        $reflection->getMethod('require_preflight')->invoke($client);
         $this->assertSame(
             '6.0-test',
             $client->get_state()->preflight_record()['data']['database']['wp']['wp_version'],
         );
+    }
+
+    public static function acceptedPreflightDomainProvider(): array
+    {
+        return [
+            'matching domain with port and path' => [[
+                'home' => 'https://example.com:8443/wordpress',
+                'home_domain_b64' => base64_encode('example.com'),
+            ]],
+            'older server without encoded domain' => [[
+                'home' => 'https://example.com',
+            ]],
+            'server could not determine a domain' => [[
+                'home' => false,
+                'home_domain_b64' => null,
+            ]],
+        ];
+    }
+
+    /** @dataProvider rejectedPreflightCommandProvider */
+    public function testPullReportsTheRewrittenDomain(string $command, bool $resume): void
+    {
+        $payload = json_encode([
+            'ok' => true,
+            'protocol_version' => 3,
+            'database' => ['wp' => [
+                'home' => 'https://preview.example.com',
+                'home_domain_b64' => base64_encode('example.com'),
+            ]],
+        ]);
+        [$url, $pid] = $this->startJsonServer(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+                . 'Content-Length: ' . strlen($payload) . "\r\nConnection: close\r\n\r\n" . $payload,
+        );
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        if ($resume) {
+            // A pull-db stopped after downloading SQL. A later standalone
+            // preflight must not let its replacement response bypass the check
+            // just because the resumed pipeline skips the preflight stage.
+            \write_current_pull_state($client, []);
+            file_put_contents(
+                $this->stateDir . '/db.sql',
+                "SELECT 1;\n-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 "
+                    . base64_encode(json_encode(['current_table' => null])) . "\n",
+            );
+            $client->mark_pull_stage_complete('db-pull', 'pull-db', ['preflight', 'db-pull', 'db-apply']);
+            $client->run_preflight();
+        }
+
+        try {
+            ob_start();
+            $client->run([
+                'command' => $command,
+                'runtime' => 'none',
+                'target_engine' => 'sqlite',
+                'target_sqlite_path' => $this->tempDir . '/target.sqlite',
+            ]);
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                "from 'example.com' to 'preview.example.com'",
+                $exception->getMessage(),
+            );
+            $this->assertSame(1, $client->exit_code);
+            $this->assertFileDoesNotExist($this->tempDir . '/target.sqlite');
+            $this->assertSame(
+                $resume ? 'db-pull' : null,
+                $client->get_state()->pull_pipeline->last_completed_stage,
+            );
+            return;
+        } finally {
+            ob_end_clean();
+            pcntl_waitpid($pid, $status);
+        }
+        $this->fail('Expected the pull to reject the rewritten domain.');
+    }
+
+    public static function rejectedPreflightCommandProvider(): array
+    {
+        return [
+            ['pull', false],
+            ['pull-files', false],
+            ['pull-db', false],
+            ['pull-db', true],
+        ];
+    }
+
+    /**
+     * @dataProvider rejectedPreflightDomainProvider
+     * @param array $wordpress {
+     *     @type mixed $home WordPress home URL, including invalid values under test.
+     *     @type mixed $home_domain_b64 Encoded domain, including invalid values under test.
+     * }
+     */
+    public function testPreflightRejectsInvalidDomainsBeforeReusingSavedResponse(
+        array $wordpress,
+        string $expected_error
+    ): void
+    {
+        $payload = json_encode([
+            'ok' => true,
+            'protocol_version' => 3,
+            'database' => ['wp' => $wordpress],
+        ]);
+        $response = "HTTP/1.1 200 OK\r\n"
+            . "Content-Type: application/octet-stream\r\n"
+            . "Content-Length: " . strlen($payload) . "\r\n"
+            . "Connection: close\r\n\r\n"
+            . $payload;
+
+        [$url, $pid] = $this->startJsonServer($response);
+
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        \write_current_pull_state($client, []);
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection->getProperty('state')->setValue(
+            $client,
+            $reflection->getMethod('load_state')->invoke($client),
+        );
+        $reflection->getProperty('is_tty')->setValue($client, false);
+
+        $client->run_preflight();
+        pcntl_waitpid($pid, $status);
+
+        $preflight = $client->get_state()->preflight_record();
+        $this->assertFalse($preflight['data']['ok']);
+        $this->assertSame($expected_error, $preflight['data']['error']);
+        $this->assertSame($expected_error, $preflight['error']);
+
+        // A later low-level command reads the saved response without fetching
+        // preflight again. It must not accept the response the first run rejected.
+        $next_client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $reflection->getProperty('state')->setValue(
+            $next_client,
+            $reflection->getMethod('load_state')->invoke($next_client),
+        );
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage($preflight['data']['error']);
+        $reflection->getMethod('require_preflight')->invoke($next_client);
+    }
+
+    public static function rejectedPreflightDomainProvider(): array
+    {
+        return [
+            'rewritten domain' => [[
+                'home' => 'https://preview.example.com',
+                'home_domain_b64' => base64_encode('example.com'),
+            ], "The preflight response changed the site domain from 'example.com' "
+                . "to 'preview.example.com'. A host response filter likely rewrote the response body."],
+            'invalid base64' => [[
+                'home' => 'https://example.com',
+                'home_domain_b64' => 'not!base64',
+            ], 'The preflight response contains an invalid base64 WordPress home domain: "not!base64".'],
+            'non-string base64' => [[
+                'home' => 'https://example.com',
+                'home_domain_b64' => 123,
+            ], 'The preflight response contains an invalid base64 WordPress home domain: 123.'],
+            'empty base64' => [[
+                'home' => 'https://example.com',
+                'home_domain_b64' => '',
+            ], 'The preflight response contains an invalid base64 WordPress home domain: "".'],
+            'home without a domain' => [[
+                'home' => 'example.com',
+                'home_domain_b64' => base64_encode('example.com'),
+            ], 'The preflight response contains a WordPress home URL without a valid domain: "example.com".'],
+            'non-string home' => [[
+                'home' => false,
+                'home_domain_b64' => base64_encode('example.com'),
+            ], 'The preflight response contains a WordPress home URL without a valid domain: false.'],
+        ];
     }
 
     public function testRunningPreflightTightensTheBoundInTheSameRun(): void

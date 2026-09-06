@@ -2583,6 +2583,47 @@ class ImportClient
             $this->audit_log("USER-AGENT BLOCKED | {$ua}", false);
         }
 
+        // Some hosts, including Hostinger, replace the site's domain in responses
+        // so links and assets work on a preview domain before DNS points at the
+        // host. The stored WordPress home URL stays unchanged, but this rewriting
+        // can also change our JSON. For home=https://example.com:8443/blog, compare
+        // example.com (the hostname, without scheme, port, or path), not the full
+        // site URL, with the decoded server copy. Hostinger's plain-domain
+        // replacement leaves the base64 value unchanged.
+        $domain_error = null;
+        $wordpress = null;
+        if (is_array($payload)) {
+            $wordpress = $payload["database"]["wp"] ?? null;
+        }
+        if (
+            is_array($wordpress)
+            && array_key_exists("home_domain_b64", $wordpress)
+            && $wordpress["home_domain_b64"] !== null
+        ) {
+            $encoded_domain = $wordpress["home_domain_b64"];
+            $home = $wordpress["home"] ?? null;
+            $plain_domain = is_string($home) ? parse_url($home, PHP_URL_HOST) : null;
+            $decoded_domain = is_string($encoded_domain)
+                ? base64_decode($encoded_domain, true)
+                : false;
+            if (!is_string($plain_domain) || $plain_domain === "") {
+                $domain_error = "The preflight response contains a WordPress home URL without a valid domain: "
+                    . json_encode($home) . ".";
+            } elseif ($decoded_domain === false || $decoded_domain === "") {
+                $domain_error = "The preflight response contains an invalid base64 WordPress home domain: "
+                    . json_encode($encoded_domain) . ".";
+            } elseif ($plain_domain !== $decoded_domain) {
+                $domain_error = "The preflight response changed the site domain from "
+                    . "'{$decoded_domain}' to '{$plain_domain}'. A host response filter likely rewrote the response body.";
+            }
+        }
+        if ($domain_error !== null && is_array($payload)) {
+            // Keep the response available for diagnosis, but mark it failed so
+            // pulls stop instead of downloading with rewritten URLs.
+            $payload["ok"] = false;
+            $payload["error"] = $domain_error;
+        }
+
         $entry = [
             "timestamp" => time(),
             "url" => $url,
@@ -2590,7 +2631,7 @@ class ImportClient
             "elapsed" => (float) ($result["elapsed"] ?? 0),
             "ok" => is_array($payload) ? ($payload["ok"] ?? null) : null,
             "data" => $payload,
-            "error" => $result["error"] ?? null,
+            "error" => $domain_error ?? $result["error"] ?? null,
             "response_body_preview" => $payload === null && isset($result["body"])
                 ? substr((string) $result["body"], 0, 200)
                 : null,
@@ -2609,6 +2650,15 @@ class ImportClient
             $this->get_state()->remote_protocol_version = (int) $payload["protocol_version"];
         } else {
             $this->get_state()->remote_protocol_version = null;
+        }
+
+        if ($domain_error !== null) {
+            $this->save_state();
+            $this->audit_log(
+                "PREFLIGHT RESULT | " . json_encode($entry),
+                false,
+            );
+            return;
         }
 
         // Detect webhost environment from preflight data.
@@ -2863,6 +2913,11 @@ class ImportClient
             throw new RuntimeException(
                 "No preflight data found. Run 'preflight' or 'preflight-assert' first.",
             );
+        }
+        if (!empty($entry["error"])) {
+            // The client rejected this response; keep it for diagnosis, not downloads.
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error, never HTML.
+            throw new RuntimeException($entry["error"]);
         }
     }
 

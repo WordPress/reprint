@@ -475,8 +475,10 @@ set_error_handler(function ($errno, $errstr, $errfile, $errline) {
     }
 
     http_response_code(500);
-    // Hostinger preview domains rewrite real domains in application/json
-    // response bodies. Keep the JSON bytes opaque to that response filter.
+    // Hosts such as Hostinger rewrite domains so links and assets stay on a
+    // preview domain while the stored site URL still uses the real domain.
+    // This lets users preview a site before changing DNS, but also rewrites
+    // application/json bodies. Octet-stream bypasses Hostinger's filter.
     @header("Content-Type: application/octet-stream");
     echo json_encode($error);
     exit(1);
@@ -504,8 +506,10 @@ set_exception_handler(function ($e) {
     }
 
     http_response_code(500);
-    // Hostinger preview domains rewrite real domains in application/json
-    // response bodies. Keep the JSON bytes opaque to that response filter.
+    // Hosts such as Hostinger rewrite domains so links and assets stay on a
+    // preview domain while the stored site URL still uses the real domain.
+    // This lets users preview a site before changing DNS, but also rewrites
+    // application/json bodies. Octet-stream bypasses Hostinger's filter.
     header("Content-Type: application/octet-stream");
     echo json_encode($error);
     exit(1);
@@ -549,8 +553,10 @@ register_shutdown_function(function () {
 
     if (!headers_sent()) {
         http_response_code(500);
-        // Hostinger preview domains rewrite real domains in application/json
-        // response bodies. Keep the JSON bytes opaque to that response filter.
+        // Hosts such as Hostinger rewrite domains so links and assets stay on a
+        // preview domain while the stored site URL still uses the real domain.
+        // This lets users preview a site before changing DNS, but also rewrites
+        // application/json bodies. Octet-stream bypasses Hostinger's filter.
         @header("Content-Type: application/octet-stream");
         echo json_encode([
             "error" => $message,
@@ -2014,7 +2020,6 @@ function endpoint_preflight(array $config): array
                         $db["wp"]["theme_stylesheet"] = get_option("stylesheet");
                         $db["wp"]["theme_template"] = get_option("template");
                         $db["wp"]["siteurl"] = get_option("siteurl");
-                        $db["wp"]["home"] = get_option("home");
                         // Resolve wp-admin and wp-includes paths.
                         // These are always ABSPATH/wp-admin and ABSPATH/WPINC
                         // by WordPress convention, but on hosts like WP Cloud
@@ -2318,6 +2323,25 @@ function endpoint_preflight(array $config): array
         }
     }
 
+    // Hosts such as Hostinger replace the site's domain in responses so links
+    // and assets work on a preview domain before DNS points at the host. The
+    // stored WordPress home URL stays unchanged, but the filter also alters JSON.
+    // Send the full home URL plus an encoded hostname to detect that rewriting:
+    // for https://example.com:8443/blog, encode example.com, not the whole URL.
+    if ($db["wp"]["wp_load_loaded"] && function_exists("get_option")) {
+        $wp_home = get_option("home");
+        $db["wp"]["home"] = $wp_home;
+        $wp_home_domain = is_string($wp_home)
+            ? parse_url($wp_home, PHP_URL_HOST)
+            : null;
+        // The importer decodes this hostname and compares it with the hostname
+        // in the received home URL before using a possibly rewritten response.
+        $db["wp"]["home_domain_b64"] =
+            is_string($wp_home_domain) && $wp_home_domain !== ""
+                ? base64_encode($wp_home_domain)
+                : null;
+    }
+
     // -- WordPress content inventory --
     // If WordPress was loaded, use its constants for the real plugin/theme/
     // mu-plugin paths. Otherwise, fall back to conventional wp-content/ layout.
@@ -2562,8 +2586,10 @@ function endpoint_preflight(array $config): array
         "database" => $db,
     ];
 
-    // Hostinger preview domains rewrite real domains in application/json
-    // response bodies. Keep the JSON bytes opaque to that response filter.
+    // Hosts such as Hostinger rewrite domains so links and assets stay on a
+    // preview domain while the stored site URL still uses the real domain.
+    // This lets users preview a site before changing DNS, but also rewrites
+    // application/json bodies. Octet-stream bypasses Hostinger's filter.
     header("Content-Type: application/octet-stream");
     $json = json_encode($response);
     if ($json === false) {

@@ -218,6 +218,20 @@ php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" 
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json` under the `preflight` key.
 
+Some hosts, including [Hostinger](https://www.hostinger.com/support/2489693-how-to-access-your-website-content-without-a-domain-in-hostinger/),
+provide preview domains so you can browse a site before its real domain points
+at the host. They replace the real domain in outgoing pages so links and assets
+stay on the preview while the stored WordPress home URL stays unchanged.
+Hostinger also applies this rewriting to JSON responses.
+
+The server sends a base64 copy of the WordPress home domain to detect this.
+For a home URL of `https://example.com:8443/blog`, the domain is `example.com`,
+without the scheme, port, or path. If the decoded copy differs from the domain
+in the plain home URL, preflight fails and reports both domains. Low-level pull
+commands also reject that mismatch in saved preflight data.
+Older servers that omit the copy, or report `null` because no domain was available,
+remain compatible. The comparison checks the home domain, not every URL in the response.
+
 All other commands check that a preflight has been completed and refuse to start without one.
 
 To run very basic diagnostics that confirms the remote server replied and it has a
