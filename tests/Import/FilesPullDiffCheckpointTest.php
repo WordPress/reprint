@@ -508,6 +508,7 @@ final class FilesPullDiffCheckpointTest extends TestCase
                 json_encode([
                     'only_path_prefixes' => [],
                     'excluded_path_prefixes' => [],
+                    'excluded_plugin_source_paths' => [],
                 ], JSON_UNESCAPED_SLASHES)
             ),
         ]);

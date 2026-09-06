@@ -12,7 +12,7 @@ parameters:
 
 		-
 			message: "#^Function get_option not found\\.$#"
-			count: 5
+			count: 4
 			path: ../../packages/reprint-server/src/export.php
 
 		-
