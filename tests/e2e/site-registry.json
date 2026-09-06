@@ -192,6 +192,15 @@
     },
     "empty-geometry-cross-engine": {
       "port": 8141
+    },
+    "multisite-database": {
+      "port": 8143
+    },
+    "multisite-admin": {
+      "port": 8144
+    },
+    "multisite-files": {
+      "port": 8145
     }
   }
 }
