@@ -9,54 +9,24 @@
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Host analyzers use established global class names.
 class WpengineHostAnalyzer implements HostAnalyzer {
     /**
-     * Score the WP Engine-specific MU-plugin names reported by preflight.
-     *
-     * One name is kept below the detection threshold because a copied plugin
-     * may remain after an earlier migration. The standard wpengine-common
-     * directory and its mu-plugin.php loader form a strong match together.
+     * Detect the current WP Engine filesystem layout, not copied plugin names.
+     * Platform plugins may remain on a site after it has moved elsewhere.
      */
     public static function score(array $preflight_data): float
     {
-        $mu_plugin_names = [];
-        foreach ($preflight_data['wp_content']['roots'] ?? [] as $root) {
-            foreach ($root['mu_plugins'] ?? [] as $mu_plugin) {
-                $name = $mu_plugin['name'] ?? null;
-                if (is_string($name)) {
-                    $mu_plugin_names[$name] = true;
-                }
-            }
-        }
-
-        $wpengine_mu_plugin_names = [
-            'wpengine-common',
-            'wpe-cache-plugin',
-            'wpe-cache-plugin.php',
-            'wpe-update-source-selector',
-            'wpe-update-source-selector.php',
-            'wpe-wp-sign-on-plugin',
-            'wpe-wp-sign-on-plugin.php',
-            'wpengine-security-auditor.php',
+        $paths = [
+            $preflight_data['runtime']['document_root'] ?? '',
+            $preflight_data['database']['wp']['paths_urls']['abspath'] ?? '',
         ];
-        $matches = 0;
-        foreach ($wpengine_mu_plugin_names as $wpengine_mu_plugin_name) {
-            if (isset($mu_plugin_names[$wpengine_mu_plugin_name])) {
-                ++$matches;
+        foreach ($paths as $path) {
+            if (is_string($path) && preg_match('~^/nas/(?:content/live|wp/www)/[^/]+(?:/|$)~', $path) === 1) {
+                return 1.0;
             }
         }
-
-        if (
-            $matches >= 2
-            || (
-                isset($mu_plugin_names['wpengine-common'])
-                && isset($mu_plugin_names['mu-plugin.php'])
-            )
-        ) {
-            return 0.9;
-        }
-
-        return $matches === 1 ? 0.3 : 0.0;
+        return 0.0;
     }
 
+    /** Preserve a generic loader unless its header identifies WP Engine System. */
     public function analyze(array $preflight_data): RuntimeManifest
     {
         $manifest = new RuntimeManifest('wpengine');
@@ -70,8 +40,6 @@ class WpengineHostAnalyzer implements HostAnalyzer {
         $manifest->paths_to_remove = [
             'wp-content/advanced-cache.php',
             'wp-content/object-cache.php',
-            'wp-content/mu-plugins/mu-plugin.php',
-            'wp-content/mu-plugins/wpengine-common',
             'wp-content/mu-plugins/slt-force-strong-passwords.php',
             'wp-content/mu-plugins/force-strong-passwords',
             'wp-content/mu-plugins/stop-long-comments.php',
@@ -84,6 +52,24 @@ class WpengineHostAnalyzer implements HostAnalyzer {
             'wp-content/mu-plugins/wpengine-security-auditor.php',
         ];
 
+        // WP Engine documents this display name for its common-platform
+        // loader. A customer can also call a file mu-plugin.php, so the shared
+        // filename alone must never authorize removing it. Older exporters
+        // without headers leave that ambiguous file and its common-platform
+        // directory in place, rather than keeping a loader with a missing dependency.
+        foreach ($preflight_data['wp_content']['roots'] ?? [] as $root) {
+            foreach ($root['mu_plugins'] ?? [] as $plugin) {
+                $name = $plugin['name'] ?? '';
+                if (( $plugin['type'] ?? '' ) === 'file'
+                    && ( $plugin['headers']['name'] ?? '' ) === 'WP Engine System'
+                    && is_string($name) && basename($name) === $name
+                    && substr($name, -4) === '.php') {
+                    $manifest->paths_to_remove[] = 'wp-content/mu-plugins/wpengine-common';
+                    $manifest->paths_to_remove[] = 'wp-content/mu-plugins/' . $name;
+                }
+            }
+        }
+        $manifest->paths_to_remove = array_values(array_unique($manifest->paths_to_remove));
         return $manifest;
     }
 }

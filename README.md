@@ -541,6 +541,14 @@ PHP constants, INI directives, and request handlers that the source host
 relied on. `apply-runtime` reads the preflight data, detects the source
 hosting provider, and generates the configuration files your target server needs.
 
+WP Engine detection uses its current `/nas/content/live/` or `/nas/wp/www/`
+site paths, not plugin names left over from an earlier migration. Preflight
+reads MU-plugin names from their first 8 KiB of public headers. Cleanup removes
+the WP Engine System loader under its actual filename. An unrecognized
+`mu-plugin.php` and its `wpengine-common` directory stay in place, including
+when an older exporter supplies no headers. Review those files manually if
+they still depend on WP Engine services.
+
 For PHP's built-in development server:
 
 ```bash

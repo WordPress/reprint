@@ -526,6 +526,10 @@ class ProductionDropInRemovalTest extends TestCase
                     ],
                     'filesystem' => ['directories' => []],
                     'wp_detect' => ['roots' => []],
+                    'wp_content' => ['roots' => [['mu_plugins' => [[
+                        'name' => 'mu-plugin.php', 'type' => 'file',
+                        'headers' => ['name' => 'WP Engine System'],
+                    ]]]]],
                 ],
             ],
         ]);
