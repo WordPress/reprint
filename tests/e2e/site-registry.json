@@ -192,6 +192,9 @@
     },
     "empty-geometry-cross-engine": {
       "port": 8141
+    },
+    "generated-css-assets": {
+      "port": 8142
     }
   }
 }
