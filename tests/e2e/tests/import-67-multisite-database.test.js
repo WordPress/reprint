@@ -1,17 +1,27 @@
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { apiRequest, createMysqlConnection } from '../lib/test-helpers.js';
-import { ensureMultisite } from '../lib/multisite-setup.js';
+import { createHash } from 'node:crypto';
+import { apiRequest, createMysqlConnection, getSiteDir } from '../lib/test-helpers.js';
+import { ensureMultisite, runWp } from '../lib/multisite-setup.js';
 
 const site = 'multisite-database';
 const database = 'e2e_multisite_database_export';
-const mode = { multisite_mode: 'one-site-network-v1', fragments_per_batch: 1 };
+const mode = { multisite_mode: 'one-site-network-v1', fragments_per_batch: 1, max_allowed_packet: 1048576 };
 
 describe('Multisite database export over HTTP', () => {
     let fixture;
-    beforeAll(async () => { fixture = await ensureMultisite(site); });
+    beforeAll(async () => {
+        fixture = await ensureMultisite(site);
+        // This member has no content, and WordPress created the profile row
+        // before the role row. Target-side membership checks would lose it.
+        runWp(getSiteDir(site), ['eval', `
+            $member = get_user_by('login', 'shop-member');
+            update_user_meta($member->ID, 'description', str_repeat('member profile ', 100000));
+        `]);
+    });
     afterAll(async () => {
+        runWp(getSiteDir(site), ['user', 'meta', 'update', 'shop-member', 'description', '']);
         const connection = await createMysqlConnection();
         try { await connection.query(`DROP DATABASE IF EXISTS \`${database}\``); }
         finally { await connection.end(); }
@@ -48,6 +58,14 @@ describe('Multisite database export over HTTP', () => {
             const [metadata] = await connection.query(`SELECT meta_key, meta_value FROM \`${database}\`.network_usermeta`);
             assert.ok(metadata.some(row => row.meta_key === 'network_7_capabilities' && row.meta_value.includes('editor')));
             assert.ok(metadata.every(row => !['network_8_capabilities', 'network_capabilities', 'session_tokens'].includes(row.meta_key)));
+            const [[profile]] = await connection.query(`SELECT m.meta_value FROM \`${database}\`.network_usermeta m
+                JOIN \`${database}\`.network_users u ON u.ID=m.user_id WHERE u.user_login='shop-member' AND m.meta_key='description'`);
+            const expectedProfile = 'member profile '.repeat(100000);
+            assert.equal(profile.meta_value.length, expectedProfile.length, 'Keep every oversized profile byte');
+            assert.equal(createHash('sha256').update(profile.meta_value).digest('hex'),
+                createHash('sha256').update(expectedProfile).digest('hex'));
+            assert.ok(sql.filter(chunk => chunk.body.includes('UPDATE `network_usermeta`')).length > 1,
+                'The profile must travel in several UPDATE parts');
         } finally { await connection.end(); }
     });
 
