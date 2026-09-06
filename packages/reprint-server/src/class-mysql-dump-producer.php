@@ -1781,7 +1781,9 @@ class MySQLDumpProducer
         $chunk = $this->read_next_oversized_chunk($current);
         $formatted_chunk = $this->format_value($chunk['value'], $data_type);
 
-        $where_parts = $this->row_reader->get_current_row_selection_conditions();
+        // The target row is already selected. Its membership records may not
+        // have been imported yet, so only its primary key belongs in this UPDATE.
+        $where_parts = [];
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
             $where_parts[] = $this->row_reader->build_comparison($pk_col, $pk_value, "=");
         }
@@ -1919,7 +1921,7 @@ class MySQLDumpProducer
         $quoted_table = $this->row_reader->quote_identifier($this->row_reader->get_current_table());
         $quoted_column = $this->row_reader->quote_identifier($column);
 
-        $where_parts = [];
+        $where_parts = $this->row_reader->get_current_row_selection_conditions();
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
             $where_parts[] = $this->row_reader->build_comparison($pk_col, $pk_value, "=");
         }
