@@ -47,6 +47,11 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
         $this->assertSame('http://127.0.0.1:8142/wp-content/uploads/main.png', $rewriter->rewrite('http://127.0.0.1:8142/wp-content/uploads/main.png'));
         $markup = '<a href="http://127.0.0.1:8142/shop/post">selected</a>';
         $this->assertSame('<a href="http://localhost:9000/post">selected</a>', $rewriter->rewrite($markup, StructuredDataUrlRewriter::BLOCK_MARKUP));
+        $relative = '<a href="/sibling/post">sibling</a><a href="local-page">selected</a>';
+        $this->assertSame(
+            '<a href="http://127.0.0.1:8142/sibling/post">sibling</a><a href="/local-page">selected</a>',
+            $rewriter->rewrite($relative, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
     }
 
     /** Invalid destinations must fail before opening the target database. */
@@ -101,6 +106,16 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('empty target database');
         $this->target()->assert_empty_database(new PdoDatabaseConnection($this->pdo));
+    }
+
+    /** Only the selected scheme's default port may be omitted from network domains. */
+    public function test_network_domain_retains_nondefault_ports(): void
+    {
+        foreach (['http://localhost:443'=>'localhost:443', 'https://localhost:80'=>'localhost:80', 'https://localhost:443'=>'localhost'] as $url => $domain) {
+            $target = new MultisiteTarget(['site_id'=>7, 'network_id'=>1, 'base_prefix'=>'wp_'], $url, 'chosen');
+            $config = $target->get_wp_config(['db'=>'clone','user'=>'local','pass'=>'','host'=>'127.0.0.1','port'=>3306]);
+            $this->assertStringContainsString("define('DOMAIN_CURRENT_SITE', '{$domain}')", $config);
+        }
     }
 
     /** Source constants and credentials are replaced, not layered behind target overrides. */

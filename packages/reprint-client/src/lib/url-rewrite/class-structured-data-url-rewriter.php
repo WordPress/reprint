@@ -135,6 +135,17 @@ class StructuredDataUrlRewriter
         }
         $this->source_domains = array_keys($domains);
 
+        // The first source is the site's base for relative links, not an asset
+        // rule. A base path describes a directory even without a trailing slash.
+        $from_urls = array_keys($url_mapping);
+        $this->base_url = isset($from_urls[0]) ? rtrim($from_urls[0], '/') . '/' : '';
+
+        // A sibling or media rule must win over its containing site URL, just
+        // as it does in the cautious plain-text rewriter. Keep the base above.
+        uksort($url_mapping, static function (string $first, string $second): int {
+            return strlen($second) <=> strlen($first);
+        });
+
         // Parse the mapping once. Each WPURL::parse() does non-trivial work
         // (scheme/host/path tokenisation, punycode, etc.) and used to be
         // repeated on every leaf we rewrote.
@@ -146,11 +157,6 @@ class StructuredDataUrlRewriter
             ];
         }
         $this->mapping_cache_key = sha1(json_encode($url_mapping, JSON_UNESCAPED_SLASHES));
-
-        // Default base_url: first from-url in the mapping. Preserves the
-        // behaviour of the previous per-call default so outputs are unchanged.
-        $from_urls = array_keys($url_mapping);
-        $this->base_url = $from_urls[0] ?? '';
     }
 
     /**
@@ -825,7 +831,10 @@ class StructuredDataUrlRewriter
                                         'old_base_url' => $mapping['from_url'],
                                         'new_base_url' => $mapping['to_url'],
                                         'raw_url'      => $raw_url,
-                                        'is_relative'  => ! WPURL::can_parse($raw_url),
+                                        // Identity rules retain the source origin. A relative
+                                        // sibling link would otherwise point into the target.
+                                        'is_relative'  => ! WPURL::can_parse($raw_url)
+                                            && $mapping['from_url']->toString() !== $mapping['to_url']->toString(),
                                     )
                                 );
                                 break;

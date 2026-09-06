@@ -60,7 +60,8 @@ class MultisiteTarget {
         $this->target_url = rtrim($target_url, '/');
         $this->network_admin = $network_admin;
         $this->domain = strtolower($url['host']);
-        if (isset($url['port']) && !in_array($url['port'], [80, 443], true)) {
+        $default_port = $url['scheme'] === 'https' ? 443 : 80;
+        if (isset($url['port']) && $url['port'] !== $default_port) {
             $this->domain .= ':' . $url['port'];
         }
     }
@@ -69,7 +70,7 @@ class MultisiteTarget {
     public function get_url_mapping(): array
     {
         $source = $this->source;
-        $mapping = [];
+        $mapping = [rtrim($source['home_url'], '/') => $this->target_url];
         foreach ($source['sibling_urls'] ?? [] as $url) {
             $url = rtrim($url, '/');
             $mapping[$url] = $url;
@@ -92,9 +93,6 @@ class MultisiteTarget {
         $mapping[rtrim($source['uploads_url'], '/')] = $this->target_url . '/' . $this->get_upload_path();
         $mapping[rtrim($source['site_url'], '/')] = $this->target_url;
         $mapping[rtrim($source['home_url'], '/')] = $this->target_url;
-        uksort($mapping, static function (string $first, string $second): int {
-            return strlen($second) <=> strlen($first);
-        });
         return $mapping;
     }
 
