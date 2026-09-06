@@ -91,7 +91,7 @@ export async function apiRequest(siteName, endpoint, params = {}, options = {}) 
 
     const contentType = response.headers.get('content-type') || '';
 
-    if (contentType.includes('application/json')) {
+    if (isJsonApiResponseContentType(contentType)) {
         return {
             status: response.status,
             json: await response.json(),
@@ -685,7 +685,7 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
 
     const contentType = response.headers.get('content-type') || '';
 
-    if (contentType.includes('application/json')) {
+    if (isJsonApiResponseContentType(contentType)) {
         return {
             status: response.status,
             json: await response.json(),
@@ -726,6 +726,18 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
         text: await response.text(),
         headers: Object.fromEntries(response.headers.entries()),
     };
+}
+
+/**
+ * Return whether a top-level API response carries JSON.
+ *
+ * The server marks top-level JSON as application/octet-stream so Hostinger
+ * does not replace real domains with its preview domain. That rewriting
+ * keeps links and assets on the preview without changing the stored site
+ * URL or waiting for DNS, but would also alter our API data.
+ */
+function isJsonApiResponseContentType(contentType) {
+    return contentType.includes('application/octet-stream');
 }
 
 function setApiRequestParameter(url, parameter, value) {

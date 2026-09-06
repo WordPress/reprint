@@ -153,18 +153,20 @@ PHPUnit tests automatically create/drop test databases. The naming convention is
 - Export database: `test_mysql_dump`
 - Import database: `test_mysql_dump_import`
 
-### Runtime Manifest and Host Analyzers
+### Runtime Manifest, Host Detection, and Excluded Plugins
 
-The `apply-runtime` command separates source host detection from target runtime configuration. The flow is:
+The `apply-runtime` command separates source host detection from target runtime setup. The flow is:
 
-1. **Host analyzer** (in `packages/reprint-client/src/lib/host/analyzers/`) reads preflight data and produces a `RuntimeManifest` — a pure-data object with INI directives, constants, server vars, routes, `paths_to_remove`, and `extra_directories`.
+1. **Host analyzer** (in `packages/reprint-client/src/lib/host/analyzers/`) reads current preflight data and produces a `RuntimeManifest` with only the settings needed by the target server: INI directives, constants, server vars, routes, extra directories, and optional SQLite setup.
 2. **Runtime applier** (in `packages/reprint-client/src/lib/target-runtime/`) reads the manifest and generates server-specific configuration files.
 
 The target database is an input to `apply-runtime`: it takes the same `--target-*` options as `db-apply` and falls back, field by field, to what `db-apply` recorded in state, so a caller that keeps its own database can generate a working runtime without ever running `db-apply`.
 
-The `WpcloudHostAnalyzer` auto-detects WP Cloud production infrastructure that won't work locally: Memcached-backed `object-cache.php`, wpcomsh mu-plugins, and `auto_prepend_file`/`auto_append_file` directories. It populates `paths_to_remove` (stripped after flattening) and `extra_directories` (auto-included in the export file list). The `SitegroundHostAnalyzer` detects SiteGround hosting via `sg-*` plugin prefixes and strips `sg-cachepress` and `sg-security` from disk.
+`excluded_plugins()` keeps plugin cleanup separate from target server setup. It calculates each excluded item's absolute source path from the `content_dir`, `plugins_dir`, and `mu_plugins_dir` values reported by preflight. Named source-host plugins and MU plugins are excluded from every import because copied files may remain after a site moves between hosts. Generic cache drop-ins are excluded only when current preflight paths identify WP Cloud or WP Engine. WP Engine's generic `mu-plugin.php` loader is excluded for a current WP Engine match or when the same source MU-plugin inventory lists both `mu-plugin.php` and `wpengine-common`. The copied pair is removed together because the loader requires the package even off-host. This inventory rule does not select the host or exclude generic cache drop-ins; a lone `mu-plugin.php` stays.
 
-Entries in `paths_to_remove` under `wp-content/plugins/` also trigger automatic plugin deactivation: at the end of `db-apply`, while the target database connection is still open, the importer instantiates the host analyzer, extracts plugin directory names from `paths_to_remove`, and removes matching entries from the `active_plugins` option. This prevents "plugin file does not exist" warnings in wp-admin. The deactivation is derived from `paths_to_remove` — there is no separate manifest field for it. We skip WordPress's `deactivate_plugins()` because the plugin files will already be gone from disk by the time WordPress boots, so firing deactivation hooks into absent code is pointless.
+During `files-pull`, matching remote-index entries are omitted before the fetch list is built, so their file bodies are not downloaded. `apply-runtime` still removes matching local paths because an older import or pre-existing local tree may already contain them. At the end of `db-apply`, the importer removes matching regular plugin directories from the `active_plugins` option while the target database connection is still open. We skip WordPress's `deactivate_plugins()` because WordPress has not booted and the excluded plugin code may already be absent.
+
+Pantheon's `mu-plugins/loader.php` and `mu-plugins/pantheon-mu-plugin` stay together. The loader requires `pantheon-mu-plugin/pantheon.php` even outside Pantheon; removing only the package causes a fatal error. The package's platform features require `PANTHEON_ENVIRONMENT`, so they do not run when that environment value is absent locally. The generic `loader.php` name is not enough to identify a file that can be deleted.
 
 ### SQL Streaming Crash Recovery
 
@@ -186,7 +188,7 @@ Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl` for that
   - src/: Core export engine (export.php, producers, HMAC client, utilities)
 - packages/reprint-client/: Packagist client package (previously reprint-importer)
   - src/: Import client and importer runtime support code
-  - src/lib/host/: Host analyzers and RuntimeManifest (WpcloudHostAnalyzer, SitegroundHostAnalyzer, DefaultHostAnalyzer)
+  - src/lib/host/: RuntimeManifest and the default, WP Cloud, and WP Engine host analyzers
   - src/lib/target-runtime/: Runtime appliers (NginxFpmApplier, PhpBuiltinApplier, PlaygroundCliApplier)
   - src/lib/url-rewrite/: URL rewriting for db-apply
   - src/lib/mysql-query-stream/: MySQL query stream parser for direct streaming

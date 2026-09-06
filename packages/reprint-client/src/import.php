@@ -94,7 +94,7 @@ require_once __DIR__ . '/lib/url-rewrite/load.php';
 // Load host analyzers (produce a runtime manifest from preflight data)
 require_once __DIR__ . '/lib/host/load.php';
 
-// Load target runtime appliers (consume a manifest, write server config)
+// Load target runtime appliers (consume a runtime manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
 
 require_once __DIR__ . '/lib/merge/load.php';
@@ -430,6 +430,17 @@ class ImportClient
      */
     private $pull_excluded_files_with_path_prefixes = [];
 
+    /**
+     * Plugins, MU plugins, and drop-ins omitted from this import.
+     *
+     * @var array<int, array{
+     *     source_path: string|null,
+     *     local_path: string,
+     *     regular_plugin_directory: string|null
+     * }>
+     */
+    private $excluded_plugins = [];
+
     /** @var string[]|null Memoized get_selected_paths_pulled_before() result. */
     private $selected_paths_pulled_before = null;
 
@@ -699,6 +710,8 @@ class ImportClient
             $this->pull_excluded_files_with_path_prefixes =
                 $this->resolve_remote_paths($excluded_raw, "exclude");
         }
+        $preflight_data = $this->get_state()->preflight_record()["data"] ?? [];
+        $this->excluded_plugins = excluded_plugins($preflight_data);
 
         if ($assert_remap) {
             $this->assert_resolved_path_mappings_consistent();
@@ -2570,6 +2583,47 @@ class ImportClient
             $this->audit_log("USER-AGENT BLOCKED | {$ua}", false);
         }
 
+        // Some hosts, including Hostinger, replace the site's domain in responses
+        // so links and assets work on a preview domain before DNS points at the
+        // host. The stored WordPress home URL stays unchanged, but this rewriting
+        // can also change our JSON. For home=https://example.com:8443/blog, compare
+        // example.com (the hostname, without scheme, port, or path), not the full
+        // site URL, with the decoded server copy. Hostinger's plain-domain
+        // replacement leaves the base64 value unchanged.
+        $domain_error = null;
+        $wordpress = null;
+        if (is_array($payload)) {
+            $wordpress = $payload["database"]["wp"] ?? null;
+        }
+        if (
+            is_array($wordpress)
+            && array_key_exists("home_domain_b64", $wordpress)
+            && $wordpress["home_domain_b64"] !== null
+        ) {
+            $encoded_domain = $wordpress["home_domain_b64"];
+            $home = $wordpress["home"] ?? null;
+            $plain_domain = is_string($home) ? parse_url($home, PHP_URL_HOST) : null;
+            $decoded_domain = is_string($encoded_domain)
+                ? base64_decode($encoded_domain, true)
+                : false;
+            if (!is_string($plain_domain) || $plain_domain === "") {
+                $domain_error = "The preflight response contains a WordPress home URL without a valid domain: "
+                    . json_encode($home) . ".";
+            } elseif ($decoded_domain === false || $decoded_domain === "") {
+                $domain_error = "The preflight response contains an invalid base64 WordPress home domain: "
+                    . json_encode($encoded_domain) . ".";
+            } elseif ($plain_domain !== $decoded_domain) {
+                $domain_error = "The preflight response changed the site domain from "
+                    . "'{$decoded_domain}' to '{$plain_domain}'. A host response filter likely rewrote the response body.";
+            }
+        }
+        if ($domain_error !== null && is_array($payload)) {
+            // Keep the response available for diagnosis, but mark it failed so
+            // pulls stop instead of downloading with rewritten URLs.
+            $payload["ok"] = false;
+            $payload["error"] = $domain_error;
+        }
+
         $entry = [
             "timestamp" => time(),
             "url" => $url,
@@ -2577,7 +2631,7 @@ class ImportClient
             "elapsed" => (float) ($result["elapsed"] ?? 0),
             "ok" => is_array($payload) ? ($payload["ok"] ?? null) : null,
             "data" => $payload,
-            "error" => $result["error"] ?? null,
+            "error" => $domain_error ?? $result["error"] ?? null,
             "response_body_preview" => $payload === null && isset($result["body"])
                 ? substr((string) $result["body"], 0, 200)
                 : null,
@@ -2596,6 +2650,15 @@ class ImportClient
             $this->get_state()->remote_protocol_version = (int) $payload["protocol_version"];
         } else {
             $this->get_state()->remote_protocol_version = null;
+        }
+
+        if ($domain_error !== null) {
+            $this->save_state();
+            $this->audit_log(
+                "PREFLIGHT RESULT | " . json_encode($entry),
+                false,
+            );
+            return;
         }
 
         // Detect webhost environment from preflight data.
@@ -2850,6 +2913,11 @@ class ImportClient
             throw new RuntimeException(
                 "No preflight data found. Run 'preflight' or 'preflight-assert' first.",
             );
+        }
+        if (!empty($entry["error"])) {
+            // The client rejected this response; keep it for diagnosis, not downloads.
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error, never HTML.
+            throw new RuntimeException($entry["error"]);
         }
     }
 
@@ -4649,9 +4717,7 @@ class ImportClient
         $database = $preflight_data["database"] ?? [];
         $wordpress = $database["wp"] ?? [];
         $paths_urls = $wordpress["paths_urls"] ?? [];
-        $runtime_manifest = host_analyzer_for(
-            $state->webhost ?? "other"
-        )->analyze($preflight_data);
+        $runtime_manifest = runtime_manifest_for($preflight_data);
 
         return [
             "hasCompletedOnce" => $pull->has_completed_once,
@@ -4695,7 +4761,7 @@ class ImportClient
     }
 
     /**
-     * Generate runtime configuration for the pulled site.
+     * Generate a runtime manifest for the pulled site.
      *
      * Reads the detected webhost from state (set during preflight), runs the
      * appropriate host analyzer to produce a runtime manifest, then applies
@@ -4850,12 +4916,11 @@ class ImportClient
             $abs_output_dir = realpath($abs_output_dir);
         }
 
-        // Step 1: Host analyzer produces a manifest from preflight data.
-        $analyzer = host_analyzer_for($webhost);
-        $manifest = $analyzer->analyze($preflight_data);
+        // Step 1: Build the runtime manifest from preflight data.
+        $manifest = runtime_manifest_for($preflight_data);
         $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data);
 
-        // Step 1b: Merge the target database configuration into the manifest.
+        // Step 1b: Add the target database settings.
         // It decides the DB_* constants and, for SQLite targets, the database
         // integration plugin setup.
         $target_engine = $target["engine"];
@@ -4971,11 +5036,11 @@ class ImportClient
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
         }
 
-        // Remove production drop-ins and mu-plugins that would crash
-        // the local site.  The host analyzer declares these — they
-        // depend on infrastructure (Memcached servers, multisite APIs)
-        // not available outside the original hosting environment.
-        foreach ($manifest->paths_to_remove as $rel_path) {
+        // A previous import or pre-existing local tree may already contain an
+        // excluded plugin. File download filtering cannot remove that copy.
+        $excluded_plugins = excluded_plugins($preflight_data);
+        $excluded_local_paths = array_column($excluded_plugins, 'local_path');
+        foreach ($excluded_local_paths as $rel_path) {
             $full_path = wp_join_unix_paths($local_document_root, $rel_path);
             if (!file_exists($full_path) && !is_link($full_path)) {
                 continue;
@@ -4985,8 +5050,8 @@ class ImportClient
             } else {
                 unlink($full_path);
             }
-            $summary[] = "Removed production drop-in: {$rel_path}";
-            $this->audit_log("APPLY-RUNTIME | removed {$rel_path} (production-only)");
+            $summary[] = "Removed source-host path: {$rel_path}";
+            $this->audit_log("APPLY-RUNTIME | removed {$rel_path} (source-host)");
         }
 
         foreach ($summary as $line) {
@@ -4994,7 +5059,7 @@ class ImportClient
         }
 
         // Persist which paths were removed so callers can inspect state.
-        $this->get_state()->apply->remote_paths_removed_from_local_site = $manifest->paths_to_remove;
+        $this->get_state()->apply->remote_paths_removed_from_local_site = $excluded_local_paths;
         $this->save_state();
 
         // Read the structured start config if the applier wrote one.
@@ -5006,7 +5071,7 @@ class ImportClient
             $start_config = json_decode(file_get_contents($start_config_path), true);
         }
 
-        // Output the summary and manifest as structured JSON for callers,
+        // Output the summary and runtime details as structured JSON for callers,
         // or print the human-readable terminal summary.
         $this->output_progress([
             "status" => "complete",
@@ -5015,7 +5080,7 @@ class ImportClient
             "webhost" => $webhost,
             "webhost_source" => $manifest->source,
             "target_engine" => $target_engine,
-            "paths_removed" => $manifest->paths_to_remove,
+            "paths_removed" => $excluded_local_paths,
             "extra_directories" => $manifest->extra_directories,
             "start_config" => $start_config,
             "message" => "apply-runtime complete (runtime: {$runtime})",
@@ -6936,16 +7001,14 @@ class ImportClient
         DatabaseConnection $connection,
         array $options
     ): void {
-        // The host analyzer declares paths_to_remove; any entry under
-        // wp-content/plugins/ means that plugin will be deleted from disk
-        // during apply-runtime. Remove it from active_plugins now, while the
-        // database connection is still open, so WordPress won't complain
-        // about missing plugin files. We skip deactivate_plugins() because the
-        // plugin files will be gone by the time WordPress boots; firing
-        // deactivation hooks into absent code is pointless.
+        // Remove excluded regular plugins from active_plugins now, while the
+        // database connection is still open. Their files are omitted from the
+        // download, and any older local copy is removed during apply-runtime.
+        // We skip deactivate_plugins() because WordPress has not booted and the
+        // excluded plugin code may already be absent.
         $deactivated = $this->deactivate_host_plugins($connection);
         foreach ($deactivated as $basename) {
-            $this->audit_log("DB-APPLY | deactivated plugin {$basename} (host-specific)");
+            $this->audit_log("DB-APPLY | deactivated plugin {$basename} (source-host)");
         }
 
         // Drop plugins whose URL builders break when the site URL has a non-/
@@ -7172,30 +7235,25 @@ class ImportClient
     }
 
     /**
-     * Deactivate host-specific plugins in the target database.
+     * Deactivate source-host plugins in the target database.
      *
-     * Looks at the detected webhost's paths_to_remove for entries under
-     * wp-content/plugins/ and removes matching basenames from the
-     * active_plugins option. Runs at the end of db-apply while the target
-     * connection is still open.
+     * Uses the regular plugin directory names calculated from preflight and
+     * removes matching basenames from active_plugins. Runs at the end of
+     * db-apply while the target connection is still open.
      *
      * @return string[]  Plugin basenames actually removed.
      */
     private function deactivate_host_plugins(DatabaseConnection $database): array
     {
-        $webhost = $this->get_state()->webhost ?? "other";
-        $analyzer = host_analyzer_for($webhost);
         $preflight_data = $this->get_state()->preflight_record()["data"] ?? [];
-        $manifest = $analyzer->analyze($preflight_data);
-
         $plugin_dirs = [];
-        foreach ($manifest->paths_to_remove as $rel_path) {
-            if (preg_match('#^wp-content/plugins/([^/]+)$#', $rel_path, $m)) {
-                $plugin_dirs[] = $m[1];
+        foreach (excluded_plugins($preflight_data) as $excluded_plugin) {
+            if ($excluded_plugin['regular_plugin_directory'] !== null) {
+                $plugin_dirs[] = $excluded_plugin['regular_plugin_directory'];
             }
         }
 
-        return $this->deactivate_plugins_by_dir($database, $plugin_dirs, "host-specific");
+        return $this->deactivate_plugins_by_dir($database, $plugin_dirs, "source-host");
     }
 
     /**
@@ -7208,9 +7266,8 @@ class ImportClient
      * carries a path component like WordPress Playground's
      * `/scope:<slug>/` iframe scope.
      *
-     * wpcomsh has the same shape but lives on WP Cloud, where
-     * WpcloudHostAnalyzer's paths_to_remove already feeds it through
-     * deactivate_host_plugins().
+     * wpcomsh has the same shape but lives under mu-plugins, where the global
+     * source-host path list removes it from disk before WordPress boots.
      *
      * Skipped when the new site URL is empty or has no path beyond `/`.
      *
@@ -7259,8 +7316,22 @@ class ImportClient
         }
 
         $table_prefix = $this->get_state()->get('preflight.database.wp.table_prefix');
+        $options_table_name = $table_prefix . 'options';
+        $options_table_exists = false;
+        $tables = $database->query('SHOW TABLES');
+        while (( $table_name = $tables->fetchColumn() ) !== false) {
+            if ($table_name === $options_table_name) {
+                $options_table_exists = true;
+                break;
+            }
+        }
+        $tables->closeCursor();
+        if (!$options_table_exists) {
+            return [];
+        }
+
         // Quote the table name to prevent SQL injection from a crafted prefix.
-        $options_table = '`' . str_replace('`', '``', $table_prefix . 'options') . '`';
+        $options_table = '`' . str_replace('`', '``', $options_table_name) . '`';
 
         $row = $database->query(
             "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"
@@ -7827,6 +7898,15 @@ class ImportClient
                         $path,
                         "index batch path",
                     );
+                    foreach ($this->excluded_plugins as $excluded_plugin) {
+                        $excluded_source_path = $excluded_plugin['source_path'];
+                        if (
+                            $excluded_source_path !== null
+                            && path_is_same_as_or_descendant_of($path, $excluded_source_path)
+                        ) {
+                            continue 2;
+                        }
+                    }
                     $ctime = (int) ($item["ctime"] ?? 0);
                     $size = (int) ($item["size"] ?? 0);
                     $type = (string) ($item["type"] ?? "file");
@@ -9821,11 +9901,12 @@ class ImportClient
     /**
      * Refuse to resume a files-pull after changing its path selection.
      *
-     * --include determines the next remote index traversal, while --exclude determines
-     * which entries enter the later fetch list. Keep both fixed for the complete
-     * in-progress lifecycle rather than allowing a resumed stage to cross a path-
-     * selection boundary. Completed runs may use a different selection because the
-     * remote index is intentionally a union across them.
+     * --include determines the next remote index traversal. --exclude and the
+     * excluded plugin source paths determine which index entries are retained.
+     * Keep all three fixed for the complete in-progress lifecycle rather than
+     * allowing a resumed stage to cross a path-selection boundary. Completed
+     * runs may use a different selection because the remote index is
+     * intentionally a union across them.
      */
     private function assert_files_pull_path_selection_unchanged_while_resuming(bool $has_progress): void
     {
@@ -9838,8 +9919,8 @@ class ImportClient
 
         if ($previous !== $fingerprint) {
             throw new RuntimeException(
-                "Cannot change --include or --exclude while resuming files-pull. " .
-                    "Use the original path selections, or use --abort to start a new files-pull.",
+                "Cannot resume files-pull because its file path selection changed. " .
+                    "Use --abort to start a new files-pull.",
             );
         }
     }
@@ -9855,6 +9936,11 @@ class ImportClient
     {
         $excluded_path_prefixes = $this->pull_excluded_files_with_path_prefixes;
         sort($excluded_path_prefixes, SORT_STRING);
+        $excluded_plugin_source_paths = array_values(array_filter(
+            array_column($this->excluded_plugins, 'source_path'),
+            'is_string',
+        ));
+        sort($excluded_plugin_source_paths, SORT_STRING);
 
         return hash(
             "sha256",
@@ -9862,6 +9948,7 @@ class ImportClient
                 [
                     "only_path_prefixes" => $this->pull_only_files_with_path_prefixes,
                     "excluded_path_prefixes" => $excluded_path_prefixes,
+                    "excluded_plugin_source_paths" => $excluded_plugin_source_paths,
                 ],
                 JSON_UNESCAPED_SLASHES
             ),
@@ -14121,8 +14208,8 @@ if (
                 "(--fs-root=DIR|--flat-document-root=DIR) [options]",
             "description" =>
                 "Generates server configuration (runtime.php, nginx.conf or start.sh)\n" .
-                "from preflight data and removes production-only drop-ins and mu-plugins\n" .
-                "that would crash outside the original host.\n" .
+                "from preflight data and removes listed source-host plugins, MU plugins,\n" .
+                "and drop-ins that should not run locally.\n" .
                 "\n" .
                 "Embeds the target database in runtime.php: the one named by the\n" .
                 "--target-* options, or the one db-apply connected to.\n" .

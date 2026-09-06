@@ -412,6 +412,15 @@ class Pull
      */
     private function run_stage(string $stage, array $options, int $step, int $total): void
     {
+        // A standalone preflight can replace the saved response between runs,
+        // even when this pipeline has already completed its preflight stage.
+        $preflight_error = $this->client->get_state()->preflight_record()["error"] ?? null;
+        if ($stage !== 'preflight' && !empty($preflight_error)) {
+            $this->client->exit_code = 1;
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error, never HTML.
+            throw new RuntimeException($preflight_error);
+        }
+
         switch ($stage) {
             case 'preflight':
                 $this->client->run_preflight();

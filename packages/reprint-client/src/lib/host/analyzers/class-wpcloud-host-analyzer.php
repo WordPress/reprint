@@ -92,25 +92,6 @@ class WpcloudHostAnalyzer implements HostAnalyzer
             'description' => 'Generate missing WordPress thumbnail sizes from originals using GD',
         ];
 
-        // Production drop-ins and mu-plugins that depend on WP Cloud
-        // infrastructure: object-cache.php and advanced-cache.php talks
-        // to a Memcached server that doesn't exist locally, wpcomsh*
-        // mu-plugins depend on multisite functions and wp.com API endpoints.
-        //
-        // TODO: Consider removing all drop-ins unconditionally, not just
-        // WP Cloud ones. Drop-ins (object-cache.php, advanced-cache.php,
-        // db.php, etc.) typically integrate platform-specific software
-        // (Memcached, Redis, custom DB layers) that won't be available
-        // in a local environment. This is host-specific today, but the
-        // problem is universal.
-        $manifest->paths_to_remove = [
-            'wp-content/object-cache.php',
-            'wp-content/advanced-cache.php',
-            'wp-content/mu-plugins/wpcomsh',
-            'wp-content/mu-plugins/wpcomsh-dev',
-            'wp-content/mu-plugins/wpcomsh-loader.php',
-        ];
-
         // auto_prepend_file on Atomic points to /scripts/env.php — a
         // directory outside the WordPress roots.  Record it so that
         // files-pull downloads it and the runtime applier can mount it.
