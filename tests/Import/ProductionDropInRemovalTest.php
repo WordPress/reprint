@@ -389,6 +389,40 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertFileExists($wpContent . '/object-cache.php');
     }
 
+    public function testApplyRuntimeKeepsPantheonPackageRequiredByLoader(): void
+    {
+        $this->writeState(array_replace_recursive(
+            ['webhost' => 'other'],
+            $this->preflightWithoutWpcloudSignals('/var/www/html'),
+        ));
+
+        $mu_plugins = $this->fsRoot . '/wp-content/mu-plugins';
+        mkdir($mu_plugins . '/pantheon-mu-plugin', 0755, true);
+        // Pantheon's loader requires this file even outside Pantheon. Keep the
+        // include local to this fixture instead of defining WPMU_PLUGIN_DIR.
+        // https://github.com/pantheon-systems/WordPress/blob/0f9cf0fe60ca08fe5e47e54863b99829bea97542/wp-content/mu-plugins/loader.php#L14-L20
+        file_put_contents(
+            $mu_plugins . '/loader.php',
+            "<?php require_once __DIR__ . '/pantheon-mu-plugin/pantheon.php';",
+        );
+        file_put_contents(
+            $mu_plugins . '/pantheon-mu-plugin/pantheon.php',
+            "<?php echo 'pantheon-package-loaded';",
+        );
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        ob_start();
+        try {
+            require $mu_plugins . '/loader.php';
+            $this->assertSame('pantheon-package-loaded', ob_get_contents());
+        } finally {
+            ob_end_clean();
+        }
+    }
+
     public function testEveryImportRemovesTheGlobalSourceHostPathList(): void
     {
         $this->writeState(array_replace_recursive(

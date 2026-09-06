@@ -79,7 +79,6 @@ class HostImportRulesTest extends TestCase {
                 'wp-content/mu-plugins/aruba-wpchecker',
                 'wp-content/mu-plugins/kinsta-mu-plugins.php',
                 'wp-content/mu-plugins/kinsta-mu-plugins',
-                'wp-content/mu-plugins/pantheon-mu-plugin',
                 'wp-content/mu-plugins/ionos-core.php',
                 'wp-content/mu-plugins/ionos-core',
                 'wp-content/mu-plugins/stretch-extra.php',

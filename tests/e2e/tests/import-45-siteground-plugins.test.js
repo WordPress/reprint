@@ -59,6 +59,14 @@ describe('Import: global removal of SiteGround plugins', () => {
  */
 `);
 
+                // Pantheon's generic loader requires its package outside Pantheon too.
+                const muPluginsDir = join(siteDir, 'wp-content', 'mu-plugins');
+                mkdirSync(join(muPluginsDir, 'pantheon-mu-plugin'), { recursive: true });
+                writeFileSync(join(muPluginsDir, 'loader.php'),
+                    "<?php require_once WPMU_PLUGIN_DIR . '/pantheon-mu-plugin/pantheon.php';");
+                writeFileSync(join(muPluginsDir, 'pantheon-mu-plugin', 'pantheon.php'),
+                    "<?php define('REPRINT_PANTHEON_FIXTURE_LOADED', true);");
+
                 // Activate both plugins via the database so they appear
                 // in active_plugins when the DB is exported.
                 const { createConnection } = await import('mysql2/promise');
@@ -138,6 +146,14 @@ describe('Import: global removal of SiteGround plugins', () => {
         assert.ok(
             existsSync(join(pulledSite, 'wp-content', 'plugins', 'reprint-server')),
             'unlisted plugins should still be downloaded',
+        );
+        assert.ok(
+            existsSync(join(pulledSite, 'wp-content', 'mu-plugins', 'loader.php')),
+            'the generic MU-plugin loader should still be downloaded',
+        );
+        assert.ok(
+            existsSync(join(pulledSite, 'wp-content', 'mu-plugins', 'pantheon-mu-plugin', 'pantheon.php')),
+            'the package required by the Pantheon loader should still be downloaded',
         );
     });
 
@@ -267,6 +283,16 @@ describe('Import: global removal of SiteGround plugins', () => {
                 existsSync(join(flatDir, 'wp-content', 'plugins', 'reprint-server')),
                 'Reprint Server plugin should still exist after apply-runtime',
             );
+        });
+
+        it('the Pantheon loader can load its package after cleanup', () => {
+            const muPluginsDir = join(tempDir, 'flattened', 'wp-content', 'mu-plugins');
+            const output = execFileSync('php', ['-r', `
+                define('WPMU_PLUGIN_DIR', $argv[1]);
+                require WPMU_PLUGIN_DIR . '/loader.php';
+                echo REPRINT_PANTHEON_FIXTURE_LOADED ? 'loaded' : 'missing';
+            `, muPluginsDir], { encoding: 'utf-8', timeout: 10000 });
+            assert.equal(output, 'loaded');
         });
     });
 });

@@ -92,6 +92,8 @@ function matching_host_analyzer_scores(array $preflight_data): array
  * included only when current preflight paths identify WP Cloud or WP Engine.
  * Source paths use the actual WordPress directories reported by preflight,
  * including custom plugin and MU-plugin locations.
+ * Pantheon's package stays because its generic loader.php requires it even
+ * outside Pantheon. Its platform features require PANTHEON_ENVIRONMENT.
  *
  * @param array $preflight_data The preflight response data.
  * @return array<int, array{
@@ -124,9 +126,6 @@ function excluded_plugins(array $preflight_data): array
         // Kinsta's platform MU plugin.
         'wp-content/mu-plugins/kinsta-mu-plugins.php',
         'wp-content/mu-plugins/kinsta-mu-plugins',
-
-        // Pantheon's platform MU-plugin package. Its generic loader.php remains.
-        'wp-content/mu-plugins/pantheon-mu-plugin',
 
         // IONOS platform and setup plugins.
         'wp-content/mu-plugins/ionos-core.php',
