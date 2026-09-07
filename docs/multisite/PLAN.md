@@ -1,7 +1,9 @@
-# Pull one site into a one-site network
+# Pull one network site into a single site
 
-Site 7 stays site 7. Its tables stay wp_7_*. The target uses wp_ as
-its base prefix and makes site 7 the main site. The source is not changed.
+Site 7 keeps its wp_7_* tables. The target adopts wp_7_ as its table prefix
+and uses CUSTOM_USER_TABLE and CUSTOM_USER_META_TABLE for wp_users and
+wp_usermeta. No table names or content IDs change. WordPress runs in single-site
+mode, where get_current_blog_id() returns 1. The source is not changed.
 The remote Reprint API URL selects the site.
 
 ## Stack
@@ -10,7 +12,8 @@ The remote Reprint API URL selects the site.
 2. Let network administrators manage the connection token through WordPress.
 3. Limit file indexing and fetching to shared code and selected uploads.
 4. Configure a fresh target network, URLs, uploads, and network access.
-5. Migrate a populated network through the real HTTP endpoint and CLI.
+5. Adopt the selected table prefix, grant site access, and carry over network plugin activations and inherited language.
+6. Migrate a populated network through the real HTTP endpoint and CLI.
 
 Each layer has an E2E success case and a rejection case, in addition to focused
 tests. The database layer imports the HTTP SQL response into MySQL and rejects
@@ -22,7 +25,7 @@ This is a pull into a fresh target, not a merge or a multisite push.
 
 ## Test matrix
 
-- Main site and non-main site; retain IDs and non-default base prefix.
+- Main site and non-main site; retain content/user IDs and adopt the selected prefix.
 - Three sites, including another network in the same database.
 - Shared member with different roles on each site; member without content.
 - Former member who still authored a post; registered commenter; link author.
@@ -37,7 +40,10 @@ This is a pull into a fresh target, not a merge or a multisite push.
 - Source URLs, serialized data, attachment metadata, and bare network domains.
 - HTTP and HTTPS links to selected pages, shared code, and media; sibling links stay remote.
 - Target boot, login, admin, existing media, new media, and network plugin load.
-- Network administrator login supplied with a different case from the imported record.
+- Site administrator login supplied with a different case from the imported record.
+- Single-site boot with unchanged shared user table names and no network constants.
+- Network-active plugins become site-active; host exclusions still apply.
+- Network language inheritance versus an explicit site language.
 - Oversized profiles exported before their membership rows reach the target.
 - Direct MySQL output rejected without changing existing target tables.
 - Target lock contention and process death on both sides of initialization,
