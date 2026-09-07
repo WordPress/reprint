@@ -5,7 +5,7 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 class ConfigEnvironmentTest extends TestCase {
-    /** Comments, strings, methods, and dynamic names do not identify global getenv reads. */
+    /** Text resembling getenv() is not a read unless it is a call with a literal variable name. */
     public function testOnlyLiteralEnvironmentReadsAreReportedWithoutValues(): void
     {
         $config = <<<'CONFIG'
@@ -26,13 +26,18 @@ CONFIG;
         );
     }
 
-    /** Inspecting config must not execute site code. */
+    /** A throwing config can still be inspected because the scanner reads PHP tokens, not execution results. */
     public function testConfigIsReadAsTextAndNeverExecuted(): void
     {
         $config = '<?php throw new Exception("Do not execute this config"); getenv("MEDIA_BUCKET");';
         $this->assertSame(['MEDIA_BUCKET'], config_environment_names($config));
     }
-    /** @dataProvider runtime_layouts */
+    /**
+     * Missing names belong in warnings; config contents and environment values
+     * must not be copied into the generated runtime or printed in the audit log.
+     *
+     * @dataProvider runtime_layouts
+     */
     public function testRuntimeReportsMissingNamesWithoutCopyingOrPrintingSecrets(bool $flat): void
     {
         $root = sys_get_temp_dir() . '/reprint-config-' . bin2hex(random_bytes(6));
@@ -76,13 +81,13 @@ CONFIG;
         }
     }
 
-    /** Config lookup must work before and after flat-docroot. */
+    /** Covers both the copied source directory tree and the flattened WordPress document root. */
     public static function runtime_layouts(): array
     {
         return [[false], [true]];
     }
 
-    /** Removes only this test's temporary site and generated runtime. */
+    /** Deletes a test directory recursively, unlinking symlinks rather than following them. */
     private function remove_tree(string $path): void
     {
         if (is_dir($path) && !is_link($path)) {

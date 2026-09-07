@@ -1,15 +1,18 @@
 <?php
 
 /**
- * Finds literal getenv('NAME') reads without running the copied configuration.
+ * Lists environment variable names read by literal getenv('NAME') calls.
  *
- * This does not decide whether a read is required: it may be conditional or
- * have a fallback. Dynamic names and included files need manual inspection.
- * Callers bound the configuration file size before tokenizing it.
+ * Tokenizing the copied wp-config.php avoids executing site code or reading
+ * secret values. Only literal names are recognized; computed names and reads
+ * in included files are outside this scan. A listed call may be conditional
+ * or have a fallback, so it does not establish that the variable is required.
+ * The caller must limit input size because token_get_all() buffers all tokens.
  *
+ * @param string $config Complete PHP source to inspect, not a file path.
  * @return list<string> Distinct environment variable names, in source order.
  */
-// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches shared runtime helper names.
+// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Runtime helpers use unprefixed function names.
 function config_environment_names(string $config): array
 {
     $tokens = array_values(array_filter(token_get_all($config), static function ($token): bool {
@@ -24,8 +27,9 @@ function config_environment_names(string $config): array
         if (is_array($previous) && in_array($previous[1], ['->', '?->', '::', 'function'], true)) {
             continue;
         }
-        // PHP 7 represents a qualified function name with separate tokens.
-        // Accept \getenv(), but not a function such as vendor\getenv().
+        // PHP 7 splits vendor\getenv into name and separator tokens, unlike
+        // PHP 8's combined name token. Reject that namespaced function while
+        // still accepting \getenv, which explicitly calls the global function.
         if (is_array($previous) && $previous[0] === T_NS_SEPARATOR) {
             $before_separator = $tokens[$index - 2] ?? null;
             if (is_array($before_separator) && $before_separator[0] === T_STRING) {

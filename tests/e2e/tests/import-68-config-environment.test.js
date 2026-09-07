@@ -1,4 +1,8 @@
-/** Missing variables and oversized configs must warn without executing PHP or exposing values. */
+/**
+ * Migrates WordPress sites whose wp-config.php reads an environment variable.
+ * Present values must stay out of output; missing names and unscanned oversized
+ * configs must produce warnings. Each target must still serve its migrated post.
+ */
 import { describe, it, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -19,8 +23,9 @@ describe('Import: external wp-config environment', () => {
                 afterCreate: async (siteDirectory) => {
                     const path = join(siteDirectory, 'wp-config.php');
                     const config = readFileSync(path, 'utf8');
-                    // This is valid source configuration: HTTP requests work,
-                    // but importing must not execute it in the CLI process.
+                    // Permit normal WordPress HTTP requests, but throw if the
+                    // importer executes the copied config to inspect it. The
+                    // literal fallback lets the site run without the variable.
                     const prefix = `<?php
 if (PHP_SAPI === 'cli') { throw new RuntimeException('COPIED_CONFIG_EXECUTED'); }
 $migration_secret = getenv('${variable}') ?: '${secret}';

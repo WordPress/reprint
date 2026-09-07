@@ -7,7 +7,12 @@ import { once } from 'node:events';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { runImporter, createTempDir, cleanupTempDir, getSiteUrl, getSiteDir, getSiteSecret } from './test-helpers.js';
 
-/** Pull a real WordPress site, serve its generated runtime, and inspect it before cleanup. */
+/**
+ * Migrates a source WordPress site to SQLite and serves the generated PHP runtime.
+ * Calls inspect with the CLI result, target HTML, and paths only after the target
+ * renders the migrated post. The server and temporary files stay available until
+ * inspect finishes; both are cleaned up even if migration or assertions fail.
+ */
 export async function withMigratedWordPress(site, inspect) {
     const temporaryDirectory = createTempDir(`e2e-migrated-${site}`);
     const flatDirectory = join(temporaryDirectory, 'flat');
@@ -32,8 +37,9 @@ export async function withMigratedWordPress(site, inspect) {
 
         const serverLog = join(temporaryDirectory, 'target-server.log');
         const log = openSync(serverLog, 'a');
-        // Even when the importer uses Playground, the generated php-builtin
-        // runtime is served by native PHP, as it would be on the target host.
+        // PHP_BINARY selects the importer under test and may be a Playground
+        // wrapper. The requested php-builtin target needs a native PHP server,
+        // so do not reuse that importer command to serve the migrated site.
         server = spawn('php', ['-S', `127.0.0.1:${port}`, '-t', flatDirectory, join(runtimeDirectory, 'runtime.php')], {
             stdio: ['ignore', log, log],
         });

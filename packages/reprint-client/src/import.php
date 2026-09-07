@@ -4989,8 +4989,11 @@ class ImportClient
             $this->audit_log("APPLY-RUNTIME | removed {$rel_path} (production-only)");
         }
 
-        // A copied wp-config.php can still read values supplied by its old
-        // host. Report names only; copying those values could expose secrets.
+        // wp-config.php may read environment variables supplied by the source
+        // host, which a file copy cannot carry over. Inspect the copied PHP as
+        // text and report names absent from this importer process, never values.
+        // A warning is advisory: the config may have a fallback, or the target
+        // web server may have an environment different from the CLI's.
         $config_paths = [];
         if (!empty($flat_document_root)) {
             $config_paths[] = wp_join_unix_paths($local_document_root, 'wp-config.php');
@@ -5006,8 +5009,10 @@ class ImportClient
             if (!is_file($config_path)) {
                 continue;
             }
-            // Tokenizing is bounded independently of the size of an unusual
-            // generated config. Do not inspect a prefix and call it complete.
+            // token_get_all() creates an array for the whole input. Cap its
+            // input at 256 KiB to bound memory use. Reading one extra byte
+            // detects oversized files, which need a warning rather than a
+            // partial scan that could miss environment reads near the end.
             $config = file_get_contents($config_path, false, null, 0, 262145);
             if ($config === false || strlen($config) > 262144) {
                 $message = "Could not inspect {$config_path} within the 256 KiB configuration limit. Check its environment settings manually.";
