@@ -1,6 +1,6 @@
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -21,7 +21,9 @@ describe('Pull a selected site into a fresh single site', () => {
     const directories = [];
     beforeAll(async () => {
         fixture = await ensureMultisite(site);
-        runWp(getSiteDir(site), ['eval', `
+        // ensureMultisite has already made the source tree writable only by nginx.
+        execFileSync('sudo', ['-u', 'nginx', process.env.E2E_WP_CLI_PHP_BINARY || 'php',
+            '/tmp/wp-cli.phar', `--path=${getSiteDir(site)}`, 'eval', `
             file_put_contents(WP_PLUGIN_DIR . '/network-fixture.php', "<?php /* Plugin Name: Network fixture */ define('SINGLE_SITE_NETWORK_PLUGIN', true);");
             if (!is_dir(WP_PLUGIN_DIR . '/redis-cache')) { mkdir(WP_PLUGIN_DIR . '/redis-cache'); }
             file_put_contents(WP_PLUGIN_DIR . '/redis-cache/redis-cache.php', "<?php /* Plugin Name: Excluded cache fixture */ define('SINGLE_SITE_EXCLUDED_PLUGIN', true);");
@@ -31,7 +33,7 @@ describe('Pull a selected site into a fresh single site', () => {
             activate_plugin('a-local-fixture.php');
             restore_current_blog();
             activate_plugin('redis-cache/redis-cache.php', '', true);
-        `]);
+        `], { encoding: 'utf8', timeout: 120000 });
     });
     afterAll(async () => {
         server?.kill('SIGTERM');
