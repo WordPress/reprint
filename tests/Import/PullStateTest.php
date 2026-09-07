@@ -69,6 +69,18 @@ class PullStateTest extends TestCase
         $this->assertSame('mirror', \PullState::from_array($array)->files_pull_mode);
     }
 
+    public function testIncludeHostPluginsRoundTripsAndDefaultsForOlderState(): void
+    {
+        $state = new \PullState();
+        $this->assertFalse($state->include_host_plugins);
+        $state->include_host_plugins = true;
+        $this->assertTrue(\PullState::from_array($state->to_array())->include_host_plugins);
+
+        $data = $state->to_array();
+        unset($data['include_host_plugins']);
+        $this->assertFalse(\PullState::from_array($data)->include_host_plugins);
+    }
+
     public function testStateDefaultsAnOlderMissingFilesPullModeToCatchUp(): void
     {
         $array = ( new \PullState() )->to_array();

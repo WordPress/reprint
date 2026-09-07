@@ -16,6 +16,13 @@ class CliHelpTest extends TestCase
         return shell_exec($cmd . ' 2>&1') ?? '';
     }
 
+    public function testHostPluginFlagIsDocumentedOnAllImportCommands(): void
+    {
+        foreach (['pull', 'pull-files', 'pull-db', 'files-pull', 'db-apply', 'apply-runtime'] as $command) {
+            $this->assertStringContainsString('--include-host-plugins', $this->runHelp($command));
+        }
+    }
+
     public function testPullFilesHelpShowsRequiredAndFileSelectionOptions(): void
     {
         $output = $this->runHelp('pull-files');

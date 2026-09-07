@@ -174,6 +174,65 @@ class OnlyFilesPathPrefixTest extends TestCase
         return json_decode(file_get_contents($this->pullStateDirectory . '/state.json'), true);
     }
 
+    public function testCannotIncludeHostPluginsDuringAnUnfinishedPull(): void
+    {
+        $client = $this->withPaths(array('abspath' => '/var/www/html/'));
+        $client->get_state()->active_resumable_command->command_name = 'files-pull';
+        $client->get_state()->active_resumable_command->completion_state = 'partial';
+        $client->save_state();
+        $before = $this->readState();
+
+        try {
+            $this->runFilesPull(array('include_host_plugins' => true));
+            $this->fail('Changing host-plugin filtering must not resume an unfinished pull.');
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString('Cannot change --include-host-plugins', $error->getMessage());
+        }
+        $this->assertSame($before, $this->readState());
+    }
+
+    public function testCannotChangeHostPluginsBetweenUnfinishedPipelineStages(): void
+    {
+        $client = $this->withPaths(array('abspath' => '/var/www/html/'));
+        $state = $client->get_state();
+        $state->active_resumable_command->command_name = 'files-pull';
+        $state->active_resumable_command->completion_state = 'complete';
+        $state->pull_pipeline->started_by_command = 'pull';
+        $state->pull_pipeline->stage_sequence = array('preflight', 'files-pull', 'db-pull', 'db-apply');
+        $state->pull_pipeline->last_completed_stage = 'files-pull';
+        $client->save_state();
+        $before = $this->readState();
+
+        try {
+            $this->runFilesPull(array('include_host_plugins' => true));
+            $this->fail('A completed file stage must not allow the policy to change before db-apply.');
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString('Cannot change --include-host-plugins', $error->getMessage());
+        }
+        $this->assertSame($before, $this->readState());
+    }
+
+    public function testIncludeHostPluginsPersistsAcrossCommands(): void
+    {
+        $client = $this->withPaths(array("abspath" => "/var/www/html/"));
+        $client->save_state();
+        $this->runFilesPull(array('include_host_plugins' => true, 'abort' => true));
+        $this->assertTrue($this->readState()['include_host_plugins']);
+        $this->runFilesPull(array('abort' => true));
+        $this->assertTrue($this->readState()['include_host_plugins']);
+    }
+
+    public function testIncludeHostPluginsRejectsNonBooleanOptionsBeforeSaving(): void
+    {
+        try {
+            $this->runFilesPull(array('include_host_plugins' => 'false', 'abort' => true));
+            $this->fail('A string must not enable host-plugin imports.');
+        } catch (\InvalidArgumentException $error) {
+            $this->assertStringContainsString('include_host_plugins must be a boolean', $error->getMessage());
+        }
+        $this->assertFileDoesNotExist($this->pullStateDirectory . '/state.json');
+    }
+
     public function testResolvePullOnlyFilesPrefixAddsDirectoriesOutsideWpContent(): void
     {
         // Selecting :wp-content: with --include yields WP_CONTENT_DIR plus any plugins,
