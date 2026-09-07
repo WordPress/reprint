@@ -210,6 +210,12 @@ class ImportClient
     private const MAX_AUDIT_RESPONSE_HEADER_BYTES = 65536;
 
     /**
+     * Longest Retry-After delay the importer will wait out before the next
+     * attempt.
+     */
+    private const MAX_SUPPORTED_RETRY_AFTER_SECONDS = 300;
+
+    /**
      * cURL error numbers that can be temporary, often meaning the peer cut the transfer short.
      * We can attempt some retries from these errors before giving up.
      */
@@ -461,6 +467,9 @@ class ImportClient
 
     /** @var bool Whether the last curl request timed out. */
     private $last_curl_timeout = false;
+
+    /** @var float|null Retry-After delay parsed from the last transient HTTP error, in seconds. */
+    private $pending_retry_after_seconds = null;
 
     /** @var string|null Machine-readable error code from the last diagnose_http_error() call. */
     public $last_error_code = null;
@@ -11368,6 +11377,7 @@ class ImportClient
         $this->last_curl_errno = null;
         $this->last_curl_timeout = false;
         $this->last_error_code = null;
+        $this->pending_retry_after_seconds = null;
     }
 
     /**
@@ -11586,6 +11596,8 @@ class ImportClient
      * the request produced another durable part, so the counter resets. If the
      * cursor did not move, the counter increments. After
      * MAX_CONSECUTIVE_INTERRUPTED_RESPONSES with no progress, the runner stops.
+     * A Retry-After delay parsed from the failing response is waited out here,
+     * after the failure limit check, so a final failure does not wait pointlessly.
      *
      * @param string                           $phase         Human-readable phase name.
      * @param ?string                          $cursor_before Cursor at request start.
@@ -11616,6 +11628,9 @@ class ImportClient
             true,
         );
 
+        $retry_after_seconds = $this->pending_retry_after_seconds;
+        $this->pending_retry_after_seconds = null;
+
         if ($count >= self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES) {
             // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The remote failure is rendered only as CLI text.
             throw new RuntimeException(
@@ -11624,6 +11639,10 @@ class ImportClient
                 $exception->getMessage(),
             );
             // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
+
+        if ($retry_after_seconds !== null && $retry_after_seconds > 0.0) {
+            $this->wait_for_retry_after($retry_after_seconds, $phase);
         }
     }
 
@@ -11996,6 +12015,7 @@ class ImportClient
         $last_bytes_received = 0;
         $error_body = "";
         $response_headers = "";
+        $retry_after_header = null;
 
         // Build headers to look like a real browser
         $headers = [
@@ -12068,7 +12088,8 @@ class ImportClient
                 &$parser,
                 $context,
                 &$current_chunk,
-                &$response_headers
+                &$response_headers,
+                &$retry_after_header
             ) {
                 $len = strlen($header_line);
 
@@ -12093,6 +12114,10 @@ class ImportClient
                         0,
                         $remaining_header_bytes,
                     );
+                }
+
+                if (stripos($header_line, "Retry-After:") === 0) {
+                    $retry_after_header = trim(substr($header_line, strlen("Retry-After:")));
                 }
 
                 // Parse Content-Type to extract boundary
@@ -12321,6 +12346,27 @@ class ImportClient
             }
 
             if ($this->is_potentially_transient_http_error($http_code, $error_body)) {
+                $retry_after_seconds = $this->parse_retry_after_seconds($retry_after_header);
+
+                if (
+                    $retry_after_seconds !== null &&
+                    $retry_after_seconds > self::MAX_SUPPORTED_RETRY_AFTER_SECONDS
+                ) {
+                    $message = sprintf(
+                        "The server sent Retry-After: %s (%.0fs) with HTTP %d, which exceeds " .
+                            "the %ds maximum Reprint waits for. Wait for that long, then rerun " .
+                            "the command to resume from the last durable cursor.",
+                        $retry_after_header,
+                        $retry_after_seconds,
+                        $http_code,
+                        self::MAX_SUPPORTED_RETRY_AFTER_SECONDS,
+                    );
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped - This exception is rendered only as CLI text.
+                    throw new RuntimeException($message);
+                }
+
+                $this->pending_retry_after_seconds = $retry_after_seconds;
+
                 // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This exception is rendered only as CLI text.
                 throw new TransientInterruptionException($error_msg);
             }
@@ -12341,6 +12387,68 @@ class ImportClient
                 "Invalid response: missing completion chunk from server.",
             );
         }
+    }
+
+    /**
+     * Parse a Retry-After header value into a wait duration in seconds.
+     */
+    private function parse_retry_after_seconds(?string $raw): ?float
+    {
+        if ($raw === null) {
+            return null;
+        }
+
+        $trimmed = trim($raw);
+        if ($trimmed === "") {
+            return null;
+        }
+
+        if (preg_match('/^\d+$/', $trimmed)) {
+            return (float) $trimmed;
+        }
+
+        $timestamp = strtotime($trimmed);
+        if ($timestamp === false) {
+            return null;
+        }
+
+        $delay = $timestamp - time();
+        return $delay > 0 ? (float) $delay : 0.0;
+    }
+
+    /**
+     * Wait out a server-requested Retry-After delay before the next attempt.
+     */
+    private function wait_for_retry_after(float $seconds, string $phase): void
+    {
+        $this->audit_log(
+            sprintf(
+                "RETRY-AFTER WAIT | %s | waiting %.1fs before the next attempt",
+                $phase,
+                $seconds,
+            ),
+            true,
+        );
+        $this->progress->show_progress_line(
+            sprintf("Waiting %.1fs before retrying %s", $seconds, $phase),
+        );
+
+        $deadline = microtime(true) + $seconds;
+        do {
+            $remaining = $deadline - microtime(true);
+            $this->output_progress([
+                "type" => "retry_after_wait",
+                "phase" => $phase,
+                "wait_seconds_remaining" => max(0.0, round($remaining, 1)),
+            ], true);
+            $this->progress->tick_spinner();
+
+            if ($this->shutdown_requested || $remaining <= 0) {
+                break;
+            }
+
+            usleep( (int) round(min(1.0, $remaining) * 1_000_000));
+        } while (microtime(true) < $deadline);
     }
 
     /** Decide whether a streaming HTTP error is potentially transient. */
