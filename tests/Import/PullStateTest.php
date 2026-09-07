@@ -69,7 +69,7 @@ class PullStateTest extends TestCase
         $this->assertSame('mirror', \PullState::from_array($array)->files_pull_mode);
     }
 
-    /** A checkpoint serialized before CSS rewriting has neither CSS field. */
+    /** State written before CSS rewriting must resume with raw downloads, not acquire new mappings. */
     public function testStateLoadsThePreCssCheckpointWithoutEnablingRewriting(): void
     {
         $data = json_decode(file_get_contents(__DIR__ . '/../fixtures/pull-state-before-css-rewriting.json'), true);

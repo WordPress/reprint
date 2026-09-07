@@ -1,4 +1,8 @@
-/** Exercise response cutoff, process death, mapping conflicts, and preserved local CSS through the CLI. */
+/**
+ * Checks CSS download recovery through the CLI and real source HTTP responses.
+ * Interrupted downloads must produce exactly one rewrite of each source URL.
+ * Rejected mapping changes and preserve-local pulls must leave local CSS intact.
+ */
 import { describe, it, beforeAll, beforeEach, afterEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -34,10 +38,10 @@ describe('Import: generated CSS download failures', () => {
             files: 'none',
             afterCreate: async () => {
                 let css = '';
-                // A URL crosses every part boundary, including whichever part
-                // the importer saves before the pause. Distinct random comment
-                // bytes also expose skipped/duplicated data and pass through
-                // compression buffers before the source waits for the test.
+                // Put a URL across every multipart boundary so any saved part
+                // leaves an incomplete match to resume. Random CSS comments
+                // make skipped or repeated bytes detectable and resist compression,
+                // allowing body bytes to reach the importer before the source pauses.
                 for (let part = 1; part <= 8; ++part) {
                     const beforeUrl = `*/\n.item-${part}{background:url("`;
                     const paddingBytes = part * chunkBytes - 10 - css.length - 2 - beforeUrl.length;
@@ -87,14 +91,16 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
         }
         child = null;
         removeTestHooks(site);
-        // Leave the released barrier readable until any old source request ends.
-        // The next case replaces it before starting another importer.
+        // A paused source request may still be reading the hook-state file.
+        // Keep release=true available until it exits; beforeEach replaces the
+        // file before the next importer starts.
         cleanupTempDir(temporaryDirectory);
     });
 
     it('loads pre-CSS pull state and keeps raw downloads unchanged when new mappings are rejected', () => {
-        // This fixture was serialized by PullState at 6a0746c640f950fbb81df4e976acbbad6a1b3474.
-        // Seed an old checkpoint before starting the CLI; do not edit current saved state.
+        // PullState at 6a0746c640f950fbb81df4e976acbbad6a1b3474 wrote this fixture
+        // before CSS fields existed. Installing it before the first CLI call
+        // exercises loading an older client's state, without altering an active download.
         const oldState = readFileSync(join(projectRoot, 'tests/fixtures/pull-state-before-css-rewriting.json'));
         const stateDirectory = pullStateDirectory(temporaryDirectory, importUrl);
         mkdirSync(stateDirectory, { recursive: true });
@@ -126,8 +132,9 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
         assert.equal(readFileSync(sourcePath, 'utf8'), sourceCss, 'Source bytes must not change');
     }, 180000);
 
-    // A Playground shell wrapper is not the PHP process whose death this case
-    // checks. Its response-cutoff case above still runs in the Playground matrix.
+    // SIGKILL reaches the native PHP importer directly. With Playground it
+    // would kill the shell wrapper instead, so this case is native-only.
+    // The HTTP response-cutoff case also runs with the Playground importer.
     it.skipIf(phpBinary.endsWith('/playground-php.sh'))('a new CLI process resumes a saved CSS part after SIGKILL', async () => {
         const preflight = runImporter(importUrl, temporaryDirectory, 'preflight', { secret: getSiteSecret(site) });
         assert.equal(preflight.exitCode, 0, preflight.stdout + preflight.stderr);
@@ -212,7 +219,7 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
         assert.equal(readFileSync(sourcePath, 'utf8'), sourceCss);
     }, 180000);
 
-    /** Keep the CLI's real file selection and multipart size identical across attempts. */
+    /** Pins the source file, part size, and URL mapping so resumed attempts use the same download settings. */
     function downloadArguments() {
         return ['--only', sourcePath, `--file-chunk-start=${chunkBytes}`, `--file-chunk-min=${chunkBytes}`, `--file-chunk-max=${chunkBytes}`,
             '--rewrite-url', sourceUrl, targetUrl];

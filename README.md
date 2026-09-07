@@ -497,11 +497,18 @@ files, including generated stylesheets under uploads. It preserves the files
 instead of flushing builder caches. `pull` applies its URL mappings to both
 CSS downloads and the database; `pull-files` also accepts these options.
 
-CSS rewriting supports literal HTTP(S), protocol-relative, and slash-escaped
-URL prefixes. It leaves relative URLs, other domains, and other file types
-unchanged. CSS hexadecimal escapes and URLs containing user information are
-not rewritten. Interrupted downloads retain the unfinished URL prefix with
-the file cursor, so a URL split across requests is still rewritten once.
+CSS rewriting uses the shared DataLiberation processor to find `url()`, bare
+`@import` strings, and `image-set()` strings. It matches HTTP(S) and
+protocol-relative URL bases after decoding CSS escapes. Comments, displayed
+text, relative URLs, other domains, URLs containing user information, and
+other file types stay unchanged. The unmatched URL suffix keeps its original
+spelling. Interrupted downloads retain parser state and the unfinished URL
+prefix with the file cursor, so a URL split across requests is rewritten once.
+
+The processor streams long comments and embedded images without keeping the
+whole token. It rejects an undecided escaped URL prefix larger than 1 MiB
+and more than 128 nested `image-set()` functions, rather than using unbounded
+memory. An error names the stylesheet; the partial file is not marked complete.
 
 File URL mappings remain bound to the saved remote index. Later downloads
 reuse them when the options are omitted. To use different mappings, start

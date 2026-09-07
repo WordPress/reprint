@@ -8,7 +8,7 @@ require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.
 
 class CssFileUrlRewritingTest extends TestCase {
 
-    /** Every split includes positions inside the scheme, host, path, and boundary. */
+    /** Splitting at every byte checks incomplete schemes, hosts, paths, escapes, and delimiters. */
     public function testEveryDownloadBoundaryPreservesCssAndRewritesEachUrlOnce(): void
     {
         $input = '@import "https://old.example/assets/theme.css";'
@@ -29,14 +29,15 @@ class CssFileUrlRewritingTest extends TestCase {
         for ($split = 0; $split <= $input_bytes; ++$split) {
             $stream = CSSURLProcessor::create_for_streaming($mapping);
             $output = $this->rewrite_chunk($stream, substr($input, 0, $split), false);
-            // A new process receives only the state saved at the part boundary.
+            // Recreate the rewriter from its cursor, as resume does; no other
+            // in-memory matching state may be needed for the remaining bytes.
             $stream = CSSURLProcessor::create_for_streaming($mapping, $stream->get_reentrancy_cursor());
             $output .= $this->rewrite_chunk($stream, substr($input, $split), true);
             $this->assertSame($expected, $output, 'Split at byte ' . $split);
         }
     }
 
-    /** A stylesheet larger than one chunk cannot grow the retained tail. */
+    /** The saved suffix must stay bounded as more of a large stylesheet passes through. */
     public function testLargeMinifiedCssKeepsOnlyOneUrlPrefixBetweenChunks(): void
     {
         $stream = CSSURLProcessor::create_for_streaming(['https://old.example' => 'https://new.example']);
@@ -51,7 +52,7 @@ class CssFileUrlRewritingTest extends TestCase {
         $this->assertSame(str_replace('old.example', 'new.example', $input), $output);
     }
 
-    /** An unrelated URL must not change because its path contains the source host. */
+    /** Matching a site requires its URL prefix, not just its name somewhere in another URL. */
     public function testUnmappedUrlsRelativePathsAndCssBytesRemainUnchanged(): void
     {
         $input = '.a{background:url(../image.png)}'
@@ -61,7 +62,7 @@ class CssFileUrlRewritingTest extends TestCase {
         $stream = CSSURLProcessor::create_for_streaming(['https://old.example' => 'https://new.example']);
         $this->assertSame($input, $this->rewrite_chunk($stream, $input, true));
     }
-    /** Local servers may be addressed by IP rather than a DNS name. */
+    /** A loopback IP address and port must work as the target without a DNS hostname. */
     public function testTargetMayUseAnIpAddress(): void
     {
         $stream = CSSURLProcessor::create_for_streaming(['https://old.example' => 'http://127.0.0.1:8881']);

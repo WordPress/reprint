@@ -74,9 +74,23 @@ class PullState
     public ?string $current_file = null;
     /** @var int|null Expected bytes written to the current file. */
     public ?int $current_file_bytes = null;
-    /** @var array<string,string>|null URL mappings bound to this file index. */
+    /**
+     * URL replacements reused while this remote file index is retained.
+     *
+     * Null means no download has selected mappings yet. An empty array means
+     * copy CSS unchanged, including when resuming state from an older client.
+     *
+     * @var array<string,string>|null
+     */
     public ?array $css_url_mapping = null;
-    /** @var array{pending_b64:string,previous_byte_b64:string}|null Unwritten CSS prefix at the saved file cursor. */
+    /**
+     * CSS parser state and undecided URL prefix at the saved fetch cursor.
+     *
+     * Restore it together with current_file_bytes, which counts transformed
+     * output bytes rather than source bytes. Null means no active CSS rewriter.
+     *
+     * @var array<string,mixed>|null
+     */
     public ?array $current_css_cursor = null;
     /** @var int|null Expected SQL file size recorded for crash recovery. */
     public ?int $sql_bytes = null;
@@ -123,8 +137,9 @@ class PullState
     public static function from_array(array $data): self
     {
         $state = new self();
-        // Older clients copied CSS verbatim. Preserve that choice on resume;
-        // enabling rewriting mid-download would mix raw and rewritten bytes.
+        // State from clients predating CSS rewriting has neither CSS field.
+        // An empty mapping keeps those downloads byte-for-byte copies. Starting
+        // rewriting on resume could otherwise join raw and rewritten file bytes.
         $data += [
             'files_pull_mode' => 'catch-up',
             'css_url_mapping' => [],
