@@ -71,7 +71,7 @@ class NewSiteUrlTest extends TestCase
                 'uploads_url' => 'https://network.test/wp-content/uploads/sites/7',
             ],
         ]]]]]);
-        $options = $this->callResolve($client, ['new_site_url' => 'http://localhost:9000', 'network_admin' => 'chosen']);
+        $options = $this->callResolve($client, ['new_site_url' => 'http://localhost:9000', 'site_admin' => 'chosen']);
         $mapping = array_column($options['rewrite_url'], 1, 0);
         $this->assertArrayNotHasKey('https://network.test', $mapping);
         $this->assertSame('http://localhost:9000', $mapping['https://network.test/shop']);

@@ -8,7 +8,7 @@ use Reprint\Importer\Database\DatabaseConnection;
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI errors, never HTML.
 // phpcs:disable WordPress.PHP.DevelopmentFunctions.error_log_var_export -- PHP literals written to wp-config.php, not diagnostic output.
 
-/** Turns the selected core records into a fresh network without renumbering the site. */
+/** Turns the selected core records into a single site without renaming tables. */
 class MultisiteTarget {
 
     /** @var array Trusted source metadata captured during preflight. */
@@ -16,16 +16,14 @@ class MultisiteTarget {
     /** @var string */
     private $target_url;
     /** @var string */
-    private $network_admin;
-    /** @var string */
-    private $domain;
+    private $site_admin;
 
     /**
      * @param array $source {
      *     Selected source site.
      *
      *     @type int    $site_id Selected site ID.
-     *     @type int    $network_id Source network ID retained at the target.
+     *     @type int    $network_id Source network ID used to read its settings.
      *     @type string $base_prefix Network table prefix.
      *     @type string $home_url Selected home URL.
      *     @type string $site_url Selected WordPress URL.
@@ -36,7 +34,7 @@ class MultisiteTarget {
      *     @type string[] $sibling_urls Other site URLs which must remain remote.
      * }
      */
-    public function __construct(array $source, string $target_url, string $network_admin)
+    public function __construct(array $source, string $target_url, string $site_admin)
     {
         if (!isset($source['base_prefix'], $source['site_id'], $source['network_id'])
             || !preg_match('/^[a-zA-Z0-9_]+$/D', $source['base_prefix'])
@@ -56,17 +54,12 @@ class MultisiteTarget {
         if (!preg_match('/^[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$/D', $url['host'])) {
             throw new InvalidArgumentException('Use an ASCII DNS host name without a trailing dot for --new-site-url; convert international names to their xn-- form. Received host: ' . $url['host'] . '.');
         }
-        if ($network_admin === '') {
-            throw new InvalidArgumentException('A multisite pull requires --network-admin=LOGIN naming an imported user who will administer the new network.');
+        if ($site_admin === '') {
+            throw new InvalidArgumentException('A multisite pull requires --site-admin=LOGIN naming an imported user who will administer the new site.');
         }
         $this->source = $source;
         $this->target_url = rtrim($target_url, '/');
-        $this->network_admin = $network_admin;
-        $this->domain = strtolower($url['host']);
-        $default_port = $url['scheme'] === 'https' ? 443 : 80;
-        if (isset($url['port']) && $url['port'] !== $default_port) {
-            $this->domain .= ':' . $url['port'];
-        }
+        $this->site_admin = $site_admin;
     }
 
     /** Map selected content and shared assets, not the old network's entire origin. */
@@ -140,44 +133,55 @@ class MultisiteTarget {
     {
         $source = $this->source;
         $base_prefix = $source['base_prefix'];
-        $site_prefix = $base_prefix . ( $source['site_id'] === 1 ? '' : $source['site_id'] . '_' );
+        $site_prefix = $this->get_table_prefix();
         $user = $database->query(
-            "SELECT user_login FROM `{$base_prefix}users` WHERE user_login = ?",
-            [$this->network_admin]
+            "SELECT ID FROM `{$base_prefix}users` WHERE user_login = ?",
+            [$this->site_admin]
         )->fetch(\PDO::FETCH_ASSOC);
         if (!$user) {
-            throw new InvalidArgumentException('The requested network administrator was not imported: ' . $this->network_admin . '. Choose a member or content author of the selected site.');
+            throw new InvalidArgumentException('The requested site administrator was not imported: ' . $this->site_admin . '. Choose a member or content author of the selected site.');
         }
 
-        $database->execute("UPDATE `{$base_prefix}site` SET domain = ?, path = '/' WHERE id = ?", [$this->domain, $source['network_id']]);
-        $database->execute("UPDATE `{$base_prefix}blogs` SET domain = ?, path = '/', site_id = ? WHERE blog_id = ?", [
-            $this->domain, $source['network_id'], $source['site_id'],
-        ]);
+        // Capability keys already use the selected table prefix. Add the explicit
+        // administrator grant without removing this user's roles or direct caps.
+        $row = $database->query("SELECT meta_value FROM `{$base_prefix}usermeta` WHERE user_id = ? AND meta_key = ?", [
+            $user['ID'], $site_prefix . 'capabilities',
+        ])->fetch(\PDO::FETCH_NUM);
+        $capabilities = $row ? @unserialize($row[0], ['allowed_classes' => false]) : [];
+        if (!is_array($capabilities)) {
+            throw new InvalidArgumentException('The imported site administrator capabilities are not a serialized array: ' . $this->site_admin . '.');
+        }
+        $capabilities['administrator'] = true;
+        foreach (['capabilities' => serialize($capabilities), 'user_level' => '10'] as $suffix => $value) {
+            $key = $site_prefix . $suffix;
+            $exists = $database->query("SELECT 1 FROM `{$base_prefix}usermeta` WHERE user_id = ? AND meta_key = ?", [$user['ID'], $key])->fetchColumn();
+            if ($exists !== false) {
+                $database->execute("UPDATE `{$base_prefix}usermeta` SET meta_value = ? WHERE user_id = ? AND meta_key = ?", [$value, $user['ID'], $key]);
+            } else {
+                $database->execute("INSERT INTO `{$base_prefix}usermeta` (user_id, meta_key, meta_value) VALUES (?, ?, ?)", [$user['ID'], $key, $value]);
+            }
+        }
         foreach ([
             'home' => $this->target_url,
             'siteurl' => $this->target_url,
-            // A promoted main site otherwise drops the /sites/7 media suffix.
+            // Single-site defaults otherwise drop the source /sites/7 media suffix.
             'upload_path' => $this->get_upload_path(),
             'upload_url_path' => $this->target_url . '/' . $this->get_upload_path(),
         ] as $name => $value) {
             $database->execute("DELETE FROM `{$site_prefix}options` WHERE option_name = ?", [$name]);
             $database->execute("INSERT INTO `{$site_prefix}options` (option_name, option_value, autoload) VALUES (?, ?, 'yes')", [$name, $value]);
         }
-        foreach ([
-            'siteurl' => $this->target_url . '/',
-            'main_site' => (string) $source['site_id'],
-            'blog_count' => '1',
-            'registration' => 'none',
-            'ms_files_rewriting' => '0',
-            // MySQL may match a different case; WordPress requires the stored spelling.
-            'site_admins' => serialize([$user['user_login']]),
-        ] as $name => $value) {
-            $database->execute("DELETE FROM `{$base_prefix}sitemeta` WHERE site_id = ? AND meta_key = ?", [$source['network_id'], $name]);
-            $database->execute("INSERT INTO `{$base_prefix}sitemeta` (site_id, meta_key, meta_value) VALUES (?, ?, ?)", [$source['network_id'], $name, $value]);
-        }
-
+        // get_locale() falls back to the network only when the site has no
+        // WPLANG row. An existing empty string is an explicit English choice.
+        $database->execute("INSERT INTO `{$site_prefix}options` (option_name, option_value, autoload)
+            SELECT 'WPLANG', meta_value, 'yes' FROM `{$base_prefix}sitemeta`
+            WHERE site_id = ? AND meta_key = 'WPLANG' LIMIT 1
+            ON DUPLICATE KEY UPDATE option_name = VALUES(option_name)", [$source['network_id']]);
         // The Reprint plugin and its credentials never enter the selected file
-        // tree. Remove both network activation keys and ordinary activation values.
+        // tree. Merge network activation keys and ordinary activation values into
+        // the single-site list, excluding Reprint from both. Keep source network
+        // rows available so cleanup can be replayed after process death.
+        $active_plugins = [];
         foreach ([
             ["{$base_prefix}sitemeta", 'meta_value', "site_id = ? AND meta_key = 'active_sitewide_plugins'", [$source['network_id']], true],
             ["{$site_prefix}options", 'option_value', "option_name = 'active_plugins'", [], false],
@@ -187,16 +191,21 @@ class MultisiteTarget {
             if (!is_array($plugins)) {
                 throw new InvalidArgumentException('The imported plugin activation list is not a serialized array: ' . $table . '.');
             }
-            foreach ($plugins as $key => $value) {
-                $basename = $network ? $key : $value;
-                if (is_string($basename) && in_array(strtok($basename, '/'), ['reprint-server', 'reprint-exporter', 'reprint-server-wp'], true)) {
-                    unset($plugins[$key]);
+            $plugins = $network ? array_keys($plugins) : array_values($plugins);
+            // WordPress sorts network plugins and loads them before site plugins.
+            if ($network) {
+                sort($plugins);
+            }
+            foreach ($plugins as $basename) {
+                if (is_string($basename) && !in_array(strtok($basename, '/'), ['reprint-server', 'reprint-exporter', 'reprint-server-wp'], true)) {
+                    $active_plugins[] = $basename;
                 }
             }
-            $database->execute("UPDATE `{$table}` SET `{$column}` = ? WHERE {$where}", array_merge([
-                serialize($network ? $plugins : array_values($plugins)),
-            ], $params));
         }
+        $active_plugins = array_values(array_unique($active_plugins));
+        // Replace the list atomically: deleting it first loses site-only plugins
+        // if the process stops before the insert and cleanup runs again.
+        $database->execute("INSERT INTO `{$site_prefix}options` (option_name, option_value, autoload) VALUES ('active_plugins', ?, 'yes') ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)", [serialize($active_plugins)]);
         if ($database->inTransaction()) {
             $database->commit();
         }
@@ -221,21 +230,27 @@ class MultisiteTarget {
             'DB_NAME' => $target['db'], 'DB_USER' => $target['user'], 'DB_PASSWORD' => $target['pass'],
             'DB_HOST' => $target['host'] . ( $target['port'] === 3306 ? '' : ':' . $target['port'] ),
             'DB_CHARSET' => 'utf8mb4', 'DB_COLLATE' => '',
-            'MULTISITE' => true, 'SUBDOMAIN_INSTALL' => false,
-            'DOMAIN_CURRENT_SITE' => $this->domain, 'PATH_CURRENT_SITE' => '/',
-            'SITE_ID_CURRENT_SITE' => $this->source['network_id'],
-            'BLOG_ID_CURRENT_SITE' => $this->source['site_id'],
+            // User tables use the source network prefix; keep their names while
+            // ordinary tables and capability keys use the selected site's prefix.
+            'CUSTOM_USER_TABLE' => $this->source['base_prefix'] . 'users',
+            'CUSTOM_USER_META_TABLE' => $this->source['base_prefix'] . 'usermeta',
         ];
         foreach (['AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT'] as $name) {
             $constants[$name] = bin2hex(random_bytes(32));
         }
-        $php = "<?php\n// One selected site, retaining its original site ID and table names.\n";
+        $php = "<?php\n// One selected site, retaining its original table names.\n";
         foreach ($constants as $name => $value) {
             $php .= "if (!defined(" . var_export($name, true) . ")) { define(" . var_export($name, true) . ", " . var_export($value, true) . "); }\n";
         }
-        return $php . '$table_prefix = ' . var_export($this->source['base_prefix'], true) . ";\n"
+        return $php . '$table_prefix = ' . var_export($this->get_table_prefix(), true) . ";\n"
             . "if (!defined('ABSPATH')) { define('ABSPATH', __DIR__ . '/'); }\n"
             . "require_once ABSPATH . 'wp-settings.php';\n";
+    }
+
+    /** Match WordPress's source table names and its saved role and capability keys. */
+    private function get_table_prefix(): string
+    {
+        return $this->source['base_prefix'] . ( $this->source['site_id'] === 1 ? '' : $this->source['site_id'] . '_' );
     }
 
     /**
@@ -252,7 +267,7 @@ class MultisiteTarget {
         return [$url, $alternate_url];
     }
 
-    /** Keep the source media layout even though the selected site becomes main. */
+    /** Keep the source media layout after leaving the network. */
     private function get_upload_path(): string
     {
         return 'wp-content/uploads' . ( $this->source['site_id'] === 1 ? '' : '/sites/' . $this->source['site_id'] );

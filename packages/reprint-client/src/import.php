@@ -4411,7 +4411,7 @@ class ImportClient
             && !empty($this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'])) {
             throw new InvalidArgumentException(
                 'A selected multisite export does not support --sql-output=mysql. '
-                . 'Use pull-db with an empty MySQL target, --new-site-url, and --network-admin.'
+                . 'Use pull-db with an empty MySQL target, --new-site-url, and --site-admin.'
             );
         }
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
@@ -6374,7 +6374,7 @@ class ImportClient
             $target = new MultisiteTarget(
                 $selection,
                 $options['new_site_url'],
-                $options['network_admin'] ?? $this->get_state()->apply->network_admin ?? ''
+                $options['site_admin'] ?? $this->get_state()->apply->site_admin ?? ''
             );
             $options['rewrite_url'] = $options['rewrite_url'] ?? [];
             foreach ($target->get_url_mapping() as $source_url => $target_url) {
@@ -6743,13 +6743,13 @@ class ImportClient
         }
 
         $selection = $this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null;
-        $network_admin = $options['network_admin'] ?? ( $has_unfinished_apply ? $apply_state->network_admin : null );
+        $site_admin = $options['site_admin'] ?? ( $has_unfinished_apply ? $apply_state->site_admin : null );
         if (is_array($selection)) {
             if ($target['engine'] !== 'mysql') {
                 throw new InvalidArgumentException('A selected multisite pull currently requires a MySQL target.');
             }
-            if ($is_resume && $network_admin !== $apply_state->network_admin) {
-                throw new InvalidArgumentException('Cannot change --network-admin while resuming db-apply.');
+            if ($is_resume && $site_admin !== $apply_state->site_admin) {
+                throw new InvalidArgumentException('Cannot change --site-admin while resuming db-apply.');
             }
             if ($is_resume) {
                 // The saved empty-database check applies only to this target.
@@ -6763,7 +6763,7 @@ class ImportClient
                     throw new InvalidArgumentException('Cannot change URL replacements while resuming a selected multisite apply.');
                 }
             }
-            new MultisiteTarget($selection, $url_mapping[rtrim($selection['home_url'], '/')] ?? '', $network_admin ?? '');
+            new MultisiteTarget($selection, $url_mapping[rtrim($selection['home_url'], '/')] ?? '', $site_admin ?? '');
         }
 
         if ($is_resume) {
@@ -6786,7 +6786,7 @@ class ImportClient
             $this->get_state()->active_resumable_command->current_stage = "database-start";
             $this->get_state()->active_resumable_command->remote_cursor = null;
             $this->get_state()->apply = new DatabaseApplyCommandState();
-            $this->get_state()->apply->network_admin = $network_admin;
+            $this->get_state()->apply->site_admin = $site_admin;
             if (!empty($url_mapping)) {
                 $this->get_state()->apply->rewrite_url = $url_mapping;
             }
@@ -7099,6 +7099,13 @@ class ImportClient
         DatabaseConnection $connection,
         array $options
     ): void {
+        // Network activations must enter active_plugins before host exclusions
+        // are applied, including when cleanup resumes after process death.
+        $multisite_target = $this->get_multisite_target();
+        if ($multisite_target !== null) {
+            $multisite_target->configure_database($connection);
+        }
+
         // Remove excluded regular plugins from active_plugins now, while the
         // database connection is still open. Their files are omitted from the
         // download, and any older local copy is removed during apply-runtime.
@@ -7117,11 +7124,6 @@ class ImportClient
         );
         foreach ($deactivated as $basename) {
             $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
-        }
-
-        $multisite_target = $this->get_multisite_target();
-        if ($multisite_target !== null) {
-            $multisite_target->configure_database($connection);
         }
 
         $this->remove_database_import_position_table($connection);
@@ -7159,7 +7161,7 @@ class ImportClient
         return new MultisiteTarget(
             $selection,
             $apply->rewrite_url[rtrim($selection['home_url'], '/')] ?? '',
-            $apply->network_admin ?? ''
+            $apply->site_admin ?? ''
         );
     }
 
@@ -13411,11 +13413,11 @@ if (
             'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
         ],
         [
-            'name' => 'network-admin',
+            'name' => 'site-admin',
             'type' => 'value-or-next',
-            'target' => 'network_admin',
+            'target' => 'site_admin',
             'placeholder' => 'LOGIN',
-            'help' => 'Imported user who will administer the new one-site network',
+            'help' => 'Imported user who will administer the new single site',
             'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [

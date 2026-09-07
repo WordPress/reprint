@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
-    runImporter, createTempDir, cleanupTempDir, getSiteSecret, createMysqlConnection, pullStateDirectory,
+    runImporter, createTempDir, cleanupTempDir, getSiteSecret, getSiteDir, createMysqlConnection, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureMultisite, runWp } from '../lib/multisite-setup.js';
 
@@ -15,11 +15,24 @@ const targetUrl = 'http://localhost:9247';
 const databases = ['e2e_multisite_boot_target', 'e2e_multisite_existing_target'];
 const clientPath = process.env.CLIENT_PATH || join(import.meta.dirname, '../../../packages/reprint-client/bin/reprint-client');
 
-describe('Pull a selected site into a fresh one-site network', () => {
+describe('Pull a selected site into a fresh single site', () => {
     let fixture;
     let server;
     const directories = [];
-    beforeAll(async () => { fixture = await ensureMultisite(site); });
+    beforeAll(async () => {
+        fixture = await ensureMultisite(site);
+        runWp(getSiteDir(site), ['eval', `
+            file_put_contents(WP_PLUGIN_DIR . '/network-fixture.php', "<?php /* Plugin Name: Network fixture */ define('SINGLE_SITE_NETWORK_PLUGIN', true);");
+            if (!is_dir(WP_PLUGIN_DIR . '/redis-cache')) { mkdir(WP_PLUGIN_DIR . '/redis-cache'); }
+            file_put_contents(WP_PLUGIN_DIR . '/redis-cache/redis-cache.php', "<?php /* Plugin Name: Excluded cache fixture */ define('SINGLE_SITE_EXCLUDED_PLUGIN', true);");
+            activate_plugin('network-fixture.php', '', true);
+            file_put_contents(WP_PLUGIN_DIR . '/a-local-fixture.php', "<?php /* Plugin Name: Local fixture */ define('SINGLE_SITE_PLUGIN_ORDER', defined('SINGLE_SITE_NETWORK_PLUGIN'));");
+            switch_to_blog(7);
+            activate_plugin('a-local-fixture.php');
+            restore_current_blog();
+            activate_plugin('redis-cache/redis-cache.php', '', true);
+        `]);
+    });
     afterAll(async () => {
         server?.kill('SIGTERM');
         const connection = await createMysqlConnection();
@@ -29,7 +42,7 @@ describe('Pull a selected site into a fresh one-site network', () => {
         for (const directory of directories) cleanupTempDir(directory);
     });
 
-    it('boots site 7 as the only network site and serves old and new uploads', async () => {
+    it('boots source site 7 as a single site and serves old and new uploads', async () => {
         const directory = createTempDir('e2e-multisite-boot');
         directories.push(directory);
         const connection = await createMysqlConnection();
@@ -43,7 +56,7 @@ describe('Pull a selected site into a fresh one-site network', () => {
             extraArgs: [
                 '--target-engine=mysql', '--target-host=127.0.0.1',
                 '--target-user=e2e_admin', '--target-pass=e2e_password', `--target-db=${databases[0]}`,
-                `--new-site-url=${targetUrl}`, '--network-admin=SHARED',
+                `--new-site-url=${targetUrl}`, '--site-admin=SHARED',
                 '--runtime=php-builtin', '--start-runtime=none', `--flatten-to=${join(directory, 'site')}`,
             ],
         });
@@ -52,22 +65,30 @@ describe('Pull a selected site into a fresh one-site network', () => {
         const inspection = JSON.parse(runWp(documentRoot, ['eval', `
             $new = wp_upload_bits('new-target.txt', null, 'New target upload');
             echo json_encode([
-                'multisite' => is_multisite(), 'main' => is_main_site(),
+                'multisite' => is_multisite(),
                 'id' => get_current_blog_id(), 'prefix' => $GLOBALS['wpdb']->prefix,
-                'sites' => array_map('intval', get_sites(['fields' => 'ids'])),
-                'admins' => get_super_admins(),
-                'is_super_admin' => is_super_admin(get_user_by('login', 'shared')->ID),
+                'users_table' => $GLOBALS['wpdb']->users, 'usermeta_table' => $GLOBALS['wpdb']->usermeta,
+                'is_admin' => user_can(get_user_by('login', 'shared'), 'manage_options'),
+                'member_roles' => get_user_by('login', 'shop-member')->roles,
+                'network_plugin' => defined('SINGLE_SITE_NETWORK_PLUGIN'),
+                'plugin_order' => SINGLE_SITE_PLUGIN_ORDER,
+                'excluded_plugin' => defined('SINGLE_SITE_EXCLUDED_PLUGIN'),
+                'plugins' => get_option('active_plugins'),
                 'media' => wp_get_attachment_url(200),
                 'new_url' => $new['url'], 'upload_error' => $new['error'],
             ]);
         `], targetUrl));
-        assert.equal(inspection.multisite, true);
-        assert.equal(inspection.main, true);
-        assert.equal(inspection.id, 7);
+        assert.equal(inspection.multisite, false);
+        assert.equal(inspection.id, 1);
         assert.equal(inspection.prefix, 'network_7_');
-        assert.deepEqual(inspection.sites, [7]);
-        assert.equal(inspection.is_super_admin, true, 'Use the stored login spelling for network access');
-        assert.deepEqual(inspection.admins, ['shared']);
+        assert.equal(inspection.users_table, 'network_users');
+        assert.equal(inspection.usermeta_table, 'network_usermeta');
+        assert.equal(inspection.is_admin, true, 'The explicit grant must accept the database-matched login');
+        assert.deepEqual(inspection.member_roles, ['subscriber']);
+        assert.equal(inspection.network_plugin, true);
+        assert.equal(inspection.excluded_plugin, false);
+        assert.deepEqual(inspection.plugins, ['network-fixture.php', 'a-local-fixture.php']);
+        assert.equal(inspection.plugin_order, true);
         assert.equal(inspection.upload_error, false);
         assert.ok(inspection.media.startsWith(`${targetUrl}/wp-content/uploads/sites/7/`));
         assert.ok(inspection.new_url.startsWith(`${targetUrl}/wp-content/uploads/sites/7/`));
@@ -93,6 +114,21 @@ describe('Pull a selected site into a fresh one-site network', () => {
         const newUpload = await fetch(inspection.new_url);
         assert.equal(newUpload.status, 200);
         assert.equal(await newUpload.text(), 'New target upload');
+        const loginPage = await fetch(`${targetUrl}/wp-login.php`);
+        const cookie = loginPage.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+        const login = await fetch(`${targetUrl}/wp-login.php`, {
+            method: 'POST', redirect: 'manual',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+            body: new URLSearchParams({ log: 'shared', pwd: 'multisite-password', testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
+        });
+        assert.equal(login.status, 302, await login.text());
+        const authCookies = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+        assert.ok(authCookies.includes('wordpress_logged_in_'));
+        const admin = await fetch(`${targetUrl}/wp-admin/options-general.php`, { headers: { Cookie: authCookies } });
+        assert.equal(admin.status, 200, await admin.text());
+        const networkAdmin = await fetch(`${targetUrl}/wp-admin/network/`, { redirect: 'manual', headers: { Cookie: authCookies } });
+        assert.equal(networkAdmin.status, 500);
+        assert.ok((await networkAdmin.text()).includes('Multisite support is not enabled.'));
     }, 300000);
 
     it('rejects a non-empty target without changing or adding database tables', async () => {
@@ -109,7 +145,7 @@ describe('Pull a selected site into a fresh one-site network', () => {
                 extraArgs: [
                     '--target-engine=mysql', '--target-host=127.0.0.1',
                     '--target-user=e2e_admin', '--target-pass=e2e_password', `--target-db=${databases[1]}`,
-                    `--new-site-url=${targetUrl}`, '--network-admin=shared',
+                    `--new-site-url=${targetUrl}`, '--site-admin=shared',
                 ],
             });
             assert.equal(result.exitCode, 1);
@@ -252,6 +288,10 @@ describe('Pull a selected site into a fresh one-site network', () => {
                 assert.deepEqual(sites.map(row => Number(row.blog_id)), [7]);
                 const [[post]] = await connection.query(`SELECT post_content FROM \`${database}\`.network_7_posts WHERE ID=100`);
                 assert.equal(post.post_content, 'Only site 7');
+                const [[activation]] = await connection.query(`SELECT option_value FROM \`${database}\`.network_7_options WHERE option_name='active_plugins'`);
+                assert.equal(activation.option_value, 'a:2:{i:0;s:19:"network-fixture.php";i:1;s:19:"a-local-fixture.php";}');
+                const [[grant]] = await connection.query(`SELECT meta_value FROM \`${database}\`.network_usermeta m JOIN \`${database}\`.network_users u ON m.user_id=u.ID WHERE u.user_login='shared' AND m.meta_key='network_7_capabilities'`);
+                assert.ok(grant.meta_value.includes('s:13:"administrator";b:1;'));
                 const [tables] = await connection.query(`SHOW TABLES FROM \`${database}\``);
                 assert.ok(tables.every(row => !Object.values(row)[0].startsWith('__reprint_')));
             } finally {
@@ -267,7 +307,7 @@ describe('Pull a selected site into a fresh one-site network', () => {
 
 function targetArgs(database) {
     return ['--target-engine=mysql', '--target-host=127.0.0.1', '--target-user=e2e_admin', '--target-pass=e2e_password',
-        `--target-db=${database}`, `--new-site-url=${targetUrl}`, '--network-admin=shared'];
+        `--target-db=${database}`, `--new-site-url=${targetUrl}`, '--site-admin=shared'];
 }
 
 function startClient(args) {
