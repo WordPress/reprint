@@ -1008,6 +1008,16 @@ class ImportClient
             return;
         }
 
+        /**
+         * Keep file selection and later cleanup on the same saved setting.
+         *
+         * A pull started with --include-host-plugins must also keep those plugins
+         * during db-apply and apply-runtime, even when later commands omit the flag.
+         * Changing it mid-pull would combine an index built with one exclusion list
+         * with cleanup using another. Check both the command and the pipeline:
+         * files-pull can be complete while the pipeline still has db-apply pending.
+         * --abort allows a new choice for the next run.
+         */
         if (
             isset($options["include_host_plugins"])
             && $options["include_host_plugins"] !== $this->get_state()->include_host_plugins
