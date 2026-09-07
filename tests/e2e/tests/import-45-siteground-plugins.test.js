@@ -417,9 +417,11 @@ describe.each([
 });
 
 /**
- * Use harmless PHP fixtures, not the real host services. The same complete tree
- * is installed on the source and as stale local files before apply-runtime.
- * Regular plugins have valid plugin headers so WordPress recognizes them.
+ * Creates host-plugin fixtures without requiring the hosting platform's services.
+ * Tests use the same tree on the source to check download exclusions and on the
+ * target to check cleanup of files already present before apply-runtime. Plugin
+ * headers let WordPress discover regular plugins; the MU loader requires its
+ * package so removing only that package would leave a broken dependency.
  */
 function writeExcludedPluginFiles(root, paths) {
     for (const path of paths) {

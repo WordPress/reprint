@@ -5,7 +5,7 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../packages/reprint-server/src/export.php';
 
 class PreflightPluginHeadersTest extends TestCase {
-    /** Only the public header crosses preflight; code and secret values do not. */
+    /** Extracting Plugin Name must neither execute the plugin nor return its other contents. */
     public function testHeaderReadDoesNotExecuteOrExportPluginCode(): void
     {
         $path = tempnam(sys_get_temp_dir(), 'reprint-header-');
@@ -19,7 +19,7 @@ class PreflightPluginHeadersTest extends TestCase {
         }
     }
 
-    /** Legacy PHP comments may use non-UTF-8 bytes, which JSON cannot encode. */
+    /** Invalid UTF-8 names must be omitted so one plugin cannot break preflight JSON encoding. */
     public function testNonUtf8NamesAreOmittedButUtf8NamesRemainReadable(): void
     {
         $path = tempnam(sys_get_temp_dir(), 'reprint-header-');
@@ -28,7 +28,8 @@ class PreflightPluginHeadersTest extends TestCase {
             $this->assertSame([], reprint_read_preflight_plugin_headers($path));
             file_put_contents($path, "<?php\n/* Plugin Name: Café customer tools */\n");
             $this->assertSame(['name' => 'Café customer tools'], reprint_read_preflight_plugin_headers($path));
-            // The 8 KiB read stops after the first byte of a valid UTF-8 character.
+            // Even a UTF-8 file can yield an invalid name when the 8 KiB read
+            // stops between the two bytes of its final character.
             file_put_contents($path, "Plugin Name:" . str_repeat(' ', 8179) . "é\n");
             $this->assertSame([], reprint_read_preflight_plugin_headers($path));
         } finally {
@@ -36,7 +37,7 @@ class PreflightPluginHeadersTest extends TestCase {
         }
     }
 
-    /** A large plugin body does not extend the bounded public-header scan. */
+    /** Plugin Name beyond WordPress's first 8 KiB is not metadata and must not extend the scan. */
     public function testHeadersPastWordpressHeaderLimitAreNotRead(): void
     {
         $path = tempnam(sys_get_temp_dir(), 'reprint-header-');

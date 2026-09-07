@@ -1,4 +1,9 @@
-/** Exercise real preflight and cleanup with platform, customer, and copied host files. */
+/**
+ * Checks host detection and file removal through full WordPress migrations.
+ * Source paths identify the current host; public headers identify removable
+ * platform loaders. Target HTTP responses check that retained customer plugins
+ * still run, including when their filenames resemble WP Engine components.
+ */
 import { describe, it, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
@@ -59,9 +64,11 @@ require_once __DIR__ . '/wpengine-common/bootstrap.php';
                 },
                 afterPermissions: async (siteDirectory) => {
                     if (site !== sites[2]) {
-                        // Keep nginx's configured entry path, but put WordPress
-                        // on a real WP Engine-style filesystem path. Preflight
-                        // must discover it over HTTP; no saved state is edited.
+                        // Move WordPress under /nas and leave a symlink at nginx's
+                        // configured document root. The source URL stays usable,
+                        // but preflight must discover WordPress's physical path
+                        // to identify WP Engine. The state comes from that HTTP
+                        // inspection, not a test-written host label.
                         const parent = site === sites[0] ? '/nas/content/live' : '/nas/wp/www';
                         const physicalDirectory = join(parent, `e2e-${site}`);
                         execFileSync('sudo', ['mkdir', '-p', parent]);

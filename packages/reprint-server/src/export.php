@@ -2632,14 +2632,16 @@ function endpoint_preflight(array $config): array
 }
 
 /**
- * Read public plugin headers without loading the plugin or returning PHP code.
+ * Extracts a MU plugin's public Plugin Name for the preflight response.
  *
- * WordPress also limits plugin header parsing to the first 8 KiB. The file
- * contents and arbitrary constants must not enter the preflight response.
+ * Preflight describes the source site before downloading it. The importer uses
+ * this name to recognize host-specific loaders without receiving or executing
+ * their PHP code. Only the first 8 KiB are scanned, matching WordPress's header
+ * limit; unrelated file contents and constants are not returned.
  *
  * @return array {
- *     Recognized public metadata, or an empty array when unavailable or not UTF-8.
- *     @type string $name Plugin Name header, when present.
+ *     Public metadata, or an empty array when no readable UTF-8 header was found.
+ *     @type string $name Trimmed Plugin Name value, when available.
  * }
  */
 function reprint_read_preflight_plugin_headers(string $path): array
@@ -2655,8 +2657,9 @@ function reprint_read_preflight_plugin_headers(string $path): array
         return [];
     }
     $name = trim(preg_replace('/\s*(?:\*\/|\?>).*/', '', $matches[1]));
-    // PHP comments may use legacy encodings; preflight JSON requires UTF-8.
-    // Omit an unreadable name rather than guessing which encoding it uses.
+    // A working PHP plugin can have non-UTF-8 comments, but including such a
+    // name would make JSON encoding fail for the entire preflight response.
+    // Omit that metadata without guessing an encoding or changing the file.
     if (preg_match('//u', $name) !== 1) {
         return [];
     }

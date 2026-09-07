@@ -45,7 +45,7 @@ class WpengineHostAnalyzerTest extends TestCase {
         $this->assertGreaterThanOrEqual(0.5, \WpengineHostAnalyzer::score($preflight));
     }
 
-    /** WordPress can live behind a different nginx entry path. */
+    /** WordPress's ABSPATH can identify WP Engine when the web server's entry paths do not. */
     public function testScoreIdentifiesCurrentWpengineWordpressRoot(): void
     {
         $preflight = $this->wpenginePreflight();
@@ -88,7 +88,7 @@ class WpengineHostAnalyzerTest extends TestCase {
         $this->assertSame(0.0, \WpengineHostAnalyzer::score($preflight));
     }
 
-    /** A current platform path excludes cache drop-ins, not a generic loader without headers. */
+    /** Current host paths identify generic cache drop-ins but do not identify the contents of mu-plugin.php. */
     public function testWpenginePathsAreExcludedFromTheImport(): void
     {
         $preflight = $this->wpenginePreflight([

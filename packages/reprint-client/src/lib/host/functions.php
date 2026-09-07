@@ -86,15 +86,20 @@ function matching_host_analyzer_scores(array $preflight_data): array
 }
 
 /**
- * Resolve plugins, MU plugins, and drop-ins excluded from a local import.
+ * Lists source-host plugins and drop-ins to omit from the local site.
  *
  * Host platform integrations are excluded when cleanup is requested. Portable
  * cache, backup, security, and password-policy plugins stay, even when a host
  * bundles them.
- * Generic drop-ins enter the exclusion list only when current preflight paths
- * identify WP Cloud or WP Engine.
- * Source paths use the actual WordPress directories reported by preflight,
- * including custom plugin and MU-plugin locations.
+ *
+ * Paths in the fixed list are selected on every host. Two cases need more
+ * context from preflight, the source inspection performed before a download:
+ * generic cache drop-ins such as object-cache.php require current WP Cloud or
+ * WP Engine filesystem paths; WP Engine's MU-plugin loader requires its Plugin
+ * Name header. Finding a copied host plugin does not identify the current host.
+ *
+ * Source paths use the WordPress directories reported by preflight, including
+ * custom plugin and MU-plugin directories, rather than assuming wp-content.
  * Pantheon's package stays because its generic loader.php requires it even
  * outside Pantheon. Its platform features require PANTHEON_ENVIRONMENT.
  *
@@ -187,12 +192,13 @@ function excluded_plugins(array $preflight_data): array
         $local_paths[] = 'wp-content/object-cache.php';
         $local_paths[] = 'wp-content/advanced-cache.php';
     }
-    // A copied WP Engine loader still requires wpengine-common after the site
-    // moves to another host. Exclude the pair without changing host detection.
-    // WP Engine documents the WP Engine System display name for this loader.
-    // A customer can also call a file mu-plugin.php, so that name alone must
-    // never authorize removing it. Older exporters without headers leave the
-    // ambiguous loader and its package together, not a missing dependency.
+    // WordPress loads top-level MU-plugin PHP files automatically. WP Engine's
+    // loader then requires files from wpengine-common, even on another host,
+    // so removing only the package would leave a fatal require on the target.
+    // Its documented Plugin Name, "WP Engine System", identifies the pair
+    // without treating any customer file named mu-plugin.php as platform code.
+    // Exporters without header metadata leave the loader and package together.
+    // Excluding a recognized pair does not select the site's current host.
     foreach ($preflight_data['wp_content']['roots'] ?? [] as $root) {
         foreach ($root['mu_plugins'] ?? [] as $plugin) {
             $name = $plugin['name'] ?? '';
