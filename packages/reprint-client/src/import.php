@@ -10,6 +10,7 @@
  * - Three-phase pull: files, SQL, then file deltas
  */
 
+use WordPress\DataLiberation\URL\CSSURLProcessor;
 use Reprint\Importer\CurlTimeoutException;
 use Reprint\Importer\Database\DatabaseConnection;
 use Reprint\Importer\Database\MysqliDatabaseConnection;
@@ -7519,7 +7520,7 @@ class ImportClient
                 $context->file_path = $tracked_file;
                 $context->file_bytes_written = $tracked_bytes;
                 if ($this->get_state()->current_css_cursor !== null) {
-                    $context->css_url_rewriter = new CssUrlRewriteStream(
+                    $context->css_url_rewriter = CSSURLProcessor::create_for_streaming(
                         $this->get_state()->css_url_mapping ?? [],
                         $this->get_state()->current_css_cursor
                     );
@@ -7671,7 +7672,7 @@ class ImportClient
                         $this->get_state()->current_file_bytes = null;
                     }
                     $this->get_state()->current_css_cursor = $context->css_url_rewriter === null
-                        ? null : $context->css_url_rewriter->get_cursor();
+                        ? null : $context->css_url_rewriter->get_reentrancy_cursor();
                     $this->pull_index_journal->flush();
                     $this->get_state()->fetch->cursor = $cursor;
                     $this->save_state();
@@ -7732,7 +7733,7 @@ class ImportClient
             $this->get_state()->current_file = $context->file_path;
             $this->get_state()->current_file_bytes = $context->file_bytes_written;
             $this->get_state()->current_css_cursor = $context->css_url_rewriter === null
-                ? null : $context->css_url_rewriter->get_cursor();
+                ? null : $context->css_url_rewriter->get_reentrancy_cursor();
         } else {
             $this->get_state()->current_file = null;
             $this->get_state()->current_file_bytes = null;
@@ -10526,7 +10527,7 @@ class ImportClient
             $context->file_bytes_written = 0;  // Reset byte counter for new file
             $context->css_url_rewriter = null;
             if (strtolower(pathinfo($path, PATHINFO_EXTENSION)) === 'css' && $this->get_state()->css_url_mapping) {
-                $context->css_url_rewriter = new CssUrlRewriteStream($this->get_state()->css_url_mapping);
+                $context->css_url_rewriter = CSSURLProcessor::create_for_streaming($this->get_state()->css_url_mapping);
             }
         }
 
@@ -10540,18 +10541,27 @@ class ImportClient
         if (( isset($chunk["body"]) && $chunk["body"] !== "" ) || ( $is_last && $context->css_url_rewriter !== null )) {
             if ($context->file_handle) {
                 $data = $chunk["body"] ?? '';
-                if ($context->css_url_rewriter !== null) {
-                    $data = $context->css_url_rewriter->rewrite_chunk($data, $is_last);
+                $output_chunks = $context->css_url_rewriter !== null
+                    ? $context->css_url_rewriter->rewrite_chunk($data, $is_last)
+                    : [$data];
+                try {
+                    foreach ($output_chunks as $output_chunk) {
+                        $bytes = fwrite($context->file_handle, $output_chunk);
+                        if ($bytes === false || $bytes !== strlen($output_chunk)) {
+                            throw new RuntimeException(
+                                "Write failed for {$context->file_path}: wrote " .
+                                ($bytes === false ? "0" : $bytes) . "/" . strlen($output_chunk) .
+                                " bytes (disk full?)"
+                            );
+                        }
+                        $context->file_bytes_written += $bytes;
+                    }
+                } catch (RuntimeException $error) {
+                    if ($context->css_url_rewriter !== null) {
+                        throw new RuntimeException("Cannot rewrite CSS file {$context->file_path}: " . $error->getMessage(), 0, $error);
+                    }
+                    throw $error;
                 }
-                $bytes = fwrite($context->file_handle, $data);
-                if ($bytes === false || $bytes !== strlen($data)) {
-                    throw new RuntimeException(
-                        "Write failed for {$context->file_path}: wrote " .
-                        ($bytes === false ? "0" : $bytes) . "/" . strlen($data) .
-                        " bytes (disk full?)"
-                    );
-                }
-                $context->file_bytes_written += $bytes;
             }
         }
 

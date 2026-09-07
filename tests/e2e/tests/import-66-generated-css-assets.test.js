@@ -25,6 +25,7 @@ describe('Import: generated CSS asset URLs', () => {
     let targetUrl;
     let sourceUrl;
     let stylesheet;
+    let escapedSourceUrl;
     let importedStylesheet;
     let server;
     let serverLog;
@@ -34,8 +35,13 @@ describe('Import: generated CSS asset URLs', () => {
             db: 'standard', files: 'sample',
             afterCreate: async (siteDirectory) => {
                 sourceUrl = new URL(getSiteUrl(site)).origin;
+                escapedSourceUrl = sourceUrl.replace('127.0.0.1', String.raw`\31 27.0.0.1`);
                 stylesheet = `@import url("${sourceUrl}${importedStylesheetPath}");\n`
-                    + `.migration-hero{background-image:url("${sourceUrl}${imagePath}?v=1#image")}\n`;
+                    + `@import "${sourceUrl}${importedStylesheetPath}";\n`
+                    + `.migration-hero{background-image:url("${escapedSourceUrl}${imagePath}?v=1#image")}\n`
+                    + `.migration-set{background-image:image-set("${sourceUrl}${imagePath}?v=2" 1x)}\n`
+                    + `/* Source address: ${sourceUrl} */\n`
+                    + `.migration-label::before{content:"${sourceUrl}"}\n`;
                 importedStylesheet = `@font-face{font-family:Migration;src:url(//${new URL(sourceUrl).host}${fontPath})}\n`
                     + '.external{background:url(https://cdn.example.test/keep.png)}\n';
                 for (const path of [stylesheetPath, importedStylesheetPath, imagePath]) {
@@ -58,6 +64,7 @@ add_action('wp_enqueue_scripts', function () {
             },
         });
         sourceUrl = new URL(getSiteUrl(site)).origin;
+        escapedSourceUrl = sourceUrl.replace('127.0.0.1', String.raw`\31 27.0.0.1`);
         stylesheet = readFileSync(join(getSiteDir(site), stylesheetPath), 'utf8');
         importedStylesheet = readFileSync(join(getSiteDir(site), importedStylesheetPath), 'utf8');
         temporaryDirectory = createTempDir('e2e-generated-css');
@@ -108,7 +115,11 @@ add_action('wp_enqueue_scripts', function () {
     });
 
     it('keeps both generated stylesheet files and only changes mapped URL prefixes', () => {
-        assert.equal(readFileSync(join(flatDirectory, stylesheetPath), 'utf8'), stylesheet.replaceAll(sourceUrl, targetUrl));
+        assert.equal(readFileSync(join(flatDirectory, stylesheetPath), 'utf8'), stylesheet
+            .replaceAll(`url("${sourceUrl}`, `url("${targetUrl}`)
+            .replaceAll(`url("${escapedSourceUrl}`, `url("${targetUrl}`)
+            .replaceAll(`@import "${sourceUrl}`, `@import "${targetUrl}`)
+            .replaceAll(`image-set("${sourceUrl}`, `image-set("${targetUrl}`));
         assert.equal(readFileSync(join(flatDirectory, importedStylesheetPath), 'utf8'),
             importedStylesheet.replaceAll(`//${new URL(sourceUrl).host}`, `//${new URL(targetUrl).host}`));
         assert.equal(readFileSync(join(getSiteDir(site), stylesheetPath), 'utf8'), stylesheet, 'Source CSS must not change');
@@ -125,8 +136,12 @@ add_action('wp_enqueue_scripts', function () {
             const response = await fetch(`${targetUrl}${path}`, { redirect: 'manual' });
             assert.equal(response.status, 200, path);
             const css = await response.text();
-            assert.ok(!css.includes(sourceUrl), `CSS must not reference the old origin: ${path}`);
-            for (const match of css.matchAll(/url\(["']?([^"')]+)["']?\)/g)) {
+            const matches = [
+                ...css.matchAll(/url\(["']?([^"')]+)["']?\)/g),
+                ...css.matchAll(/@import "([^"]+)"/g),
+                ...css.matchAll(/image-set\("([^"]+)"/g),
+            ];
+            for (const match of matches) {
                 const url = new URL(match[1], targetUrl);
                 if (url.host === 'cdn.example.test') continue;
                 assert.equal(url.origin, targetUrl, `Asset must use the target: ${url}`);

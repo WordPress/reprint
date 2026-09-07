@@ -19,6 +19,8 @@ describe('Import: generated CSS download failures', () => {
     const targetUrl = 'https://target.example.test/moved';
     const chunkBytes = 65536;
     const sourcePath = join(getSiteDir(site), 'test-data/generated.css');
+    const limitPath = join(getSiteDir(site), 'test-data/escaped-prefix-limit.css');
+    const limitCss = 'a{src:url("h' + '\\\n'.repeat(550000) + sourceUrl.slice(1) + '/photo.png")}';
     const importUrl = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     const projectRoot = join(import.meta.dirname, '../../..');
     const clientPath = process.env.CLIENT_PATH || join(projectRoot, 'packages/reprint-client/bin/reprint-client');
@@ -43,6 +45,7 @@ describe('Import: generated CSS download failures', () => {
                         + beforeUrl + `${sourceUrl}/photo-${part}.png")}\n`;
                 }
                 writeFileSync(sourcePath, css);
+                writeFileSync(limitPath, limitCss);
             },
         });
         sourceCss = readFileSync(sourcePath, 'utf8');
@@ -150,7 +153,7 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
         }
         assert.ok(savedPart, `The importer must save a CSS part while the source request is open:\n${output}`);
         assert.equal(readHookState(site).offset, 2 * chunkBytes);
-        assert.ok(Buffer.from(savedPart.current_css_cursor.pending_b64, 'base64').toString().includes(sourceUrl.slice(0, 10)));
+        assert.ok(Buffer.from(savedPart.current_css_cursor.css.pending_b64, 'base64').toString().includes(sourceUrl.slice(0, 10)));
         assert.equal(child.kill('SIGKILL'), true);
         assert.deepEqual(await exited, [null, 'SIGKILL']);
         writeHookState(site, { action: null, fired: true, release: true });
@@ -160,6 +163,22 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
         assert.equal(resumed.exitCode, 0, resumed.stdout + resumed.stderr);
         assert.equal(readFileSync(join(fsRootDir(temporaryDirectory), sourcePath), 'utf8'), sourceCss.replaceAll(sourceUrl, targetUrl));
         assert.equal(readFileSync(sourcePath, 'utf8'), sourceCss);
+    }, 180000);
+
+    it('reports an oversized escaped URL prefix without completing a partial stylesheet', () => {
+        // This is valid source CSS. Line continuations add raw bytes without
+        // completing the URL base, so the shared parser must stop at its cap.
+        const argumentsForLimit = downloadArguments().map(argument => argument === sourcePath ? limitPath : argument);
+        for (let attempt = 0; attempt < 2; ++attempt) {
+            const result = runImporter(importUrl, temporaryDirectory, 'files-pull', {
+                secret: getSiteSecret(site), autoResume: false, extraArgs: argumentsForLimit,
+            });
+            assert.equal(result.exitCode, 1, result.stdout + result.stderr);
+            assert.match(result.stdout + result.stderr, /Cannot rewrite CSS file .*escaped-prefix-limit\.css/);
+            assert.match(result.stdout + result.stderr, /exceeding 1048576/);
+            assert.notEqual(readFileSync(join(fsRootDir(temporaryDirectory), limitPath), 'utf8'), limitCss);
+            assert.equal(readFileSync(limitPath, 'utf8'), limitCss, 'Source bytes must not change');
+        }
     }, 180000);
 
     it('rejects changed mappings on a repeat pull without changing the downloaded stylesheet', () => {

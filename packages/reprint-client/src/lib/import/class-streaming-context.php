@@ -9,7 +9,7 @@ class StreamingContext {
 
     public $on_chunk = null;
     public $file_handle = null;
-    /** @var \CssUrlRewriteStream|null URL prefix retained until the next body callback. */
+    /** @var \WordPress\DataLiberation\URL\CSSURLProcessor|null CSS context retained between body callbacks. */
     public $css_url_rewriter = null;
     public $file_path = null;
     public $file_ctime = null;

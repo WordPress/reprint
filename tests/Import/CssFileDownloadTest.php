@@ -66,7 +66,12 @@ class CssFileDownloadTest extends TestCase {
     public function testCssDownloadResumesWithoutLosingOrRewritingBytesTwice(string $stop): void
     {
         $relative = '/wp-content/uploads/elementor/css/post-1.css';
-        $css = str_repeat('.a{background:url(https://old.example/photo.jpg)}', 4000);
+        $css = str_repeat('/* https://old.example stays in this comment */'
+            . '.a{background:url(https://\\6f ld.example/photo.jpg)}'
+            . '@import "https://old.example/theme.css";', 4000);
+        $expected_css = str_repeat('/* https://old.example stays in this comment */'
+            . '.a{background:url(http://old.example/local/photo.jpg)}'
+            . '@import "http://old.example/local/theme.css";', 4000);
         file_put_contents($this->source . $relative, $css);
         file_put_contents($this->source . '/unchanged.txt', $css);
         $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/files');
@@ -109,7 +114,7 @@ CODE
         }
         $local_root = $this->root . '/files' . $this->source;
         $this->assertSame(
-            hash('sha256', str_replace('https://old.example', 'http://old.example/local', $css)),
+            hash('sha256', $expected_css),
             hash_file('sha256', $local_root . $relative),
             'The downloaded CSS must contain the mapped URL exactly once.'
         );
