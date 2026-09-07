@@ -34,6 +34,7 @@ use WordPress\Reprint\Server\FileIndexProcessor;
 
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
+use function Reprint\Importer\apply_zipwp_access_cookie;
 use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
@@ -11856,6 +11857,7 @@ class ImportClient
         $ch = curl_init($url);
         apply_curl_proxy_from_environment($ch);
         apply_curl_ca_bundle($ch);
+        apply_zipwp_access_cookie($ch, $url);
 
         $headers = [
             ...$this->get_base_headers("application/json"),
@@ -11987,6 +11989,7 @@ class ImportClient
         $ch = curl_init($url);
         apply_curl_proxy_from_environment($ch);
         apply_curl_ca_bundle($ch);
+        apply_zipwp_access_cookie($ch, $url);
 
         $parser = null;
         $current_chunk = null;
