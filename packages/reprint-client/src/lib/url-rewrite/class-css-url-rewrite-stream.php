@@ -1,27 +1,42 @@
 <?php
 
 /**
- * Rewrites mapped HTTP(S) prefixes in CSS without buffering a stylesheet.
+ * Rewrites source-site URL prefixes as CSS download bytes arrive.
  *
- * Only the prefix is replaced. CSS quotes, url() syntax, suffixes, and comments
- * keep their original bytes. Literal and slash-escaped URLs are supported;
- * hexadecimal CSS escapes require a CSS parser and are left alone.
+ * A URL can span two network callbacks. Retaining a short suffix lets the next
+ * callback complete a match without keeping the whole stylesheet in memory.
+ * The retained bytes can also be saved with the download checkpoint for resume.
+ *
+ * This scans bytes, not CSS syntax: matching prefixes are replaced wherever
+ * they occur, and all other bytes are preserved. It recognizes HTTP(S) and
+ * protocol-relative URLs, including slash escapes, but does not decode CSS
+ * hexadecimal escapes. Callers write the returned bytes to the destination;
+ * this class performs no file I/O.
  */
-// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Matches the existing URL processor names.
+// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- URL processors use unprefixed class names.
 class CssUrlRewriteStream {
 
-    /** @var list<array{pattern:string,scheme:string,authority:string,path:string,source_bytes:int}> */
+    /**
+     * Longest source prefixes first, so a specific path wins over its parent.
+     *
+     * @var list<array{pattern:string,scheme:string,authority:string,path:string,source_bytes:int}>
+     */
     private array $mappings = [];
     private int $lookahead_bytes = 1;
     private string $pending = '';
     private string $previous_byte = '';
 
     /**
-     * @param array<string,string> $url_mapping Source URL base => target URL.
+     * Prepares URL matches, optionally restoring bytes retained at a checkpoint.
+     *
+     * Unsupported source or target URL bases are skipped. A restored cursor
+     * must use the same mappings as the download that produced it.
+     *
+     * @param array<string,string> $url_mapping Source URL bases as keys, target URL bases as values.
      * @param array|null $cursor {
-     *     State saved with the download's completed multipart part.
-     *     @type string $pending_b64       Unwritten source bytes, base64 encoded.
-     *     @type string $previous_byte_b64 Source byte before the pending prefix.
+     *     State returned by get_cursor(), or null to start a file.
+     *     @type string $pending_b64       Unprocessed source suffix, base64 encoded.
+     *     @type string $previous_byte_b64 Source byte before that suffix, base64 encoded, for checking the match's left boundary.
      * }
      */
     public function __construct(array $url_mapping, ?array $cursor = null)
@@ -34,8 +49,9 @@ class CssUrlRewriteStream {
             }
             $slash = '\\\\{0,8}/';
             $path = str_replace('/', $slash, preg_quote($source['path'], '~'));
-            // No bare domains or user information: those would allow matches
-            // inside unrelated URLs or require unbounded prefix lookahead.
+            // Require URL syntax and a left boundary: old.example inside
+            // another URL's path or credentials must not become a site match.
+            // Credential prefixes would also need an unbounded lookahead.
             $pattern = '~(?<![A-Za-z0-9._%+\\\\/@-])'
                 . '(?:(?<scheme>(?i:' . $source['scheme'] . '))(?<colon>\\\\{0,8}:)|(?<!:))'
                 . '(?<slash>' . $slash . ')\k<slash>'
@@ -64,8 +80,16 @@ class CssUrlRewriteStream {
     }
 
     /**
-     * Returns transformed bytes ready to write, retaining only a URL prefix.
-     * The final call also releases the tail; no stylesheet cache is discarded.
+     * Returns bytes ready to write and retains a bounded source suffix.
+     *
+     * The suffix is long enough to hold an incomplete mapped prefix and its
+     * following delimiter. Matching uses original source bytes, so replacement
+     * URLs are not matched again. The previous source byte is retained only to
+     * check the next match's left boundary; it is not emitted twice.
+     *
+     * @param string $chunk Next source bytes, in file order.
+     * @param bool $is_last Whether this is the end of the file, not merely the
+     *                      end of a multipart part. Releases all retained bytes.
      */
     public function rewrite_chunk(string $chunk, bool $is_last): string
     {
@@ -104,10 +128,16 @@ class CssUrlRewriteStream {
     }
 
     /**
+     * Returns the source bytes needed to resume matching in a new instance.
+     *
+     * Save this with the corresponding source fetch cursor and the number of
+     * transformed bytes written locally. Neither file offset alone describes
+     * the pending bytes. Base64 keeps arbitrary CSS bytes safe in JSON state.
+     *
      * @return array {
-     *     Bounded source tail required to continue after a process stops.
-     *     @type string $pending_b64       Unwritten source bytes, base64 encoded.
-     *     @type string $previous_byte_b64 Source byte before the pending prefix.
+     *     State accepted by the constructor's $cursor argument.
+     *     @type string $pending_b64       Unprocessed source suffix, base64 encoded.
+     *     @type string $previous_byte_b64 Source byte before that suffix, base64 encoded, for checking the match's left boundary.
      * }
      */
     public function get_cursor(): array
@@ -118,14 +148,17 @@ class CssUrlRewriteStream {
         ];
     }
     /**
-     * Accept URL bases whose literal bytes are safe in quoted or unquoted CSS.
-     * This includes local IPv4/IPv6 targets; no opaque-text escaping is guessed.
+     * Extracts the scheme, host, port, and path supported by the byte matcher.
+     *
+     * Only HTTP(S) bases without credentials, queries, or fragments are accepted.
+     * Hosts may be ASCII names or IP addresses. Restricting path characters lets
+     * replacements work without determining how the surrounding CSS is quoted.
      *
      * @return array|null {
-     *     Supported URL base, or null for unsupported syntax.
+     *     Parsed URL base, or null when the matcher cannot handle its syntax.
      *     @type string $scheme    Lowercase HTTP(S) scheme.
-     *     @type string $authority Host and optional port.
-     *     @type string $path      Initial path without trailing slashes.
+     *     @type string $authority Host and optional port, including brackets around IPv6 addresses.
+     *     @type string $path      Path prefix with trailing slashes removed.
      * }
      * @phpstan-return array{scheme:string,authority:string,path:string}|null
      */

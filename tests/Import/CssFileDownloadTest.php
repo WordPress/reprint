@@ -1,7 +1,7 @@
 <?php
 
-// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedNamespaceFound -- Existing importer test namespace.
-// phpcs:disable WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Encode paths into child PHP scripts.
+// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedNamespaceFound -- Importer tests share the ImportTests namespace.
+// phpcs:disable WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Paths must be quoted as PHP literals in generated child scripts.
 
 namespace ImportTests;
 
@@ -9,16 +9,22 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
-/** Real file_index/file_fetch requests, with process death at a part checkpoint. */
+/**
+ * Checks CSS rewriting through the production file_index and file_fetch endpoints.
+ *
+ * A separate importer process exits before or after saving a multipart part.
+ * Resuming must produce the same bytes as an uninterrupted download and must
+ * not report rewritten files as local edits in the next file comparison.
+ */
 class CssFileDownloadTest extends TestCase {
 
     private string $root;
     private string $source;
     private string $url;
-    /** @var resource|null */
+    /** @var resource|null PHP server process retained until tearDown(). */
     private $server;
 
-    /** Starts the production file endpoints on a private local HTTP server. */
+    /** Serves the production router with small parts so each CSS file spans several checkpoints. */
     protected function setUp(): void
     {
         $this->root = sys_get_temp_dir() . '/reprint-css-' . bin2hex(random_bytes(6));
@@ -52,7 +58,7 @@ class CssFileDownloadTest extends TestCase {
         $this->fail('File endpoint did not start: ' . file_get_contents($this->root . '/server.log'));
     }
 
-    /** Stops this test server and removes its temporary files. */
+    /** Stops the server before deleting the source files and download state it used. */
     protected function tearDown(): void
     {
         if (is_resource($this->server)) {
@@ -62,7 +68,11 @@ class CssFileDownloadTest extends TestCase {
         $this->remove_tree($this->root);
     }
 
-    /** @dataProvider checkpoint_boundaries */
+    /**
+     * Checks the complete output, untouched non-CSS files, and the next file diff.
+     *
+     * @dataProvider checkpoint_boundaries
+     */
     public function testCssDownloadResumesWithoutLosingOrRewritingBytesTwice(string $stop): void
     {
         $relative = '/wp-content/uploads/elementor/css/post-1.css';
@@ -120,13 +130,22 @@ CODE
         $this->assertStringContainsString('"local_paths_to_push":0', $diff['output']);
     }
 
-    /** Run uninterrupted, then stop on each side of the durable part boundary. */
+    /** Covers normal completion and process exit immediately before or after save_state(). */
     public static function checkpoint_boundaries(): array
     {
         return [['none'], ['before'], ['after']];
     }
 
-    /** @return array{exit:int,output:string} Child process result. */
+    /**
+     * Runs one importer command in a new process against the same download state.
+     *
+     * @return array {
+     *     Result after the child exits.
+     *     @type int    $exit   Process exit code; 99 marks the test's deliberate stop.
+     *     @type string $output Captured standard output and error for assertions.
+     * }
+     * @phpstan-return array{exit:int,output:string}
+     */
     private function run_client(string $script, string $command, string $stop): array
     {
         $process = proc_open([PHP_BINARY, $script, $this->url, $this->root, $command, $stop],
@@ -135,7 +154,7 @@ CODE
         return ['exit' => proc_close($process), 'output' => file_get_contents($this->root . '/client.log')];
     }
 
-    /** Removes only this test's temporary source, target, and state. */
+    /** Deletes a test directory recursively, unlinking symlinks rather than following them. */
     private function remove_tree(string $path): void
     {
         if (is_dir($path) && !is_link($path)) {

@@ -7,7 +7,7 @@ require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.
 
 class CssUrlRewriteStreamTest extends TestCase {
 
-    /** Every split includes positions inside the scheme, host, path, and boundary. */
+    /** Splitting at every byte checks incomplete schemes, hosts, paths, escapes, and delimiters. */
     public function testEveryDownloadBoundaryPreservesCssAndRewritesEachUrlOnce(): void
     {
         $input = '@import "https://old.example/assets/theme.css";'
@@ -28,14 +28,15 @@ class CssUrlRewriteStreamTest extends TestCase {
         for ($split = 0; $split <= $input_bytes; ++$split) {
             $stream = new CssUrlRewriteStream($mapping);
             $output = $stream->rewrite_chunk(substr($input, 0, $split), false);
-            // A new process receives only the state saved at the part boundary.
+            // Recreate the rewriter from its cursor, as resume does; no other
+            // in-memory matching state may be needed for the remaining bytes.
             $stream = new CssUrlRewriteStream($mapping, $stream->get_cursor());
             $output .= $stream->rewrite_chunk(substr($input, $split), true);
             $this->assertSame($expected, $output, 'Split at byte ' . $split);
         }
     }
 
-    /** A stylesheet larger than one chunk cannot grow the retained tail. */
+    /** The saved suffix must stay bounded as more of a large stylesheet passes through. */
     public function testLargeMinifiedCssKeepsOnlyOneUrlPrefixBetweenChunks(): void
     {
         $stream = new CssUrlRewriteStream(['https://old.example' => 'https://new.example']);
@@ -50,7 +51,7 @@ class CssUrlRewriteStreamTest extends TestCase {
         $this->assertSame(str_replace('old.example', 'new.example', $input), $output);
     }
 
-    /** An unrelated URL must not change because its path contains the source host. */
+    /** Matching a site requires its URL prefix, not just its name somewhere in another URL. */
     public function testUnmappedUrlsRelativePathsAndCssBytesRemainUnchanged(): void
     {
         $input = '.a{background:url(../image.png)}'
@@ -60,7 +61,7 @@ class CssUrlRewriteStreamTest extends TestCase {
         $stream = new CssUrlRewriteStream(['https://old.example' => 'https://new.example']);
         $this->assertSame($input, $stream->rewrite_chunk($input, true));
     }
-    /** Local servers may be addressed by IP rather than a DNS name. */
+    /** A loopback IP address and port must work as the target without a DNS hostname. */
     public function testTargetMayUseAnIpAddress(): void
     {
         $stream = new CssUrlRewriteStream(['https://old.example' => 'http://127.0.0.1:8881']);

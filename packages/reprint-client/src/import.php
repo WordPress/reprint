@@ -7549,14 +7549,13 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            // Streamed file bodies can arrive in multiple parser callbacks
-            // for one exporter file part. Save only at the part boundary:
-            // mid-body, the cursor already points to the end of the part
-            // while file_bytes_written may still lag; at is_streaming_close
-            // the bytes are on disk and we force a per-part checkpoint.
-            // Snapshot the file boundary before handle_file_chunk() may close
-            // the file so a stop after the close still retains its path. The
-            // context keeps the final size, including the CSS tail written on close.
+            // One multipart part can arrive in several body callbacks. Its
+            // source cursor already points past the part while some body bytes
+            // are still unwritten, so only is_streaming_close can checkpoint it.
+            // Capture the path before handle_file_chunk() can close the file and
+            // clear it. Read the byte count afterward: finishing a CSS file also
+            // writes the rewriter's retained tail, which belongs in that count.
+            // The completed part is flushed before its checkpoint is saved.
             $is_streaming_body = !empty($chunk["is_streaming_body"]);
             $is_streaming_close = !empty($chunk["is_streaming_close"]);
             $file_path_at_completed_part = null;
@@ -10530,8 +10529,9 @@ class ImportClient
             }
         }
 
-        // Continuation parts carry the same file metadata. A resumed request
-        // opens the handle without a ctime; restore it before recording the file.
+        // Resume reopens the local file without its source ctime. Each part
+        // repeats that metadata, so recover it here before recording the file
+        // in the pull index journal; the local write time is not a substitute.
         if ($context->file_handle && isset($headers['x-file-ctime'])) {
             $context->file_ctime = (int) $headers['x-file-ctime'];
         }
@@ -10597,8 +10597,9 @@ class ImportClient
             $context->file_path = null;
             $context->file_ctime = null;
             $context->css_url_rewriter = null;
-            // Keep the final byte count until the part checkpoint is saved.
-            // Clear crash recovery tracking - file is complete
+            // Leave file_bytes_written intact for the outer part callback to
+            // checkpoint, including the final CSS tail. This file is closed,
+            // so it no longer needs an active-file resume cursor.
             $this->get_state()->current_file = null;
             $this->get_state()->current_file_bytes = null;
             $this->get_state()->current_css_cursor = null;

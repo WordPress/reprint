@@ -9,7 +9,12 @@ class StreamingContext {
 
     public $on_chunk = null;
     public $file_handle = null;
-    /** @var \CssUrlRewriteStream|null URL prefix retained until the next body callback. */
+    /**
+     * Rewrites the current CSS file and retains incomplete matches across body
+     * callbacks. Null for files copied without CSS URL rewriting.
+     *
+     * @var \CssUrlRewriteStream|null
+     */
     public $css_url_rewriter = null;
     public $file_path = null;
     public $file_ctime = null;

@@ -1,6 +1,8 @@
 /**
- * Follow a migrated WordPress page through generated CSS to its image and font.
- * No builder cache flush is allowed to hide a stale URL or a removed stylesheet.
+ * Checks a migrated page and the files linked from its generated stylesheets.
+ * The source has saved Elementor and Beaver Builder CSS files but no builder
+ * that could regenerate them. Successful target requests therefore require
+ * keeping those files and rewriting their image, font, and stylesheet URLs.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -68,8 +70,8 @@ add_action('wp_enqueue_scripts', function () {
         await once(listener, 'listening');
         const port = listener.address().port;
         await new Promise((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
-        // Database URL rewriting currently supports DNS-name targets. CSS IP
-        // targets are covered by the downloader unit tests.
+        // This full migration also rewrites database URLs, whose rewriter needs
+        // a DNS-name target. The CSS rewriter's IP support is tested separately.
         targetUrl = `http://localhost:${port}`;
         const result = runImporter(`${getSiteUrl(site)}&directory=${getSiteDir(site)}`, temporaryDirectory, 'pull', {
             secret: getSiteSecret(site), skipPreflight: true, timeout: 180000,
@@ -92,7 +94,7 @@ add_action('wp_enqueue_scripts', function () {
                 const body = await response.text();
                 lastResponse = `HTTP ${response.status}, Location: ${response.headers.get('location')}, body: ${body.slice(0, 500)}`;
                 if (response.status === 200) return;
-            } catch { /* The server may not have bound the socket yet. */ }
+            } catch { /* Connection failures are expected while PHP starts listening. */ }
             if (server.exitCode !== null) break;
             await sleep(100);
         }
@@ -145,7 +147,7 @@ add_action('wp_enqueue_scripts', function () {
     });
 });
 
-/** Reuse a real font shipped with the test WordPress theme, without a network font dependency. */
+/** Finds a bundled WOFF2 font so asset requests can verify real font bytes without an external download. */
 function findFont(directory) {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
         const path = join(directory, entry.name);
