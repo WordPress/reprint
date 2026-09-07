@@ -85,6 +85,25 @@ function apply_curl_proxy_from_environment($curl_handle): ?string
 }
 
 /**
+ * Send the cookie set by ZipWP's "continue with temporary site" button.
+ *
+ * @param resource|object $curl_handle            cURL handle to configure.
+ * @param string          $remote_reprint_api_url Remote Reprint API URL.
+ */
+function apply_zipwp_access_cookie($curl_handle, string $remote_reprint_api_url): void
+{
+	$host = parse_url($remote_reprint_api_url, PHP_URL_HOST);
+	if (!is_string($host) || substr(strtolower(rtrim($host, '.')), -9) !== '.zipwp.to') {
+		return;
+	}
+
+	// ZipWP serves an HTML landing page until this cookie is present, even
+	// for API requests. The button uses a random 12-character value. This
+	// cookie does not replace Reprint authentication.
+	curl_setopt($curl_handle, CURLOPT_COOKIE, 'zipwp_access=' . bin2hex(random_bytes(6)));
+}
+
+/**
  * Mirror PHP's `openssl.cafile` ini value onto the cURL handle as
  * `CURLOPT_CAINFO` — workaround for WordPress Playground, where the
  * WASM curl build doesn't honor `curl.cainfo` / `openssl.cafile`

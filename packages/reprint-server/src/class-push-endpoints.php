@@ -600,8 +600,10 @@ final class PushEndpoints {
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         header('Pragma: no-cache');
         header('Expires: 0');
-        // Hostinger preview domains rewrite real domains in application/json
-        // response bodies. Keep the JSON bytes opaque to that response filter.
+        // Hosts such as Hostinger rewrite domains so links and assets stay on a
+        // preview domain while the stored site URL still uses the real domain.
+        // This lets users preview a site before changing DNS, but also rewrites
+        // application/json bodies. Octet-stream bypasses Hostinger's filter.
         header('Content-Type: application/octet-stream');
         $json = json_encode($body);
         if ($json === false) {

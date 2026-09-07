@@ -51,8 +51,10 @@ if (!defined(__NAMESPACE__ . '\\TIMESTAMP_TOLERANCE')) {
 /** Sends a JSON error response and terminates. */
 function error(int $code, string $message): void {
     http_response_code($code);
-    // Hostinger preview domains rewrite real domains in application/json
-    // response bodies. Keep the JSON bytes opaque to that response filter.
+    // Hosts such as Hostinger rewrite domains so links and assets stay on a
+    // preview domain while the stored site URL still uses the real domain.
+    // This lets users preview a site before changing DNS, but also rewrites
+    // application/json bodies. Octet-stream bypasses Hostinger's filter.
     header('Content-Type: application/octet-stream');
     echo json_encode(['error' => $message, 'code' => $code]);
     exit;
@@ -76,8 +78,10 @@ function push_error(int $http_code, string $reason, string $detail): void {
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     header('Pragma: no-cache');
     header('Expires: 0');
-    // Hostinger preview domains rewrite real domains in application/json
-    // response bodies. Keep the JSON bytes opaque to that response filter.
+    // Hosts such as Hostinger rewrite domains so links and assets stay on a
+    // preview domain while the stored site URL still uses the real domain.
+    // This lets users preview a site before changing DNS, but also rewrites
+    // application/json bodies. Octet-stream bypasses Hostinger's filter.
     header('Content-Type: application/octet-stream');
     echo json_encode([
         'status' => 'rejected',
@@ -448,8 +452,10 @@ function handle_api_request(array $options = []): void {
         ];
         error_log('Reprint Server API error: ' . json_encode($error));
         http_response_code(500);
-        // Hostinger preview domains rewrite real domains in application/json
-        // response bodies. Keep the JSON bytes opaque to that response filter.
+        // Hosts such as Hostinger rewrite domains so links and assets stay on a
+        // preview domain while the stored site URL still uses the real domain.
+        // This lets users preview a site before changing DNS, but also rewrites
+        // application/json bodies. Octet-stream bypasses Hostinger's filter.
         @header('Content-Type: application/octet-stream');
         echo json_encode($error);
         exit(1);
@@ -463,8 +469,10 @@ function handle_api_request(array $options = []): void {
         ];
         error_log('Reprint Server API exception: ' . json_encode($error));
         http_response_code(500);
-        // Hostinger preview domains rewrite real domains in application/json
-        // response bodies. Keep the JSON bytes opaque to that response filter.
+        // Hosts such as Hostinger rewrite domains so links and assets stay on a
+        // preview domain while the stored site URL still uses the real domain.
+        // This lets users preview a site before changing DNS, but also rewrites
+        // application/json bodies. Octet-stream bypasses Hostinger's filter.
         @header('Content-Type: application/octet-stream');
         echo json_encode($error);
         exit(1);
@@ -694,8 +702,10 @@ function handle_api_request(array $options = []): void {
         }
         if (!headers_sent()) {
             http_response_code(400);
-            // Hostinger preview domains rewrite real domains in application/json
-            // response bodies. Keep the JSON bytes opaque to that response filter.
+            // Hosts such as Hostinger rewrite domains so links and assets stay on a
+            // preview domain while the stored site URL still uses the real domain.
+            // This lets users preview a site before changing DNS, but also rewrites
+            // application/json bodies. Octet-stream bypasses Hostinger's filter.
             header('Content-Type: application/octet-stream');
         }
         echo json_encode([

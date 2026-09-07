@@ -88,38 +88,23 @@ final class SortIndexFileTest extends TestCase
         );
     }
 
-    public function testSystemSortCompletesInsideTheCiMemoryLimit(): void
+    /**
+     * Check sort's peak process memory without counting cached spill files.
+     */
+    public function testSystemSortKeepsPeakProcessMemoryBelow128MiB(): void
     {
-        if (getenv('GITHUB_ACTIONS') !== 'true' || PHP_VERSION_ID < 80400) {
-            $this->markTestSkipped('The constrained-memory sort runs once in the PHPUnit CI matrix.');
+        if (getenv('GITHUB_ACTIONS') !== 'true' || PHP_VERSION_ID < 80400 || PHP_OS_FAMILY !== 'Linux') {
+            $this->markTestSkipped('The Linux peak-memory sort runs once in the PHPUnit CI matrix.');
         }
 
-        $docker_path_output = [];
-        $docker_path_exit_code = 0;
-        exec('command -v docker', $docker_path_output, $docker_path_exit_code);
-        $this->assertSame(0, $docker_path_exit_code, 'The PHPUnit workflow must provide Docker.');
-        $docker_path = $docker_path_output[0] ?? '';
-        $this->assertNotSame('', $docker_path, 'The PHPUnit workflow must provide Docker.');
+        $this->assertTrue(is_executable('/usr/bin/sort'), 'The PHPUnit workflow must provide GNU sort.');
 
-        $docker_image_output = [];
-        $docker_image_exit_code = 0;
-        exec(
-            escapeshellarg($docker_path) . ' image inspect mariadb:10.11 2>/dev/null',
-            $docker_image_output,
-            $docker_image_exit_code
-        );
-        $this->assertSame(
-            0,
-            $docker_image_exit_code,
-            'The PHPUnit workflow must provide its mariadb:10.11 service image.'
-        );
-
-        $path = $this->temporary_directory . '/constrained-memory-index.jsonl';
+        $path = $this->temporary_directory . '/large-index.jsonl';
         $input = fopen($path, 'w');
         $this->assertIsResource($input);
         $path_prefix = '/wp-content/uploads/';
         $path_suffix = '-' . str_repeat('x', 180) . '.jpg';
-        for ($index = 100000; $index >= 1; --$index) {
+        for ($index = 500000; $index >= 1; --$index) {
             fwrite(
                 $input,
                 $this->index_line(
@@ -131,21 +116,25 @@ final class SortIndexFileTest extends TestCase
         fclose($input);
         $input_size = filesize($path);
         $this->assertIsInt($input_size);
+        $this->assertGreaterThan(128 * 1024 * 1024, $input_size);
 
-        // The PHPUnit workflow already pulls this image for its MariaDB
-        // service. Run only GNU sort in a 64 MiB cgroup so the limit includes
-        // the complete child process, as it does on a constrained host.
-        $sort_directory = $this->temporary_directory . '/memory-limited-sort-bin';
+        // A cgroup also counts cached temporary-file data. Measure peak
+        // process memory instead, without an address-space limit: GNU sort
+        // reads that limit and can shrink its buffer even when -S is missing.
+        // A fresh PHP process keeps earlier PHPUnit children out of getrusage.
+        $measure_sort_memory = <<<'PHP'
+passthru('/usr/bin/sort ' . implode(' ', array_map('escapeshellarg', array_slice($argv, 2))), $exit_code);
+file_put_contents($argv[1], (string) getrusage(1)['ru_maxrss']);
+exit($exit_code);
+PHP;
+        $memory_usage_path = $this->temporary_directory . '/sort-peak-memory-kib';
+        $sort_directory = $this->temporary_directory . '/measured-sort-bin';
         mkdir($sort_directory);
         file_put_contents(
             $sort_directory . '/sort',
-            "#!/bin/sh\nexec " . escapeshellarg($docker_path)
-                . " run --rm --network=none"
-                . " --memory=64m --memory-swap=64m"
-                . ' -v ' . escapeshellarg(
-                    $this->temporary_directory . ':' . $this->temporary_directory
-                )
-                . " --entrypoint /usr/bin/sort mariadb:10.11 \"$@\"\n"
+            "#!/bin/sh\nexec " . escapeshellarg(PHP_BINARY)
+                . ' -r ' . escapeshellarg($measure_sort_memory)
+                . ' ' . escapeshellarg($memory_usage_path) . " \"$@\"\n"
         );
         chmod($sort_directory . '/sort', 0755);
 
@@ -158,11 +147,22 @@ final class SortIndexFileTest extends TestCase
                     $path . '.sorted',
                     fn(string $line): ?string => $this->index_path_from_line($line)
                 ),
-                'GNU sort must complete while the child process is limited to 64 MiB.'
+                'GNU sort must complete the large-index sort.'
             );
         } finally {
             putenv('PATH=' . $original_path);
         }
+
+        // Linux reports ru_maxrss in KiB, including process code and data.
+        $peak_memory_kib = file_get_contents($memory_usage_path);
+        $this->assertIsString($peak_memory_kib);
+        $this->assertMatchesRegularExpression('/^[0-9]+$/', $peak_memory_kib);
+        $this->assertGreaterThan(0, (int) $peak_memory_kib);
+        $this->assertLessThan(
+            128 * 1024,
+            (int) $peak_memory_kib,
+            'GNU sort must keep peak process memory below 128 MiB.'
+        );
 
         $sorted_input = fopen($path, 'r');
         $this->assertIsResource($sorted_input);

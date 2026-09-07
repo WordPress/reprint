@@ -218,6 +218,20 @@ php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" 
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json` under the `preflight` key.
 
+Some hosts, including [Hostinger](https://www.hostinger.com/support/2489693-how-to-access-your-website-content-without-a-domain-in-hostinger/),
+provide preview domains so you can browse a site before its real domain points
+at the host. They replace the real domain in outgoing pages so links and assets
+stay on the preview while the stored WordPress home URL stays unchanged.
+Hostinger also applies this rewriting to JSON responses.
+
+The server sends a base64 copy of the WordPress home domain to detect this.
+For a home URL of `https://example.com:8443/blog`, the domain is `example.com`,
+without the scheme, port, or path. If the decoded copy differs from the domain
+in the plain home URL, preflight fails and reports both domains. Low-level pull
+commands also reject that mismatch in saved preflight data.
+Older servers that omit the copy, or report `null` because no domain was available,
+remain compatible. The comparison checks the home domain, not every URL in the response.
+
 All other commands check that a preflight has been completed and refuse to start without one.
 
 To run very basic diagnostics that confirms the remote server replied and it has a
@@ -279,6 +293,35 @@ rules cover known generated backup archives, cache, log, upgrade, and temporary
 paths, plus version-control metadata, `node_modules`, IDE and package-manager
 caches, operating-system metadata, and editor scratch files. `--include`,
 `--exclude`, `--filter`, and `--remap` cannot override these omissions.
+
+**Host platform plugins**
+
+By default, file pulls also skip listed host platform plugins that depend on
+services from the source host, including WP Engine and WP Cloud MU plugins.
+Named platform paths are skipped even when they are leftovers from an earlier
+host. Portable plugins stay: this includes Redis Cache, WP Rocket, SiteGround's
+Speed and Security Optimizers, and Force Strong Passwords.
+
+To keep host platform plugins too, pass `--include-host-plugins`:
+
+```bash
+php reprint.phar pull-files "$REMOTE_REPRINT_API_URL" --secret="$SECRET_KEY" \
+    --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --include-host-plugins
+```
+
+The flag is saved for that remote in the state directory. Later pulls, `db-apply`,
+and `apply-runtime` keep those plugins without repeating the flag. It also keeps
+host cache drop-ins. Use it when the target, such as wp.com, handles its own
+post-import cleanup. Reprint does not infer that choice from the target host.
+Kept platform plugins may need that cleanup before WordPress can boot.
+
+The flag is also accepted by `pull`, `pull-db`, `files-pull`, `db-apply`, and
+`apply-runtime`. Set it before the pull starts; changing it during an unfinished
+pull requires `--abort` first. It does not override explicit `--exclude` paths
+or the generated-file skip rules above. New state directories use the default
+filtering again. To fetch plugins skipped by a completed pull, start another
+`pull-files`, or abort the completed `files-pull` and run it again with the flag.
+The flag cannot restore files or plugin activation removed by an earlier import.
 
 Mirror mode requires `--state-dir` to be outside `--fs-root`, because the state
 files must not appear in the local tree being compared. The selected mode is
@@ -626,10 +669,10 @@ manifest and write server-specific files. Adding a new source host or target
 server is independent — you implement one interface without touching the other.
 
 Currently supported source hosts: WP Cloud (with on-the-fly thumbnail
-generation for missing image sizes, automatic stripping of production-only
-drop-ins like Memcached object-cache and wpcomsh mu-plugins, and
-auto-detection of extra directories from `auto_prepend_file`/`auto_append_file`
-INI values), SiteGround, and a generic default.
+generation for missing image sizes and auto-detection of extra directories from
+`auto_prepend_file`/`auto_append_file` INI values), WP Engine, and a generic default.
+The host-plugin filtering described above also governs cleanup of existing local
+copies during `apply-runtime`. `--include-host-plugins` disables that cleanup.
 Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in
 development server, and WordPress Playground CLI.
 

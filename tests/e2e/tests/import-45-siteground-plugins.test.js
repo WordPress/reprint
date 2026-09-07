@@ -25,17 +25,6 @@ const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'r
 // Keep the expected paths independent of excluded_plugins(): removing a rule
 // must make this test fail rather than silently remove its source fixture too.
 const EXCLUDED_PATHS = [
-    'wp-content/plugins/nginx-helper',
-    'wp-content/plugins/redis-cache',
-    'wp-content/plugins/breeze',
-    'wp-content/plugins/object-cache-pro',
-    'wp-content/plugins/wp-rocket',
-    'wp-content/plugins/w3-total-cache',
-    'wp-content/plugins/servebolt-optimizer',
-    'wp-content/plugins/a2-optimized-wp',
-    'wp-content/plugins/boldgrid-backup',
-    'wp-content/plugins/litespeed-cache',
-    'wp-content/plugins/aruba-hispeed-cache',
     'wp-content/mu-plugins/aruba-wpchecker.php',
     'wp-content/mu-plugins/aruba-wpchecker',
     'wp-content/mu-plugins/kinsta-mu-plugins.php',
@@ -66,9 +55,6 @@ const EXCLUDED_PATHS = [
     'wp-content/mu-plugins/vip-go-mu-plugins',
     'wp-content/plugins/wp-engine-smart-plugin-manager',
     'wp-content/mu-plugins/wpengine-common',
-    'wp-content/mu-plugins/slt-force-strong-passwords.php',
-    'wp-content/mu-plugins/force-strong-passwords',
-    'wp-content/mu-plugins/stop-long-comments.php',
     'wp-content/mu-plugins/wpe-cache-plugin',
     'wp-content/mu-plugins/wpe-cache-plugin.php',
     'wp-content/mu-plugins/wpe-update-source-selector',
@@ -76,8 +62,6 @@ const EXCLUDED_PATHS = [
     'wp-content/mu-plugins/wpe-wp-sign-on-plugin',
     'wp-content/mu-plugins/wpe-wp-sign-on-plugin.php',
     'wp-content/mu-plugins/wpengine-security-auditor.php',
-    'wp-content/plugins/sg-cachepress',
-    'wp-content/plugins/sg-security',
     'wp-content/mu-plugins/wpcomsh',
     'wp-content/mu-plugins/wpcomsh-dev',
     'wp-content/mu-plugins/wpcomsh-loader.php',
@@ -85,6 +69,29 @@ const EXCLUDED_PATHS = [
     'wp-content/mu-plugins/mu-plugin.php',
 ];
 const EXCLUDED_REGULAR_PLUGINS = EXCLUDED_PATHS
+    .filter(path => path.startsWith('wp-content/plugins/'))
+    .map(path => `${basename(path)}/${basename(path)}.php`);
+// These plugins can be chosen independently of the source host.
+const PORTABLE_PATHS = [
+    'wp-content/plugins/nginx-helper',
+    'wp-content/plugins/redis-cache',
+    'wp-content/plugins/breeze',
+    'wp-content/plugins/object-cache-pro',
+    'wp-content/plugins/wp-rocket',
+    'wp-content/plugins/w3-total-cache',
+    'wp-content/plugins/servebolt-optimizer',
+    'wp-content/plugins/a2-optimized-wp',
+    'wp-content/plugins/boldgrid-backup',
+    'wp-content/plugins/litespeed-cache',
+    'wp-content/plugins/aruba-hispeed-cache',
+    'wp-content/plugins/sg-cachepress',
+    'wp-content/plugins/sg-security',
+    'wp-content/mu-plugins/slt-force-strong-passwords.php',
+    'wp-content/mu-plugins/force-strong-passwords',
+    'wp-content/mu-plugins/stop-long-comments.php',
+    'wp-content/plugins/wordpress-starter',
+];
+const PORTABLE_REGULAR_PLUGINS = PORTABLE_PATHS
     .filter(path => path.startsWith('wp-content/plugins/'))
     .map(path => `${basename(path)}/${basename(path)}.php`);
 const KEPT_PLUGIN = 'reprint-kept-plugin/reprint-kept-plugin.php';
@@ -105,13 +112,15 @@ const KEPT_FILES = new Map([
 ]);
 
 describe.each([
-    ['other', 'siteground-plugins'],
-    ['wpengine', 'wpengine-plugin-inventory'],
-])('Import: complete source-host plugin inventory (%s)', (host, site) => {
-    const excludedPaths = host === 'wpengine'
+    ['other', 'siteground-plugins', false],
+    ['wpengine', 'wpengine-plugin-inventory', false],
+    ['wpengine', 'wpengine-plugin-inventory', true],
+])('Import: source-host plugins (%s, %s, include=%s)', (host, site, includeHostPlugins) => {
+    const platformPaths = host === 'wpengine'
         ? [...EXCLUDED_PATHS, 'wp-content/object-cache.php', 'wp-content/advanced-cache.php']
         : EXCLUDED_PATHS;
-    const keptFiles = new Map([...KEPT_FILES].filter(([path]) => !excludedPaths.includes(path)));
+    const excludedPaths = includeHostPlugins ? [] : platformPaths;
+    const keptFiles = new Map([...KEPT_FILES].filter(([path]) => !platformPaths.includes(path)));
     let tempDir;
     let runtimeDir;
 
@@ -120,7 +129,7 @@ describe.each([
             db: 'standard',
             files: 'sample',
             afterCreate: async (siteDir, dbName) => {
-                writeExcludedPluginFiles(siteDir, excludedPaths);
+                writeExcludedPluginFiles(siteDir, [...platformPaths, ...PORTABLE_PATHS]);
                 for (const [path, contents] of keptFiles) {
                     mkdirSync(dirname(join(siteDir, path)), { recursive: true });
                     writeFileSync(join(siteDir, path), contents);
@@ -157,7 +166,7 @@ describe.each([
                     const matches = [...raw.matchAll(/s:\d+:"([^"]+)"/g)];
                     plugins = matches.map(m => m[1]);
                 }
-                plugins.push(...EXCLUDED_REGULAR_PLUGINS, KEPT_PLUGIN);
+                plugins.push(...EXCLUDED_REGULAR_PLUGINS, ...PORTABLE_REGULAR_PLUGINS, KEPT_PLUGIN);
 
                 // Serialize as PHP array: a:N:{i:0;s:LEN:"value";...}
                 const entries = plugins.map((p, i) => `i:${i};s:${p.length}:"${p}";`).join('');
@@ -197,9 +206,10 @@ describe.each([
             `Expected webhost '${host}', got '${state.webhost}'`);
     });
 
-    it('files-pull omits the excluded plugins', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-pull', {
+    it('files-pull applies the host-plugin flag', () => {
+        const result = runImporter(importUrl(), tempDir, includeHostPlugins ? 'pull-files' : 'files-pull', {
             secret: getSiteSecret(site),
+            extraArgs: includeHostPlugins ? ['--include-host-plugins'] : [],
         });
         assert.equal(result.exitCode, 0, `files-pull failed:\n${result.stderr}`);
 
@@ -208,10 +218,35 @@ describe.each([
             assert.ok(existsSync(join(getSiteDir(site), path)), `Source fixture is missing: ${path}`);
             assert.ok(!existsSync(join(pulledSite, path)), `${path} should not be downloaded`);
         }
+        for (const path of [...PORTABLE_PATHS, ...(includeHostPlugins ? platformPaths : [])]) {
+            assert.ok(existsSync(join(pulledSite, path)), `${path} should be downloaded`);
+        }
         for (const [path, contents] of keptFiles) {
             assert.equal(readFileSync(join(pulledSite, path), 'utf-8'), contents, `${path} should be downloaded unchanged`);
         }
     });
+
+    if (includeHostPlugins) {
+        it('include-host-plugins does not override explicit path exclusions', () => {
+            const excludedPlugin = 'wp-content/plugins/pressable-onepress-login';
+            const separateImport = createTempDir('e2e-host-plugins-explicit-exclude');
+            try {
+                const result = runImporter(importUrl(), separateImport, 'pull-files', {
+                    secret: getSiteSecret(site),
+                    extraArgs: [
+                        '--include-host-plugins',
+                        `--exclude=${getSiteDir(site)}/${excludedPlugin}`,
+                    ],
+                });
+                assert.equal(result.exitCode, 0, `pull-files failed:\n${result.stderr}`);
+                const pulledSite = join(fsRootDir(separateImport), getSiteDir(site));
+                assert.ok(!existsSync(join(pulledSite, excludedPlugin)));
+                assert.ok(existsSync(join(pulledSite, 'wp-content/mu-plugins/wpengine-common/plugin.php')));
+            } finally {
+                cleanupTempDir(separateImport);
+            }
+        });
+    }
 
     it('db-pull downloads the SQL dump', () => {
         const result = runImporter(importUrl(), tempDir, 'db-pull', {
@@ -221,7 +256,7 @@ describe.each([
         assert.ok(existsSync(join(tempDir, 'db.sql')), 'db.sql should exist');
     });
 
-    describe('db-apply deactivates every excluded regular plugin', () => {
+    describe('db-apply follows the saved host-plugin policy', () => {
         beforeAll(async () => {
             // Create the target database before db-apply connects to it.
             const importDb = `${getDbName(site)}_import`;
@@ -257,7 +292,10 @@ describe.each([
 
             assert.ok(raw.length > 0, 'active_plugins option should exist');
             for (const plugin of EXCLUDED_REGULAR_PLUGINS) {
-                assert.ok(!raw.includes(plugin), `Excluded plugin is still active: ${plugin}`);
+                assert.equal(raw.includes(plugin), includeHostPlugins, `Unexpected active state for ${plugin}`);
+            }
+            for (const plugin of PORTABLE_REGULAR_PLUGINS) {
+                assert.ok(raw.includes(plugin), `Portable plugin must stay active: ${plugin}`);
             }
             // Confirm non-host plugins survived in active_plugins too.
             assert.ok(raw.includes(KEPT_PLUGIN), 'The custom plugin should stay active');
@@ -267,13 +305,13 @@ describe.each([
         it('audit log records the deactivations', () => {
             const auditLog = readFileSync(join(tempDir, 'audit.log'), 'utf-8');
             for (const plugin of EXCLUDED_REGULAR_PLUGINS) {
-                assert.ok(auditLog.includes(`deactivated plugin ${plugin}`),
-                    `Audit log should record deactivation of ${plugin}`);
+                assert.equal(auditLog.includes(`deactivated plugin ${plugin}`), !includeHostPlugins,
+                    `Unexpected deactivation log for ${plugin}`);
             }
         });
     });
 
-    describe('apply-runtime removes every excluded path', () => {
+    describe('apply-runtime follows the saved host-plugin policy', () => {
         beforeAll(() => {
             const flatDir = join(tempDir, 'flattened');
             const flatResult = runImporter(importUrl(), tempDir, 'flat-docroot', {
@@ -320,6 +358,9 @@ describe.each([
             for (const [path, contents] of keptFiles) {
                 assert.equal(readFileSync(join(flatDir, path), 'utf-8'), contents, `${path} should survive migration unchanged`);
             }
+            for (const path of [...PORTABLE_PATHS, ...(includeHostPlugins ? platformPaths : [])]) {
+                assert.ok(existsSync(join(flatDir, path)), `${path} should survive runtime cleanup`);
+            }
             assert.ok(existsSync(join(flatDir, 'wp-content/plugins/reprint-server')));
         });
 
@@ -352,11 +393,11 @@ describe.each([
             assert.ok(boot.kept_plugin && boot.kept_mu_plugin && boot.pantheon_package);
             assert.ok(boot.active_plugins.includes(KEPT_PLUGIN));
             for (const plugin of EXCLUDED_REGULAR_PLUGINS) {
-                assert.ok(!boot.active_plugins.includes(plugin), `${plugin} should not be active after boot`);
+                assert.equal(boot.active_plugins.includes(plugin), includeHostPlugins, `Unexpected active state after boot: ${plugin}`);
             }
         });
 
-        it('the copied WP Engine loader and package are removed together', () => {
+        it('the copied WP Engine loader and package are kept or removed together', () => {
             const muPluginsDir = join(tempDir, 'flattened', 'wp-content', 'mu-plugins');
             const output = execFileSync('php', ['-r', `
                 define('WPMU_PLUGIN_DIR', $argv[1]);
@@ -366,8 +407,8 @@ describe.each([
                 echo 'loaded';
             `, muPluginsDir], { encoding: 'utf-8', timeout: 10000 });
             assert.equal(output, 'loaded');
-            assert.ok(!existsSync(join(muPluginsDir, 'mu-plugin.php')));
-            assert.ok(!existsSync(join(muPluginsDir, 'wpengine-common')));
+            assert.equal(existsSync(join(muPluginsDir, 'mu-plugin.php')), includeHostPlugins);
+            assert.equal(existsSync(join(muPluginsDir, 'wpengine-common')), includeHostPlugins);
         });
     });
 });

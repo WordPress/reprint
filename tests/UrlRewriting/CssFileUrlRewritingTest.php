@@ -79,5 +79,4 @@ class CssFileUrlRewritingTest extends TestCase {
         }
         return $output;
     }
-
 }
