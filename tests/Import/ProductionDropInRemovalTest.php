@@ -65,6 +65,7 @@ class ProductionDropInRemovalTest extends TestCase
     private function writeState(array $state): void
     {
         $defaults = [
+            'include_host_plugins' => false,
             'active_resumable_command' => [
                 'command_name' => 'files-pull',
                 'completion_state' => 'complete',
@@ -423,7 +424,7 @@ class ProductionDropInRemovalTest extends TestCase
         }
     }
 
-    public function testEveryImportRemovesTheGlobalSourceHostPathList(): void
+    public function testRequestedCleanupRemovesTheGlobalSourceHostPathList(): void
     {
         $this->writeState(array_replace_recursive(
             ['webhost' => 'other'],
@@ -473,7 +474,32 @@ class ProductionDropInRemovalTest extends TestCase
         );
     }
 
-    // ---- Globally removed SiteGround paths ----
+    public function testIncludeHostPluginsKeepsPlatformFilesAndDropIns(): void
+    {
+        $this->writeState(['include_host_plugins' => true]);
+        $paths = [
+            'wp-content/mu-plugins/wpcomsh-loader.php',
+            'wp-content/mu-plugins/wpcomsh/plugin.php',
+            'wp-content/object-cache.php',
+            'wp-content/advanced-cache.php',
+        ];
+        foreach ($paths as $path) {
+            if (!is_dir(dirname($this->fsRoot . '/' . $path))) {
+                mkdir(dirname($this->fsRoot . '/' . $path), 0755, true);
+            }
+            file_put_contents($this->fsRoot . '/' . $path, '<?php // Keep platform file');
+        }
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        foreach ($paths as $path) {
+            $this->assertSame('<?php // Keep platform file', file_get_contents($this->fsRoot . '/' . $path));
+        }
+        $this->assertSame([], $client->get_state()->apply->remote_paths_removed_from_local_site);
+    }
+
+    // ---- Portable SiteGround plugins stay on disk ----
 
     private function writeSitegroundState(array $overrides = []): void
     {
@@ -515,7 +541,7 @@ class ProductionDropInRemovalTest extends TestCase
         );
     }
 
-    public function testSitegroundRemovesSgCachepressDirectory(): void
+    public function testSitegroundKeepsSgCachepressDirectory(): void
     {
         $this->writeSitegroundState();
         $this->createSitegroundPlugins();
@@ -527,10 +553,10 @@ class ProductionDropInRemovalTest extends TestCase
         $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
-        $this->assertDirectoryDoesNotExist($sgCacheDir);
+        $this->assertDirectoryExists($sgCacheDir);
     }
 
-    public function testSitegroundRemovesSgSecurityDirectory(): void
+    public function testSitegroundKeepsSgSecurityDirectory(): void
     {
         $this->writeSitegroundState();
         $this->createSitegroundPlugins();
@@ -542,7 +568,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
-        $this->assertDirectoryDoesNotExist($sgSecurityDir);
+        $this->assertDirectoryExists($sgSecurityDir);
     }
 
     public function testSitegroundPreservesUnrelatedPlugins(): void
@@ -561,7 +587,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertDirectoryExists($plugins . '/woocommerce');
     }
 
-    public function testSitegroundLogsRemovalsToAuditLog(): void
+    public function testSitegroundDoesNotLogPluginRemovals(): void
     {
         $this->writeSitegroundState();
         $this->createSitegroundPlugins();
@@ -572,17 +598,17 @@ class ProductionDropInRemovalTest extends TestCase
 
         $auditLog = file_get_contents($this->stateDir . '/audit.log');
 
-        $this->assertStringContainsString(
+        $this->assertStringNotContainsString(
             'removed wp-content/plugins/sg-cachepress (source-host)',
             $auditLog,
         );
-        $this->assertStringContainsString(
+        $this->assertStringNotContainsString(
             'removed wp-content/plugins/sg-security (source-host)',
             $auditLog,
         );
     }
 
-    public function testSitegroundPersistsPathsRemovedToState(): void
+    public function testSitegroundDoesNotRecordPortablePluginsAsRemoved(): void
     {
         $this->writeSitegroundState();
         $this->createSitegroundPlugins();
@@ -596,11 +622,11 @@ class ProductionDropInRemovalTest extends TestCase
             true,
         );
 
-        $this->assertContains(
+        $this->assertNotContains(
             'wp-content/plugins/sg-cachepress',
             $state['apply']['remote_paths_removed_from_local_site'],
         );
-        $this->assertContains(
+        $this->assertNotContains(
             'wp-content/plugins/sg-security',
             $state['apply']['remote_paths_removed_from_local_site'],
         );
@@ -687,7 +713,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertDirectoryDoesNotExist($mu_plugins . '/wpengine-common');
         $this->assertDirectoryDoesNotExist($mu_plugins . '/wpe-update-source-selector');
         $this->assertFileDoesNotExist($mu_plugins . '/mu-plugin.php');
-        $this->assertFileDoesNotExist($mu_plugins . '/stop-long-comments.php');
+        $this->assertFileExists($mu_plugins . '/stop-long-comments.php');
         $this->assertFileExists($mu_plugins . '/my-custom-plugin.php');
     }
 }

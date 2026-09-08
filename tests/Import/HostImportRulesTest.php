@@ -64,17 +64,6 @@ class HostImportRulesTest extends TestCase {
 
         $this->assertSame(
             [
-                'wp-content/plugins/nginx-helper',
-                'wp-content/plugins/redis-cache',
-                'wp-content/plugins/breeze',
-                'wp-content/plugins/object-cache-pro',
-                'wp-content/plugins/wp-rocket',
-                'wp-content/plugins/w3-total-cache',
-                'wp-content/plugins/servebolt-optimizer',
-                'wp-content/plugins/a2-optimized-wp',
-                'wp-content/plugins/boldgrid-backup',
-                'wp-content/plugins/litespeed-cache',
-                'wp-content/plugins/aruba-hispeed-cache',
                 'wp-content/mu-plugins/aruba-wpchecker.php',
                 'wp-content/mu-plugins/aruba-wpchecker',
                 'wp-content/mu-plugins/kinsta-mu-plugins.php',
@@ -105,9 +94,6 @@ class HostImportRulesTest extends TestCase {
                 'wp-content/mu-plugins/vip-go-mu-plugins',
                 'wp-content/plugins/wp-engine-smart-plugin-manager',
                 'wp-content/mu-plugins/wpengine-common',
-                'wp-content/mu-plugins/slt-force-strong-passwords.php',
-                'wp-content/mu-plugins/force-strong-passwords',
-                'wp-content/mu-plugins/stop-long-comments.php',
                 'wp-content/mu-plugins/wpe-cache-plugin',
                 'wp-content/mu-plugins/wpe-cache-plugin.php',
                 'wp-content/mu-plugins/wpe-update-source-selector',
@@ -115,14 +101,43 @@ class HostImportRulesTest extends TestCase {
                 'wp-content/mu-plugins/wpe-wp-sign-on-plugin',
                 'wp-content/mu-plugins/wpe-wp-sign-on-plugin.php',
                 'wp-content/mu-plugins/wpengine-security-auditor.php',
-                'wp-content/plugins/sg-cachepress',
-                'wp-content/plugins/sg-security',
                 'wp-content/mu-plugins/wpcomsh',
                 'wp-content/mu-plugins/wpcomsh-dev',
                 'wp-content/mu-plugins/wpcomsh-loader.php',
             ],
             array_column($excluded_plugins, 'local_path'),
         );
+    }
+
+    public function testKeepsPortablePluginsEvenOnWpengine(): void
+    {
+        $preflight_data = $this->preflight([], []);
+        $preflight_data['runtime']['document_root'] = '/nas/content/live/example';
+        $excluded_paths = array_column(\excluded_plugins($preflight_data), 'local_path');
+
+        foreach ([
+            'wp-content/plugins/nginx-helper',
+            'wp-content/plugins/redis-cache',
+            'wp-content/plugins/breeze',
+            'wp-content/plugins/object-cache-pro',
+            'wp-content/plugins/wp-rocket',
+            'wp-content/plugins/w3-total-cache',
+            'wp-content/plugins/servebolt-optimizer',
+            'wp-content/plugins/a2-optimized-wp',
+            'wp-content/plugins/boldgrid-backup',
+            'wp-content/plugins/litespeed-cache',
+            'wp-content/plugins/aruba-hispeed-cache',
+            'wp-content/plugins/sg-cachepress',
+            'wp-content/plugins/sg-security',
+            'wp-content/mu-plugins/slt-force-strong-passwords.php',
+            'wp-content/mu-plugins/force-strong-passwords',
+            'wp-content/mu-plugins/stop-long-comments.php',
+            'wp-content/plugins/wordpress-starter',
+        ] as $path) {
+            $this->assertNotContains($path, $excluded_paths);
+        }
+        $this->assertContains('wp-content/mu-plugins/wpengine-common', $excluded_paths);
+        $this->assertContains('wp-content/mu-plugins/mu-plugin.php', $excluded_paths);
     }
 
     public function testWpcloudRuntimeAndWpengineExclusionsAreAppliedIndependently(): void
@@ -185,8 +200,8 @@ class HostImportRulesTest extends TestCase {
         }
 
         $this->assertSame(
-            '/srv/custom-plugins/sg-cachepress',
-            $excluded_plugins['wp-content/plugins/sg-cachepress']['source_path'],
+            '/srv/custom-plugins/pressable-onepress-login',
+            $excluded_plugins['wp-content/plugins/pressable-onepress-login']['source_path'],
         );
         $this->assertSame(
             '/srv/custom-mu-plugins/wpengine-common',
@@ -197,8 +212,8 @@ class HostImportRulesTest extends TestCase {
             $excluded_plugins['wp-content/object-cache.php']['source_path'],
         );
         $this->assertSame(
-            'sg-cachepress',
-            $excluded_plugins['wp-content/plugins/sg-cachepress']['regular_plugin_directory'],
+            'pressable-onepress-login',
+            $excluded_plugins['wp-content/plugins/pressable-onepress-login']['regular_plugin_directory'],
         );
         $this->assertNull(
             $excluded_plugins['wp-content/mu-plugins/wpengine-common']['regular_plugin_directory'],
@@ -218,8 +233,8 @@ class HostImportRulesTest extends TestCase {
         }
 
         $this->assertSame(
-            '/opt/wordpress/wp-content/plugins/sg-cachepress',
-            $excluded_plugins['wp-content/plugins/sg-cachepress']['source_path'],
+            '/opt/wordpress/wp-content/plugins/pressable-onepress-login',
+            $excluded_plugins['wp-content/plugins/pressable-onepress-login']['source_path'],
         );
         $this->assertSame(
             '/opt/wordpress/wp-content/mu-plugins/wpcomsh',
@@ -229,14 +244,14 @@ class HostImportRulesTest extends TestCase {
 
     public function testNamedHostPluginsUseDefaultRuntimeBehavior(): void
     {
-        $preflight_data = $this->preflight(['sg-cachepress', 'sg-security'], []);
+        $preflight_data = $this->preflight(['pressable-onepress-login'], []);
 
         $manifest = \runtime_manifest_for($preflight_data);
 
         $this->assertSame('other', $manifest->source);
         $this->assertSame(['memory_limit' => '256M'], $manifest->php_ini);
         $excluded_local_paths = array_column(\excluded_plugins($preflight_data), 'local_path');
-        $this->assertContains('wp-content/plugins/sg-cachepress', $excluded_local_paths);
+        $this->assertContains('wp-content/plugins/pressable-onepress-login', $excluded_local_paths);
         $this->assertNotContains('wp-content/object-cache.php', $excluded_local_paths);
         $this->assertNotContains('wp-content/mu-plugins/mu-plugin.php', $excluded_local_paths);
     }
