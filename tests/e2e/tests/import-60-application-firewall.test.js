@@ -212,7 +212,7 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
                 );
                 assert.ok(
                     retryLine.includes(
-                        `consecutive_interrupted_responses=${index + 1}/3`,
+                        `consecutive_interrupted_responses=${index + 1}/5`,
                     ),
                     `Expected ${endpoint} HTTP ${expectedStatus} to record ` +
                     `failure ${index + 1} of 3`,

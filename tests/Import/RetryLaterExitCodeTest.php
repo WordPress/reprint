@@ -88,7 +88,63 @@ final class RetryLaterExitCodeTest extends TestCase {
             ['files-pull', 522, 'file_fetch'],
             ['files-pull', 523, 'file_fetch'],
             ['files-pull', 524, 'file_fetch'],
+            ['files-pull', 503, 'file_index'],
+            ['files-pull', 429, 'file_index'],
+            ['files-pull', 0, 'file_fetch'],
         ];
+    }
+
+    /** @dataProvider temporary_failures */
+    public function testRepeatedOutageStopsAfterTwoDelayedRetries(string $command, int $http_status, string $endpoint): void
+    {
+        file_put_contents($this->root . '/proxy-status', (string) $http_status);
+        file_put_contents($this->root . '/proxy-endpoint', $endpoint);
+        foreach ([3, 3, 1, 1] as $run => $expected_exit_code) {
+            $result = $this->run_command($command);
+            $this->assertSame($expected_exit_code, $result['exit_code'], $result['output']);
+            $this->assertSame(
+                3 + $run,
+                substr_count(file_get_contents($this->root . '/requests.log'), $endpoint . "\n"),
+                'After the immediate retry limit, each later process makes only one failed request.'
+            );
+        }
+        $this->assertStringContainsString('delayed retries', $result['output']);
+    }
+
+    public function testRepeatedPartialDatabaseIndexRunsBecomeDelayedThenPermanentFailure(): void
+    {
+        file_put_contents($this->root . '/proxy-status', '503');
+        file_put_contents($this->root . '/proxy-endpoint', 'db_index');
+        foreach ([2, 2, 3, 3, 1] as $run => $expected_exit_code) {
+            $result = $this->run_command('db-index');
+            $this->assertSame($expected_exit_code, $result['exit_code'], $result['output']);
+            $this->assertSame($run + 1, substr_count(file_get_contents($this->root . '/requests.log'), "db_index\n"));
+        }
+    }
+
+    public function testChangingTemporaryErrorsDoesNotResetTheDelayedRetryLimit(): void
+    {
+        foreach ([520, 503, 0] as $run => $http_status) {
+            file_put_contents($this->root . '/proxy-status', (string) $http_status);
+            $result = $this->run_command('files-pull');
+            $this->assertSame($run === 2 ? 1 : 3, $result['exit_code'], $result['output']);
+        }
+    }
+
+    public function testSuccessfulIndexResetsDelayedRetriesBeforeFileDownload(): void
+    {
+        file_put_contents($this->root . '/proxy-status', '520');
+        foreach ([3, 3] as $expected_exit_code) {
+            $result = $this->run_command('files-pull');
+            $this->assertSame($expected_exit_code, $result['exit_code'], $result['output']);
+        }
+
+        // Let the real index complete, then fail at the next transfer phase.
+        file_put_contents($this->root . '/proxy-endpoint', 'file_fetch');
+        foreach ([3, 3, 1] as $expected_exit_code) {
+            $result = $this->run_command('files-pull');
+            $this->assertSame($expected_exit_code, $result['exit_code'], $result['output']);
+        }
     }
 
     public function testPermanentHttpFailureStillExitsOne(): void

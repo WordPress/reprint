@@ -202,10 +202,13 @@ class ImportClient
 
     /**
      * Maximum number of consecutive temporary request failures with no cursor
-     * progress before the importer gives up. This prevents endless resumption
-     * when the source cannot complete a response.
+     * progress before the importer asks the caller to retry later. The count
+     * survives process restarts so immediate retries cannot continue forever.
      */
     private const MAX_CONSECUTIVE_INTERRUPTED_RESPONSES = 3;
+
+    /** Later failed requests allowed after the immediate retry limit. */
+    private const MAX_DELAYED_RETRIES = 2;
 
     /** Maximum response header bytes retained for failed request audit logging. */
     private const MAX_AUDIT_RESPONSE_HEADER_BYTES = 65536;
@@ -11669,7 +11672,10 @@ class ImportClient
      * Compares the cursor before and after the request. A cursor advance means
      * the request produced another durable part, so the counter resets. If the
      * cursor did not move, the counter increments. After
-     * MAX_CONSECUTIVE_INTERRUPTED_RESPONSES with no progress, the runner stops.
+     * MAX_CONSECUTIVE_INTERRUPTED_RESPONSES with no progress, the runner stops
+     * with exit 3. Each later run stops at its first failure without progress:
+     * exit 3, then 1 once MAX_DELAYED_RETRIES have also failed. A successful request or
+     * a durable cursor advance resets the count, not a changed error message.
      *
      * @param string                           $phase         Human-readable phase name.
      * @param ?string                          $cursor_before Cursor at request start.
@@ -11689,11 +11695,11 @@ class ImportClient
         }
 
         $count = $this->get_state()->consecutive_interrupted_responses;
+        $failure_limit = self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES + self::MAX_DELAYED_RETRIES;
 
         $this->audit_log(
             "TEMPORARY REQUEST FAILURE | {$phase} | " .
-                "consecutive_interrupted_responses={$count}/" .
-                self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES .
+                "consecutive_interrupted_responses={$count}/{$failure_limit}" .
                 " | cursor_moved=" .
                 ($cursor_after !== $cursor_before ? "yes" : "no") .
                 " | " . $exception->getMessage(),
@@ -11701,11 +11707,24 @@ class ImportClient
         );
 
         if ($count >= self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES) {
-            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The remote failure is rendered only as CLI text.
-            throw new TransientInterruptionException(
-                "The remote request failed {$count} consecutive times " .
+            // No cursor advanced in this request. Persist the failed attempt
+            // before throwing, since callers save only when this method returns.
+            $this->save_state();
+            $message = "The remote request failed {$count} consecutive times " .
                 "without cursor progress during {$phase}. Last failure: " .
-                $exception->getMessage(),
+                $exception->getMessage();
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The remote failure is rendered only as CLI text.
+            if ($count >= $failure_limit) {
+                throw new RuntimeException(
+                    $message . "\n\nThe delayed retries also failed. Stop automatic retries and check the remote site.",
+                    0,
+                    $exception,
+                );
+            }
+            throw new TransientInterruptionException(
+                $message . "\n\nRetry the same command later with the same state directory.",
+                0,
+                $exception,
             );
             // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         }

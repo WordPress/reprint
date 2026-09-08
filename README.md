@@ -266,14 +266,36 @@ same command with the same state directory and filesystem root. Reprint keeps
 its saved progress. Exit `1` requires checking the error instead of scheduling
 an automatic retry.
 
-Exit `3` covers temporary streaming transfer failures, including repeated HTTP
-520–524 responses, after the in-process retry limit is reached. It also applies
-when these failures reach `pull`, `pull-files`, or `pull-db`. It does not classify
-all command errors: preflight failures and local errors still exit `1`.
+The temporary-failure count survives separate CLI runs. For one stalled
+transfer, the sequence is:
 
-The caller decides when to retry. For example, Migration Assistant can schedule
-retries after 5, 15, and 60 minutes and cancel pending retries when a human
-intervenes. Reprint does not schedule retries or track human action.
+| Failed request without progress | Result |
+| --- | --- |
+| First and second | Retry immediately, in this process or after exit `2` |
+| Third | Exit `3`: retry later |
+| Fourth, in a later run | Exit `3`: retry later once more |
+| Fifth, in a later run | Exit `1`: stop automatic retries |
+
+A successful response or an interrupted response with a new durable cursor
+resets the count. A different temporary error message does not. Healthy partial
+runs can keep returning `2`; making progress does not use up delayed retries.
+
+This applies to temporary streaming failures in file and database transfers,
+including those reached through `pull`, `pull-files`, and `pull-db`:
+
+- HTTP `400`, `408`, `413`, `418`, `421`, `425`, `429`, `500`, `502`, `503`,
+  `504`, and `520–524` without an explicit Reprint error.
+- Unmarked HTTP `401` or `403` after a signed request.
+- cURL timeouts, connection resets during transfer, empty or cut-short
+  responses, invalid compressed responses, and HTTP/2 or HTTP/3 stream errors.
+- Multipart responses missing their boundary or completion marker.
+
+Explicit Reprint errors (JSON containing a matching HTTP `code`) remain fatal.
+Preflight failures, DNS lookup failures, refused connections, certificate errors,
+and local errors are not covered by this delayed-retry rule.
+
+The caller chooses the delays between exit-`3` runs and cancels pending retries
+when a human intervenes. Reprint does not schedule retries or track human action.
 
 **File pull modes**
 

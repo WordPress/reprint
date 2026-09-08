@@ -20,6 +20,12 @@ if ($reprint_endpoint === 'preflight') {
 }
 $reprint_status = (int) file_get_contents('proxy-status');
 if ($reprint_endpoint === file_get_contents('proxy-endpoint') && $reprint_status !== 200) {
+    if ($reprint_status === 0) {
+        // A worker or proxy can cut the response short before completion.
+        header('Content-Type: multipart/mixed; boundary=interrupted-export');
+        echo "--interrupted-export\r\n";
+        return;
+    }
     http_response_code($reprint_status);
     echo 'Upstream unavailable';
     return;
