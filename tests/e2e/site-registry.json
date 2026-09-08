@@ -201,6 +201,9 @@
     },
     "multisite-admin": {
       "port": 8144
+    },
+    "multisite-query-budget": {
+      "port": 8148
     }
   }
 }

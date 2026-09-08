@@ -31,6 +31,9 @@ This is a pull into a fresh target, not a merge or a multisite push.
 - Network options, network plugins, enabled themes, selected-site options.
 - Sibling options, signup records, and Reprint credentials never exported.
 - Multiple database batches and oversized values, interrupted and resumed.
+- Oracle MySQL 8 source with 20,000 extra network users, 20,000 anonymous
+  comments, and 10,000 links. Export and resume users and profile rows with
+  a five-second query limit; check the imported rows, not just elapsed time.
 - Resume with another selected site rejected before reading its records.
 - Main uploads containing sibling sites/ directories; direct fetch bypass.
 - Symlinks and custom uploads must not widen the selected file scope.

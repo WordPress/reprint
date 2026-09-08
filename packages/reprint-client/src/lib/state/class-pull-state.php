@@ -58,6 +58,8 @@ class PullState
     public ?string $local_followed_symlinks_root_fingerprint = null;
     public string $fs_root_nonempty_behavior = 'error';
     public string $filter = 'none';
+    /** Keep host platform plugins through file download, db-apply, and apply-runtime. */
+    public bool $include_host_plugins = true;
     /** @var string|null User-Agent that worked during preflight. */
     public ?string $user_agent = null;
     public ?int $max_allowed_packet = null;
@@ -119,7 +121,9 @@ class PullState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $data += ['files_pull_mode' => 'catch-up'];
+        // State written before the host-plugin setting existed used automatic
+        // cleanup. Keep that behavior when resuming those imports.
+        $data += ['files_pull_mode' => 'catch-up', 'include_host_plugins' => false];
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
         $state->preflight = $data['preflight'];
@@ -136,6 +140,7 @@ class PullState
         $state->local_followed_symlinks_root_fingerprint = $data['local_followed_symlinks_root_fingerprint'];
         $state->fs_root_nonempty_behavior = $data['fs_root_nonempty_behavior'];
         $state->filter = $data['filter'];
+        $state->include_host_plugins = $data['include_host_plugins'];
         $state->user_agent = $data['user_agent'];
         $state->max_allowed_packet = $data['max_allowed_packet'];
         $state->resolved_path_mappings_fingerprint = $data['resolved_path_mappings_fingerprint'];
@@ -242,6 +247,7 @@ class PullState
             'local_followed_symlinks_root_fingerprint' => $this->local_followed_symlinks_root_fingerprint,
             'fs_root_nonempty_behavior' => $this->fs_root_nonempty_behavior,
             'filter' => $this->filter,
+            'include_host_plugins' => $this->include_host_plugins,
             'user_agent' => $this->user_agent,
             'max_allowed_packet' => $this->max_allowed_packet,
             'resolved_path_mappings_fingerprint' => $this->resolved_path_mappings_fingerprint,

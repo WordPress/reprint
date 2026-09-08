@@ -2,6 +2,7 @@
 
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
+use function Reprint\Importer\apply_zipwp_access_cookie;
 use function Reprint\Importer\unsupported_media_type_error_detail;
 use function Reprint\Importer\wordpress_admin_referer;
 
@@ -299,6 +300,7 @@ class MultipartPushStreamClient
         $header_lines[] = 'Expect:';
 
         $this->curl_handle = curl_init($request_url);
+        apply_zipwp_access_cookie($this->curl_handle, $request_url);
         if (function_exists('Reprint\\Importer\\apply_curl_proxy_from_environment')) {
             apply_curl_proxy_from_environment($this->curl_handle);
         }
@@ -833,6 +835,7 @@ class MultipartPushStreamClient
             $lines[] = $name . ': ' . $value;
         }
         $handle = curl_init($url);
+        apply_zipwp_access_cookie($handle, $url);
         if (function_exists('Reprint\\Importer\\apply_curl_proxy_from_environment')) {
             apply_curl_proxy_from_environment($handle);
         }
