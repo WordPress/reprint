@@ -22,6 +22,17 @@ class MultisiteDatabaseSelection {
     /** Retains the selected site's IDs; promoting it does not rename its tables. */
     public function __construct(string $base_prefix, int $site_id, int $network_id)
     {
+        /**
+         * WordPress restricts prefixes to ASCII letters, digits and underscores
+         * in wpdb::set_prefix(); MySQL table names allow more characters.
+         * WordPress already checks the source prefix during normal bootstrap.
+         * Repeat the check here because the queries below insert the prefix
+         * into backtick-quoted table names and single-quoted meta keys without
+         * escaping it. Removing this guard requires quoting both SQL contexts.
+         * /D rejects a final newline that $ would otherwise allow.
+         *
+         * @see https://developer.wordpress.org/reference/classes/wpdb/set_prefix/
+         */
         if (!preg_match('/^[a-zA-Z0-9_]+$/D', $base_prefix) || $site_id < 1 || $network_id < 1) {
             throw new \InvalidArgumentException(
                 "A multisite selection requires a WordPress table prefix and positive site and network IDs."
