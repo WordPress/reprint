@@ -122,10 +122,10 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
                 '--file-chunk-start=262144',
                 '--file-chunk-max=262144',
             ],
-            autoResume: false,
+            autoResume: true,
         });
         assert.equal(result.exitCode, 0,
-            `Expected the same process to recover after the interrupted response\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+            `Expected a later process to recover after the interrupted response\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
         assert.ok(existsSync(marker), 'Expected the source cutoff hook to fire');
     });
 

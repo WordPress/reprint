@@ -14,11 +14,10 @@ require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
  * Verify recovery from cURL timeouts during streaming fetches.
  *
  * Each fetch method (fetch_sql, fetch_file_batch, fetch_next_remote_index,
- * fetch_database_index) is tested by injecting a CurlTimeoutException. SQL retries
- * in the same invocation; the other phases save partial state for a later run.
+ * fetch_database_index) is tested by injecting a CurlTimeoutException.
+ * Every phase saves its durable state and rethrows the original exception for a later caller-controlled run.
  *
- * Also verifies the no-progress safety net: after repeated interrupted
- * responses with no cursor progress, the importer gives up.
+ * Also verifies the no-progress count persists without imposing a retry limit.
  */
 class CurlTimeoutRecoveryTest extends TestCase
 {
@@ -139,10 +138,10 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // fetch_sql: timeout retries in the same invocation
+    // fetch_sql: timeout leaves the next request to the caller
     // ---------------------------------------------------------------
 
-    public function testSqlDownloadRetriesTimeoutUntilNoProgressLimit()
+    public function testSqlDownloadStopsAtTheFirstTimeout()
     {
         $this->writeState([
             "active_resumable_command" => [
@@ -165,23 +164,17 @@ class CurlTimeoutRecoveryTest extends TestCase
         $fetchSql = $reflection->getMethod('fetch_sql');
         try {
             $fetchSql->invoke($client);
-            $this->fail("Expected the no-progress limit to stop SQL retries");
-        } catch (\RuntimeException $e) {
-            $this->assertStringContainsString(
-                "3 consecutive times without cursor progress",
-                $e->getMessage(),
-            );
+            $this->fail("Expected the first timeout to return control to the caller");
+        } catch (CurlTimeoutException $e) {
+            $this->assertStringContainsString('timed out', $e->getMessage());
         }
 
-        $this->assertSame(
-            3,
-            $client->streaming_requests,
-            "fetch_sql should retry timeouts until the no-progress limit",
-        );
+        $this->assertSame(1, $client->streaming_requests);
+        $this->assertSame(1, $this->readState()['consecutive_interrupted_responses']);
     }
 
     /** @dataProvider potentiallyTransientHttpResponseProvider */
-    public function testSqlDownloadRetriesPotentiallyTransientHttpResponseThenCompletes(
+    public function testSqlDownloadCompletesWhenCallerRetriesTemporaryHttpFailure(
         string $status_line
     )
     {
@@ -220,6 +213,12 @@ class CurlTimeoutRecoveryTest extends TestCase
         $reflection = $wire_client['reflection'];
 
         try {
+            try {
+                $reflection->getMethod('fetch_sql')->invoke($client);
+                $this->fail('The first failed request must return control to the caller.');
+            } catch (TransientInterruptionException $error) {
+                $this->assertSame(1, $client->get_state()->consecutive_interrupted_responses);
+            }
             $reflection->getMethod('fetch_sql')->invoke($client);
         } finally {
             pcntl_waitpid($server['child_pid'], $status);
@@ -245,7 +244,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         ];
     }
 
-    public function testSqlDownloadRetriesHttp520AndLogsResponseHeaders()
+    public function testSqlDownloadReportsHttp520AndLogsResponseHeaders()
     {
         if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
             $this->markTestSkipped('HTTP retry coverage requires PHP curl and pcntl.');
@@ -289,6 +288,12 @@ class CurlTimeoutRecoveryTest extends TestCase
         $reflection = $wire_client['reflection'];
 
         try {
+            try {
+                $reflection->getMethod('fetch_sql')->invoke($client);
+                $this->fail('The first failed request must return control to the caller.');
+            } catch (TransientInterruptionException $error) {
+                $this->assertSame(1, $client->get_state()->consecutive_interrupted_responses);
+            }
             $reflection->getMethod('fetch_sql')->invoke($client);
         } finally {
             pcntl_waitpid($server['child_pid'], $status);
@@ -312,7 +317,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->assertStringNotContainsString('do-not-log-me', $audit_log);
     }
 
-    public function testSqlDownloadPreservesHttp418AfterRetryLimit()
+    public function testSqlDownloadPreservesHttp418OnFirstFailure()
     {
         if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
             $this->markTestSkipped('HTTP retry coverage requires PHP curl and pcntl.');
@@ -325,8 +330,6 @@ class CurlTimeoutRecoveryTest extends TestCase
             '<!doctype html><title>Temporary bot response</title>',
         );
         $server = $this->startSqlResponseServer([
-            $http418,
-            $http418,
             $http418,
         ], $cursor);
         $wire_client = $this->prepareWireSqlClient(
@@ -349,20 +352,17 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->assertTrue(pcntl_wifexited($status));
         $this->assertSame(0, pcntl_wexitstatus($status));
         $this->assertNotNull($failure);
-        $this->assertStringContainsString(
-            '3 consecutive times without cursor progress',
-            $failure->getMessage(),
-        );
+        $this->assertInstanceOf(TransientInterruptionException::class, $failure);
         $this->assertStringContainsString('HTTP 418', $failure->getMessage());
         $this->assertSame('HTML_RESPONSE', $client->last_error_code);
         $this->assertSame(
-            3,
+            1,
             $client->get_state()->consecutive_interrupted_responses,
         );
     }
 
     // ---------------------------------------------------------------
-    // fetch_file_batch: timeout saves state and returns false
+    // fetch_file_batch: timeout saves state and rethrows
     // ---------------------------------------------------------------
 
     public function testFileFetchTimeoutSavesPartialState()
@@ -384,17 +384,12 @@ class CurlTimeoutRecoveryTest extends TestCase
         [$client, $reflection] = $this->prepareClient();
 
         $fetchFileBatch = $reflection->getMethod('fetch_file_batch');
-        $result = $fetchFileBatch->invoke(
-            $client,
-            null,
-            base64_encode('{"path":"/photo.jpg","offset":4096}'),
-            "fetch",
-        );
-
-        $this->assertFalse(
-            $result,
-            "fetch_file_batch should return false (not complete) on timeout"
-        );
+        try {
+            $fetchFileBatch->invoke($client, null, base64_encode('{"path":"/photo.jpg","offset":4096}'), "fetch");
+            $this->fail('Expected the original timeout after saving partial state.');
+        } catch (CurlTimeoutException $error) {
+            $this->assertStringContainsString('timed out', $error->getMessage());
+        }
 
         $state = $this->readState();
         $this->assertEquals(
@@ -467,7 +462,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // fetch_next_remote_index: timeout saves state and returns false
+    // fetch_next_remote_index: timeout saves state and rethrows
     // ---------------------------------------------------------------
 
     public function testNextRemoteIndexTimeoutSavesPartialState()
@@ -497,12 +492,12 @@ class CurlTimeoutRecoveryTest extends TestCase
         [$client, $reflection] = $this->prepareClient();
 
         $fetchNextRemoteIndex = $reflection->getMethod('fetch_next_remote_index');
-        $result = $fetchNextRemoteIndex->invoke($client);
-
-        $this->assertFalse(
-            $result,
-            "fetch_next_remote_index should return false on timeout"
-        );
+        try {
+            $fetchNextRemoteIndex->invoke($client);
+            $this->fail('Expected the original timeout after saving partial state.');
+        } catch (CurlTimeoutException $error) {
+            $this->assertStringContainsString('timed out', $error->getMessage());
+        }
 
         $state = $this->readState();
         $this->assertEquals(
@@ -541,7 +536,12 @@ class CurlTimeoutRecoveryTest extends TestCase
         [$client, $reflection] = $this->prepareClient();
 
         $fetchDatabaseIndex = $reflection->getMethod('fetch_database_index');
-        $fetchDatabaseIndex->invoke($client);
+        try {
+            $fetchDatabaseIndex->invoke($client);
+            $this->fail('Expected the original timeout after saving partial state.');
+        } catch (CurlTimeoutException $error) {
+            $this->assertStringContainsString('timed out', $error->getMessage());
+        }
 
         $state = $this->readState();
         $this->assertEquals(
@@ -621,7 +621,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     /**
      * A broken compressed response may be specific to one request or network
      * path. Treat it as interrupted so the saved cursor can repeat the last
-     * unconfirmed part, while the existing no-progress limit prevents a loop.
+     * unconfirmed part. The caller decides whether to try again.
      */
     public function testInvalidGzipResponseIsTransient()
     {
@@ -766,7 +766,7 @@ PHP);
     // ---------------------------------------------------------------
 
     /**
-     * assert_can_resume_after_interrupted_response increments the counter when the
+     * record_interrupted_response increments the counter when the
      * cursor did not move.
      */
     public function testTrackInterruptedResponsesIncrementsOnNoProgress()
@@ -782,7 +782,7 @@ PHP);
         [$client, $reflection] = $this->prepareClient();
         $state = $reflection->getProperty('state');
 
-        $method = $reflection->getMethod('assert_can_resume_after_interrupted_response');
+        $method = $reflection->getMethod('record_interrupted_response');
 
         // First call — no progress (same cursor before and after)
         $method->invoke(
@@ -824,7 +824,7 @@ PHP);
         [$client, $reflection] = $this->prepareClient();
         $state = $reflection->getProperty('state');
 
-        $method = $reflection->getMethod('assert_can_resume_after_interrupted_response');
+        $method = $reflection->getMethod('record_interrupted_response');
 
         // Cursor advanced — should reset to 0
         $method->invoke(
@@ -840,7 +840,7 @@ PHP);
         );
     }
 
-    public function testTrackInterruptedResponsesThrowsAtMax()
+    public function testTrackInterruptedResponsesHasNoRetryLimit()
     {
         $this->writeState([
             "active_resumable_command" => [
@@ -852,26 +852,18 @@ PHP);
 
         [$client, $reflection] = $this->prepareClient();
 
-        $method = $reflection->getMethod('assert_can_resume_after_interrupted_response');
+        $method = $reflection->getMethod('record_interrupted_response');
 
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('consecutive');
-
-        // The third response without progress should throw.
-        $method->invoke(
-            $client,
-            "sql_chunk",
-            "abc",
-            "abc",
-            new TransientInterruptionException("Response ended early"),
-        );
+        for ($count = 3; $count <= 7; ++$count) {
+            $method->invoke($client, "sql_chunk", "abc", "abc", new TransientInterruptionException("Response ended early"));
+            $this->assertSame($count, $this->readState()['consecutive_interrupted_responses']);
+        }
     }
 
     /**
-     * End-to-end: fetch_sql with counter already at MAX-1 and no
-     * cursor progress should throw RuntimeException.
+     * A saved failure count must not replace the original timeout exception.
      */
-    public function testSqlDownloadGivesUpAfterMaxConsecutiveTimeouts()
+    public function testSqlDownloadPreservesTimeoutAfterEarlierFailures()
     {
         $this->writeState([
             "active_resumable_command" => [
@@ -892,8 +884,8 @@ PHP);
         $modeProp = $reflection->getProperty('sql_output_mode');
         $modeProp->setValue($client, 'file');
 
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('consecutive');
+        $this->expectException(CurlTimeoutException::class);
+        $this->expectExceptionMessage('timed out');
 
         $fetchSql = $reflection->getMethod('fetch_sql');
         $fetchSql->invoke($client);

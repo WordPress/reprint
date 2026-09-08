@@ -266,19 +266,32 @@ same command with the same state directory and filesystem root. Reprint keeps
 its saved progress. Exit `1` requires checking the error instead of scheduling
 an automatic retry.
 
-The temporary-failure count survives separate CLI runs. For one stalled
-transfer, the sequence is:
+Every retryable streaming failure stops the current invocation with exit `3`.
+Reprint does not retry the failed request in that process or change it to exit
+`1` after repeated failures. The caller decides when to retry and when to stop.
 
-| Failed request without progress | Result |
-| --- | --- |
-| First and second | Retry immediately, in this process or after exit `2` |
-| Third | Exit `3`: retry after 15 minutes (`retry_after_seconds: 900`) |
-| Fourth, in a later run | Exit `3`: retry after 45 minutes (`retry_after_seconds: 2700`) |
-| Fifth, in a later run | Exit `1`: stop automatic retries |
+JSON error records on stdout and stderr include
+`consecutive_failures_without_progress`. The count survives separate CLI runs:
+a first stalled request reports `1`, the next reports `2`, and so on. A
+successful response or a failed response that advances the durable cursor resets
+the count to `0`. A different temporary error does not reset it. Exit `2` remains
+healthy partial completion.
 
-A successful response or an interrupted response with a new durable cursor
-resets the count. A different temporary error message does not. Healthy partial
-runs can keep returning `2`; making progress does not use up delayed retries.
+The records retain `error` and `error_code`, and include the original
+`exception` class, `http_code` when received, and a nonzero `curl_errno` when
+available. For example, an HTTP 520 before any transfer progress reports:
+
+```json
+{
+  "status": "error",
+  "error": "The remote server crashed (HTTP 520).\n\nThis is a problem on the remote server. Check its PHP error log for details.",
+  "error_code": "SERVER_ERROR",
+  "message": "Error: The remote server crashed (HTTP 520).\n\nThis is a problem on the remote server. Check its PHP error log for details.",
+  "exception": "Reprint\\Importer\\TransientInterruptionException",
+  "http_code": 520,
+  "consecutive_failures_without_progress": 1
+}
+```
 
 This applies to temporary streaming failures in file and database transfers,
 including those reached through `pull`, `pull-files`, and `pull-db`:
@@ -292,13 +305,8 @@ including those reached through `pull`, `pull-files`, and `pull-db`:
 
 Explicit Reprint errors (JSON containing a matching HTTP `code`) remain fatal.
 Preflight failures, DNS lookup failures, refused connections, certificate errors,
-and local errors are not covered by this delayed-retry rule.
-
-JSON error records on stdout and stderr include the integer
-`retry_after_seconds` when exiting `3`. The field is absent for successful,
-partial, and permanent-error exits. The caller schedules the next run after
-that delay and cancels pending retries when a human intervenes. Reprint does
-not wait, schedule retries, or track human action.
+and local errors keep their existing classification. Reprint does not suggest a
+wait time, schedule retries, or track human action.
 
 **File pull modes**
 
