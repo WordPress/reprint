@@ -62,6 +62,9 @@ function get_multisite_export_context(): array {
         $suffix = substr($table, strlen($base_prefix));
         $table_site_id = preg_match('/^([1-9][0-9]*)_/', $suffix, $matches) ? (int) $matches[1] : 1;
         $selection = new MultisiteDatabaseSelection($base_prefix, $table_site_id, $network_id);
+        if ($table === $selection->get_user_table_name()) {
+            continue;
+        }
         if (!$selection->includes_table($table)) {
             throw new \RuntimeException('No multisite migration rule exists for table ' . $table . '. It may contain shared plugin data.');
         }
