@@ -1271,11 +1271,16 @@ class ImportClient
             return;
         }
 
-        // preflight and preflight-assert run the preflight themselves and
-        // exit directly — they do not go through the normal command dispatch.
+        // preflight fetches a new report; preflight-assert reads the saved one.
+        // Both exit directly, including when the saved report contains an error.
         if ($command === "preflight") {
             $this->run_preflight();
             $this->run_preflight_report();
+            return;
+        }
+
+        if ($command === "preflight-assert") {
+            $this->run_preflight_assert();
             return;
         }
 
@@ -1366,10 +1371,6 @@ class ImportClient
         // Dispatch to appropriate command handler
         try {
             switch ($command) {
-                case "preflight-assert":
-                    $this->run_preflight_assert();
-                    return;
-
                 case "files-pull":
                     $this->run_files_pull();
                     break;
@@ -2670,6 +2671,7 @@ class ImportClient
             "ok" => is_array($payload) ? ($payload["ok"] ?? null) : null,
             "data" => $payload,
             "error" => $domain_error ?? $result["error"] ?? null,
+            "error_code" => $domain_error !== null ? "PREFLIGHT_FAILED" : ( $result["error_code"] ?? null ),
             "response_body_preview" => $payload === null && isset($result["body"])
                 ? substr((string) $result["body"], 0, 200)
                 : null,
@@ -2973,11 +2975,16 @@ class ImportClient
             echo "No preflight data available.\n";
             exit(1);
         }
+        $error = $this->get_preflight_error();
+        $this->last_error_code = $error['code'] ?? null;
+        $entry["status"] = $error === null ? "complete" : "error";
+        $entry["error"] = $error['message'] ?? null;
+        $entry["error_code"] = $this->last_error_code;
+        $entry["message"] = $error === null ? "Preflight passed." : "Error: " . $error['message'];
         // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
         echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
-        $ok = ($entry["http_code"] ?? 0) === 200 && !empty($entry["data"]["ok"]);
-        $this->write_progress_file($ok ? null : "Preflight failed");
-        exit($ok ? 0 : 1);
+        $this->write_progress_file($entry["error"]);
+        exit($error === null ? 0 : 1);
     }
 
     /**
@@ -2992,8 +2999,9 @@ class ImportClient
     {
         $entry = $this->get_state()->preflight_record();
         $data = $entry["data"] ?? null;
+        $error = $this->get_preflight_error();
         $checks = [];
-        $all_pass = true;
+        $all_pass = $error === null;
 
         // 1. Server responded OK
         $http_ok = ($entry["http_code"] ?? 0) === 200;
@@ -3002,7 +3010,7 @@ class ImportClient
             "pass" => $http_ok,
             "detail" => $http_ok
                 ? "HTTP 200"
-                : "HTTP " . ($entry["http_code"] ?? "no response"),
+                : ( $error['message'] ?? "HTTP " . ( $entry["http_code"] ?? "no response" ) ),
         ];
         if (!$http_ok) {
             $all_pass = false;
@@ -3015,7 +3023,7 @@ class ImportClient
             "pass" => $top_ok,
             "detail" => $top_ok
                 ? "passed"
-                : ($data["error"] ?? "preflight not ok"),
+                : ( $error['message'] ?? $data["error"] ?? "preflight not ok" ),
         ];
         if (!$top_ok) {
             $all_pass = false;
@@ -3095,14 +3103,22 @@ class ImportClient
 
         // Print the terminal summary or emit one structured result.
         $human_summary = "";
+        $failed_checks = [];
         foreach ($checks as $check) {
             $icon = $check["pass"] ? "PASS" : "FAIL";
             $human_summary .= "[{$icon}] {$check["label"]}: {$check["detail"]}\n";
+            if (!$check["pass"]) {
+                $failed_checks[] = "{$check["label"]}: {$check["detail"]}";
+            }
         }
+        if (!$all_pass && $error === null) {
+            $error = ['code' => 'PREFLIGHT_FAILED', 'message' => implode("\n", $failed_checks)];
+        }
+        $this->last_error_code = $error['code'] ?? null;
 
         $message = $all_pass
             ? "Migration looks feasible."
-            : "Migration may not be feasible. Review the failures above.";
+            : "Error: " . $error['message'];
         $human_summary .= "\n{$message}\n";
         $this->progress->show_lifecycle_line($human_summary);
         $this->output_progress([
@@ -3110,11 +3126,57 @@ class ImportClient
             "command" => "preflight-assert",
             "status" => $all_pass ? "complete" : "error",
             "checks" => $checks,
+            "error" => $error['message'] ?? null,
+            "error_code" => $this->last_error_code,
             "message" => $message,
         ], true);
 
-        $this->write_progress_file($all_pass ? null : "Preflight assertions failed");
+        $this->write_progress_file($error['message'] ?? null);
         exit($all_pass ? 0 : 1);
+    }
+
+    /**
+     * Read the failure from the saved report without changing its raw data.
+     *
+     * The saved error also rejects low-level downloads. Do not store display-only
+     * database check failures there: files-pull can run without a database.
+     *
+     * @return array|null { Failure details, or null when the preflight passed.
+     *     @type string $code    Machine-readable failure code.
+     *     @type string $message Failure detail for display.
+     * }
+     */
+    private function get_preflight_error(): ?array
+    {
+        $entry = $this->get_state()->preflight_record();
+        if ($entry === null) {
+            return ['code' => 'PREFLIGHT_REQUIRED', 'message' => "No preflight data found. Run 'preflight' first."];
+        }
+        if ( ( $entry["http_code"] ?? 0 ) !== 200 ) {
+            $diagnosis = $this->diagnose_http_error($entry["http_code"] ?? 0, $entry["response_body_preview"] ?? null);
+            return [
+                'code' => $entry["error_code"] ?? $diagnosis['code'],
+                'message' => $entry["error"] ?? $diagnosis['message'],
+            ];
+        }
+        if (!empty($entry["error"])) {
+            return ['code' => $entry["error_code"] ?? 'PREFLIGHT_FAILED', 'message' => $entry["error"]];
+        }
+        $data = $entry["data"] ?? null;
+        if (!is_array($data) || !array_key_exists("ok", $data)) {
+            return [
+                'code' => 'INVALID_PREFLIGHT_RESPONSE',
+                'message' => "The remote server returned HTTP 200 without a preflight JSON object containing an 'ok' field.",
+            ];
+        }
+        if (!empty($data["ok"])) {
+            return null;
+        }
+        return [
+            'code' => 'PREFLIGHT_FAILED',
+            'message' => $data["error"] ?? $data["filesystem"]["error"] ?? $data["database"]["error"]
+                ?? "The remote server reported that preflight did not pass (ok=false).",
+        ];
     }
 
     /**
@@ -12164,6 +12226,7 @@ class ImportClient
                 "body" => null,
                 "json" => null,
                 "error" => $e->getMessage(),
+                "error_code" => "CURL_ERROR",
                 "curl_errno" => $this->last_curl_errno,
                 "timeout" => $this->last_curl_timeout,
             ];

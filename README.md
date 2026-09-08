@@ -218,6 +218,19 @@ php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" 
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json` under the `preflight` key.
 
+The command's JSON result keeps the response data and HTTP details, and includes
+`status`, `error`, `error_code`, and `message`. On failure, `status` is `error`,
+`error` contains the failure detail, and `message` is the same detail prefixed
+with `Error: `. HTTP failures use the same codes as downloads, such as
+`SERVER_ERROR`, `AUTH_FAILED`, and `REDIRECT`. Connection failures use
+`CURL_ERROR`; malformed JSON uses `INVALID_JSON`; a response without a preflight
+object uses `INVALID_PREFLIGHT_RESPONSE`. Failed preflight checks use
+`PREFLIGHT_FAILED`. On success, `status` is `complete`, and both error fields
+are null. Failures exit with code 1.
+
+`progress.json` receives the same `error` and `error_code` as the command's
+JSON result, rather than a generic "Preflight failed" message.
+
 Some hosts, including [Hostinger](https://www.hostinger.com/support/2489693-how-to-access-your-website-content-without-a-domain-in-hostinger/),
 provide preview domains so you can browse a site before its real domain points
 at the host. They replace the real domain in outgoing pages so links and assets
@@ -240,6 +253,13 @@ sound-looking filesystem and a database connection, run:
 ```bash
 php reprint.phar preflight-assert "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
+
+`preflight-assert` reads the saved report without making another preflight
+request. Its JSONL result includes the same error fields alongside the existing
+`checks` list. Request failures retain their saved detail and code. Assertion
+failures report the failed check details with `PREFLIGHT_FAILED`. If no report
+has been saved, it reports `PREFLIGHT_REQUIRED` and asks you to run `preflight`.
+The terminal summary and `progress.json` also include the failure detail.
 
 For hosting platform-specific checks, such as database version compatibility or
 php version compatibility, you might need your own custom logic. See the 
@@ -1079,7 +1099,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 ```
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
-* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary in terminal mode or one structured result in JSONL mode. Exits with code 0 if migration looks feasible, code 1 if not.
+* `preflight-assert` — Checks the saved preflight report and prints a human-readable pass/fail summary in terminal mode or one structured result in JSONL mode. Exits with code 0 if migration looks feasible, code 1 if not.
 * `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
 * `pull-db` — Runs `preflight`, `db-pull`, and `db-apply` as one resumable high-level command.
 * `files-pull` — Pull all files (initial) or a delta. Catch-up mode applies remote changes; mirror mode makes the selected local paths match the current remote index. Runs files-index if needed.
