@@ -202,16 +202,10 @@ class DatabaseRowsReader {
      */
     public function collect_missing_user_references_step(): bool
     {
-        if ($this->multisite_selection === null || $this->current_table === null ||
-            !$this->multisite_selection->is_shared_user_table($this->current_table)) {
+        $table = $this->get_pending_user_reference_source();
+        if ($table === null) {
             return false;
         }
-        $exported_tables = array_diff($this->tables_to_process, array_keys($this->exclude_rows_by_table));
-        $sources = $this->multisite_selection->get_undiscovered_sources($exported_tables);
-        if (!isset($sources[$this->user_discovery_source])) {
-            return false;
-        }
-        $table = $sources[$this->user_discovery_source];
         $columns = $this->multisite_selection->get_reference_columns($table);
         $primary_key = $columns['primary_key'];
         $select_columns = "`{$primary_key}`, `{$columns['user_column']}`" . ( $columns['kind'] === 4 ? ', meta_key' : '' );
@@ -227,6 +221,26 @@ class DatabaseRowsReader {
             $this->user_discovery_last_id = $last_id;
         }
         return true;
+    }
+
+    /**
+     * Returns the next ID source needed before exporting users, or null.
+     *
+     * order_tables() puts posts, comments and links before users, then usermeta.
+     * Content exports collect their own IDs. Users need the remaining sources,
+     * including capability rows for members with no content. The saved source
+     * position is not reset between tables, so usermeta does not enter discovery
+     * again. If users were omitted, usermeta still needs those IDs for profiles.
+     */
+    public function get_pending_user_reference_source(): ?string
+    {
+        if ($this->multisite_selection === null || $this->current_table === null ||
+            !$this->multisite_selection->is_shared_user_table($this->current_table)) {
+            return null;
+        }
+        $exported_tables = array_diff($this->tables_to_process, array_keys($this->exclude_rows_by_table));
+        $sources = $this->multisite_selection->get_undiscovered_sources($exported_tables);
+        return $sources[$this->user_discovery_source] ?? null;
     }
 
     public function __destruct()
