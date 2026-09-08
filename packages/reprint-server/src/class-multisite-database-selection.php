@@ -96,16 +96,18 @@ class MultisiteDatabaseSelection {
     /** Selects members and core content references without collecting user IDs in PHP. */
     private function related_user_condition(string $user_expression): string
     {
-        return '(' .
-            "EXISTS (SELECT 1 FROM `{$this->base_prefix}usermeta` AS membership " .
-                "WHERE membership.user_id = {$user_expression} " .
-                "AND membership.meta_key = '{$this->site_prefix}capabilities') OR " .
-            "EXISTS (SELECT 1 FROM `{$this->site_prefix}posts` AS authored_post " .
-                "WHERE authored_post.post_author = {$user_expression}) OR " .
-            "EXISTS (SELECT 1 FROM `{$this->site_prefix}comments` AS authored_comment " .
-                "WHERE authored_comment.user_id = {$user_expression}) OR " .
-            "EXISTS (SELECT 1 FROM `{$this->site_prefix}links` AS authored_link " .
-                "WHERE authored_link.link_owner = {$user_expression})" .
-        ')';
+        // Core does not index comments.user_id or links.link_owner. Build the
+        // ID set inside MySQL instead of scanning those tables for each network
+        // user or profile row. The derived UNION prevents MySQL from pushing
+        // the outer user ID back into correlated, unindexed scans. Each query
+        // rebuilds the set, so resumed and oversized reads still check current
+        // membership without keeping user IDs in PHP or changing source tables.
+        return "{$user_expression} IN (SELECT user_id FROM (" .
+            "SELECT user_id FROM `{$this->base_prefix}usermeta` " .
+                "WHERE meta_key = '{$this->site_prefix}capabilities' " .
+            "UNION SELECT post_author FROM `{$this->site_prefix}posts` " .
+            "UNION SELECT user_id FROM `{$this->site_prefix}comments` " .
+            "UNION SELECT link_owner FROM `{$this->site_prefix}links`" .
+        ') AS related_users)';
     }
 }

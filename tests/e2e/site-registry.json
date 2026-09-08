@@ -198,6 +198,9 @@
     },
     "multisite-database": {
       "port": 8143
+    },
+    "multisite-query-budget": {
+      "port": 8148
     }
   }
 }
