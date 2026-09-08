@@ -457,6 +457,9 @@ class ImportClient
     /** Monotonic seconds at the last compact update or stage change. */
     private float $last_compact_progress_time = 0;
 
+    /** @var array<string,mixed> Final error or preflight checks for the current invocation, independent of progress throttling. */
+    public array $command_report_details = [];
+
     /** @var TerminalProgress Renders progress and lifecycle output to the terminal. */
     private TerminalProgress $progress;
 
@@ -1334,7 +1337,7 @@ class ImportClient
         }
 
         // preflight fetches a new report; preflight-assert reads the saved one.
-        // Both exit directly, including when the saved report contains an error.
+        // Both return their exit code to the CLI so it can append a command report.
         if ($command === "preflight") {
             $this->run_preflight();
             $this->run_preflight_report();
@@ -1977,6 +1980,11 @@ class ImportClient
             'steps' => $this->pipeline_steps,
         ], $result);
         $this->progress_reporter->write_file(true);
+
+        $this->command_report_details = array_intersect_key($result, array_flip(['status', 'reason', 'detail']));
+        if (in_array($status, ['failed', 'error'], true)) {
+            $this->command_report_details['error'] = $message;
+        }
 
         // Emit the final JSON line after any preceding progress records.
         if ($this->uses_terminal_progress() && !$this->verbose_mode) {
@@ -3040,7 +3048,7 @@ class ImportClient
     /**
      * Command: preflight
      *
-     * Prints the full preflight response as pretty-printed JSON to stdout.
+     * Prints the full preflight response as one JSON line to stdout.
      * The preflight itself already ran in run_preflight() — this just
      * outputs the stored result.
      */
@@ -3048,8 +3056,7 @@ class ImportClient
     {
         $entry = $this->get_state()->preflight_record();
         if ($entry === null) {
-            echo "No preflight data available.\n";
-            exit(1);
+            throw new RuntimeException("No preflight data available.");
         }
         $error = $this->get_preflight_error();
         $this->last_error_code = $error['code'] ?? null;
@@ -3057,17 +3064,18 @@ class ImportClient
         $entry["error"] = $error['message'] ?? null;
         $entry["error_code"] = $this->last_error_code;
         $entry["message"] = $error === null ? "Preflight passed." : "Error: " . $error['message'];
+        $this->command_report_details = array_intersect_key($entry, array_flip(['error', 'error_code', 'http_code']));
         // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
         echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
         $this->write_progress_file($entry["error"]);
-        exit($error === null ? 0 : 1);
+        $this->exit_code = $error === null ? 0 : 1;
     }
 
     /**
      * Command: preflight-assert
      *
      * Inspects the preflight response (already fetched by run_preflight())
-     * and exits with code 0 if migration looks feasible, code 1 if not.
+     * and sets exit code 0 if migration looks feasible, code 1 if not.
      * Prints a human-readable pass/fail summary in terminal mode or one
      * structured result in JSONL mode.
      */
@@ -3082,6 +3090,7 @@ class ImportClient
         // 1. Server responded OK
         $http_ok = ($entry["http_code"] ?? 0) === 200;
         $checks[] = [
+            "code" => "SERVER_RESPONDED",
             "label" => "Server responded",
             "pass" => $http_ok,
             "detail" => $http_ok
@@ -3095,6 +3104,7 @@ class ImportClient
         // 2. Top-level ok flag
         $top_ok = is_array($data) && !empty($data["ok"]);
         $checks[] = [
+            "code" => "PREFLIGHT_OK",
             "label" => "Preflight OK",
             "pass" => $top_ok,
             "detail" => $top_ok
@@ -3121,6 +3131,7 @@ class ImportClient
             $proto_detail = "remote v{$remote_ver}, client v" . PULL_PROTOCOL_VERSION;
         }
         $checks[] = [
+            "code" => "PROTOCOL_COMPATIBLE",
             "label" => "Protocol compatible",
             "pass" => $proto_ok,
             "detail" => $proto_detail,
@@ -3133,6 +3144,7 @@ class ImportClient
         $fs = $data["filesystem"] ?? null;
         $fs_ok = is_array($fs) && !empty($fs["ok"]);
         $checks[] = [
+            "code" => "FILESYSTEM_ACCESSIBLE",
             "label" => "Filesystem accessible",
             "pass" => $fs_ok,
             "detail" => $fs_ok
@@ -3147,6 +3159,7 @@ class ImportClient
         $db = $data["database"] ?? null;
         $db_ok = is_array($db) && !empty($db["connected"]);
         $checks[] = [
+            "code" => "DATABASE_ACCESSIBLE",
             "label" => "Database accessible",
             "pass" => $db_ok,
             "detail" => $db_ok
@@ -3208,7 +3221,7 @@ class ImportClient
         ], true);
 
         $this->write_progress_file($error['message'] ?? null);
-        exit($all_pass ? 0 : 1);
+        $this->exit_code = $all_pass ? 0 : 1;
     }
 
     /**
@@ -13536,6 +13549,12 @@ class ImportClient
         $this->progress_reporter->update($context, $data);
         $this->progress_reporter->write_file();
 
+        if (( $data['status'] ?? null ) === 'error' || ( $data['type'] ?? null ) === 'preflight_assertion') {
+            $this->command_report_details = array_intersect_key($data, array_flip([
+                'error', 'error_code', 'failed_stage', 'checks', 'http_code', 'curl_errno',
+                'consecutive_failures_without_progress',
+            ]));
+        }
         // The non-verbose terminal presentation uses show_progress_line() instead.
         if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             return;
@@ -13616,6 +13635,61 @@ class ImportClient
 // ============================================================================
 // CLI Entry Point
 // ============================================================================
+
+/**
+ * Append the invocation result, never an inner pipeline stage's result.
+ *
+ * A missing client means construction or lock acquisition failed. Reports do
+ * not rely on shutdown callbacks: a killed process cannot promise a result.
+ *
+ * @param string            $command   Invoked command.
+ * @param int               $exit_code Actual process exit code.
+ * @param array             $options { Parsed CLI options.
+ *     @type bool   $report     Whether to append a final report.
+ *     @type bool   $abort      Whether this invocation clears saved work.
+ *     @type string $sql_output SQL destination; stdout reserves that stream for SQL.
+ * }
+ * @param ImportClient|null $client    Command client, when construction succeeded.
+ * @param Throwable|null    $exception Unhandled command failure, when present.
+ */
+function reprint_write_command_report(
+    string $command,
+    int $exit_code,
+    array $options,
+    ?ImportClient $client,
+    ?Throwable $exception = null
+): void {
+    if (empty($options['report'])) {
+        return;
+    }
+    $details = $client === null ? [] : $client->command_report_details;
+    $status = $details['status'] ?? ( $exit_code === 0 ? 'complete' : ( $exit_code === 2 ? 'partial' : 'error' ) );
+    if ($exit_code === 0 && !empty($options['abort'])) {
+        $status = 'aborted';
+    }
+    $error = null;
+    $error_code = null;
+    if ($exit_code !== 0 && $exit_code !== 2) {
+        $error = $exception === null ? ( $details['error'] ?? null ) : $exception->getMessage();
+        $error_code = $details['error_code'] ?? ( $client === null ? null : $client->last_error_code );
+    }
+    $report = [
+        'type' => 'reprint_report',
+        'schema_version' => 1,
+        'command' => $command,
+        'status' => $status,
+        'exit_code' => $exit_code,
+        'failed_stage' => $details['failed_stage'] ?? null,
+        'error' => $error,
+        'error_code' => $error_code,
+    ] + $details;
+    $stream = !in_array($command, ['files-push', 'files-diff'], true)
+        && ( $options['sql_output'] ?? ( $client === null ? null : $client->get_state()->sql_output ) ) === 'stdout'
+        ? STDERR : STDOUT;
+    // Error messages may contain arbitrary source bytes. Keep the record valid
+    // JSON; path fields in structured details use the protocol's base64 form.
+    fwrite($stream, json_encode($report, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES) . "\n");
+}
 
 // Returns the importer version string. Inside the phar, reads the baked-in
 // VERSION file. In development, falls back to `git describe`.
@@ -13734,6 +13808,14 @@ if (
             'help_section' => 'global',
             'commands' => ImportClient::COMMANDS,
             'valid_values' => ImportClient::PROGRESS_OUTPUT_MODES,
+        ],
+        [
+            'name' => 'report',
+            'type' => 'flag',
+            'target' => 'report',
+            'help' => 'Append one versioned JSON command report to the progress stream',
+            'help_section' => 'global',
+            'commands' => ImportClient::COMMANDS,
         ],
         [
             'name' => 'abort',
@@ -15056,7 +15138,7 @@ if (
         foreach ($reprint_files_command_arguments as $reprint_files_push_command_argument) {
             $reprint_files_push_option_allowed = in_array(
                 $reprint_files_push_command_argument,
-                ['--force-http', '--verbose', '-v'],
+                ['--force-http', '--verbose', '-v', '--report'],
                 true
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
@@ -15072,7 +15154,8 @@ if (
     } elseif ($command === 'files-diff') {
         foreach ($reprint_files_command_arguments as $reprint_files_diff_command_argument) {
             $reprint_files_diff_option_allowed =
-                strpos($reprint_files_diff_command_argument, '--progress=') === 0
+                $reprint_files_diff_command_argument === '--report'
+                || strpos($reprint_files_diff_command_argument, '--progress=') === 0
                 || strpos($reprint_files_diff_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_diff_command_argument, '--fs-root=') === 0;
             if (!$reprint_files_diff_option_allowed) {
@@ -15212,6 +15295,7 @@ if (
         // channel to surface as ndjson events. Stash the exit code on
         // a global so the embedder can read it.
         $GLOBALS['REPRINT_PULL_EXIT_CODE'] = (int) $client->exit_code;
+        reprint_write_command_report($command, (int) $client->exit_code, $options, $client);
         if (!defined('EXIT_AFTER_PULL') || EXIT_AFTER_PULL) {
             exit($client->exit_code);
         }
@@ -15242,6 +15326,7 @@ if (
         }
         $reprint_exit_code = $e instanceof RetryLaterException ? 3 : 1;
         $GLOBALS['REPRINT_PULL_EXIT_CODE'] = $reprint_exit_code;
+        reprint_write_command_report($command, (int) $GLOBALS['REPRINT_PULL_EXIT_CODE'], $options, $client ?? null, $e);
         if (!defined('EXIT_AFTER_PULL') || EXIT_AFTER_PULL) {
             exit( (int) $reprint_exit_code );
         }

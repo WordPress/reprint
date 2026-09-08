@@ -1011,6 +1011,10 @@ progress snapshot, and `audit.log` remains available for troubleshooting.
 Use `--progress=jsonl` when the caller wants the full progress stream.
 With `--sql-output=stdout`, SQL stays on stdout and compact progress goes to stderr.
 
+Add `--report` to append one versioned JSON result for the invoked command.
+See [CLI reporting](docs/CLI-REPORTING.md) for the schema, preflight checks,
+pipeline boundaries, and handling a missing report.
+
 The files-push terminal presentation uses one stage-weighted progress bar. The
 percentage comes first, followed by a major stage such as `Indexing`, `Pushing`,
 or `Committing`. While pushing local paths, the line also shows target-confirmed
