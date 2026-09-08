@@ -132,6 +132,215 @@ class MultisiteSelectionTest extends MySQLDumpProducerTestBase
         $this->createProducer(['cursor' => $producer->get_reentrancy_cursor()]);
     }
 
+    /** A normal restart replaces only this site's saved IDs, never a sibling's. */
+    public function test_site_tables_are_separate_and_replaced_cursors_stop(): void
+    {
+        $this->create_network();
+        $options = ['multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1)];
+        $producer = $this->createProducer($options);
+        $producer->next_sql_fragment();
+        $cursor = $producer->get_reentrancy_cursor();
+        unset($producer);
+        $this->getDumpSQL(['multisite_selection' => new MultisiteDatabaseSelection('network_', 8, 2)]);
+        $tables = $this->pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
+        $this->assertContains('network_7_reprint_users', $tables);
+        $this->assertContains('network_8_reprint_users', $tables);
+        $resumed = $this->createProducer($options + ['cursor' => $cursor]);
+        $this->assertTrue($resumed->next_sql_fragment());
+        unset($resumed);
+        $this->getDumpSQL($options);
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('replaced');
+        $this->createProducer($options + ['cursor' => $cursor]);
+    }
+
+    /** A users-only request still discovers content authors and content-free members. */
+    public function test_skipped_content_is_discovered_in_bounded_resumable_steps(): void
+    {
+        $this->create_network();
+        $options = [
+            'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+            'tables_to_process' => ['network_users'], 'batch_size' => 2,
+        ];
+        $sql = '';
+        $discovery_steps = 0;
+        do {
+            $producer = $this->createProducer($options);
+            $more = $producer->next_sql_fragment();
+            if ($more) {
+                $sql .= $producer->get_sql_fragment() . "\n";
+                $options['cursor'] = $producer->get_reentrancy_cursor();
+                if (strpos($producer->get_sql_fragment(), 'Collect selected-site user IDs') !== false) {
+                    ++$discovery_steps;
+                }
+            }
+            unset($producer);
+        } while ($more);
+        $this->assertGreaterThan(4, $discovery_steps, 'Discovery must return between small primary-key batches');
+        $target = $this->executeDumpInNewDatabase($sql);
+        $this->assertSame(['1', '2', '3', '4', '5'], array_map('strval',
+            $target->query('SELECT ID FROM network_users ORDER BY ID')->fetchAll(PDO::FETCH_COLUMN)));
+    }
+
+    /** The saved set precedes each content cursor; replay does not duplicate IDs. */
+    public function test_content_cursor_has_durable_ids_and_users_are_last(): void
+    {
+        $this->create_network();
+        $options = ['multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1), 'batch_size' => 2];
+        $producer = $this->createProducer($options);
+        $sql = '';
+        while ($producer->next_sql_fragment()) {
+            $sql .= $producer->get_sql_fragment() . "\n";
+            if (strpos($producer->get_sql_fragment(), 'INSERT INTO `network_7_posts`') !== false) {
+                break;
+            }
+        }
+        $this->assertStringNotContainsString('CREATE TABLE `network_users`', $sql);
+        $this->assertContains('network_7_reprint_users', $this->pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
+        $this->assertSame('3', (string) $this->pdo->query('SELECT user_id FROM network_7_reprint_users WHERE user_id = 3')->fetchColumn());
+        $cursor = $producer->get_reentrancy_cursor();
+        unset($producer);
+        $resumed_sql = $this->getDumpSQL($options + ['cursor' => $cursor]);
+        $target = $this->executeDumpInNewDatabase($sql . $resumed_sql);
+        $this->assertSame(5, (int) $target->query('SELECT COUNT(*) FROM network_users')->fetchColumn());
+        $this->assertSame(5, (int) $this->pdo->query('SELECT COUNT(*) FROM network_7_reprint_users')->fetchColumn());
+        $this->getDumpSQL($options + ['cursor' => $cursor]);
+        $this->assertSame(5, (int) $this->pdo->query('SELECT COUNT(*) FROM network_7_reprint_users')->fetchColumn());
+        $this->assertNotContains('network_7_reprint_users', $target->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
+        $target = null;
+        $unselected = $this->executeDumpInNewDatabase($this->getDumpSQL());
+        $this->assertNotContains('network_7_reprint_users', $unselected->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
+    }
+
+    /** A live author edit must not turn a saved ID into permission to read a profile. */
+    public function test_removed_saved_reference_stops_before_exporting_the_user(): void
+    {
+        $this->create_network();
+        $options = ['multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1)];
+        $producer = $this->createProducer($options);
+        while ($producer->next_sql_fragment()) {
+            if (strpos($producer->get_sql_fragment(), 'INSERT INTO `network_7_posts`') !== false) {
+                break;
+            }
+        }
+        $cursor = $producer->get_reentrancy_cursor();
+        unset($producer);
+        $this->pdo->exec('UPDATE network_7_posts SET post_author = 0 WHERE ID = 1');
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('saved user reference');
+        $this->getDumpSQL($options + ['cursor' => $cursor]);
+    }
+
+    /** Unbuffered source reads must release their result before saving the next batch. */
+    public function test_unbuffered_export_resumes_after_partial_content_query(): void
+    {
+        $this->create_network();
+        $this->pdo->exec("INSERT INTO network_7_posts VALUES (2,4,'second'),(3,5,'third'),(4,3,'fourth')");
+        $this->pdo->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
+        $options = ['multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1), 'batch_size' => 3];
+        $producer = $this->createProducer($options);
+        $sql = '';
+        while ($producer->next_sql_fragment()) {
+            $sql .= $producer->get_sql_fragment() . "\n";
+            if (strpos($producer->get_sql_fragment(), 'INSERT INTO `network_7_posts`') !== false) {
+                break;
+            }
+        }
+        $cursor = $producer->get_reentrancy_cursor();
+        unset($producer);
+        $target = $this->executeDumpInNewDatabase($sql . $this->getDumpSQL($options + ['cursor' => $cursor]));
+        $this->assertSame(4, (int) $target->query('SELECT COUNT(*) FROM network_7_posts')->fetchColumn());
+        $this->assertSame(5, (int) $target->query('SELECT COUNT(*) FROM network_users')->fetchColumn());
+    }
+
+    /** Two real source connections cannot replace the same set inside an open request. */
+    public function test_source_lock_is_released_by_idempotent_close(): void
+    {
+        $this->create_network();
+        $options = ['multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1)];
+        $producer = $this->createProducer($options);
+        $producer->next_sql_fragment();
+        $cursor = $producer->get_reentrancy_cursor();
+        $other_connection = new PDO('mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName,
+            getenv('DB_USER'), getenv('DB_PASS'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        try {
+            new \WordPress\Reprint\Server\MySQLDumpProducer($other_connection, $options);
+            $this->fail('An open source request must prevent replacing its user set');
+        } catch (RuntimeException $error) {
+            $this->assertStringContainsString('Another SQL export request', $error->getMessage());
+        }
+        $producer->close();
+        $producer->close();
+        $resumed = new \WordPress\Reprint\Server\MySQLDumpProducer($other_connection, $options + ['cursor' => $cursor]);
+        $this->assertTrue($resumed->next_sql_fragment());
+        $resumed->close();
+    }
+
+    /** An embedding caller must not leave ID writes inside its own transaction. */
+    public function test_open_source_transaction_is_rejected_without_committing_it(): void
+    {
+        $this->create_network();
+        $this->pdo->beginTransaction();
+        try {
+            $this->createProducer(['multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1)]);
+            $this->fail('The saved user set needs a dedicated autocommit connection');
+        } catch (RuntimeException $error) {
+            $this->assertStringContainsString('autocommit connection', $error->getMessage());
+            $this->assertTrue($this->pdo->inTransaction());
+        } finally {
+            $this->pdo->rollBack();
+        }
+    }
+
+    /** Host process death after a content cursor must leave its saved IDs usable. */
+    public function test_process_death_releases_lock_and_preserves_collected_ids(): void
+    {
+        if (!function_exists('posix_kill')) {
+            $this->markTestSkipped('This process-death test needs the POSIX extension.');
+        }
+        $this->create_network();
+        $script = tempnam(sys_get_temp_dir(), 'reprint-user-set-child-');
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Quote a filesystem path in the child PHP script.
+        $autoload = var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true);
+        file_put_contents($script, '<?php require ' . $autoload . ';' . <<<'CHILD'
+$pdo = new PDO('mysql:host=' . getenv('DB_HOST') . ';dbname=' . getenv('DB_NAME'), getenv('DB_USER'), getenv('DB_PASS'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$producer = new \WordPress\Reprint\Server\MySQLDumpProducer($pdo, [
+    'multisite_selection' => new \WordPress\Reprint\Server\MultisiteDatabaseSelection('network_', 7, 1),
+]);
+$sql = '';
+while ($producer->next_sql_fragment()) {
+    $sql .= $producer->get_sql_fragment() . "\n";
+    if (strpos($producer->get_sql_fragment(), 'INSERT INTO `network_7_posts`') !== false) {
+        echo json_encode(['sql' => $sql, 'cursor' => $producer->get_reentrancy_cursor()]);
+        fflush(STDOUT);
+        // SIGKILL skips destructors, matching a host terminating the PHP worker.
+        posix_kill(getmypid(), SIGKILL);
+    }
+}
+CHILD
+        );
+        try {
+            $process = proc_open([PHP_BINARY, $script], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+            $output = stream_get_contents($pipes[1]);
+            $error = stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $this->assertNotSame(0, proc_close($process), $error);
+            $saved = json_decode($output, true);
+            $this->assertIsArray($saved, $error . $output);
+            $this->assertContains('network_7_reprint_users', $this->pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
+            $this->assertSame('3', (string) $this->pdo->query('SELECT user_id FROM network_7_reprint_users WHERE user_id=3')->fetchColumn());
+            $target = $this->executeDumpInNewDatabase($saved['sql'] . $this->getDumpSQL([
+                'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+                'cursor' => $saved['cursor'],
+            ]));
+            $this->assertSame(5, (int) $target->query('SELECT COUNT(*) FROM network_users')->fetchColumn());
+            $this->assertSame('shop', $target->query('SELECT post_title FROM network_7_posts')->fetchColumn());
+        } finally {
+            unlink($script);
+        }
+    }
+
     /** Builds overlapping IDs, memberships, authors, and network records. */
     private function create_network(): void
     {

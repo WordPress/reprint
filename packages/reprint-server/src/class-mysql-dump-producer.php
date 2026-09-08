@@ -17,7 +17,7 @@ require_once __DIR__ . "/class-database-rows-reader.php";
  *
  * The producer is a finite state machine that walks through tables sequentially:
  *
- *   INIT → EMIT_HEADER → NEXT_TABLE → CREATE_TABLE → TABLE_HEADER →
+ *   INIT → EMIT_HEADER → NEXT_TABLE → COLLECT_USER_IDS → CREATE_TABLE → TABLE_HEADER →
  *   START_INSERT ⇄ EMIT_ROW → (EMIT_NULLABLE_SPATIAL_COLUMNS) →
  *   (STAGE_OVERSIZED_SPATIAL) → (EMIT_OVERSIZED_UPDATE) → … →
  *   EMIT_FOOTER → FINISHED
@@ -81,6 +81,7 @@ class MySQLDumpProducer
      */
     public const NONZERO_SRID_CONTEXT_VERSION = 'v1';
 
+    private const STATE_COLLECT_USER_IDS = "collect_user_ids";
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
     const STATE_NEXT_TABLE = "next_table";
@@ -222,6 +223,14 @@ class MySQLDumpProducer
         }
     }
 
+    /** Releases a partially consumed source query and the selected site's lock. */
+    public function close(): void
+    {
+        if ($this->row_reader !== null) {
+            $this->row_reader->close();
+        }
+    }
+
     public function get_sql_fragment(): ?string
     {
         return $this->current_sql_fragment;
@@ -269,12 +278,23 @@ class MySQLDumpProducer
 
                 case self::STATE_NEXT_TABLE:
                     if ($this->move_to_next_table()) {
-                        $this->state = $this->emit_create_table
-                            ? self::STATE_CREATE_TABLE
-                            : self::STATE_TABLE_HEADER;
+                        $this->state = self::STATE_COLLECT_USER_IDS;
                     } else {
                         $this->state = self::STATE_EMIT_FOOTER;
                     }
+                    break;
+
+                case self::STATE_COLLECT_USER_IDS:
+                    if ($this->row_reader->collect_missing_user_references_step()) {
+                        // A complete harmless statement carries the discovery
+                        // cursor through the normal SQL/target commit path.
+                        $this->current_sql_fragment = "-- Collect selected-site user IDs\nDO 0;";
+                        $this->current_fragment_must_be_its_own_part = true;
+                        return true;
+                    }
+                    $this->state = $this->emit_create_table
+                        ? self::STATE_CREATE_TABLE
+                        : self::STATE_TABLE_HEADER;
                     break;
 
                 case self::STATE_EMIT_FOOTER:
@@ -1921,7 +1941,7 @@ class MySQLDumpProducer
         $quoted_table = $this->row_reader->quote_identifier($this->row_reader->get_current_table());
         $quoted_column = $this->row_reader->quote_identifier($column);
 
-        $where_parts = $this->row_reader->get_current_row_selection_conditions();
+        $where_parts = $this->row_reader->get_current_row_selection_conditions(true);
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
             $where_parts[] = $this->row_reader->build_comparison($pk_col, $pk_value, "=");
         }
@@ -1930,7 +1950,7 @@ class MySQLDumpProducer
         $value_expression = $character_string
             ? "SUBSTRING({$quoted_column}, {$start}, {$length})"
             : "SUBSTRING(CAST({$quoted_column} AS BINARY), {$start}, {$length})";
-        $sql = "SELECT CAST({$value_expression} AS BINARY) AS value_chunk,"
+        $sql = $this->row_reader->get_select_prefix() . " CAST({$value_expression} AS BINARY) AS value_chunk,"
              . " CHAR_LENGTH({$value_expression}) AS value_length"
              . " FROM {$quoted_table} WHERE {$where_clause}";
         $stmt = $this->db->prepare($sql);
