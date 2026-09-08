@@ -133,7 +133,7 @@ jobs:
       - name: Setup infrastructure
         run: tests/e2e/ci/setup-infrastructure.sh "${{ matrix.server_php }}"
 
-      - name: Start Oracle MySQL 8 target
+      - name: Start Oracle MySQL 8 for cross-engine and multisite query tests
         if: matrix.server_php == '8.2'
         run: tests/e2e/ci/start-mysql8-target.sh
 

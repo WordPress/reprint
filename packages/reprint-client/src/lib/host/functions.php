@@ -88,8 +88,11 @@ function matching_host_analyzer_scores(array $preflight_data): array
 /**
  * Resolve plugins, MU plugins, and drop-ins excluded from a local import.
  *
- * Named plugin paths are excluded from every import. Generic drop-ins are
- * included only when current preflight paths identify WP Cloud or WP Engine.
+ * Host platform integrations are excluded when cleanup is requested. Portable
+ * cache, backup, security, and password-policy plugins stay, even when a host
+ * bundles them.
+ * Generic drop-ins enter the exclusion list only when current preflight paths
+ * identify WP Cloud or WP Engine.
  * Source paths use the actual WordPress directories reported by preflight,
  * including custom plugin and MU-plugin locations.
  * Pantheon's package stays because its generic loader.php requires it even
@@ -106,20 +109,7 @@ function matching_host_analyzer_scores(array $preflight_data): array
 function excluded_plugins(array $preflight_data): array
 {
     $local_paths = [
-        // Plugins commonly installed or recommended by several hosts.
-        'wp-content/plugins/nginx-helper',
-        'wp-content/plugins/redis-cache',
-        'wp-content/plugins/breeze',
-        'wp-content/plugins/object-cache-pro',
-        'wp-content/plugins/wp-rocket',
-        'wp-content/plugins/w3-total-cache',
-        'wp-content/plugins/servebolt-optimizer',
-        'wp-content/plugins/a2-optimized-wp',
-        'wp-content/plugins/boldgrid-backup',
-        'wp-content/plugins/litespeed-cache',
-
-        // Aruba's cache plugin and managed hosting checker.
-        'wp-content/plugins/aruba-hispeed-cache',
+        // Aruba's managed hosting checker.
         'wp-content/mu-plugins/aruba-wpchecker.php',
         'wp-content/mu-plugins/aruba-wpchecker',
 
@@ -171,14 +161,11 @@ function excluded_plugins(array $preflight_data): array
         // WordPress VIP's platform MU-plugin package.
         'wp-content/mu-plugins/vip-go-mu-plugins',
 
-        // WP Engine tells sites moving away to remove its installed plugin and
-        // platform MU plugins. The cache and update-source files include its
-        // current plugin layout.
+        // WP Engine's platform plugins, including its current cache and
+        // update-source layout. Its standalone password and comment-policy
+        // plugins are portable and stay installed.
         'wp-content/plugins/wp-engine-smart-plugin-manager',
         'wp-content/mu-plugins/wpengine-common',
-        'wp-content/mu-plugins/slt-force-strong-passwords.php',
-        'wp-content/mu-plugins/force-strong-passwords',
-        'wp-content/mu-plugins/stop-long-comments.php',
         'wp-content/mu-plugins/wpe-cache-plugin',
         'wp-content/mu-plugins/wpe-cache-plugin.php',
         'wp-content/mu-plugins/wpe-update-source-selector',
@@ -186,10 +173,6 @@ function excluded_plugins(array $preflight_data): array
         'wp-content/mu-plugins/wpe-wp-sign-on-plugin',
         'wp-content/mu-plugins/wpe-wp-sign-on-plugin.php',
         'wp-content/mu-plugins/wpengine-security-auditor.php',
-
-        // SiteGround's cache and security plugins.
-        'wp-content/plugins/sg-cachepress',
-        'wp-content/plugins/sg-security',
 
         // WP Cloud's MU plugins depend on multisite functions and wp.com APIs.
         'wp-content/mu-plugins/wpcomsh',
