@@ -314,27 +314,40 @@ stay: this includes Redis Cache, WP Rocket, SiteGround's Speed and Security
 Optimizers, and Force Strong Passwords. Generic cache drop-ins are excluded only
 when current preflight paths identify WP Cloud or WP Engine.
 
-The choice is saved for that remote in the state directory. Later pulls skip
-the same plugins, `db-apply` deactivates excluded regular plugins, and
-`apply-runtime` removes their local copies without repeating the flag.
-Integrations such as Studio that need this cleanup must request it before
-starting the imported WordPress site. Targets such as wp.com can keep the
-plugins and run their own cleanup. Preserved host plugins may prevent WordPress
-from booting in an environment that lacks the source host's services.
+The pull choice is saved for that remote in the state directory. Later pulls
+use the same selection, and `db-apply` deactivates excluded regular plugins.
+`--include-host-plugins` selects preservation again. Existing state keeps its
+saved choice; only new state defaults to preservation. Changing the choice
+during an unfinished pull requires `--abort` first. Neither flag overrides
+explicit `--exclude` paths or the generated-file skip rules above.
 
-`--include-host-plugins` explicitly selects preservation again. Both flags are
-accepted by `pull`, `pull-files`, `pull-db`, `files-pull`, `db-apply`, and
-`apply-runtime`, and cannot be combined. Changing the choice during an
-unfinished pull requires `--abort` first. Neither flag overrides explicit
-`--exclude` paths or the generated-file skip rules above.
+**Local runtime cleanup is separate.** `apply-runtime` removes the listed local
+copies by default, including plugins that were downloaded by a preserving pull.
+Portable plugins stay. Pass `apply-runtime --include-host-plugins` to leave the
+local copies in place for that invocation. `apply-runtime --exclude-host-plugins`
+explicitly requests the default cleanup. Neither flag changes the saved pull
+selection, and the two flags cannot be combined.
 
-Existing state keeps its saved choice, including imports from older versions
-that excluded host plugins by default. Only new state defaults to preservation.
+The high-level `pull` command prepares a local runtime and uses this default
+cleanup regardless of its download selection. Integrations such as Studio can
+pull files unchanged, then call `apply-runtime` before starting WordPress.
+Targets such as wp.com can keep the plugins and run their own cleanup without
+calling `apply-runtime`. Preserved host plugins may prevent WordPress from
+booting without the source host's services.
+
+Runtime cleanup records its document-root-relative paths before deleting any
+local copy. `files-diff` and `files-push` exclude those paths, so a later theme
+push does not delete the source host's plugins. The record survives command
+resets, database imports, and later runtime opt-outs: skipping a later cleanup
+does not restore files already removed. Finish an interrupted files-push, or
+finish or abort an interrupted files-pull, before applying runtime cleanup.
+This protects the recorded file paths; it does not make other local runtime or
+database changes suitable for production.
+
 To fetch plugins skipped by a completed pull, start another `pull-files` with
 `--include-host-plugins`, or abort the completed `files-pull` and run it again
-with that flag. The flag cannot restore plugin activation removed by an earlier
-import. Enabling cleanup does not make the resulting local changes safe to push
-back to the source host.
+with that flag. This cannot restore plugin activation removed by an earlier
+import. Runtime setup itself does not connect to or edit the database.
 
 Mirror mode requires `--state-dir` to be outside `--fs-root`, because the state
 files must not appear in the local tree being compared. The selected mode is
@@ -660,9 +673,9 @@ server is independent — you implement one interface without touching the other
 Currently supported source hosts: WP Cloud (with on-the-fly thumbnail
 generation for missing image sizes and auto-detection of extra directories from
 `auto_prepend_file`/`auto_append_file` INI values), WP Engine, and a generic default.
-The saved host-plugin choice described above also governs cleanup of existing
-local copies during `apply-runtime`. New imports preserve them unless
-`--exclude-host-plugins` requests cleanup.
+`apply-runtime` removes known host-plugin copies by default, independently of
+the saved download selection. Pass `apply-runtime --include-host-plugins` to
+skip that local cleanup. See the host-plugin section above for push exclusions.
 Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in
 development server, and WordPress Playground CLI.
 

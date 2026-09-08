@@ -138,8 +138,9 @@ A push plan is an internal part of the sender lifecycle:
    has an active commit, the sender stores its `blocking_push_session_id`, enters
    `finishing_previous_commit`, and sends one bounded `push_commit` request per
    step until that commit finishes. It then returns to `creating`. A successful
-   create stores the exclusions in `excluded_paths.json` after creating the
-   active `plan/` directory.
+   create combines the target exclusions with at most 100 caller exclusions
+   and stores the result in `excluded_paths.json` after creating the active
+   `plan/` directory. The combined list stays with that plan across resume.
 2. The sender starts one internal `PushPlan`. The plan copies the exclusions to
    `plan/excluded_paths.json` and enters `filtering_patch_base`. Each step reads
    at most one caller-owned local-index entry and appends it to
@@ -543,6 +544,20 @@ request containing a local path, and both counts survive resume. They are
 absent while planning. Neither the audit log nor the progress file copies
 receiver cursors or tentative upload positions.
 
+## Local runtime cleanup and file pushes
+
+`apply-runtime` removes known host-plugin copies by default even when the pull
+preserved them. Before removal, it saves the document-root-relative paths in
+`apply.remote_paths_removed_from_local_site`. `files-push` supplies that record
+as caller exclusions, so cleanup does not become a source-host deletion.
+Exclusions also prevent an ancestor deletion or replacement from covering a
+protected path. Command resets, database imports, and later runtime opt-outs
+retain the record; skipping cleanup does not restore removed files.
+
+Runtime cleanup rejects an unfinished files-push or files-pull. A push therefore
+keeps the same exclusions when resumed, and a pull must finish or be aborted
+before setup changes its local files.
+
 ## Local files-diff command
 
 `reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl]`
@@ -556,7 +571,9 @@ confirms commit. The remote state directory is
 query cannot reuse the index. A different filesystem root uses a different
 state directory. The command accepts only `--state-dir`, `--fs-root`, and the
 optional `--progress`; it needs no secret, performs no preflight, and makes no
-network request. It runs one complete PushPlan against the local index in
+network request. It reads any local runtime cleanup record from pull state and
+excludes those paths, with the remote document root prepended for its
+filesystem-root-wide plan. It runs one complete PushPlan against the local index in
 `<remote-state-directory>/push/files-diff-plan/` while the command holds the
 state-directory-wide Reprint process lock.
 
