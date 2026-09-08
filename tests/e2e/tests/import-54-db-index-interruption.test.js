@@ -38,7 +38,7 @@ describe('Import: Database Index Response Interruption', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('first run exits partial when the completion part is interrupted', () => {
+    it('first run exits retryable when the completion part is interrupted', () => {
         writeTestHooks(site, [
             'function test_hook_before_completion($status, $gz, $boundary) {',
             `    if (file_exists('${hookState}')) { return; }`,
@@ -54,8 +54,8 @@ describe('Import: Database Index Response Interruption', () => {
 
         assert.equal(
             result.exitCode,
-            2,
-            `Expected exit 2 after the interrupted db-index response\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
+            3,
+            `Expected exit 3 after the interrupted db-index response\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
         );
         assert.deepEqual(
             readHookState(site),
