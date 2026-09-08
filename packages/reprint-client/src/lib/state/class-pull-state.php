@@ -59,7 +59,7 @@ class PullState
     public string $fs_root_nonempty_behavior = 'error';
     public string $filter = 'none';
     /** Keep host platform plugins through file download, db-apply, and apply-runtime. */
-    public bool $include_host_plugins = false;
+    public bool $include_host_plugins = true;
     /** @var string|null User-Agent that worked during preflight. */
     public ?string $user_agent = null;
     public ?int $max_allowed_packet = null;
@@ -139,6 +139,8 @@ class PullState
     public static function from_array(array $data): self
     {
         $state = new self();
+        // State written before the host-plugin setting existed used automatic
+        // cleanup. Keep that behavior when resuming those imports.
         // State from clients predating CSS rewriting has neither CSS field.
         // An empty mapping keeps those downloads byte-for-byte copies. Starting
         // rewriting on resume could otherwise join raw and rewritten file bytes.

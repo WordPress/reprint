@@ -117,6 +117,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     private function writeFilesPullState(array $state): void
     {
         $defaults = array(
+            'include_host_plugins' => false,
             'active_resumable_command' => array(
                 'command_name' => 'files-pull',
                 'completion_state' => 'in_progress',
@@ -177,6 +178,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     public function testCannotIncludeHostPluginsDuringAnUnfinishedPull(): void
     {
         $client = $this->withPaths(array('abspath' => '/var/www/html/'));
+        $client->get_state()->include_host_plugins = false;
         $client->get_state()->active_resumable_command->command_name = 'files-pull';
         $client->get_state()->active_resumable_command->completion_state = 'partial';
         $client->save_state();
@@ -195,6 +197,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     {
         $client = $this->withPaths(array('abspath' => '/var/www/html/'));
         $state = $client->get_state();
+        $state->include_host_plugins = false;
         $state->active_resumable_command->command_name = 'files-pull';
         $state->active_resumable_command->completion_state = 'complete';
         $state->pull_pipeline->started_by_command = 'pull';
@@ -220,6 +223,43 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->assertTrue($this->readState()['include_host_plugins']);
         $this->runFilesPull(array('abort' => true));
         $this->assertTrue($this->readState()['include_host_plugins']);
+    }
+
+    public function testExcludeHostPluginsCliPersistsAndIncludeFlagRestoresPreservation(): void
+    {
+        $client = $this->withPaths(array('abspath' => '/var/www/html/'));
+        $client->save_state();
+        $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+        $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($entry)
+            . ' files-pull https://src.example/export.php --abort --state-dir=' . escapeshellarg($this->stateDir)
+            . ' --fs-root=' . escapeshellarg($this->fsRoot);
+
+        $output = shell_exec($command . ' --exclude-host-plugins 2>&1') ?? '';
+        $this->assertStringNotContainsString('Unknown option', $output);
+        $this->assertFalse($this->readState()['include_host_plugins'], $output);
+        $this->runFilesPull(array('abort' => true));
+        $this->assertFalse($this->readState()['include_host_plugins']);
+
+        $output = shell_exec($command . ' --include-host-plugins 2>&1') ?? '';
+        $this->assertTrue($this->readState()['include_host_plugins'], $output);
+    }
+
+    public function testCannotExcludeHostPluginsDuringAnUnfinishedPull(): void
+    {
+        $client = $this->withPaths(array('abspath' => '/var/www/html/'));
+        $client->get_state()->include_host_plugins = true;
+        $client->get_state()->active_resumable_command->command_name = 'files-pull';
+        $client->get_state()->active_resumable_command->completion_state = 'partial';
+        $client->save_state();
+        $before = $this->readState();
+
+        try {
+            $this->runFilesPull(array('include_host_plugins' => false));
+            $this->fail('Changing host-plugin filtering must not resume an unfinished pull.');
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString('Cannot change --include-host-plugins', $error->getMessage());
+        }
+        $this->assertSame($before, $this->readState());
     }
 
     public function testIncludeHostPluginsRejectsNonBooleanOptionsBeforeSaving(): void

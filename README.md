@@ -296,32 +296,45 @@ caches, operating-system metadata, and editor scratch files. `--include`,
 
 **Host platform plugins**
 
-By default, file pulls also skip listed host platform plugins that depend on
-services from the source host, including WP Engine and WP Cloud MU plugins.
-Named platform paths are skipped even when they are leftovers from an earlier
-host. Portable plugins stay: this includes Redis Cache, WP Rocket, SiteGround's
-Speed and Security Optimizers, and Force Strong Passwords.
+New pulls keep host platform plugins, MU plugins, and host cache drop-ins.
+Reprint does not infer whether the destination needs them or whether the local
+copy will later be pushed back to the source host.
 
-To keep host platform plugins too, pass `--include-host-plugins`:
+To request Reprint's host-plugin cleanup, pass `--exclude-host-plugins` before
+the pull starts:
 
 ```bash
 php reprint.phar pull-files "$REMOTE_REPRINT_API_URL" --secret="$SECRET_KEY" \
-    --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --include-host-plugins
+    --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --exclude-host-plugins
 ```
 
-The flag is saved for that remote in the state directory. Later pulls, `db-apply`,
-and `apply-runtime` keep those plugins without repeating the flag. It also keeps
-host cache drop-ins. Use it when the target, such as wp.com, handles its own
-post-import cleanup. Reprint does not infer that choice from the target host.
-Kept platform plugins may need that cleanup before WordPress can boot.
+Cleanup skips listed host platform paths, including WP Engine and WP Cloud MU
+plugins, even when they are leftovers from an earlier host. Portable plugins
+stay: this includes Redis Cache, WP Rocket, SiteGround's Speed and Security
+Optimizers, and Force Strong Passwords. Generic cache drop-ins are excluded only
+when current preflight paths identify WP Cloud or WP Engine.
 
-The flag is also accepted by `pull`, `pull-db`, `files-pull`, `db-apply`, and
-`apply-runtime`. Set it before the pull starts; changing it during an unfinished
-pull requires `--abort` first. It does not override explicit `--exclude` paths
-or the generated-file skip rules above. New state directories use the default
-filtering again. To fetch plugins skipped by a completed pull, start another
-`pull-files`, or abort the completed `files-pull` and run it again with the flag.
-The flag cannot restore files or plugin activation removed by an earlier import.
+The choice is saved for that remote in the state directory. Later pulls skip
+the same plugins, `db-apply` deactivates excluded regular plugins, and
+`apply-runtime` removes their local copies without repeating the flag.
+Integrations such as Studio that need this cleanup must request it before
+starting the imported WordPress site. Targets such as wp.com can keep the
+plugins and run their own cleanup. Preserved host plugins may prevent WordPress
+from booting in an environment that lacks the source host's services.
+
+`--include-host-plugins` explicitly selects preservation again. Both flags are
+accepted by `pull`, `pull-files`, `pull-db`, `files-pull`, `db-apply`, and
+`apply-runtime`, and cannot be combined. Changing the choice during an
+unfinished pull requires `--abort` first. Neither flag overrides explicit
+`--exclude` paths or the generated-file skip rules above.
+
+Existing state keeps its saved choice, including imports from older versions
+that excluded host plugins by default. Only new state defaults to preservation.
+To fetch plugins skipped by a completed pull, start another `pull-files` with
+`--include-host-plugins`, or abort the completed `files-pull` and run it again
+with that flag. The flag cannot restore plugin activation removed by an earlier
+import. Enabling cleanup does not make the resulting local changes safe to push
+back to the source host.
 
 Mirror mode requires `--state-dir` to be outside `--fs-root`, because the state
 files must not appear in the local tree being compared. The selected mode is
@@ -673,8 +686,9 @@ server is independent — you implement one interface without touching the other
 Currently supported source hosts: WP Cloud (with on-the-fly thumbnail
 generation for missing image sizes and auto-detection of extra directories from
 `auto_prepend_file`/`auto_append_file` INI values), WP Engine, and a generic default.
-The host-plugin filtering described above also governs cleanup of existing local
-copies during `apply-runtime`. `--include-host-plugins` disables that cleanup.
+The saved host-plugin choice described above also governs cleanup of existing
+local copies during `apply-runtime`. New imports preserve them unless
+`--exclude-host-plugins` requests cleanup.
 Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in
 development server, and WordPress Playground CLI.
 

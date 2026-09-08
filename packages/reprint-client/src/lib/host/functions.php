@@ -88,8 +88,9 @@ function matching_host_analyzer_scores(array $preflight_data): array
 /**
  * Resolve plugins, MU plugins, and drop-ins excluded from a local import.
  *
- * Host platform integrations are excluded by default. Portable cache, backup,
- * security, and password-policy plugins stay, even when a host bundles them.
+ * Host platform integrations are excluded when cleanup is requested. Portable
+ * cache, backup, security, and password-policy plugins stay, even when a host
+ * bundles them.
  * Generic drop-ins enter the exclusion list only when current preflight paths
  * identify WP Cloud or WP Engine.
  * Source paths use the actual WordPress directories reported by preflight,

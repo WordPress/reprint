@@ -20,6 +20,28 @@ class CliHelpTest extends TestCase
     {
         foreach (['pull', 'pull-files', 'pull-db', 'files-pull', 'db-apply', 'apply-runtime'] as $command) {
             $this->assertStringContainsString('--include-host-plugins', $this->runHelp($command));
+            $this->assertStringContainsString('--exclude-host-plugins', $this->runHelp($command));
+        }
+    }
+
+    public function testConflictingHostPluginFlagsAreRejectedInEitherOrder(): void
+    {
+        $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+        $state_directory = sys_get_temp_dir() . '/host-plugin-flags-' . uniqid('', true);
+        foreach ([
+            '--include-host-plugins --exclude-host-plugins',
+            '--exclude-host-plugins --include-host-plugins',
+        ] as $flags) {
+            $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($entry)
+                . ' files-pull https://example.test --state-dir=' . escapeshellarg($state_directory)
+                . ' --fs-root=' . escapeshellarg($state_directory . '/files') . ' ' . $flags;
+            $output = shell_exec($command . ' 2>&1') ?? '';
+
+            $this->assertStringContainsString(
+                '--include-host-plugins and --exclude-host-plugins cannot be combined.',
+                $output
+            );
+            $this->assertDirectoryDoesNotExist($state_directory);
         }
     }
 
