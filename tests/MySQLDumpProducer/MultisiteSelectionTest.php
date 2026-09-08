@@ -182,6 +182,88 @@ class MultisiteSelectionTest extends MySQLDumpProducerTestBase
             $target->query('SELECT ID FROM network_users ORDER BY ID')->fetchAll(PDO::FETCH_COLUMN)));
     }
 
+    /** Track stage entry: an immediate no-op still enters the wrong lifecycle phase. */
+    public function test_discovery_is_entered_only_for_users_after_all_content_tables(): void
+    {
+        $this->create_network();
+        $options = [
+            'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+            'tables_to_process' => ['network_usermeta', 'network_users', 'network_7_links', 'network_7_comments', 'network_7_posts'],
+            'batch_size' => 2,
+        ];
+        $producer = $this->createProducer($options);
+        $producer->close();
+        // Keep real MySQL reads and writes. Count calls to the stepping method,
+        // including the old per-table calls which returned without a query.
+        $reader = new class($this->pdo, $options) extends \WordPress\Reprint\Server\DatabaseRowsReader {
+            public $discovery_tables = [];
+
+            public function collect_missing_user_references_step(): bool
+            {
+                $this->discovery_tables[] = $this->get_current_table();
+                return parent::collect_missing_user_references_step();
+            }
+        };
+        $property = new ReflectionProperty($producer, 'row_reader');
+        $property->setAccessible(true);
+        $property->setValue($producer, $reader);
+        $sql = '';
+        $exported_tables = [];
+        $discovery_steps = 0;
+        while ($producer->next_sql_fragment()) {
+            $fragment = $producer->get_sql_fragment();
+            $sql .= $fragment . "\n";
+            if (preg_match('/CREATE TABLE `([^`]+)`/', $fragment, $match)) {
+                $exported_tables[] = $match[1];
+            }
+            if (strpos($fragment, 'Collect selected-site user IDs') !== false) {
+                ++$discovery_steps;
+                $this->assertSame(['network_7_links', 'network_7_comments', 'network_7_posts'], $exported_tables);
+                $this->assertSame(['3', '4', '5'], array_map('strval', $this->pdo->query(
+                    'SELECT user_id FROM network_7_reprint_users WHERE reference_kind IN (1,2,3) ORDER BY user_id'
+                )->fetchAll(PDO::FETCH_COLUMN)));
+            }
+        }
+        $this->assertGreaterThan(1, $discovery_steps);
+        $this->assertSame(['network_users'], array_values(array_unique($reader->discovery_tables)),
+            'Enter discovery for users only, never for content tables or again for profiles');
+        $this->assertSame(['network_7_links', 'network_7_comments', 'network_7_posts', 'network_users', 'network_usermeta'], $exported_tables);
+        $target = $this->executeDumpInNewDatabase($sql);
+        $this->assertSame(['1', '2', '3', '4', '5'], array_map('strval',
+            $target->query('SELECT ID FROM network_users ORDER BY ID')->fetchAll(PDO::FETCH_COLUMN)));
+    }
+
+    /** A profiles-only request still needs content authors and content-free members. */
+    public function test_profiles_only_export_resumes_user_discovery_without_exporting_content(): void
+    {
+        $this->create_network();
+        $this->pdo->exec("INSERT INTO network_usermeta VALUES (20,3,'first_name','Author'),(21,4,'first_name','Commenter'),(22,5,'first_name','Link author')");
+        $options = [
+            'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+            'tables_to_process' => ['network_usermeta'], 'batch_size' => 2,
+        ];
+        $sql = '';
+        $discovery_steps = 0;
+        do {
+            $producer = $this->createProducer($options);
+            $more = $producer->next_sql_fragment();
+            if ($more) {
+                $fragment = $producer->get_sql_fragment();
+                $sql .= $fragment . "\n";
+                $options['cursor'] = $producer->get_reentrancy_cursor();
+                if (strpos($fragment, 'Collect selected-site user IDs') !== false) {
+                    ++$discovery_steps;
+                }
+            }
+            unset($producer);
+        } while ($more);
+        $this->assertGreaterThan(4, $discovery_steps);
+        $target = $this->executeDumpInNewDatabase($sql);
+        $this->assertSame(['network_usermeta'], $target->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
+        $this->assertSame(['1', '2', '3', '4', '5'], array_map('strval',
+            $target->query('SELECT DISTINCT user_id FROM network_usermeta ORDER BY user_id')->fetchAll(PDO::FETCH_COLUMN)));
+    }
+
     /** The saved set precedes each content cursor; replay does not duplicate IDs. */
     public function test_content_cursor_has_durable_ids_and_users_are_last(): void
     {

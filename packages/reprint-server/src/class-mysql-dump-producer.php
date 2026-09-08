@@ -17,10 +17,18 @@ require_once __DIR__ . "/class-database-rows-reader.php";
  *
  * The producer is a finite state machine that walks through tables sequentially:
  *
- *   INIT → EMIT_HEADER → NEXT_TABLE → COLLECT_USER_IDS → CREATE_TABLE → TABLE_HEADER →
+ *   INIT → EMIT_HEADER → NEXT_TABLE → CREATE_TABLE → TABLE_HEADER →
  *   START_INSERT ⇄ EMIT_ROW → (EMIT_NULLABLE_SPATIAL_COLUMNS) →
  *   (STAGE_OVERSIZED_SPATIAL) → (EMIT_OVERSIZED_UPDATE) → … →
  *   EMIT_FOOTER → FINISHED
+ *
+ * A selected-site dump exports posts, comments and links before users, saving
+ * their referenced user IDs as it goes. Before users, NEXT_TABLE branches into
+ * COLLECT_USER_IDS to add members from usermeta's selected capabilities key.
+ * That stage also reads IDs from content tables omitted by a partial export.
+ * Each batch has a cursor; users are exported after discovery finishes. The
+ * stage is not entered for content tables or repeated for usermeta. A usermeta-only
+ * export performs the same discovery before profiles because it omits users.
  *
  * All values are base64-encoded in the SQL output (via FROM_BASE64('...')). This avoids
  * charset-related corruption: MySQL interprets string literals according to the
@@ -278,7 +286,9 @@ class MySQLDumpProducer
 
                 case self::STATE_NEXT_TABLE:
                     if ($this->move_to_next_table()) {
-                        $this->state = self::STATE_COLLECT_USER_IDS;
+                        $this->state = $this->row_reader->get_pending_user_reference_source() !== null
+                            ? self::STATE_COLLECT_USER_IDS
+                            : ( $this->emit_create_table ? self::STATE_CREATE_TABLE : self::STATE_TABLE_HEADER );
                     } else {
                         $this->state = self::STATE_EMIT_FOOTER;
                     }
