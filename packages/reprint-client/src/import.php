@@ -35,6 +35,7 @@ use WordPress\Reprint\Server\FileIndexProcessor;
 
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
+use function Reprint\Importer\apply_zipwp_access_cookie;
 use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
@@ -712,8 +713,7 @@ class ImportClient
             $this->pull_excluded_files_with_path_prefixes =
                 $this->resolve_remote_paths($excluded_raw, "exclude");
         }
-        $preflight_data = $this->get_state()->preflight_record()["data"] ?? [];
-        $this->excluded_plugins = excluded_plugins($preflight_data);
+        $this->excluded_plugins = $this->get_excluded_plugins();
 
         if ($assert_remap) {
             $this->assert_resolved_path_mappings_consistent();
@@ -990,6 +990,13 @@ class ImportClient
             return;
         }
 
+        if (array_key_exists("include_host_plugins", $options) && !is_bool($options["include_host_plugins"])) {
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports a CLI/library option type, not HTML.
+                "include_host_plugins must be a boolean; received " . gettype($options["include_host_plugins"]) . "."
+            );
+        }
+
         // High-level pulls persist resume state before they enter the stage
         // runner. Reject invalid options first so a typo does not leave behind
         // state that looks like an interrupted pull.
@@ -1002,6 +1009,43 @@ class ImportClient
         if ($command === "pull-metadata") {
             $this->run_pull_metadata();
             return;
+        }
+
+        /**
+         * Keep file selection and later cleanup on the same saved setting.
+         *
+         * A pull started with --include-host-plugins must also keep those plugins
+         * during db-apply and apply-runtime, even when later commands omit the flag.
+         * --exclude-host-plugins selects cleanup for those same stages.
+         * Changing it mid-pull would combine an index built with one exclusion list
+         * with cleanup using another. Check both the command and the pipeline:
+         * files-pull can be complete while the pipeline still has db-apply pending.
+         * --abort allows a new choice for the next run.
+         */
+        if (
+            isset($options["include_host_plugins"])
+            && $options["include_host_plugins"] !== $this->get_state()->include_host_plugins
+        ) {
+            $checkpoint = $this->get_state()->active_resumable_command;
+            $pipeline = $this->get_state()->pull_pipeline;
+            if (
+                !$abort
+                && (
+                    ( $checkpoint->command_name !== null && $checkpoint->completion_state !== "complete" )
+                    || (
+                        $pipeline->started_by_command !== null
+                        && $pipeline->stage_sequence !== []
+                        && $pipeline->last_completed_stage !== end($pipeline->stage_sequence)
+                    )
+                )
+            ) {
+                throw new RuntimeException(
+                    "Cannot change --include-host-plugins/--exclude-host-plugins while a pull is in progress. " .
+                    "Finish the current pull or use --abort first."
+                );
+            }
+            $this->get_state()->include_host_plugins = $options["include_host_plugins"];
+            $this->save_state();
         }
 
         if (in_array($command, ["pull", "pull-files", "files-pull"], true)) {
@@ -5076,7 +5120,7 @@ class ImportClient
 
         // A previous import or pre-existing local tree may already contain an
         // excluded plugin. File download filtering cannot remove that copy.
-        $excluded_plugins = excluded_plugins($preflight_data);
+        $excluded_plugins = $this->get_excluded_plugins();
         $excluded_local_paths = array_column($excluded_plugins, 'local_path');
         foreach ($excluded_local_paths as $rel_path) {
             $full_path = wp_join_unix_paths($local_document_root, $rel_path);
@@ -7363,15 +7407,32 @@ class ImportClient
      */
     private function deactivate_host_plugins(DatabaseConnection $database): array
     {
-        $preflight_data = $this->get_state()->preflight_record()["data"] ?? [];
         $plugin_dirs = [];
-        foreach (excluded_plugins($preflight_data) as $excluded_plugin) {
+        foreach ($this->get_excluded_plugins() as $excluded_plugin) {
             if ($excluded_plugin['regular_plugin_directory'] !== null) {
                 $plugin_dirs[] = $excluded_plugin['regular_plugin_directory'];
             }
         }
 
         return $this->deactivate_plugins_by_dir($database, $plugin_dirs, "source-host");
+    }
+
+    /**
+     * Use the same saved host-plugin policy for download and both apply commands.
+     *
+     * @return array[] { Excluded paths, or an empty list when host plugins are included.
+     *
+     *     @type string|null $source_path              Absolute source path, when preflight reports its directory.
+     *     @type string      $local_path               Path relative to the local WordPress root.
+     *     @type string|null $regular_plugin_directory Directory to deactivate, or null for MU plugins and drop-ins.
+     * }
+     */
+    private function get_excluded_plugins(): array
+    {
+        if ($this->get_state()->include_host_plugins) {
+            return [];
+        }
+        return excluded_plugins($this->get_state()->preflight_record()["data"] ?? []);
     }
 
     /**
@@ -7384,8 +7445,9 @@ class ImportClient
      * carries a path component like WordPress Playground's
      * `/scope:<slug>/` iframe scope.
      *
-     * wpcomsh has the same shape but lives under mu-plugins, where the global
-     * source-host path list removes it from disk before WordPress boots.
+     * wpcomsh has the same shape but lives under mu-plugins. The host-plugin
+     * list removes it before WordPress boots unless --include-host-plugins
+     * leaves that cleanup to the caller.
      *
      * Skipped when the new site URL is empty or has no path beyond `/`.
      *
@@ -11975,6 +12037,7 @@ class ImportClient
         $ch = curl_init($url);
         apply_curl_proxy_from_environment($ch);
         apply_curl_ca_bundle($ch);
+        apply_zipwp_access_cookie($ch, $url);
 
         $headers = [
             ...$this->get_base_headers("application/json"),
@@ -12106,6 +12169,7 @@ class ImportClient
         $ch = curl_init($url);
         apply_curl_proxy_from_environment($ch);
         apply_curl_ca_bundle($ch);
+        apply_zipwp_access_cookie($ch, $url);
 
         $parser = null;
         $current_chunk = null;
@@ -12504,6 +12568,7 @@ class ImportClient
         $this->state->version = $previous_state->version;
         $this->state->webhost = $previous_state->webhost;
         $this->state->follow_symlinks = $previous_state->follow_symlinks;
+        $this->state->include_host_plugins = $previous_state->include_host_plugins;
         $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
         $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
         $this->state->resolved_path_mappings_fingerprint = $previous_state->resolved_path_mappings_fingerprint;
@@ -13182,6 +13247,23 @@ if (
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
         ],
         [
+            'name' => 'exclude-host-plugins',
+            'type' => 'flag',
+            'target' => 'include_host_plugins',
+            'flag_value' => false,
+            'help' => 'Skip listed host platform plugins and drop-ins, deactivate excluded plugins, and remove their local copies during runtime setup (saved in state)',
+            'help_section' => 'global',
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'db-apply', 'apply-runtime'],
+        ],
+        [
+            'name' => 'include-host-plugins',
+            'type' => 'flag',
+            'target' => 'include_host_plugins',
+            'help' => 'Keep host platform plugins and drop-ins (default for new state); disable their download filtering, deactivation, and runtime cleanup (saved in state)',
+            'help_section' => 'global',
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'db-apply', 'apply-runtime'],
+        ],
+        [
             'name' => 'no-follow-symlinks',
             'type' => 'flag',
             'target' => 'follow_symlinks',
@@ -13619,6 +13701,14 @@ if (
 
                         case 'flag':
                             if ($arg === "--{$cli_name}" || (isset($def['short']) && $arg === "-{$def['short']}")) {
+                                if (
+                                    $def['target'] === 'include_host_plugins'
+                                    && array_key_exists('include_host_plugins', $options)
+                                    && $options['include_host_plugins'] !== ( $def['flag_value'] ?? true )
+                                ) {
+                                    fwrite(STDERR, "--include-host-plugins and --exclude-host-plugins cannot be combined.\n");
+                                    exit(1);
+                                }
                                 _cli_store($def, $def['flag_value'] ?? true, $state_dir, $filesystem_root, $options);
                                 $matched = true;
                                 break 3;
@@ -14335,7 +14425,8 @@ if (
                 "(--fs-root=DIR|--flat-document-root=DIR) [options]",
             "description" =>
                 "Generates server configuration (runtime.php, nginx.conf or start.sh)\n" .
-                "from preflight data and removes listed source-host plugins, MU plugins,\n" .
+                "from preflight data. If saved host-plugin cleanup is enabled, removes\n" .
+                "listed host platform plugins, MU plugins,\n" .
                 "and drop-ins that should not run locally.\n" .
                 "\n" .
                 "Embeds the target database in runtime.php: the one named by the\n" .

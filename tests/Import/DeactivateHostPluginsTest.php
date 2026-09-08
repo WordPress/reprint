@@ -67,15 +67,15 @@ class DeactivateHostPluginsTest extends TestCase
         $database = $this->createDatabase($engine);
         $this->createWpOptionsTable($database);
         $this->insertOption($database, 'active_plugins', serialize([
-            'sg-cachepress/sg-cachepress.php',
-            'sg-security/sg-security.php',
-            'sg-cachepress-extra/sg-cachepress-extra.php',
+            'pressable-cache-management/pressable-cache-management.php',
+            'pressable-onepress-login/pressable-onepress-login.php',
+            'pressable-cache-management-extra/pressable-cache-management-extra.php',
             'woocommerce/woocommerce.php',
             'akismet/akismet.php',
         ]));
 
         $this->writeState([
-            'webhost' => 'siteground',
+            'webhost' => 'other',
             'preflight' => [
                 'data' => [
                     'database' => ['wp' => ['table_prefix' => 'wp_']],
@@ -90,17 +90,17 @@ class DeactivateHostPluginsTest extends TestCase
         sort($result);
         $this->assertSame(
             [
-                'sg-cachepress/sg-cachepress.php',
-                'sg-security/sg-security.php',
+                'pressable-cache-management/pressable-cache-management.php',
+                'pressable-onepress-login/pressable-onepress-login.php',
             ],
             $result,
-            'expected the SiteGround plugins to be reported as deactivated',
+            'expected the Pressable plugins to be reported as deactivated',
         );
 
         $remaining = unserialize($this->fetchOption($database, 'active_plugins'));
         $this->assertSame(
             [
-                'sg-cachepress-extra/sg-cachepress-extra.php',
+                'pressable-cache-management-extra/pressable-cache-management-extra.php',
                 'woocommerce/woocommerce.php',
                 'akismet/akismet.php',
             ],
@@ -117,12 +117,12 @@ class DeactivateHostPluginsTest extends TestCase
         $database = $this->createDatabase($engine);
         $this->createWpOptionsTable($database, 'custom_');
         $this->insertOption($database, 'active_plugins', serialize([
-            'sg-cachepress/sg-cachepress.php',
+            'pressable-cache-management/pressable-cache-management.php',
             'akismet/akismet.php',
         ]), 'custom_');
 
         $this->writeState([
-            'webhost' => 'siteground',
+            'webhost' => 'other',
             'preflight' => [
                 'data' => [
                     'database' => ['wp' => ['table_prefix' => 'custom_']],
@@ -133,7 +133,7 @@ class DeactivateHostPluginsTest extends TestCase
         $this->loadClientState($client);
 
         $result = $this->callPrivate($client, 'deactivate_host_plugins', [$database]);
-        $this->assertSame(['sg-cachepress/sg-cachepress.php'], $result);
+        $this->assertSame(['pressable-cache-management/pressable-cache-management.php'], $result);
 
         $remaining = unserialize($this->fetchOption($database, 'active_plugins', 'custom_'));
         $this->assertSame(['akismet/akismet.php'], array_values($remaining));
@@ -190,6 +190,45 @@ class DeactivateHostPluginsTest extends TestCase
     /**
      * @dataProvider targetProvider
      */
+    public function testKeepsPortablePluginsActive(string $engine): void
+    {
+        $database = $this->createDatabase($engine);
+        $this->createWpOptionsTable($database);
+        $serialized = serialize([
+            'redis-cache/redis-cache.php',
+            'wp-rocket/wp-rocket.php',
+            'sg-cachepress/sg-cachepress.php',
+            'sg-security/sg-security.php',
+        ]);
+        $this->insertOption($database, 'active_plugins', $serialized);
+        $this->writeState([]);
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+
+        $this->assertSame([], $this->callPrivate($client, 'deactivate_host_plugins', [$database]));
+        $this->assertSame($serialized, $this->fetchOption($database, 'active_plugins'));
+    }
+
+    /**
+     * @dataProvider targetProvider
+     */
+    public function testIncludeHostPluginsKeepsPlatformPluginsActive(string $engine): void
+    {
+        $database = $this->createDatabase($engine);
+        $this->createWpOptionsTable($database);
+        $serialized = serialize(['pressable-onepress-login/pressable-onepress-login.php']);
+        $this->insertOption($database, 'active_plugins', $serialized);
+        $this->writeState(['include_host_plugins' => true]);
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+
+        $this->assertSame([], $this->callPrivate($client, 'deactivate_host_plugins', [$database]));
+        $this->assertSame($serialized, $this->fetchOption($database, 'active_plugins'));
+    }
+
+    /**
+     * @dataProvider targetProvider
+     */
     public function testReturnsEmptyWhenNoHostPluginsUnderPluginsDir(string $engine): void
     {
         // The active list contains no excluded plugin directory, so the value
@@ -227,7 +266,7 @@ class DeactivateHostPluginsTest extends TestCase
         // Intentionally no active_plugins row.
 
         $this->writeState([
-            'webhost' => 'siteground',
+            'webhost' => 'other',
             'preflight' => [
                 'data' => [
                     'database' => ['wp' => ['table_prefix' => 'wp_']],
@@ -378,7 +417,7 @@ class DeactivateHostPluginsTest extends TestCase
 
     private function writeState(array $state): void
     {
-        \write_current_pull_state($this->makeClient(), $state);
+        \write_current_pull_state($this->makeClient(), $state + ['include_host_plugins' => false]);
     }
 
     private function makeClient(): \ImportClient
