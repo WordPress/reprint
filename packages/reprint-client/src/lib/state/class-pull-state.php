@@ -59,7 +59,7 @@ class PullState
     public string $fs_root_nonempty_behavior = 'error';
     public string $filter = 'none';
     /** Keep host platform plugins through file download, db-apply, and apply-runtime. */
-    public bool $include_host_plugins = false;
+    public bool $include_host_plugins = true;
     /** @var string|null User-Agent that worked during preflight. */
     public ?string $user_agent = null;
     public ?int $max_allowed_packet = null;
@@ -121,6 +121,8 @@ class PullState
     public static function from_array(array $data): self
     {
         $state = new self();
+        // State written before the host-plugin setting existed used automatic
+        // cleanup. Keep that behavior when resuming those imports.
         $data += ['files_pull_mode' => 'catch-up', 'include_host_plugins' => false];
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
