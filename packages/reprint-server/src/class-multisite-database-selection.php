@@ -2,6 +2,8 @@
 
 namespace WordPress\Reprint\Server;
 
+require_once __DIR__ . '/utils.php';
+
 /**
  * Selects one site's core tables and its related records in shared core tables.
  *
@@ -115,7 +117,7 @@ class MultisiteDatabaseSelection {
             // Starting again replaces one site's set, including abandoned work.
             // Do not delete it at completion: the last HTTP response may be lost
             // and the importer may still need to replay an earlier cursor.
-            $this->generation = bin2hex(random_bytes(16));
+            $this->generation = bin2hex(generate_random_bytes(16));
             $db->exec("DROP TABLE IF EXISTS `{$table}`");
             $db->exec("CREATE TABLE `{$table}` (user_id bigint unsigned NOT NULL PRIMARY KEY, reference_kind tinyint unsigned NOT NULL, reference_id bigint unsigned NOT NULL) ENGINE=InnoDB COMMENT='reprint-users-v1:{$this->generation}'");
         } catch (\Throwable $error) {
