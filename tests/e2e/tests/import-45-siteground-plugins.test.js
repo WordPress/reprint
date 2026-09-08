@@ -410,8 +410,8 @@ describe.each([
                 echo 'loaded';
             `, muPluginsDir], { encoding: 'utf-8', timeout: 10000 });
             assert.equal(output, 'loaded');
-            assert.equal(existsSync(join(muPluginsDir, 'mu-plugin.php')), includeHostPlugins);
-            assert.equal(existsSync(join(muPluginsDir, 'wpengine-common')), includeHostPlugins);
+            assert.equal(existsSync(join(muPluginsDir, 'mu-plugin.php')), keepRuntimeHostPlugins);
+            assert.equal(existsSync(join(muPluginsDir, 'wpengine-common')), keepRuntimeHostPlugins);
         });
     });
 });
