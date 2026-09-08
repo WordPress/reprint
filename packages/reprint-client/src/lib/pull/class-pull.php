@@ -510,6 +510,9 @@ class Pull
                 break;
 
             case 'apply-runtime':
+                // The pull flag selects downloads, not local runtime cleanup.
+                // A resumed pipeline must make the same choice without the flag.
+                unset($options['include_host_plugins']);
                 $this->client->run_apply_runtime($options);
                 $this->print_done($stage);
                 break;

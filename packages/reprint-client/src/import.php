@@ -963,14 +963,15 @@ class ImportClient
         $this->progress_output_mode = $progress_output_mode;
         $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
 
-        // files-diff uses local push state and must not load or write the
-        // pull command's pull/state.json file.
+        // Local runtime cleanup is recorded in pull state. Read it for diff
+        // exclusions as well as push; neither command changes the pull selection.
         if ($command === "files-diff") {
             if (is_file($this->pull_index_wal_path)) {
                 throw new RuntimeException(
                     "Finish or abort the interrupted files-pull before running files-diff."
                 );
             }
+            $this->state = $this->load_state();
             $this->run_files_diff($options);
             return;
         }
@@ -1010,18 +1011,16 @@ class ImportClient
         }
 
         /**
-         * Keep file selection and later cleanup on the same saved setting.
-         *
-         * A pull started with --include-host-plugins must also keep those plugins
-         * during db-apply and apply-runtime, even when later commands omit the flag.
-         * --exclude-host-plugins selects cleanup for those same stages.
-         * Changing it mid-pull would combine an index built with one exclusion list
-         * with cleanup using another. Check both the command and the pipeline:
-         * files-pull can be complete while the pipeline still has db-apply pending.
+         * Keep file selection and db-apply on the same saved setting.
+         * apply-runtime selects cleanup for its invocation, independently.
+         * Changing the saved choice mid-pull would combine an index built with
+         * one exclusion list with db-apply using another. Check both the command
+         * and the pipeline: files-pull can be complete while db-apply is pending.
          * --abort allows a new choice for the next run.
          */
         if (
-            isset($options["include_host_plugins"])
+            $command !== "apply-runtime"
+            && isset($options["include_host_plugins"])
             && $options["include_host_plugins"] !== $this->get_state()->include_host_plugins
         ) {
             $checkpoint = $this->get_state()->active_resumable_command;
@@ -1482,9 +1481,16 @@ class ImportClient
             if (!mkdir($plan_directory, 0755, true)) {
                 throw new RuntimeException('Failed to create the local plan directory: ' . $plan_directory . '.');
             }
-            $excluded_paths_path = wp_join_unix_paths($plan_directory, 'no_target_exclusions.json');
-            if (file_put_contents($excluded_paths_path, "[]\n") === false) {
-                throw new RuntimeException('Failed to write the empty exclusions file: ' . $excluded_paths_path . '.');
+            // files-diff covers the whole filesystem root, so prepend the
+            // remote document root to the runtime's document-root-relative paths.
+            $excluded_paths = [];
+            $document_root = $this->get_state()->preflight_record()['data']['runtime']['document_root'] ?? '/';
+            foreach ($this->get_state()->apply->remote_paths_removed_from_local_site as $document_root_relative_path) {
+                $excluded_paths[] = base64_encode(ltrim(wp_join_unix_paths($document_root, $document_root_relative_path), '/'));
+            }
+            $excluded_paths_path = wp_join_unix_paths($plan_directory, 'local_exclusions.json');
+            if (file_put_contents($excluded_paths_path, json_encode($excluded_paths, JSON_THROW_ON_ERROR)) === false) {
+                throw new RuntimeException('Failed to write local exclusions: ' . $excluded_paths_path . '.');
             }
             $plan = PushPlan::start(
                 $plan_directory,
@@ -1767,6 +1773,7 @@ class ImportClient
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
             'allow_http' => $options['force_http'] ?? false,
             'chunk_bytes' => $chunk_bytes,
+            'excluded_paths' => $this->get_state()->apply->remote_paths_removed_from_local_site,
         ];
 
         $resuming = is_file(wp_join_unix_paths($context['push_state_directory'], 'sender.json'));
@@ -4960,6 +4967,18 @@ class ImportClient
             $abs_output_dir = realpath($abs_output_dir);
         }
 
+        $excluded_plugins = ( $options['include_host_plugins'] ?? false ) ? [] : excluded_plugins($preflight_data);
+        $excluded_local_paths = array_column($excluded_plugins, 'local_path');
+        if ($excluded_local_paths !== []) {
+            $push_state_directory = wp_join_unix_paths(dirname($this->pull_state_directory), 'push');
+            if (is_file(wp_join_unix_paths($push_state_directory, 'sender.json'))) {
+                throw new RuntimeException('Finish the interrupted files-push before applying local runtime cleanup.');
+            }
+            if (is_file($this->pull_index_wal_path)) {
+                throw new RuntimeException('Finish or abort the interrupted files-pull before applying local runtime cleanup.');
+            }
+        }
+
         // Step 1: Build the runtime manifest from preflight data.
         $manifest = runtime_manifest_for($preflight_data);
         $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data);
@@ -5082,8 +5101,14 @@ class ImportClient
 
         // A previous import or pre-existing local tree may already contain an
         // excluded plugin. File download filtering cannot remove that copy.
-        $excluded_plugins = $this->get_excluded_plugins();
-        $excluded_local_paths = array_column($excluded_plugins, 'local_path');
+        // Save exclusions before the first removal: a stopped setup must not
+        // turn its completed removals into source-host deletions on the next push.
+        // A later opt-out does not restore files removed by an earlier setup.
+        $this->get_state()->apply->remote_paths_removed_from_local_site = array_values(array_unique(array_merge(
+            $this->get_state()->apply->remote_paths_removed_from_local_site,
+            $excluded_local_paths
+        )));
+        $this->save_state();
         foreach ($excluded_local_paths as $rel_path) {
             $full_path = wp_join_unix_paths($local_document_root, $rel_path);
             if (!file_exists($full_path) && !is_link($full_path)) {
@@ -5101,10 +5126,6 @@ class ImportClient
         foreach ($summary as $line) {
             $this->audit_log("APPLY-RUNTIME | {$line}");
         }
-
-        // Persist which paths were removed so callers can inspect state.
-        $this->get_state()->apply->remote_paths_removed_from_local_site = $excluded_local_paths;
-        $this->save_state();
 
         // Read the structured start config if the applier wrote one.
         // Playground CLI writes start.json with mount paths as seen by
@@ -6754,6 +6775,7 @@ class ImportClient
             $this->get_state()->active_resumable_command->current_stage = "database-start";
             $this->get_state()->active_resumable_command->remote_cursor = null;
             $this->get_state()->apply = new DatabaseApplyCommandState();
+            $this->get_state()->apply->remote_paths_removed_from_local_site = $apply_state->remote_paths_removed_from_local_site;
             if (!empty($url_mapping)) {
                 $this->get_state()->apply->rewrite_url = $url_mapping;
             }
@@ -7300,7 +7322,7 @@ class ImportClient
     }
 
     /**
-     * Use the same saved host-plugin policy for download and both apply commands.
+     * Use the same saved host-plugin policy for download and db-apply.
      *
      * @return array[] { Excluded paths, or an empty list when host plugins are included.
      *
@@ -7328,8 +7350,8 @@ class ImportClient
      * `/scope:<slug>/` iframe scope.
      *
      * wpcomsh has the same shape but lives under mu-plugins. The host-plugin
-     * list removes it before WordPress boots unless --include-host-plugins
-     * leaves that cleanup to the caller.
+     * list removes it before WordPress boots unless apply-runtime receives
+     * --include-host-plugins and leaves that cleanup to the caller.
      *
      * Skipped when the new site URL is empty or has no path beyond `/`.
      *
@@ -12450,6 +12472,7 @@ class ImportClient
         $this->state->webhost = $previous_state->webhost;
         $this->state->follow_symlinks = $previous_state->follow_symlinks;
         $this->state->include_host_plugins = $previous_state->include_host_plugins;
+        $this->state->apply->remote_paths_removed_from_local_site = $previous_state->apply->remote_paths_removed_from_local_site;
         $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
         $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
         $this->state->resolved_path_mappings_fingerprint = $previous_state->resolved_path_mappings_fingerprint;
@@ -13132,7 +13155,7 @@ if (
             'type' => 'flag',
             'target' => 'include_host_plugins',
             'flag_value' => false,
-            'help' => 'Skip listed host platform plugins and drop-ins, deactivate excluded plugins, and remove their local copies during runtime setup (saved in state)',
+            'help' => 'Skip host platform plugins during pull and deactivate them during db-apply (saved in state). For apply-runtime only: remove local copies (the default), without changing the saved pull choice',
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'db-apply', 'apply-runtime'],
         ],
@@ -13140,7 +13163,7 @@ if (
             'name' => 'include-host-plugins',
             'type' => 'flag',
             'target' => 'include_host_plugins',
-            'help' => 'Keep host platform plugins and drop-ins (default for new state); disable their download filtering, deactivation, and runtime cleanup (saved in state)',
+            'help' => 'Keep host platform plugins during pull and db-apply (default for new state; saved in state). For apply-runtime only: skip local cleanup without changing the saved pull choice',
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'db-apply', 'apply-runtime'],
         ],
