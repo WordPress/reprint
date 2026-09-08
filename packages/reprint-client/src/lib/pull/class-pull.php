@@ -1028,7 +1028,7 @@ class Pull
             "error_code" => $this->client->last_error_code,
             "error" => $e->getMessage(),
             "message" => $message,
-        ]);
+        ] + $this->client->get_retry_error_fields($e));
         $this->client->write_progress_file($message);
 
         $red = "\033[31m";

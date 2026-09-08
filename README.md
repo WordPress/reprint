@@ -272,8 +272,8 @@ transfer, the sequence is:
 | Failed request without progress | Result |
 | --- | --- |
 | First and second | Retry immediately, in this process or after exit `2` |
-| Third | Exit `3`: retry later |
-| Fourth, in a later run | Exit `3`: retry later once more |
+| Third | Exit `3`: retry after 15 minutes (`retry_after_seconds: 900`) |
+| Fourth, in a later run | Exit `3`: retry after 45 minutes (`retry_after_seconds: 2700`) |
 | Fifth, in a later run | Exit `1`: stop automatic retries |
 
 A successful response or an interrupted response with a new durable cursor
@@ -294,8 +294,11 @@ Explicit Reprint errors (JSON containing a matching HTTP `code`) remain fatal.
 Preflight failures, DNS lookup failures, refused connections, certificate errors,
 and local errors are not covered by this delayed-retry rule.
 
-The caller chooses the delays between exit-`3` runs and cancels pending retries
-when a human intervenes. Reprint does not schedule retries or track human action.
+JSON error records on stdout and stderr include the integer
+`retry_after_seconds` when exiting `3`. The field is absent for successful,
+partial, and permanent-error exits. The caller schedules the next run after
+that delay and cancels pending retries when a human intervenes. Reprint does
+not wait, schedule retries, or track human action.
 
 **File pull modes**
 

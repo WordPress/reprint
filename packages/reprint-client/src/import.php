@@ -207,8 +207,8 @@ class ImportClient
      */
     private const MAX_CONSECUTIVE_INTERRUPTED_RESPONSES = 3;
 
-    /** Later failed requests allowed after the immediate retry limit. */
-    private const MAX_DELAYED_RETRIES = 2;
+    /** Suggested wait before each delayed retry, in seconds. */
+    private const DELAYED_RETRY_SECONDS = [900, 2700];
 
     /** Maximum response header bytes retained for failed request audit logging. */
     private const MAX_AUDIT_RESPONSE_HEADER_BYTES = 65536;
@@ -1429,7 +1429,7 @@ class ImportClient
                 "error" => $e->getMessage(),
                 "error_code" => $this->last_error_code,
                 "message" => "Error: " . $e->getMessage(),
-            ]);
+            ] + $this->get_retry_error_fields($e));
             $this->write_progress_file($e->getMessage());
             throw $e;
         }
@@ -11674,7 +11674,7 @@ class ImportClient
      * cursor did not move, the counter increments. After
      * MAX_CONSECUTIVE_INTERRUPTED_RESPONSES with no progress, the runner stops
      * with exit 3. Each later run stops at its first failure without progress:
-     * exit 3, then 1 once MAX_DELAYED_RETRIES have also failed. A successful request or
+     * exit 3, then 1 once the delayed retries have also failed. A successful request or
      * a durable cursor advance resets the count, not a changed error message.
      *
      * @param string                           $phase         Human-readable phase name.
@@ -11695,7 +11695,7 @@ class ImportClient
         }
 
         $count = $this->get_state()->consecutive_interrupted_responses;
-        $failure_limit = self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES + self::MAX_DELAYED_RETRIES;
+        $failure_limit = self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES + count(self::DELAYED_RETRY_SECONDS);
 
         $this->audit_log(
             "TEMPORARY REQUEST FAILURE | {$phase} | " .
@@ -11728,6 +11728,25 @@ class ImportClient
             );
             // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         }
+    }
+
+    /**
+     * Suggested retry delay for JSON error output, derived from saved attempts.
+     *
+     * @param Throwable $exception Failure being reported, not a previous cause.
+     * @return array {
+     *     @type int $retry_after_seconds Suggested wait in seconds. Omitted when no delayed retry is available.
+     * }
+     */
+    public function get_retry_error_fields(Throwable $exception): array
+    {
+        if (!$exception instanceof TransientInterruptionException) {
+            return [];
+        }
+        $delayed_retry = $this->get_state()->consecutive_interrupted_responses
+            - self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES;
+        $seconds = self::DELAYED_RETRY_SECONDS[$delayed_retry] ?? null;
+        return $seconds === null ? [] : ['retry_after_seconds' => $seconds];
     }
 
     /**
@@ -14649,7 +14668,7 @@ if (
                 "exception" => get_class($e),
                 "file" => $e->getFile(),
                 "line" => $e->getLine(),
-            ];
+            ] + ( isset($client) ? $client->get_retry_error_fields($e) : [] );
             $json = json_encode($error);
             if ($json === false) {
                 $json = '{"error":"' . addslashes($e->getMessage()) . '","exception":"' . get_class($e) . '"}';

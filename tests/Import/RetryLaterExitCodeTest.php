@@ -73,6 +73,7 @@ final class RetryLaterExitCodeTest extends TestCase {
         file_put_contents($this->root . '/proxy-status', '200');
         $result = $this->run_command($command);
         $this->assertSame(0, $result['exit_code'], $result['output']);
+        $this->assert_retry_delay_in_json($result, null);
         $this->assertSame(
             file_get_contents($this->root . '/remote/example.txt'),
             file_get_contents($this->root . '/files' . $this->root . '/remote/example.txt')
@@ -102,6 +103,7 @@ final class RetryLaterExitCodeTest extends TestCase {
         foreach ([3, 3, 1, 1] as $run => $expected_exit_code) {
             $result = $this->run_command($command);
             $this->assertSame($expected_exit_code, $result['exit_code'], $result['output']);
+            $this->assert_retry_delay_in_json($result, [900, 2700, null, null][$run]);
             $this->assertSame(
                 3 + $run,
                 substr_count(file_get_contents($this->root . '/requests.log'), $endpoint . "\n"),
@@ -118,6 +120,7 @@ final class RetryLaterExitCodeTest extends TestCase {
         foreach ([2, 2, 3, 3, 1] as $run => $expected_exit_code) {
             $result = $this->run_command('db-index');
             $this->assertSame($expected_exit_code, $result['exit_code'], $result['output']);
+            $this->assert_retry_delay_in_json($result, [null, null, 900, 2700, null][$run]);
             $this->assertSame($run + 1, substr_count(file_get_contents($this->root . '/requests.log'), "db_index\n"));
         }
     }
@@ -141,9 +144,10 @@ final class RetryLaterExitCodeTest extends TestCase {
 
         // Let the real index complete, then fail at the next transfer phase.
         file_put_contents($this->root . '/proxy-endpoint', 'file_fetch');
-        foreach ([3, 3, 1] as $expected_exit_code) {
+        foreach ([3, 3, 1] as $run => $expected_exit_code) {
             $result = $this->run_command('files-pull');
             $this->assertSame($expected_exit_code, $result['exit_code'], $result['output']);
+            $this->assert_retry_delay_in_json($result, [900, 2700, null][$run]);
         }
     }
 
@@ -154,6 +158,45 @@ final class RetryLaterExitCodeTest extends TestCase {
         $this->assertSame(1, $result['exit_code'], $result['output']);
         $this->assertStringContainsString('NOT_FOUND', $result['output']);
         $this->assertSame(1, substr_count(file_get_contents($this->root . '/requests.log'), "file_index\n"));
+    }
+
+    public function testPermanentFailureAfterDelayedRetryHasNoSuggestedWait(): void
+    {
+        file_put_contents($this->root . '/proxy-status', '520');
+        $result = $this->run_command('files-pull');
+        $this->assertSame(3, $result['exit_code'], $result['output']);
+
+        file_put_contents($this->root . '/proxy-status', '404');
+        $result = $this->run_command('files-pull');
+        $this->assertSame(1, $result['exit_code'], $result['output']);
+        $this->assert_retry_delay_in_json($result, null);
+    }
+
+    /**
+     * @param array $result {
+     *     @type int    $exit_code Process exit status.
+     *     @type string $output    CLI progress and errors.
+     * }
+     * @param int|null $expected_seconds Expected delay, or null when no retry is suggested.
+     */
+    private function assert_retry_delay_in_json(array $result, ?int $expected_seconds): void
+    {
+        $error_records = 0;
+        foreach (explode("\n", trim($result['output'])) as $line) {
+            $record = json_decode($line, true);
+            $this->assertIsArray($record, $line);
+            if ($expected_seconds === null) {
+                $this->assertArrayNotHasKey('retry_after_seconds', $record);
+            } elseif (( $record['status'] ?? null ) === 'error' || isset($record['exception'])) {
+                $this->assertSame($expected_seconds, $record['retry_after_seconds'] ?? null, $line);
+                ++$error_records;
+            }
+        }
+        if ($expected_seconds !== null) {
+            // Both the progress error on stdout and the final error on stderr
+            // must carry the same suggestion.
+            $this->assertSame(2, $error_records);
+        }
     }
 
     /**
