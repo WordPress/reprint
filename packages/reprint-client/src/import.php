@@ -11702,7 +11702,7 @@ class ImportClient
 
         if ($count >= self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES) {
             // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The remote failure is rendered only as CLI text.
-            throw new RuntimeException(
+            throw new TransientInterruptionException(
                 "The remote request failed {$count} consecutive times " .
                 "without cursor progress during {$phase}. Last failure: " .
                 $exception->getMessage(),
@@ -13744,6 +13744,7 @@ if (
         echo "Exit codes:\n";
         echo "  0  Command completed successfully\n";
         echo "  2  Partial progress — run the same command again to continue\n";
+        echo "  3  Temporary transfer failure — retry the same command later\n";
         echo "  1  Error\n";
         echo "\n";
         echo "Resumable commands keep their command-specific work under --state-dir.\n";
@@ -14636,9 +14637,10 @@ if (
             }
             fwrite(STDERR, $json . "\n");
         }
-        $GLOBALS['REPRINT_PULL_EXIT_CODE'] = 1;
+        $reprint_exit_code = $e instanceof TransientInterruptionException ? 3 : 1;
+        $GLOBALS['REPRINT_PULL_EXIT_CODE'] = $reprint_exit_code;
         if (!defined('EXIT_AFTER_PULL') || EXIT_AFTER_PULL) {
-            exit(1);
+            exit( (int) $reprint_exit_code );
         }
         // When EXIT_AFTER_PULL is false we still want the embedder
         // to see the failure — re-throw so its try/catch around

@@ -254,13 +254,26 @@ It can be interrupted and resumed at any time — just re-run the same command:
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
-The command returns one of three exit codes:
+The command returns one of four exit codes:
 
 - 0: sync completed
 - 1: failure
 - 2: partial completion, needs re-running
+- 3: temporary transfer failure, retry the same command later
 
-Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
+Run again immediately after exit `2`. After exit `3`, wait before running the
+same command with the same state directory and filesystem root. Reprint keeps
+its saved progress. Exit `1` requires checking the error instead of scheduling
+an automatic retry.
+
+Exit `3` covers temporary streaming transfer failures, including repeated HTTP
+520–524 responses, after the in-process retry limit is reached. It also applies
+when these failures reach `pull`, `pull-files`, or `pull-db`. It does not classify
+all command errors: preflight failures and local errors still exit `1`.
+
+The caller decides when to retry. For example, Migration Assistant can schedule
+retries after 5, 15, and 60 minutes and cancel pending retries when a human
+intervenes. Reprint does not schedule retries or track human action.
 
 **File pull modes**
 
@@ -529,11 +542,12 @@ environment variable). The host string also supports `host:port` and
 `host:/path/to/socket` formats (same as WordPress `DB_HOST`), but
 `--mysql-port` takes precedence when both are specified.
 
-The command returns one of three exit codes:
+The command returns one of four exit codes:
 
 - 0: sync completed
 - 1: failure
 - 2: partial completion, needs re-running
+- 3: temporary transfer failure, retry the same command later
 
 #### Step 4 — Download files delta.
 
@@ -554,11 +568,12 @@ since the initial sync, and apply that delta in the local directory:
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
-The command returns one of three exit codes:
+The command returns one of four exit codes:
 
 - 0: sync completed
 - 1: failure
 - 2: partial completion, needs re-running
+- 3: temporary transfer failure, retry the same command later
 
 #### Step 5 — Apply the database with domain rewriting.
 
