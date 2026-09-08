@@ -416,6 +416,7 @@ class Pull
         // even when this pipeline has already completed its preflight stage.
         $preflight_error = $this->client->get_state()->preflight_record()["error"] ?? null;
         if ($stage !== 'preflight' && !empty($preflight_error)) {
+            $this->client->last_error_code = $this->client->get_preflight_error()['code'];
             $this->client->exit_code = 1;
             // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error, never HTML.
             throw new RuntimeException($preflight_error);
@@ -424,14 +425,15 @@ class Pull
         switch ($stage) {
             case 'preflight':
                 $this->client->run_preflight();
-                $preflight = $this->client->get_state()->preflight_record();
-                $ok = ($preflight["http_code"] ?? 0) === 200 && !empty($preflight["data"]["ok"]);
-                if (!$ok) {
+                $error = $this->client->get_preflight_error();
+                $this->client->last_error_code = $error['code'] ?? null;
+                if ($error !== null) {
                     $this->client->exit_code = 1;
-                    throw new RuntimeException($preflight["error"] ?? "Preflight check failed");
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error, never HTML.
+                    throw new RuntimeException($error['message']);
                 }
                 $summary = null;
-                $data = $preflight["data"] ?? null;
+                $data = $this->client->get_state()->preflight_record()["data"] ?? null;
                 if (is_array($data)) {
                     $parts = [];
                     $wp = $data["database"]["wp"]["wp_version"] ?? null;
@@ -1028,7 +1030,7 @@ class Pull
             "error" => $e->getMessage(),
             "message" => $message,
         ] + $this->client->get_error_details($e));
-        $this->client->write_progress_file($message);
+        $this->client->write_progress_file($e->getMessage());
 
         $red = "\033[31m";
         $dim = "\033[2m";

@@ -260,6 +260,10 @@ request. Its JSONL result includes the same error fields alongside the existing
 failures report the failed check details with `PREFLIGHT_FAILED`. If no report
 has been saved, it reports `PREFLIGHT_REQUIRED` and asks you to run `preflight`.
 The terminal summary and `progress.json` also include the failure detail.
+The preflight stage inside `pull`, `pull-files`, and `pull-db` uses the same
+failure details and codes. Download errors use the same four fields; their
+`message` may add the failed stage, while `error` and `progress.json` retain
+the failure detail. cURL failures use `CURL_ERROR` for both preflight and downloads.
 
 For hosting platform-specific checks, such as database version compatibility or
 php version compatibility, you might need your own custom logic. See the 

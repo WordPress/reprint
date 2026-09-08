@@ -74,6 +74,12 @@ final class PreflightErrorOutputTest extends TestCase {
         $this->assertSame($error_code, $assertion['error_code']);
         $this->assertNotEmpty($assertion['checks']);
         $this->assert_error_output($assertion);
+
+        $pull = $this->run_command('pull-files', 1);
+        $this->assertSame('preflight', $pull['failed_stage']);
+        $this->assertSame($preflight['error'], $pull['error']);
+        $this->assertSame($error_code, $pull['error_code']);
+        $this->assert_error_output($pull);
     }
 
     public static function failed_responses(): array
@@ -108,6 +114,59 @@ final class PreflightErrorOutputTest extends TestCase {
         $this->assertSame($preflight['error'], $assertion['error']);
         $this->assertSame('CURL_ERROR', $assertion['error_code']);
         $this->assert_error_output($assertion);
+
+        $pull = $this->run_command('pull-files', 1);
+        $this->assertSame('preflight', $pull['failed_stage']);
+        $this->assertSame('CURL_ERROR', $pull['error_code']);
+        $this->assertStringContainsString('cURL error', $pull['error']);
+        $this->assert_error_output($pull);
+    }
+
+    /** @dataProvider download_commands */
+    public function testDownloadFailuresUseTheSameErrorFields(string $command, bool $connection_failure): void
+    {
+        $preflight_body = json_encode([
+            'ok' => true,
+            'protocol_version' => PULL_PROTOCOL_VERSION,
+            'filesystem' => ['ok' => true],
+            'database' => ['connected' => true],
+            'wp_detect' => ['roots' => [['path' => '/site']]],
+        ]);
+        file_put_contents($this->root . '/response.json', json_encode([
+            'http_code' => 200,
+            'body' => $preflight_body,
+        ]));
+        $this->run_command('preflight', 0);
+        file_put_contents($this->root . '/response.json', json_encode([
+            'http_code' => 401,
+            'body' => '{"error":"Invalid signature"}',
+            'preflight_body' => $preflight_body,
+        ]));
+        if ($connection_failure) {
+            proc_terminate($this->server_process);
+            proc_close($this->server_process);
+            $this->server_process = null;
+        }
+        // A signed request's unmarked HTTP 401 can come from a gateway; it is
+        // retryable. A refused connection still exits with code 1.
+        $download = $this->run_command($command, $connection_failure ? 1 : 3);
+        $this->assertSame($connection_failure ? 'CURL_ERROR' : 'AUTH_FAILED', $download['error_code']);
+        $this->assertStringContainsString($connection_failure ? 'cURL error' : 'Invalid signature', $download['error']);
+        $this->assert_error_output($download);
+    }
+
+    public static function download_commands(): array
+    {
+        return [
+            'files-pull HTTP error' => ['files-pull', false],
+            'db-pull HTTP error' => ['db-pull', false],
+            'pull-files HTTP error' => ['pull-files', false],
+            'pull-db HTTP error' => ['pull-db', false],
+            'files-pull connection error' => ['files-pull', true],
+            'db-pull connection error' => ['db-pull', true],
+            'pull-files connection error' => ['pull-files', true],
+            'pull-db connection error' => ['pull-db', true],
+        ];
     }
 
     public function testRealEndpointFailureReportsItsReason(): void
@@ -199,13 +258,18 @@ final class PreflightErrorOutputTest extends TestCase {
      *     @type string $status     Command status.
      *     @type string $error      Failure detail.
      *     @type string $message    Display message.
-     *     @type string $error_code Machine-readable failure code.
+     *     @type string $error_code   Machine-readable failure code.
+     *     @type string $failed_stage Optional failed pipeline stage.
      * }
      */
     private function assert_error_output(array $result): void
     {
         $this->assertSame('error', $result['status']);
-        $this->assertSame('Error: ' . $result['error'], $result['message']);
+        if (isset($result['failed_stage'])) {
+            $this->assertStringContainsString($result['error'], $result['message']);
+        } else {
+            $this->assertSame('Error: ' . $result['error'], $result['message']);
+        }
         $progress = json_decode(file_get_contents($this->root . '/state/progress.json'), true);
         $this->assertSame('error', $progress['status']);
         $this->assertSame($result['error'], $progress['error']);
@@ -214,21 +278,29 @@ final class PreflightErrorOutputTest extends TestCase {
 
     private function run_command(string $command, int $exit_code): array
     {
-        $process = proc_open(
-            [PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
-                $command, $this->remote_url, '--secret=preflight-test-secret',
-                '--state-dir=' . $this->root . '/state', '--fs-root=' . $this->root . '/files',
-                '--progress=jsonl'],
-            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
-            $pipes
-        );
-        $this->assertIsResource($process);
-        fclose($pipes[0]);
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $this->assertSame($exit_code, proc_close($process), $stdout . $stderr);
+        // Continue healthy partial work according to the exit-code-2 contract.
+        // Request failures return to the caller without retrying here.
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            $process = proc_open(
+                [PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
+                    $command, $this->remote_url, '--secret=preflight-test-secret',
+                    '--state-dir=' . $this->root . '/state', '--fs-root=' . $this->root . '/files',
+                    '--progress=jsonl'],
+                [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                $pipes
+            );
+            $this->assertIsResource($process);
+            fclose($pipes[0]);
+            $stdout = stream_get_contents($pipes[1]);
+            $stderr = stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $actual_exit_code = proc_close($process);
+            if ($actual_exit_code !== 2) {
+                break;
+            }
+        }
+        $this->assertSame($exit_code, $actual_exit_code, $stdout . $stderr);
         $records = array_map(static function (string $line): array {
             return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
         }, array_filter(explode("\n", trim($stdout))));

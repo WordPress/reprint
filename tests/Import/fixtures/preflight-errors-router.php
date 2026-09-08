@@ -4,6 +4,12 @@
 // over HTTP. Without a response fixture, exercise the real preflight endpoint.
 if (is_file('response.json')) {
     $reprint_response = json_decode(file_get_contents('response.json'), true);
+    // phpcs:ignore WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput -- Select the fixture for the endpoint the real client requested.
+    if ( ( $_GET['endpoint'] ?? '' ) === 'preflight' && isset($reprint_response['preflight_body'])) {
+        // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- This is the fixture's JSON response.
+        echo $reprint_response['preflight_body'];
+        return;
+    }
     http_response_code($reprint_response['http_code']);
     if ($reprint_response['http_code'] === 302) {
         header('Location: https://example.test/reprint-api');

@@ -438,7 +438,7 @@ class ImportClient
     /** @var bool Whether the last curl request timed out. */
     private $last_curl_timeout = false;
 
-    /** @var string|null Machine-readable error code from the last diagnose_http_error() call. */
+    /** @var string|null Machine-readable HTTP, cURL, or preflight error code for reporting. */
     public $last_error_code = null;
 
     /** @var TerminalProgress Renders progress and lifecycle output to the terminal. */
@@ -1263,6 +1263,7 @@ class ImportClient
                 $this->output_progress([
                     "status" => "error",
                     "error" => $e->getMessage(),
+                    "error_code" => $this->last_error_code,
                     "message" => "Error: " . $e->getMessage(),
                 ]);
                 $this->write_progress_file($e->getMessage());
@@ -3146,7 +3147,7 @@ class ImportClient
      *     @type string $message Failure detail for display.
      * }
      */
-    private function get_preflight_error(): ?array
+    public function get_preflight_error(): ?array
     {
         $entry = $this->get_state()->preflight_record();
         if ($entry === null) {
@@ -11819,7 +11820,7 @@ class ImportClient
     }
 
     /**
-     * Check for cURL errors after curl_exec and record timeout state.
+     * Check for cURL errors after curl_exec and record the error code and timeout state.
      *
      * @throws CurlTimeoutException          When the request times out.
      * @throws TransientInterruptionException When the response ends early.
@@ -11840,6 +11841,7 @@ class ImportClient
             ? CURLE_OPERATION_TIMEDOUT
             : 28;
 
+        $this->last_error_code = "CURL_ERROR";
         $this->last_curl_errno = $error_number;
         $this->last_curl_timeout = $error_number === $timeout_error_number;
 
@@ -12226,7 +12228,7 @@ class ImportClient
                 "body" => null,
                 "json" => null,
                 "error" => $e->getMessage(),
-                "error_code" => "CURL_ERROR",
+                "error_code" => $this->last_error_code,
                 "curl_errno" => $this->last_curl_errno,
                 "timeout" => $this->last_curl_timeout,
             ];
