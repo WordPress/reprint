@@ -545,13 +545,15 @@ CSS rewriting uses the shared DataLiberation processor to find `url()`, bare
 protocol-relative URL bases after decoding CSS escapes. Comments, displayed
 text, relative URLs, other domains, URLs containing user information, and
 other file types stay unchanged. The unmatched URL suffix keeps its original
-spelling. Interrupted downloads retain parser state and the unfinished URL
-prefix with the file cursor, so a URL split across requests is rewritten once.
+spelling. Interrupted downloads retain URL context and the unfinished CSS
+token with the file cursor, so a URL split across requests is rewritten once.
 
-The processor streams long comments and embedded images without keeping the
-whole token. It rejects an undecided escaped URL prefix larger than 1 MiB
-and more than 128 nested `image-set()` functions, rather than using unbounded
-memory. An error names the stylesheet; the partial file is not marked complete.
+The processor keeps each unfinished CSS token and parses it again when more
+bytes arrive. A large comment or embedded image therefore increases memory
+use and saved state size; token size is not capped. Completed input is released.
+Malformed string and URL tokens stay unchanged. More than 128 nested
+`image-set()` functions are rejected. An error names the stylesheet; the
+partial file is not marked complete.
 
 File URL mappings remain bound to the saved remote index. Later downloads
 reuse them when the options are omitted. To use different mappings, start

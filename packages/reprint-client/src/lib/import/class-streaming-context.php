@@ -10,7 +10,7 @@ class StreamingContext {
     public $on_chunk = null;
     public $file_handle = null;
     /**
-     * Rewrites the current CSS file and retains incomplete matches across body
+     * Rewrites the current CSS file and retains an unfinished token across body
      * callbacks. Null for files copied without CSS URL rewriting.
      *
      * @var \WordPress\DataLiberation\URL\CSSURLProcessor|null

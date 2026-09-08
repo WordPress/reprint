@@ -86,7 +86,7 @@ class PullState
      */
     public ?array $css_url_mapping = null;
     /**
-     * CSS parser state and undecided URL prefix at the saved fetch cursor.
+     * Unfinished CSS token and URL context at the saved fetch cursor.
      *
      * Restore it together with current_file_bytes, which counts transformed
      * output bytes rather than source bytes. Null means no active CSS rewriter.

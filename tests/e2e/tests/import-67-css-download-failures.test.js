@@ -23,8 +23,11 @@ describe('Import: generated CSS download failures', () => {
     const targetUrl = 'https://target.example.test/moved';
     const chunkBytes = 65536;
     const sourcePath = join(getSiteDir(site), 'test-data/generated.css');
-    const limitPath = join(getSiteDir(site), 'test-data/escaped-prefix-limit.css');
-    const limitCss = 'a{src:url("h' + '\\\n'.repeat(550000) + sourceUrl.slice(1) + '/photo.png")}';
+    const largePath = join(getSiteDir(site), 'test-data/long-escaped-url.css');
+    const largeCss = 'a{src:url("h' + '\\\n'.repeat(550000) + sourceUrl.slice(1) + '/photo.png")}';
+    const limitPath = join(getSiteDir(site), 'test-data/image-set-nesting-limit.css');
+    const limitCss = '/*' + 'a'.repeat(2 * chunkBytes) + '*/a{src:' + 'image-set('.repeat(129)
+        + `"${sourceUrl}/photo.png"` + ')'.repeat(129) + '}';
     const importUrl = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     const projectRoot = join(import.meta.dirname, '../../..');
     const clientPath = process.env.CLIENT_PATH || join(projectRoot, 'packages/reprint-client/bin/reprint-client');
@@ -50,6 +53,7 @@ describe('Import: generated CSS download failures', () => {
                 }
                 writeFileSync(sourcePath, css);
                 writeFileSync(limitPath, limitCss);
+                writeFileSync(largePath, largeCss);
             },
         });
         sourceCss = readFileSync(sourcePath, 'utf8');
@@ -172,17 +176,28 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
         assert.equal(readFileSync(sourcePath, 'utf8'), sourceCss);
     }, 180000);
 
-    it('reports an oversized escaped URL prefix without completing a partial stylesheet', () => {
-        // This is valid source CSS. Line continuations add raw bytes without
-        // completing the URL base, so the shared parser must stop at its cap.
+    it('buffers a long escaped URL and rewrites it once its token is complete', () => {
+        const result = runImporter(importUrl, temporaryDirectory, 'files-pull', {
+            secret: getSiteSecret(site), autoResume: false,
+            extraArgs: downloadArguments().map(argument => argument === sourcePath ? largePath : argument),
+        });
+        assert.equal(result.exitCode, 0, result.stdout + result.stderr);
+        assert.equal(readFileSync(join(fsRootDir(temporaryDirectory), largePath), 'utf8'),
+            `a{src:url("${targetUrl}/photo.png")}`);
+        assert.equal(readFileSync(largePath, 'utf8'), largeCss, 'Source bytes must not change');
+    }, 180000);
+
+    it('reports excessive image-set nesting without completing a partial stylesheet', () => {
+        // Completed comment bytes precede the failing token, so both the first
+        // attempt and resume must leave the stylesheet incomplete.
         const argumentsForLimit = downloadArguments().map(argument => argument === sourcePath ? limitPath : argument);
         for (let attempt = 0; attempt < 2; ++attempt) {
             const result = runImporter(importUrl, temporaryDirectory, 'files-pull', {
                 secret: getSiteSecret(site), autoResume: false, extraArgs: argumentsForLimit,
             });
             assert.equal(result.exitCode, 1, result.stdout + result.stderr);
-            assert.match(result.stdout + result.stderr, /Cannot rewrite CSS file .*escaped-prefix-limit\.css/);
-            assert.match(result.stdout + result.stderr, /exceeding 1048576/);
+            assert.match(result.stdout + result.stderr, /Cannot rewrite CSS file .*image-set-nesting-limit\.css/);
+            assert.match(result.stdout + result.stderr, /nesting exceeds 128/);
             assert.notEqual(readFileSync(join(fsRootDir(temporaryDirectory), limitPath), 'utf8'), limitCss);
             assert.equal(readFileSync(limitPath, 'utf8'), limitCss, 'Source bytes must not change');
         }
