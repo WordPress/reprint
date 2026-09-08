@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createConnection } from 'mysql2/promise';
-import { apiRequest, getSiteDir, getSiteUrl } from '../lib/test-helpers.js';
+import { apiRequest, getSiteDir, getSiteUrl, writeTestHooks, removeTestHooks, readHookState, clearHookState } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { runWp } from '../lib/multisite-setup.js';
 
@@ -55,6 +55,8 @@ define('BLOG_ID_CURRENT_SITE', 1);
         await connection.query(`USE \`${sourceDatabase}\`; SET SESSION sql_mode = ''`);
         // Most network users have no relationship to this site. Anonymous
         // comments force the old correlated query to scan without finding one.
+        // A million comments and ten thousand selected members also expose the
+        // derived UNION's repeated full-site scans across many profile batches.
         await connection.query(`
             CREATE TABLE digits (n int PRIMARY KEY);
             INSERT INTO digits VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
@@ -68,18 +70,23 @@ define('BLOG_ID_CURRENT_SITE', 1);
             INSERT INTO network_usermeta (user_id,meta_key,meta_value)
                 SELECT 1000+n,'nickname',CONCAT('Nickname ',n) FROM numbers;
             INSERT INTO network_usermeta (user_id,meta_key,meta_value)
+                SELECT 1000+numbers.n, profiles.meta_key, 'Profile value' FROM numbers CROSS JOIN
+                (SELECT 'last_name' AS meta_key UNION ALL SELECT 'description'
+                    UNION ALL SELECT 'rich_editing' UNION ALL SELECT 'syntax_highlighting') profiles;
+            INSERT INTO network_usermeta (user_id,meta_key,meta_value)
                 SELECT 1000+n,'network_8_capabilities','a:1:{s:6:"author";b:1;}' FROM numbers;
             INSERT INTO network_usermeta (user_id,meta_key,meta_value)
-                SELECT 1000+n,'network_7_capabilities','a:1:{s:10:"subscriber";b:1;}' FROM numbers WHERE n<600;
+                SELECT 1000+n,'network_7_capabilities','a:1:{s:10:"subscriber";b:1;}' FROM numbers WHERE n<10000;
             INSERT INTO network_7_comments (comment_ID,comment_post_ID,user_id)
-                SELECT 1000+n,100,0 FROM numbers;
+                SELECT 100000+numbers.n+20000*(a.n+10*b.n),100,0
+                FROM numbers CROSS JOIN digits a CROSS JOIN digits b WHERE b.n<5;
             INSERT INTO network_7_comments (comment_ID,comment_post_ID,user_id) VALUES (99999,100,20997);
             INSERT INTO network_7_links (link_id,link_owner) SELECT 1000+n,20998 FROM numbers WHERE n<10000;
             INSERT INTO network_7_posts (ID,post_author) VALUES (99999,20999);
             DROP TEMPORARY TABLE numbers; DROP TABLE digits;
         `);
         const [members] = await connection.query("SELECT ID FROM network_users WHERE user_login IN ('shared','shop-member') ORDER BY ID");
-        expectedUserIds = [...members.map(row => row.ID), ...Array.from({ length: 600 }, (_, index) => 1000 + index), 20997, 20998, 20999];
+        expectedUserIds = [...members.map(row => row.ID), ...Array.from({ length: 10000 }, (_, index) => 1000 + index), 20997, 20998, 20999];
         const [rows] = await connection.query('SHOW TABLES');
         tables = rows.map(row => Object.values(row)[0]);
         await connection.query('ANALYZE TABLE network_users,network_usermeta,network_7_posts,network_7_comments,network_7_links');
@@ -89,6 +96,8 @@ define('BLOG_ID_CURRENT_SITE', 1);
     });
 
     afterAll(async () => {
+        removeTestHooks(site);
+        clearHookState(site);
         if (connection) {
             try { await connection.query(`DROP DATABASE IF EXISTS \`${sourceDatabase}\`; DROP DATABASE IF EXISTS \`${targetDatabase}\``); }
             finally { await connection.end(); }
@@ -99,20 +108,20 @@ define('BLOG_ID_CURRENT_SITE', 1);
     for (const table of ['network_users', 'network_usermeta']) {
         it(`exports and resumes ${table} within the query budget`, async () => {
             const params = {
-                multisite_mode: 'one-site-network-v1', fragments_per_batch: 1,
+                multisite_mode: 'one-site-network-v1', fragments_per_batch: 250,
                 db_query_time_limit: 5000, skip_tables: tables.filter(name => name !== table),
             };
             const first = await apiRequest(site, 'sql_chunk', params, { url, signal: AbortSignal.timeout(20000) });
             assert.equal(first.status, 200, JSON.stringify(first.json));
             assert.equal(first.chunks?.find(chunk => chunk.type === 'completion')?.headers['x-status'], 'complete',
-                `${table} must finish without a query timeout: ${JSON.stringify(first.chunks?.filter(chunk => chunk.type === 'error'))}`);
+                `${table} must finish within one request's time budget: ${JSON.stringify(first.chunks?.filter(chunk => chunk.type === 'error'))}`);
             const firstInsert = first.chunks.findIndex(chunk => chunk.type === 'sql' && chunk.body.includes(`INSERT INTO \`${table}\``));
             assert.ok(firstInsert >= 0, 'Resume from a real INSERT, not a fabricated cursor');
             const resumed = await apiRequest(site, 'sql_chunk', {
                 ...params, cursor: first.chunks[firstInsert].headers['x-cursor'],
             }, { url, signal: AbortSignal.timeout(20000) });
             assert.equal(resumed.chunks?.find(chunk => chunk.type === 'completion')?.headers['x-status'], 'complete',
-                `Resumed ${table} must finish without a query timeout: ${JSON.stringify(resumed.chunks?.filter(chunk => chunk.type === 'error'))}`);
+                `Resumed ${table} must finish within one request's time budget: ${JSON.stringify(resumed.chunks?.filter(chunk => chunk.type === 'error'))}`);
             // Keep only the confirmed prefix from the first request. The second
             // request must supply every remaining row across multiple batches.
             const sql = [...first.chunks.slice(0, firstInsert + 1), ...resumed.chunks]
@@ -134,4 +143,51 @@ define('BLOG_ID_CURRENT_SITE', 1);
             }
         });
     }
+
+    it('rejects an overlapping request, keeps sibling exports independent, and rejects replaced cursors', async () => {
+        clearHookState(site);
+        writeTestHooks(site, `
+function test_hook_after_gzip_init($gz, $boundary) {
+    global $wpdb;
+    if (get_current_blog_id() !== 7) { return; }
+    e2e_write_hook_state('/srv/e2e-sites/.e2e-hook-state-${site}', ['connection_id' => (int) $wpdb->get_var('SELECT CONNECTION_ID()')]);
+    // Hold a real request open before its first SQL part. No store is edited.
+    // This represents a slow worker; another export must fail without waiting.
+    sleep(3);
+}
+`);
+        const params = { multisite_mode: 'one-site-network-v1', skip_tables: tables.filter(name => name !== 'network_7_options') };
+        const firstRequest = apiRequest(site, 'sql_chunk', params, { url, signal: AbortSignal.timeout(20000) });
+        try {
+            const deadline = Date.now() + 10000;
+            while (!readHookState(site)?.connection_id && Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            assert.ok(readHookState(site)?.connection_id, 'The first HTTP export must reach the lock-protected stream');
+            const overlap = await apiRequest(site, 'sql_chunk', params, { url });
+            assert.equal(overlap.status, 400, JSON.stringify(overlap.json));
+            assert.match(JSON.stringify(overlap.json), /Another SQL export request/);
+            const fixture = JSON.parse(readFileSync(join(getSiteDir(site), '.multisite-layer.json'), 'utf8'));
+            const sibling = await apiRequest(site, 'sql_chunk', params, { url: fixture.sites[8].url + '/?reprint-api' });
+            assert.equal(sibling.status, 200, JSON.stringify(sibling.json));
+            const first = await firstRequest;
+            assert.equal(first.chunks?.find(chunk => chunk.type === 'completion')?.headers['x-status'], 'complete');
+            const cursor = first.chunks.find(chunk => chunk.type === 'sql').headers['x-cursor'];
+            removeTestHooks(site);
+            const resumed = await apiRequest(site, 'sql_chunk', { ...params, cursor }, { url });
+            assert.equal(resumed.status, 200, JSON.stringify(resumed.json));
+            const replacement = await apiRequest(site, 'sql_chunk', params, { url });
+            assert.equal(replacement.status, 200, JSON.stringify(replacement.json));
+            const stale = await apiRequest(site, 'sql_chunk', { ...params, cursor }, { url });
+            assert.equal(stale.status, 400, JSON.stringify(stale.json));
+            assert.match(JSON.stringify(stale.json), /replaced/);
+            const preflight = await apiRequest(site, 'preflight', { multisite_mode: 'one-site-network-v1' }, { url });
+            assert.equal(preflight.status, 200, JSON.stringify(preflight.json));
+
+        } finally {
+            removeTestHooks(site);
+            clearHookState(site);
+            await firstRequest;
+        }
+    });
 });

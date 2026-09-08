@@ -1120,6 +1120,16 @@ function endpoint_sql_chunk(
         $stream_failure = $e;
     }
 
+    // Release the selected site's request lock before announcing completion.
+    // Another importer request may arrive as soon as that response is read.
+    try {
+        $reader->close();
+    } catch (Throwable $close_error) {
+        if ($stream_failure === null) {
+            $stream_failure = $close_error;
+        }
+    }
+
     if ($stream_failure !== null) {
         $aborted = true;
         error_log("SQL streaming error: " . $stream_failure->getMessage());
@@ -1241,6 +1251,10 @@ function endpoint_db_index(
             $tables = [];
             foreach ($rows as $row) {
                 $name = (string) ($row["TABLE_NAME"] ?? "");
+                $last_table = $name;
+                if (MultisiteDatabaseSelection::is_internal_table($name)) {
+                    continue;
+                }
                 $tables[] = [
                     "name" => $name,
                     "rows" =>
@@ -1258,7 +1272,6 @@ function endpoint_db_index(
                     "engine" => $row["ENGINE"] ?? null,
                     "collation" => $row["TABLE_COLLATION"] ?? null,
                 ];
-                $last_table = $name;
                 $tables_processed++;
                 if (
                     isset($row["TABLE_ROWS"]) &&

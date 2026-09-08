@@ -19,6 +19,13 @@ class MultisiteDatabaseSelection {
     /** @var int */
     private $network_id;
 
+    /** @var mixed Source connection retained for this request's lock and ID writes. */
+    private $db;
+    /** @var string|null */
+    private $lock_name;
+    /** @var string|null Generation of the one saved set, not a source snapshot. */
+    private $generation;
+
     /** Retains the selected site's IDs; promoting it does not rename its tables. */
     public function __construct(string $base_prefix, int $site_id, int $network_id)
     {
@@ -56,7 +63,181 @@ class MultisiteDatabaseSelection {
      */
     public function get_identity(): string
     {
-        return 'core-v1:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
+        return 'core-v3:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
+    }
+
+    /**
+     * Starts or resumes the single saved user set for this site.
+     *
+     * The importer lock covers only its local state directory. Hold a source
+     * lock for this request; compare the saved generation on the next request.
+     * A fresh export replaces a paused one rather than retaining several sets.
+     *
+     * @param mixed $db Dedicated PDO MySQL connection from the SQL endpoint.
+     * @param string|null $generation Saved cursor generation, or null for a fresh export.
+     */
+    public function open_user_set($db, ?string $generation): void
+    {
+        // wpdb may route reads and writes to different connections or retain
+        // a plugin's transaction. Neither can protect these source-side writes
+        // with one named lock and commit them before an export cursor leaves.
+        if (!$db instanceof \PDO || $db->getAttribute(\PDO::ATTR_DRIVER_NAME) !== 'mysql') {
+            throw new \RuntimeException('Selected-site SQL export requires a direct PDO MySQL connection. Enable pdo_mysql and allow direct access using the source WordPress database credentials.');
+        }
+        if ($db->inTransaction() || (string) $db->query('SELECT @@autocommit')->fetchColumn() !== '1') {
+            throw new \RuntimeException('Selected-site SQL export requires an autocommit connection without an open transaction. End the source transaction before starting the export.');
+        }
+        $this->db = $db;
+        $database = $db->query('SELECT DATABASE()')->fetchColumn();
+        // Named locks are server-wide and limited to 64 bytes. Include the
+        // database as well as the site table. Fold case for servers with
+        // case-insensitive table names. Locks survive commits, not connection death.
+        $lock_name = 'reprint-users:' . sha1(strtolower($database . '.' . $this->get_user_table_name()));
+        $result = $db->query("SELECT GET_LOCK('{$lock_name}', 0)")->fetchColumn();
+        if ( (string) $result !== '1') {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Plain source-side JSON error, never HTML.
+            throw new \RuntimeException("Another SQL export request is using the saved users for site {$this->site_id}; try again after it finishes.");
+        }
+        $this->lock_name = $lock_name;
+        try {
+            $table = $this->get_user_table_name();
+            $comment = $db->query("SELECT TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{$table}'")->fetchColumn();
+            if ($generation !== null) {
+                if (!preg_match('/^[a-f0-9]{32}$/D', $generation) || $comment !== 'reprint-users-v1:' . $generation) {
+                    throw new \RuntimeException("The saved users for site {$this->site_id} were replaced or are missing. Run db-pull --abort and start again.");
+                }
+                $this->generation = $generation;
+                return;
+            }
+            if ($comment !== false && !preg_match('/^reprint-users-v1:[a-f0-9]{32}$/D', $comment)) {
+                throw new \RuntimeException("Cannot create the saved user set: table {$table} already exists without Reprint's schema marker.");
+            }
+            // Starting again replaces one site's set, including abandoned work.
+            // Do not delete it at completion: the last HTTP response may be lost
+            // and the importer may still need to replay an earlier cursor.
+            $this->generation = bin2hex(random_bytes(16));
+            $db->exec("DROP TABLE IF EXISTS `{$table}`");
+            $db->exec("CREATE TABLE `{$table}` (user_id bigint unsigned NOT NULL PRIMARY KEY, reference_kind tinyint unsigned NOT NULL, reference_id bigint unsigned NOT NULL) ENGINE=InnoDB COMMENT='reprint-users-v1:{$this->generation}'");
+        } catch (\Throwable $error) {
+            $this->close();
+            throw $error;
+        }
+    }
+
+    /** Releases the request's lock; keeps the saved rows available for resume. */
+    public function close(): void
+    {
+        if ($this->lock_name !== null) {
+            $lock_name = $this->lock_name;
+            $this->lock_name = null;
+            $this->db->query("SELECT RELEASE_LOCK('{$lock_name}')")->fetchColumn();
+        }
+        $this->db = null;
+    }
+
+    public function get_generation(): ?string
+    {
+        return $this->generation;
+    }
+
+    public function get_user_table_name(): string
+    {
+        return $this->site_prefix . 'reprint_users';
+    }
+
+    /** These reserved tables are source state, including in unfiltered dumps. */
+    public static function is_internal_table(string $table): bool
+    {
+        return (bool) preg_match('/^[a-zA-Z0-9_]+reprint_users$/iD', $table);
+    }
+
+    /**
+     * Places shared users and profiles after the site's content.
+     *
+     * @param string[] $tables Tables already selected by the row reader.
+     * @return string[] The same tables in export order.
+     */
+    public function order_tables(array $tables): array
+    {
+        $shared = [$this->base_prefix . 'users', $this->base_prefix . 'usermeta'];
+        return array_merge(array_values(array_diff($tables, $shared)), array_values(array_intersect($shared, $tables)));
+    }
+
+    /**
+     * Collects one LIMIT-sized query before its matching content cursor can leave.
+     *
+     * @return string Last source primary key, or '0' when the query was empty.
+     */
+    public function collect_user_references(string $table, string $query): string
+    {
+        $columns = $this->get_reference_columns($table);
+        $result = $this->db->query($query);
+        $values = [];
+        $last_id = '0';
+        $row = $result->fetch(PdoConstants::fetch_assoc());
+        while ($row !== false) {
+            $last_id = (string) $row[$columns['primary_key']];
+            $user_id = ltrim( (string) $row[$columns['user_column']], '0');
+            if (ctype_digit($user_id) &&
+                ( $columns['kind'] !== 4 || $row['meta_key'] === $this->site_prefix . 'capabilities' )) {
+                $values[] = '(' . $user_id . ',' . $columns['kind'] . ',' . $last_id . ')';
+            }
+            $row = $result->fetch(PdoConstants::fetch_assoc());
+        }
+        // The result is fully consumed before writing, including with PDO's
+        // unbuffered mode. Only IDs from this bounded query are held in PHP.
+        $result = null;
+        if ($values) {
+            $this->db->exec("INSERT INTO `{$this->get_user_table_name()}` (user_id, reference_kind, reference_id) VALUES " . implode(',', $values) . ' ON DUPLICATE KEY UPDATE user_id=user_id');
+        }
+        return $last_id;
+    }
+
+    /**
+     * Returns sources not already visited while exporting their content.
+     *
+     * Members without content still need a separate usermeta discovery pass.
+     * Skipping a content table must not silently drop its authors from a
+     * users-only export. Row exclusions likewise do not change membership.
+     *
+     * @param string[] $exported_tables Tables exported without row exclusions.
+     * @return string[] Source tables needing bounded ID-only reads.
+     */
+    public function get_undiscovered_sources(array $exported_tables): array
+    {
+        return array_merge(array_values(array_diff([
+            $this->site_prefix . 'posts', $this->site_prefix . 'comments', $this->site_prefix . 'links',
+        ], $exported_tables)), [$this->base_prefix . 'usermeta']);
+    }
+
+    /**
+     * Checks the saved source row by primary key, never by scanning its user column.
+     *
+     * One saved reference per user bounds storage by distinct users, not comments.
+     * If that reference changes, stop rather than scan for another one. Another
+     * valid relationship may still exist; a fresh export discovers it again.
+     * New relationships behind the discovery cursor need a fresh export too.
+     */
+    public function get_user_reference_check(string $table): ?string
+    {
+        if (!$this->is_shared_user_table($table)) {
+            $columns = $this->get_reference_columns($table);
+            if ($columns === null) {
+                return null;
+            }
+            // Discovery and the content SELECT are separate statements. Reject
+            // a newly assigned author absent from the set rather than sending
+            // content whose user could never be included by this export.
+            $user_expression = "`{$table}`.`{$columns['user_column']}`";
+            return "({$user_expression} = 0 OR " . $this->related_user_condition($user_expression) . ')';
+        }
+        $user_column = $table === $this->base_prefix . 'users' ? 'ID' : 'user_id';
+        return "(SELECT CASE saved.reference_kind " .
+            "WHEN 1 THEN EXISTS (SELECT 1 FROM `{$this->site_prefix}posts` WHERE ID=saved.reference_id AND post_author=saved.user_id) " .
+            "WHEN 2 THEN EXISTS (SELECT 1 FROM `{$this->site_prefix}comments` WHERE comment_ID=saved.reference_id AND user_id=saved.user_id) " .
+            "WHEN 3 THEN EXISTS (SELECT 1 FROM `{$this->site_prefix}links` WHERE link_id=saved.reference_id AND link_owner=saved.user_id) " .
+            "WHEN 4 THEN EXISTS (SELECT 1 FROM `{$this->base_prefix}usermeta` WHERE umeta_id=saved.reference_id AND user_id=saved.user_id AND meta_key='{$this->site_prefix}capabilities') " .
+            "ELSE 0 END FROM `{$this->get_user_table_name()}` saved WHERE saved.user_id=`{$table}`.`{$user_column}` LIMIT 1)";
     }
 
     /**
@@ -160,7 +341,7 @@ class MultisiteDatabaseSelection {
     }
 
     /**
-     * Selects members and core content references without collecting user IDs in PHP.
+     * Selects IDs saved from members and core content references.
      *
      * A capabilities row includes members who have no content. Post, registered
      * comment and link references also retain users who no longer have a role
@@ -170,18 +351,32 @@ class MultisiteDatabaseSelection {
      */
     private function related_user_condition(string $user_expression): string
     {
-        // Core does not index comments.user_id or links.link_owner. Build the
-        // ID set inside MySQL instead of scanning those tables for each network
-        // user or profile row. The derived UNION prevents MySQL from pushing
-        // the outer user ID back into correlated, unindexed scans. Each query
-        // rebuilds the set, so resumed and oversized reads still check current
-        // membership without keeping user IDs in PHP or changing source tables.
-        return "{$user_expression} IN (SELECT user_id FROM (" .
-            "SELECT user_id FROM `{$this->base_prefix}usermeta` " .
-                "WHERE meta_key = '{$this->site_prefix}capabilities' " .
-            "UNION SELECT post_author FROM `{$this->site_prefix}posts` " .
-            "UNION SELECT user_id FROM `{$this->site_prefix}comments` " .
-            "UNION SELECT link_owner FROM `{$this->site_prefix}links`" .
-        ') AS related_users)';
+        // A scalar primary-key lookup cannot rebuild a materialized user set
+        // for each batch. WordPress tables and their indexes stay unchanged.
+        return "(SELECT saved.user_id FROM `{$this->get_user_table_name()}` saved WHERE saved.user_id={$user_expression} LIMIT 1) IS NOT NULL";
+    }
+    /**
+     * Identifies the small fields needed to collect a user without its profile.
+     *
+     * @return array|null {
+     *     @type string $primary_key Source row's primary key.
+     *     @type string $user_column User ID in that row.
+     *     @type int    $kind Source table discriminator stored with the ID.
+     * }
+     */
+    public function get_reference_columns(string $table): ?array
+    {
+        $sources = [
+            $this->site_prefix . 'posts' => ['primary_key' => 'ID', 'user_column' => 'post_author', 'kind' => 1],
+            $this->site_prefix . 'comments' => ['primary_key' => 'comment_ID', 'user_column' => 'user_id', 'kind' => 2],
+            $this->site_prefix . 'links' => ['primary_key' => 'link_id', 'user_column' => 'link_owner', 'kind' => 3],
+            $this->base_prefix . 'usermeta' => ['primary_key' => 'umeta_id', 'user_column' => 'user_id', 'kind' => 4],
+        ];
+        return $sources[$table] ?? null;
+    }
+
+    public function is_shared_user_table(string $table): bool
+    {
+        return $table === $this->base_prefix . 'users' || $table === $this->base_prefix . 'usermeta';
     }
 }
