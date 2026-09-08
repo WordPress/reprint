@@ -154,7 +154,10 @@ class MultisiteDatabaseSelection {
     }
 
     /**
-     * Places shared users and profiles after the site's content.
+     * Exports posts, comments and links before users, then usermeta.
+     *
+     * Their content batches save the referenced user IDs before users are read.
+     * Keep this order even when the caller explicitly lists users first.
      *
      * @param string[] $tables Tables already selected by the row reader.
      * @return string[] The same tables in export order.
