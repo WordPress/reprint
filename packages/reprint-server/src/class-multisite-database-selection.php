@@ -39,18 +39,33 @@ class MultisiteDatabaseSelection {
             );
         }
         $this->base_prefix = $base_prefix;
+        // WordPress leaves only site ID 1 unnumbered. A different network's
+        // main site still uses its numeric site ID in the table prefix.
         $this->site_prefix = $base_prefix . ( $site_id === 1 ? '' : $site_id . '_' );
         $this->site_id = $site_id;
         $this->network_id = $network_id;
     }
 
-    /** Binds a database cursor to the same source site and selection rules. */
+    /**
+     * Binds a database cursor to the same source site and selection rules.
+     *
+     * The row reader compares this value on resume. Change the version when
+     * selection or value-replacement rules change, not for an equivalent query
+     * plan. Source rows may change without changing this version.
+     * This identifies the rules, not a snapshot of the mutable source records.
+     */
     public function get_identity(): string
     {
         return 'core-v1:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
     }
 
-    /** Whether this table has a defined core selection rule. */
+    /**
+     * Whether this table has a defined core selection rule.
+     *
+     * '1=0' keeps a known table's schema without rows. '0=1' marks a table
+     * without a rule for this selection, so the reader skips the whole table.
+     * Keep these spellings distinct even though both SQL conditions are false.
+     */
     public function includes_table(string $table): bool
     {
         return $this->get_row_condition($table) !== '0=1';
@@ -59,6 +74,8 @@ class MultisiteDatabaseSelection {
     /** Returns a trusted SQL condition, including schema-only shared tables. */
     public function get_row_condition(string $table): string
     {
+        // These exact core tables contain only the selected site's records.
+        // A prefix match alone cannot establish what a plugin table contains.
         $site_tables = [
             'posts', 'postmeta', 'comments', 'commentmeta', 'terms',
             'termmeta', 'term_taxonomy', 'term_relationships', 'links',
@@ -69,8 +86,13 @@ class MultisiteDatabaseSelection {
             }
         }
         if ($table === $this->site_prefix . 'options') {
+            // Remove Reprint's source connection and authorization state.
+            // Other plugin settings in this site-specific table still travel;
+            // this is not a general filter for plugin secrets.
             return "`option_name` NOT IN ('reprint_server_connection_token', 'reprint_server_push_authorized_token_fingerprint', 'site_export_secret', 'site_export_push_authorized_token_fingerprint')";
         }
+        // WordPress calls sites "blogs" here; the singular "site" table holds
+        // networks. Filter each shared table by the corresponding kind of ID.
         if ($table === $this->base_prefix . 'blogs' || $table === $this->base_prefix . 'blogmeta') {
             return "`blog_id` = {$this->site_id}";
         }
@@ -78,6 +100,13 @@ class MultisiteDatabaseSelection {
             return "`id` = {$this->network_id}";
         }
         if ($table === $this->base_prefix . 'sitemeta') {
+            /**
+             * Network plugin/theme settings describe code available to the
+             * site; WPLANG supplies its network language fallback. Retain the
+             * upload policy and network name/contact metadata alongside the
+             * selected network record. These remain network metadata in the
+             * dump, not automatically converted single-site options.
+             */
             // Counters, signups, source administrators, and unknown plugin settings
             // describe the old network. The target supplies its own network identity.
             return "`site_id` = {$this->network_id} AND `meta_key` IN (" .
@@ -89,6 +118,30 @@ class MultisiteDatabaseSelection {
             return $this->related_user_condition("`{$table}`.`ID`");
         }
         if ($table === $this->base_prefix . 'usermeta') {
+            /**
+             * A selected user's metadata can also contain data for other sites.
+             * Filtering user IDs alone would copy those roles and credentials.
+             * Keep this explicit subset, not every key attached to the user:
+             *
+             * - first_name, last_name, nickname and description retain the
+             *   user's profile and author biography.
+             * - rich_editing, syntax_highlighting and comment_shortcuts retain
+             *   editor and comment-moderation preferences.
+             * - admin_color, show_admin_bar_front, locale and use_ssl retain
+             *   the color scheme, toolbar, language and admin HTTPS preference.
+             * - The selected prefix's capabilities stores roles and direct
+             *   grants/denials; user_level preserves the legacy numeric level.
+             *   Keep their keys unchanged because the target adopts that prefix.
+             *
+             * Other-site roles, session_tokens, _application_passwords and
+             * unlisted core/plugin metadata stay out. An unlisted field is not
+             * necessarily secret, but adding it requires an export decision.
+             * The user-ID condition also excludes unrelated users' profiles.
+             *
+             * @see https://developer.wordpress.org/reference/functions/wp_insert_user/
+             * @see https://developer.wordpress.org/reference/classes/wp_user/for_site/
+             * @see https://developer.wordpress.org/reference/classes/wp_user/update_user_level_from_caps/
+             */
             $keys = [
                 'first_name', 'last_name', 'nickname', 'description', 'rich_editing',
                 'syntax_highlighting', 'comment_shortcuts', 'admin_color', 'use_ssl',
@@ -99,12 +152,22 @@ class MultisiteDatabaseSelection {
                 " AND `meta_key` IN ('" . implode("', '", $keys) . "')";
         }
         if ($table === $this->base_prefix . 'signups' || $table === $this->base_prefix . 'registration_log') {
+            // Pending registrations and registration history describe the
+            // network, not this site's content. Retain empty core tables only.
             return '1=0';
         }
         return '0=1';
     }
 
-    /** Selects members and core content references without collecting user IDs in PHP. */
+    /**
+     * Selects members and core content references without collecting user IDs in PHP.
+     *
+     * A capabilities row includes members who have no content. Post, registered
+     * comment and link references also retain users who no longer have a role
+     * on this site, so existing content keeps its original user IDs. Both users
+     * and usermeta use this test; selecting a content author does not create a
+     * capabilities row or grant that author a role.
+     */
     private function related_user_condition(string $user_expression): string
     {
         // Core does not index comments.user_id or links.link_owner. Build the
