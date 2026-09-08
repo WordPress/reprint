@@ -65,6 +65,7 @@ class ProductionDropInRemovalTest extends TestCase
     private function writeState(array $state): void
     {
         $defaults = [
+            'include_host_plugins' => false,
             'active_resumable_command' => [
                 'command_name' => 'files-pull',
                 'completion_state' => 'complete',
@@ -423,7 +424,7 @@ class ProductionDropInRemovalTest extends TestCase
         }
     }
 
-    public function testEveryImportRemovesTheGlobalSourceHostPathList(): void
+    public function testRequestedCleanupRemovesTheGlobalSourceHostPathList(): void
     {
         $this->writeState(array_replace_recursive(
             ['webhost' => 'other'],

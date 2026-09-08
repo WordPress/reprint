@@ -2,8 +2,8 @@
  * Test 45: Migrate the complete source-host plugin inventory.
  *
  * The source contains every named exclusion, nested plugin files, the copied
- * WP Engine loader, and unrelated files with similar names. Check that files-pull
- * omits excluded paths, db-apply deactivates excluded regular plugins, and
+ * WP Engine loader, and unrelated files with similar names. With cleanup
+ * requested, files-pull omits excluded paths, db-apply deactivates excluded regular plugins, and
  * apply-runtime removes stale copies without changing unrelated files. Finally,
  * boot the imported WordPress site against its target database.
  */
@@ -209,7 +209,7 @@ describe.each([
     it('files-pull applies the host-plugin flag', () => {
         const result = runImporter(importUrl(), tempDir, includeHostPlugins ? 'pull-files' : 'files-pull', {
             secret: getSiteSecret(site),
-            extraArgs: includeHostPlugins ? ['--include-host-plugins'] : [],
+            extraArgs: includeHostPlugins ? [] : ['--exclude-host-plugins'],
         });
         assert.equal(result.exitCode, 0, `files-pull failed:\n${result.stderr}`);
 

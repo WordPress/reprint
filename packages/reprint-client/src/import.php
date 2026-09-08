@@ -1014,6 +1014,7 @@ class ImportClient
          *
          * A pull started with --include-host-plugins must also keep those plugins
          * during db-apply and apply-runtime, even when later commands omit the flag.
+         * --exclude-host-plugins selects cleanup for those same stages.
          * Changing it mid-pull would combine an index built with one exclusion list
          * with cleanup using another. Check both the command and the pipeline:
          * files-pull can be complete while the pipeline still has db-apply pending.
@@ -1037,7 +1038,7 @@ class ImportClient
                 )
             ) {
                 throw new RuntimeException(
-                    "Cannot change --include-host-plugins while a pull is in progress. " .
+                    "Cannot change --include-host-plugins/--exclude-host-plugins while a pull is in progress. " .
                     "Finish the current pull or use --abort first."
                 );
             }
@@ -13127,10 +13128,19 @@ if (
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
         ],
         [
+            'name' => 'exclude-host-plugins',
+            'type' => 'flag',
+            'target' => 'include_host_plugins',
+            'flag_value' => false,
+            'help' => 'Skip listed host platform plugins and drop-ins, deactivate excluded plugins, and remove their local copies during runtime setup (saved in state)',
+            'help_section' => 'global',
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'db-apply', 'apply-runtime'],
+        ],
+        [
             'name' => 'include-host-plugins',
             'type' => 'flag',
             'target' => 'include_host_plugins',
-            'help' => 'Keep host platform plugins and drop-ins; disable their download filtering, deactivation, and runtime cleanup (saved in state)',
+            'help' => 'Keep host platform plugins and drop-ins (default for new state); disable their download filtering, deactivation, and runtime cleanup (saved in state)',
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'db-apply', 'apply-runtime'],
         ],
@@ -13564,6 +13574,14 @@ if (
 
                         case 'flag':
                             if ($arg === "--{$cli_name}" || (isset($def['short']) && $arg === "-{$def['short']}")) {
+                                if (
+                                    $def['target'] === 'include_host_plugins'
+                                    && array_key_exists('include_host_plugins', $options)
+                                    && $options['include_host_plugins'] !== ( $def['flag_value'] ?? true )
+                                ) {
+                                    fwrite(STDERR, "--include-host-plugins and --exclude-host-plugins cannot be combined.\n");
+                                    exit(1);
+                                }
                                 _cli_store($def, $def['flag_value'] ?? true, $state_dir, $filesystem_root, $options);
                                 $matched = true;
                                 break 3;
@@ -14280,7 +14298,7 @@ if (
                 "(--fs-root=DIR|--flat-document-root=DIR) [options]",
             "description" =>
                 "Generates server configuration (runtime.php, nginx.conf or start.sh)\n" .
-                "from preflight data and, unless --include-host-plugins is set, removes\n" .
+                "from preflight data. If saved host-plugin cleanup is enabled, removes\n" .
                 "listed host platform plugins, MU plugins,\n" .
                 "and drop-ins that should not run locally.\n" .
                 "\n" .

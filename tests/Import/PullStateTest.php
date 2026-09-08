@@ -72,9 +72,10 @@ class PullStateTest extends TestCase
     public function testIncludeHostPluginsRoundTripsAndDefaultsForOlderState(): void
     {
         $state = new \PullState();
-        $this->assertFalse($state->include_host_plugins);
-        $state->include_host_plugins = true;
+        $this->assertTrue($state->include_host_plugins);
         $this->assertTrue(\PullState::from_array($state->to_array())->include_host_plugins);
+        $state->include_host_plugins = false;
+        $this->assertFalse(\PullState::from_array($state->to_array())->include_host_plugins);
 
         $data = $state->to_array();
         unset($data['include_host_plugins']);

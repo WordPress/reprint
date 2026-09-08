@@ -3000,6 +3000,63 @@ final class PushEndpointsTest extends TestCase {
         ];
     }
 
+    public function testDefaultPullThenThemePushPreservesHostPlugins(): void
+    {
+        $remote_document_root = (string) realpath($this->docroot);
+        $filesystem_root = $this->root . '/pulled-files';
+        $state_directory = $this->root . '/pull-push-state';
+        $local_document_root = $filesystem_root . $remote_document_root;
+        $host_plugin_files = [
+            'wp-content/mu-plugins/wpcomsh-loader.php' => '<?php // Host loader',
+            'wp-content/mu-plugins/wpcomsh/plugin.php' => '<?php // Host package',
+            'wp-content/plugins/pressable-onepress-login/plugin.php' => '<?php // Host sign-on',
+        ];
+        $theme_document_root_relative_path = 'wp-content/themes/example/style.css';
+        foreach ($host_plugin_files + [$theme_document_root_relative_path => 'body { color: red; }'] as $document_root_relative_path => $contents) {
+            mkdir(dirname($remote_document_root . '/' . $document_root_relative_path), 0700, true);
+            file_put_contents($remote_document_root . '/' . $document_root_relative_path, $contents);
+        }
+        $client = new ImportClient($this->remote_reprint_api_url, $state_directory, $filesystem_root);
+        write_current_pull_state($client, [
+            'preflight' => [
+                'http_code' => 200,
+                'data' => [
+                    'runtime' => ['document_root' => $remote_document_root],
+                    'wp_detect' => ['roots' => [['path' => $remote_document_root]]],
+                    'database' => ['wp' => ['paths_urls' => [
+                        'abspath' => $remote_document_root . '/',
+                        'content_dir' => $remote_document_root . '/wp-content',
+                    ]]],
+                ],
+            ],
+        ]);
+        $command = [
+            PHP_BINARY,
+            __DIR__ . '/../packages/reprint-client/bin/reprint-client',
+            'files-pull',
+            $this->remote_reprint_api_url,
+            '--state-dir=' . $state_directory,
+            '--fs-root=' . $filesystem_root,
+            '--secret=' . self::SECRET,
+        ];
+        exec(implode(' ', array_map('escapeshellarg', $command)) . ' 2>&1', $output, $exit_code);
+        $this->assertSame(0, $exit_code, implode("\n", $output));
+        foreach ($host_plugin_files as $document_root_relative_path => $contents) {
+            $this->assertFileExists($local_document_root . '/' . $document_root_relative_path);
+            $this->assertSame($contents, file_get_contents($local_document_root . '/' . $document_root_relative_path));
+        }
+
+        file_put_contents($local_document_root . '/' . $theme_document_root_relative_path, 'body { color: blue; }');
+        $pushed = $this->runFilesPushCli($filesystem_root, $state_directory, [], $remote_document_root);
+
+        $this->assertSame(0, $pushed['exit'], $pushed['output']);
+        $this->assertSame(1, $this->lastCliJsonLine($pushed['stdout'])['files_total']);
+        $this->assertSame('body { color: blue; }', file_get_contents($remote_document_root . '/' . $theme_document_root_relative_path));
+        foreach ($host_plugin_files as $document_root_relative_path => $contents) {
+            $this->assertSame($contents, file_get_contents($remote_document_root . '/' . $document_root_relative_path));
+        }
+    }
+
     public function testFilesPushCliPushesFromDocumentRootBelowFilesystemRoot(): void
     {
         $this->writeDocrootConfiguration([
