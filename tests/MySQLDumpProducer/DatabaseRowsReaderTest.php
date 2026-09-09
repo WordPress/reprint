@@ -7,6 +7,47 @@ use WordPress\Reprint\Server\DatabaseRowsReader;
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
 class DatabaseRowsReaderTest extends MySQLDumpProducerTestBase {
 
+    /** A table name identifies one position, including after an empty table or resume. */
+    public function testTableNamesDetermineOrderBeforeAndAfterResume(): void
+    {
+        $expected_tables = ['third_table', 'empty_table', 'first_table'];
+        foreach ($expected_tables as $table) {
+            $this->pdo->exec("CREATE TABLE `{$table}` (id INT PRIMARY KEY)");
+        }
+        $this->pdo->exec('INSERT INTO third_table VALUES (3)');
+        $this->pdo->exec('INSERT INTO first_table VALUES (1)');
+
+        foreach ([false, true] as $resume) {
+            foreach ([$expected_tables, ['third_table', 'third_table', 'empty_table', 'first_table', 'empty_table']] as $requested_tables) {
+                $options = ['tables_to_process' => $requested_tables, 'batch_size' => 1];
+                $reader = new DatabaseRowsReader($this->pdo, $options);
+                $rows = [];
+                foreach ($expected_tables as $table) {
+                    $this->assertTrue($reader->move_to_next_table());
+                    $this->assertSame($table, $reader->get_current_table());
+                    while ($reader->next_record()) {
+                        $rows[] = (int) $reader->get_current_record()['id'];
+                    }
+                    if ($resume) {
+                        $cursor = $reader->get_cursor_state();
+                        $reader->close();
+                        $reader = new DatabaseRowsReader($this->pdo, $options);
+                        $this->assertTrue($reader->restore_cursor_state($cursor));
+                    }
+                }
+                $this->assertFalse($reader->move_to_next_table());
+                $this->assertNull($reader->get_current_table());
+                $this->assertSame([3, 1], $rows);
+                $reader->close();
+            }
+        }
+
+        $empty_reader = new DatabaseRowsReader($this->pdo, ['tables_to_process' => []]);
+        $this->assertFalse($empty_reader->move_to_next_table());
+        $this->assertFalse($empty_reader->start_user_tables());
+        $empty_reader->close();
+    }
+
     public function testExcludesRequestedAndReprintProgressTablesWhenDiscoveringSourceTables(): void
     {
         $this->pdo->exec('CREATE TABLE included_table (id INT PRIMARY KEY)');
