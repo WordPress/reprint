@@ -2,7 +2,10 @@
 
 namespace Reprint\Importer;
 
-/** Keeps the latest screen snapshot separate from the JSONL event log. */
+use Reprint\Importer\State\FetchListProgressState;
+use RuntimeException;
+
+/** Tracks file-pull counters and keeps the latest screen snapshot separate from the JSONL event log. */
 class ProgressReporter {
     public const SCHEMA_VERSION = 1;
     /** Stable screen keys when a phase has no reported counters. */
@@ -20,6 +23,14 @@ class ProgressReporter {
     private float $last_file_write = 0;
     /** Timestamp of the last emitted JSONL record, independent of file writes. */
     private float $last_output = 0;
+
+    /** Rebuildable counters for the selected file list. Resume positions remain in the pull checkpoint. */
+    private ?int $files_total = null;
+    private int $files_before_batch = 0;
+    private int $files_in_batch = 0;
+    private ?int $file_bytes_total = null;
+    private int $file_bytes_before_batch = 0;
+    private int $file_bytes_in_batch = 0;
 
     public function __construct(string $progress_file) {
         $this->progress_file = $progress_file;
@@ -130,5 +141,127 @@ class ProgressReporter {
         @flush();
         $this->last_output = $now;
         return true;
+    }
+
+    /**
+     * Reads the list once per invocation. Totals survive across batches in memory;
+     * a new process rebuilds them from the fetch-list byte offset and saved cursor.
+     * FileTreeProducer sorts each batch by remote absolute path, regardless of list order.
+     */
+    public function load_file_list(string $list_file, FetchListProgressState $fetch): void {
+        if ($this->files_total !== null) {
+            return;
+        }
+        $handle = fopen($list_file, 'rb');
+        if (!is_resource($handle)) {
+            throw new RuntimeException('Failed to open the fetch list for progress totals.');
+        }
+        $cursor = json_decode(base64_decode($fetch->cursor ?? '', true) ?: '', true);
+        $cursor_path = isset($cursor['path']) ? base64_decode($cursor['path'], true) : false;
+        $cursor_finishes_file = ( $cursor['bytes'] ?? 0 ) === 0;
+        $this->files_total = 0;
+        $this->file_bytes_total = 0;
+        while (true) {
+            $line = fgets($handle);
+            if ($line === false) {
+                break;
+            }
+            $entry = json_decode($line, true);
+            if (!is_array($entry)) {
+                continue;
+            }
+            ++$this->files_total;
+            $size = (int) ( $entry['size'] ?? 0 );
+            if (!isset($entry['size'])) {
+                $this->file_bytes_total = null;
+            } elseif ($this->file_bytes_total !== null) {
+                $this->file_bytes_total += $size;
+            }
+            $position = ftell($handle);
+            if ($position <= $fetch->offset) {
+                ++$this->files_before_batch;
+                $this->file_bytes_before_batch += $size;
+            } elseif ($position <= $fetch->next_offset) {
+                $entry_path = base64_decode($entry['path'], true);
+                if (
+                    ( $cursor['phase'] ?? null ) === 'finished'
+                    || ( $cursor_path !== false && (
+                        strcmp($entry_path, $cursor_path) < 0
+                        || ( $entry_path === $cursor_path && $cursor_finishes_file )
+                    ) )
+                ) {
+                    ++$this->files_in_batch;
+                    $this->file_bytes_in_batch += $size;
+                }
+            }
+        }
+        fclose($handle);
+    }
+
+    /** Clears counters for a new pull without changing the screen snapshot or write timers. */
+    public function reset_file_counters(): void {
+        $this->files_total = null;
+        $this->files_before_batch = 0;
+        $this->file_bytes_total = null;
+        $this->file_bytes_before_batch = 0;
+        $this->restart_file_batch();
+    }
+
+    public function complete_file(int $file_size): void {
+        ++$this->files_in_batch; // Count completed files only.
+        $this->file_bytes_in_batch += $file_size;
+    }
+
+    public function complete_file_batch(int $batch_entries): void {
+        // Use the known batch size, including directories and skipped paths.
+        // Completed files move into the preceding-batch counters only once.
+        $this->files_before_batch += $batch_entries;
+        $this->file_bytes_before_batch += $this->file_bytes_in_batch;
+        $this->restart_file_batch();
+    }
+
+    public function restart_file_batch(): void {
+        $this->files_in_batch = 0;
+        $this->file_bytes_in_batch = 0;
+    }
+
+    public function get_batch_files_done(): int {
+        return $this->files_in_batch;
+    }
+
+    /**
+     * @return array {
+     *     Current file-download progress; totals stay unknown until the list is loaded.
+     *     @type array|null $items         Files processed and selected path count.
+     *     @type array|null $bytes         Completed file bytes plus the open file position.
+     *     @type array|null $current_file  Remote path and current file byte position and size.
+     *     @type null       $current_table Unused during files-pull.
+     * }
+     */
+    public function get_file_details(?StreamingContext $context = null): array {
+        $progress = self::EMPTY_DETAILS;
+        if ($this->files_total === null && $context === null) {
+            return $progress;
+        }
+        $progress['items'] = [
+            'unit' => 'files',
+            'done' => $this->files_before_batch + $this->files_in_batch,
+            'total' => $this->files_total,
+        ];
+        if ($this->file_bytes_total !== null) {
+            $progress['bytes'] = [
+                'done' => $this->file_bytes_before_batch + $this->file_bytes_in_batch
+                    + ( $context !== null && $context->remote_file_path !== null ? $context->file_bytes_written : 0 ),
+                'total' => $this->file_bytes_total,
+            ];
+        }
+        if ($context !== null && $context->remote_file_path !== null && $context->remote_file_size !== null) {
+            $progress['current_file'] = [
+                'path_b64' => base64_encode($context->remote_file_path),
+                'bytes_done' => $context->file_bytes_written,
+                'bytes_total' => $context->remote_file_size,
+            ];
+        }
+        return $progress;
     }
 }

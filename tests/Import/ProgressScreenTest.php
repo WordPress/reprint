@@ -51,8 +51,8 @@ class ProgressScreenTest extends TestCase {
             }
         }
         $client->get_state()->fetch->offset = $offset;
-        $reflection->getProperty('files_pull_progress')->getValue($client)
-            ->load_list($list_file, $client->get_state()->fetch);
+        $reflection->getProperty('progress_reporter')->getValue($client)
+            ->load_file_list($list_file, $client->get_state()->fetch);
         $progress_stream = fopen('php://memory', 'w+b');
         $this->assertIsResource($progress_stream);
         $reflection->getProperty('progress_fd')->setValue($client, $progress_stream);

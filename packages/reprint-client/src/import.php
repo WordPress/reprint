@@ -15,7 +15,6 @@ use Reprint\Importer\Database\DatabaseConnection;
 use Reprint\Importer\Database\MysqliDatabaseConnection;
 use Reprint\Importer\Database\PdoDatabaseConnection;
 use Reprint\Importer\DatabaseUrlRewriteProcessor;
-use Reprint\Importer\FilesPullProgress;
 use Reprint\Importer\NullableSpatialColumnStatementRewriter;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\ProgressReporter;
@@ -262,7 +261,7 @@ class ImportClient
     /** @var string Pull state file which persists command, cursor, and stage across invocations. */
     private $pull_state_file;
 
-    /** @var ProgressReporter Screen snapshots, JSONL output and write throttling. */
+    /** @var ProgressReporter File-pull counters, screen snapshots, JSONL output and write throttling. */
     private ProgressReporter $progress_reporter;
 
     /** @var string Retained filesystem-root snapshot for this remote state directory. */
@@ -310,9 +309,6 @@ class ImportClient
 
     /** @var string Progress output mode for this invocation: auto, tty, or jsonl. */
     private $progress_output_mode = 'auto';
-
-    /** @var FilesPullProgress Rebuildable counters for the selected file list. */
-    private FilesPullProgress $files_pull_progress;
 
     /** @var PullState Persistent pull state loaded from / saved to $pull_state_file. */
     private PullState $state;
@@ -554,7 +550,6 @@ class ImportClient
         $this->progress_reporter = new ProgressReporter(
             wp_join_unix_paths($this->state_dir, "progress.json")
         );
-        $this->files_pull_progress = new FilesPullProgress();
 
         // Detect TTY for progress display and terminal colors. In stdout mode
         // this is re-evaluated against STDERR in run() once the output mode is
@@ -3420,7 +3415,7 @@ class ImportClient
             $this->get_state()->index = new RemoteFileIndexCursorState();
             $this->get_state()->fetch = new FetchListProgressState();
             $this->get_state()->files_pull_summary = new FilesPullSummaryState();
-            $this->files_pull_progress = new FilesPullProgress();
+            $this->progress_reporter->reset_file_counters();
             $this->save_state();
 
             if ($is_delta) {
@@ -3633,7 +3628,7 @@ class ImportClient
 
         $this->progress->show_lifecycle_line("{$label} complete: {$remote_index_entry_count} remote index entries\n");
         $this->progress->show_lifecycle_line("Audit log: {$this->audit_log_file}\n");
-        $progress = $this->files_pull_progress->get_details();
+        $progress = $this->progress_reporter->get_file_details();
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
@@ -8430,7 +8425,7 @@ class ImportClient
         }
 
         // Compute totals once, reconstructing completed paths from the saved cursor.
-        $this->files_pull_progress->load_list($list_file, $this->get_state()->fetch);
+        $this->progress_reporter->load_file_list($list_file, $this->get_state()->fetch);
         $fetch_state = $this->get_state()->fetch;
         $batch_file = $fetch_state->batch_file;
         $batch_offset = $fetch_state->offset;
@@ -8454,7 +8449,7 @@ class ImportClient
             // Clear this batch's progress tracking, as it's going to be rebuilt & restarted.
             $this->get_state()->current_file = null;
             $this->get_state()->current_file_bytes = null;
-            $this->files_pull_progress->restart_batch();
+            $this->progress_reporter->restart_file_batch();
         }
 
         if ($batch_file === null || !file_exists($batch_file)) {
@@ -8495,7 +8490,7 @@ class ImportClient
             $this->audit_log("FILE DELETE | {$batch_file} | fetch batch complete");
         }
 
-        $this->files_pull_progress->complete_batch($batch_entries);
+        $this->progress_reporter->complete_file_batch($batch_entries);
         $this->get_state()->files_pull_summary->files_pulled += $batch_entries;
 
         $this->get_state()->fetch = FetchListProgressState::from_array([
@@ -10721,7 +10716,7 @@ class ImportClient
                 false,
             );
 
-            $file_progress = $this->files_pull_progress->get_details($context);
+            $file_progress = $this->progress_reporter->get_file_details($context);
             $files_done = $file_progress['items']['done'];
             $files_total = $file_progress['items']['total'];
             $file_fraction = ($files_total !== null && $files_total > 0)
@@ -10823,7 +10818,7 @@ class ImportClient
                     "file",
                     $context->file_path,
                 );
-                $this->files_pull_progress->complete_file($file_size);
+                $this->progress_reporter->complete_file($file_size);
                 $this->clear_volatile_file($path);
                 $this->audit_log(
                     sprintf("  Indexed (wrote %d bytes)", $final_size),
@@ -10862,7 +10857,7 @@ class ImportClient
         ?string $event_path = null,
         ?int $event_size = null
     ): array {
-        $progress = $this->files_pull_progress->get_details($context);
+        $progress = $this->progress_reporter->get_file_details($context);
         $files_done = $progress['items']['done'];
         $files_total = $progress['items']['total'];
 
@@ -12979,7 +12974,7 @@ class ImportClient
             throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->pull_state_file}");
         }
 
-        $files_pulled = $this->files_pull_progress->get_batch_files_done(); // Completed in this batch
+        $files_pulled = $this->progress_reporter->get_batch_files_done(); // Completed in this batch
         $has_cursor =
             !empty($state["active_resumable_command"]["remote_cursor"] ?? null) ||
             !empty($state["index"]["cursor"] ?? null) ||
@@ -13102,7 +13097,7 @@ class ImportClient
 
         // Log final progress before exit
         $remote_index_entry_count = $this->remote_index_entry_count();
-        $files_pulled = $this->files_pull_progress->get_batch_files_done(); // Files completed in this batch
+        $files_pulled = $this->progress_reporter->get_batch_files_done(); // Files completed in this batch
         $current_command =
             $active_resumable_command->command_name ?? "unknown";
 
