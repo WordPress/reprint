@@ -397,9 +397,17 @@ class MySQLDumpProducer
         $reader_cursor_before_current_record = $this->reader_cursor_before_retained_record;
         if ($this->row_reader->get_current_record() === null) {
             $reader_cursor_before_current_record = $this->row_reader->get_cursor_state();
-            if (!$this->row_reader->next_record()) {
+            $read_result = $this->row_reader->next_record();
+            if ($read_result === false) {
                 $this->state = self::STATE_NEXT_TABLE;
                 return false;
+            }
+            if ($read_result === null) {
+                // Rejected candidates still need a checkpoint. Do not search
+                // the next batch inside this step when no SQL row was found.
+                $this->current_sql_fragment = 'DO 0; /* selected-user batch complete */';
+                $this->current_fragment_must_be_its_own_part = true;
+                return true;
             }
         }
 
@@ -485,15 +493,16 @@ class MySQLDumpProducer
         return true;
     }
 
-    /** Emits one row with a leading comma, or closes the open INSERT when no row remains. */
+    /** Emits one row, or closes the INSERT at table EOF or a consumed candidate batch. */
     private function emit_row()
     {
         $reader_cursor_before_current_record = $this->row_reader->get_cursor_state();
-        if (!$this->row_reader->next_record()) {
+        $read_result = $this->row_reader->next_record();
+        if ($read_result !== true) {
             $this->current_sql_fragment = $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
             $this->current_insert_has_nonzero_srid_context = false;
-            $this->state = self::STATE_NEXT_TABLE;
+            $this->state = $read_result === false ? self::STATE_NEXT_TABLE : self::STATE_START_INSERT;
             return true;
         }
 

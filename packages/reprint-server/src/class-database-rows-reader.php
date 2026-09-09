@@ -20,8 +20,9 @@ class DatabaseRowsReader {
     private $current_pk_columns = null;
 
     /**
-     * Cursor bookmark containing the primary key of the last returned record.
-     * The next SELECT starts strictly after these values.
+     * Primary key of the last returned record or completed candidate batch.
+     * For selected-site user reads, an empty filtered batch still moves this
+     * position past every checked ID. The next SELECT starts after it.
      *
      * @var array|null
      */
@@ -49,6 +50,17 @@ class DatabaseRowsReader {
      * @var int
      */
     private $rows_fetched_from_current_query = 0;
+
+    /**
+     * Last candidate ID in the open selected-user query, or null without one.
+     * For example, a metadata batch may check IDs 1–250 but return only row 7.
+     * After returning row 7, consume the query before moving the cursor to 250.
+     * This value stays in memory only. Resume reads a new bounded batch after
+     * the last returned row; it must not skip candidates that were not consumed.
+     *
+     * @var int|string|null
+     */
+    private $current_query_last_candidate_id = null;
 
     /**
      * Table names selected for SQL output, or null before table discovery.
@@ -359,10 +371,15 @@ class DatabaseRowsReader {
 
 
     /**
-     * Fetches the next row and advances the resume position.
+     * Fetches a row or finishes one filtered batch, then advances the cursor.
      *
-     * An exhausted batch opens another bounded query after the last primary
-     * key. A fresh query returning no rows means the table is complete.
+     * Selected-site user reads limit candidate IDs before applying filters.
+     * An empty result can therefore mean 250 rejected metadata rows, not EOF.
+     * Return control so the producer can emit a checkpoint and stop or resume.
+     * Other reads open the next LIMIT query when the previous one is consumed.
+     *
+     * @return bool|null True for a row, null after a selected-user batch was
+     *                   consumed without a row, false when no candidates remain.
      */
     public function next_record()
     {
@@ -380,7 +397,12 @@ class DatabaseRowsReader {
                     );
                 }
             }
-            $query = $this->build_select_query();
+            $query = $this->multisite_selection !== null && $this->multisite_selection->is_shared_user_table($this->current_table)
+                ? $this->read_candidate_ids_and_build_row_query()
+                : $this->build_select_query();
+            if ($query === null) {
+                return false;
+            }
             try {
                 $this->current_result_set = $this->db->query($query);
             } catch (\Exception $e) {
@@ -394,6 +416,12 @@ class DatabaseRowsReader {
         $record = $this->current_result_set->fetch(PdoConstants::fetch_assoc());
         if (!$record) {
             $this->current_result_set = null;
+            if ($this->current_query_last_candidate_id !== null) {
+                $this->last_pk_values = [$this->current_pk_columns[0] => $this->current_query_last_candidate_id];
+                $this->current_query_last_candidate_id = null;
+                $this->clear_current_record();
+                return null;
+            }
             if ($this->rows_fetched_from_current_query === 0) {
                 return false;
             }
@@ -429,8 +457,54 @@ class DatabaseRowsReader {
         if ($this->rows_fetched_from_current_query >= $this->batch_size) {
             $this->current_row_ends_query_batch = true;
             $this->release_current_result_set();
+            $this->current_query_last_candidate_id = null;
         }
         return true;
+    }
+
+    /**
+     * Reads one candidate-ID batch and builds the permitted user/profile row query.
+     *
+     * Users come from the site's saved ID table. Metadata walks the network's
+     * umeta_id primary key, including rejected keys. A per-user ORDER BY
+     * umeta_id can read and sort every profile row on MyISAM; its user_id index
+     * does not contain the primary key as InnoDB's secondary indexes do.
+     *
+     * The second query uses only these IDs and the primary index. Keep the
+     * normal filters and live reference checks, including for oversized rows.
+     * Only this bounded ID list is held in PHP; profile values are not read
+     * until the second query. Neither query adds or changes a WordPress index.
+     *
+     * @return string|null SQL for this batch, or null when no candidate IDs remain.
+     */
+    private function read_candidate_ids_and_build_row_query(): ?string
+    {
+        $is_usermeta = $this->current_table === $this->multisite_selection->get_usermeta_table_name();
+        $primary_key = $is_usermeta ? 'umeta_id' : 'ID';
+        $candidate_column = $is_usermeta ? 'umeta_id' : 'user_id';
+        $candidate_table = $is_usermeta ? $this->current_table : $this->multisite_selection->get_user_table_name();
+        $last_id = $this->last_pk_values[$primary_key] ?? '0';
+        if (!is_numeric($last_id)) {
+            throw new \InvalidArgumentException("Cannot compare numeric primary key '{$primary_key}': the cursor contains a non-numeric value, " . json_encode($last_id) . '.');
+        }
+        $last_id = $this->db->quote( (string) $last_id );
+        $query = $this->get_select_prefix() . " `{$candidate_column}` FROM `{$candidate_table}` FORCE INDEX (PRIMARY)" .
+            " WHERE `{$candidate_column}` > {$last_id} ORDER BY `{$candidate_column}` LIMIT {$this->batch_size}";
+        $result = $this->db->query($query);
+        $candidate_ids = $result->fetchAll(PdoConstants::fetch_column());
+        if (!$candidate_ids) {
+            return null;
+        }
+        $this->current_query_last_candidate_id = end($candidate_ids);
+        $quoted_ids = array_map(function ($id) {
+            return $this->db->quote( (string) $id );
+        }, $candidate_ids);
+        $where_conditions = $this->get_current_row_selection_conditions();
+        $where_conditions[] = "`{$primary_key}` IN (" . implode(',', $quoted_ids) . ')';
+        return $this->build_byte_preserving_select_from_current_table() .
+            ' FORCE INDEX (PRIMARY) WHERE ' . implode(' AND ', array_map(function ($condition) {
+                return "({$condition})";
+            }, $where_conditions)) . " ORDER BY `{$primary_key}`";
     }
 
     /** Drains unconsumed records and releases the active LIMIT-sized result set. */
@@ -1051,6 +1125,7 @@ class DatabaseRowsReader {
         if ($this->current_table) {
             $this->current_pk_columns = $this->get_primary_key_columns($this->current_table);
             $this->last_pk_values = null;
+            $this->current_query_last_candidate_id = null;
             $this->current_offset = 0;
             $this->current_column_types = $this->get_column_types($this->current_table);
             $this->current_column_names = array_keys($this->current_column_types);
