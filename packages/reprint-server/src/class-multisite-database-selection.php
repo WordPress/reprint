@@ -86,7 +86,7 @@ class MultisiteDatabaseSelection {
      */
     public function get_identity(): string
     {
-        return 'core-v5:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
+        return 'core-v6:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
     }
 
     /**
@@ -311,6 +311,27 @@ class MultisiteDatabaseSelection {
     public function includes_table(string $table): bool
     {
         return $this->get_row_condition($table) !== '0=1';
+    }
+
+    /**
+     * Returns replacement values for login secrets in exported user rows.
+     *
+     * Shared logins must not leave the network with a selected site's content.
+     * For `network_users`, replace user_pass with '*' and user_activation_key
+     * with an empty string. This returns values; it does not change source rows.
+     *
+     * @return array {
+     *     Replacement values for the shared users table; empty for other tables.
+     *
+     *     @type string $user_pass Unusable password marker, never a source hash.
+     *     @type string $user_activation_key Empty source password-reset key.
+     * }
+     */
+    public function get_column_replacements(string $table): array
+    {
+        return $table === $this->base_prefix . 'users'
+            ? ['user_pass' => '*', 'user_activation_key' => '']
+            : [];
     }
 
     /**
