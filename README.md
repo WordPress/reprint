@@ -254,13 +254,59 @@ It can be interrupted and resumed at any time — just re-run the same command:
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
-The command returns one of three exit codes:
+The command returns one of four exit codes:
 
 - 0: sync completed
 - 1: failure
 - 2: partial completion, needs re-running
+- 3: temporary transfer failure, retry the same command later
 
-Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
+Run again immediately after exit `2`. After exit `3`, wait before running the
+same command with the same state directory and filesystem root. Reprint keeps
+its saved progress. Exit `1` requires checking the error instead of scheduling
+an automatic retry.
+
+Every retryable streaming failure stops the current invocation with exit `3`.
+Reprint does not retry the failed request in that process or change it to exit
+`1` after repeated failures. The caller decides when to retry and when to stop.
+
+JSON error records on stdout and stderr include
+`consecutive_failures_without_progress`. The count survives separate CLI runs:
+a first stalled request reports `1`, the next reports `2`, and so on. A
+successful response or a failed response that advances the durable cursor resets
+the count to `0`. A different temporary error does not reset it. Exit `2` remains
+healthy partial completion.
+
+The records retain `error` and `error_code`, and include the original
+`exception` class, `http_code` when received, and a nonzero `curl_errno` when
+available. For example, an HTTP 520 before any transfer progress reports:
+
+```json
+{
+  "status": "error",
+  "error": "The remote server crashed (HTTP 520).\n\nThis is a problem on the remote server. Check its PHP error log for details.",
+  "error_code": "SERVER_ERROR",
+  "message": "Error: The remote server crashed (HTTP 520).\n\nThis is a problem on the remote server. Check its PHP error log for details.",
+  "exception": "Reprint\\Importer\\TransientInterruptionException",
+  "http_code": 520,
+  "consecutive_failures_without_progress": 1
+}
+```
+
+This applies to temporary streaming failures in file and database transfers,
+including those reached through `pull`, `pull-files`, and `pull-db`:
+
+- HTTP `400`, `408`, `413`, `418`, `421`, `425`, `429`, `500`, `502`, `503`,
+  `504`, and `520–524` without an explicit Reprint error.
+- Unmarked HTTP `401` or `403` after a signed request.
+- cURL timeouts, connection resets during transfer, empty or cut-short
+  responses, invalid compressed responses, and HTTP/2 or HTTP/3 stream errors.
+- Multipart responses missing their boundary or completion marker.
+
+Explicit Reprint errors (JSON containing a matching HTTP `code`) remain fatal.
+Preflight failures, DNS lookup failures, refused connections, certificate errors,
+and local errors keep their existing classification. Reprint does not suggest a
+wait time, schedule retries, or track human action.
 
 **File pull modes**
 
@@ -529,11 +575,12 @@ environment variable). The host string also supports `host:port` and
 `host:/path/to/socket` formats (same as WordPress `DB_HOST`), but
 `--mysql-port` takes precedence when both are specified.
 
-The command returns one of three exit codes:
+The command returns one of four exit codes:
 
 - 0: sync completed
 - 1: failure
 - 2: partial completion, needs re-running
+- 3: temporary transfer failure, retry the same command later
 
 #### Step 4 — Download files delta.
 
@@ -554,11 +601,12 @@ since the initial sync, and apply that delta in the local directory:
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
-The command returns one of three exit codes:
+The command returns one of four exit codes:
 
 - 0: sync completed
 - 1: failure
 - 2: partial completion, needs re-running
+- 3: temporary transfer failure, retry the same command later
 
 #### Step 5 — Apply the database with domain rewriting.
 

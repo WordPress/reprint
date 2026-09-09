@@ -200,13 +200,6 @@ class ImportClient
         self::DATABASE_IMPORT_POSITION_TABLE_PREFIX . "spatial";
     private const SQL_GROUP_MARKER = "-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 ";
 
-    /**
-     * Maximum number of consecutive temporary request failures with no cursor
-     * progress before the importer gives up. This prevents endless resumption
-     * when the source cannot complete a response.
-     */
-    private const MAX_CONSECUTIVE_INTERRUPTED_RESPONSES = 3;
-
     /** Maximum response header bytes retained for failed request audit logging. */
     private const MAX_AUDIT_RESPONSE_HEADER_BYTES = 65536;
 
@@ -459,6 +452,9 @@ class ImportClient
 
     /** @var int|null Last curl error number, for retry/diagnostic logic. */
     private $last_curl_errno = null;
+
+    /** @var int|null HTTP status received with the last streaming failure. */
+    private $last_http_code = null;
 
     /** @var bool Whether the last curl request timed out. */
     private $last_curl_timeout = false;
@@ -1426,7 +1422,7 @@ class ImportClient
                 "error" => $e->getMessage(),
                 "error_code" => $this->last_error_code,
                 "message" => "Error: " . $e->getMessage(),
-            ]);
+            ] + $this->get_error_details($e));
             $this->write_progress_file($e->getMessage());
             throw $e;
         }
@@ -3280,9 +3276,10 @@ class ImportClient
      * - Prior completed files-pull → delta mode (re-index, diff, fetch changes)
      * - In-progress files-pull → resume from saved state
      *
-     * Both modes share the same pipeline: index → diff → fetch. Partial
-     * source responses continue in this process while PHP has memory headroom.
+     * Both modes share the same pipeline: index → diff → fetch. Healthy partial
+     * responses continue in this process while PHP has memory headroom.
      * Otherwise the saved partial state leaves exit code 2 for the next process.
+     * A retryable streaming failure saves progress and throws for CLI exit 3.
      */
     public function run_files_pull(): void
     {
@@ -4548,11 +4545,6 @@ class ImportClient
 
             $this->fetch_database_index();
 
-            // Interrupted response during db-index — state already saved, exit partial.
-            if (($this->get_state()->active_resumable_command->completion_state ?? null) === "partial") {
-                return;
-            }
-
             $tables = (int) ($this->get_state()->db_index->tables ?? 0);
             $this->audit_log(
                 sprintf("db-pull db-index stage complete: %d tables", $tables),
@@ -4573,11 +4565,6 @@ class ImportClient
         ]);
 
         $this->fetch_sql($stage === "mysql-start");
-
-        // Interrupted response during SQL download — state already saved, exit partial.
-        if (($this->get_state()->active_resumable_command->completion_state ?? null) === "partial") {
-            return;
-        }
 
         // Mark as complete
         $this->get_state()->active_resumable_command->completion_state = "complete";
@@ -7805,12 +7792,6 @@ class ImportClient
             // the last complete part; the next invocation truncates any later
             // bytes before resuming.
             $durable_cursor = $this->get_state()->fetch->cursor;
-            $this->assert_can_resume_after_interrupted_response(
-                "file_fetch",
-                $cursor_before,
-                $durable_cursor,
-                $e,
-            );
             if ($context->file_handle) {
                 fflush($context->file_handle);
                 fclose($context->file_handle);
@@ -7818,8 +7799,13 @@ class ImportClient
             }
             $this->pull_index_journal->apply_pending_records();
             $this->get_state()->active_resumable_command->completion_state = "partial";
-            $this->save_state();
-            return false;
+            $this->record_interrupted_response(
+                "file_fetch",
+                $cursor_before,
+                $durable_cursor,
+                $e,
+            );
+            throw $e;
         }
         $this->get_state()->consecutive_interrupted_responses = 0;
         $wall_time = microtime(true) - $request_start;
@@ -8077,17 +8063,16 @@ class ImportClient
         try {
             $this->fetch_streaming($url, $cursor, $context, null, "file_index");
         } catch (TransientInterruptionException $e) {
-            $this->assert_can_resume_after_interrupted_response(
+            fclose($next_remote_index_file_handle);
+            $this->get_state()->index->cursor = $cursor;
+            $this->get_state()->active_resumable_command->completion_state = "partial";
+            $this->record_interrupted_response(
                 "file_index",
                 $cursor_before,
                 $cursor,
                 $e,
             );
-            fclose($next_remote_index_file_handle);
-            $this->get_state()->index->cursor = $cursor;
-            $this->get_state()->active_resumable_command->completion_state = "partial";
-            $this->save_state();
-            return false;
+            throw $e;
         }
         $this->get_state()->consecutive_interrupted_responses = 0;
         $wall_time = microtime(true) - $request_start;
@@ -8978,6 +8963,7 @@ class ImportClient
             false,
         );
 
+        $durable_mysql_cursor = $cursor;
         $caught_exception = null;
         $buffer_not_flushed = "";
         $chunks_since_save = 0;
@@ -9009,7 +8995,8 @@ class ImportClient
                     $query_stream,
                     &$sql_statements_counted,
                     &$chunks_since_save,
-                    &$remote_sql_error
+                    &$remote_sql_error,
+                    &$durable_mysql_cursor
                 ) {
                     // Check if shutdown was requested
                     if ($this->shutdown_requested) {
@@ -9114,6 +9101,7 @@ class ImportClient
                                         null,
                                         $spatial_srid_guard,
                                     );
+                                    $durable_mysql_cursor = $cursor;
                                     $sql_buffer = "";
                                 }
                                 break;
@@ -9213,7 +9201,7 @@ class ImportClient
                     }
                 };
 
-                $cursor_before = $cursor;
+                $cursor_before = $mode === "mysql" ? $durable_mysql_cursor : $cursor;
                 $request_start = microtime(true);
                 try {
                     $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
@@ -9223,22 +9211,26 @@ class ImportClient
                             "The source could not export the database: {$remote_sql_error}",
                         );
                     }
-                    // The source may time out or crash after complete SQL parts
-                    // but before its completion part. SQL multipart bodies are
-                    // delivered only at a complete part boundary, so resume from
-                    // that part's cursor without closing the selected output.
-                    $this->assert_can_resume_after_interrupted_response(
+                    // The source may stop after complete SQL parts but before
+                    // completion. File/stdout output can retain complete parts.
+                    // MySQL can retain only committed groups: sql_buffer may
+                    // contain an unfinished group which the next process must
+                    // request again from the target's saved position.
+                    if ($sql_handle && !fflush($sql_handle)) {
+                        throw new RuntimeException("Cannot flush db.sql before saving its cursor.");
+                    }
+                    $this->get_state()->active_resumable_command->remote_cursor =
+                        $mode === "mysql" ? null : $cursor;
+                    $this->get_state()->sql_bytes = $sql_bytes_written;
+                    $this->get_state()->sql_statements_counted = $sql_statements_counted;
+                    $this->get_state()->active_resumable_command->completion_state = "partial";
+                    $this->record_interrupted_response(
                         "sql_chunk",
                         $cursor_before,
-                        $cursor,
+                        $mode === "mysql" ? $durable_mysql_cursor : $cursor,
                         $e,
                     );
-                    $retry_log = "SQL RETRY | resuming source request | mode={$mode}";
-                    if ($sql_buffer !== "") {
-                        $retry_log .= " | buffered_sql=" . strlen($sql_buffer) . " bytes";
-                    }
-                    $this->audit_log($retry_log, true);
-                    continue;
+                    throw $e;
                 }
                 if ($remote_sql_error !== null) {
                     throw new RuntimeException(
@@ -9746,12 +9738,6 @@ class ImportClient
                         "db_index",
                     );
                 } catch (TransientInterruptionException $e) {
-                    $this->assert_can_resume_after_interrupted_response(
-                        "db_index",
-                        $cursor_before,
-                        $cursor,
-                        $e,
-                    );
                     fflush($handle);
                     $this->get_state()->active_resumable_command->remote_cursor = $cursor;
                     $this->get_state()->db_index->file = $tables_file;
@@ -9760,8 +9746,13 @@ class ImportClient
                     $this->get_state()->db_index->bytes = $bytes_written;
                     $this->get_state()->db_index->updated_at = (string) time();
                     $this->get_state()->active_resumable_command->completion_state = "partial";
-                    $this->save_state();
-                    return;
+                    $this->record_interrupted_response(
+                        "db_index",
+                        $cursor_before,
+                        $cursor,
+                        $e,
+                    );
+                    throw $e;
                 }
                 $this->get_state()->consecutive_interrupted_responses = 0;
                 $wall_time = microtime(true) - $request_start;
@@ -11450,6 +11441,7 @@ class ImportClient
     private function reset_request_error_state(): void
     {
         $this->last_curl_errno = null;
+        $this->last_http_code = null;
         $this->last_curl_timeout = false;
         $this->last_error_code = null;
     }
@@ -11653,30 +11645,19 @@ class ImportClient
     }
 
     /**
-     * Whether the request after this failure is the last one that will be tried.
-     */
-    private function is_final_resume_attempt(): bool
-    {
-        // The current failure hasn't been counted yet, so add an artificial 1 to the count.
-        $failures = $this->get_state()->consecutive_interrupted_responses + 1;
-
-        return self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES - $failures <= 1;
-    }
-
-    /**
-     * Track consecutive temporary request failures and decide whether to resume.
+     * Record one interrupted request after its durable cursor has been saved
+     * in command state. The caller rethrows the original error and exits 3;
+     * only the caller of the CLI decides when to retry or stop.
      *
-     * Compares the cursor before and after the request. A cursor advance means
-     * the request produced another durable part, so the counter resets. If the
-     * cursor did not move, the counter increments. After
-     * MAX_CONSECUTIVE_INTERRUPTED_RESPONSES with no progress, the runner stops.
+     * A durable cursor advance resets the no-progress count, even if the
+     * response later failed. Different temporary errors share the count.
      *
-     * @param string                           $phase         Human-readable phase name.
-     * @param ?string                          $cursor_before Cursor at request start.
-     * @param ?string                          $cursor_after  Last durable cursor.
-     * @param TransientInterruptionException   $exception     Temporary request failure.
+     * @param string                         $phase         Endpoint whose request failed.
+     * @param ?string                        $cursor_before Durable cursor at request start.
+     * @param ?string                        $cursor_after  Last durable cursor after the request.
+     * @param TransientInterruptionException $exception     Original request failure.
      */
-    protected function assert_can_resume_after_interrupted_response(
+    protected function record_interrupted_response(
         string $phase,
         ?string $cursor_before,
         ?string $cursor_after,
@@ -11687,28 +11668,43 @@ class ImportClient
         } else {
             $this->get_state()->consecutive_interrupted_responses++;
         }
-
+        $this->save_state();
         $count = $this->get_state()->consecutive_interrupted_responses;
-
         $this->audit_log(
             "TEMPORARY REQUEST FAILURE | {$phase} | " .
-                "consecutive_interrupted_responses={$count}/" .
-                self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES .
+                "consecutive_failures_without_progress={$count}" .
                 " | cursor_moved=" .
                 ($cursor_after !== $cursor_before ? "yes" : "no") .
                 " | " . $exception->getMessage(),
             true,
         );
+    }
 
-        if ($count >= self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES) {
-            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The remote failure is rendered only as CLI text.
-            throw new RuntimeException(
-                "The remote request failed {$count} consecutive times " .
-                "without cursor progress during {$phase}. Last failure: " .
-                $exception->getMessage(),
-            );
-            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+    /**
+     * Details shared by the progress error and final CLI error JSON records.
+     *
+     * @param Throwable $exception Failure being reported, not a previous cause.
+     * @return array {
+     *     @type string $exception                             Original exception class.
+     *     @type int    $http_code                             HTTP status when received with the failure. Otherwise omitted.
+     *     @type int    $curl_errno                            Nonzero cURL error number. Otherwise omitted.
+     *     @type int    $consecutive_failures_without_progress Consecutive stalled requests, only for retryable failures.
+     * }
+     */
+    public function get_error_details(Throwable $exception): array
+    {
+        $details = ['exception' => get_class($exception)];
+        if ($this->last_http_code > 0) {
+            $details['http_code'] = $this->last_http_code;
         }
+        if ($this->last_curl_errno > 0) {
+            $details['curl_errno'] = $this->last_curl_errno;
+        }
+        if ($exception instanceof TransientInterruptionException) {
+            $details['consecutive_failures_without_progress'] =
+                $this->get_state()->consecutive_interrupted_responses;
+        }
+        return $details;
     }
 
     /**
@@ -12348,6 +12344,7 @@ class ImportClient
             try {
                 $this->check_curl_error($ch);
             } catch (RuntimeException $curl_error) {
+                $this->last_http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
                 if ($endpoint !== null) {
                     $this->handle_tuner_error($endpoint, [
                         "http_code" => 0,
@@ -12373,12 +12370,12 @@ class ImportClient
         $context->response_stats["total_time"] = $total_time;
 
         if ($http_code !== 200) {
+            $this->last_http_code = (int) $http_code;
             if ($endpoint !== null) {
                 $this->handle_tuner_error($endpoint, [
                     "http_code" => $http_code,
                     "timeout" => false,
                     "curl_errno" => 0,
-                    "final_attempt" => $this->is_final_resume_attempt(),
                 ]);
             }
 
@@ -12415,6 +12412,7 @@ class ImportClient
         }
 
         if (!$parser) {
+            $this->last_http_code = (int) $http_code;
             $snippet = $error_body ? substr($error_body, 0, 500) : "";
             throw new TransientInterruptionException(
                 "Invalid response: missing multipart boundary. " .
@@ -12423,6 +12421,7 @@ class ImportClient
         }
 
         if (!$context->saw_completion) {
+            $this->last_http_code = (int) $http_code;
             throw new TransientInterruptionException(
                 "Invalid response: missing completion chunk from server.",
             );
@@ -13744,6 +13743,7 @@ if (
         echo "Exit codes:\n";
         echo "  0  Command completed successfully\n";
         echo "  2  Partial progress — run the same command again to continue\n";
+        echo "  3  Temporary transfer failure — retry the same command later\n";
         echo "  1  Error\n";
         echo "\n";
         echo "Resumable commands keep their command-specific work under --state-dir.\n";
@@ -14629,16 +14629,17 @@ if (
                 "exception" => get_class($e),
                 "file" => $e->getFile(),
                 "line" => $e->getLine(),
-            ];
+            ] + ( isset($client) ? $client->get_error_details($e) : [] );
             $json = json_encode($error);
             if ($json === false) {
                 $json = '{"error":"' . addslashes($e->getMessage()) . '","exception":"' . get_class($e) . '"}';
             }
             fwrite(STDERR, $json . "\n");
         }
-        $GLOBALS['REPRINT_PULL_EXIT_CODE'] = 1;
+        $reprint_exit_code = $e instanceof TransientInterruptionException ? 3 : 1;
+        $GLOBALS['REPRINT_PULL_EXIT_CODE'] = $reprint_exit_code;
         if (!defined('EXIT_AFTER_PULL') || EXIT_AFTER_PULL) {
-            exit(1);
+            exit( (int) $reprint_exit_code );
         }
         // When EXIT_AFTER_PULL is false we still want the embedder
         // to see the failure — re-throw so its try/catch around
