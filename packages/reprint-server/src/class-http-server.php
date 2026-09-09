@@ -296,7 +296,7 @@ final class HTTPServer {
                     'This source requires a Reprint client that supports pulling one site into a one-site network. Update the client.'
                 );
             }
-            if (!in_array($config['endpoint'] ?? '', ['preflight', 'sql_chunk'], true)) {
+            if (!in_array($config['endpoint'] ?? '', ['preflight', 'sql_chunk', 'file_index', 'file_fetch'], true)) {
                 throw new InvalidArgumentException('This endpoint does not support a selected multisite site.');
             }
             $config['_multisite'] = $this->multisite;
