@@ -53,7 +53,8 @@ class DatabaseRowsReader {
     /**
      * Table names selected for SQL output, or null before table discovery.
      * A selected-site export can also read omitted content tables to collect
-     * user IDs. Those tables go in $tables_in_group, not in this list.
+     * user IDs. Those tables are included by get_tables_in_current_group(),
+     * without adding them to this list of SQL output tables.
      *
      * @var string[]|null
      */
@@ -140,16 +141,6 @@ class DatabaseRowsReader {
     private $table_group = 'content';
 
     /**
-     * Ordered table names for the current group; null until the list is built.
-     * For a selected-site users-only export, the content list still includes
-     * posts, comments and links. The reader visits those tables for user IDs,
-     * without SQL output.
-     *
-     * @var string[]|null
-     */
-    private $tables_in_group = null;
-
-    /**
      * Last network usermeta primary key checked for site membership.
      * For site 7, a batch ending at umeta_id 500 saves '500' even if no row
      * has the `network_7_capabilities` key. Resume starts after row 500.
@@ -189,9 +180,10 @@ class DatabaseRowsReader {
         }
         $this->tables_to_process = $options["tables_to_process"] ?? null;
         if ($this->tables_to_process !== null) {
-            $this->tables_to_process = array_values(array_filter($this->tables_to_process, function ($table) {
+            // A table name identifies the resume position, so visit each name once.
+            $this->tables_to_process = array_values(array_unique(array_filter($this->tables_to_process, function ($table) {
                 return !MultisiteDatabaseSelection::is_internal_table($table);
-            }));
+            })));
         }
         if ($this->multisite_selection !== null && $this->tables_to_process !== null) {
             $this->tables_to_process = array_values(array_filter(
@@ -240,10 +232,10 @@ class DatabaseRowsReader {
     }
 
     /**
-     * Selects the users and usermeta table list after all content tables are complete.
+     * Switches to users and usermeta after all content tables are complete.
      *
      * The producer calls this when a table list ends, not for each table.
-     * This only changes the list. The producer must finish
+     * This only changes $table_group. The producer must finish
      * collect_site_members_step() before it calls move_to_next_table()
      * to read the first user table.
      *
@@ -256,12 +248,10 @@ class DatabaseRowsReader {
         if ($this->multisite_selection === null || $this->table_group === 'users') {
             return false;
         }
-        $user_tables = $this->multisite_selection->get_user_tables($this->tables_to_process);
-        if (!$user_tables) {
+        if (!$this->multisite_selection->get_user_tables($this->tables_to_process)) {
             return false;
         }
         $this->table_group = 'users';
-        $this->tables_in_group = $user_tables;
         return true;
     }
 
@@ -690,16 +680,10 @@ class DatabaseRowsReader {
         if ($this->tables_to_process === null) {
             $this->initialize_tables_to_process();
         }
-        $this->initialize_table_group();
         if ($this->current_table) {
-            $position = array_search($this->current_table, $this->tables_in_group, true);
-            if ($position === false) {
+            if (!in_array($this->current_table, $this->get_tables_in_current_group(), true)) {
                 $this->current_table = null;
                 return false;
-            }
-            reset($this->tables_in_group);
-            while (key($this->tables_in_group) !== $position) {
-                next($this->tables_in_group);
             }
             if ($this->get_primary_key_columns($this->current_table) !== $this->current_pk_columns) {
                 throw new \RuntimeException(
@@ -1052,19 +1036,18 @@ class DatabaseRowsReader {
         return array_values($columns_by_position);
     }
 
+    /**
+     * Selects the next table in the current group and resets its row cursor.
+     * Returns false if the table list is not initialized or this group is complete.
+     */
     public function move_to_next_table()
     {
         if ($this->tables_to_process === null) {
             return false;
         }
-        if ($this->tables_in_group === null) {
-            $this->initialize_table_group();
-        }
-        if (!$this->current_table) {
-            $this->current_table = reset($this->tables_in_group) ?: null;
-        } else {
-            $this->current_table = next($this->tables_in_group) ?: null;
-        }
+        $tables = $this->get_tables_in_current_group();
+        $position = $this->current_table === null ? -1 : array_search($this->current_table, $tables, true);
+        $this->current_table = $position === false ? null : ( $tables[$position + 1] ?? null );
         if ($this->current_table) {
             $this->current_pk_columns = $this->get_primary_key_columns($this->current_table);
             $this->last_pk_values = null;
@@ -1117,18 +1100,25 @@ class DatabaseRowsReader {
     }
 
     /**
-     * Rebuilds the current table group once when starting or restoring a reader.
-     * The cursor stores its group and current table, not another table-list index.
+     * Computes the ordered table names when moving between tables or resuming.
+     * The current group and table name determine the position; there is no
+     * stored group list or separate table-list index to restore.
+     *
+     * For a selected-site users-only export, the content list still includes
+     * posts, comments and links. The reader visits those tables for user IDs,
+     * without SQL output. Building this list does not read those tables.
+     *
+     * @return string[] Tables in the current group.
      */
-    private function initialize_table_group(): void
+    private function get_tables_in_current_group(): array
     {
         if ($this->multisite_selection === null) {
-            $this->tables_in_group = $this->tables_to_process;
-        } elseif ($this->table_group === 'content') {
-            $this->tables_in_group = $this->multisite_selection->get_content_tables($this->tables_to_process);
-        } else {
-            $this->tables_in_group = $this->multisite_selection->get_user_tables($this->tables_to_process);
+            return $this->tables_to_process;
         }
+        if ($this->table_group === 'content') {
+            return $this->multisite_selection->get_content_tables($this->tables_to_process);
+        }
+        return $this->multisite_selection->get_user_tables($this->tables_to_process);
     }
 
     /** Returns cached column metadata for a table. */
