@@ -533,7 +533,13 @@ class DatabaseRowsReader {
                         " THEN LEFT({$binary_value}, 4) ELSE NULL END AS {$quoted_prefix_alias}";
                     continue;
                 }
-                if (
+                if (strtoupper($column_info["data_type"]) === "BIT") {
+                    // Drivers may return native BIT results as packed bytes. Ask
+                    // the server for an unsigned number instead, keeping SQL
+                    // values and cursor comparisons numeric without a PHP cast
+                    // that could lose the upper half of BIT(64)'s range.
+                    $select_parts[] = "CAST({$quoted_column} AS UNSIGNED) AS {$quoted_column}";
+                } elseif (
                     $this->is_numeric_type($column_info["data_type"]) ||
                     $this->is_binary_type($column_info["data_type"])
                 ) {
