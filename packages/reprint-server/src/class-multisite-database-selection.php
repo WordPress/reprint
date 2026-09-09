@@ -5,30 +5,48 @@ namespace WordPress\Reprint\Server;
 require_once __DIR__ . '/utils.php';
 
 /**
- * Selects one site's core tables and its related records in shared core tables.
+ * Selects the WordPress tables and shared rows to export for one network site.
  *
- * Constructed from trusted WordPress state, never from a client's SQL predicate.
- * Plugin-defined shared records need a separate, explicit migration contract.
+ * For site 7 with base prefix `network_`, keep core tables such as
+ * `network_7_posts`. Use `network_7_reprint_users` to store user IDs found in
+ * that site's content and membership rows. Then use those IDs to select rows
+ * from the shared `network_users` and `network_usermeta` tables.
+ *
+ * The SQL endpoint supplies the prefix and site/network IDs from WordPress
+ * state on the source server. A client cannot supply a SQL condition here.
+ * Shared plugin tables need their own rules to select one site's data.
  */
 class MultisiteDatabaseSelection {
 
-    /** @var string */
+    /** @var string Network table prefix, for example `network_` in `network_users`. */
     private $base_prefix;
-    /** @var string */
+    /** @var string Site table prefix: `network_7_` for site 7, `network_` for site 1. */
     private $site_prefix;
-    /** @var int */
+    /** @var int Selected site's blog_id in the network's blogs table, for example 7. */
     private $site_id;
-    /** @var int */
+    /** @var int Selected network's id in the site table, for example 1. */
     private $network_id;
 
     /** @var mixed Source connection retained for this request's lock and ID writes. */
     private $db;
-    /** @var string|null */
+    /** @var string|null MySQL named lock held for this site's saved user table until close(). */
     private $lock_name;
-    /** @var string|null Generation of the one saved set, not a source snapshot. */
+    /**
+     * Random token set when this site's saved user table is created.
+     * Stored in the table comment and export cursor. A new export replaces the
+     * table and token, so an older cursor cannot resume against the new set.
+     * This token does not track changes to the source WordPress rows.
+     *
+     * @var string|null Null until the saved user table is opened.
+     */
     private $generation;
 
-    /** Retains the selected site's IDs; promoting it does not rename its tables. */
+    /**
+     * Builds selection rules without changing source site IDs or table names.
+     * For example, ('network_', 7, 1) selects site 7 in network 1 and uses
+     * `network_7_` as its site table prefix. This does not query WordPress to
+     * check that the site exists; the caller must supply the source site's IDs.
+     */
     public function __construct(string $base_prefix, int $site_id, int $network_id)
     {
         /**
@@ -56,7 +74,10 @@ class MultisiteDatabaseSelection {
     }
 
     /**
-     * Binds a database cursor to the same source site and selection rules.
+     * Returns a cursor check value for the source site and selection rules.
+     *
+     * Contains the rule version, base prefix, network ID and site ID, in that
+     * order. Site 7 and site 8 cannot use each other's database cursor.
      *
      * The row reader compares this value on resume. Change the version when
      * selection, value-replacement rules or the cursor layout change, not for
@@ -137,17 +158,25 @@ class MultisiteDatabaseSelection {
         $this->db = null;
     }
 
+    /** Returns the saved user table's token for the cursor, or null before open_user_set(). */
     public function get_generation(): ?string
     {
         return $this->generation;
     }
 
+    /**
+     * Returns the table that stores collected IDs, for example `network_7_reprint_users`.
+     * This is Reprint's source state table, not WordPress's shared `network_users` table.
+     */
     public function get_user_table_name(): string
     {
         return $this->site_prefix . 'reprint_users';
     }
 
-    /** These reserved tables are source state, including in unfiltered dumps. */
+    /**
+     * Identifies Reprint's saved user tables, such as `network_7_reprint_users`.
+     * The row reader excludes them from SQL output, even without selected-site rules.
+     */
     public static function is_internal_table(string $table): bool
     {
         return (bool) preg_match('/^[a-zA-Z0-9_]+reprint_users$/iD', $table);
@@ -159,6 +188,8 @@ class MultisiteDatabaseSelection {
      * A users-only or profiles-only export must still read author IDs from
      * posts, comments and links. Add those tables to the content walk; the
      * reader omits their SQL when the caller did not select their contents.
+     * For site 7, input ['network_users'] returns ['network_7_posts',
+     * 'network_7_comments', 'network_7_links']. This only builds the list.
      *
      * @param string[] $tables Tables selected for SQL export.
      * @return string[] Content tables, including any needed ID-only reads.
@@ -186,15 +217,26 @@ class MultisiteDatabaseSelection {
         return array_values(array_intersect([$this->base_prefix . 'users', $this->base_prefix . 'usermeta'], $tables));
     }
 
+    /** Returns the shared membership and profile table, for example `network_usermeta`. */
     public function get_usermeta_table_name(): string
     {
         return $this->base_prefix . 'usermeta';
     }
 
     /**
-     * Collects one LIMIT-sized query before its matching content cursor can leave.
+     * Runs one ID query and saves its users before the reader moves its cursor.
      *
-     * @return string Last source primary key, or '0' when the query was empty.
+     * For post ID 100 with post_author 42, save user 42 with reference_kind 1
+     * and reference_id 100. Keep only the first saved reference for each user.
+     * Ignore user ID 0. For usermeta, save only the selected site's capabilities
+     * rows. The caller must put a LIMIT on the query to bound this step.
+     *
+     * @param string $table Source table supported by get_reference_columns().
+     * @param string $query SELECT ordered by primary key, limited to one reader
+     *                      batch. Must return the primary key and user column,
+     *                      plus meta_key for usermeta.
+     * @return string Last source primary key read, including rows which added
+     *                no user IDs; '0' when the query was empty.
      */
     public function collect_user_references(string $table, string $query): string
     {
@@ -222,12 +264,20 @@ class MultisiteDatabaseSelection {
     }
 
     /**
-     * Checks the saved source row by primary key, never by scanning its user column.
+     * Returns a SQL expression that checks a row's link to the saved user set.
+     *
+     * For content, check that its user ID is zero or already saved. For users
+     * and usermeta, check that the saved source row still refers to that user.
+     * For example, if user 42 was saved from post 100, check that post 100
+     * still has post_author 42. Use its primary key, not a scan of post_author.
+     * The reader runs this expression in its SELECT and rejects a failed check.
      *
      * One saved reference per user bounds storage by distinct users, not comments.
      * If that reference changes, stop rather than scan for another one. Another
      * valid relationship may still exist; a fresh export discovers it again.
      * New relationships behind the discovery cursor need a fresh export too.
+     *
+     * @return string|null SQL check, or null for a table with no user references.
      */
     public function get_user_reference_check(string $table): ?string
     {
@@ -263,7 +313,12 @@ class MultisiteDatabaseSelection {
         return $this->get_row_condition($table) !== '0=1';
     }
 
-    /** Returns a trusted SQL condition, including schema-only shared tables. */
+    /**
+     * Returns a WHERE condition for the selected site's rows; does not run SQL.
+     * For site 7, `network_blogs` gets `blog_id = 7`. Shared users and profiles
+     * use the saved user IDs; profile rows also need an allowed metadata key.
+     * Returns '1=0' for a schema-only table, or '0=1' to omit the whole table.
+     */
     public function get_row_condition(string $table): string
     {
         // These exact core tables contain only the selected site's records.
@@ -352,7 +407,9 @@ class MultisiteDatabaseSelection {
     }
 
     /**
-     * Selects IDs saved from members and core content references.
+     * Returns a SQL lookup for a user ID in the site's saved user table.
+     * For example, `network_users`.`ID` is checked against user_id in
+     * `network_7_reprint_users` when site 7 is selected.
      *
      * A capabilities row includes members who have no content. Post, registered
      * comment and link references also retain users who no longer have a role
@@ -367,12 +424,16 @@ class MultisiteDatabaseSelection {
         return "(SELECT saved.user_id FROM `{$this->get_user_table_name()}` saved WHERE saved.user_id={$user_expression} LIMIT 1) IS NOT NULL";
     }
     /**
-     * Identifies the small fields needed to collect a user without its profile.
+     * Returns the columns used to save a user ID and the source row that refers to it.
+     * For `network_7_posts`, read ID and post_author, then save the reference
+     * as kind 1. The kind tells get_user_reference_check() which table to check.
      *
      * @return array|null {
-     *     @type string $primary_key Source row's primary key.
-     *     @type string $user_column User ID in that row.
-     *     @type int    $kind Source table discriminator stored with the ID.
+     *     Columns for a supported source table; null for other tables.
+     *
+     *     @type string $primary_key Column name for the source row ID, such as ID.
+     *     @type string $user_column Column name for its user ID, such as post_author.
+     *     @type int    $kind Saved reference_kind: 1 posts, 2 comments, 3 links, 4 usermeta.
      * }
      */
     public function get_reference_columns(string $table): ?array
@@ -386,6 +447,7 @@ class MultisiteDatabaseSelection {
         return $sources[$table] ?? null;
     }
 
+    /** Checks for shared WordPress users or usermeta, not Reprint's saved ID table. */
     public function is_shared_user_table(string $table): bool
     {
         return $table === $this->base_prefix . 'users' || $table === $this->base_prefix . 'usermeta';
