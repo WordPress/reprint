@@ -13,6 +13,7 @@ class PullFilterFakeClient extends \ImportClient
     public int $files_pull_runs = 0;
     public int $db_sync_runs = 0;
     public int $db_apply_runs = 0;
+    public ?array $db_apply_options = null;
     public array $progress_events = [];
     public array $progress_file_errors = [];
 
@@ -90,6 +91,7 @@ class PullFilterFakeClient extends \ImportClient
                 ],
             ],
         ]);
+        $state->remote_protocol_version = PULL_PROTOCOL_VERSION;
         $state->active_resumable_command->completion_state = "complete";
         $this->save_state();
     }
@@ -128,6 +130,7 @@ class PullFilterFakeClient extends \ImportClient
     public function run_db_apply(array $options): void
     {
         $this->db_apply_runs++;
+        $this->db_apply_options = $options;
         $state = $this->get_state();
         $state->active_resumable_command->command_name = "db-apply";
         $state->active_resumable_command->completion_state = "complete";
@@ -153,6 +156,16 @@ class PullFailingPreflightFakeClient extends PullFilterFakeClient
     }
 }
 
+class PullOlderProtocolFakeClient extends PullFilterFakeClient
+{
+    public function run_preflight(): void
+    {
+        parent::run_preflight();
+        $this->get_state()->remote_protocol_version = PULL_PROTOCOL_VERSION - 1;
+        $this->save_state();
+    }
+}
+
 /**
  * Fake client that records the options the pull pipeline hands to
  * apply-runtime, so we can assert the flatten_to -> flat_document_root
@@ -162,6 +175,17 @@ class PullBridgeFakeClient extends PullFilterFakeClient
 {
     public ?array $apply_runtime_options = null;
 
+    public function run_db_apply(array $options): void
+    {
+        parent::run_db_apply($options);
+        if (!empty($options['new_site_url'])) {
+            $this->get_state()->apply->rewrite_url = [
+                'http://fake.invalid' => $options['new_site_url'],
+            ];
+            $this->save_state();
+        }
+    }
+
     public function run_flat_document_root(array $options): void
     {
     }
@@ -169,6 +193,12 @@ class PullBridgeFakeClient extends PullFilterFakeClient
     public function run_apply_runtime(array $options): void
     {
         $this->apply_runtime_options = $options;
+        $output_dir = $options['output_dir'];
+        if (!is_dir($output_dir)) {
+            mkdir($output_dir, 0755, true);
+        }
+        file_put_contents($output_dir . '/start.sh', "#!/bin/sh\nexit 0\n");
+        chmod($output_dir . '/start.sh', 0755);
     }
 }
 
@@ -240,6 +270,9 @@ class PullFilterOptionTest extends TestCase
 
     private function writeState(array $state): void
     {
+        if (!array_key_exists('remote_protocol_version', $state)) {
+            $state['remote_protocol_version'] = PULL_PROTOCOL_VERSION;
+        }
         \write_current_pull_state($this->makeClient(), $state);
     }
 
@@ -301,6 +334,187 @@ class PullFilterOptionTest extends TestCase
             static fn ($error): bool => $error !== null,
         ));
         $this->assertSame(["Exporter unavailable"], $progress_file_errors);
+    }
+
+    public function testPullDoesNotTransferFilesWithAnOlderExportPlugin(): void
+    {
+        $client = new PullOlderProtocolFakeClient($this->stateDir, $this->filesystem_root);
+
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull",
+                "runtime" => "none",
+            ]);
+            $this->fail('Expected pull to stop on the incompatible protocol');
+        } catch (\RuntimeException $e) {
+            $this->assertSame(
+                'Remote protocol v' . (PULL_PROTOCOL_VERSION - 1) .
+                ' does not match client protocol v' . PULL_PROTOCOL_VERSION .
+                '. Update the export plugin.',
+                $e->getMessage(),
+            );
+        } finally {
+            ob_end_clean();
+        }
+
+        $state = $this->readState();
+        $this->assertSame(0, $client->files_pull_runs);
+        $this->assertSame(0, $client->db_sync_runs);
+        $this->assertNull($state["pull_pipeline"]["last_completed_stage"]);
+    }
+
+    public function testResumedPullDoesNotTransferFilesWithAnOlderExportPlugin(): void
+    {
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "fetch",
+            ],
+            "pull_pipeline" => [
+                "started_by_command" => "pull",
+                "last_completed_stage" => "preflight",
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            "remote_protocol_version" => PULL_PROTOCOL_VERSION - 1,
+        ]);
+
+        $client = $this->makeClient();
+
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull",
+                "runtime" => "none",
+            ]);
+            $this->fail('Expected resumed pull to stop on the incompatible protocol');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('Update the export plugin.', $e->getMessage());
+            $this->assertStringContainsString('rerun this command with --abort', $e->getMessage());
+        } finally {
+            ob_end_clean();
+        }
+
+        $this->assertSame(0, $client->preflight_runs);
+        $this->assertSame(0, $client->files_pull_runs);
+        $this->assertSame(0, $client->db_sync_runs);
+    }
+
+    /**
+     * @dataProvider phpBuiltinServerProvider
+     */
+    public function testBarePullRewritesTheDatabaseToThePhpBuiltinServer(
+        array $runtime_options,
+        string $expected_url
+    ): void
+    {
+        $client = new PullBridgeFakeClient($this->stateDir, $this->filesystem_root);
+
+        ob_start();
+        $client->run(array_merge([
+            "command" => "pull",
+            "start_runtime" => "none",
+        ], $runtime_options));
+        ob_end_clean();
+
+        $this->assertSame($expected_url, $client->db_apply_options['new_site_url'] ?? null);
+    }
+
+    public static function phpBuiltinServerProvider(): array
+    {
+        return [
+            'default address' => [[], 'http://localhost:8881'],
+            'custom address' => [[
+                'host' => '127.0.0.1',
+                'port' => 9999,
+            ], 'http://127.0.0.1:9999'],
+        ];
+    }
+
+    public function testBarePullKeepsExplicitRewritePairs(): void
+    {
+        $client = new PullBridgeFakeClient($this->stateDir, $this->filesystem_root);
+        $rewrite_url = [[
+            'https://source.example',
+            'https://local.example',
+        ]];
+
+        ob_start();
+        $client->run([
+            "command" => "pull",
+            "start_runtime" => "none",
+            "rewrite_url" => $rewrite_url,
+        ]);
+        ob_end_clean();
+
+        $this->assertSame($rewrite_url, $client->db_apply_options['rewrite_url'] ?? null);
+        $this->assertArrayNotHasKey('new_site_url', $client->db_apply_options);
+    }
+
+    public function testStartedServerUsesTheExplicitNewSiteUrl(): void
+    {
+        $client = new PullBridgeFakeClient($this->stateDir, $this->filesystem_root);
+
+        ob_start();
+        $client->run([
+            "command" => "pull",
+            "new_site_url" => "http://127.0.0.1:9999",
+        ]);
+        ob_end_clean();
+
+        $server_events = array_values(array_filter(
+            $client->progress_events,
+            static fn (array $event): bool => ($event['event'] ?? null) === 'server_starting',
+        ));
+        $this->assertCount(1, $server_events);
+        $this->assertSame('http://127.0.0.1:9999', $server_events[0]['url']);
+    }
+
+    /**
+     * @dataProvider databaseApplyStageProvider
+     */
+    public function testDatabaseApplyAddsTheDefaultUrlOnlyBeforeSqlStarts(
+        string $current_stage,
+        bool $expects_default
+    ): void
+    {
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "db-apply",
+                "completion_state" => "partial",
+                "current_stage" => $current_stage,
+            ],
+            "pull_pipeline" => [
+                "started_by_command" => "pull",
+                "last_completed_stage" => "db-pull",
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+        ]);
+        file_put_contents($this->stateDir . '/db.sql', "SELECT 1;\n");
+        $client = new PullBridgeFakeClient($this->stateDir, $this->filesystem_root);
+
+        ob_start();
+        $client->run([
+            "command" => "pull",
+            "start_runtime" => "none",
+        ]);
+        ob_end_clean();
+
+        if ($expects_default) {
+            $this->assertSame('http://localhost:8881', $client->db_apply_options['new_site_url'] ?? null);
+        } else {
+            $this->assertArrayNotHasKey('new_site_url', $client->db_apply_options);
+        }
+    }
+
+    public static function databaseApplyStageProvider(): array
+    {
+        return [
+            'database setup may restart safely' => ['database-start', true],
+            'SQL import keeps its original mapping' => ['sql', false],
+            'database cleanup keeps its original mapping' => ['database-cleanup', false],
+        ];
     }
 
     public function testPullResumesAfterFilesPullCompletedBeforePipelineStageWasMarked(): void

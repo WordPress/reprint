@@ -39,6 +39,47 @@ function runtime_applier_for(string $runtime): RuntimeApplier
 }
 
 /**
+ * Resolve a runtime address from explicit options or the saved URL target.
+ *
+ * @param array $options {
+ *     Runtime options.
+ *
+ *     @type string|null $host Runtime host.
+ *     @type int|null    $port Runtime port.
+ * }
+ * @param array<string,string> $rewrite_map Saved source-to-target URL map.
+ * @return array {
+ *     Resolved runtime address.
+ *
+ *     @type string|null $host Runtime host.
+ *     @type int|null    $port Runtime port.
+ * }
+ */
+// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the runtime helper API in this file.
+function resolve_runtime_host_and_port(array $options, array $rewrite_map): array
+{
+    $host = $options['host'] ?? null;
+    $port = $options['port'] ?? null;
+    if ($host === null || $port === null) {
+        $first_target = !empty($rewrite_map) ? reset($rewrite_map) : null;
+        if (is_string($first_target)) {
+            $parsed_target = parse_url($first_target);
+            if ($host === null) {
+                $host = $parsed_target['host'] ?? null;
+            }
+            if ($port === null && isset($parsed_target['port'])) {
+                $port = $parsed_target['port'];
+            }
+        }
+    }
+
+    return [
+        'host' => $host,
+        'port' => $port === null ? null : (int) $port,
+    ];
+}
+
+/**
  * Generate the base runtime.php content: constants, server vars, and
  * route handlers.
  *
