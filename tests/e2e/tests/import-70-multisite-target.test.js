@@ -141,10 +141,12 @@ describe('Pull a selected site into a fresh single site', () => {
         assert.equal(await newUpload.text(), 'New target upload');
         const loginPage = await fetch(`${targetUrl}/wp-login.php`);
         const cookie = loginPage.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+        const targetPassword = runWp(documentRoot, ['user', 'reset-password', 'shared', '--skip-email', '--porcelain']).trim();
+        assert.ok(targetPassword.length > 0);
         const login = await fetch(`${targetUrl}/wp-login.php`, {
             method: 'POST', redirect: 'manual',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-            body: new URLSearchParams({ log: 'shared', pwd: 'multisite-password', testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
+            body: new URLSearchParams({ log: 'shared', pwd: targetPassword, testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
         });
         assert.equal(login.status, 302, await login.text());
         const authCookies = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
