@@ -22,13 +22,16 @@ require_once __DIR__ . "/class-database-rows-reader.php";
  *   (STAGE_OVERSIZED_SPATIAL) → (EMIT_OVERSIZED_UPDATE) → … →
  *   EMIT_FOOTER → FINISHED
  *
- * A selected-site dump exports posts, comments and links before users, saving
- * their referenced user IDs as it goes. Before users, NEXT_TABLE branches into
- * COLLECT_USER_IDS to add members from usermeta's selected capabilities key.
- * That stage also reads IDs from content tables omitted by a partial export.
- * Each batch has a cursor; users are exported after discovery finishes. The
- * stage is not entered for content tables or repeated for usermeta. A usermeta-only
- * export performs the same discovery before profiles because it omits users.
+ * Selected-site exports finish the content table group before collecting site
+ * members from network usermeta, then export users and profiles:
+ *
+ *   content tables → COLLECT_SITE_MEMBERS → users → usermeta → footer
+ *
+ * Posts, comments and links save their user IDs alongside each content batch.
+ * Omitted or row-filtered content uses COLLECT_CONTENT_USER_IDS while visiting
+ * that table, with the same table/primary-key cursor. Membership has only one
+ * input table and its own last_scanned_usermeta_id. Both ID-only reads and the
+ * boundaries before and after membership collection emit checkpoint statements.
  *
  * All values are base64-encoded in the SQL output (via FROM_BASE64('...')). This avoids
  * charset-related corruption: MySQL interprets string literals according to the
@@ -89,7 +92,8 @@ class MySQLDumpProducer
      */
     public const NONZERO_SRID_CONTEXT_VERSION = 'v1';
 
-    private const STATE_COLLECT_USER_IDS = "collect_user_ids";
+    private const STATE_COLLECT_CONTENT_USER_IDS = "collect_content_user_ids";
+    private const STATE_COLLECT_SITE_MEMBERS = "collect_site_members";
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
     const STATE_NEXT_TABLE = "next_table";
@@ -286,26 +290,43 @@ class MySQLDumpProducer
 
                 case self::STATE_NEXT_TABLE:
                     if ($this->move_to_next_table()) {
-                        $this->state = $this->row_reader->get_pending_user_reference_source() !== null
-                            ? self::STATE_COLLECT_USER_IDS
-                            : ( $this->emit_create_table ? self::STATE_CREATE_TABLE : self::STATE_TABLE_HEADER );
+                        $this->state = $this->row_reader->get_current_table_export_mode() === 'rows'
+                            ? ( $this->emit_create_table ? self::STATE_CREATE_TABLE : self::STATE_TABLE_HEADER )
+                            : self::STATE_COLLECT_CONTENT_USER_IDS;
+                    } elseif ($this->row_reader->start_user_tables()) {
+                        // Only the end of the content group enters membership
+                        // collection. Checkpoint before the first metadata read.
+                        $this->state = self::STATE_COLLECT_SITE_MEMBERS;
+                        $this->current_sql_fragment = "-- Begin site membership collection\nDO 0;";
+                        $this->current_fragment_must_be_its_own_part = true;
+                        return true;
                     } else {
                         $this->state = self::STATE_EMIT_FOOTER;
                     }
                     break;
 
-                case self::STATE_COLLECT_USER_IDS:
-                    if ($this->row_reader->collect_missing_user_references_step()) {
-                        // A complete harmless statement carries the discovery
-                        // cursor through the normal SQL/target commit path.
-                        $this->current_sql_fragment = "-- Collect selected-site user IDs\nDO 0;";
+                case self::STATE_COLLECT_CONTENT_USER_IDS:
+                    if ($this->row_reader->collect_content_user_ids_step()) {
+                        // A complete harmless statement carries the ID cursor
+                        // through the normal SQL/target commit path.
+                        $this->current_sql_fragment = "-- Collect content user IDs\nDO 0;";
                         $this->current_fragment_must_be_its_own_part = true;
                         return true;
                     }
-                    $this->state = $this->emit_create_table
-                        ? self::STATE_CREATE_TABLE
-                        : self::STATE_TABLE_HEADER;
+                    $this->state = $this->row_reader->get_current_table_export_mode() === 'user_ids'
+                        ? self::STATE_NEXT_TABLE
+                        : ( $this->emit_create_table ? self::STATE_CREATE_TABLE : self::STATE_TABLE_HEADER );
                     break;
+
+                case self::STATE_COLLECT_SITE_MEMBERS:
+                    if ($this->row_reader->collect_site_members_step()) {
+                        $this->current_sql_fragment = "-- Collect site members\nDO 0;";
+                    } else {
+                        $this->state = self::STATE_NEXT_TABLE;
+                        $this->current_sql_fragment = "-- Begin user and profile export\nDO 0;";
+                    }
+                    $this->current_fragment_must_be_its_own_part = true;
+                    return true;
 
                 case self::STATE_EMIT_FOOTER:
                     $this->emit_sql_footer();

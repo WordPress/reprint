@@ -110,10 +110,12 @@ class DatabaseRowsReader {
     /** @var MultisiteDatabaseSelection|null Trusted source-side selection. */
     private $multisite_selection;
 
-    /** @var int Next ID-discovery source, saved independently of the SQL table. */
-    private $user_discovery_source = 0;
-    /** @var string Last primary key collected from that source. */
-    private $user_discovery_last_id = '0';
+    /** @var string Content tables are exhausted before switching to users and profiles. */
+    private $table_group = 'content';
+    /** @var string[]|null Tables in the current group, derived from the export selection. */
+    private $tables_in_group = null;
+    /** @var string Last network usermeta row checked for the selected capabilities key. */
+    private $last_scanned_usermeta_id = '0';
 
     /**
      * Initializes the bounded database row reader.
@@ -154,7 +156,6 @@ class DatabaseRowsReader {
                 $this->tables_to_process,
                 [$this->multisite_selection, 'includes_table']
             ));
-            $this->tables_to_process = $this->multisite_selection->order_tables($this->tables_to_process);
         }
         $this->batch_size = max(1, (int) ( $options["batch_size"] ?? 250 ));
         $this->exclude_tables = array_values(array_filter(
@@ -197,50 +198,81 @@ class DatabaseRowsReader {
     }
 
     /**
-     * Performs one bounded ID-only read before shared users and profiles.
-     * Returns false after all remaining sources have been visited.
+     * Opens the users/profile table group after all content tables are complete.
+     * Called at the end of the table walk, never for each content table.
      */
-    public function collect_missing_user_references_step(): bool
+    public function start_user_tables(): bool
     {
-        $table = $this->get_pending_user_reference_source();
-        if ($table === null) {
+        if ($this->multisite_selection === null || $this->table_group === 'users') {
             return false;
         }
-        $columns = $this->multisite_selection->get_reference_columns($table);
-        $primary_key = $columns['primary_key'];
-        $select_columns = "`{$primary_key}`, `{$columns['user_column']}`" . ( $columns['kind'] === 4 ? ', meta_key' : '' );
-        // Scanning primary-key windows bounds work even when the network has
-        // millions of unrelated metadata rows. Filtering capabilities before
-        // LIMIT could turn one sparse-membership step into an unbounded scan.
-        $query = $this->get_select_prefix() . " {$select_columns} FROM `{$table}` WHERE `{$primary_key}` > {$this->user_discovery_last_id} ORDER BY `{$primary_key}` LIMIT {$this->batch_size}";
-        $last_id = $this->multisite_selection->collect_user_references($table, $query);
-        if ($last_id === '0') {
-            ++$this->user_discovery_source;
-            $this->user_discovery_last_id = '0';
-        } else {
-            $this->user_discovery_last_id = $last_id;
+        $user_tables = $this->multisite_selection->get_user_tables($this->tables_to_process);
+        if (!$user_tables) {
+            return false;
         }
+        $this->table_group = 'users';
+        $this->tables_in_group = $user_tables;
         return true;
     }
 
     /**
-     * Returns the next ID source needed before exporting users, or null.
+     * Checks one primary-key window of network usermeta for site members.
      *
-     * order_tables() puts posts, comments and links before users, then usermeta.
-     * Content exports collect their own IDs. Users need the remaining sources,
-     * including capability rows for members with no content. The saved source
-     * position is not reset between tables, so usermeta does not enter discovery
-     * again. If users were omitted, usermeta still needs those IDs for profiles.
+     * Read IDs and keys, not profile values. Filtering capabilities before
+     * LIMIT could scan millions of unrelated rows in one step. Persist the
+     * last scanned umeta_id even when none of the batch belongs to this site.
      */
-    public function get_pending_user_reference_source(): ?string
+    public function collect_site_members_step(): bool
     {
-        if ($this->multisite_selection === null || $this->current_table === null ||
-            !$this->multisite_selection->is_shared_user_table($this->current_table)) {
-            return null;
+        $table = $this->multisite_selection->get_usermeta_table_name();
+        $query = $this->get_select_prefix() . " umeta_id, user_id, meta_key FROM `{$table}` WHERE umeta_id > {$this->last_scanned_usermeta_id} ORDER BY umeta_id LIMIT {$this->batch_size}";
+        $last_id = $this->multisite_selection->collect_user_references($table, $query);
+        if ($last_id === '0') {
+            return false;
         }
-        $exported_tables = array_diff($this->tables_to_process, array_keys($this->exclude_rows_by_table));
-        $sources = $this->multisite_selection->get_undiscovered_sources($exported_tables);
-        return $sources[$this->user_discovery_source] ?? null;
+        $this->last_scanned_usermeta_id = $last_id;
+        return true;
+    }
+
+    /**
+     * Content omitted from SQL can still identify users to migrate.
+     * Row exclusions likewise do not remove a user's connection to the site.
+     *
+     * @return string rows, user_ids, or user_ids_then_rows for row-filtered content.
+     */
+    public function get_current_table_export_mode(): string
+    {
+        if (!in_array($this->current_table, $this->tables_to_process, true)) {
+            return 'user_ids';
+        }
+        if ($this->multisite_selection !== null && isset($this->exclude_rows_by_table[$this->current_table]) &&
+            $this->multisite_selection->get_user_tables($this->tables_to_process)) {
+            $columns = $this->multisite_selection->get_reference_columns($this->current_table);
+            if ($columns !== null && $columns['kind'] !== 4) {
+                return 'user_ids_then_rows';
+            }
+        }
+        return 'rows';
+    }
+
+    /**
+     * Reads one ID-only batch using the current content table's normal cursor.
+     * Row-filtered exports finish this pass before reading the permitted content.
+     */
+    public function collect_content_user_ids_step(): bool
+    {
+        $columns = $this->multisite_selection->get_reference_columns($this->current_table);
+        $primary_key = $columns['primary_key'];
+        $where = $this->build_comparison($primary_key, $this->last_pk_values[$primary_key] ?? '0', '>');
+        $query = $this->get_select_prefix() . " `{$primary_key}`, `{$columns['user_column']}` FROM `{$this->current_table}` WHERE {$where} ORDER BY `{$primary_key}` LIMIT {$this->batch_size}";
+        $last_id = $this->multisite_selection->collect_user_references($this->current_table, $query);
+        if ($last_id === '0') {
+            // The following SQL export, when requested, starts at the first row.
+            $this->last_pk_values = null;
+            return false;
+        }
+        $this->last_pk_values = [$primary_key => $last_id];
+        return true;
     }
 
     public function __destruct()
@@ -508,8 +540,8 @@ class DatabaseRowsReader {
      *     @type array|null  $current_column_names Current column names.
      *     @type string|null $multisite_selection Selected source site and rule version, or null.
      *     @type string|null $multisite_generation Generation of this site's saved user set.
-     *     @type int         $user_discovery_source Next ID-only discovery source.
-     *     @type string      $user_discovery_last_id Last collected primary key in that source.
+     *     @type string      $table_group Content tables, or users and profiles after membership collection starts.
+     *     @type string      $last_scanned_usermeta_id Last metadata row checked for site membership.
      * }
      */
     public function get_cursor_state()
@@ -517,8 +549,8 @@ class DatabaseRowsReader {
         return [
             "multisite_selection" => $this->multisite_selection === null ? null : $this->multisite_selection->get_identity(),
             "multisite_generation" => $this->multisite_selection === null ? null : $this->multisite_selection->get_generation(),
-            "user_discovery_source" => $this->user_discovery_source,
-            "user_discovery_last_id" => $this->user_discovery_last_id,
+            "table_group" => $this->table_group,
+            "last_scanned_usermeta_id" => $this->last_scanned_usermeta_id,
             "current_table" => $this->current_table,
             "current_pk_columns" => $this->current_pk_columns,
             "last_pk_values" => $this->encode_database_values_for_cursor($this->last_pk_values),
@@ -545,15 +577,15 @@ class DatabaseRowsReader {
         }
         if ($this->multisite_selection !== null) {
             $generation = $cursor_data['multisite_generation'] ?? null;
-            $source = $cursor_data['user_discovery_source'] ?? null;
-            $last_id = $cursor_data['user_discovery_last_id'] ?? null;
-            if (!is_string($generation) || !is_int($source) || $source < 0 || $source > 4 ||
+            $table_group = $cursor_data['table_group'] ?? null;
+            $last_id = $cursor_data['last_scanned_usermeta_id'] ?? null;
+            if (!is_string($generation) || !in_array($table_group, ['content', 'users'], true) ||
                 !is_string($last_id) || !preg_match('/^[0-9]{1,20}$/D', $last_id)) {
-                throw new \InvalidArgumentException('Cannot resume the selected-site cursor: its saved user discovery position is invalid. Run db-pull --abort and start again.');
+                throw new \InvalidArgumentException('Cannot resume the selected-site cursor: its table group or membership position is invalid. Run db-pull --abort and start again.');
             }
             $this->multisite_selection->open_user_set($this->db, $generation);
-            $this->user_discovery_source = $source;
-            $this->user_discovery_last_id = $last_id;
+            $this->table_group = $table_group;
+            $this->last_scanned_usermeta_id = $last_id;
         }
         $this->current_table = $cursor_data["current_table"] ?? null;
         if ($this->current_table !== null && !is_string($this->current_table)) {
@@ -587,15 +619,16 @@ class DatabaseRowsReader {
         if ($this->tables_to_process === null) {
             $this->initialize_tables_to_process();
         }
+        $this->initialize_table_group();
         if ($this->current_table) {
-            $position = array_search($this->current_table, $this->tables_to_process, true);
+            $position = array_search($this->current_table, $this->tables_in_group, true);
             if ($position === false) {
                 $this->current_table = null;
                 return false;
             }
-            reset($this->tables_to_process);
-            while (key($this->tables_to_process) !== $position) {
-                next($this->tables_to_process);
+            reset($this->tables_in_group);
+            while (key($this->tables_in_group) !== $position) {
+                next($this->tables_in_group);
             }
             if ($this->get_primary_key_columns($this->current_table) !== $this->current_pk_columns) {
                 throw new \RuntimeException(
@@ -870,6 +903,9 @@ class DatabaseRowsReader {
                 : "{$column_expression} IS NOT NULL";
         }
         if ($this->is_numeric_type($this->get_data_type($column))) {
+            if (!is_numeric($value)) {
+                throw new \InvalidArgumentException("Cannot compare numeric primary key '{$column}': the cursor contains a non-numeric value, " . json_encode($value) . '.');
+            }
             return "{$column_expression} {$operator} {$value}";
         }
         return "{$column_expression} {$operator} FROM_BASE64('" . base64_encode($value) . "')";
@@ -950,10 +986,13 @@ class DatabaseRowsReader {
         if ($this->tables_to_process === null) {
             return false;
         }
+        if ($this->tables_in_group === null) {
+            $this->initialize_table_group();
+        }
         if (!$this->current_table) {
-            $this->current_table = reset($this->tables_to_process) ?: null;
+            $this->current_table = reset($this->tables_in_group) ?: null;
         } else {
-            $this->current_table = next($this->tables_to_process) ?: null;
+            $this->current_table = next($this->tables_in_group) ?: null;
         }
         if ($this->current_table) {
             $this->current_pk_columns = $this->get_primary_key_columns($this->current_table);
@@ -1004,8 +1043,20 @@ class DatabaseRowsReader {
             }
             $row = $statement->fetch(PdoConstants::fetch_assoc());
         }
-        if ($this->multisite_selection !== null) {
-            $this->tables_to_process = $this->multisite_selection->order_tables($this->tables_to_process);
+    }
+
+    /**
+     * Rebuilds the current table group once when starting or restoring a reader.
+     * The cursor stores its group and current table, not another table-list index.
+     */
+    private function initialize_table_group(): void
+    {
+        if ($this->multisite_selection === null) {
+            $this->tables_in_group = $this->tables_to_process;
+        } elseif ($this->table_group === 'content') {
+            $this->tables_in_group = $this->multisite_selection->get_content_tables($this->tables_to_process);
+        } else {
+            $this->tables_in_group = $this->multisite_selection->get_user_tables($this->tables_to_process);
         }
     }
 
