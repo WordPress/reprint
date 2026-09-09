@@ -2,6 +2,7 @@
 
 require_once __DIR__ . '/MySQLDumpProducerTestBase.php';
 
+use WordPress\Reprint\Server\DatabaseRowsReader;
 use WordPress\Reprint\Server\MultisiteDatabaseSelection;
 
 /** Exercises site selection against MySQL, including resumable oversized reads. */
@@ -210,7 +211,7 @@ class MultisiteSelectionTest extends MySQLDumpProducerTestBase
                 if (preg_match('/CREATE TABLE `([^`]+)`/', $fragment, $match)) {
                     $exported_tables[] = $match[1];
                 }
-                if (strpos($fragment, 'DO 0;') !== false) {
+                if ($cursor['state'] === 'collect_site_members' || strpos($fragment, '-- Begin user and profile export') === 0) {
                     $this->assertNull($cursor['current_table'], 'Membership work happens between table groups, not inside a user table');
                     $this->assertSame(['network_7_links', 'network_7_comments', 'network_7_posts'], $exported_tables);
                     $this->assertSame(['3', '4', '5'], array_map('strval', $this->pdo->query(
@@ -525,6 +526,172 @@ CHILD
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('selected multisite site changed');
         $this->createProducer($options + ['cursor' => json_encode($cursor)]);
+    }
+
+    /** Sparse users must cost saved-ID lookups, not a scan of unrelated accounts. */
+    public function test_sparse_users_bound_source_index_reads(): void
+    {
+        $this->create_network();
+        $values = [];
+        for ($id = 10; $id <= 2010; ++$id) {
+            $values[] = "({$id},'unrelated')";
+        }
+        $this->pdo->exec('INSERT INTO network_users VALUES ' . implode(',', $values));
+        $this->pdo->exec("INSERT INTO network_users VALUES (9000,'last-selected')");
+        $this->pdo->exec('INSERT INTO network_7_comments VALUES (2,9000)');
+        $reader = $this->open_shared_table_reader('network_users', 2);
+        $users = [];
+        do {
+            $before = $this->count_source_index_reads();
+            $result = $reader->next_record();
+            $reads = $this->count_source_index_reads() - $before;
+            $this->assertLessThan(60, $reads, 'One step must not scan unrelated network users.');
+            if ($result === true) {
+                $users[] = (string) $reader->get_current_record()['ID'];
+                $reader->clear_current_record();
+            }
+        } while ($result !== false);
+        $this->assertSame(['1', '2', '3', '4', '5', '9000'], $users);
+        $reader->close();
+    }
+
+    /** Rejected metadata still produces a bounded step and a durable row position. */
+    public function test_rejected_metadata_batches_resume_on_both_storage_engines(): void
+    {
+        $this->create_network();
+        $this->pdo->exec('DELETE FROM network_usermeta');
+        $values = [];
+        for ($id = 1; $id <= 1000; ++$id) {
+            $values[] = "({$id},3,'session_tokens','never-export')";
+        }
+        $this->pdo->exec('INSERT INTO network_usermeta VALUES ' . implode(',', $values));
+        // A sparse final key also checks that we page through actual IDs,
+        // rather than walking every integer between the first and last ID.
+        $this->pdo->exec("INSERT INTO network_usermeta VALUES (9000000000000000000,3,'nickname','selected')");
+        foreach (['InnoDB', 'MyISAM'] as $engine) {
+            $this->pdo->exec("ALTER TABLE network_usermeta ENGINE={$engine}");
+            $reader = $this->open_shared_table_reader('network_usermeta', 250);
+            $before = $this->count_source_index_reads();
+            $this->assertNull($reader->next_record(), 'An empty filtered batch must return control, not scan ahead.');
+            $this->assertLessThan(800, $this->count_source_index_reads() - $before);
+            $cursor = $reader->get_cursor_state();
+            $this->assertSame(['umeta_id' => 250], $cursor['last_pk_values']);
+            $reader->close();
+
+            // Resume a fresh reader after every empty batch. The ID is saved
+            // even though no row from that batch will appear in the dump.
+            for ($last_id = 500; $last_id <= 1000; $last_id += 250) {
+                $reader = new DatabaseRowsReader($this->pdo, [
+                    'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+                    'tables_to_process' => ['network_usermeta'], 'batch_size' => 250,
+                    'cursor' => $cursor,
+                ]);
+                $this->assertTrue($reader->restore_cursor_state($cursor));
+                $this->assertNull($reader->next_record());
+                $cursor = $reader->get_cursor_state();
+                $this->assertSame(['umeta_id' => $last_id], $cursor['last_pk_values']);
+                $reader->close();
+            }
+            $reader = new DatabaseRowsReader($this->pdo, [
+                'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+                'tables_to_process' => ['network_usermeta'], 'batch_size' => 250,
+                'cursor' => $cursor,
+            ]);
+            $reader->restore_cursor_state($cursor);
+            $this->assertTrue($reader->next_record());
+            $this->assertSame('selected', $reader->get_current_record()['meta_value']);
+            $reader->clear_current_record();
+            // Completing the final batch can yield once before table EOF.
+            $result = $reader->next_record();
+            if ($result === null) {
+                $result = $reader->next_record();
+            }
+            $this->assertFalse($result);
+            $reader->close();
+        }
+    }
+
+    /** Missing accounts and rejected tails must not end either table early. */
+    public function test_resume_each_fragment_keeps_rows_after_empty_user_batches(): void
+    {
+        $this->create_network();
+        $this->pdo->exec("INSERT INTO network_7_comments VALUES (2,8),(3,9),(4,10),(5,11),(6,12)");
+        $this->pdo->exec("INSERT INTO network_users VALUES (12,'last-user')");
+        $this->pdo->exec("INSERT INTO network_usermeta VALUES
+            (9,6,'session_tokens','private'),(10,12,'nickname','Last'),
+            (11,12,'session_tokens','private'),(12,12,'session_tokens','private')");
+        foreach ([true, false] as $buffered) {
+            $this->pdo->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, $buffered);
+            $options = [
+                'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+                'tables_to_process' => ['network_users', 'network_usermeta'], 'batch_size' => 2,
+            ];
+            $producer = $this->createProducer($options);
+            $sql = '';
+            $steps = 0;
+            while ($producer->next_sql_fragment()) {
+                $sql .= $producer->get_sql_fragment() . "\n";
+                $options['cursor'] = $producer->get_reentrancy_cursor();
+                $producer->close();
+                $producer = $this->createProducer($options);
+                $this->assertLessThan(100, ++$steps, 'Empty batches must make progress after resume.');
+            }
+            $producer->close();
+            $target = $this->executeDumpInNewDatabase($sql);
+            $this->assertSame(['1','2','3','4','5','12'], array_map('strval',
+                $target->query('SELECT ID FROM network_users ORDER BY ID')->fetchAll(PDO::FETCH_COLUMN)));
+            $this->assertSame(['1','2','4','10'], array_map('strval',
+                $target->query('SELECT umeta_id FROM network_usermeta ORDER BY umeta_id')->fetchAll(PDO::FETCH_COLUMN)));
+            $target = null;
+        }
+        $this->pdo->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, true);
+    }
+
+    /** Candidate queries retain the existing rejection of non-numeric cursor IDs. */
+    public function test_tampered_shared_user_cursor_rejects_non_numeric_id(): void
+    {
+        $this->create_network();
+        foreach (['network_users' => 'ID', 'network_usermeta' => 'umeta_id'] as $table => $column) {
+            $reader = $this->open_shared_table_reader($table, 2);
+            $cursor = $reader->get_cursor_state();
+            $cursor['last_pk_values'] = $reader->encode_database_values_for_cursor([$column => '0 OR 1=1']);
+            $reader->restore_cursor_state($cursor);
+            try {
+                $reader->next_record();
+                $this->fail('A tampered shared-table ID must be rejected before reading candidates.');
+            } catch (InvalidArgumentException $error) {
+                $this->assertStringContainsString('non-numeric value', $error->getMessage());
+            } finally {
+                $reader->close();
+            }
+        }
+    }
+
+    /** Starts an actual selected-site reader after content and membership collection. */
+    private function open_shared_table_reader(string $table, int $batch_size): DatabaseRowsReader
+    {
+        $reader = new DatabaseRowsReader($this->pdo, [
+            'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+            'tables_to_process' => [$table], 'batch_size' => $batch_size,
+        ]);
+        while ($reader->move_to_next_table()) {
+            while ($reader->collect_content_user_ids_step()) {
+                $this->assertNotNull($reader->get_cursor_state()['last_pk_values']);
+            }
+        }
+        $this->assertTrue($reader->start_user_tables());
+        while ($reader->collect_site_members_step()) {
+            $this->assertNotSame('0', $reader->get_cursor_state()['last_scanned_usermeta_id']);
+        }
+        $this->assertTrue($reader->move_to_next_table());
+        $this->assertSame($table, $reader->get_current_table());
+        return $reader;
+    }
+
+    /** Counts storage-engine row reads on this connection without a fake transport. */
+    private function count_source_index_reads(): int
+    {
+        return array_sum($this->pdo->query("SHOW SESSION STATUS LIKE 'Handler_read_%'")->fetchAll(PDO::FETCH_KEY_PAIR));
     }
 
     /** Builds overlapping IDs, memberships, authors, and network records. */

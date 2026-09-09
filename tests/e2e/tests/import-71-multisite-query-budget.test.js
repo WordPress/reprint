@@ -117,29 +117,38 @@ define('BLOG_ID_CURRENT_SITE', 1);
                 `${table} must finish within one request's time budget: ${JSON.stringify(first.chunks?.filter(chunk => chunk.type === 'error'))}`);
             const firstInsert = first.chunks.findIndex(chunk => chunk.type === 'sql' && chunk.body.includes(`INSERT INTO \`${table}\``));
             assert.ok(firstInsert >= 0, 'Resume from a real INSERT, not a fabricated cursor');
-            const resumed = await apiRequest(site, 'sql_chunk', {
-                ...params, cursor: first.chunks[firstInsert].headers['x-cursor'],
-            }, { url, signal: AbortSignal.timeout(20000) });
-            assert.equal(resumed.chunks?.find(chunk => chunk.type === 'completion')?.headers['x-status'], 'complete',
-                `Resumed ${table} must finish within one request's time budget: ${JSON.stringify(resumed.chunks?.filter(chunk => chunk.type === 'error'))}`);
-            // Keep only the confirmed prefix from the first request. The second
-            // request must supply every remaining row across multiple batches.
-            const sql = [...first.chunks.slice(0, firstInsert + 1), ...resumed.chunks]
-                .filter(chunk => ['sql', 'sql_session_setup'].includes(chunk.type))
-                .map(chunk => Buffer.from(chunk.body, 'binary'));
-            execFileSync('mysql', [`--host=${host}`, `--port=${port}`, `--user=${user}`, targetDatabase], {
-                env: { ...process.env, MYSQL_PWD: password }, input: Buffer.concat(sql),
-            });
-            if (table === 'network_users') {
-                const [users] = await connection.query(`SELECT ID FROM \`${targetDatabase}\`.network_users ORDER BY ID`);
-                assert.deepEqual(users.map(row => row.ID), expectedUserIds);
-            } else {
-                const [metadata] = await connection.query(`SELECT user_id,meta_key,meta_value FROM \`${targetDatabase}\`.network_usermeta ORDER BY umeta_id`);
-                assert.deepEqual([...new Set(metadata.map(row => row.user_id))].sort((a, b) => a - b), expectedUserIds);
-                assert.ok(metadata.every(row => !['network_8_capabilities','network_capabilities','session_tokens'].includes(row.meta_key)));
-                const [expected] = await connection.query(`SELECT user_id,meta_key,meta_value FROM network_usermeta
-                    WHERE user_id IN (${expectedUserIds.join(',')}) AND user_id>=1000 AND meta_key!='network_8_capabilities' ORDER BY umeta_id`);
-                assert.deepEqual(metadata.filter(row => row.user_id >= 1000), expected);
+            const resumePositions = [firstInsert];
+            if (table === 'network_usermeta') {
+                const emptyBatch = first.chunks.findIndex(chunk => chunk.type === 'sql' &&
+                    chunk.body.includes('DO 0; /* selected-user batch complete */'));
+                assert.ok(emptyBatch > firstInsert, 'Rejected metadata must produce a checkpoint before the next batch');
+                resumePositions.push(emptyBatch);
+            }
+            for (const resumePosition of resumePositions) {
+                const resumed = await apiRequest(site, 'sql_chunk', {
+                    ...params, cursor: first.chunks[resumePosition].headers['x-cursor'],
+                }, { url, signal: AbortSignal.timeout(20000) });
+                assert.equal(resumed.chunks?.find(chunk => chunk.type === 'completion')?.headers['x-status'], 'complete',
+                    `Resumed ${table} must finish within one request's time budget: ${JSON.stringify(resumed.chunks?.filter(chunk => chunk.type === 'error'))}`);
+                // Keep only the confirmed prefix from the first request. The second
+                // request must supply every remaining row across multiple batches.
+                const sql = [...first.chunks.slice(0, resumePosition + 1), ...resumed.chunks]
+                    .filter(chunk => ['sql', 'sql_session_setup'].includes(chunk.type))
+                    .map(chunk => Buffer.from(chunk.body, 'binary'));
+                execFileSync('mysql', [`--host=${host}`, `--port=${port}`, `--user=${user}`, targetDatabase], {
+                    env: { ...process.env, MYSQL_PWD: password }, input: Buffer.concat(sql),
+                });
+                if (table === 'network_users') {
+                    const [users] = await connection.query(`SELECT ID FROM \`${targetDatabase}\`.network_users ORDER BY ID`);
+                    assert.deepEqual(users.map(row => row.ID), expectedUserIds);
+                } else {
+                    const [metadata] = await connection.query(`SELECT user_id,meta_key,meta_value FROM \`${targetDatabase}\`.network_usermeta ORDER BY umeta_id`);
+                    assert.deepEqual([...new Set(metadata.map(row => row.user_id))].sort((a, b) => a - b), expectedUserIds);
+                    assert.ok(metadata.every(row => !['network_8_capabilities','network_capabilities','session_tokens'].includes(row.meta_key)));
+                    const [expected] = await connection.query(`SELECT user_id,meta_key,meta_value FROM network_usermeta
+                        WHERE user_id IN (${expectedUserIds.join(',')}) AND user_id>=1000 AND meta_key!='network_8_capabilities' ORDER BY umeta_id`);
+                    assert.deepEqual(metadata.filter(row => row.user_id >= 1000), expected);
+                }
             }
         });
     }
