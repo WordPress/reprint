@@ -254,13 +254,59 @@ It can be interrupted and resumed at any time — just re-run the same command:
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
-The command returns one of three exit codes:
+The command returns one of four exit codes:
 
 - 0: sync completed
 - 1: failure
 - 2: partial completion, needs re-running
+- 3: temporary transfer failure, retry the same command later
 
-Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
+Run again immediately after exit `2`. After exit `3`, wait before running the
+same command with the same state directory and filesystem root. Reprint keeps
+its saved progress. Exit `1` requires checking the error instead of scheduling
+an automatic retry.
+
+Every retryable streaming failure stops the current invocation with exit `3`.
+Reprint does not retry the failed request in that process or change it to exit
+`1` after repeated failures. The caller decides when to retry and when to stop.
+
+JSON error records on stdout and stderr include
+`consecutive_failures_without_progress`. The count survives separate CLI runs:
+a first stalled request reports `1`, the next reports `2`, and so on. A
+successful response or a failed response that advances the durable cursor resets
+the count to `0`. A different temporary error does not reset it. Exit `2` remains
+healthy partial completion.
+
+The records retain `error` and `error_code`, and include the original
+`exception` class, `http_code` when received, and a nonzero `curl_errno` when
+available. For example, an HTTP 520 before any transfer progress reports:
+
+```json
+{
+  "status": "error",
+  "error": "The remote server crashed (HTTP 520).\n\nThis is a problem on the remote server. Check its PHP error log for details.",
+  "error_code": "SERVER_ERROR",
+  "message": "Error: The remote server crashed (HTTP 520).\n\nThis is a problem on the remote server. Check its PHP error log for details.",
+  "exception": "Reprint\\Importer\\TransientInterruptionException",
+  "http_code": 520,
+  "consecutive_failures_without_progress": 1
+}
+```
+
+This applies to temporary streaming failures in file and database transfers,
+including those reached through `pull`, `pull-files`, and `pull-db`:
+
+- HTTP `400`, `408`, `413`, `418`, `421`, `425`, `429`, `500`, `502`, `503`,
+  `504`, and `520–524` without an explicit Reprint error.
+- Unmarked HTTP `401` or `403` after a signed request.
+- cURL timeouts, connection resets during transfer, empty or cut-short
+  responses, invalid compressed responses, and HTTP/2 or HTTP/3 stream errors.
+- Multipart responses missing their boundary or completion marker.
+
+Explicit Reprint errors (JSON containing a matching HTTP `code`) remain fatal.
+Preflight failures, DNS lookup failures, refused connections, certificate errors,
+and local errors keep their existing classification. Reprint does not suggest a
+wait time, schedule retries, or track human action.
 
 **File pull modes**
 
@@ -314,27 +360,40 @@ stay: this includes Redis Cache, WP Rocket, SiteGround's Speed and Security
 Optimizers, and Force Strong Passwords. Generic cache drop-ins are excluded only
 when current preflight paths identify WP Cloud or WP Engine.
 
-The choice is saved for that remote in the state directory. Later pulls skip
-the same plugins, `db-apply` deactivates excluded regular plugins, and
-`apply-runtime` removes their local copies without repeating the flag.
-Integrations such as Studio that need this cleanup must request it before
-starting the imported WordPress site. Targets such as wp.com can keep the
-plugins and run their own cleanup. Preserved host plugins may prevent WordPress
-from booting in an environment that lacks the source host's services.
+The pull choice is saved for that remote in the state directory. Later pulls
+use the same selection, and `db-apply` deactivates excluded regular plugins.
+`--include-host-plugins` selects preservation again. Existing state keeps its
+saved choice; only new state defaults to preservation. Changing the choice
+during an unfinished pull requires `--abort` first. Neither flag overrides
+explicit `--exclude` paths or the generated-file skip rules above.
 
-`--include-host-plugins` explicitly selects preservation again. Both flags are
-accepted by `pull`, `pull-files`, `pull-db`, `files-pull`, `db-apply`, and
-`apply-runtime`, and cannot be combined. Changing the choice during an
-unfinished pull requires `--abort` first. Neither flag overrides explicit
-`--exclude` paths or the generated-file skip rules above.
+**Local runtime cleanup is separate.** `apply-runtime` removes the listed local
+copies by default, including plugins that were downloaded by a preserving pull.
+Portable plugins stay. Pass `apply-runtime --include-host-plugins` to leave the
+local copies in place for that invocation. `apply-runtime --exclude-host-plugins`
+explicitly requests the default cleanup. Neither flag changes the saved pull
+selection, and the two flags cannot be combined.
 
-Existing state keeps its saved choice, including imports from older versions
-that excluded host plugins by default. Only new state defaults to preservation.
+The high-level `pull` command prepares a local runtime and uses this default
+cleanup regardless of its download selection. Integrations such as Studio can
+pull files unchanged, then call `apply-runtime` before starting WordPress.
+Targets such as wp.com can keep the plugins and run their own cleanup without
+calling `apply-runtime`. Preserved host plugins may prevent WordPress from
+booting without the source host's services.
+
+Runtime cleanup records its document-root-relative paths before deleting any
+local copy. `files-diff` and `files-push` exclude those paths, so a later theme
+push does not delete the source host's plugins. The record survives command
+resets, database imports, and later runtime opt-outs: skipping a later cleanup
+does not restore files already removed. Finish an interrupted files-push, or
+finish or abort an interrupted files-pull, before applying runtime cleanup.
+This protects the recorded file paths; it does not make other local runtime or
+database changes suitable for production.
+
 To fetch plugins skipped by a completed pull, start another `pull-files` with
 `--include-host-plugins`, or abort the completed `files-pull` and run it again
-with that flag. The flag cannot restore plugin activation removed by an earlier
-import. Enabling cleanup does not make the resulting local changes safe to push
-back to the source host.
+with that flag. This cannot restore plugin activation removed by an earlier
+import. Runtime setup itself does not connect to or edit the database.
 
 Mirror mode requires `--state-dir` to be outside `--fs-root`, because the state
 files must not appear in the local tree being compared. The selected mode is
@@ -516,11 +575,12 @@ environment variable). The host string also supports `host:port` and
 `host:/path/to/socket` formats (same as WordPress `DB_HOST`), but
 `--mysql-port` takes precedence when both are specified.
 
-The command returns one of three exit codes:
+The command returns one of four exit codes:
 
 - 0: sync completed
 - 1: failure
 - 2: partial completion, needs re-running
+- 3: temporary transfer failure, retry the same command later
 
 #### Step 4 — Download files delta.
 
@@ -541,11 +601,12 @@ since the initial sync, and apply that delta in the local directory:
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
-The command returns one of three exit codes:
+The command returns one of four exit codes:
 
 - 0: sync completed
 - 1: failure
 - 2: partial completion, needs re-running
+- 3: temporary transfer failure, retry the same command later
 
 #### Step 5 — Apply the database with domain rewriting.
 
@@ -660,9 +721,9 @@ server is independent — you implement one interface without touching the other
 Currently supported source hosts: WP Cloud (with on-the-fly thumbnail
 generation for missing image sizes and auto-detection of extra directories from
 `auto_prepend_file`/`auto_append_file` INI values), WP Engine, and a generic default.
-The saved host-plugin choice described above also governs cleanup of existing
-local copies during `apply-runtime`. New imports preserve them unless
-`--exclude-host-plugins` requests cleanup.
+`apply-runtime` removes known host-plugin copies by default, independently of
+the saved download selection. Pass `apply-runtime --include-host-plugins` to
+skip that local cleanup. See the host-plugin section above for push exclusions.
 Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in
 development server, and WordPress Playground CLI.
 

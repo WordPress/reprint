@@ -65,7 +65,7 @@ class ProductionDropInRemovalTest extends TestCase
     private function writeState(array $state): void
     {
         $defaults = [
-            'include_host_plugins' => false,
+            'include_host_plugins' => true,
             'active_resumable_command' => [
                 'command_name' => 'files-pull',
                 'completion_state' => 'complete',
@@ -169,7 +169,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->setPrivate($client, 'state', $state);
     }
 
-    private function runApplyRuntime(\ImportClient $client): void
+    private function runApplyRuntime(\ImportClient $client, array $options = []): void
     {
         ob_start();
         try {
@@ -177,7 +177,7 @@ class ProductionDropInRemovalTest extends TestCase
                 'runtime' => 'php-builtin',
                 'output_dir' => $this->outputDir,
                 'flat_document_root' => $this->fsRoot,
-            ]]);
+            ] + $options]);
         } finally {
             ob_end_clean();
         }
@@ -476,7 +476,7 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testIncludeHostPluginsKeepsPlatformFilesAndDropIns(): void
     {
-        $this->writeState(['include_host_plugins' => true]);
+        $this->writeState(['include_host_plugins' => false]);
         $paths = [
             'wp-content/mu-plugins/wpcomsh-loader.php',
             'wp-content/mu-plugins/wpcomsh/plugin.php',
@@ -491,12 +491,102 @@ class ProductionDropInRemovalTest extends TestCase
         }
         $client = $this->makeClient();
         $this->loadClientState($client);
-        $this->runApplyRuntime($client);
+        $this->runApplyRuntime($client, ['include_host_plugins' => true]);
 
         foreach ($paths as $path) {
             $this->assertSame('<?php // Keep platform file', file_get_contents($this->fsRoot . '/' . $path));
         }
         $this->assertSame([], $client->get_state()->apply->remote_paths_removed_from_local_site);
+    }
+
+    public function testCleanupRecordSurvivesCommandResetAndLaterRuntimeOptOut(): void
+    {
+        $this->writeState([]);
+        $this->createProductionDropIns();
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+        $removed_paths = $client->get_state()->apply->remote_paths_removed_from_local_site;
+        $this->assertNotEmpty($removed_paths);
+
+        $this->callPrivate($client, 'reset_state');
+        $this->assertSame($removed_paths, $client->get_state()->apply->remote_paths_removed_from_local_site);
+        $this->runApplyRuntime($client, ['include_host_plugins' => true]);
+        $this->assertSame($removed_paths, $client->get_state()->apply->remote_paths_removed_from_local_site);
+    }
+
+    public function testRuntimeFlagDoesNotChangeTheSavedPullSelection(): void
+    {
+        $this->writeState([]);
+        $this->createProductionDropIns();
+        $client = $this->makeClient();
+        ob_start();
+        try {
+            $client->run([
+                'command' => 'apply-runtime',
+                'runtime' => 'php-builtin',
+                'output_dir' => $this->outputDir,
+                'flat_document_root' => $this->fsRoot,
+                'include_host_plugins' => false,
+            ]);
+        } finally {
+            ob_end_clean();
+        }
+        $this->assertTrue($client->get_state()->include_host_plugins);
+        $this->assertFileDoesNotExist($this->fsRoot . '/wp-content/object-cache.php');
+    }
+
+    /** @dataProvider unlinkFailurePositions */
+    public function testCleanupExclusionsAreSavedBeforeUnlinkFails(bool $remove_first_file): void
+    {
+        $this->writeState(['include_host_plugins' => false]);
+        $mu_plugins = $this->fsRoot . '/wp-content/mu-plugins';
+        $locked_directory = $remove_first_file ? $mu_plugins . '/aruba-wpchecker' : $mu_plugins;
+        mkdir($locked_directory, 0755, true);
+        file_put_contents($mu_plugins . '/aruba-wpchecker.php', '<?php // Host loader');
+        $blocked_file = $remove_first_file ? $locked_directory . '/plugin.php' : $mu_plugins . '/aruba-wpchecker.php';
+        file_put_contents($blocked_file, '<?php // Host plugin');
+        chmod($locked_directory, 0555);
+        if (is_writable($locked_directory)) {
+            chmod($locked_directory, 0755);
+            $this->markTestSkipped('This test requires directory write permissions to prevent unlink.');
+        }
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        // Stop on the actual unlink failure, including inside recursive removal.
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- Exercise a real filesystem failure in this test.
+        set_error_handler(static function (int $severity, string $message): void {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- PHP warning text is asserted by PHPUnit, not rendered as HTML.
+            throw new \ErrorException($message, 0, $severity);
+        });
+        try {
+            $this->runApplyRuntime($client);
+            $this->fail('Removing a file from the read-only directory must fail.');
+        } catch (\ErrorException $exception) {
+            $this->assertStringContainsString('unlink(', $exception->getMessage());
+        } finally {
+            restore_error_handler();
+            chmod($locked_directory, 0755);
+        }
+        if ($remove_first_file) {
+            $this->assertFileDoesNotExist($mu_plugins . '/aruba-wpchecker.php');
+        }
+        $this->assertFileExists($blocked_file);
+        $reopened = $this->makeClient();
+        $this->loadClientState($reopened);
+        $this->assertContains('wp-content/mu-plugins/aruba-wpchecker.php', $reopened->get_state()->apply->remote_paths_removed_from_local_site);
+        $this->assertContains('wp-content/mu-plugins/aruba-wpchecker', $reopened->get_state()->apply->remote_paths_removed_from_local_site);
+        $this->runApplyRuntime($reopened);
+        $this->assertFileDoesNotExist($blocked_file);
+    }
+
+    public static function unlinkFailurePositions(): array
+    {
+        return [
+            'before first removal' => [false],
+            'after first removal' => [true],
+        ];
     }
 
     // ---- Portable SiteGround plugins stay on disk ----

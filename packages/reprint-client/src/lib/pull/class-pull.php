@@ -510,6 +510,9 @@ class Pull
                 break;
 
             case 'apply-runtime':
+                // The pull flag selects downloads, not local runtime cleanup.
+                // A resumed pipeline must make the same choice without the flag.
+                unset($options['include_host_plugins']);
                 $this->client->run_apply_runtime($options);
                 $this->print_done($stage);
                 break;
@@ -870,10 +873,9 @@ class Pull
     }
 
     /**
-     * Lower-level commands return with completion_state="partial" after a
-     * temporary streaming failure. This loop retries automatically, resetting
-     * the completion state to "in_progress" so the handler enters its resume
-     * path on the next call.
+     * Continue healthy partial work, resetting completion_state to
+     * "in_progress" so the handler resumes on the next call. Temporary
+     * streaming failures throw and leave the next invocation to the caller.
      */
     private function run_until_complete(string $stage, callable $handler): void
     {
@@ -1025,7 +1027,7 @@ class Pull
             "error_code" => $this->client->last_error_code,
             "error" => $e->getMessage(),
             "message" => $message,
-        ]);
+        ] + $this->client->get_error_details($e));
         $this->client->write_progress_file($message);
 
         $red = "\033[31m";

@@ -332,7 +332,8 @@ export function runImporter(url, outputDir, command, options = {}) {
         command !== 'preflight-assert'
     ) {
         let attempts = 0;
-        while (result.exitCode === 2 && attempts < maxResumeAttempts) {
+        // This test runner chooses the retry limit; the CLI does not retry errors itself.
+        while ([2, 3].includes(result.exitCode) && attempts < maxResumeAttempts) {
             if (Date.now() - wallStart > wallTimeout) {
                 result = {
                     ...result,
@@ -350,11 +351,11 @@ export function runImporter(url, outputDir, command, options = {}) {
             };
         }
 
-        if (result.exitCode === 2) {
+        if ([2, 3].includes(result.exitCode)) {
             result = {
                 ...result,
                 exitCode: 1,
-                stderr: `${result.stderr}\nExceeded max resume attempts (${maxResumeAttempts}) while command remained partial.`,
+                stderr: `${result.stderr}\nExceeded max resume attempts (${maxResumeAttempts}) while command remained partial or retryable.`,
             };
         }
     }

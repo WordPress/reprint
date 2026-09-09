@@ -573,22 +573,6 @@ class FetchRequestBodySizingTest extends TestCase
 
         $this->assertSame(400 * 1024, $tuner->get_request_body_budget('file_fetch'));
     }
-
-    public function testFinalAttemptIsReachedOneRequestBeforeTheLimit(): void
-    {
-        [$client, $reflection] = $this->prepareClient(64 * 1024);
-        $isFinal = $reflection->getMethod('is_final_resume_attempt');
-        $state = $reflection->getMethod('get_state')->invoke($client);
-
-        // MAX_CONSECUTIVE_INTERRUPTED_RESPONSES is 3, and the failure being
-        // handled has not been counted yet: at a stored count of 1 exactly one
-        // request remains, so that is the last chance to pick a working size.
-        $state->consecutive_interrupted_responses = 0;
-        $this->assertFalse($isFinal->invoke($client));
-
-        $state->consecutive_interrupted_responses = 1;
-        $this->assertTrue($isFinal->invoke($client));
-    }
 }
 
 /**
