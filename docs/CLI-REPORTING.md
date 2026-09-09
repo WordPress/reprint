@@ -9,9 +9,10 @@ php reprint.phar pull "$URL" --state-dir="$STATE_DIR" \
 ```
 
 The CLI appends one JSON line after a command returns or throws a handled
-exception. Existing progress and command data remain unchanged. In particular,
-`preflight` without `--report` still prints its single JSON result. With
-`--report`, it prints that result followed by the report.
+exception. Existing progress and command records stay in place; preflight
+assertion checks gain the stable codes described below. `preflight` without
+`--report` still prints its single JSON result. With `--report`, it prints
+that result followed by the report.
 
 The report goes to stdout, except when stdout carries SQL; then it goes to
 stderr with the other progress records. `progress.json` remains the source for
