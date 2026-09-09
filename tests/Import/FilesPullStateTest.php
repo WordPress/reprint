@@ -202,70 +202,34 @@ class FilesPullStateTest extends TestCase
 
     public function testSavingStateThrottlesOnlyInProgressProgressFileWrites()
     {
-        $client = $this->getMockBuilder(\ImportClient::class)
-            ->setConstructorArgs([
-                'http://fake.url',
-                $this->stateDir,
-                $this->filesystem_root,
-            ])
-            ->onlyMethods(['write_progress_file'])
-            ->getMock();
-        $written_completion_states = [];
-        $client->method('write_progress_file')
-            ->willReturnCallback(function () use (
-                $client,
-                &$written_completion_states
-            ): void {
-                $written_completion_states[] =
-                    $client->get_state()
-                        ->active_resumable_command
-                        ->completion_state;
-            });
-
-        $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getProperty('last_progress_file_write')
-            ->setValue($client, microtime(true));
-        $client->get_state()->active_resumable_command->completion_state =
-            'in_progress';
+        $client = $this->makeClient();
+        $command = $client->get_state()->active_resumable_command;
+        $command->completion_state = 'in_progress';
+        $client->write_progress_file();
+        $progress_file = $this->stateDir . '/progress.json';
+        $first_write = file_get_contents($progress_file);
         $client->save_state();
+        $this->assertSame($first_write, file_get_contents($progress_file));
 
-        $client->get_state()->active_resumable_command->completion_state = null;
-        $client->save_state();
-
-        $client->get_state()->active_resumable_command->completion_state =
-            'partial';
-        $client->save_state();
-
-        $client->get_state()->active_resumable_command->completion_state =
-            'complete';
-        $client->save_state();
-
-        $this->assertSame(
-            [null, 'partial', 'complete'],
-            $written_completion_states
-        );
+        foreach ([null, 'partial', 'complete'] as $status) {
+            $command->completion_state = $status;
+            $client->save_state();
+            $snapshot = json_decode(file_get_contents($progress_file), true);
+            $this->assertSame($status ?? 'in_progress', $snapshot['status']);
+        }
     }
 
     public function testSavingStateRefreshesInProgressProgressAfterThrottle()
     {
-        $client = $this->getMockBuilder(\ImportClient::class)
-            ->setConstructorArgs([
-                'http://fake.url',
-                $this->stateDir,
-                $this->filesystem_root,
-            ])
-            ->onlyMethods(['write_progress_file'])
-            ->getMock();
-        $client->expects($this->once())
-            ->method('write_progress_file');
-
-        $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getProperty('last_progress_file_write')
-            ->setValue($client, microtime(true) - 1.1);
-        $client->get_state()->active_resumable_command->completion_state =
-            'in_progress';
-
+        $client = $this->makeClient();
+        $client->get_state()->active_resumable_command->completion_state = 'in_progress';
+        $client->write_progress_file();
+        $progress_file = $this->stateDir . '/progress.json';
+        $first_write = json_decode(file_get_contents($progress_file), true);
+        usleep(1100000);
         $client->save_state();
+        $next_write = json_decode(file_get_contents($progress_file), true);
+        $this->assertGreaterThan($first_write['ts'], $next_write['ts']);
     }
 
     public function testShutdownFlushesTheLatestProgressFile()

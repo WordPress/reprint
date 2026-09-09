@@ -308,7 +308,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             ['/wp-content/themes/flavor/style.css'],
             $fetchPaths
         );
-        $this->assertSame('file', $fetchEntries[0]['type']);
+        $this->assertSame(['path', 'size'], array_keys($fetchEntries[0]));
         $this->assertSame(100, $fetchEntries[0]['size']);
         $this->assertStringContainsString(
             base64_encode('/wp-content/uploads/photo.jpg'),

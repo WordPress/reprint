@@ -894,6 +894,8 @@ immediately. A polling UI can therefore read this file without parsing JSONL.
 The JSONL records that report screen progress carry the same `schema_version`
 and nested `progress` object, while their event-specific top-level fields stay
 available for existing consumers.
+Ordinary log events, such as a skipped path, do not replace the screen's action
+label. File counts and bytes include completed paths inside a resumed batch.
 
 Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl`. The
 default `auto` mode uses terminal progress when its output stream is a TTY and

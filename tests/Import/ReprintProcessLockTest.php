@@ -65,7 +65,6 @@ final class ReprintProcessLockTest extends TestCase
             'fetch_list_file' => $pull_state_directory . '/fetch-list.jsonl',
             'volatile_files_file' => $pull_state_directory . '/volatile-files.json',
             'audit_log_file' => $this->root . '/state/audit.log',
-            'progress_file' => $this->root . '/state/progress.json',
         ];
         foreach ($expected_paths as $property_name => $expected_path) {
             $property = $reflection->getProperty($property_name);
@@ -73,6 +72,8 @@ final class ReprintProcessLockTest extends TestCase
             $this->assertSame($expected_path, $property->getValue($client), $property_name);
         }
 
+        $client->write_progress_file();
+        $this->assertFileExists($this->root . '/state/progress.json');
         $process_lock->close();
     }
 

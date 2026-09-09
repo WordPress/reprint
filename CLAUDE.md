@@ -188,6 +188,14 @@ current byte-bounded phase, `current_file` reports base64 path plus file byte
 progress during files-pull, and `current_table` reports table row progress
 during db-pull.
 
+`ProgressReporter` retains one screen snapshot and handles JSONL output and
+progress-file writes. Ordinary log messages do not replace the screen label.
+`FilesPullProgress` rebuilds file counters from the fetch list and its saved
+cursor, including completed paths inside a resumed batch. The fetch list stores
+only the base64 path and content size; directories and symlinks have size zero.
+These counters add no fields to the pull checkpoint. The current table's row
+estimate is cached only while `fetch_sql()` runs.
+
 During the file fetch phase, progress and heartbeat records keep the legacy
 `files_done` and `files_total` fields and also report them through
 `progress.items`. The current file byte count changes while one large file is

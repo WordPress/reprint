@@ -15,8 +15,10 @@ use Reprint\Importer\Database\DatabaseConnection;
 use Reprint\Importer\Database\MysqliDatabaseConnection;
 use Reprint\Importer\Database\PdoDatabaseConnection;
 use Reprint\Importer\DatabaseUrlRewriteProcessor;
+use Reprint\Importer\FilesPullProgress;
 use Reprint\Importer\NullableSpatialColumnStatementRewriter;
 use Reprint\Importer\PreserveLocalSkipException;
+use Reprint\Importer\ProgressReporter;
 use Reprint\Importer\Pull\PullFailureReportedException;
 use Reprint\Importer\SpatialSridGuard;
 use Reprint\Importer\State\DatabaseApplyCommandState;
@@ -190,15 +192,6 @@ class ImportClient
     /** Progress output modes accepted by every command. */
     public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl'];
 
-    private const PROGRESS_SCHEMA_VERSION = 1;
-
-    /** Stable progress-screen keys used when a phase has no reported counters. */
-    private const EMPTY_PROGRESS_DETAILS = [
-        'items' => null,
-        'bytes' => null,
-        'current_file' => null,
-        'current_table' => null,
-    ];
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const DATABASE_IMPORT_POSITION_TABLE_PREFIX = "__reprint_db_pull_progress_";
@@ -269,29 +262,8 @@ class ImportClient
     /** @var string Pull state file which persists command, cursor, and stage across invocations. */
     private $pull_state_file;
 
-    /**
-     * @var float Monotonic timestamp of last progress JSON line emitted.
-     * Used with $progress_throttle to rate-limit stdout progress output.
-     */
-    private $last_progress_output = 0;
-
-    /** @var float Timestamp of the last successful progress.json write. */
-    private $last_progress_file_write = 0;
-
-    /** @var float Minimum seconds between recurring progress reports. */
-    private $progress_throttle = 1.0;
-
-    /** @var string|null Latest message associated with the progress-screen counters. */
-    private $progress_message = null;
-
-    /** @var array|null Latest progress-screen counters emitted by the active command. */
-    private $progress_details = null;
-
-    /** @var string|null Command whose counters are stored in $progress_details. */
-    private $progress_details_command = null;
-
-    /** @var string|null Phase whose counters are stored in $progress_details. */
-    private $progress_details_phase = null;
+    /** @var ProgressReporter Screen snapshots, JSONL output and write throttling. */
+    private ProgressReporter $progress_reporter;
 
     /** @var string Retained filesystem-root snapshot for this remote state directory. */
     private $local_index_file;
@@ -339,33 +311,8 @@ class ImportClient
     /** @var string Progress output mode for this invocation: auto, tty, or jsonl. */
     private $progress_output_mode = 'auto';
 
-    /** @var int Running count of files pulled in the current invocation. */
-    private $files_pulled = 0;
-
-    /** @var int Running byte count of completed files in the current fetch batch. */
-    private $files_pulled_bytes = 0;
-
-    /** @var int|null Total entries in the current fetch list. Set once
-     *  at the start of fetch_files_from_list() while reading byte totals. */
-    private $fetch_list_total = null;
-
-    /** @var int|null Entries already processed (before the current offset)
-     *  in the fetch list.  Computed at list start and incremented after
-     *  each batch completes.  This is the cumulative, restart-safe counter
-     *  that consumers should display as "files done". */
-    private $fetch_list_done = null;
-
-    /** @var int|null Regular-file bytes represented by the current fetch list. */
-    private $fetch_list_bytes_total = null;
-
-    /** @var int|null Regular-file bytes before the current fetch-list offset. */
-    private $fetch_list_bytes_done = null;
-
-    /** @var string|null Table whose row estimate is cached for progress output. */
-    private $database_progress_table_name = null;
-
-    /** @var int|null Estimated rows in the cached progress table. */
-    private $database_progress_table_rows_total = null;
+    /** @var FilesPullProgress Rebuildable counters for the selected file list. */
+    private FilesPullProgress $files_pull_progress;
 
     /** @var PullState Persistent pull state loaded from / saved to $pull_state_file. */
     private PullState $state;
@@ -521,9 +468,6 @@ class ImportClient
     /** @var int|null Total number of pipeline steps. Set via --steps. */
     private $pipeline_steps = null;
 
-    /** @var string Path to progress.json — machine-readable progress for external readers. */
-    private $progress_file;
-
     /** @var string SQL output mode: 'file' (default), 'stdout', or 'mysql'. */
     private $sql_output_mode = 'file';
 
@@ -607,7 +551,10 @@ class ImportClient
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl.new");
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
         $this->volatile_files_file = wp_join_unix_paths($this->pull_state_directory, "volatile-files.json");
-        $this->progress_file = wp_join_unix_paths($this->state_dir, "progress.json");
+        $this->progress_reporter = new ProgressReporter(
+            wp_join_unix_paths($this->state_dir, "progress.json")
+        );
+        $this->files_pull_progress = new FilesPullProgress();
 
         // Detect TTY for progress display and terminal colors. In stdout mode
         // this is re-evaluated against STDERR in run() once the output mode is
@@ -1962,26 +1909,15 @@ class ImportClient
             }
         }
         $progress_details = $this->files_push_progress_details($sender_progress);
-        $result['schema_version'] = self::PROGRESS_SCHEMA_VERSION;
+        $result['schema_version'] = ProgressReporter::SCHEMA_VERSION;
         $result['progress'] = $progress_details;
 
         // Write the files-push progress snapshot without consulting pull state.
-        $progress_payload = [
-            'schema_version' => self::PROGRESS_SCHEMA_VERSION,
+        $this->progress_reporter->update($result + [
             'step' => $this->pipeline_step,
             'steps' => $this->pipeline_steps,
-            'command' => 'files-push',
-            'status' => $status,
-            'phase' => $phase,
-            'message' => $message,
-            'progress' => $progress_details,
-            'error' => null,
-            'error_code' => null,
-            'reason' => $reason,
-            'detail' => $detail,
-            'ts' => microtime(true),
-        ];
-        $this->write_files_push_progress_file($progress_payload, true);
+        ], $result);
+        $this->progress_reporter->write_file(true);
 
         // Emit the final JSON line after any preceding progress records.
         if ($this->uses_terminal_progress() && !$this->verbose_mode) {
@@ -2165,27 +2101,12 @@ class ImportClient
 
         $progress_record = [
             'type' => 'push_progress',
-            'schema_version' => self::PROGRESS_SCHEMA_VERSION,
+            'schema_version' => ProgressReporter::SCHEMA_VERSION,
             'command' => 'files-push',
             'status' => 'in_progress',
             'phase' => $phase,
             'message' => $message,
             'progress' => $this->files_push_progress_details($sender_progress),
-        ];
-        $progress_payload = [
-            'schema_version' => self::PROGRESS_SCHEMA_VERSION,
-            'step' => $this->pipeline_step,
-            'steps' => $this->pipeline_steps,
-            'command' => 'files-push',
-            'status' => 'in_progress',
-            'phase' => $phase,
-            'message' => $message,
-            'progress' => $progress_record['progress'],
-            'error' => null,
-            'error_code' => null,
-            'reason' => null,
-            'detail' => null,
-            'ts' => microtime(true),
         ];
         foreach (['files_done', 'files_total'] as $progress_field) {
             if (isset($sender_progress[$progress_field])) {
@@ -2193,7 +2114,6 @@ class ImportClient
             }
         }
         $this->output_progress($progress_record, $force_output);
-        $this->write_files_push_progress_file($progress_payload);
     }
 
     /**
@@ -2211,7 +2131,7 @@ class ImportClient
      */
     private function files_push_progress_details(array $sender_progress): array
     {
-        $progress = self::EMPTY_PROGRESS_DETAILS;
+        $progress = ProgressReporter::EMPTY_DETAILS;
         if (isset($sender_progress['files_done'], $sender_progress['files_total'])) {
             $progress['items'] = [
                 'unit' => 'local_paths',
@@ -2256,27 +2176,6 @@ class ImportClient
             return 1.0;
         }
         return max(0.0, min(1.0, $done / $total));
-    }
-
-    /**
-     * Writes the files-push progress snapshot when its active-write limit allows it.
-     *
-     * @param array<string,mixed> $progress_payload Complete progress-file payload.
-     * @param bool                $force            Whether to write without waiting for the active-write interval.
-     */
-    private function write_files_push_progress_file(
-        array $progress_payload,
-        bool $force = false
-    ): void
-    {
-        if (
-            !$force
-            && microtime(true) - $this->last_progress_file_write <
-                $this->progress_throttle
-        ) {
-            return;
-        }
-        $this->write_progress_payload($progress_payload);
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions are CLI text, not HTML.
@@ -3465,10 +3364,10 @@ class ImportClient
 
         // Resuming an in-progress sync
         if ($has_progress) {
-            // Don't reset files_pulled here — it counts files within
-            // the current batch and is only reset when a batch completes
-            // (in fetch_files_from_list). Resetting it on entry would
-            // cause the progress counter to dip between pull retries.
+            // Keep the current batch counters across requests in this invocation.
+            // They reset only when the batch completes or is rebuilt in
+            // fetch_files_from_list(). Resetting them on entry would make the
+            // progress counter dip between pull retries.
             $remote_index_entry_count = $this->remote_index_entry_count();
 
 
@@ -3521,10 +3420,10 @@ class ImportClient
             $this->get_state()->index = new RemoteFileIndexCursorState();
             $this->get_state()->fetch = new FetchListProgressState();
             $this->get_state()->files_pull_summary = new FilesPullSummaryState();
+            $this->files_pull_progress = new FilesPullProgress();
             $this->save_state();
 
             if ($is_delta) {
-                $this->files_pulled = 0;
                 $remote_index_entry_count = $this->remote_index_entry_count();
 
                 $this->audit_log(
@@ -3734,23 +3633,7 @@ class ImportClient
 
         $this->progress->show_lifecycle_line("{$label} complete: {$remote_index_entry_count} remote index entries\n");
         $this->progress->show_lifecycle_line("Audit log: {$this->audit_log_file}\n");
-        $progress = self::EMPTY_PROGRESS_DETAILS;
-        if ($this->fetch_list_done !== null && $this->fetch_list_total !== null) {
-            $progress['items'] = [
-                'unit' => 'files',
-                'done' => $this->fetch_list_done,
-                'total' => $this->fetch_list_total,
-            ];
-        }
-        if (
-            $this->fetch_list_bytes_done !== null
-            && $this->fetch_list_bytes_total !== null
-        ) {
-            $progress['bytes'] = [
-                'done' => $this->fetch_list_bytes_done,
-                'total' => $this->fetch_list_bytes_total,
-            ];
-        }
+        $progress = $this->files_pull_progress->get_details();
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
@@ -6501,7 +6384,7 @@ class ImportClient
     private function database_rewrite_progress_details(
         int $records_processed
     ): array {
-        $progress = self::EMPTY_PROGRESS_DETAILS;
+        $progress = ProgressReporter::EMPTY_DETAILS;
         $progress['items'] = [
             'unit' => 'records',
             'done' => $records_processed,
@@ -7266,7 +7149,7 @@ class ImportClient
         int $bytes_read,
         int $bytes_total
     ): array {
-        $progress = self::EMPTY_PROGRESS_DETAILS;
+        $progress = ProgressReporter::EMPTY_DETAILS;
         $progress['items'] = [
             'unit' => 'statements',
             'done' => $statements_executed,
@@ -8546,52 +8429,8 @@ class ImportClient
             return true;
         }
 
-        // Compute fetch list counters once at the start of each list.
-        // These survive across batches within one invocation and are
-        // recomputed on restart from the state file's byte offset.
-        if ($this->fetch_list_total === null) {
-            $offset = $this->get_state()->fetch->offset;
-            $this->fetch_list_total = 0;
-            $this->fetch_list_done = 0;
-            $this->fetch_list_bytes_total = 0;
-            $this->fetch_list_bytes_done = 0;
-            $has_sizes_for_every_fetch_entry = true;
-            $fetch_list_handle = fopen($list_file, 'rb');
-            if (!is_resource($fetch_list_handle)) {
-                throw new RuntimeException('Failed to open the fetch list for progress totals.');
-            }
-            while (true) {
-                $fetch_list_line = fgets($fetch_list_handle);
-                if ($fetch_list_line === false) {
-                    break;
-                }
-                $fetch_list_entry = json_decode($fetch_list_line, true);
-                if (!is_array($fetch_list_entry)) {
-                    continue;
-                }
-                ++$this->fetch_list_total;
-                $fetch_list_position = ftell($fetch_list_handle);
-                if (is_int($fetch_list_position) && $fetch_list_position <= $offset) {
-                    ++$this->fetch_list_done;
-                }
-                if (!isset($fetch_list_entry['type'], $fetch_list_entry['size'])) {
-                    $has_sizes_for_every_fetch_entry = false;
-                    continue;
-                }
-                if ($fetch_list_entry['type'] === 'file') {
-                    $fetch_entry_size = (int) $fetch_list_entry['size'];
-                    $this->fetch_list_bytes_total += $fetch_entry_size;
-                    if (is_int($fetch_list_position) && $fetch_list_position <= $offset) {
-                        $this->fetch_list_bytes_done += $fetch_entry_size;
-                    }
-                }
-            }
-            fclose($fetch_list_handle);
-            if (!$has_sizes_for_every_fetch_entry) {
-                $this->fetch_list_bytes_total = null;
-                $this->fetch_list_bytes_done = null;
-            }
-        }
+        // Compute totals once, reconstructing completed paths from the saved cursor.
+        $this->files_pull_progress->load_list($list_file, $this->get_state()->fetch);
         $fetch_state = $this->get_state()->fetch;
         $batch_file = $fetch_state->batch_file;
         $batch_offset = $fetch_state->offset;
@@ -8615,8 +8454,7 @@ class ImportClient
             // Clear this batch's progress tracking, as it's going to be rebuilt & restarted.
             $this->get_state()->current_file = null;
             $this->get_state()->current_file_bytes = null;
-            $this->files_pulled = 0;
-            $this->files_pulled_bytes = 0;
+            $this->files_pull_progress->restart_batch();
         }
 
         if ($batch_file === null || !file_exists($batch_file)) {
@@ -8657,19 +8495,8 @@ class ImportClient
             $this->audit_log("FILE DELETE | {$batch_file} | fetch batch complete");
         }
 
-        // Advance the done counter by the known batch size and reset
-        // the per-batch file counter. files_pulled counted files within
-        // this batch; now that the batch is complete, those files are
-        // accounted for in fetch_list_done.
-        if ($this->fetch_list_done !== null) {
-            $this->fetch_list_done += $batch_entries;
-        }
-        if ($this->fetch_list_bytes_done !== null) {
-            $this->fetch_list_bytes_done += $this->files_pulled_bytes;
-        }
+        $this->files_pull_progress->complete_batch($batch_entries);
         $this->get_state()->files_pull_summary->files_pulled += $batch_entries;
-        $this->files_pulled = 0;
-        $this->files_pulled_bytes = 0;
 
         $this->get_state()->fetch = FetchListProgressState::from_array([
             "offset" => $next_offset,
@@ -8831,7 +8658,6 @@ class ImportClient
         $fetch_list_json_line = json_encode(
             [
                 "path" => base64_encode($remote_absolute_path),
-                "type" => $remote_path_type,
                 "size" => $remote_path_type === 'file' ? $remote_file_size : 0,
             ],
             JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
@@ -9045,8 +8871,7 @@ class ImportClient
         $cursor = $this->get_state()->active_resumable_command->remote_cursor ?? null;
         $complete = false;
         $mode = $this->sql_output_mode;
-        $this->database_progress_table_name = null;
-        $this->database_progress_table_rows_total = null;
+        $progress_table = null;
 
         // ── Set up write strategy based on output mode ──────────────
 
@@ -9223,6 +9048,7 @@ class ImportClient
                     $spatial_srid_guard,
                     $session_setup_file,
                     &$sql_bytes_written,
+                    &$progress_table,
                     $context,
                     $query_stream,
                     &$sql_statements_counted,
@@ -9389,7 +9215,8 @@ class ImportClient
                             'message' => 'Downloading SQL dump',
                             'progress' => $this->database_pull_progress_details(
                                 $cursor,
-                                $sql_bytes_written
+                                $sql_bytes_written,
+                                $progress_table
                             ),
                         ]);
 
@@ -9561,13 +9388,19 @@ class ImportClient
      *
      * @param string|null $cursor Base64-encoded exporter cursor.
      * @param int         $sql_bytes_written SQL bytes written by this pull.
+     * @param array|null  $progress_table {
+     *     Cached estimate for the current table, retained only while fetch_sql() runs.
+     *     @type string   $name       Table name.
+     *     @type int|null $rows_total Estimated rows, or null when absent from db-index.
+     * }
      * @return array<string,mixed> Stable progress-screen details.
      */
     private function database_pull_progress_details(
         ?string $cursor,
-        int $sql_bytes_written
+        int $sql_bytes_written,
+        ?array &$progress_table
     ): array {
-        $progress = self::EMPTY_PROGRESS_DETAILS;
+        $progress = ProgressReporter::EMPTY_DETAILS;
         $progress['bytes'] = [
             'done' => $sql_bytes_written,
             // INFORMATION_SCHEMA only supplies a rough estimate,
@@ -9608,9 +9441,8 @@ class ImportClient
         }
 
         $table_name = $current_table['name'];
-        if ($this->database_progress_table_name !== $table_name) {
-            $this->database_progress_table_name = $table_name;
-            $this->database_progress_table_rows_total = null;
+        if (($progress_table['name'] ?? null) !== $table_name) {
+            $progress_table = ['name' => $table_name, 'rows_total' => null];
             $tables_file = wp_join_unix_paths($this->state_dir, 'db-tables.jsonl');
             $tables_handle = @fopen($tables_file, 'rb');
             if (is_resource($tables_handle)) {
@@ -9626,7 +9458,7 @@ class ImportClient
                         && isset($table['rows'])
                         && is_numeric($table['rows'])
                     ) {
-                        $this->database_progress_table_rows_total = (int) $table['rows'];
+                        $progress_table['rows_total'] = (int) $table['rows'];
                         break;
                     }
                 }
@@ -9637,7 +9469,7 @@ class ImportClient
         $progress['current_table'] = [
             'name' => $table_name,
             'rows_done' => (int) $current_table['rows_done'],
-            'rows_total' => $this->database_progress_table_rows_total,
+            'rows_total' => $progress_table['rows_total'],
             'rows_total_is_estimate' => true,
         ];
         return $progress;
@@ -10846,6 +10678,10 @@ class ImportClient
         if ($context->remote_file_path === null) {
             $context->remote_file_path = $path;
             $context->remote_file_size = $file_size;
+            if (!$is_first) {
+                // A resumed handle has no ctime yet; the continuation part supplies it.
+                $context->file_ctime = (int) ($headers["x-file-ctime"] ?? 0);
+            }
         }
 
         // Open file on first chunk
@@ -10885,8 +10721,9 @@ class ImportClient
                 false,
             );
 
-            $files_done = ($this->fetch_list_done ?? 0) + $this->files_pulled;
-            $files_total = $this->fetch_list_total;
+            $file_progress = $this->files_pull_progress->get_details($context);
+            $files_done = $file_progress['items']['done'];
+            $files_total = $file_progress['items']['total'];
             $file_fraction = ($files_total !== null && $files_total > 0)
                 ? $files_done / $files_total
                 : null;
@@ -10986,8 +10823,7 @@ class ImportClient
                     "file",
                     $context->file_path,
                 );
-                $this->files_pulled++; // Count completed files only
-                $this->files_pulled_bytes += $file_size;
+                $this->files_pull_progress->complete_file($file_size);
                 $this->clear_volatile_file($path);
                 $this->audit_log(
                     sprintf("  Indexed (wrote %d bytes)", $final_size),
@@ -11026,35 +10862,9 @@ class ImportClient
         ?string $event_path = null,
         ?int $event_size = null
     ): array {
-        $files_done = ($this->fetch_list_done ?? 0) + $this->files_pulled;
-        $files_total = $this->fetch_list_total;
-        $progress = self::EMPTY_PROGRESS_DETAILS;
-        $progress['items'] = [
-            'unit' => 'files',
-            'done' => $files_done,
-            'total' => $files_total,
-        ];
-        if (
-            $this->fetch_list_bytes_done !== null
-            && $this->fetch_list_bytes_total !== null
-        ) {
-            $progress['bytes'] = [
-                'done' => $this->fetch_list_bytes_done
-                    + $this->files_pulled_bytes
-                    + $context->file_bytes_written,
-                'total' => $this->fetch_list_bytes_total,
-            ];
-        }
-        if (
-            $context->remote_file_path !== null
-            && $context->remote_file_size !== null
-        ) {
-            $progress['current_file'] = [
-                'path_b64' => base64_encode($context->remote_file_path),
-                'bytes_done' => $context->file_bytes_written,
-                'bytes_total' => $context->remote_file_size,
-            ];
-        }
+        $progress = $this->files_pull_progress->get_details($context);
+        $files_done = $progress['items']['done'];
+        $files_total = $progress['items']['total'];
 
         $record = [
             'type' => 'file_progress',
@@ -12703,8 +12513,8 @@ class ImportClient
                     // been counted (fetch phase).  During indexing the
                     // list doesn't exist yet and emitting files_done:0
                     // without files_total confuses consumers.
-                    if ($this->fetch_list_total !== null) {
-                        $file_progress = $this->files_pull_progress_record($context);
+                    $file_progress = $this->files_pull_progress_record($context);
+                    if (isset($file_progress['files_total'])) {
                         $heartbeat['command'] = $file_progress['command'];
                         $heartbeat['phase'] = $file_progress['phase'];
                         $heartbeat['files_done'] = $file_progress['files_done'];
@@ -13169,7 +12979,7 @@ class ImportClient
             throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->pull_state_file}");
         }
 
-        $files_pulled = $this->files_pulled; // Completed in this run
+        $files_pulled = $this->files_pull_progress->get_batch_files_done(); // Completed in this batch
         $has_cursor =
             !empty($state["active_resumable_command"]["remote_cursor"] ?? null) ||
             !empty($state["index"]["cursor"] ?? null) ||
@@ -13207,81 +13017,44 @@ class ImportClient
         $this->write_progress_file_if_due();
     }
 
-    /**
-     * Write a flat progress file for external consumers (e.g. web UI polling).
-     *
-     * Derives a simple JSON object from the current state and pipeline
-     * position. Written atomically via temp file + rename so readers
-     * never see a partial write.
-     */
+    /** Immediately write the latest screen snapshot, including on shutdown or error. */
     public function write_progress_file(?string $error = null): void
     {
-        $state = $this->state;
-        $command = $state->active_resumable_command->command_name;
-        $status = $error !== null ? "error" : ($state->active_resumable_command->completion_state ?? "in_progress");
-
-        // Derive phase from the state's stage field
-        $phase = $state->active_resumable_command->current_stage;
-        $progress_details_are_current =
-            $this->progress_details_command === $command
-            && $this->progress_details_phase === $phase;
-
-        $payload = [
-            "schema_version" => self::PROGRESS_SCHEMA_VERSION,
-            "step" => $this->pipeline_step,
-            "steps" => $this->pipeline_steps,
-            "command" => $command,
-            "status" => $status,
-            "phase" => $phase,
-            "message" => $progress_details_are_current
-                ? $this->progress_message
-                : null,
-            "progress" => $progress_details_are_current
-                && $this->progress_details !== null
-                    ? $this->progress_details
-                    : self::EMPTY_PROGRESS_DETAILS,
-            "error" => $error,
-            "error_code" => $error !== null ? $this->last_error_code : null,
-            "reason" => null,
-            "detail" => null,
-            "ts" => microtime(true),
-        ];
-
-        $this->write_progress_payload($payload);
+        $this->progress_reporter->update($this->progress_context($error));
+        $this->progress_reporter->write_file(true);
     }
 
     /** Writes an active progress snapshot at most once per second. */
     private function write_progress_file_if_due(): void
     {
-        $completion_state =
-            $this->state->active_resumable_command->completion_state;
-        if (
-            $completion_state !== "in_progress"
-            || microtime(true) - $this->last_progress_file_write >=
-                $this->progress_throttle
-        ) {
-            $this->write_progress_file();
-        }
+        $this->progress_reporter->update($this->progress_context());
+        $this->progress_reporter->write_file();
     }
 
-    /** Atomically replaces progress.json with one complete snapshot. */
-    private function write_progress_payload(array $payload): void
+    /**
+     * @return array {
+     *     Command fields shared by screen updates and pull checkpoints.
+     *     @type int|null    $step       Pipeline position.
+     *     @type int|null    $steps      Pipeline length.
+     *     @type string|null $command    Active pull command.
+     *     @type string|null $status     Active command's completion state.
+     *     @type string|null $phase      Active command's durable stage.
+     *     @type string|null $error      Terminal error, when supplied.
+     *     @type string|null $error_code Terminal error classification.
+     * }
+     */
+    private function progress_context(?string $error = null): array
     {
-        $json = json_encode(
-            $payload,
-            JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE
-        );
-
-        if ($json === false) {
-            return; // Best-effort — don't crash the pull over a progress file
-        }
-        $tmp = $this->progress_file . ".tmp";
-        if (
-            file_put_contents($tmp, $json) !== false
-            && rename($tmp, $this->progress_file)
-        ) {
-            $this->last_progress_file_write = microtime(true);
-        }
+        $command = $this->state->active_resumable_command;
+        return [
+            'step' => $this->pipeline_step,
+            'steps' => $this->pipeline_steps,
+            'command' => $command->command_name,
+            'status' => $error !== null ? 'error' : $command->completion_state,
+            'phase' => $command->current_stage,
+            'error' => $error,
+            'error_code' => $error !== null ? $this->last_error_code : null,
+        ];
     }
 
     /**
@@ -13329,7 +13102,7 @@ class ImportClient
 
         // Log final progress before exit
         $remote_index_entry_count = $this->remote_index_entry_count();
-        $files_pulled = $this->files_pulled; // Files completed in this run
+        $files_pulled = $this->files_pull_progress->get_batch_files_done(); // Files completed in this batch
         $current_command =
             $active_resumable_command->command_name ?? "unknown";
 
@@ -13400,67 +13173,21 @@ class ImportClient
      */
     public function output_progress(array $data, bool $force = false): void
     {
-        if (isset($data['progress']) && is_array($data['progress'])) {
-            $data['schema_version'] = self::PROGRESS_SCHEMA_VERSION;
-        }
-        // progress.json may reuse these fields only while the state still
-        // names the same command and phase as this JSONL record.
-        $has_message = isset($data['message']) && is_string($data['message']);
-        $has_progress = isset($data['progress']) && is_array($data['progress']);
-        if ($has_message || $has_progress) {
-            $active_command = $this->state->active_resumable_command;
-            $command = $active_command->command_name;
-            $phase = $active_command->current_stage;
-            if (
-                $command !== $this->progress_details_command
-                || $phase !== $this->progress_details_phase
-            ) {
-                $this->progress_details = null;
-                $this->progress_message = null;
-            }
-            $this->progress_details_command = $command;
-            $this->progress_details_phase = $phase;
-            if ($has_message) {
-                $this->progress_message = $data['message'];
-            }
-            if ($has_progress) {
-                $this->progress_details = $data['progress'];
-            }
-        }
-        if (($data['command'] ?? null) !== 'files-push') {
-            $this->write_progress_file_if_due();
-        }
+        $context = ($data['command'] ?? null) === 'files-push'
+            ? $data + ['step' => $this->pipeline_step, 'steps' => $this->pipeline_steps]
+            : $this->progress_context();
+        $this->progress_reporter->update($context, $data);
+        $this->progress_reporter->write_file();
 
         // The non-verbose terminal presentation uses show_progress_line() instead.
         if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             return;
         }
-
-        $now = microtime(true);
-
-        // Always output status changes
-        $is_status_change =
-            isset($data["status"]) &&
-            in_array($data["status"], ["starting", "complete", "error"]);
-
-        // Output if forced, status change, or throttle time passed
-        if (
-            $force ||
-            $is_status_change ||
-            $now - $this->last_progress_output >= $this->progress_throttle
-        ) {
-            $written = @fwrite(
-                $this->progress_fd,
-                json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE) . "\n"
-            );
-            if ($written === false) {
-                // Broken pipe — save state and exit cleanly
-                $this->save_state();
-                $this->write_progress_file();
-                exit(0);
-            }
-            @flush();
-            $this->last_progress_output = $now;
+        if (!$this->progress_reporter->output_jsonl($data, $this->progress_fd, $force)) {
+            // Broken pipe — save state and exit cleanly.
+            $this->save_state();
+            $this->write_progress_file();
+            exit(0);
         }
     }
 }
