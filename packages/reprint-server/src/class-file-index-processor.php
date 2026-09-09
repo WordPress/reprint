@@ -91,7 +91,13 @@ final class FileIndexProcessor {
     /** @var array|null Directory failure produced by the most recent step. */
     private $directory_error = null;
 
-    /** @var MultisiteFileSelection|null Trusted source file boundaries. */
+    /**
+     * Restricts traversal to shared code and the selected site's uploads.
+     * For site 7, skip uploads/sites/8 before opening it. Null leaves the
+     * ordinary single-site traversal rules in place.
+     *
+     * @var MultisiteFileSelection|null
+     */
     private $multisite_selection;
 
     /** @var bool Whether close() has been called. */
@@ -106,7 +112,7 @@ final class FileIndexProcessor {
      *                                      external directory reached by a followed link.
      * @param bool            $follow_symlinks Whether directory symlinks may lead outside the allowed directories.
      * @param string          $storage_path Reprint storage path omitted from the index, or an empty string.
-     * @param MultisiteFileSelection|null $multisite_selection Trusted site file boundaries.
+     * @param MultisiteFileSelection|null $multisite_selection Shared code and selected uploads allowed by the source WordPress site; null for single-site sources.
      * @return self New file-index processor.
      */
     public static function start(
@@ -222,6 +228,7 @@ final class FileIndexProcessor {
      * @param string          $cursor_json JSON cursor returned by the preceding request.
      * @param bool            $follow_symlinks Whether directory symlinks may lead outside the allowed directories.
      * @param string          $storage_path Reprint storage path omitted from the index, or an empty string.
+     * @param MultisiteFileSelection|null $multisite_selection Current source selection, which must match the cursor's site and paths.
      * @return self Resumed file-index processor.
      */
     public static function resume(
@@ -389,9 +396,10 @@ final class FileIndexProcessor {
         $this->directory_stack[$frame_index]["after"] = $entry_name;
         $path = wp_join_unix_paths($this->current_directory, $entry_name);
 
-        // Apply component omissions before lstat() and before a directory can
-        // enter the stack. Omitted subtrees therefore cost no extra filesystem
-        // calls.
+        // Skip sibling paths before lstat() and before a directory can enter
+        // the stack. Their names came from the parent listing, but skipping
+        // them here adds no filesystem calls. Allowed paths still need a link
+        // check; includes_path() only checks strings.
         if ($this->multisite_selection !== null && !$this->multisite_selection->includes_path($path)) {
             $this->step_status = self::STATUS_SKIPPED;
             return true;
@@ -716,6 +724,7 @@ final class FileIndexProcessor {
      * @param string   $index_directory      Directory reported by the endpoint.
      * @param array[]  $initial_index_entries Intermediate symlinks emitted before traversal.
      * @param string[] $pending_named_roots  Requested named roots still to index, one per step.
+     * @param MultisiteFileSelection|null $multisite_selection Source selection checked against saved directories before traversal resumes.
      */
     private function __construct(
         array $roots,
@@ -808,6 +817,10 @@ final class FileIndexProcessor {
         // scandir() supplies the stable byte order on which cursor resumption
         // depends. Failure settles this directory rather than retrying it on
         // every subsequent request.
+        // This reads, sorts and holds every name in this directory, including
+        // on resume. The index batch limit does not bound this allocation. For
+        // a site 7 pull, uploads/sites still lists sibling names; the selection
+        // skips their subtrees, not this parent-directory listing.
         clearstatcache(true, $canonical_directory);
         $directory_names = @scandir($canonical_directory, SCANDIR_SORT_ASCENDING);
         if ($directory_names === false) {
@@ -830,7 +843,8 @@ final class FileIndexProcessor {
         }
 
         // Remove the two navigation names, then seek past the last settled name.
-        // Binary search keeps continuation cheap for unusually wide directories.
+        // Binary search makes the seek cheap even in a wide directory; the full
+        // directory scan and allocation above have already happened.
         $this->current_directory_names = [];
         foreach ($directory_names as $directory_name) {
             if ($directory_name !== "." && $directory_name !== "..") {

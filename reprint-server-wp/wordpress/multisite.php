@@ -12,6 +12,10 @@ use WordPress\Reprint\Server\MultisiteDatabaseSelection;
  * No switch_to_blog(): it changes tables but does not load the other site's
  * plugins. Custom shared storage needs a migration rule before we can export it.
  *
+ * Filesystem paths are source-side absolute paths with trailing slashes removed.
+ * They are not resolved through symlinks here; file selection checks those when
+ * indexing or fetching each path. URLs are separate from filesystem paths.
+ *
  * @return array {
  *     Trusted source context.
  *
@@ -19,10 +23,12 @@ use WordPress\Reprint\Server\MultisiteDatabaseSelection;
  *     @type int    $network_id Selected network ID.
  *     @type string $base_prefix Network table prefix, not the selected site's prefix.
  *     @type string $abspath Remote WordPress root.
- *     @type string $content_dir Remote content directory.
- *     @type string $exporter_dir Reprint plugin directory excluded from the target.
- *     @type string $uploads_dir Remote selected uploads directory.
- *     @type string $uploads_url Selected uploads URL.
+ *     @type string $content_dir Remote abspath/wp-content directory.
+ *     @type string $exporter_dir Actual Reprint plugin directory, excluded from the target.
+ *     @type string $uploads_dir Whole-site upload basedir: content_dir/uploads for
+ *                               site 1, content_dir/uploads/sites/7 for site 7.
+ *                               Never the current year/month directory.
+ *     @type string $uploads_url Whole-site uploads base URL, without a year/month suffix.
  *     @type string $home_url Selected home URL.
  *     @type string $site_url Selected WordPress URL.
  *     @type string $content_url Shared content URL.
@@ -41,13 +47,22 @@ function get_multisite_export_context(): array {
     if (!$site || $site->archived || $site->spam || $site->deleted) {
         throw new \RuntimeException('The selected multisite site is archived, spam, deleted, or missing.');
     }
+    // Legacy layouts can use blogs.dir and rewritten media URLs. The file
+    // selection below assumes uploads/ and uploads/sites/<site_id>/ instead.
     if (get_site_option('ms_files_rewriting') || defined('UPLOADS') || defined('BLOGUPLOADDIR')) {
         throw new \RuntimeException('Legacy multisite uploads require a separate migration rule; this pull supports modern uploads directories.');
     }
+    // File traversal starts inside abspath. A relocated content directory needs
+    // separate source roots and target path rules, which this mode does not have.
     if (rtrim(WP_CONTENT_DIR, '/') !== rtrim(ABSPATH, '/') . '/wp-content') {
         throw new \RuntimeException('A separate content directory requires a separate multisite migration rule.');
     }
+    // Ask WordPress, including upload_dir filters, without creating a directory
+    // during an export. Use basedir, not path: path can end in the current month.
     $uploads = wp_upload_dir(null, false);
+    // Accept only the layout that MultisiteFileSelection can separate by site.
+    // A custom basedir could overlap another site's files. Site 1 is the known
+    // overlap: its uploads/ root contains sites/, which file selection excludes.
     $expected_uploads = WP_CONTENT_DIR . '/uploads' . ( $site_id === 1 ? '' : '/sites/' . $site_id );
     if (rtrim($uploads['basedir'], '/') !== $expected_uploads) {
         throw new \RuntimeException('Custom multisite uploads are not supported; observed directory: ' . $uploads['basedir']);
@@ -55,6 +70,9 @@ function get_multisite_export_context(): array {
 
     // Use the exporter's rules, not $wpdb->tables: plugins can append their
     // own tables there. A registered plugin table still needs a migration rule.
+    // This runs for each multisite API request, including file requests.
+    // get_col() holds the whole database table-name list in memory; this setup
+    // cost grows with the number of tables, despite cheap per-path file filters.
     foreach ($wpdb->get_col('SHOW TABLES') as $table) {
         if (strpos($table, $base_prefix) !== 0) {
             continue;

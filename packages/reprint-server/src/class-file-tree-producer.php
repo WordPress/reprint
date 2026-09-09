@@ -40,7 +40,13 @@ class FileTreeProducer
     private $paths_sorted = false;
     /** @var bool */
     private $paths_positioned = false;
-    /** @var MultisiteFileSelection|null Trusted source file boundaries. */
+    /**
+     * Restricts requested files to shared code and the selected site's uploads.
+     * Checked even when the client skips the index and supplies a path directly.
+     * Null leaves the ordinary single-site file rules in place.
+     *
+     * @var MultisiteFileSelection|null
+     */
     private $multisite_selection;
 
     /** Ephemeral index into $paths; NOT stored in cursor. */
@@ -74,7 +80,8 @@ class FileTreeProducer
      *     @type int    $chunk_size Bytes per file chunk (default 5MB).
      *     @type bool   $index_only Emit index entries instead of file contents.
      *     @type string $cursor     JSON cursor string for resumption.
-     *     @type MultisiteFileSelection $multisite_selection Trusted selected-site file boundaries.
+     *     @type MultisiteFileSelection|null $multisite_selection Shared code and
+     *         selected uploads allowed by the source WordPress site. Default null.
      *     @type array  $paths      Paths to stream (required).
      * }
      */
@@ -144,6 +151,8 @@ class FileTreeProducer
             );
         }
 
+        // Check before the finished-phase return: a completed cursor has no
+        // file path left to check, but it must still belong to this selection.
         $selection_identity = $this->multisite_selection === null ? null : $this->multisite_selection->get_identity();
         if (( $cursor['multisite_selection'] ?? null ) !== $selection_identity) {
             throw new InvalidArgumentException('Cannot resume file fetch: multisite selection changed.');
