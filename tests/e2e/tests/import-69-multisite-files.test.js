@@ -1,7 +1,8 @@
 import { describe, it, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { lstatSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { apiRequest, apiRequestWithFileList, getSiteDir } from '../lib/test-helpers.js';
 import { ensureMultisite } from '../lib/multisite-setup.js';
 
@@ -50,5 +51,39 @@ describe('Multisite file selection over HTTP', () => {
             const error = response.chunks.find(chunk => chunk.type === 'error');
             assert.equal(error?.json?.message, `Path is outside the selected multisite site: ${path}`);
         }
+    });
+
+    it('rejects an indexed upload when its parent becomes a symlink into sibling media', async () => {
+        const url = `${fixture.sites[7].url}/?reprint-api`;
+        const media = fixture.sites[7].media_file;
+        const siblingMedia = fixture.sites[8].media_file;
+        const original = readFileSync(media);
+        const sibling = readFileSync(siblingMedia);
+        const index = await apiRequest(site, 'file_index', { ...mode, list_dir: getSiteDir(site), batch_size: 50000 }, { url });
+        assert.equal(index.chunks.find(chunk => chunk.type === 'completion')?.headers['x-status'], 'complete');
+        const paths = index.chunks.filter(chunk => chunk.type === 'index_batch')
+            .flatMap(chunk => chunk.json).map(entry => Buffer.from(entry.path, 'base64').toString());
+        assert.ok(paths.includes(media), 'The regular upload must be indexed before the source path changes');
+        const parent = dirname(media);
+        const backup = parent + '-before-link';
+        execFileSync('sudo', ['-u', 'nginx', 'mv', parent, backup]);
+        let linked = false;
+        try {
+            // A source file publisher can replace a directory after indexing.
+            // The requested file itself is not a symlink; its ancestor is.
+            execFileSync('sudo', ['-u', 'nginx', 'ln', '-s', dirname(siblingMedia), parent]);
+            linked = true;
+            assert.equal(lstatSync(media).isSymbolicLink(), false);
+            assert.deepEqual(readFileSync(media), sibling, 'The changed path must really resolve to sibling bytes');
+            const response = await apiRequestWithFileList(site, [media], mode, { url });
+            assert.ok(response.chunks?.every(chunk => chunk.type !== 'file'), 'No sibling file bytes may be sent through the indexed path');
+            const error = response.chunks.find(chunk => chunk.type === 'error');
+            assert.equal(error?.json?.message, `Symlinks require a separate multisite migration rule: ${media}`);
+        } finally {
+            if (linked) execFileSync('sudo', ['-u', 'nginx', 'rm', parent]);
+            execFileSync('sudo', ['-u', 'nginx', 'mv', backup, parent]);
+        }
+        assert.deepEqual(readFileSync(media), original);
+        assert.deepEqual(readFileSync(siblingMedia), sibling);
     });
 });
