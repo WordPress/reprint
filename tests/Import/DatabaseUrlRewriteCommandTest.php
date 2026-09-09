@@ -96,7 +96,28 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
         $this->assertSame('partial', $partial_state['active_resumable_command']['completion_state']);
         $this->assertSame(2, $partial_state['database_url_rewrite']['records_processed']);
 
-        $resuming_client = $this->new_client();
+        $resuming_client = new class(
+            $this->remote_reprint_api_url,
+            $this->temp_dir,
+            $this->temp_dir . '/fs-root'
+        ) extends \ImportClient {
+            public int $checked_updates = 0;
+
+            public function output_progress(array $data, bool $force = false): void {
+                $reporter = ( new \ReflectionClass(\ImportClient::class) )
+                    ->getProperty('progress_reporter')->getValue($this);
+                $last_write = ( new \ReflectionClass($reporter) )->getProperty('last_file_write');
+                $before = $last_write->getValue($reporter);
+                parent::output_progress($data, $force);
+                if (!$force && isset($data['records_processed'])) {
+                    TestCase::assertSame('in_progress', $this->get_state()->active_resumable_command->completion_state);
+                    if (microtime(true) - $before < 0.9) {
+                        TestCase::assertSame($before, $last_write->getValue($reporter));
+                        ++$this->checked_updates;
+                    }
+                }
+            }
+        };
         $resume_options = $this->command_options();
         unset(
             $resume_options['rewrite_url'],
@@ -105,6 +126,7 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
             $resume_options['target_db']
         );
         $resuming_client->run($resume_options);
+        $this->assertGreaterThan(1, $resuming_client->checked_updates);
 
         $database = new \PDO('sqlite:' . $this->database_path);
         $update_counts = $database->query(

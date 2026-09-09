@@ -28,6 +28,8 @@ class ProgressReporter {
     private ?int $files_total = null;
     private int $files_before_batch = 0;
     private int $files_in_batch = 0;
+    /** Same-process retries must forget paths delivered after the saved fetch cursor. */
+    private int $files_in_batch_at_checkpoint = 0;
     private ?int $file_bytes_total = null;
     private int $file_bytes_before_batch = 0;
     private int $file_bytes_in_batch = 0;
@@ -197,6 +199,7 @@ class ProgressReporter {
             }
         }
         fclose($handle);
+        $this->files_in_batch_at_checkpoint = $this->files_in_batch;
     }
 
     /** Clears counters for a new pull without changing the screen snapshot or write timers. */
@@ -208,27 +211,36 @@ class ProgressReporter {
         $this->restart_file_batch();
     }
 
-    public function complete_file(int $file_size): void {
-        ++$this->files_in_batch; // Count completed files only.
-        $this->file_bytes_in_batch += $file_size;
+    /** Counts one processed path; skipped paths, directories and links contribute zero file bytes. */
+    public function complete_path(int $file_bytes): void {
+        ++$this->files_in_batch;
+        $this->file_bytes_in_batch += $file_bytes;
     }
 
     public function complete_file_batch(int $batch_entries): void {
         // Use the known batch size, including directories and skipped paths.
-        // Completed files move into the preceding-batch counters only once.
+        // Processed paths move into the preceding-batch counters only once.
         $this->files_before_batch += $batch_entries;
         $this->file_bytes_before_batch += $this->file_bytes_in_batch;
         $this->restart_file_batch();
     }
 
-    /** Copies byte counts into the checkpoint together with the cursor that confirms those files. */
-    public function checkpoint_file_bytes(FetchListProgressState $fetch): void {
+    /** Saves bytes alongside the fetch cursor and remembers its path count for same-process retries. */
+    public function checkpoint_file_progress(FetchListProgressState $fetch): void {
         $fetch->file_bytes_before_batch = $this->file_bytes_before_batch;
         $fetch->file_bytes_in_batch = $this->file_bytes_in_batch;
+        $this->files_in_batch_at_checkpoint = $this->files_in_batch;
+    }
+
+    /** Drops counts from uncheckpointed parts before the next request replays them. */
+    public function restore_file_progress(FetchListProgressState $fetch): void {
+        $this->files_in_batch = $this->files_in_batch_at_checkpoint;
+        $this->file_bytes_in_batch = $fetch->file_bytes_in_batch;
     }
 
     public function restart_file_batch(): void {
         $this->files_in_batch = 0;
+        $this->files_in_batch_at_checkpoint = 0;
         $this->file_bytes_in_batch = 0;
     }
 

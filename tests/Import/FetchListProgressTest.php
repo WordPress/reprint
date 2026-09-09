@@ -142,6 +142,32 @@ class FetchListProgressTest extends TestCase
     // Tests
     // ---------------------------------------------------------------
 
+    public function testCompletedPreviousCheckpointCanBeAbortedAfterUpdating(): void
+    {
+        $this->writeState([
+            'active_resumable_command' => ['command_name' => 'files-pull', 'completion_state' => 'complete'],
+        ]);
+        $state_file = $this->pullStateDirectory . '/state.json';
+        $previous_state = json_decode(file_get_contents($state_file), true);
+        // The completed fetch object serialized by the previous build (52f1d6cc).
+        $previous_state['fetch'] = [
+            'offset' => 0,
+            'next_offset' => 0,
+            'batch_file' => null,
+            'cursor' => null,
+            'batch_entries' => 0,
+        ];
+        file_put_contents($state_file, json_encode($previous_state));
+        $client = $this->makeClient();
+        $client->run([
+            'command' => 'files-pull', 'abort' => true, 'verbose' => false, 'secret' => null, 'tuning_config' => [],
+        ]);
+        $saved_state = json_decode(file_get_contents($state_file), true);
+        $this->assertNull($saved_state['active_resumable_command']['completion_state']);
+        $this->assertSame(0, $saved_state['fetch']['file_bytes_before_batch']);
+        $this->assertSame(0, $saved_state['fetch']['file_bytes_in_batch']);
+    }
+
     public function testFreshDownloadShowsZeroDone()
     {
         $listFile = $this->writeFetchList(100);
@@ -456,12 +482,12 @@ class FetchListProgressTest extends TestCase
         $progress->load_file_list($list_file, $fetch);
         $this->assertSame(300, $progress->get_file_details()['bytes']['done']);
         $this->assertSame(2, $progress->get_file_details()['items']['done']);
-        $progress->complete_file(300);
+        $progress->complete_path(300);
         $progress->restart_file_batch();
         $this->assertSame(100, $progress->get_file_details()['bytes']['done']);
         $this->assertSame(1, $progress->get_file_details()['items']['done']);
-        $progress->complete_file(200);
-        $progress->complete_file(300);
+        $progress->complete_path(200);
+        $progress->complete_path(300);
         $progress->complete_file_batch(2);
         $this->assertSame(600, $progress->get_file_details()['bytes']['done']);
         $this->assertSame(3, $progress->get_file_details()['items']['done']);
@@ -469,19 +495,22 @@ class FetchListProgressTest extends TestCase
         $this->assertSame(1000, $progress->get_file_details()['bytes']['total']);
     }
 
-    public function testFileByteCheckpointChangesOnlyAtTheFetchBoundary(): void
+    public function testFileProgressRestoresOnlyTheSavedBoundary(): void
     {
         $list_file = $this->writeFetchList(4, null, true);
         $fetch = new \Reprint\Importer\State\FetchListProgressState();
         $progress = new \Reprint\Importer\ProgressReporter($this->stateDir . '/progress.json');
         $progress->load_file_list($list_file, $fetch);
-        $progress->complete_file(100);
+        $progress->complete_path(100);
         $this->assertSame(0, $fetch->file_bytes_in_batch);
-        $progress->checkpoint_file_bytes($fetch);
+        $progress->checkpoint_file_progress($fetch);
         $this->assertSame(100, $fetch->file_bytes_in_batch);
-        $progress->complete_file(200);
+        $progress->complete_path(200);
         $this->assertSame(100, $fetch->file_bytes_in_batch);
         $this->assertSame(300, $progress->get_file_details()['bytes']['done']);
+        $progress->restore_file_progress($fetch);
+        $this->assertSame(1, $progress->get_file_details()['items']['done']);
+        $this->assertSame(100, $progress->get_file_details()['bytes']['done']);
     }
 
     public function testResettingFileCountersKeepsTheScreenSnapshot(): void
@@ -569,7 +598,7 @@ class FetchListProgressTest extends TestCase
         // Five completed files add to the paths before the saved batch offset.
         $progress = $reflection->getProperty('progress_reporter')->getValue($client);
         for ($file = 0; $file < 5; ++$file) {
-            $progress->complete_file(0);
+            $progress->complete_path(0);
         }
         $items = $progress->get_file_details()['items'];
         $this->assertSame(45, $items['done']); // 40 from offset + 5 pulled.

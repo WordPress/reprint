@@ -93,6 +93,46 @@ class PullStateTest extends TestCase
         );
     }
 
+    public function testCompletedPreviousFetchCheckpointLoadsWithZeroBytes(): void
+    {
+        $data = ( new \PullState() )->to_array();
+        $data['active_resumable_command']['command_name'] = 'files-pull';
+        $data['active_resumable_command']['completion_state'] = 'complete';
+        // FetchListProgressState::to_array() at 52f1d6cc, after files-pull clears its fetch state.
+        $data['fetch'] = [
+            'offset' => 0,
+            'next_offset' => 0,
+            'batch_file' => null,
+            'cursor' => null,
+            'batch_entries' => 0,
+        ];
+
+        $state = \PullState::from_array($data);
+        $this->assertSame('complete', $state->active_resumable_command->completion_state);
+        $this->assertSame(0, $state->fetch->file_bytes_before_batch);
+        $this->assertSame(0, $state->fetch->file_bytes_in_batch);
+        $this->assertSame($state->to_array(), \PullState::from_array($state->to_array())->to_array());
+    }
+
+    public function testPreviousActiveFetchCheckpointRequiresThePreviousBuild(): void
+    {
+        $data = ( new \PullState() )->to_array();
+        $data['active_resumable_command']['command_name'] = 'files-pull';
+        $data['active_resumable_command']['completion_state'] = 'partial';
+        // The previous writer retained offsets after a completed batch. Its bytes are unknown.
+        $data['fetch'] = [
+            'offset' => 100,
+            'next_offset' => 100,
+            'batch_file' => null,
+            'cursor' => null,
+            'batch_entries' => 0,
+        ];
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage('Finish or abort this files-pull with the previous Reprint build before updating.');
+        \PullState::from_array($data);
+    }
+
     public function testStateRejectsAnUnknownFilesPullMode(): void
     {
         $array = ( new \PullState() )->to_array();

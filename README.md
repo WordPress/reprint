@@ -898,7 +898,8 @@ The JSONL records that report screen progress carry the same `schema_version`
 and nested `progress` object, while their event-specific top-level fields stay
 available for existing consumers.
 Ordinary log events, such as a skipped path, do not replace the screen's action
-label. File counts and bytes include completed paths inside a resumed batch.
+label. File counts include every processed path, including failed or skipped
+paths, directories and symlinks. Live updates and resume use the same rule.
 If a batch must be downloaded again, its old batch counts are cleared first.
 A new file reports its own path and size even after an error in the previous file.
 Completed file bytes exclude failed files and use their downloaded size, not
@@ -907,8 +908,10 @@ before and within the current batch. This keeps byte counts stable after
 resume without another file scan. Failed files or source size changes can make
 completed bytes differ from the planned byte total.
 
-This changes the pull checkpoint schema. Finish active pulls with the previous
-build before updating; old checkpoints lack the completed-byte counts.
+Finish or abort active file downloads with the previous build before updating.
+Old checkpoints with saved fetch progress lack the completed-byte counts and
+cannot resume in this build. Cleared fetch checkpoints, including those left by
+completed pulls, load with zero completed bytes. Retained indexes are unchanged.
 
 Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl`. The
 default `auto` mode uses terminal progress when its output stream is a TTY and

@@ -26,7 +26,8 @@ class FileErrorProgressClient extends \ImportClient {
 }
 
 class FilesPullProgressErrorTest extends TestCase {
-    public function testNextFileHasItsOwnProgressAfterSourceFileDisappears(): void {
+    /** @dataProvider interruptedResponses */
+    public function testNextFileHasItsOwnProgressAfterSourceFileDisappears(bool $interrupt_response): void {
         $root = sys_get_temp_dir() . '/file-progress-error-' . bin2hex(random_bytes(6));
         mkdir($root . '/source', 0700, true);
         $source = realpath($root . '/source');
@@ -40,7 +41,12 @@ class FilesPullProgressErrorTest extends TestCase {
         file_put_contents($router, '<?php putenv("REPRINT_SERVER_TEST_MODE=1");'
             . 'function test_hook_before_file_chunk($path, $offset, &$data) {'
             . 'if (basename($path) === "a.bin" && $offset === 0) { unlink($path); }'
-            . '} require ' . var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true)
+            . '}'
+            // Flush the data but omit completion once, after the directory part.
+            . ( $interrupt_response
+                ? 'function test_hook_before_completion($status, $gz, $boundary) { if (!file_exists(__DIR__ . "/cut-once")) { file_put_contents(__DIR__ . "/cut-once", "1"); $gz->finish(); exit; } }'
+                : '' )
+            . ' require ' . var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true)
             . '; require ' . var_export(dirname(__DIR__, 2) . '/packages/reprint-server/src/export.php', true)
             . '; (new WordPress\\Reprint\\Server\\HTTPServer())->handle_request();');
         $listener = stream_socket_server('tcp://127.0.0.1:0', $error_number, $error_message);
@@ -79,12 +85,32 @@ class FilesPullProgressErrorTest extends TestCase {
             foreach (['a.bin', 'b.bin'] as $name) {
                 $append->invoke($client, $source . '/' . $name, 'file', filesize($source . '/' . $name), $list_handle);
             }
+            if ($interrupt_response) {
+                mkdir($source . '/c-directory');
+                $append->invoke($client, $source . '/c-directory', 'dir', 0, $list_handle);
+            }
             fclose($list_handle);
             $download = ( new \ReflectionClass($client) )->getMethod('fetch_files_from_list');
             for ($request = 0; $request < 10; ++$request) {
-                if ($download->invoke($client, $list_file)) {
-                    break;
+                try {
+                    if ($download->invoke($client, $list_file)) {
+                        break;
+                    }
+                } catch (\Reprint\Importer\TransientInterruptionException $exception) {
+                    // The CLI exits 3 here. This caller explicitly starts the next attempt.
+                    $this->assertTrue($interrupt_response);
                 }
+                // A broken response may have delivered directory or error parts after its last saved cursor.
+                // The next request replays those paths in this same client object.
+                $reporter = ( new \ReflectionClass(\ImportClient::class) )
+                    ->getProperty('progress_reporter')->getValue($client);
+                $reloaded = new \Reprint\Importer\ProgressReporter($root . '/unused-progress.json');
+                $reloaded->load_file_list($list_file, $client->get_state()->fetch);
+                $this->assertSame(
+                    $reloaded->get_file_details()['items'],
+                    $reporter->get_file_details()['items'],
+                    'A partial response must leave live counts at the saved cursor before replay.'
+                );
             }
             $this->assertLessThan(10, $request, 'The two-file download did not finish within ten requests.');
             $this->assertFileDoesNotExist($source . '/a.bin');
@@ -112,6 +138,10 @@ class FilesPullProgressErrorTest extends TestCase {
             proc_close($server);
             $this->remove_directory($root);
         }
+    }
+
+    public static function interruptedResponses(): array {
+        return [[false], [true]];
     }
 
     private function remove_directory(string $directory): void {

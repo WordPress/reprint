@@ -258,6 +258,37 @@ class ProgressScreenTest extends TestCase {
         );
     }
 
+    public function testSkippedEmptyFileCountsAsAProcessedPath(): void
+    {
+        $client = $this->make_client();
+        $reflection = new \ReflectionClass($client);
+        $reflection->getProperty('fs_root_nonempty_behavior')->setValue($client, 'preserve-local');
+        $reflection->getProperty('remote_to_local_path_mapper')->setValue(
+            $client,
+            new \RemoteToLocalPathMapper(
+                (string) realpath($this->filesystem_root),
+                ['/']
+            )
+        );
+        $reporter = $reflection->getProperty('progress_reporter')->getValue($client);
+        $list_file = $client->pull_state_directory . '/fetch-list.jsonl';
+        file_put_contents($list_file, json_encode(['path' => base64_encode('/blocked/empty.bin'), 'size' => 0]) . "\n");
+        $reporter->load_file_list($list_file, $client->get_state()->fetch);
+        // A local process can create a parent file after this path was selected for download.
+        file_put_contents($this->filesystem_root . '/blocked', 'keep this local file');
+        $reflection->getMethod('handle_file_chunk')->invoke($client, [
+            'headers' => [
+                'x-file-path' => base64_encode('/blocked/empty.bin'),
+                'x-file-size' => '0', 'x-first-chunk' => '1', 'x-last-chunk' => '1',
+            ],
+            'body' => '',
+        ], new StreamingContext());
+
+        $this->assertSame(1, $reporter->get_file_details()['items']['done']);
+        $this->assertSame(0, $reporter->get_file_details()['bytes']['done']);
+        $this->assertSame('keep this local file', file_get_contents($this->filesystem_root . '/blocked'));
+    }
+
     private function make_client(): \ImportClient
     {
         return new \ImportClient(

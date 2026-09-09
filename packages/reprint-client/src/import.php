@@ -3986,6 +3986,7 @@ class ImportClient
                 "message" => "Starting files-index",
             ], true);
         } else {
+            $this->get_state()->active_resumable_command->completion_state = "in_progress";
             $cursor = $this->get_state()->index->cursor ?? null;
             $this->audit_log(
                 sprintf(
@@ -6229,13 +6230,13 @@ class ImportClient
 
         [$database, $connection_label] = $this->create_target_database_connection($target, false);
 
+        $active_command->completion_state = 'in_progress';
         if (!$is_resume) {
             $rewrite_state = new DatabaseUrlRewriteCommandState();
             $rewrite_state->rewrite_url = $url_mapping;
             $rewrite_state->target = $target_identity;
             $this->get_state()->database_url_rewrite = $rewrite_state;
             $active_command->command_name = 'db-rewrite-urls';
-            $active_command->completion_state = 'in_progress';
             $active_command->current_stage = 'database-records';
             $this->save_state();
         }
@@ -6760,6 +6761,7 @@ class ImportClient
         }
 
         if ($is_resume) {
+            $this->get_state()->active_resumable_command->completion_state = "in_progress";
             $resume_message = "Resuming db-apply from the position saved in the target database";
             $this->audit_log(
                 "RESUME db-apply | position stored in target database",
@@ -7567,6 +7569,7 @@ class ImportClient
                 "message" => "Starting db-index",
             ], true);
         } else {
+            $this->get_state()->active_resumable_command->completion_state = "in_progress";
             $this->audit_log(
                 sprintf(
                     "RESUME db-index | cursor=%s",
@@ -7738,13 +7741,16 @@ class ImportClient
                 $this->handle_file_chunk($chunk, $context);
             } elseif ($chunk_type === "directory") {
                 $this->handle_directory_chunk($chunk);
+                $this->progress_reporter->complete_path(0);
             } elseif ($chunk_type === "symlink") {
                 $this->handle_symlink_chunk($chunk);
+                $this->progress_reporter->complete_path(0);
             } elseif ($chunk_type === "missing") {
                 $path = base64_decode($chunk["headers"]["x-file-path"] ?? "");
                 if ($path) {
                     $this->audit_log("Missing on server: {$path}", true);
                 }
+                $this->progress_reporter->complete_path(0);
                 // @TODO: Cleanup the local file that we may have started downloading.
             } elseif ($chunk_type === "error") {
                 $this->handle_error_chunk($chunk, "files", $context);
@@ -7829,7 +7835,7 @@ class ImportClient
                     }
                     $this->pull_index_journal->flush();
                     $this->get_state()->fetch->cursor = $cursor;
-                    $this->progress_reporter->checkpoint_file_bytes($this->get_state()->fetch);
+                    $this->progress_reporter->checkpoint_file_progress($this->get_state()->fetch);
                     $this->save_state();
                     $chunks_since_save = 0;
                 }
@@ -7852,6 +7858,7 @@ class ImportClient
             // the last complete part; the next invocation truncates any later
             // bytes before resuming.
             $durable_cursor = $this->get_state()->fetch->cursor;
+            $this->progress_reporter->restore_file_progress($this->get_state()->fetch);
             if ($context->file_handle) {
                 fflush($context->file_handle);
                 fclose($context->file_handle);
@@ -7876,7 +7883,7 @@ class ImportClient
             $context->response_stats ?? [],
         );
         $this->get_state()->fetch->cursor = $cursor;
-        $this->progress_reporter->checkpoint_file_bytes($this->get_state()->fetch);
+        $this->progress_reporter->checkpoint_file_progress($this->get_state()->fetch);
         $this->pull_index_journal->apply_pending_records();
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
@@ -8470,7 +8477,7 @@ class ImportClient
             $fetch_state->batch_file = $batch_file;
             $fetch_state->batch_entries = $batch_entries;
             $fetch_state->cursor = null;
-            $this->progress_reporter->checkpoint_file_bytes($fetch_state);
+            $this->progress_reporter->checkpoint_file_progress($fetch_state);
             $this->save_state();
         }
 
@@ -8500,7 +8507,7 @@ class ImportClient
         $fetch_state->batch_file = null;
         $fetch_state->batch_entries = 0;
         $fetch_state->cursor = null;
-        $this->progress_reporter->checkpoint_file_bytes($fetch_state);
+        $this->progress_reporter->checkpoint_file_progress($fetch_state);
         $this->save_state();
 
         return $next_offset >= filesize($list_file);
@@ -10698,6 +10705,9 @@ class ImportClient
 
         // Skip body/close for files being preserved
         if ($context->skip_current_file) {
+            if ($is_last) {
+                $this->progress_reporter->complete_path(0);
+            }
             return;
         }
 
@@ -10721,6 +10731,9 @@ class ImportClient
                     $context->skip_current_file = true;
                     $context->remote_file_path = null;
                     $context->remote_file_size = null;
+                    if ($is_last) {
+                        $this->progress_reporter->complete_path(0);
+                    }
                     $this->audit_log($e->getMessage(), true);
                     $this->emit_skip_progress($path);
                     return;
@@ -10786,7 +10799,6 @@ class ImportClient
                     "file",
                     $context->file_path,
                 );
-                $this->progress_reporter->complete_file($context->file_bytes_written);
                 $this->clear_volatile_file($path);
                 $this->audit_log(
                     sprintf("  Indexed (wrote %d bytes)", $final_size),
@@ -10798,6 +10810,11 @@ class ImportClient
                     true,
                 );
             }
+
+            // A passed path counts even when its bytes cannot be kept.
+            $this->progress_reporter->complete_path(
+                $context->file_ctime && !$file_changed ? $context->file_bytes_written : 0
+            );
 
             $context->file_handle = null;
             $context->file_path = null;
@@ -11347,6 +11364,11 @@ class ImportClient
             if ($error_type === "file_changed") {
                 $this->record_volatile_file($path);
             }
+        }
+
+        // Path errors finish that fetch entry. Request errors have no path.
+        if ($phase === "files" && $path !== "") {
+            $this->progress_reporter->complete_path(0);
         }
 
         $error_progress_message = "Remote error: {$error_type} " . ($path !== "" ? $path : "");

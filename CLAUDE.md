@@ -190,12 +190,15 @@ during db-pull.
 
 `ProgressReporter` retains one screen snapshot, handles JSONL output and
 progress-file writes, and rebuilds file counters from the fetch list and its
-saved cursor, including completed paths inside a resumed batch. Ordinary log
-messages do not replace the screen label. The fetch list stores
+saved cursor, including processed paths inside a resumed batch. Failed or skipped
+paths, directories and symlinks count as processed paths with zero file bytes.
+Ordinary log messages do not replace the screen label. The fetch list stores
 only the base64 path and content size; directories and symlinks have size zero.
 The fetch checkpoint stores completed file bytes before and within the current
 batch. A passed path may have failed or changed size, so the fetch list cannot
 rebuild those byte counts. They are saved with the existing cursor writes.
+A failed response discards unsaved counts in memory before the next request
+replays those parts; this does not reread the fetch list.
 The exporter loads row estimates with its table list and includes the current
 estimate in the SQL cursor. Progress updates read the current table entry in
 memory; they do not scan the table list or open `db-tables.jsonl`.

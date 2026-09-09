@@ -12,16 +12,17 @@ require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
 /** A process may die after any saved multipart part, including inside a batch. */
 class StopDuringFileProgressClient extends \ImportClient {
     public ?string $stop_after = null;
+    public string $observation_file;
 
     public function save_state(): void {
         parent::save_state();
         $cursor = json_decode(base64_decode($this->get_state()->fetch->cursor ?? ''), true);
         if (
             ( in_array($this->stop_after, ['file', 'source_grew', 'source_shrank'], true) && basename(base64_decode($cursor['path'] ?? '')) === 'a.bin' && ( $cursor['bytes'] ?? 0 ) === 0 )
-            || ( $this->stop_after === 'file_after_error' && basename(base64_decode($cursor['path'] ?? '')) === 'b.bin' && ( $cursor['bytes'] ?? 0 ) === 0 )
+            || ( in_array($this->stop_after, ['file_after_error', 'file_after_directory', 'file_after_symlink', 'file_after_missing'], true) && basename(base64_decode($cursor['path'] ?? '')) === 'b.bin' && ( $cursor['bytes'] ?? 0 ) === 0 )
             || ( $this->stop_after === 'part' && basename(base64_decode($cursor['path'] ?? '')) === 'b.bin' && ( $cursor['bytes'] ?? 0 ) > 0 )
         ) {
-            posix_kill(getmypid(), SIGKILL);
+            $this->stop_at_current_progress();
         }
     }
 
@@ -29,8 +30,15 @@ class StopDuringFileProgressClient extends \ImportClient {
         parent::audit_log($message, $to_console);
         // Stop after production unlink(), before the next batch offset is saved.
         if ($this->stop_after === 'batch_removed' && strpos($message, '| fetch batch complete') !== false) {
-            posix_kill(getmypid(), SIGKILL);
+            $this->stop_at_current_progress();
         }
+    }
+    /** Records live counters before process death without changing the pull checkpoint. */
+    private function stop_at_current_progress(): void {
+        $reporter = ( new \ReflectionClass(\ImportClient::class) )
+            ->getProperty('progress_reporter')->getValue($this);
+        file_put_contents($this->observation_file, json_encode($reporter->get_file_details()));
+        posix_kill(getmypid(), SIGKILL);
     }
 }
 
@@ -82,6 +90,7 @@ class FilesPullProgressResumeTest extends TestCase {
             $this->assertTrue($ready, (string) file_get_contents($root . '/server.log'));
             $url = 'http://' . $address . '/?chunk_size=16384';
             $client = new StopDuringFileProgressClient($url, $root . '/state', $root . '/local');
+            $client->observation_file = $root . '/before-stop.json';
             \write_current_pull_state($client, [
                 'preflight' => ['data' => ['ok' => true, 'wp_detect' => ['roots' => [['path' => $source]]]], 'http_code' => 200],
                 'active_resumable_command' => ['command_name' => 'files-pull', 'completion_state' => 'in_progress', 'current_stage' => 'fetch'],
@@ -98,6 +107,14 @@ class FilesPullProgressResumeTest extends TestCase {
             if ($boundary === 'source_grew' || $boundary === 'source_shrank') {
                 $source_file_size += $boundary === 'source_grew' ? 32768 : -32768;
                 file_put_contents($source . '/a.bin', str_repeat('a', $source_file_size));
+            }
+            if (in_array($boundary, ['file_after_directory', 'file_after_symlink', 'file_after_missing'], true)) {
+                unlink($source . '/a.bin');
+                if ($boundary === 'file_after_directory') {
+                    mkdir($source . '/a.bin');
+                } elseif ($boundary === 'file_after_symlink') {
+                    symlink('b.bin', $source . '/a.bin');
+                }
             }
             $child_pid = pcntl_fork();
             $this->assertNotSame(-1, $child_pid);
@@ -116,7 +133,15 @@ class FilesPullProgressResumeTest extends TestCase {
             $reflection->getProperty('state')->setValue($resumed, $reflection->getMethod('load_state')->invoke($resumed));
             $this->assertSame(0, $resumed->get_state()->fetch->offset, 'The first batch is still active.');
             $cursor = json_decode(base64_decode($resumed->get_state()->fetch->cursor), true);
-            $expected_file = ['file' => '/a.bin', 'part' => '/b.bin', 'batch_removed' => '/c.bin', 'file_after_error' => '/b.bin', 'source_grew' => '/a.bin', 'source_shrank' => '/a.bin'][$boundary];
+            $before_stop = json_decode(file_get_contents($root . '/before-stop.json'), true);
+            $reporter = $reflection->getProperty('progress_reporter')->getValue($resumed);
+            $reporter->load_file_list($list_file, $resumed->get_state()->fetch);
+            $this->assertSame(
+                $before_stop['items'],
+                $reporter->get_file_details()['items'],
+                'Resume alone must not change the completed path count.'
+            );
+            $expected_file = ['file' => '/a.bin', 'part' => '/b.bin', 'batch_removed' => '/c.bin', 'file_after_error' => '/b.bin', 'file_after_directory' => '/b.bin', 'file_after_symlink' => '/b.bin', 'file_after_missing' => '/b.bin', 'source_grew' => '/a.bin', 'source_shrank' => '/a.bin'][$boundary];
             $this->assertSame($source . $expected_file, base64_decode($cursor['path']));
             if ($boundary === 'batch_removed') {
                 $this->assertFileDoesNotExist($resumed->get_state()->fetch->batch_file);
@@ -125,9 +150,9 @@ class FilesPullProgressResumeTest extends TestCase {
             $this->download_list($resumed, $list_file);
             $resumed->write_progress_file();
             $snapshot = json_decode(file_get_contents($root . '/state/progress.json'), true);
-            $this->assertSame(2 * $file_size + ( $boundary === 'file_after_error' ? 0 : $source_file_size ), $snapshot['progress']['bytes']['done']);
+            $this->assertSame(2 * $file_size + ( strpos($boundary, 'file_after_') === 0 ? 0 : $source_file_size ), $snapshot['progress']['bytes']['done']);
             $this->assertSame(3, $snapshot['progress']['items']['done']);
-            foreach (( $boundary === 'file_after_error' ? ['b.bin', 'c.bin'] : ['a.bin', 'b.bin', 'c.bin'] ) as $name) {
+            foreach (( strpos($boundary, 'file_after_') === 0 ? ['b.bin', 'c.bin'] : ['a.bin', 'b.bin', 'c.bin'] ) as $name) {
                 $this->assertSame(
                     hash_file('sha256', $source . '/' . $name),
                     hash_file('sha256', $root . '/local' . $source . '/' . $name)
@@ -145,7 +170,7 @@ class FilesPullProgressResumeTest extends TestCase {
     }
 
     public static function interruptionBoundaries(): array {
-        return [['file'], ['part'], ['batch_removed'], ['file_after_error'], ['source_grew'], ['source_shrank']];
+        return [['file'], ['part'], ['batch_removed'], ['file_after_error'], ['file_after_directory'], ['file_after_symlink'], ['file_after_missing'], ['source_grew'], ['source_shrank']];
     }
 
     private function download_list(\ImportClient $client, string $list_file): void {
