@@ -31,6 +31,9 @@ class SettingsPage {
 
     /** Add the bundled page beneath Tools. */
     public function add_admin_menu(): void {
+        if (is_multisite()) {
+            return;
+        }
         $this->page_hook = add_management_page(
             __('Reprint Server', 'reprint'),
             __('Reprint Server', 'reprint'),
@@ -133,6 +136,9 @@ class SettingsPage {
 
     /** Render the bundled Tools page. */
     public function render_admin_page(): void {
+        if (is_multisite()) {
+            return;
+        }
         if (!current_user_can('manage_options')) {
             return;
         }

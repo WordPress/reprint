@@ -8,6 +8,7 @@ use WordPress\Reprint\Server\FileTreeProducer;
 use WordPress\Reprint\Server\GzipOutputStream;
 use WordPress\Reprint\Server\HTTPServer;
 use WordPress\Reprint\Server\MySQLDumpProducer;
+use WordPress\Reprint\Server\MultisiteDatabaseSelection;
 use WordPress\Reprint\Server\PdoConstants;
 use WordPress\Reprint\Server\ResourceBudget;
 use WordPress\Reprint\Server\SqliteDriverPDO;
@@ -792,6 +793,13 @@ function endpoint_sql_chunk(
         "create_table_query" => $config["create_table_query"] ?? true,
     ];
 
+    if (isset($config['_multisite'])) {
+        $selection = $config['_multisite'];
+        $producer_options['multisite_selection'] = new MultisiteDatabaseSelection(
+            $selection['base_prefix'], $selection['site_id'], $selection['network_id']
+        );
+    }
+
     // -- Cap statement size to packet limits --
     // If the client sent its max_allowed_packet, cap the producer's
     // max_statement_size so the dump stays importable on the client.
@@ -1111,6 +1119,16 @@ function endpoint_sql_chunk(
         $stream_failure = $e;
     }
 
+    // Release the selected site's request lock before announcing completion.
+    // Another importer request may arrive as soon as that response is read.
+    try {
+        $reader->close();
+    } catch (Throwable $close_error) {
+        if ($stream_failure === null) {
+            $stream_failure = $close_error;
+        }
+    }
+
     if ($stream_failure !== null) {
         $aborted = true;
         error_log("SQL streaming error: " . $stream_failure->getMessage());
@@ -1232,6 +1250,10 @@ function endpoint_db_index(
             $tables = [];
             foreach ($rows as $row) {
                 $name = (string) ($row["TABLE_NAME"] ?? "");
+                $last_table = $name;
+                if (MultisiteDatabaseSelection::is_internal_table($name)) {
+                    continue;
+                }
                 $tables[] = [
                     "name" => $name,
                     "rows" =>
@@ -1249,7 +1271,6 @@ function endpoint_db_index(
                     "engine" => $row["ENGINE"] ?? null,
                     "collation" => $row["TABLE_COLLATION"] ?? null,
                 ];
-                $last_table = $name;
                 $tables_processed++;
                 if (
                     isset($row["TABLE_ROWS"]) &&
@@ -2195,6 +2216,9 @@ function endpoint_preflight(array $config): array
                                     ];
                                 }
                             }
+                        }
+                        if (isset($config['_multisite'])) {
+                            $multisite['selection'] = $config['_multisite'];
                         }
                         $db["wp"]["multisite"] = $multisite;
 

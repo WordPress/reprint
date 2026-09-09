@@ -57,7 +57,7 @@ export function createHmacClient(siteName) {
  * @param {string} siteName - Site name
  * @param {string} endpoint - API endpoint
  * @param {Object} params - Query parameters
- * @param {Object} options - Additional options (method, body, rawResponse, followRedirects)
+ * @param {Object} options - Additional options (method, body, rawResponse, followRedirects, signal)
  * @returns {Promise<Object>} Parsed response or raw response
  */
 export async function apiRequest(siteName, endpoint, params = {}, options = {}) {
@@ -77,6 +77,7 @@ export async function apiRequest(siteName, endpoint, params = {}, options = {}) 
         method,
         headers,
         redirect: options.followRedirects === false ? 'manual' : 'follow',
+        signal: options.signal,
     };
     if (body && method !== 'GET') {
         fetchOptions.body = body;

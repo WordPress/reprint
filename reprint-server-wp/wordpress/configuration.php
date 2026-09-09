@@ -37,6 +37,10 @@ function register_wordpress_configuration(): void {
 
 /** Register the connection token for the Settings and REST APIs. */
 function register_connection_token_setting(): void {
+    // Core's Settings REST controller reads site options, not network options.
+    if (function_exists('is_multisite') && is_multisite()) {
+        return;
+    }
     register_setting(
         'reprint_server',
         CONNECTION_TOKEN_OPTION,

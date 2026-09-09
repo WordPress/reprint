@@ -22,6 +22,17 @@ require_once __DIR__ . "/class-database-rows-reader.php";
  *   (STAGE_OVERSIZED_SPATIAL) → (EMIT_OVERSIZED_UPDATE) → … →
  *   EMIT_FOOTER → FINISHED
  *
+ * Selected-site exports finish the content table group before collecting site
+ * members from network usermeta, then export users and profiles:
+ *
+ *   content tables → COLLECT_SITE_MEMBERS → users → usermeta → footer
+ *
+ * Posts, comments and links save their user IDs alongside each content batch.
+ * Omitted or row-filtered content uses COLLECT_CONTENT_USER_IDS while visiting
+ * that table, with the same table/primary-key cursor. Membership has only one
+ * input table and its own last_scanned_usermeta_id. Both ID-only reads and the
+ * boundaries before and after membership collection emit checkpoint statements.
+ *
  * All values are base64-encoded in the SQL output (via FROM_BASE64('...')). This avoids
  * charset-related corruption: MySQL interprets string literals according to the
  * connection charset, but base64 is pure ASCII and the decoded bytes are assigned
@@ -81,6 +92,8 @@ class MySQLDumpProducer
      */
     public const NONZERO_SRID_CONTEXT_VERSION = 'v1';
 
+    private const STATE_COLLECT_CONTENT_USER_IDS = "collect_content_user_ids";
+    private const STATE_COLLECT_SITE_MEMBERS = "collect_site_members";
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
     const STATE_NEXT_TABLE = "next_table";
@@ -222,6 +235,14 @@ class MySQLDumpProducer
         }
     }
 
+    /** Releases a partially consumed source query and the selected site's lock. */
+    public function close(): void
+    {
+        if ($this->row_reader !== null) {
+            $this->row_reader->close();
+        }
+    }
+
     public function get_sql_fragment(): ?string
     {
         return $this->current_sql_fragment;
@@ -269,13 +290,43 @@ class MySQLDumpProducer
 
                 case self::STATE_NEXT_TABLE:
                     if ($this->move_to_next_table()) {
-                        $this->state = $this->emit_create_table
-                            ? self::STATE_CREATE_TABLE
-                            : self::STATE_TABLE_HEADER;
+                        $this->state = $this->row_reader->get_current_table_export_mode() === 'rows'
+                            ? ( $this->emit_create_table ? self::STATE_CREATE_TABLE : self::STATE_TABLE_HEADER )
+                            : self::STATE_COLLECT_CONTENT_USER_IDS;
+                    } elseif ($this->row_reader->start_user_tables()) {
+                        // Only the end of the content group enters membership
+                        // collection. Checkpoint before the first metadata read.
+                        $this->state = self::STATE_COLLECT_SITE_MEMBERS;
+                        $this->current_sql_fragment = "-- Begin site membership collection\nDO 0;";
+                        $this->current_fragment_must_be_its_own_part = true;
+                        return true;
                     } else {
                         $this->state = self::STATE_EMIT_FOOTER;
                     }
                     break;
+
+                case self::STATE_COLLECT_CONTENT_USER_IDS:
+                    if ($this->row_reader->collect_content_user_ids_step()) {
+                        // A complete harmless statement carries the ID cursor
+                        // through the normal SQL/target commit path.
+                        $this->current_sql_fragment = "-- Collect content user IDs\nDO 0;";
+                        $this->current_fragment_must_be_its_own_part = true;
+                        return true;
+                    }
+                    $this->state = $this->row_reader->get_current_table_export_mode() === 'user_ids'
+                        ? self::STATE_NEXT_TABLE
+                        : ( $this->emit_create_table ? self::STATE_CREATE_TABLE : self::STATE_TABLE_HEADER );
+                    break;
+
+                case self::STATE_COLLECT_SITE_MEMBERS:
+                    if ($this->row_reader->collect_site_members_step()) {
+                        $this->current_sql_fragment = "-- Collect site members\nDO 0;";
+                    } else {
+                        $this->state = self::STATE_NEXT_TABLE;
+                        $this->current_sql_fragment = "-- Begin user and profile export\nDO 0;";
+                    }
+                    $this->current_fragment_must_be_its_own_part = true;
+                    return true;
 
                 case self::STATE_EMIT_FOOTER:
                     $this->emit_sql_footer();
@@ -1781,6 +1832,8 @@ class MySQLDumpProducer
         $chunk = $this->read_next_oversized_chunk($current);
         $formatted_chunk = $this->format_value($chunk['value'], $data_type);
 
+        // The target row is already selected. Its membership records may not
+        // have been imported yet, so only its primary key belongs in this UPDATE.
         $where_parts = [];
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
             $where_parts[] = $this->row_reader->build_comparison($pk_col, $pk_value, "=");
@@ -1919,7 +1972,7 @@ class MySQLDumpProducer
         $quoted_table = $this->row_reader->quote_identifier($this->row_reader->get_current_table());
         $quoted_column = $this->row_reader->quote_identifier($column);
 
-        $where_parts = [];
+        $where_parts = $this->row_reader->get_current_row_selection_conditions(true);
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
             $where_parts[] = $this->row_reader->build_comparison($pk_col, $pk_value, "=");
         }
@@ -1928,7 +1981,7 @@ class MySQLDumpProducer
         $value_expression = $character_string
             ? "SUBSTRING({$quoted_column}, {$start}, {$length})"
             : "SUBSTRING(CAST({$quoted_column} AS BINARY), {$start}, {$length})";
-        $sql = "SELECT CAST({$value_expression} AS BINARY) AS value_chunk,"
+        $sql = $this->row_reader->get_select_prefix() . " CAST({$value_expression} AS BINARY) AS value_chunk,"
              . " CHAR_LENGTH({$value_expression}) AS value_length"
              . " FROM {$quoted_table} WHERE {$where_clause}";
         $stmt = $this->db->prepare($sql);

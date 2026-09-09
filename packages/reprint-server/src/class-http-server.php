@@ -44,7 +44,11 @@ final class HTTPServer {
     /** @var PushEndpoints|null */
     private $push_endpoints;
 
+    /** @var array|null Trusted WordPress source metadata, never read from the request. */
+    private $multisite;
+
     public function __construct(array $options = []) {
+        $this->multisite = $options['multisite'] ?? null;
         $this->budget_factory = $options['budget_factory'] ?? [$this, 'default_budget_factory'];
         $this->body_reader = $options['body_reader'] ?? static function (): string {
             $body = file_get_contents('php://input');
@@ -285,6 +289,19 @@ final class HTTPServer {
      * @return array<string, mixed>
      */
     public function normalize_config(array $config, array $server = []): array {
+        unset($config['_multisite']);
+        if ($this->multisite !== null) {
+            if (( $config['multisite_mode'] ?? null ) !== 'one-site-network-v1') {
+                throw new InvalidArgumentException(
+                    'This source requires a Reprint client that supports pulling one site into a one-site network. Update the client.'
+                );
+            }
+            if (!in_array($config['endpoint'] ?? '', ['preflight', 'sql_chunk'], true)) {
+                throw new InvalidArgumentException('This endpoint does not support a selected multisite site.');
+            }
+            $config['_multisite'] = $this->multisite;
+        }
+
         if (
             $this->default_directory !== null &&
             !isset($config['directory'])
