@@ -59,8 +59,8 @@ class MultisiteDatabaseSelection {
      * Binds a database cursor to the same source site and selection rules.
      *
      * The row reader compares this value on resume. Change the version when
-     * selection or value-replacement rules change, not for an equivalent query
-     * plan. Source rows may change without changing this version.
+     * selection, value-replacement rules or the cursor layout change, not for
+     * an equivalent query plan. Source rows may change without changing this version.
      * This identifies the rules, not a snapshot of the mutable source records.
      */
     public function get_identity(): string
