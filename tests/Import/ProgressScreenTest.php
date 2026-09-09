@@ -40,10 +40,19 @@ class ProgressScreenTest extends TestCase {
         $command->current_stage = 'fetch';
 
         $reflection = new \ReflectionClass($client);
-        $reflection->getProperty('fetch_list_done')->setValue($client, 3);
-        $reflection->getProperty('fetch_list_total')->setValue($client, 10);
-        $reflection->getProperty('fetch_list_bytes_done')->setValue($client, 1024);
-        $reflection->getProperty('fetch_list_bytes_total')->setValue($client, 30 * 1024 * 1024);
+        $list_file = $client->pull_state_directory . '/fetch-list.jsonl';
+        $sizes = [1024, 0, 0, 20 * 1024 * 1024, 10 * 1024 * 1024 - 1024, 0, 0, 0, 0, 0];
+        $offset = 0;
+        foreach ($sizes as $index => $size) {
+            $line = json_encode(['path' => base64_encode('/file-' . $index), 'size' => $size]) . "\n";
+            file_put_contents($list_file, $line, FILE_APPEND);
+            if ($index < 3) {
+                $offset += strlen($line);
+            }
+        }
+        $client->get_state()->fetch->offset = $offset;
+        $reflection->getProperty('files_pull_progress')->getValue($client)
+            ->load_list($list_file, $client->get_state()->fetch);
         $progress_stream = fopen('php://memory', 'w+b');
         $this->assertIsResource($progress_stream);
         $reflection->getProperty('progress_fd')->setValue($client, $progress_stream);
@@ -145,11 +154,7 @@ class ProgressScreenTest extends TestCase {
         $this->assertSame(1024, $first_progress['progress']['bytes']['done']);
         $this->assertSame($first_progress, $throttled_progress);
 
-        $last_write = new \ReflectionProperty(
-            \ImportClient::class,
-            'last_progress_file_write'
-        );
-        $last_write->setValue($client, microtime(true) - 2.0);
+        usleep(1100000);
         $client->output_progress($this->byte_progress_record(3072), true);
         $updated_progress = $this->read_progress_file();
         $this->assertSame(3072, $updated_progress['progress']['bytes']['done']);
@@ -173,9 +178,10 @@ class ProgressScreenTest extends TestCase {
             ],
         ]));
 
+        $progress_table = null;
         $progress = ( new \ReflectionClass($client) )
             ->getMethod('database_pull_progress_details')
-            ->invoke($client, $cursor, 500100);
+            ->invokeArgs($client, [$cursor, 500100, &$progress_table]);
 
         $this->assertSame([
             'items' => [
@@ -195,6 +201,41 @@ class ProgressScreenTest extends TestCase {
                 'rows_total_is_estimate' => true,
             ],
         ], $progress);
+    }
+
+    public function testLogMessagesDoNotReplaceTheScreenLabel(): void
+    {
+        $client = $this->make_client();
+        $command = $client->get_state()->active_resumable_command;
+        $command->command_name = 'db-pull';
+        $command->completion_state = 'in_progress';
+        $command->current_stage = 'sql';
+        $client->output_progress($this->byte_progress_record(1024), true);
+        $client->output_progress(['type' => 'skip', 'message' => 'Skipped one path'], true);
+        $client->write_progress_file();
+
+        $this->assertSame('1024 bytes', $this->read_progress_file()['message']);
+        $this->assertSame(1024, $this->read_progress_file()['progress']['bytes']['done']);
+    }
+
+    public function testPhaseChangeClearsCountersAndTerminalWriteKeepsLatestUpdate(): void
+    {
+        $client = $this->make_client();
+        $command = $client->get_state()->active_resumable_command;
+        $command->command_name = 'db-pull';
+        $command->completion_state = 'in_progress';
+        $command->current_stage = 'sql';
+        $client->output_progress($this->byte_progress_record(1024), true);
+        $client->output_progress($this->byte_progress_record(2048), true);
+        $command->completion_state = 'partial';
+        $client->save_state();
+        $this->assertSame(2048, $this->read_progress_file()['progress']['bytes']['done']);
+        $this->assertSame('partial', $this->read_progress_file()['status']);
+
+        $command->current_stage = 'db-index';
+        $client->write_progress_file();
+        $this->assertNull($this->read_progress_file()['message']);
+        $this->assertNull($this->read_progress_file()['progress']['bytes']);
     }
 
     private function make_client(): \ImportClient
