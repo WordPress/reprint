@@ -11,6 +11,7 @@ const mode = { multisite_mode: 'one-site-network-v1', fragments_per_batch: 1, ma
 
 describe('Multisite database export over HTTP', () => {
     let fixture;
+    let sourceCredentials;
     beforeAll(async () => {
         fixture = await ensureMultisite(site);
         // This member has no content, and WordPress created the profile row
@@ -18,7 +19,10 @@ describe('Multisite database export over HTTP', () => {
         runWp(getSiteDir(site), ['eval', `
             $member = get_user_by('login', 'shop-member');
             update_user_meta($member->ID, 'description', str_repeat('member profile ', 100000));
+            get_password_reset_key(get_user_by('login', 'shared'));
         `]);
+        sourceCredentials = JSON.parse(runWp(getSiteDir(site), ['eval', "global $wpdb; echo json_encode($wpdb->get_results('SELECT ID, user_pass, user_activation_key FROM ' . $wpdb->users . ' ORDER BY ID', ARRAY_A));"]));
+        assert.ok(sourceCredentials.some(user => user.user_activation_key.length > 0));
     });
     afterAll(async () => {
         runWp(getSiteDir(site), ['user', 'meta', 'update', 'shop-member', 'description', '']);
@@ -67,6 +71,32 @@ describe('Multisite database export over HTTP', () => {
             assert.ok(sql.filter(chunk => chunk.body.includes('UPDATE `network_usermeta`')).length > 1,
                 'The profile must travel in several UPDATE parts');
         } finally { await connection.end(); }
+    });
+
+    it('excludes shared login credentials from HTTP SQL and resumed responses', async () => {
+        const url = `${fixture.sites[7].url}/?reprint-api`;
+        const first = await apiRequest(site, 'sql_chunk', mode, { url });
+        const cursor = first.chunks?.find(chunk => chunk.type === 'sql' && chunk.body.includes('INSERT INTO `network_users`'))?.headers['x-cursor'];
+        assert.ok(cursor, 'Resume while the shared users table is being exported');
+        const resumed = await apiRequest(site, 'sql_chunk', { ...mode, cursor }, { url });
+        assert.ok(resumed.chunks?.some(chunk => chunk.type === 'sql' && chunk.body.includes(Buffer.from('shop-member').toString('base64'))), 'The resumed request must read another shared user');
+        for (const response of [first, resumed]) {
+            assert.equal(response.status, 200, JSON.stringify(response.json));
+            assert.equal(response.chunks.find(chunk => chunk.type === 'completion')?.headers['x-status'], 'complete');
+            const cursors = response.chunks.filter(chunk => chunk.headers['x-cursor'])
+                .map(chunk => Buffer.from(chunk.headers['x-cursor'], 'base64').toString('utf8')).join('\n');
+            const received = response.raw.toString('binary') + cursors;
+            for (const user of sourceCredentials) {
+                for (const field of ['user_pass', 'user_activation_key']) {
+                    if (user[field] === '') continue;
+                    for (const value of [user[field], Buffer.from(user[field]).toString('base64'), Buffer.from(user[field]).toString('hex')]) {
+                        assert.ok(!received.includes(value), `The HTTP export must not contain source ${field} for user ${user.ID}`);
+                    }
+                }
+            }
+        }
+        const after = JSON.parse(runWp(getSiteDir(site), ['eval', "global $wpdb; echo json_encode($wpdb->get_results('SELECT ID, user_pass, user_activation_key FROM ' . $wpdb->users . ' ORDER BY ID', ARRAY_A));"]));
+        assert.deepEqual(after, sourceCredentials, 'Export must not change source credentials');
     });
 
     it('rejects a cursor replayed against another site before sending SQL', async () => {

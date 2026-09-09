@@ -139,6 +139,120 @@ class MultisiteSelectionTest extends MySQLDumpProducerTestBase
         return [[false], [true]];
     }
 
+    /** Shared login secrets stay at the source, including after every fragment. */
+    public function test_login_credentials_are_replaced_before_export_and_resume(): void
+    {
+        $this->create_network();
+        $display_name = str_repeat('😀', 250);
+        $this->pdo->prepare('UPDATE network_users SET display_name = ? WHERE ID = 1')->execute([$display_name]);
+        $source_users = $this->pdo->query('SELECT * FROM network_users ORDER BY ID')->fetchAll();
+        foreach ([false, true] as $resume) {
+            $options = [
+                'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+                'max_statement_size' => 1450,
+                'batch_size' => 2,
+            ];
+            $producer = $this->createProducer($options);
+            $sql = '';
+            $steps = 0;
+            while ($producer->next_sql_fragment()) {
+                $sql .= $producer->get_sql_fragment() . "\n";
+                $cursor = $producer->get_reentrancy_cursor();
+                foreach ($source_users as $user) {
+                    foreach (['user_pass', 'user_activation_key'] as $column) {
+                        $this->assertStringNotContainsString($user[$column], $sql . $cursor);
+                        $this->assertStringNotContainsString(bin2hex($user[$column]), strtolower($sql));
+                        $this->assertStringNotContainsString(base64_encode($user[$column]), $sql . $cursor);
+                    }
+                }
+                if ($resume) {
+                    $producer = $this->createProducer($options + ['cursor' => $cursor]);
+                }
+                $this->assertLessThan(500, ++$steps);
+            }
+            $target = $this->executeDumpInNewDatabase($sql);
+            $this->assertSame(['*'], $target->query('SELECT DISTINCT user_pass FROM network_users')->fetchAll(PDO::FETCH_COLUMN));
+            $this->assertSame([''], $target->query('SELECT DISTINCT user_activation_key FROM network_users')->fetchAll(PDO::FETCH_COLUMN));
+            $this->assertSame($display_name, $target->query('SELECT display_name FROM network_users WHERE ID = 1')->fetchColumn());
+            $this->assertStringContainsString('UPDATE `network_users`', $sql, 'A permitted profile field must exercise oversized-row reloads.');
+            $this->assertSame($source_users, $this->pdo->query('SELECT * FROM network_users ORDER BY ID')->fetchAll());
+            $target = null;
+        }
+    }
+
+    /** The preceding rule version may already have sent credentials to the target. */
+    public function test_previous_selection_rules_require_a_fresh_export(): void
+    {
+        $this->create_network();
+        $options = ['multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1)];
+        $producer = $this->createProducer($options);
+        $producer->next_sql_fragment();
+        $cursor = json_decode($producer->get_reentrancy_cursor(), true);
+        // v3 and v5 save user IDs but still send credentials in the earlier
+        // stack layer. v4 also has the previous table-walk cursor layout.
+        foreach (['core-v1', 'core-v2', 'core-v3', 'core-v4', 'core-v5'] as $version) {
+            $cursor['multisite_selection'] = $version . ':network_:1:7';
+            try {
+                $this->createProducer($options + ['cursor' => json_encode($cursor)]);
+                $this->fail('A cursor from ' . $version . ' must not resume under the current rules');
+            } catch (InvalidArgumentException $error) {
+                $this->assertStringContainsString('export rules changed', $error->getMessage());
+            }
+        }
+    }
+
+    /** A client-supplied cursor cannot turn a profile chunk into a credential read. */
+    public function test_tampered_oversized_cursor_cannot_read_login_credentials(): void
+    {
+        $this->create_network();
+        $this->pdo->prepare('UPDATE network_users SET display_name = ? WHERE ID = 1')
+            ->execute([str_repeat('😀', 250)]);
+        $options = [
+            'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+            'max_statement_size' => 1450,
+        ];
+        $producer = $this->createProducer($options);
+        $cursor = null;
+        while ($producer->next_sql_fragment()) {
+            $candidate = json_decode($producer->get_reentrancy_cursor(), true);
+            if ($candidate['current_table'] === 'network_users' && !empty($candidate['oversized_queue'])) {
+                $cursor = $candidate;
+                break;
+            }
+        }
+        $this->assertNotNull($cursor, 'The profile must leave an unfinished oversized read');
+        foreach (['user_pass' => 'source-password-hash-1', 'user_activation_key' => 'source-reset-key-1'] as $column => $secret) {
+            $cursor['oversized_queue'][0]['column'] = $column;
+            $cursor['oversized_queue'][0]['total_length'] = strlen($secret);
+            $producer = $this->createProducer($options + ['cursor' => json_encode($cursor)]);
+            $read_error = null;
+            while (true) {
+                try {
+                    if (!$producer->next_sql_fragment()) {
+                        break;
+                    }
+                } catch (RuntimeException $error) {
+                    $read_error = $error;
+                    break;
+                }
+                $fragment = $producer->get_sql_fragment();
+                $this->assertStringNotContainsString($secret, $fragment);
+                $this->assertStringNotContainsString(base64_encode($secret), $fragment);
+            }
+            $this->assertInstanceOf(RuntimeException::class, $read_error, 'A credential read must not satisfy the forged profile length');
+            $this->assertStringContainsString('changed during export', $read_error->getMessage());
+        }
+    }
+
+    /** Ordinary database exports keep their existing login behavior. */
+    public function test_unselected_dump_preserves_login_credentials(): void
+    {
+        $this->create_network();
+        $target = $this->executeDumpInNewDatabase($this->getDumpSQL());
+        $query = 'SELECT ID, user_pass, user_activation_key FROM network_users ORDER BY ID';
+        $this->assertSame($this->pdo->query($query)->fetchAll(), $target->query($query)->fetchAll());
+    }
+
     /** Removing a content-free member must also stop subsequent source value reads. */
     public function test_membership_removed_during_oversized_reads_stops_export(): void
     {
@@ -595,8 +709,8 @@ CHILD
         for ($id = 10; $id <= 2010; ++$id) {
             $values[] = "({$id},'unrelated')";
         }
-        $this->pdo->exec('INSERT INTO network_users VALUES ' . implode(',', $values));
-        $this->pdo->exec("INSERT INTO network_users VALUES (9000,'last-selected')");
+        $this->pdo->exec('INSERT INTO network_users (ID, user_login) VALUES ' . implode(',', $values));
+        $this->pdo->exec("INSERT INTO network_users (ID, user_login) VALUES (9000,'last-selected')");
         $this->pdo->exec('INSERT INTO network_7_comments VALUES (2,9000)');
         $reader = $this->open_shared_table_reader('network_users', 2);
         $users = [];
@@ -675,7 +789,7 @@ CHILD
     {
         $this->create_network();
         $this->pdo->exec("INSERT INTO network_7_comments VALUES (2,8),(3,9),(4,10),(5,11),(6,12)");
-        $this->pdo->exec("INSERT INTO network_users VALUES (12,'last-user')");
+        $this->pdo->exec("INSERT INTO network_users (ID, user_login) VALUES (12,'last-user')");
         $this->pdo->exec("INSERT INTO network_usermeta VALUES
             (9,6,'session_tokens','private'),(10,12,'nickname','Last'),
             (11,12,'session_tokens','private'),(12,12,'session_tokens','private')");
@@ -789,5 +903,11 @@ CHILD
             INSERT INTO network_7_comments VALUES (1,4);
             INSERT INTO network_7_links VALUES (1,5);
             INSERT INTO network_7_options VALUES (1,'blogname','Shop'),(2,'reprint_server_connection_token','private'),(3,'reprint_server_push_authorized_token_fingerprint','private'),(4,'site_export_secret','private')");
+        $this->pdo->exec("ALTER TABLE network_users
+            ADD user_pass varchar(255) NOT NULL DEFAULT '',
+            ADD user_activation_key varchar(255) NOT NULL DEFAULT '',
+            ADD display_name varchar(250) NOT NULL DEFAULT ''");
+        $this->pdo->exec("UPDATE network_users SET user_pass = CONCAT('source-password-hash-', ID),
+            user_activation_key = CONCAT('source-reset-key-', ID), display_name = user_login");
     }
 }
