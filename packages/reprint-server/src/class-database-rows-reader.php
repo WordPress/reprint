@@ -50,7 +50,13 @@ class DatabaseRowsReader {
      */
     private $rows_fetched_from_current_query = 0;
 
-    /** @var array */
+    /**
+     * Table names selected for SQL output, or null before table discovery.
+     * A selected-site export can also read omitted content tables to collect
+     * user IDs. Those tables go in $tables_in_group, not in this list.
+     *
+     * @var string[]|null
+     */
     private $tables_to_process;
 
     /**
@@ -107,14 +113,50 @@ class DatabaseRowsReader {
     private $exclude_tables = [];
 
 
-    /** @var MultisiteDatabaseSelection|null Trusted source-side selection. */
+    /**
+     * Rules for the tables and rows that this reader can export for one site.
+     *
+     * For site 7 with base prefix `network_`, this selects `network_7_posts`
+     * and other core site tables. It limits shared `network_users` and
+     * `network_usermeta` rows to this site's members and users named in its
+     * posts, comments and links.
+     * The SQL endpoint builds the selection from server-side WordPress state.
+     * This object does not check who sent the request.
+     *
+     * Null means no selected-site rules; normal table and row filters still apply.
+     *
+     * @var MultisiteDatabaseSelection|null
+     */
     private $multisite_selection;
 
-    /** @var string Content tables are exhausted before switching to users and profiles. */
+    /**
+     * Which table list to use: 'content' or 'users'.
+     * For a selected-site export, the producer selects 'users' when all content
+     * tables are complete. It then collects site members before reading the
+     * users and usermeta tables. Other exports use only the 'content' list.
+     *
+     * @var string
+     */
     private $table_group = 'content';
-    /** @var string[]|null Tables in the current group, derived from the export selection. */
+
+    /**
+     * Ordered table names for the current group; null until the list is built.
+     * For a selected-site users-only export, the content list still includes
+     * posts, comments and links. The reader visits those tables for user IDs,
+     * without SQL output.
+     *
+     * @var string[]|null
+     */
     private $tables_in_group = null;
-    /** @var string Last network usermeta row checked for the selected capabilities key. */
+
+    /**
+     * Last network usermeta primary key checked for site membership.
+     * For site 7, a batch ending at umeta_id 500 saves '500' even if no row
+     * has the `network_7_capabilities` key. Resume starts after row 500.
+     * A decimal string preserves large MySQL IDs without a PHP integer cast.
+     *
+     * @var string
+     */
     private $last_scanned_usermeta_id = '0';
 
     /**
@@ -130,7 +172,7 @@ class DatabaseRowsReader {
      *     @type int|null   $maximum_inline_spatial_bytes Largest spatial value returned inline.
      *     @type array      $exclude_rows        Table, column, and value exclusion rules.
      *     @type string[]   $exclude_tables      Table names to omit from automatic discovery.
-     *     @type MultisiteDatabaseSelection $multisite_selection Selected WordPress site, when present.
+     *     @type MultisiteDatabaseSelection $multisite_selection Site table and row rules built from source WordPress state.
      * }
      */
     public function __construct($db, $options = [])
@@ -198,8 +240,16 @@ class DatabaseRowsReader {
     }
 
     /**
-     * Opens the users/profile table group after all content tables are complete.
-     * Called at the end of the table walk, never for each content table.
+     * Selects the users and usermeta table list after all content tables are complete.
+     *
+     * The producer calls this when a table list ends, not for each table.
+     * This only changes the list. The producer must finish
+     * collect_site_members_step() before it calls move_to_next_table()
+     * to read the first user table.
+     *
+     * @return bool True when the user table group was selected. False when no
+     *              selected-site rules apply, no user table was requested,
+     *              or this group was already selected.
      */
     public function start_user_tables(): bool
     {
@@ -216,11 +266,16 @@ class DatabaseRowsReader {
     }
 
     /**
-     * Checks one primary-key window of network usermeta for site members.
+     * Reads one batch of network usermeta rows and saves this site's member IDs.
      *
      * Read IDs and keys, not profile values. Filtering capabilities before
      * LIMIT could scan millions of unrelated rows in one step. Persist the
      * last scanned umeta_id even when none of the batch belongs to this site.
+     * For site 7 with base prefix `network_`, read `network_usermeta` and
+     * save user IDs only for rows with meta_key `network_7_capabilities`.
+     *
+     * @return bool True when a batch was read, even if it had no site members.
+     *              False when no rows remain after the saved umeta_id.
      */
     public function collect_site_members_step(): bool
     {
@@ -235,10 +290,19 @@ class DatabaseRowsReader {
     }
 
     /**
+     * Returns how the producer must read the current table; does not read rows.
+     *
      * Content omitted from SQL can still identify users to migrate.
      * Row exclusions likewise do not remove a user's connection to the site.
      *
-     * @return string rows, user_ids, or user_ids_then_rows for row-filtered content.
+     * For example, a users-only export visits `network_7_posts` in user_ids
+     * mode. If posts are selected but some rows are excluded, and users or
+     * usermeta are requested, user_ids_then_rows keeps all authors before
+     * exporting only the permitted post rows.
+     *
+     * @return string 'rows' for normal SQL output; 'user_ids' for an omitted
+     *                content table; 'user_ids_then_rows' for all content IDs
+     *                followed by SQL output with row exclusions applied.
      */
     public function get_current_table_export_mode(): string
     {
@@ -256,8 +320,15 @@ class DatabaseRowsReader {
     }
 
     /**
-     * Reads one ID-only batch using the current content table's normal cursor.
+     * Saves one batch of content user IDs using the current table's normal cursor.
+     *
+     * For `network_7_posts`, read only ID and post_author. Save the user IDs
+     * in `network_7_reprint_users` before moving the cursor past those posts.
+     * No post text or user profiles are read by this step.
      * Row-filtered exports finish this pass before reading the permitted content.
+     *
+     * @return bool True when a batch was read. False after an empty read, which
+     *              resets the table cursor so SQL output can start at its first row.
      */
     public function collect_content_user_ids_step(): bool
     {
@@ -538,10 +609,10 @@ class DatabaseRowsReader {
      *     @type array|null  $current_row         Encoded retained record.
      *     @type bool        $current_row_ends_query_batch Whether the retained record ends its query batch.
      *     @type array|null  $current_column_names Current column names.
-     *     @type string|null $multisite_selection Selected source site and rule version, or null.
-     *     @type string|null $multisite_generation Generation of this site's saved user set.
-     *     @type string      $table_group Content tables, or users and profiles after membership collection starts.
-     *     @type string      $last_scanned_usermeta_id Last metadata row checked for site membership.
+     *     @type string|null $multisite_selection Rule version, base prefix, network ID and site ID; null without selected-site rules.
+     *     @type string|null $multisite_generation Token matched against the saved user table's comment on resume.
+     *     @type string      $table_group 'content', or 'users' from the start of membership collection through user export.
+     *     @type string      $last_scanned_usermeta_id Last checked umeta_id, including rows for other sites; '0' before the first read.
      * }
      */
     public function get_cursor_state()
