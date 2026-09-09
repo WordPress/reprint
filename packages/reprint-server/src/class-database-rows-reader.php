@@ -1047,7 +1047,7 @@ class DatabaseRowsReader {
         }
         $tables = $this->get_tables_in_current_group();
         $position = $this->current_table === null ? -1 : array_search($this->current_table, $tables, true);
-        $this->current_table = $position === false ? null : ( $tables[$position + 1] ?? null );
+        $this->current_table = $position !== false && isset($tables[$position + 1]) ? $tables[$position + 1] : null;
         if ($this->current_table) {
             $this->current_pk_columns = $this->get_primary_key_columns($this->current_table);
             $this->last_pk_values = null;
