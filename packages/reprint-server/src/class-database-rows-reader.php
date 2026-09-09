@@ -708,7 +708,9 @@ class DatabaseRowsReader {
             "last_pk_values" => $this->encode_database_values_for_cursor($this->last_pk_values),
             "current_offset" => $this->current_offset,
             "current_table_rows_processed" => $this->current_table_rows_processed,
-            "current_table_rows_estimated" => $this->tables_to_process[$this->current_table] ?? null,
+            "current_table_rows_estimated" => $exports_current_table
+                ? $this->tables_to_process[$this->current_table]
+                : null,
             "current_table_number" => $exports_current_table ? $this->tables_before_current + 1 : null,
             "tables_before_current" => $this->tables_before_current,
             "tables_total" => count($this->tables_to_process ?? []),
