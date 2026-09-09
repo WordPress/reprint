@@ -65,7 +65,7 @@ class MultisiteDatabaseSelection {
      */
     public function get_identity(): string
     {
-        return 'core-v3:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
+        return 'core-v5:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
     }
 
     /**
@@ -154,18 +154,41 @@ class MultisiteDatabaseSelection {
     }
 
     /**
-     * Exports posts, comments and links before users, then usermeta.
+     * Tables visited before membership collection and user export.
      *
-     * Their content batches save the referenced user IDs before users are read.
-     * Keep this order even when the caller explicitly lists users first.
+     * A users-only or profiles-only export must still read author IDs from
+     * posts, comments and links. Add those tables to the content walk; the
+     * reader omits their SQL when the caller did not select their contents.
      *
-     * @param string[] $tables Tables already selected by the row reader.
-     * @return string[] The same tables in export order.
+     * @param string[] $tables Tables selected for SQL export.
+     * @return string[] Content tables, including any needed ID-only reads.
      */
-    public function order_tables(array $tables): array
+    public function get_content_tables(array $tables): array
     {
-        $shared = [$this->base_prefix . 'users', $this->base_prefix . 'usermeta'];
-        return array_merge(array_values(array_diff($tables, $shared)), array_values(array_intersect($shared, $tables)));
+        $user_tables = $this->get_user_tables($tables);
+        $content_tables = array_values(array_diff($tables, $user_tables));
+        if ($user_tables) {
+            $content_tables = array_values(array_unique(array_merge($content_tables, [
+                $this->site_prefix . 'posts', $this->site_prefix . 'comments', $this->site_prefix . 'links',
+            ])));
+        }
+        return $content_tables;
+    }
+
+    /**
+     * Users precede profiles even when the caller lists the tables backwards.
+     *
+     * @param string[] $tables Tables selected for SQL export.
+     * @return string[] Selected users and usermeta tables, in that order.
+     */
+    public function get_user_tables(array $tables): array
+    {
+        return array_values(array_intersect([$this->base_prefix . 'users', $this->base_prefix . 'usermeta'], $tables));
+    }
+
+    public function get_usermeta_table_name(): string
+    {
+        return $this->base_prefix . 'usermeta';
     }
 
     /**
@@ -196,23 +219,6 @@ class MultisiteDatabaseSelection {
             $this->db->exec("INSERT INTO `{$this->get_user_table_name()}` (user_id, reference_kind, reference_id) VALUES " . implode(',', $values) . ' ON DUPLICATE KEY UPDATE user_id=user_id');
         }
         return $last_id;
-    }
-
-    /**
-     * Returns sources not already visited while exporting their content.
-     *
-     * Members without content still need a separate usermeta discovery pass.
-     * Skipping a content table must not silently drop its authors from a
-     * users-only export. Row exclusions likewise do not change membership.
-     *
-     * @param string[] $exported_tables Tables exported without row exclusions.
-     * @return string[] Source tables needing bounded ID-only reads.
-     */
-    public function get_undiscovered_sources(array $exported_tables): array
-    {
-        return array_merge(array_values(array_diff([
-            $this->site_prefix . 'posts', $this->site_prefix . 'comments', $this->site_prefix . 'links',
-        ], $exported_tables)), [$this->base_prefix . 'usermeta']);
     }
 
     /**
