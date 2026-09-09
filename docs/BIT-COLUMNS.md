@@ -42,12 +42,21 @@ The regression tests exercise these consequences of #785's binary approach:
 | MySQL source, the same values | SQLite receives `0, 0, 1, 0`. | Packed bytes do not carry the numeric meaning expected by SQLite. |
 | Resume after key `0` using an existing numeric cursor | A ten-row BIT(16) table finishes with only `0, 32768, 65535`. | Reinterpreting the saved number as bytes changes the next-key comparison and skips rows. |
 | BIT(64) pattern `0x687474703a2f2f61` | Rewriting `http://a` to `http://b` changes the flag bits. | The packed bytes happen to spell a URL. Numeric SQL never sends this value through string rewriting. |
+| Second batch of a BIT primary-key export | EXPLAIN shows a full index scan and filesort rather than a primary-key range read. | Cast the SELECT result without wrapping the indexed key in comparisons or ordering. |
+| Live URL rewriting with a BIT(16) key of `0` | Strict-mode error 1292 aborts the command before it can rewrite a later INT-keyed table. | The updater's bound numeric comparison must not receive packed zero bytes. |
 
 These tests use actual exports and imports. The resume fixture was captured
 from trunk commit `248dd565` after emitting a complete one-row batch. A
 separate result-metadata assertion fails on that unchanged reader: mysqlnd
 already decodes native BIT values as numbers, so value assertions alone
 would miss the driver-dependent problem.
+
+`BitColumnsTest` covers both the ordinary SQL and prepared INSERT paths into
+SQLite. It runs EXPLAIN on the reader's actual second-batch query, rather
+than a handwritten substitute, and runs the real live URL rewrite processor
+through a BIT-keyed table followed by an INT-keyed table. All eleven cases reject
+#785's reader at `e388ce92` on MySQL 8.0 and MariaDB 10.11, then pass with the
+unsigned read.
 
 ## Scope and limits
 
@@ -62,3 +71,8 @@ failed run. The full unsigned range is tested between MySQL-family
 databases; this does not add unsigned 64-bit storage to SQLite. Handling of
 DECIMAL, floating-point values, dates, JSON, spatial columns, ENUM, SET, and
 generated columns is unchanged.
+
+The live URL updater also has a pre-existing BIT-key matching problem which
+can leave URLs unchanged. The live regression test protects against the new
+abort and verifies that a later INT-keyed row is rewritten. It neither
+claims to solve the older matching problem nor requires that bug to remain.

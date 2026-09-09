@@ -5,6 +5,7 @@ require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/database/load.php';
 
 use Reprint\Importer\Database\PdoDatabaseConnection;
+use Reprint\Importer\DatabaseUrlRewriteProcessor;
 use WordPress\Reprint\Server\DatabaseRowsReader;
 use WordPress\Reprint\Server\MySQLDumpProducer;
 use WordPress\Reprint\Server\SqliteDriverPDO;
@@ -107,8 +108,64 @@ class BitColumnsTest extends MySQLDumpProducerTestBase {
         );
     }
 
-    /** @dataProvider sqliteSourceProvider */
-    public function testBitValuesRoundTripBetweenMysqlAndSqlite(bool $sqlite_source): void
+    public function testBitPrimaryKeyBatchesUseAnIndexRangeWithoutSorting(): void
+    {
+        $this->pdo->exec('CREATE TABLE bits (flags BIT(16) PRIMARY KEY)');
+        $this->pdo->exec('INSERT INTO bits VALUES (0),(1),(2),(49),(255),(256),(257),(511),(32768),(65535)');
+        $reader = new DatabaseRowsReader($this->pdo, ['tables_to_process' => ['bits'], 'batch_size' => 2]);
+        $this->assertTrue($reader->move_to_next_table());
+        for ($record = 0; $record < 3; ++$record) {
+            $this->assertTrue($reader->next_record());
+        }
+
+        // Explain the actual second-batch query, including its ORDER BY. A
+        // separately constructed predicate would not protect the reader's SQL.
+        $property = new ReflectionProperty(DatabaseRowsReader::class, 'current_result_set');
+        $result = $property->getValue($reader);
+        $this->assertInstanceOf(PDOStatement::class, $result);
+        $plan = $this->pdo->query('EXPLAIN ' . $result->queryString)->fetch(PDO::FETCH_ASSOC);
+        $this->assertSame('range', $plan['type']);
+        $this->assertSame('PRIMARY', $plan['key']);
+        $this->assertStringNotContainsString('Using filesort', $plan['Extra']);
+    }
+
+    public function testLiveUrlRewritingContinuesPastZeroByteBitKeys(): void
+    {
+        $this->pdo->exec("SET SESSION sql_mode='STRICT_ALL_TABLES'");
+        $this->pdo->exec('CREATE TABLE bit_links (flags BIT(16) PRIMARY KEY, url TEXT)');
+        $this->pdo->exec(
+            "INSERT INTO bit_links VALUES (0,'https://old.example/zero')," .
+            "(1,'https://old.example/one'),(256,'https://old.example/two')"
+        );
+        $this->pdo->exec('CREATE TABLE later_links (id INT PRIMARY KEY, url TEXT)');
+        $this->pdo->exec("INSERT INTO later_links VALUES (1,'https://old.example/later')");
+        $processor = new DatabaseUrlRewriteProcessor(
+            new PdoDatabaseConnection($this->pdo),
+            new SqlStatementRewriter(new StructuredDataUrlRewriter(['https://old.example' => 'https://new.example']))
+        );
+        for ($step = 0; $step < 30; ++$step) {
+            if (!$processor->next_step()) {
+                break;
+            }
+        }
+
+        $this->assertTrue($processor->get_cursor()['complete']);
+        $this->assertSame(4, $processor->get_progress()['records_processed']);
+        // BIT-key updates have a separate pre-existing matching problem. Do
+        // not lock that bug into the expected values: check that those rows
+        // cannot abort the command before it rewrites a later INT-keyed row.
+        $this->assertSame(
+            'https://new.example/later',
+            $this->pdo->query('SELECT url FROM later_links WHERE id=1')->fetchColumn()
+        );
+        $this->assertSame(
+            ['0', '1', '256'],
+            array_map('strval', $this->pdo->query('SELECT flags+0 FROM bit_links ORDER BY flags')->fetchAll(PDO::FETCH_COLUMN))
+        );
+    }
+
+    /** @dataProvider sqliteTransferProvider */
+    public function testBitValuesRoundTripBetweenMysqlAndSqlite(string $transfer): void
     {
         if (!extension_loaded('pdo_sqlite')) {
             $this->markTestSkipped('pdo_sqlite extension required');
@@ -121,6 +178,7 @@ class BitColumnsTest extends MySQLDumpProducerTestBase {
         $raw_sqlite->sqliteCreateFunction('FROM_BASE64', static function ($value) {
             return $value === null ? null : base64_decode($value);
         });
+        $sqlite_source = $transfer === 'sqlite-to-mysql';
         $source = $sqlite_source ? $sqlite : $this->pdo;
         $source->exec(
             'CREATE TABLE bits (id INT PRIMARY KEY, flags BIT(8)) ' .
@@ -144,7 +202,9 @@ class BitColumnsTest extends MySQLDumpProducerTestBase {
             $queries->mark_input_complete();
             while ($queries->next_query()) {
                 $query = $queries->get_query();
-                $prepared = SQLitePreparedInsertBuilder::build($query);
+                $prepared = $transfer === 'mysql-to-sqlite-prepared'
+                    ? SQLitePreparedInsertBuilder::build($query)
+                    : null;
                 if ($prepared !== null) {
                     $connection->execute($prepared['sql'], $prepared['params']);
                 } else {
@@ -176,8 +236,12 @@ class BitColumnsTest extends MySQLDumpProducerTestBase {
         return ['native values' => [false], 'numeric strings' => [true]];
     }
 
-    public static function sqliteSourceProvider(): array
+    public static function sqliteTransferProvider(): array
     {
-        return ['MySQL to SQLite' => [false], 'SQLite to MySQL' => [true]];
+        return [
+            'MySQL to SQLite, ordinary SQL' => ['mysql-to-sqlite'],
+            'MySQL to SQLite, prepared INSERTs' => ['mysql-to-sqlite-prepared'],
+            'SQLite to MySQL' => ['sqlite-to-mysql'],
+        ];
     }
 }
