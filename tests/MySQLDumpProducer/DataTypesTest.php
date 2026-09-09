@@ -209,9 +209,27 @@ class DataTypesTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // BIT should be output as numeric
-        $this->assertMatchesRegularExpression('/\(1,255,1\)/', $sql);
-        $this->assertMatchesRegularExpression('/\(2,170,0\)/', $sql);
+        // BIT carries opaque bytes, not a number the dump can write unquoted: the
+        // server sends BIT raw and only some drivers turn it into decimal text, so a
+        // bare literal would put those bytes straight into the SQL on the drivers
+        // that don't. It goes out base64-encoded like every other opaque value.
+        $this->assertStringNotContainsString('(1,255,1)', $sql);
+        $this->assertStringContainsString(
+            sprintf(
+                "(1,FROM_BASE64('%s'),FROM_BASE64('%s'))",
+                base64_encode("\xff"),
+                base64_encode("\x01")
+            ),
+            $sql
+        );
+        $this->assertStringContainsString(
+            sprintf(
+                "(2,FROM_BASE64('%s'),FROM_BASE64('%s'))",
+                base64_encode("\xaa"),
+                base64_encode("\x00")
+            ),
+            $sql
+        );
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);

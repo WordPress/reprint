@@ -840,11 +840,17 @@ class DatabaseRowsReader {
         return $columns;
     }
 
-    /** Identifies numeric types which the dump emits as bare literals. */
+    /**
+     * Identifies numeric types which the dump emits as bare literals.
+     *
+     * BIT is excluded on purpose: some drivers return it as raw bytes, which a
+     * bare literal would write into the SQL unquoted and break db-apply with a
+     * syntax error. It goes out base64-encoded like every other opaque value.
+     */
     public function is_numeric_type($data_type)
     {
         $data_type = strtoupper($data_type);
-        foreach (["TINYINT", "SMALLINT", "MEDIUMINT", "INTEGER", "INT", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL", "BIT", "YEAR"] as $type) {
+        foreach (["TINYINT", "SMALLINT", "MEDIUMINT", "INTEGER", "INT", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL", "YEAR"] as $type) {
             if (strpos($data_type, $type) === 0) {
                 return true;
             }
