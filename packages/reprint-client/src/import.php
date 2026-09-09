@@ -8449,10 +8449,11 @@ class ImportClient
             // Clear this batch's progress tracking, as it's going to be rebuilt & restarted.
             $this->get_state()->current_file = null;
             $this->get_state()->current_file_bytes = null;
-            $this->progress_reporter->restart_file_batch();
         }
 
         if ($batch_file === null || !file_exists($batch_file)) {
+            // A process may stop after removing a completed batch but before saving its next offset.
+            $this->progress_reporter->restart_file_batch();
             $batch = $this->prepare_fetch_batch($list_file, $batch_offset);
             if ($batch === null) {
                 return true;
@@ -10670,7 +10671,7 @@ class ImportClient
         }
 
         $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($path);
-        if ($context->remote_file_path === null) {
+        if ($is_first || $context->remote_file_path === null) {
             $context->remote_file_path = $path;
             $context->remote_file_size = $file_size;
             if (!$is_first) {
@@ -11360,6 +11361,8 @@ class ImportClient
             true,
         );
         if ($path !== "" && $is_file_error) {
+            $context->remote_file_path = null;
+            $context->remote_file_size = null;
             $local_absolute_path = $this->filesystem_root . $path;
             if ($context->file_handle && $context->file_path === $local_absolute_path) {
                 fclose($context->file_handle);

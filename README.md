@@ -896,6 +896,8 @@ and nested `progress` object, while their event-specific top-level fields stay
 available for existing consumers.
 Ordinary log events, such as a skipped path, do not replace the screen's action
 label. File counts and bytes include completed paths inside a resumed batch.
+If a batch must be downloaded again, its old batch counts are cleared first.
+A new file reports its own path and size even after an error in the previous file.
 
 Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl`. The
 default `auto` mode uses terminal progress when its output stream is a TTY and

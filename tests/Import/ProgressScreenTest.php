@@ -238,6 +238,29 @@ class ProgressScreenTest extends TestCase {
         $this->assertNull($this->read_progress_file()['progress']['bytes']);
     }
 
+    public function testFileErrorClearsCurrentFileProgress(): void
+    {
+        $client = $this->make_client();
+        $context = new StreamingContext();
+        $context->remote_file_path = '/uploads/a.bin';
+        $context->remote_file_size = 32769;
+        $reflection = new \ReflectionClass($client);
+        $reflection->getMethod('handle_error_chunk')->invoke($client, [
+            'body' => json_encode([
+                'error_type' => 'file_missing',
+                'path' => base64_encode($context->remote_file_path),
+                'message' => 'File disappeared during stream',
+            ]),
+        ], 'files', $context);
+
+        $this->assertNull($context->remote_file_path);
+        $this->assertNull($context->remote_file_size);
+        $this->assertNull(
+            $reflection->getProperty('progress_reporter')->getValue($client)
+                ->get_file_details($context)['current_file']
+        );
+    }
+
     private function make_client(): \ImportClient
     {
         return new \ImportClient(

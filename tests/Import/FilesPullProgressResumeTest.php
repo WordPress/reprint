@@ -23,6 +23,14 @@ class StopDuringFileProgressClient extends \ImportClient {
             posix_kill(getmypid(), SIGKILL);
         }
     }
+
+    public function audit_log(string $message, bool $to_console = true): void {
+        parent::audit_log($message, $to_console);
+        // Stop after production unlink(), before the next batch offset is saved.
+        if ($this->stop_after === 'batch_removed' && strpos($message, '| fetch batch complete') !== false) {
+            posix_kill(getmypid(), SIGKILL);
+        }
+    }
 }
 
 class FilesPullProgressResumeTest extends TestCase {
@@ -97,7 +105,11 @@ class FilesPullProgressResumeTest extends TestCase {
             $reflection->getProperty('state')->setValue($resumed, $reflection->getMethod('load_state')->invoke($resumed));
             $this->assertSame(0, $resumed->get_state()->fetch->offset, 'The first batch is still active.');
             $cursor = json_decode(base64_decode($resumed->get_state()->fetch->cursor), true);
-            $this->assertSame($source . ( $boundary === 'file' ? '/a.bin' : '/b.bin' ), base64_decode($cursor['path']));
+            $expected_file = ['file' => '/a.bin', 'part' => '/b.bin', 'batch_removed' => '/c.bin'][$boundary];
+            $this->assertSame($source . $expected_file, base64_decode($cursor['path']));
+            if ($boundary === 'batch_removed') {
+                $this->assertFileDoesNotExist($resumed->get_state()->fetch->batch_file);
+            }
             $this->assertSame($boundary === 'part', $cursor['bytes'] > 0);
             $this->download_list($resumed, $list_file);
             $resumed->write_progress_file();
@@ -122,7 +134,7 @@ class FilesPullProgressResumeTest extends TestCase {
     }
 
     public static function interruptionBoundaries(): array {
-        return [['file'], ['part']];
+        return [['file'], ['part'], ['batch_removed']];
     }
 
     private function download_list(\ImportClient $client, string $list_file): void {
