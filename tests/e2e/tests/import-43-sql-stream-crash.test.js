@@ -3,8 +3,9 @@
  *
  * Simulates a PHP crash (exit(1)) after emitting a complete multipart
  * part which ends midway through an INSERT, but before emitting the next
- * part. Every SQL output mode must resume the REST stream from that part's
- * cursor without repeating or skipping its SQL.
+ * part. File/stdout output resumes from the last complete part. MySQL
+ * requests the unfinished group again from its last committed cursor.
+ * Neither path may skip an INSERT row.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -128,17 +129,30 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 300000 }, () => {
             }
 
             try {
-                // autoResume=false requires this one importer invocation to
-                // recover instead of starting another process.
-                const result = runImporter(importUrl(), tempDir, 'db-pull', {
+                // The caller starts another process after exit 3; complete SQL
+                // parts or committed target groups must survive that boundary.
+                const options = {
                     secret: getSiteSecret(site),
                     extraArgs: sqlOutputArgs(mode, importDb),
                     autoResume: false,
                     timeout: 270000,
-                });
+                };
+                const interrupted = runImporter(importUrl(), tempDir, 'db-pull', options);
+                assert.equal(interrupted.exitCode, 3,
+                    `Expected ${mode} mode to stop at the source crash\nstderr: ${interrupted.stderr}`);
+                const error = interrupted.stderr.split('\n')
+                    .filter(line => line.startsWith('{'))
+                    .map(line => JSON.parse(line))
+                    .find(record => record.exception);
+                assert.ok(error, 'Expected the original error in stderr JSON');
+                assert.equal(error.http_code, 200);
+                assert.equal(error.consecutive_failures_without_progress, 0,
+                    'Completed parts or committed groups before the crash count as progress');
+                assert.equal(error.retry_after_seconds, undefined);
 
+                const result = runImporter(importUrl(), tempDir, 'db-pull', options);
                 assert.equal(result.exitCode, 0,
-                    `Expected ${mode} mode to complete in one invocation, got ${result.exitCode}\n` +
+                    `Expected ${mode} mode to complete after the caller retries, got ${result.exitCode}\n` +
                     `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
 
                 const hookState = readHookState(site);
@@ -170,7 +184,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 300000 }, () => {
                 } else {
                     const sql = mode === 'file'
                         ? readFileSync(join(tempDir, 'db.sql'), 'utf8')
-                        : result.stdout;
+                        : interrupted.stdout + result.stdout;
                     for (const [index, payload] of sourcePayloads.entries()) {
                         const encodedPayload = payload.toString('base64');
                         const occurrences = sql.split(encodedPayload).length - 1;
@@ -191,8 +205,8 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 300000 }, () => {
                 const audit = readAuditLog(tempDir);
                 assert.match(
                     audit,
-                    /SQL RETRY \| resuming source request/,
-                    `Expected ${mode} mode to retry the interrupted REST request`,
+                    /TEMPORARY REQUEST FAILURE \| sql_chunk/,
+                    `Expected ${mode} mode to report the interrupted REST request`,
                 );
 
             } finally {

@@ -217,7 +217,9 @@ class NewSiteUrlSqliteTest extends TestCase
         $secondSqlitePath = $this->tempDir . '/database/second.sqlite';
 
         file_put_contents($this->tempDir . '/db.sql', $this->buildSqlDump($sourceUrl));
-        $this->writeState($exportUrl);
+        $this->writeState($exportUrl, [
+            'apply' => ['remote_paths_removed_from_local_site' => ['wp-content/mu-plugins/wpcomsh']],
+        ]);
 
         $firstApply = new \ImportClient(
             $exportUrl,
@@ -280,6 +282,10 @@ class NewSiteUrlSqliteTest extends TestCase
             'wp_second',
         );
         $this->assertSame($sourceUrl, $rows[0]['option_value']);
+        $this->assertSame(
+            ['wp-content/mu-plugins/wpcomsh'],
+            $secondApply->get_state()->apply->remote_paths_removed_from_local_site,
+        );
     }
 
     /**

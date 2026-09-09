@@ -2,7 +2,7 @@
  * Test 20: Request Cutoff and Resume via import.php
  * Uses test hooks to simulate PHP crashing mid-stream by calling exit()
  * after a few file index batches. Verifies files-pull continues from its
- * saved partial state and reaches completion in the same local process.
+ * saved partial state in a later local process and reaches completion.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -53,17 +53,17 @@ describe('Import: Request Cutoff', () => {
         cleanupTempDir(tempDir);
     });
 
-    it('one importer run recovers after cutoff', () => {
+    it('caller resumes the importer after cutoff', () => {
         const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         const result = runImporter(url, tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--max-exec=10'],
-            autoResume: false,
+            autoResume: true,
         });
         assert.equal(
             result.exitCode,
             0,
-            `Expected one process to recover after the interrupted file index response\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
+            `Expected the caller to resume after the interrupted file index response\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
         );
 
         const stateFile = join(pullStateDirectory(tempDir, url), 'state.json');
@@ -71,7 +71,7 @@ describe('Import: Request Cutoff', () => {
         assert.equal(
             state.active_resumable_command.completion_state,
             'complete',
-            'Expected files-pull to complete after the internal retry',
+            'Expected files-pull to complete after the caller retries',
         );
     });
 
@@ -81,7 +81,7 @@ describe('Import: Request Cutoff', () => {
         assert.ok(state.scan_count >= 5, `Expected scan_count >= 5, got ${state.scan_count}`);
     });
 
-    it('all file hashes match source after same-process recovery', () => {
+    it('all file hashes match source after recovery across processes', () => {
         removeTestHooks(site);
 
         // The source hook itself was present while files-pull indexed the

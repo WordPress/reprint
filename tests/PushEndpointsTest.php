@@ -3000,8 +3000,13 @@ final class PushEndpointsTest extends TestCase {
         ];
     }
 
-    public function testDefaultPullThenThemePushPreservesHostPlugins(): void
+    /** @dataProvider hostPluginRuntimeOptions */
+    public function testDefaultPullThenThemePushPreservesHostPlugins(?array $runtime_options, ?string $resume_phase = null): void
     {
+        $this->writeDocrootConfiguration([
+            'document_root' => $this->docroot,
+            'maximum_part_bytes' => 256,
+        ]);
         $remote_document_root = (string) realpath($this->docroot);
         $filesystem_root = $this->root . '/pulled-files';
         $state_directory = $this->root . '/pull-push-state';
@@ -3046,15 +3051,75 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame($contents, file_get_contents($local_document_root . '/' . $document_root_relative_path));
         }
 
+        if ($runtime_options !== null) {
+            $runtime_command = [
+                PHP_BINARY,
+                __DIR__ . '/../packages/reprint-client/bin/reprint-client',
+                'apply-runtime',
+                $this->remote_reprint_api_url,
+                '--state-dir=' . $state_directory,
+                '--fs-root=' . $filesystem_root,
+                '--runtime=php-builtin',
+                '--output-dir=' . $this->root . '/runtime',
+                '--target-engine=mysql',
+                '--target-db=local-wordpress',
+                '--target-user=local-user',
+            ];
+            exec(implode(' ', array_map('escapeshellarg', array_merge($runtime_command, $runtime_options))) . ' 2>&1', $runtime_output, $runtime_exit);
+            $this->assertSame(0, $runtime_exit, implode("\n", $runtime_output));
+            foreach ($host_plugin_files as $document_root_relative_path => $contents) {
+                $this->assertFileDoesNotExist($local_document_root . '/' . $document_root_relative_path);
+            }
+            // Deleting the now-empty parents must not delete their host plugins remotely.
+            rmdir($local_document_root . '/wp-content/mu-plugins');
+            rmdir($local_document_root . '/wp-content/plugins');
+        }
+
         file_put_contents($local_document_root . '/' . $theme_document_root_relative_path, 'body { color: blue; }');
+        $diff = $this->runFilesDiffCli($filesystem_root, $state_directory);
+        if ($resume_phase !== null) {
+            $runtime_state = json_decode(file_get_contents($client->pull_state_directory . '/state.json'), true, 512, JSON_THROW_ON_ERROR);
+            $sender_options = $this->filesPushSenderOptions($filesystem_root, $this->filesPushStateDirectory($state_directory));
+            $sender_options['document_root'] = $remote_document_root;
+            $sender_options['excluded_paths'] = $runtime_state['apply']['remote_paths_removed_from_local_site'];
+            $sender = $this->startSender($sender_options);
+            try {
+                $this->takeSenderStepsUntilPhase($sender, $resume_phase);
+                $sender->cancel();
+            } finally {
+                $this->closeSender($sender);
+            }
+            // Runtime cleanup cannot change the exclusions of an unfinished push.
+            $repeated_runtime_output = [];
+            exec(implode(' ', array_map('escapeshellarg', $runtime_command)) . ' 2>&1', $repeated_runtime_output, $repeated_runtime_exit);
+            $this->assertSame(1, $repeated_runtime_exit);
+            $this->assertStringContainsString('Finish the interrupted files-push', implode("\n", $repeated_runtime_output));
+        }
         $pushed = $this->runFilesPushCli($filesystem_root, $state_directory, [], $remote_document_root);
 
         $this->assertSame(0, $pushed['exit'], $pushed['output']);
         $this->assertSame(1, $this->lastCliJsonLine($pushed['stdout'])['files_total']);
         $this->assertSame('body { color: blue; }', file_get_contents($remote_document_root . '/' . $theme_document_root_relative_path));
         foreach ($host_plugin_files as $document_root_relative_path => $contents) {
+            $this->assertFileExists($remote_document_root . '/' . $document_root_relative_path);
             $this->assertSame($contents, file_get_contents($remote_document_root . '/' . $document_root_relative_path));
         }
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $this->assertSame(1, $this->lastCliJsonLine($diff['stdout'])['local_paths_to_push']);
+        $this->assertSame(0, $this->lastCliJsonLine($diff['stdout'])['local_paths_to_delete']);
+    }
+
+    public static function hostPluginRuntimeOptions(): array
+    {
+        return [
+            'download only' => [null],
+            'default local setup' => [[]],
+            'explicit local cleanup' => [['--exclude-host-plugins']],
+            'resume before create' => [[], 'creating'],
+            'resume before plan' => [[], 'starting_plan'],
+            'resume during plan' => [[], 'planning'],
+            'resume before upload' => [[], 'pushing_paths'],
+        ];
     }
 
     public function testFilesPushCliPushesFromDocumentRootBelowFilesystemRoot(): void
