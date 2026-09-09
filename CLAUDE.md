@@ -193,8 +193,12 @@ progress-file writes, and rebuilds file counters from the fetch list and its
 saved cursor, including completed paths inside a resumed batch. Ordinary log
 messages do not replace the screen label. The fetch list stores
 only the base64 path and content size; directories and symlinks have size zero.
-These counters add no fields to the pull checkpoint. The current table's row
-estimate is cached only while `fetch_sql()` runs.
+The fetch checkpoint stores completed file bytes before and within the current
+batch. A passed path may have failed or changed size, so the fetch list cannot
+rebuild those byte counts. They are saved with the existing cursor writes.
+The exporter loads row estimates with its table list and includes the current
+estimate in the SQL cursor. Progress updates read the current table entry in
+memory; they do not scan the table list or open `db-tables.jsonl`.
 
 During the file fetch phase, progress and heartbeat records keep the legacy
 `files_done` and `files_total` fields and also report them through
@@ -204,8 +208,8 @@ cover the paths selected by this pull, so a delta pull counts only changed
 paths.
 
 During db-pull SQL streaming, `progress.items` counts selected base tables and
-`current_table` reports rows processed against the row estimate saved by
-db-index. The estimate is marked by `rows_total_is_estimate`.
+`current_table` reports rows processed against the estimate supplied by the
+SQL exporter. The estimate is marked by `rows_total_is_estimate`.
 
 During files-push, progress records include `files_done` and `files_total`
 together after planning. The nested object reports those target-confirmed local

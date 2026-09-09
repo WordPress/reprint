@@ -93,6 +93,16 @@ class FilesPullProgressErrorTest extends TestCase {
             $this->assertSame($source . '/b.bin', base64_decode($client->next_file_progress['path_b64']));
             $this->assertSame($file_size, $client->next_file_progress['bytes_total']);
             $this->assertGreaterThan(0, $client->next_file_progress['bytes_done']);
+            $reflection = new \ReflectionClass(\ImportClient::class);
+            $reporter = $reflection->getProperty('progress_reporter')->getValue($client);
+            $before_resume = $reporter->get_file_details();
+            $this->assertSame($file_size, $before_resume['bytes']['done']);
+            $resumed = new \ImportClient($url, $root . '/state', $root . '/local');
+            $reflection->getProperty('state')->setValue($resumed, $reflection->getMethod('load_state')->invoke($resumed));
+            $resumed_reporter = $reflection->getProperty('progress_reporter')->getValue($resumed);
+            $resumed_reporter->load_file_list($list_file, $resumed->get_state()->fetch);
+            $this->assertSame($before_resume, $resumed_reporter->get_file_details(), 'Resume must not count the missing source file as completed bytes.');
+
             $this->assertSame(
                 hash_file('sha256', $source . '/b.bin'),
                 hash_file('sha256', $root . '/local' . $source . '/b.bin')

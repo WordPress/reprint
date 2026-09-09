@@ -80,6 +80,65 @@ class MultisiteSelectionTest extends MySQLDumpProducerTestBase
         $this->assertNotContains('network_8_posts', $target->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
     }
 
+    /** @dataProvider progress_resume_modes */
+    public function test_progress_counts_only_sql_tables_in_export_order(bool $resume_each_fragment): void
+    {
+        $this->create_network();
+        $options = [
+            'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+            // Profiles are listed first, but content and users must precede them.
+            'tables_to_process' => ['network_usermeta', 'network_7_options', 'network_users', 'network_users'],
+            'batch_size' => 2,
+        ];
+        $table_order = ['network_7_options', 'network_users', 'network_usermeta'];
+        $producer = $this->createProducer($options);
+        $previous_done = 0;
+        $discovery_steps = 0;
+        $seen_tables = [];
+        $sql = '';
+        while ($producer->next_sql_fragment()) {
+            $sql .= $producer->get_sql_fragment() . "\n";
+            $options['cursor'] = $producer->get_reentrancy_cursor();
+            $cursor = json_decode($options['cursor'], true);
+            $progress = $cursor['progress'];
+            $this->assertSame(3, $progress['tables']['total']);
+            $this->assertGreaterThanOrEqual($previous_done, $progress['tables']['done']);
+            $this->assertLessThanOrEqual(3, $progress['tables']['done']);
+            $this->assertArrayNotHasKey('tables_before_current', $cursor);
+            $previous_done = $progress['tables']['done'];
+            if ($progress['current_table'] !== null) {
+                $table = $progress['current_table']['name'];
+                $this->assertContains($table, $table_order);
+                $this->assertSame(array_search($table, $table_order, true), $previous_done);
+                $seen_tables[$table] = true;
+            }
+            if (in_array($cursor['state'], ['collect_content_user_ids', 'collect_site_members'], true)) {
+                ++$discovery_steps;
+                $this->assertSame(1, $previous_done, 'ID-only reads must retain the completed content-table count.');
+                $this->assertNull($progress['current_table']);
+            }
+            if ($resume_each_fragment) {
+                $producer->close();
+                $producer = $this->createProducer($options);
+                $resumed_cursor = json_decode($producer->get_reentrancy_cursor(), true);
+                $this->assertSame($progress, $resumed_cursor['progress'], 'Resume must not change the table or row counts.');
+            }
+        }
+        $producer->close();
+        $this->assertGreaterThan(0, $discovery_steps);
+        $this->assertSame($table_order, array_keys($seen_tables));
+        $this->assertSame(3, $previous_done);
+        $target = $this->executeDumpInNewDatabase($sql);
+        $this->assertEqualsCanonicalizing($table_order, $target->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
+        $this->assertSame(['1', '2', '3', '4', '5'], array_map('strval',
+            $target->query('SELECT ID FROM network_users ORDER BY ID')->fetchAll(PDO::FETCH_COLUMN)));
+    }
+
+    public static function progress_resume_modes(): array
+    {
+        return [[false], [true]];
+    }
+
     /** Removing a content-free member must also stop subsequent source value reads. */
     public function test_membership_removed_during_oversized_reads_stops_export(): void
     {

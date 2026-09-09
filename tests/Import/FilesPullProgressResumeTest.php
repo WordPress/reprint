@@ -17,7 +17,8 @@ class StopDuringFileProgressClient extends \ImportClient {
         parent::save_state();
         $cursor = json_decode(base64_decode($this->get_state()->fetch->cursor ?? ''), true);
         if (
-            ( $this->stop_after === 'file' && basename(base64_decode($cursor['path'] ?? '')) === 'a.bin' && ( $cursor['bytes'] ?? 0 ) === 0 )
+            ( in_array($this->stop_after, ['file', 'source_grew', 'source_shrank'], true) && basename(base64_decode($cursor['path'] ?? '')) === 'a.bin' && ( $cursor['bytes'] ?? 0 ) === 0 )
+            || ( $this->stop_after === 'file_after_error' && basename(base64_decode($cursor['path'] ?? '')) === 'b.bin' && ( $cursor['bytes'] ?? 0 ) === 0 )
             || ( $this->stop_after === 'part' && basename(base64_decode($cursor['path'] ?? '')) === 'b.bin' && ( $cursor['bytes'] ?? 0 ) > 0 )
         ) {
             posix_kill(getmypid(), SIGKILL);
@@ -47,7 +48,11 @@ class FilesPullProgressResumeTest extends TestCase {
             file_put_contents($source . '/' . $name, str_repeat($name[0], $file_size));
         }
         $router = $root . '/router.php';
-        file_put_contents($router, '<?php require ' . var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true)
+        file_put_contents($router, '<?php '
+            . ( $boundary === 'file_after_error'
+                ? 'putenv("REPRINT_SERVER_TEST_MODE=1"); function test_hook_before_file_chunk($path, $offset, &$data) { if (basename($path) === "a.bin" && $offset === 0) { unlink($path); } }'
+                : '' )
+            . ' require ' . var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true)
             . '; require ' . var_export(dirname(__DIR__, 2) . '/packages/reprint-server/src/export.php', true)
             . '; (new WordPress\\Reprint\\Server\\HTTPServer())->handle_request();');
         $listener = stream_socket_server('tcp://127.0.0.1:0', $error_number, $error_message);
@@ -88,6 +93,12 @@ class FilesPullProgressResumeTest extends TestCase {
                 $append->invoke($client, $source . '/' . $name, 'file', $file_size, $list_handle);
             }
             fclose($list_handle);
+            // Source content may change after indexing but before the download starts.
+            $source_file_size = $file_size;
+            if ($boundary === 'source_grew' || $boundary === 'source_shrank') {
+                $source_file_size += $boundary === 'source_grew' ? 32768 : -32768;
+                file_put_contents($source . '/a.bin', str_repeat('a', $source_file_size));
+            }
             $child_pid = pcntl_fork();
             $this->assertNotSame(-1, $child_pid);
             if ($child_pid === 0) {
@@ -105,7 +116,7 @@ class FilesPullProgressResumeTest extends TestCase {
             $reflection->getProperty('state')->setValue($resumed, $reflection->getMethod('load_state')->invoke($resumed));
             $this->assertSame(0, $resumed->get_state()->fetch->offset, 'The first batch is still active.');
             $cursor = json_decode(base64_decode($resumed->get_state()->fetch->cursor), true);
-            $expected_file = ['file' => '/a.bin', 'part' => '/b.bin', 'batch_removed' => '/c.bin'][$boundary];
+            $expected_file = ['file' => '/a.bin', 'part' => '/b.bin', 'batch_removed' => '/c.bin', 'file_after_error' => '/b.bin', 'source_grew' => '/a.bin', 'source_shrank' => '/a.bin'][$boundary];
             $this->assertSame($source . $expected_file, base64_decode($cursor['path']));
             if ($boundary === 'batch_removed') {
                 $this->assertFileDoesNotExist($resumed->get_state()->fetch->batch_file);
@@ -114,9 +125,9 @@ class FilesPullProgressResumeTest extends TestCase {
             $this->download_list($resumed, $list_file);
             $resumed->write_progress_file();
             $snapshot = json_decode(file_get_contents($root . '/state/progress.json'), true);
-            $this->assertSame(3 * $file_size, $snapshot['progress']['bytes']['done']);
+            $this->assertSame(2 * $file_size + ( $boundary === 'file_after_error' ? 0 : $source_file_size ), $snapshot['progress']['bytes']['done']);
             $this->assertSame(3, $snapshot['progress']['items']['done']);
-            foreach (['a.bin', 'b.bin', 'c.bin'] as $name) {
+            foreach (( $boundary === 'file_after_error' ? ['b.bin', 'c.bin'] : ['a.bin', 'b.bin', 'c.bin'] ) as $name) {
                 $this->assertSame(
                     hash_file('sha256', $source . '/' . $name),
                     hash_file('sha256', $root . '/local' . $source . '/' . $name)
@@ -134,7 +145,7 @@ class FilesPullProgressResumeTest extends TestCase {
     }
 
     public static function interruptionBoundaries(): array {
-        return [['file'], ['part'], ['batch_removed']];
+        return [['file'], ['part'], ['batch_removed'], ['file_after_error'], ['source_grew'], ['source_shrank']];
     }
 
     private function download_list(\ImportClient $client, string $list_file): void {

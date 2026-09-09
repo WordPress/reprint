@@ -7829,6 +7829,7 @@ class ImportClient
                     }
                     $this->pull_index_journal->flush();
                     $this->get_state()->fetch->cursor = $cursor;
+                    $this->progress_reporter->checkpoint_file_bytes($this->get_state()->fetch);
                     $this->save_state();
                     $chunks_since_save = 0;
                 }
@@ -7875,6 +7876,7 @@ class ImportClient
             $context->response_stats ?? [],
         );
         $this->get_state()->fetch->cursor = $cursor;
+        $this->progress_reporter->checkpoint_file_bytes($this->get_state()->fetch);
         $this->pull_index_journal->apply_pending_records();
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
@@ -8463,13 +8465,12 @@ class ImportClient
             $next_offset = $batch["next_offset"];
             $batch_entries = $batch["entries"];
             $cursor = null;
-            $this->get_state()->fetch = FetchListProgressState::from_array([
-                "offset" => $batch_offset,
-                "next_offset" => $next_offset,
-                "batch_file" => $batch_file,
-                "batch_entries" => $batch_entries,
-                "cursor" => null,
-            ]);
+            $fetch_state->offset = $batch_offset;
+            $fetch_state->next_offset = $next_offset;
+            $fetch_state->batch_file = $batch_file;
+            $fetch_state->batch_entries = $batch_entries;
+            $fetch_state->cursor = null;
+            $this->progress_reporter->checkpoint_file_bytes($fetch_state);
             $this->save_state();
         }
 
@@ -8494,13 +8495,12 @@ class ImportClient
         $this->progress_reporter->complete_file_batch($batch_entries);
         $this->get_state()->files_pull_summary->files_pulled += $batch_entries;
 
-        $this->get_state()->fetch = FetchListProgressState::from_array([
-            "offset" => $next_offset,
-            "next_offset" => $next_offset,
-            "batch_file" => null,
-            "batch_entries" => 0,
-            "cursor" => null,
-        ]);
+        $fetch_state->offset = $next_offset;
+        $fetch_state->next_offset = $next_offset;
+        $fetch_state->batch_file = null;
+        $fetch_state->batch_entries = 0;
+        $fetch_state->cursor = null;
+        $this->progress_reporter->checkpoint_file_bytes($fetch_state);
         $this->save_state();
 
         return $next_offset >= filesize($list_file);
@@ -8867,7 +8867,6 @@ class ImportClient
         $cursor = $this->get_state()->active_resumable_command->remote_cursor ?? null;
         $complete = false;
         $mode = $this->sql_output_mode;
-        $progress_table = null;
 
         // ── Set up write strategy based on output mode ──────────────
 
@@ -9044,7 +9043,6 @@ class ImportClient
                     $spatial_srid_guard,
                     $session_setup_file,
                     &$sql_bytes_written,
-                    &$progress_table,
                     $context,
                     $query_stream,
                     &$sql_statements_counted,
@@ -9211,8 +9209,7 @@ class ImportClient
                             'message' => 'Downloading SQL dump',
                             'progress' => $this->database_pull_progress_details(
                                 $cursor,
-                                $sql_bytes_written,
-                                $progress_table
+                                $sql_bytes_written
                             ),
                         ]);
 
@@ -9380,21 +9377,15 @@ class ImportClient
     }
 
     /**
-     * Builds database-download counters from the exporter cursor and db-index file.
+     * Builds database-download counters from the exporter cursor without reading an index.
      *
      * @param string|null $cursor Base64-encoded exporter cursor.
      * @param int         $sql_bytes_written SQL bytes written by this pull.
-     * @param array|null  $progress_table {
-     *     Cached estimate for the current table, retained only while fetch_sql() runs.
-     *     @type string   $name       Table name.
-     *     @type int|null $rows_total Estimated rows, or null when absent from db-index.
-     * }
      * @return array<string,mixed> Stable progress-screen details.
      */
     private function database_pull_progress_details(
         ?string $cursor,
-        int $sql_bytes_written,
-        ?array &$progress_table
+        int $sql_bytes_written
     ): array {
         $progress = ProgressReporter::EMPTY_DETAILS;
         $progress['bytes'] = [
@@ -9436,36 +9427,12 @@ class ImportClient
             return $progress;
         }
 
-        $table_name = $current_table['name'];
-        if (($progress_table['name'] ?? null) !== $table_name) {
-            $progress_table = ['name' => $table_name, 'rows_total' => null];
-            $tables_file = wp_join_unix_paths($this->state_dir, 'db-tables.jsonl');
-            $tables_handle = @fopen($tables_file, 'rb');
-            if (is_resource($tables_handle)) {
-                while (true) {
-                    $table_line = fgets($tables_handle);
-                    if ($table_line === false) {
-                        break;
-                    }
-                    $table = json_decode($table_line, true);
-                    if (
-                        is_array($table)
-                        && ( $table['name'] ?? null ) === $table_name
-                        && isset($table['rows'])
-                        && is_numeric($table['rows'])
-                    ) {
-                        $progress_table['rows_total'] = (int) $table['rows'];
-                        break;
-                    }
-                }
-                fclose($tables_handle);
-            }
-        }
-
         $progress['current_table'] = [
-            'name' => $table_name,
+            'name' => $current_table['name'],
             'rows_done' => (int) $current_table['rows_done'],
-            'rows_total' => $progress_table['rows_total'],
+            'rows_total' => isset($current_table['rows_total']) && is_numeric($current_table['rows_total'])
+                ? (int) $current_table['rows_total']
+                : null,
             'rows_total_is_estimate' => true,
         ];
         return $progress;
@@ -10819,7 +10786,7 @@ class ImportClient
                     "file",
                     $context->file_path,
                 );
-                $this->progress_reporter->complete_file($file_size);
+                $this->progress_reporter->complete_file($context->file_bytes_written);
                 $this->clear_volatile_file($path);
                 $this->audit_log(
                     sprintf("  Indexed (wrote %d bytes)", $final_size),

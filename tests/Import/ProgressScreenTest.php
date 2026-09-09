@@ -51,6 +51,7 @@ class ProgressScreenTest extends TestCase {
             }
         }
         $client->get_state()->fetch->offset = $offset;
+        $client->get_state()->fetch->file_bytes_before_batch = 1024;
         $reflection->getProperty('progress_reporter')->getValue($client)
             ->load_file_list($list_file, $client->get_state()->fetch);
         $progress_stream = fopen('php://memory', 'w+b');
@@ -161,27 +162,23 @@ class ProgressScreenTest extends TestCase {
         fclose($progress_stream);
     }
 
-    public function testDatabaseProgressCombinesExporterCursorWithTableEstimate(): void
+    public function testDatabaseProgressUsesExporterEstimateWithoutATableIndex(): void
     {
         $client = $this->make_client();
-        file_put_contents(
-            $this->state_directory . '/db-tables.jsonl',
-            json_encode(['name' => 'wp_posts', 'rows' => 12000]) . "\n"
-        );
         $cursor = base64_encode(json_encode([
             'progress' => [
                 'tables' => ['done' => 2, 'total' => 12],
                 'current_table' => [
                     'name' => 'wp_posts',
                     'rows_done' => 500,
+                    'rows_total' => 12000,
                 ],
             ],
         ]));
 
-        $progress_table = null;
         $progress = ( new \ReflectionClass($client) )
             ->getMethod('database_pull_progress_details')
-            ->invokeArgs($client, [$cursor, 500100, &$progress_table]);
+            ->invoke($client, $cursor, 500100);
 
         $this->assertSame([
             'items' => [

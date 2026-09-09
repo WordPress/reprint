@@ -428,7 +428,7 @@ class DatabaseUrlRewriteCommandTest extends TestCase {
             $has_more_steps = $processor->next_step();
         } while ($has_more_steps && $processor->get_progress()['records_processed'] < 1);
 
-        $this->assertContains('SHOW FULL TABLES', $database->queries);
+        $this->assertContains('SHOW TABLE STATUS;', $database->queries);
         $this->assertNotEmpty(array_filter($database->queries, static function ($query) {
             return strpos($query, 'SHOW INDEX FROM ') === 0;
         }));

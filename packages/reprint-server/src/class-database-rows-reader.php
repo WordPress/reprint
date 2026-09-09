@@ -66,14 +66,17 @@ class DatabaseRowsReader {
     private $current_query_last_candidate_id = null;
 
     /**
-     * Table names selected for SQL output, or null before table discovery.
+     * Table names mapped to row estimates, or null before table discovery.
      * A selected-site export can also read omitted content tables to collect
      * user IDs. Those tables are included by get_tables_in_current_group(),
      * without adding them to this list of SQL output tables.
      *
-     * @var string[]|null
+     * @var array<int|string, int|null>|null
      */
     private $tables_to_process;
+
+    /** SQL tables before the current table; rebuilt from the table order on resume. */
+    private $tables_before_current = 0;
 
     /**
      * Column metadata cached by table and column name. Each column contains
@@ -206,6 +209,9 @@ class DatabaseRowsReader {
                 [$this->multisite_selection, 'includes_table']
             ));
         }
+        if ($this->tables_to_process !== null) {
+            $this->tables_to_process = array_fill_keys($this->tables_to_process, null);
+        }
         $this->batch_size = max(1, (int) ( $options["batch_size"] ?? 250 ));
         $this->exclude_tables = array_values(array_filter(
             $options["exclude_tables"] ?? [],
@@ -263,7 +269,7 @@ class DatabaseRowsReader {
         if ($this->multisite_selection === null || $this->table_group === 'users') {
             return false;
         }
-        if (!$this->multisite_selection->get_user_tables($this->tables_to_process)) {
+        if (!$this->multisite_selection->get_user_tables($this->get_selected_table_names())) {
             return false;
         }
         $this->table_group = 'users';
@@ -311,11 +317,11 @@ class DatabaseRowsReader {
      */
     public function get_current_table_export_mode(): string
     {
-        if (!in_array($this->current_table, $this->tables_to_process, true)) {
+        if (!array_key_exists($this->current_table, $this->tables_to_process)) {
             return 'user_ids';
         }
         if ($this->multisite_selection !== null && isset($this->exclude_rows_by_table[$this->current_table]) &&
-            $this->multisite_selection->get_user_tables($this->tables_to_process)) {
+            $this->multisite_selection->get_user_tables($this->get_selected_table_names())) {
             $columns = $this->multisite_selection->get_reference_columns($this->current_table);
             if ($columns !== null && $columns['kind'] !== 4) {
                 return 'user_ids_then_rows';
@@ -675,7 +681,9 @@ class DatabaseRowsReader {
      *     @type array|null  $last_pk_values      Encoded primary key values.
      *     @type int         $current_offset      Offset for a table without a primary key.
      *     @type int         $current_table_rows_processed Rows returned from the current table.
+     *     @type int|null    $current_table_rows_estimated Source metadata estimate, or null when unavailable.
      *     @type int|null    $current_table_number One-based position of the current table.
+     *     @type int         $tables_before_current SQL tables before this table, excluding ID-only reads.
      *     @type int         $tables_total        Number of tables selected for export.
      *     @type array|null  $current_row         Encoded retained record.
      *     @type bool        $current_row_ends_query_batch Whether the retained record ends its query batch.
@@ -688,9 +696,8 @@ class DatabaseRowsReader {
      */
     public function get_cursor_state()
     {
-        $current_table_index = $this->current_table === null
-            ? false
-            : array_search($this->current_table, $this->tables_to_process ?? [], true);
+        $exports_current_table = $this->current_table !== null
+            && array_key_exists($this->current_table, $this->tables_to_process);
         return [
             "multisite_selection" => $this->multisite_selection === null ? null : $this->multisite_selection->get_identity(),
             "multisite_generation" => $this->multisite_selection === null ? null : $this->multisite_selection->get_generation(),
@@ -701,9 +708,9 @@ class DatabaseRowsReader {
             "last_pk_values" => $this->encode_database_values_for_cursor($this->last_pk_values),
             "current_offset" => $this->current_offset,
             "current_table_rows_processed" => $this->current_table_rows_processed,
-            "current_table_number" => $current_table_index === false
-                ? null
-                : $current_table_index + 1,
+            "current_table_rows_estimated" => $this->tables_to_process[$this->current_table] ?? null,
+            "current_table_number" => $exports_current_table ? $this->tables_before_current + 1 : null,
+            "tables_before_current" => $this->tables_before_current,
             "tables_total" => count($this->tables_to_process ?? []),
             "current_row" => $this->encode_database_values_for_cursor($this->current_row),
             "current_row_ends_query_batch" => $this->current_row_ends_query_batch,
@@ -785,6 +792,19 @@ class DatabaseRowsReader {
         if ($this->tables_to_process === null) {
             $this->initialize_tables_to_process();
         }
+        // Content SQL precedes users and profiles, regardless of discovery order.
+        // ID-only content reads follow the selected content but do not add SQL tables.
+        $table_names = $this->get_selected_table_names();
+        $content_tables = $table_names;
+        if ($this->multisite_selection !== null) {
+            $user_tables = $this->multisite_selection->get_user_tables($table_names);
+            $content_tables = array_values(array_diff($table_names, $user_tables));
+            $table_names = array_merge($content_tables, $user_tables);
+        }
+        $position = $this->current_table === null ? false : array_search($this->current_table, $table_names, true);
+        $this->tables_before_current = $position !== false
+            ? $position
+            : ( $this->table_group === 'users' || $this->current_table !== null ? count($content_tables) : 0 );
         if ($this->current_table) {
             if (!in_array($this->current_table, $this->get_tables_in_current_group(), true)) {
                 $this->current_table = null;
@@ -1156,6 +1176,9 @@ class DatabaseRowsReader {
         if ($this->tables_to_process === null) {
             return false;
         }
+        if ($this->current_table !== null && array_key_exists($this->current_table, $this->tables_to_process)) {
+            ++$this->tables_before_current;
+        }
         $tables = $this->get_tables_in_current_group();
         $position = $this->current_table === null ? -1 : array_search($this->current_table, $tables, true);
         $this->current_table = $position !== false && isset($tables[$position + 1]) ? $tables[$position + 1] : null;
@@ -1178,35 +1201,36 @@ class DatabaseRowsReader {
     }
 
     /**
-     * Discovers BASE TABLEs and excludes views and Reprint progress tables.
+     * Discovers tables and row estimates together, excluding views and Reprint progress tables.
      *
      * @TODO: Paginate databases with millions of tables.
      */
     public function initialize_tables_to_process()
     {
         $this->tables_to_process = [];
-        $statement = $this->db->query("SHOW FULL TABLES");
+        $statement = $this->db->query("SHOW TABLE STATUS;");
         $row = $statement->fetch(PdoConstants::fetch_assoc());
         while ($row !== false) {
-            $values = array_values($row);
-            $excluded = isset($values[0]) && stripos(
-                $values[0],
+            $name = $row["Name"];
+            $excluded = stripos(
+                $name,
                 self::MYSQL_IMPORT_PROGRESS_TABLE_PREFIX
             ) === 0;
             foreach ($this->exclude_tables as $excluded_table) {
-                if (isset($values[0]) && strcasecmp($values[0], $excluded_table) === 0) {
+                if (strcasecmp($name, $excluded_table) === 0) {
                     $excluded = true;
                     break;
                 }
             }
             if (
-                isset($values[0], $values[1])
-                && strcasecmp($values[1], "BASE TABLE") === 0
+                isset($row["Engine"])
                 && !$excluded
-                && !MultisiteDatabaseSelection::is_internal_table($values[0])
-                && ( $this->multisite_selection === null || $this->multisite_selection->includes_table($values[0]) )
+                && !MultisiteDatabaseSelection::is_internal_table($name)
+                && ( $this->multisite_selection === null || $this->multisite_selection->includes_table($name) )
             ) {
-                $this->tables_to_process[] = $values[0];
+                $this->tables_to_process[$name] = isset($row["Rows"]) && is_numeric($row["Rows"])
+                    ? (int) $row["Rows"]
+                    : null;
             }
             $row = $statement->fetch(PdoConstants::fetch_assoc());
         }
@@ -1226,12 +1250,18 @@ class DatabaseRowsReader {
     private function get_tables_in_current_group(): array
     {
         if ($this->multisite_selection === null) {
-            return $this->tables_to_process;
+            return $this->get_selected_table_names();
         }
         if ($this->table_group === 'content') {
-            return $this->multisite_selection->get_content_tables($this->tables_to_process);
+            return $this->multisite_selection->get_content_tables($this->get_selected_table_names());
         }
-        return $this->multisite_selection->get_user_tables($this->tables_to_process);
+        return $this->multisite_selection->get_user_tables($this->get_selected_table_names());
+    }
+
+    /** Keeps numeric table names as strings after PHP converts their array keys to integers. */
+    private function get_selected_table_names(): array
+    {
+        return array_map('strval', array_keys($this->tables_to_process));
     }
 
     /** Returns cached column metadata for a table. */

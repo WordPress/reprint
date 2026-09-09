@@ -93,6 +93,7 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
             $active_table_progress['tables']
         );
         $this->assertSame('wp_posts', $active_table_progress['current_table']['name']);
+        $this->assertSame(0, $active_table_progress['current_table']['rows_total']);
         $this->assertGreaterThanOrEqual(
             1,
             $active_table_progress['current_table']['rows_done']

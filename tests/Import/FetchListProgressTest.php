@@ -218,6 +218,7 @@ class FetchListProgressTest extends TestCase
                 "next_offset" => $offset,
                 "batch_file" => null,
                 "batch_entries" => 0,
+                "file_bytes_before_batch" => 300,
                 "cursor" => null,
             ],
         ]);
@@ -444,6 +445,8 @@ class FetchListProgressTest extends TestCase
     {
         $list_file = $this->writeFetchList(4, null, true);
         $fetch = new \Reprint\Importer\State\FetchListProgressState();
+        $fetch->file_bytes_before_batch = 100;
+        $fetch->file_bytes_in_batch = 200;
         $fetch->offset = $this->byteOffsetAfterLines($list_file, 1);
         $fetch->next_offset = $this->byteOffsetAfterLines($list_file, 3);
         $fetch->cursor = base64_encode(json_encode([
@@ -466,10 +469,27 @@ class FetchListProgressTest extends TestCase
         $this->assertSame(1000, $progress->get_file_details()['bytes']['total']);
     }
 
+    public function testFileByteCheckpointChangesOnlyAtTheFetchBoundary(): void
+    {
+        $list_file = $this->writeFetchList(4, null, true);
+        $fetch = new \Reprint\Importer\State\FetchListProgressState();
+        $progress = new \Reprint\Importer\ProgressReporter($this->stateDir . '/progress.json');
+        $progress->load_file_list($list_file, $fetch);
+        $progress->complete_file(100);
+        $this->assertSame(0, $fetch->file_bytes_in_batch);
+        $progress->checkpoint_file_bytes($fetch);
+        $this->assertSame(100, $fetch->file_bytes_in_batch);
+        $progress->complete_file(200);
+        $this->assertSame(100, $fetch->file_bytes_in_batch);
+        $this->assertSame(300, $progress->get_file_details()['bytes']['done']);
+    }
+
     public function testResettingFileCountersKeepsTheScreenSnapshot(): void
     {
         $list_file = $this->writeFetchList(4, null, true);
         $fetch = new \Reprint\Importer\State\FetchListProgressState();
+        $fetch->file_bytes_before_batch = 100;
+        $fetch->file_bytes_in_batch = 200;
         $fetch->offset = $this->byteOffsetAfterLines($list_file, 1);
         $fetch->next_offset = $this->byteOffsetAfterLines($list_file, 3);
         $fetch->cursor = base64_encode(json_encode([
@@ -509,6 +529,7 @@ class FetchListProgressTest extends TestCase
             ]) . "\n", FILE_APPEND);
         }
         $fetch = new \Reprint\Importer\State\FetchListProgressState();
+        $fetch->file_bytes_in_batch = 200;
         $fetch->next_offset = filesize($list_file);
         $fetch->cursor = base64_encode(json_encode([
             'path' => base64_encode('/m'), 'bytes' => 10,

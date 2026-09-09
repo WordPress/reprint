@@ -858,9 +858,12 @@ totals cover the paths selected by the current pull. A delta pull therefore
 reports only changed paths. The byte total adds regular-file content sizes;
 directories and symlinks add zero bytes.
 
-During `db-pull`, `progress.items` counts imported tables and
+During `db-pull`, `progress.items` counts exported tables and
 `progress.current_table` reports row progress for the active table. MySQL's
-table row count is an estimate, so `rows_total_is_estimate` is always `true`:
+table row count is an estimate, so `rows_total_is_estimate` is always `true`.
+The exporter loads estimates with the table list, then supplies the current
+table's estimate with SQL progress. Reporting progress does not read the local
+table index or search the exporter's table list:
 
 ```json
 {
@@ -898,6 +901,14 @@ Ordinary log events, such as a skipped path, do not replace the screen's action
 label. File counts and bytes include completed paths inside a resumed batch.
 If a batch must be downloaded again, its old batch counts are cleared first.
 A new file reports its own path and size even after an error in the previous file.
+Completed file bytes exclude failed files and use their downloaded size, not
+the earlier index size. The existing fetch checkpoint saves completed bytes
+before and within the current batch. This keeps byte counts stable after
+resume without another file scan. Failed files or source size changes can make
+completed bytes differ from the planned byte total.
+
+This changes the pull checkpoint schema. Finish active pulls with the previous
+build before updating; old checkpoints lack the completed-byte counts.
 
 Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl`. The
 default `auto` mode uses terminal progress when its output stream is a TTY and

@@ -24,7 +24,7 @@ class ProgressReporter {
     /** Timestamp of the last emitted JSONL record, independent of file writes. */
     private float $last_output = 0;
 
-    /** Rebuildable counters for the selected file list. Resume positions remain in the pull checkpoint. */
+    /** Live counters; completed bytes are copied to the fetch checkpoint only at durable fetch boundaries. */
     private ?int $files_total = null;
     private int $files_before_batch = 0;
     private int $files_in_batch = 0;
@@ -145,7 +145,8 @@ class ProgressReporter {
 
     /**
      * Reads the list once per invocation. Totals survive across batches in memory;
-     * a new process rebuilds them from the fetch-list byte offset and saved cursor.
+     * a new process rebuilds path counts from the fetch-list byte offset and saved cursor.
+     * Completed bytes come from the checkpoint: a passed path may have failed, or changed size.
      * FileTreeProducer sorts each batch by remote absolute path, regardless of list order.
      */
     public function load_file_list(string $list_file, FetchListProgressState $fetch): void {
@@ -161,6 +162,8 @@ class ProgressReporter {
         $cursor_finishes_file = ( $cursor['bytes'] ?? 0 ) === 0;
         $this->files_total = 0;
         $this->file_bytes_total = 0;
+        $this->file_bytes_before_batch = $fetch->file_bytes_before_batch;
+        $this->file_bytes_in_batch = $fetch->file_bytes_in_batch;
         while (true) {
             $line = fgets($handle);
             if ($line === false) {
@@ -180,7 +183,6 @@ class ProgressReporter {
             $position = ftell($handle);
             if ($position <= $fetch->offset) {
                 ++$this->files_before_batch;
-                $this->file_bytes_before_batch += $size;
             } elseif ($position <= $fetch->next_offset) {
                 $entry_path = base64_decode($entry['path'], true);
                 if (
@@ -191,7 +193,6 @@ class ProgressReporter {
                     ) )
                 ) {
                     ++$this->files_in_batch;
-                    $this->file_bytes_in_batch += $size;
                 }
             }
         }
@@ -218,6 +219,12 @@ class ProgressReporter {
         $this->files_before_batch += $batch_entries;
         $this->file_bytes_before_batch += $this->file_bytes_in_batch;
         $this->restart_file_batch();
+    }
+
+    /** Copies byte counts into the checkpoint together with the cursor that confirms those files. */
+    public function checkpoint_file_bytes(FetchListProgressState $fetch): void {
+        $fetch->file_bytes_before_batch = $this->file_bytes_before_batch;
+        $fetch->file_bytes_in_batch = $this->file_bytes_in_batch;
     }
 
     public function restart_file_batch(): void {
