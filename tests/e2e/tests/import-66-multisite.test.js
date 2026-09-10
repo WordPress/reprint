@@ -8,6 +8,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { inspect } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir, getSiteDir, getSiteUrl, getSiteSecret,
@@ -201,11 +202,17 @@ define('BLOG_ID_CURRENT_SITE', 1);
             target.server = spawn(php, ['-S', `127.0.0.1:${target.port}`, '-t', target.documentRoot, join(directory, 'runtime/runtime.php')], { stdio: ['ignore', 'pipe', 'pipe'] });
             target.server.stdout.on('data', data => { serverLog += data; });
             target.server.stderr.on('data', data => { serverLog += data; });
+            // A refused connection after the server accepted a request hides
+            // the first failure. Retain that error and the child's exit reason.
+            target.server.on('exit', (code, signal) => { serverLog += `PHP server exited: code=${code}, signal=${signal}\n`; });
             let response;
+            let firstRequestError;
+            let lastRequestError;
             for (let attempt = 0; attempt < 100; ++attempt) {
-                try { response = await fetch(`${targetUrl}/?p=100`); break; } catch { await sleep(100); }
+                try { response = await fetch(`${targetUrl}/?p=100`); break; }
+                catch (error) { firstRequestError ??= error; lastRequestError = error; await sleep(100); }
             }
-            assert.ok(response, serverLog);
+            assert.ok(response, serverLog + '\n' + inspect({ firstRequestError, lastRequestError }, { depth: 4 }));
             const html = await response.text();
             assert.equal(response.status, 200, html + serverLog);
             assert.ok(html.includes(`site-${selectedId}-content`));
