@@ -18,9 +18,13 @@ describe('Import: CSS mappings across full-pull resume', () => {
     let temporaryDirectory;
 
     beforeAll(async () => {
-        await ensureSite(site, { db: 'standard', files: 'none' });
-        mkdirSync(dirname(sourcePath), { recursive: true });
-        writeFileSync(sourcePath, sourceCss);
+        await ensureSite(site, {
+            db: 'standard', files: 'none',
+            afterCreate: async () => {
+                mkdirSync(dirname(sourcePath), { recursive: true });
+                writeFileSync(sourcePath, sourceCss);
+            },
+        });
     });
 
     afterEach(() => {
