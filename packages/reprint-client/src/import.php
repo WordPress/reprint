@@ -7726,13 +7726,6 @@ class ImportClient
         $this->save_state();
 
         $this->fetch_database_index();
-        if (
-            $this->get_state()->active_resumable_command->completion_state ===
-            "partial"
-        ) {
-            return;
-        }
-
         $this->get_state()->active_resumable_command->completion_state = "complete";
         $this->save_state();
 

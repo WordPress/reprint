@@ -560,6 +560,23 @@ class CurlTimeoutRecoveryTest extends TestCase
         );
     }
 
+    public function testDbIndexCompletesAfterAnInternalRetry()
+    {
+        $this->writeState([]);
+        [$client, $reflection] = $this->prepareClient(
+            SuccessTestClient::class,
+        );
+        $client->interrupt_first_database_index_request = true;
+
+        $reflection->getMethod('run_db_index')->invoke($client);
+
+        $this->assertSame(2, $client->streaming_requests);
+        $this->assertSame(
+            'complete',
+            $this->readState()['active_resumable_command']['completion_state'],
+        );
+    }
+
     // ---------------------------------------------------------------
     // Exception hierarchy
     // ---------------------------------------------------------------
@@ -1151,6 +1168,9 @@ class InterruptedAfterStreamedPartCloseClient extends \ImportClient
  */
 class SuccessTestClient extends \ImportClient
 {
+    public $streaming_requests = 0;
+    public $interrupt_first_database_index_request = false;
+
     protected function fetch_streaming(
         string $url,
         ?string $cursor,
@@ -1158,6 +1178,25 @@ class SuccessTestClient extends \ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
+        ++$this->streaming_requests;
+        if (
+            $this->interrupt_first_database_index_request
+            && $this->streaming_requests === 1
+        ) {
+            throw new CurlTimeoutException('The first database-index request timed out');
+        }
+        if ($endpoint === 'db_index') {
+            ( $context->on_chunk )([
+                'headers' => [
+                    'x-chunk-type' => 'completion',
+                    'x-status' => 'complete',
+                    'x-tables-processed' => '0',
+                ],
+                'body' => '',
+            ]);
+            return;
+        }
+
         // Signal completion
         $context->saw_completion = true;
     }
