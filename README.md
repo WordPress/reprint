@@ -957,10 +957,14 @@ reformat a command's data result, such as preflight or pull-metadata JSON,
 files-stats JSON, or SQL written with `--sql-output=stdout`.
 
 Use `--progress=compact` to print command starts, stage changes, command results,
-warnings, and errors as JSON lines. It hides per-file records, preserve-local
-skips, repeated counters and stage labels, per-request results, and debug chatter.
-Warnings and errors remain individual records; compact mode does not group them
-or add a final report.
+warnings, and errors as JSON lines. During a stage, it prints item and byte
+counters at most once every 30 seconds, only when they changed. These updates
+omit individual file paths and table names. They come from existing progress
+events, so a blocked request or a stage without item/byte counters stays quiet.
+It hides per-file records, preserve-local skips, repeated stage labels,
+per-request results, receive-rate diagnostics, and debug chatter.
+Warnings and errors, including rejected symlink targets, remain individual
+records; compact mode does not group them or add a final report.
 
 ```bash
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" \

@@ -137,6 +137,7 @@ final class CompactProgressOutputTest extends TestCase {
         $warnings = [
             ['type' => 'warning', 'reason' => 'missing_primary_key', 'message' => 'Skipped table without a primary key'],
             ['type' => 'symlink_error', 'error' => 'Could not create symlink'],
+            ['type' => 'symlink_follow_rejected', 'directory' => '/uploads', 'message' => 'Skipped (server rejected): /uploads'],
             ['type' => 'error', 'phase' => 'files', 'error_message' => 'Remote file changed'],
             ['type' => 'volatile_files', 'count' => 1, 'message' => 'One file needs re-syncing'],
         ];
@@ -150,10 +151,10 @@ final class CompactProgressOutputTest extends TestCase {
             return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
         }, explode("\n", trim(stream_get_contents($stream))));
         fclose($stream);
-        $this->assertCount(7, $records);
+        $this->assertCount(8, $records);
         $this->assertSame(['db-index', 'sql'], array_column(array_slice($records, 0, 2), 'stage'));
-        $this->assertSame($warnings, array_slice($records, 2, 4));
-        $this->assertSame($complete, $records[6]);
+        $this->assertSame($warnings, array_slice($records, 2, 5));
+        $this->assertSame($complete, $records[7]);
     }
 
     public function testPushProgressPrintsEachStageOnceWithoutItsCounters(): void
@@ -178,6 +179,115 @@ final class CompactProgressOutputTest extends TestCase {
             $this->assertSame('stage', $record['event']);
             $this->assertArrayNotHasKey('progress', $record);
         }
+    }
+
+    /** @dataProvider counterEvents */
+    public function testCompactSamplesChangedCountersWithoutPerFileOrTableDetails(string $command_name, string $phase, string $type): void
+    {
+        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files');
+        $command = $client->get_state()->active_resumable_command;
+        $command->command_name = $command_name;
+        $command->completion_state = 'in_progress';
+        $command->current_stage = $phase;
+        $stream = fopen('php://memory', 'w+b');
+        ( new \ReflectionProperty($client, 'progress_fd') )->setValue($client, $stream);
+        ( new \ReflectionProperty($client, 'progress_output_mode') )->setValue($client, 'compact');
+        $last_update = new \ReflectionProperty($client, 'last_compact_progress_time');
+        $event = [
+            'command' => $command_name, 'phase' => $phase, 'status' => 'in_progress',
+            'path' => '/uploads/first.jpg', 'bytes_received' => 123,
+            'progress' => [
+                'items' => ['unit' => 'files', 'done' => 1, 'total' => 20],
+                'bytes' => ['done' => 100, 'total' => 2000],
+                'current_file' => ['path_b64' => base64_encode('/uploads/first.jpg'), 'bytes_done' => 100, 'bytes_total' => 200],
+                'current_table' => ['name' => 'wp_posts', 'rows_done' => 1, 'rows_total' => 20, 'rows_total_is_estimate' => true],
+            ],
+        ];
+        if ($type === 'heartbeat') {
+            $event['heartbeat'] = true;
+        } else {
+            $event['type'] = $type;
+        }
+        $client->output_progress($event, true);
+        $stage_end = ftell($stream);
+        $event['message'] = 'Processing /uploads/private.jpg';
+        $event['progress']['bytes']['done'] = 200;
+        $last_update->setValue($client, hrtime(true) / 1e9 - 29);
+        $client->output_progress($event, true);
+        $this->assertSame($stage_end, ftell($stream), 'Forced events still wait for the compact interval.');
+        $last_update->setValue($client, hrtime(true) / 1e9 - 31);
+        $client->output_progress($event, true);
+        $this->assertGreaterThan($stage_end, ftell($stream), 'Hidden changes must reach the next counter update.');
+        $heartbeat_end = ftell($stream);
+        $last_update->setValue($client, hrtime(true) / 1e9 - 31);
+        $event['progress']['current_file']['path_b64'] = base64_encode('/uploads/second.jpg');
+        $event['progress']['current_table']['name'] = 'wp_options';
+        $client->output_progress($event, true);
+        $this->assertSame($heartbeat_end, ftell($stream), 'Detail changes alone must not produce a heartbeat.');
+        $event['progress']['items']['done'] = 2;
+        $client->output_progress($event);
+        $this->assertGreaterThan($heartbeat_end, ftell($stream));
+        $heartbeat_end = ftell($stream);
+        $event['progress']['bytes']['done'] = 300;
+        $client->output_progress($event, true);
+        $this->assertSame($heartbeat_end, ftell($stream), 'Each printed heartbeat starts a new interval.');
+        rewind($stream);
+        $records = array_map(static function (string $line): array {
+            return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+        }, explode("\n", trim(stream_get_contents($stream))));
+        fclose($stream);
+        $this->assertCount(3, $records);
+        $this->assertSame([
+            'heartbeat' => true, 'command' => $command_name, 'phase' => $phase,
+            'progress' => [
+                'items' => ['unit' => 'files', 'done' => 1, 'total' => 20],
+                'bytes' => ['done' => 200, 'total' => 2000],
+                'current_file' => null, 'current_table' => null,
+            ],
+            'schema_version' => 1,
+        ], $records[1]);
+        $this->assertSame(2, $records[2]['progress']['items']['done']);
+    }
+
+    public static function counterEvents(): array
+    {
+        return [
+            'file counters' => ['files-pull', 'fetch', 'file_progress'],
+            'receive heartbeat' => ['files-pull', 'fetch', 'heartbeat'],
+            'push counters' => ['files-push', 'pushing_paths', 'push_progress'],
+            'database counters' => ['db-pull', 'sql', 'progress'],
+        ];
+    }
+
+    public function testStageChangesRestartTheCompactInterval(): void
+    {
+        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files');
+        $stream = fopen('php://memory', 'w+b');
+        ( new \ReflectionProperty($client, 'progress_fd') )->setValue($client, $stream);
+        ( new \ReflectionProperty($client, 'progress_output_mode') )->setValue($client, 'compact');
+        $last_update = new \ReflectionProperty($client, 'last_compact_progress_time');
+        $event = [
+            'type' => 'push_progress', 'command' => 'files-push', 'phase' => 'planning', 'status' => 'in_progress',
+            'progress' => ['bytes' => ['done' => 100, 'total' => null]],
+        ];
+        $client->output_progress($event);
+        $last_update->setValue($client, hrtime(true) / 1e9 - 31);
+        $event['phase'] = 'pushing_paths';
+        $client->output_progress($event);
+        $stage_end = ftell($stream);
+        $event['progress']['bytes']['done'] = 200;
+        $client->output_progress($event, true);
+        $this->assertSame($stage_end, ftell($stream), 'A stage change must not be followed immediately by a heartbeat.');
+        $last_update->setValue($client, hrtime(true) / 1e9 - 31);
+        $client->output_progress($event);
+        rewind($stream);
+        $records = array_map(static function (string $line): array {
+            return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+        }, explode("\n", trim(stream_get_contents($stream))));
+        fclose($stream);
+        $this->assertCount(3, $records);
+        $this->assertSame(['planning', 'pushing_paths'], array_column($records, 'stage'));
+        $this->assertTrue($records[2]['heartbeat']);
     }
 
     /**

@@ -498,6 +498,9 @@ Like every `ImportClient` command, files-push accepts
 terminal progress when its output stream is a TTY and JSONL otherwise. `tty`
 and `jsonl` force the corresponding presentation. `compact` prints stage changes,
 command results, warnings, and errors without saving the omitted records.
+Within a stage, it prints changed item and byte counters at most once every
+30 seconds, without per-file details. These updates require an existing progress
+event; there is no separate timer that prints while a request is blocked.
 `progress.json` snapshots and `audit.log` are unchanged. These modes are not
 stored in sender state and cannot be combined with `--verbose`.
 

@@ -443,6 +443,10 @@ class ImportClient
 
     /** @var array{string|null, string|null}|null Last command and stage printed in compact mode. */
     private ?array $last_compact_stage = null;
+    /** Item and byte counters at the last compact update or stage change. */
+    private array $last_compact_counters = [];
+    /** Monotonic seconds at the last compact update or stage change. */
+    private float $last_compact_progress_time = 0;
 
     /** @var TerminalProgress Renders progress and lifecycle output to the terminal. */
     private TerminalProgress $progress;
@@ -948,6 +952,8 @@ class ImportClient
         // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         $this->progress_output_mode = $progress_output_mode;
         $this->last_compact_stage = null;
+        $this->last_compact_counters = [];
+        $this->last_compact_progress_time = 0;
         $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
 
         // Local runtime cleanup is recorded in pull state. Read it for diff
@@ -13278,7 +13284,7 @@ class ImportClient
      * Suppressed when the terminal presentation is active without verbose logs.
      *
      * @param array $data Progress data to output
-     * @param bool $force Force output regardless of throttle
+     * @param bool $force Bypass ordinary JSONL throttling, not compact filtering.
      */
     public function output_progress(array $data, bool $force = false): void
     {
@@ -13299,8 +13305,13 @@ class ImportClient
             $command = $data['command'] ?? $context['command'];
             $phase = $data['stage'] ?? $context['phase'] ?? $data['phase'] ?? null;
             $stage = [$command, $phase];
+            $now = hrtime(true) / 1e9;
+            $counters = [
+                'items' => $data['progress']['items'] ?? null,
+                'bytes' => $data['progress']['bytes'] ?? null,
+            ];
             $is_attention = isset($data['error']) || isset($data['error_message'])
-                || in_array($type, ['warning', 'error', 'symlink_error', 'volatile_files', 'interrupt', 'state_saved', 'state_save_error'], true);
+                || in_array($type, ['warning', 'error', 'symlink_error', 'symlink_follow_rejected', 'volatile_files', 'interrupt', 'state_saved', 'state_save_error'], true);
             // Request-completion records have a phase and counters, but no
             // command or message. Omit those from compact output.
             $is_result = in_array($status, ['complete', 'partial', 'error', 'aborted', 'failed', 'interrupted', 'restart'], true)
@@ -13313,25 +13324,42 @@ class ImportClient
                 ) {
                     return;
                 }
-                $this->last_compact_stage = $stage;
                 $force = true;
             } elseif ($status === 'starting' || isset($data['progress'])) {
                 if ($stage === $this->last_compact_stage) {
-                    return;
+                    // Compare with the last printed counters, not every hidden event.
+                    // Repeated labels and per-file/table details are not progress.
+                    if (!isset($data['progress']) || $now - $this->last_compact_progress_time < 30
+                        || $counters === $this->last_compact_counters
+                        || ( $counters['items'] === null && $counters['bytes'] === null )
+                    ) {
+                        return;
+                    }
+                    $data = [
+                        'heartbeat' => true,
+                        'command' => $command,
+                        'phase' => $phase,
+                        'progress' => $counters + ['current_file' => null, 'current_table' => null],
+                    ];
+                } else {
+                    $data = [
+                        'type' => 'lifecycle',
+                        'event' => 'stage',
+                        'command' => $command,
+                        'stage' => $phase,
+                        'message' => $status === 'starting' || $type === 'push_progress'
+                            ? ( $data['message'] ?? $phase )
+                            : "Starting {$command} stage: {$phase}",
+                    ];
                 }
-                $this->last_compact_stage = $stage;
-                $data = [
-                    'type' => 'lifecycle',
-                    'event' => 'stage',
-                    'command' => $command,
-                    'stage' => $phase,
-                    'message' => $status === 'starting' || $type === 'push_progress'
-                        ? ( $data['message'] ?? $phase )
-                        : "Starting {$command} stage: {$phase}",
-                ];
                 $force = true;
             } else {
                 return;
+            }
+            if (!$is_attention && !$is_result) {
+                $this->last_compact_stage = $stage;
+                $this->last_compact_counters = $counters;
+                $this->last_compact_progress_time = $now;
             }
         }
 
@@ -13461,7 +13489,7 @@ if (
             'type' => 'value',
             'target' => 'progress',
             'placeholder' => 'MODE',
-            'help' => 'Progress output: auto, tty, jsonl, or compact (default: auto). Compact keeps stage changes, results, warnings, and errors.',
+            'help' => 'Progress output: auto, tty, jsonl, or compact (default: auto). Compact keeps stage changes, 30-second counter updates, results, warnings, and errors.',
             'help_section' => 'global',
             'commands' => ImportClient::COMMANDS,
             'valid_values' => ImportClient::PROGRESS_OUTPUT_MODES,
@@ -14475,7 +14503,7 @@ if (
                 "  auto   Use tty on a terminal and jsonl otherwise (default)\n" .
                 "  tty    Force the single interactive progress bar\n" .
                 "  jsonl  Force one JSON object per line\n" .
-                "  compact  Print stage changes, results, warnings, and errors\n" .
+                "  compact  Print stage changes, 30-second counter updates, results, warnings, and errors\n" .
                 "Explicit tty, jsonl, and compact modes cannot be combined with --verbose.\n" .
                 "\n" .
                 "Exit outcomes:\n" .
