@@ -1,6 +1,8 @@
 <?php
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../vendor/autoload.php';
@@ -13,6 +15,117 @@ class StructuredDataUrlRewriterTest extends TestCase
         return new StructuredDataUrlRewriter($mapping ?? [
             'https://old-site.com' => 'https://new-site.com',
         ]);
+    }
+
+    /** Destination characters are escaped by the known format, not rejected globally. */
+    public function testTargetHostRestrictionsStayInTheUnknownTextFallback(): void
+    {
+        foreach (['a"b.test', "a'b.test", 'a&b.test', '[::1]', 'target.test.'] as $host) {
+            $rewriter = new StructuredDataUrlRewriter(['https://source.test' => 'https://' . $host]);
+            foreach ([
+                '<a href="https://source.test/page">link</a>',
+                '<style>a{background:url("https://source.test/page")}</style>',
+                '<div style="background:url(https://source.test/page)"></div>',
+                '<!-- wp:image {"url":"https://source.test/page"} /-->',
+            ] as $input) {
+                $output = $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
+                $parser = new StructuredBlockMarkupUrlProcessor($output);
+                $this->assertTrue($parser->next_url(), $output);
+                $this->assertSame('https://' . $host . '/page', $parser->get_raw_url(), $output);
+                $this->assertFalse($parser->next_url(), $output);
+            }
+
+            $input = '[unknown link="https://source.test/page"]';
+            $expected = $host === 'target.test.' ? '[unknown link="https://target.test./page"]' : $input;
+            $this->assertSame($expected, $rewriter->rewrite($input));
+        }
+    }
+
+    /** Each parsed field uses the original mapping once, including unchanged URLs. */
+    public function testParsedUrlsAreNotRewrittenAgainByTheTextFallback(): void
+    {
+        $rewriter = new StructuredDataUrlRewriter([
+            'https://old.example' => 'https://middle.example',
+            'https://middle.example' => 'https://last.example',
+        ]);
+        foreach ([
+            '<a href="https://old.example/page">link</a>',
+            '<img src="https://old.example/image.png" srcset="https://old.example/small.png 1x">',
+            '<div style="background:url(https://old.example/image.png)"></div>',
+            '<style>.hero{background:url(https://old.example/image.png)}</style>',
+            '<style style="background:url(https://old.example/inline.png)">.hero{background:url(https://old.example/body.png)}</style><img src="https://old.example/after.png">',
+            '<script type="application/json">{"url":"https://old.example/page"}</script>',
+            '<!-- wp:image {"url":"https://old.example/image.png","settings":{"url":"https://old.example/nested.png"}} /-->',
+        ] as $input) {
+            $output = $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
+            $this->assertStringContainsString('middle.example', $output, $input);
+            $this->assertStringNotContainsString('old.example', $output, $input);
+            $this->assertStringNotContainsString('last.example', $output, $input);
+        }
+        $input = '<a href="https://archive.example/?url=https://old.example/page">archive</a>';
+        $this->assertSame($input, $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
+    }
+
+    /** The CSS parser resolves escapes before selecting a child site or the target. */
+    public function testStyleElementUsesTheCssAndUrlParsers(): void
+    {
+        $rewriter = new StructuredDataUrlRewriter(['https://network.test' => 'https://target.test'], [
+            'https://network.test' => ['/news/'],
+        ]);
+        $input = '<style>.child{background:url("https://network\\2e test/a;b/../news/image.png")}'
+            . '.selected{background:url("https://network\\2e test/a;b/../selected/image.png")}</style>';
+        $output = $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
+        $this->assertStringContainsString('https://network.test/news/image.png', $output);
+        $this->assertStringContainsString('https://target.test/selected/image.png', $output);
+    }
+
+    /** Rejected URL fields and non-URL CSS tokens must not receive a second guess. */
+    public function testDeclaredUrlFieldsDoNotFallBackAfterParserRejection(): void
+    {
+        $rewriter = new StructuredDataUrlRewriter(['https://old.example' => 'https://new.example']);
+        foreach ([
+            '<a href="http://[invalid]/?url=https://old.example/page">link</a>',
+            '<!-- wp:image {"url":"http://[invalid]/?url=https://old.example/page"} /-->',
+            '<style>/* https://old.example/page */.a{content:"https://old.example/page"}</style>',
+            '<div style="content:\'https://old.example/page\'"></div>',
+        ] as $input) {
+            $this->assertSame($input, $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
+        }
+    }
+
+    /** CSS escapes need parsing even when HTML permits spaces around the equals sign. */
+    public function testStyleAttributeWithWhitespaceReachesTheCssParser(): void
+    {
+        $rewriter = new StructuredDataUrlRewriter(['https://network.test' => 'https://target.test']);
+        $input = '<div STYLE = "background:url(https://network\\2e test/image.png)"></div>';
+        $this->assertStringContainsString('target.test/image.png', $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
+    }
+
+    /** Mixed URL fields and nested HTML must not queue overlapping block-comment edits. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testManyBlocksDoNotDuplicateMarkupOrExhaustMemory(): void
+    {
+        // Isolate the memory ceiling from the other tests. Three blocks catch
+        // duplicated output directly; 5,000 cover one large database value.
+        ini_set('memory_limit', '64M');
+        foreach ([3, 5000] as $block_count) {
+            $content = '';
+            for ($index = 0; $index < $block_count; ++$index) {
+                $content .= '<!-- wp:divi/text ' . json_encode([
+                    'settings' => [
+                        'html' => '<a href="https://old.example/page-' . $index . '">Text ' . $index . '</a>',
+                        'label' => 'Distinct label ' . $index,
+                    ],
+                    'url' => 'https://old.example/image-' . $index,
+                ]) . ' /-->';
+            }
+            $rewriter = new StructuredDataUrlRewriter(['https://old.example' => 'https://new.example']);
+            $output = $rewriter->rewrite($content, StructuredDataUrlRewriter::BLOCK_MARKUP);
+            $this->assertSame($block_count, substr_count($output, '<!-- wp:divi/text '));
+            $this->assertSame(2 * $block_count, substr_count($output, 'new.example'));
+            $this->assertStringNotContainsString('old.example', $output);
+        }
     }
 
     // --- HTML content ---
@@ -41,6 +154,30 @@ class StructuredDataUrlRewriterTest extends TestCase
         $result = $rewriter->rewrite($input);
         $this->assertStringContainsString('https://new-site.com/page1', $result);
         $this->assertStringContainsString('https://new-site.com/page2', $result);
+    }
+
+    /** A site or media base ends at a full path segment and includes its port. */
+    public function testStructuredSourceBasesRequirePathBoundariesAndMatchingPorts(): void
+    {
+        foreach ([
+            ['https://network.test/sites/7', 'https://network.test/sites/7/photo.jpg', 'https://target.test/photo.jpg'],
+            ['https://network.test/sites/7', 'https://network.test/sites/70/photo.jpg', null],
+            ['https://network.test/sites/7', 'https://network.test/sites/700/photo.jpg', null],
+            ['https://network.test/sites/7', 'https://network.test/sites/7-other/photo.jpg', null],
+            ['https://network.test/sites/7', 'https://network.test/sites/%37/photo.jpg', 'https://target.test/photo.jpg'],
+            ['https://network.test/sites/7', 'https://network.test/sites/%37%30/photo.jpg', null],
+            ['https://network.test/sites/7', 'https://network.test:444/sites/7/photo.jpg', null],
+            ['https://network.test:443/sites/7', 'https://network.test/sites/7/photo.jpg', 'https://target.test/photo.jpg'],
+            ['https://network.test:8443/sites/7', 'https://network.test:8443/sites/7/photo.jpg', 'https://target.test/photo.jpg'],
+            ['https://network.test:8443/sites/7', 'https://network.test/sites/7/photo.jpg', null],
+            ['https://network.test/a+b', 'https://network.test/a%20b/photo.jpg', null],
+            ['https://network.test/a+b', 'https://network.test/a+b/photo.jpg', 'https://target.test/photo.jpg'],
+        ] as [$source, $input, $expected]) {
+            $rewriter = new StructuredDataUrlRewriter([$source => 'https://target.test']);
+            $this->assertSame('<img src="' . ($expected ?? $input) . '">', $rewriter->rewrite(
+                '<img src="' . $input . '">', StructuredDataUrlRewriter::BLOCK_MARKUP
+            ), $input);
+        }
     }
 
     // --- Block markup ---
@@ -459,15 +596,15 @@ class StructuredDataUrlRewriterTest extends TestCase
         );
     }
 
-    public function testLiteralDiviUrlUsesRawRewriteWithoutReencodingBlockJson(): void
+    /** Block fields retain their values through JSON and HTML parsing, not a raw-token scan. */
+    public function testLiteralDiviUrlUsesTheParsedBlockFields(): void
     {
         $rewriter = $this->createRewriter([
             'https://old-site.com' => 'https://much-longer.example',
         ]);
         $input = '<!-- wp:divi/text { "module": { "content": { "value": "<a href=\"https:\/\/old-site.com\/about\">Read</a>" } } } /-->';
-        $expected = str_replace('old-site.com', 'much-longer.example', $input);
-
-        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+        $attributes = $this->getBlockAttributes($rewriter->rewrite($input, 'block_markup'), 'wp:divi/text');
+        $this->assertSame('<a href="https://much-longer.example/about">Read</a>', $attributes['module']['content']['value']);
     }
 
     public function testNamespacedBlockAttributeStringsReuseStructuredFormatInference(): void
@@ -1049,7 +1186,7 @@ class StructuredDataUrlRewriterTest extends TestCase
             ],
             'style element body' => [
                 '<style>.hero{background-image:url(https://old-site.com/hero.jpg)}</style>',
-                '<style>.hero{background-image:url(https://new-site.com/hero.jpg)}</style>',
+                '<style>.hero{background-image:url("https://new-site.com/hero.jpg")}</style>',
             ],
             'meta content attribute' => [
                 '<meta property="og:image" content="https://old-site.com/social.jpg">',
@@ -1395,11 +1532,12 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $result);
     }
 
-    public function testKnownBlockMarkupCautiouslyRewritesEmbeddedQueryUrl(): void
+    /** A query value is not declared to contain a second URL; keep it as URL data. */
+    public function testKnownBlockMarkupKeepsEmbeddedQueryUrl(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<a href="https://webarchive.org?url=https://old-site.com/about">Archive</a>';
-        $expected = '<a href="https://webarchive.org?url=https://new-site.com/about">Archive</a>';
+        $expected = $input;
 
         $this->assertSame($expected, $rewriter->rewrite_known_block_markup_value($input));
     }
@@ -1678,7 +1816,7 @@ class StructuredDataUrlRewriterTest extends TestCase
             'protocol-relative' => ['//old-site.com/uploads/c.jpg', '/uploads/c.jpg'],
             'relative no-slash' => ['uploads/d.jpg', '/uploads/d.jpg'],
             'relative dotted'   => ['../uploads/e.jpg', '/uploads/e.jpg'],
-            'query embedded'    => ['/page?ref=https://old-site.com/x', '/page?ref=https://new-site.com/x'],
+            'query embedded'    => ['/page?ref=https://old-site.com/x', '/page?ref=https://old-site.com/x'],
         ];
 
         $rewriter = $this->createRewriter();

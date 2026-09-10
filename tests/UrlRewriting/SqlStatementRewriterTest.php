@@ -359,7 +359,7 @@ class SqlStatementRewriterTest extends TestCase
             'CSS escaped slashes, a protocol-relative URL, and entity quotes' => [
                 '<style>.hero{background:url(https\:\/\/old-site.com\/hero.jpg)} @import url(//old-site.com/theme.css);</style>'
                     . '<div style="background:url(&quot;https://old-site.com/card.jpg&quot;)">Card</div>',
-                '<style>.hero{background:url(https\:\/\/new-site.com\/hero.jpg)} @import url(//new-site.com/theme.css);</style>'
+                '<style>.hero{background:url("https://new-site.com/hero.jpg")} @import url("/theme.css");</style>'
                     . '<div style="background:url(&quot;https://new-site.com/card.jpg&quot;)">Card</div>',
             ],
             'JavaScript strings, split pieces, and a URL constructor' => [

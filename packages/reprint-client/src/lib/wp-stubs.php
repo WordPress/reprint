@@ -60,22 +60,18 @@ if (!function_exists('wp_kses_uri_attributes')) {
 
 if (!function_exists('esc_url')) {
     /**
-     * Stub: minimal URL escaping for attribute output.
-     * In our context we trust the URLs from the rewriter, so we just
-     * clean obvious bad protocols and encode entities.
+     * Escape a decoded URL for the HTML tag processor's attribute setter.
+     * URL parsing happens before this call. Quotes in a valid URL must become
+     * entities here, or they can end the surrounding HTML attribute.
      */
     function esc_url($url, $protocols = null, $_context = 'display') {
         if (empty($url)) {
             return '';
         }
         $url = str_replace(' ', '%20', $url);
-        $url = str_replace("'", '&#039;', $url);
-        if ($_context === 'display') {
-            $url = str_replace('&', '&amp;', $url);
-            // Don't double-encode
-            $url = str_replace('&amp;amp;', '&amp;', $url);
-        }
-        return $url;
+        return $_context === 'display'
+            ? htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')
+            : $url;
     }
 }
 

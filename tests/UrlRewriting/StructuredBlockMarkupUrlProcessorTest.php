@@ -404,7 +404,7 @@ class StructuredBlockMarkupUrlProcessorTest extends TestCase {
         );
     }
 
-    public function testReplacesOpaqueTokenUrlBasesAfterStructuredUrls(): void
+    public function testReplacesUnparsedAttributeValuesAfterStructuredUrls(): void
     {
         $processor = new StructuredBlockMarkupUrlProcessor(
             '<a href="https://old.example/image.jpg" data-shortcode=' .
@@ -434,7 +434,7 @@ class StructuredBlockMarkupUrlProcessorTest extends TestCase {
 
         $this->assertSame(
             '<a href="https://new.example/image.jpg" data-shortcode=' .
-            '"[video src=\'https://new.example/video.mp4\']">Link</a>',
+            '"[video src=&#039;https://new.example/video.mp4&#039;]">Link</a>',
             $processor->get_updated_html()
         );
     }
