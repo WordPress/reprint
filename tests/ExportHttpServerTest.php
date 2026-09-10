@@ -14,14 +14,14 @@ final class ExportHttpServerTest extends TestCase
         $this->assertArrayNotHasKey('_multisite', $config);
     }
 
-    /** Old clients must not import a selected dump as an ordinary site. */
+    /** Clients must support selected-site exports before reading a network source. */
     public function testMultisiteRequiresAnExplicitClientMode(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer([
             'multisite' => ['site_id' => 7, 'network_id' => 1, 'base_prefix' => 'wp_'],
         ]);
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('one-site network');
+        $this->expectExceptionMessage('supports exporting one selected network site. Update the client.');
         $server->normalize_config(['endpoint' => 'preflight']);
     }
 
