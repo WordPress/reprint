@@ -31,7 +31,10 @@ add_action('wp_footer', function () { echo '<p>LEGACY_CUSTOMER_RUNNING</p>'; });
 
     beforeAll(async () => {
         for (const site of sites) {
+            const parent = site === sites[0] ? '/nas/content/live' : '/nas/wp/www';
+            const physicalDirectory = site === sites[2] ? getSiteDir(site) : join(parent, `e2e-${site}`);
             await ensureSite(site, {
+                directory: physicalDirectory,
                 files: 'none',
                 afterCreate: async (siteDirectory) => {
                     const muPlugins = join(siteDirectory, 'wp-content/mu-plugins');
@@ -64,16 +67,12 @@ require_once __DIR__ . '/wpengine-common/bootstrap.php';
                 },
                 afterPermissions: async (siteDirectory) => {
                     if (site !== sites[2]) {
-                        // Move WordPress under /nas and leave a symlink at nginx's
-                        // configured document root. The source URL stays usable,
-                        // but preflight must discover WordPress's physical path
-                        // to identify WP Engine. The state comes from that HTTP
-                        // inspection, not a test-written host label.
-                        const parent = site === sites[0] ? '/nas/content/live' : '/nas/wp/www';
-                        const physicalDirectory = join(parent, `e2e-${site}`);
-                        execFileSync('sudo', ['mkdir', '-p', parent]);
-                        execFileSync('sudo', ['mv', siteDirectory, physicalDirectory]);
-                        execFileSync('sudo', ['ln', '-s', physicalDirectory, siteDirectory]);
+                        // Keep nginx's document root outside /nas. Preflight must
+                        // discover WordPress's physical path through HTTP, rather
+                        // than read a test-written host label. Create WordPress
+                        // at that final path before installation: moving loaded
+                        // PHP files can leave cached code using the old paths.
+                        execFileSync('sudo', ['ln', '-s', siteDirectory, getSiteDir(site)]);
                     }
                     execFileSync(process.env.E2E_WP_CLI_PHP_BINARY || 'php', [
                         '/tmp/wp-cli.phar', 'plugin', 'activate', 'portable-cache', `--path=${realpathSync(siteDirectory)}`,

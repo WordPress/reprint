@@ -167,6 +167,7 @@ function createSampleFiles(siteDir) {
  * Idempotent site creation. Creates WP files, DB via wp core install, plugin files.
  *
  * Options:
+ *   directory: absolute site directory (default: SITE_ROOT/name) — set before WordPress first loads
  *   db: 'standard' (default) | 'none' | 'custom'
  *   files: 'sample' (default) | 'none'
  *   customDb: async (dbName, conn) => {} — adds extra tables on top of real WP tables
@@ -177,7 +178,7 @@ function createSampleFiles(siteDir) {
  *   afterPermissions: async (siteDir) => {} — runs after final chown/chmod (for chmod 000 etc.)
  */
 export async function ensureSite(name, options = {}) {
-    const siteDir = join(SITE_ROOT, name);
+    const siteDir = options.directory || join(SITE_ROOT, name);
     const markerPath = join(siteDir, MARKER);
 
     if (existsSync(markerPath)) {
