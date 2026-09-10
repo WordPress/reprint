@@ -967,19 +967,11 @@ php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" \
     --fs-root="$FS_ROOT" --secret="$SECRET" --progress=compact
 ```
 
-Compact mode appends the full normal JSONL progress stream to
-`$STATE_DIR/progress.jsonl` before filtering output. The log retains the usual
-one-second counter sampling, with stage changes, warnings, and errors written
-immediately. It is separate from `audit.log`. New logs have mode `0600` because
-records can contain local paths and preflight data. Existing logs are appended,
-not truncated or rotated. After an interrupted write, the next invocation adds
-a newline so the unfinished record cannot absorb the next record. A reader may
-therefore encounter an incomplete JSON line after a killed process.
-
-A log-open or log-write failure stops the command rather than silently losing
-the full log. `progress.json` still receives its normal snapshot updates.
-Other progress modes do not create `progress.jsonl`. With `--sql-output=stdout`,
-SQL stays on stdout and compact progress goes to stderr.
+Compact mode only changes the displayed output. It does not save the omitted
+records or create `progress.jsonl`. `progress.json` still receives the latest
+progress snapshot, and `audit.log` remains available for troubleshooting.
+Use `--progress=jsonl` when the caller wants the full progress stream.
+With `--sql-output=stdout`, SQL stays on stdout and compact progress goes to stderr.
 
 The files-push terminal presentation uses one stage-weighted progress bar. The
 percentage comes first, followed by a major stage such as `Indexing`, `Pushing`,

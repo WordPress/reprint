@@ -6,7 +6,6 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
-require_once __DIR__ . '/FailingProgressLogStream.php';
 
 final class CompactProgressOutputTest extends TestCase {
     private string $root;
@@ -50,7 +49,7 @@ final class CompactProgressOutputTest extends TestCase {
         $this->remove_directory($this->root);
     }
 
-    public function testPreflightKeepsItsDataAndAppendsTheFullLogAcrossInvocations(): void
+    public function testPreflightKeepsItsDataWithoutCreatingAProgressLog(): void
     {
         $plain = $this->run_command('preflight');
         $compact = $this->run_command('preflight', ['--progress=compact']);
@@ -59,24 +58,12 @@ final class CompactProgressOutputTest extends TestCase {
         $compact_record = json_decode($compact['stdout'], true);
         $this->assertSame(array_keys($plain_record), array_keys($compact_record));
         $this->assertSame($plain_record['data'], $compact_record['data']);
-        $this->assertSame([json_decode($compact['stdout'], true)], $this->read_progress_log());
-        $this->assertSame(0600, fileperms($this->root . '/state/progress.jsonl') & 0777);
-        $this->run_command('preflight', ['--progress=compact']);
-        $this->assertCount(2, $this->read_progress_log());
+        $this->assertFileDoesNotExist($this->root . '/state/progress.jsonl');
+        $this->assertFileExists($this->root . '/state/progress.json');
+        $this->assertFileExists($this->root . '/state/audit.log');
     }
 
-    public function testNextInvocationSeparatesAnInterruptedLogRecord(): void
-    {
-        $this->run_command('preflight', ['--progress=compact']);
-        file_put_contents($this->root . '/state/progress.jsonl', '{"unfinished":', FILE_APPEND);
-        $result = $this->run_command('preflight', ['--progress=compact']);
-        $this->assertSame(0, $result['exit_code'], $result['stderr']);
-        $lines = explode("\n", trim(file_get_contents($this->root . '/state/progress.jsonl')));
-        $this->assertSame('{"unfinished":', $lines[1]);
-        $this->assertTrue(json_decode($lines[2], true, 512, JSON_THROW_ON_ERROR)['data']['ok']);
-    }
-
-    public function testCompactKeepsFilePullStagesAndLeavesAllSkipsInTheLog(): void
+    public function testCompactKeepsFilePullStagesWithoutSavingHiddenRecords(): void
     {
         $local_directory = $this->root . '/files' . realpath($this->root . '/remote');
         mkdir($local_directory, 0755, true);
@@ -87,10 +74,10 @@ final class CompactProgressOutputTest extends TestCase {
         $this->run_command('preflight');
         $result = $this->run_command('files-pull', ['--progress=compact', '--on-fs-root-nonempty=preserve-local']);
         $this->assertSame(0, $result['exit_code'], $result['stdout'] . $result['stderr']);
-        $skips = array_filter($this->read_progress_log(), static function (array $record): bool {
-            return ( $record['type'] ?? null ) === 'skip';
-        });
-        $this->assertGreaterThanOrEqual(25, count($skips));
+        $this->assertFileDoesNotExist($this->root . '/state/progress.jsonl');
+        $snapshot = json_decode(file_get_contents($this->root . '/state/progress.json'), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('complete', $snapshot['status']);
+        $this->assertStringContainsString('files-pull complete:', file_get_contents($this->root . '/state/audit.log'));
         $this->assertStringNotContainsString('"type":"skip"', $result['stdout']);
         $this->assertStringNotContainsString('"type":"file_progress"', $result['stdout']);
         $this->assertStringNotContainsString('reprint_report', $result['stdout']);
@@ -102,7 +89,7 @@ final class CompactProgressOutputTest extends TestCase {
         $this->assertSame('local', file_get_contents($local_directory . '/file-0'));
     }
 
-    public function testFullJsonlStillPrintsIndividualSkipsWithoutCreatingALog(): void
+    public function testFullJsonlStillPrintsIndividualSkips(): void
     {
         $local_directory = $this->root . '/files' . realpath($this->root . '/remote');
         mkdir($local_directory, 0755, true);
@@ -125,7 +112,7 @@ final class CompactProgressOutputTest extends TestCase {
         $this->assertNotSame(0, $result['exit_code']);
         $this->assertSame('', $result['stdout']);
         $this->assertStringContainsString('"event":"starting"', $result['stderr']);
-        $this->assertNotEmpty($this->read_progress_log());
+        $this->assertFileDoesNotExist($this->root . '/state/progress.jsonl');
     }
 
     public function testStageChangesAndWarningsBypassTheCounterThrottle(): void
@@ -138,7 +125,6 @@ final class CompactProgressOutputTest extends TestCase {
         $stream = fopen('php://memory', 'w+b');
         ( new \ReflectionProperty($client, 'progress_fd') )->setValue($client, $stream);
         ( new \ReflectionProperty($client, 'progress_output_mode') )->setValue($client, 'compact');
-        ( new \ReflectionProperty($client, 'progress_log_handle') )->setValue($client, fopen($this->root . '/state/progress.jsonl', 'ab'));
         $start = ['status' => 'starting', 'phase' => 'db-index', 'message' => 'Downloading table metadata'];
         $client->output_progress($start);
         $client->output_progress($start);
@@ -168,7 +154,6 @@ final class CompactProgressOutputTest extends TestCase {
         $this->assertSame(['db-index', 'sql'], array_column(array_slice($records, 0, 2), 'stage'));
         $this->assertSame($warnings, array_slice($records, 2, 4));
         $this->assertSame($complete, $records[6]);
-        $this->assertCount(12, $this->read_progress_log());
     }
 
     public function testPushProgressPrintsEachStageOnceWithoutItsCounters(): void
@@ -193,29 +178,6 @@ final class CompactProgressOutputTest extends TestCase {
             $this->assertSame('stage', $record['event']);
             $this->assertArrayNotHasKey('progress', $record);
         }
-    }
-
-    public function testAZeroByteLogWriteThrowsInsteadOfDiscardingTheRecord(): void
-    {
-        stream_wrapper_register('reprint-log-full', FailingProgressLogStream::class);
-        try {
-            $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files');
-            ( new \ReflectionProperty($client, 'progress_output_mode') )->setValue($client, 'compact');
-            ( new \ReflectionProperty($client, 'progress_log_handle') )->setValue($client, fopen('reprint-log-full://log', 'w'));
-            $this->expectException(\RuntimeException::class);
-            $this->expectExceptionMessage('Could not append the full progress record');
-            $client->output_progress(['type' => 'lifecycle', 'event' => 'starting'], true);
-        } finally {
-            stream_wrapper_unregister('reprint-log-full');
-        }
-    }
-
-    /** @return array[] Decoded full progress records in append order. */
-    private function read_progress_log(): array
-    {
-        return array_map(static function (string $line): array {
-            return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
-        }, explode("\n", trim(file_get_contents($this->root . '/state/progress.jsonl'))));
     }
 
     /**

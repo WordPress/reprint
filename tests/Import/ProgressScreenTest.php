@@ -32,7 +32,7 @@ class ProgressScreenTest extends TestCase {
     }
 
     /** @dataProvider progress_output_modes */
-    public function testFileProgressUsesTheSameCountersInJsonlAndProgressFile(string $mode): void
+    public function testFileProgressSnapshotKeepsCountersInBothOutputModes(string $mode): void
     {
         $client = $this->make_client();
         $command = $client->get_state()->active_resumable_command;
@@ -42,11 +42,6 @@ class ProgressScreenTest extends TestCase {
 
         $reflection = new \ReflectionClass($client);
         $reflection->getProperty('progress_output_mode')->setValue($client, $mode);
-        if ($mode === 'compact') {
-            $reflection->getProperty('progress_log_handle')->setValue(
-                $client, fopen($this->state_directory . '/progress.jsonl', 'ab')
-            );
-        }
         $list_file = $client->pull_state_directory . '/fetch-list.jsonl';
         $sizes = [1024, 0, 0, 20 * 1024 * 1024, 10 * 1024 * 1024 - 1024, 0, 0, 0, 0, 0];
         $offset = 0;
@@ -98,10 +93,7 @@ class ProgressScreenTest extends TestCase {
             $this->assertSame('stage', $jsonl_record['event']);
             $this->assertSame('fetch', $jsonl_record['stage']);
             $this->assertArrayNotHasKey('progress', $jsonl_record);
-            $jsonl_record = json_decode(
-                trim(file_get_contents($this->state_directory . '/progress.jsonl')),
-                true, 512, JSON_THROW_ON_ERROR
-            );
+            $this->assertFileDoesNotExist($this->state_directory . '/progress.jsonl');
         }
         $progress_file = json_decode(
             (string) file_get_contents($this->state_directory . '/progress.json'),
@@ -127,9 +119,11 @@ class ProgressScreenTest extends TestCase {
             ],
             'current_table' => null,
         ];
-        $this->assertSame(1, $jsonl_record['schema_version']);
-        $this->assertSame('Downloading files', $jsonl_record['message']);
-        $this->assertSame($expected, $jsonl_record['progress']);
+        if ($mode === 'jsonl') {
+            $this->assertSame(1, $jsonl_record['schema_version']);
+            $this->assertSame('Downloading files', $jsonl_record['message']);
+            $this->assertSame($expected, $jsonl_record['progress']);
+        }
         $this->assertSame([
             'schema_version',
             'step',

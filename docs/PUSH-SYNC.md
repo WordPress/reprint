@@ -497,9 +497,9 @@ Like every `ImportClient` command, files-push accepts
 `--progress=auto|tty|jsonl|compact` for one invocation. The default `auto` mode uses
 terminal progress when its output stream is a TTY and JSONL otherwise. `tty`
 and `jsonl` force the corresponding presentation. `compact` prints stage changes,
-command results, warnings, and errors while retaining the normal JSONL progress
-stream in `<state-dir>/progress.jsonl`. These modes are not stored in sender
-state and cannot be combined with `--verbose`.
+command results, warnings, and errors without saving the omitted records.
+`progress.json` snapshots and `audit.log` are unchanged. These modes are not
+stored in sender state and cannot be combined with `--verbose`.
 
 One process starts or resumes exactly one sender. Before every `next_step()` it
 checks whether another step may begin. The wall-clock admission deadline is 80
