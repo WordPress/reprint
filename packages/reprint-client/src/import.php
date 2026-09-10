@@ -11,6 +11,7 @@
  */
 
 use WordPress\DataLiberation\URL\CSSURLProcessor;
+use WordPress\DataLiberation\URL\WPURL;
 use Reprint\Importer\CurlTimeoutException;
 use Reprint\Importer\Database\DatabaseConnection;
 use Reprint\Importer\Database\MysqliDatabaseConnection;
@@ -7715,6 +7716,31 @@ class ImportClient
         $context->file_handle = null;
         $context->file_path = null;
         $context->file_ctime = null;
+        // Prepare the same replacement rules for every CSS file in this request.
+        // Longer source paths win: /assets must match before the site-wide rule.
+        foreach ($this->get_state()->css_url_mapping ?? [] as $source => $target) {
+            $source_url = WPURL::parse($source);
+            $target_url = WPURL::parse($target);
+            foreach ([$source_url, $target_url] as $mapping_url) {
+                if ($mapping_url === false || !in_array($mapping_url->protocol, ['http:', 'https:'], true)
+                    || $mapping_url->username !== '' || $mapping_url->password !== '' || $mapping_url->search !== '' || $mapping_url->hash !== '') {
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- URL values are CLI error text, not HTML.
+                    throw new InvalidArgumentException('CSS URL bases must be HTTP(S) addresses without credentials, query, or fragment: ' . $source . ' => ' . $target);
+                }
+            }
+            foreach ([$source_url->protocol, ''] as $scheme) {
+                $origin = $scheme . '//' . $source_url->host;
+                $context->css_url_replacements[] = [
+                    'origin' => $origin,
+                    'prefix' => $origin . rtrim($source_url->pathname, '/'),
+                    'target' => ( $scheme === '' ? '' : $target_url->protocol ) . '//' . $target_url->host . rtrim($target_url->pathname, '/'),
+                    'position' => count($context->css_url_replacements),
+                ];
+            }
+        }
+        usort($context->css_url_replacements, static function (array $first, array $second): int {
+            return ( strlen($second['prefix']) <=> strlen($first['prefix']) ) ?: ( $first['position'] <=> $second['position'] );
+        });
 
         // Resume recovery: if a file was partially downloaded in a previous
         // request, re-open it in append mode so continuation chunks (where
@@ -7727,8 +7753,8 @@ class ImportClient
                 $context->file_bytes_written = $tracked_bytes;
                 if ($this->get_state()->current_css_cursor !== null) {
                     $context->css_url_rewriter = CSSURLProcessor::create_for_streaming(
-                        $this->get_state()->css_url_mapping ?? [],
-                        $this->get_state()->current_css_cursor
+                        base64_decode($this->get_state()->current_css_cursor['pending_input_b64']),
+                        $this->get_state()->current_css_cursor['parser_cursor']
                     );
                 }
                 $this->audit_log(
@@ -7879,8 +7905,7 @@ class ImportClient
                         $this->get_state()->current_file = null;
                         $this->get_state()->current_file_bytes = null;
                     }
-                    $this->get_state()->current_css_cursor = $context->css_url_rewriter === null
-                        ? null : $context->css_url_rewriter->get_reentrancy_cursor();
+                    $this->get_state()->current_css_cursor = $this->get_css_download_state($context->css_url_rewriter);
                     $this->pull_index_journal->flush();
                     $this->get_state()->fetch->cursor = $cursor;
                     $this->progress_reporter->checkpoint_file_progress($this->get_state()->fetch);
@@ -7942,8 +7967,7 @@ class ImportClient
             }
             $this->get_state()->current_file = $context->file_path;
             $this->get_state()->current_file_bytes = $context->file_bytes_written;
-            $this->get_state()->current_css_cursor = $context->css_url_rewriter === null
-                ? null : $context->css_url_rewriter->get_reentrancy_cursor();
+            $this->get_state()->current_css_cursor = $this->get_css_download_state($context->css_url_rewriter);
         } else {
             $this->get_state()->current_file = null;
             $this->get_state()->current_file_bytes = null;
@@ -7952,6 +7976,34 @@ class ImportClient
         $this->save_state();
 
         return $complete;
+    }
+
+    /**
+     * Saves the CSS parser and the source bytes before the next HTTP part.
+     *
+     * A part can end after `url(https://old.exa`. The server cursor resumes
+     * after that part, while the CSS cursor resumes before its unfinished
+     * token. Keep those source bytes separately so the next process can
+     * supply them before appending the next HTTP part. Completed CSS has
+     * already been flushed; get_updated_css() contains only unprocessed bytes.
+     *
+     * @param CSSURLProcessor|null $processor Current file parser, or null for a raw download.
+     * @return array|null {
+     *     State saved with the completed part and output byte count.
+     *     @type string $parser_cursor     Opaque DataLiberation parser cursor.
+     *     @type string $pending_input_b64 Unfinished source bytes, base64 encoded for JSON.
+     * }
+     * @phpstan-return array{parser_cursor:string,pending_input_b64:string}|null
+     */
+    private function get_css_download_state(?CSSURLProcessor $processor): ?array
+    {
+        if ($processor === null) {
+            return null;
+        }
+        return [
+            'parser_cursor' => $processor->get_reentrancy_cursor(),
+            'pending_input_b64' => base64_encode($processor->get_updated_css()),
+        ];
     }
 
     /**
@@ -10810,7 +10862,7 @@ class ImportClient
             $context->file_bytes_written = 0;  // Reset byte counter for new file
             $context->css_url_rewriter = null;
             if (strtolower(pathinfo($path, PATHINFO_EXTENSION)) === 'css' && $this->get_state()->css_url_mapping) {
-                $context->css_url_rewriter = CSSURLProcessor::create_for_streaming($this->get_state()->css_url_mapping);
+                $context->css_url_rewriter = CSSURLProcessor::create_for_streaming();
             }
         }
 
@@ -10825,21 +10877,38 @@ class ImportClient
         if (( isset($chunk["body"]) && $chunk["body"] !== "" ) || ( $is_last && $context->css_url_rewriter !== null )) {
             if ($context->file_handle) {
                 $data = $chunk["body"] ?? '';
-                $output_chunks = $context->css_url_rewriter !== null
-                    ? $context->css_url_rewriter->rewrite_chunk($data, $is_last)
-                    : [$data];
                 try {
-                    foreach ($output_chunks as $output_chunk) {
-                        $bytes = fwrite($context->file_handle, $output_chunk);
-                        if ($bytes === false || $bytes !== strlen($output_chunk)) {
-                            throw new RuntimeException(
-                                "Write failed for {$context->file_path}: wrote " .
-                                ($bytes === false ? "0" : $bytes) . "/" . strlen($output_chunk) .
-                                " bytes (disk full?)"
-                            );
+                    $processor = $context->css_url_rewriter;
+                    if ($processor !== null) {
+                        $processor->append_bytes($data);
+                        if ($is_last) {
+                            $processor->input_finished();
                         }
-                        $context->file_bytes_written += $bytes;
+                        while ($processor->next_url()) {
+                            if (!$processor->is_data_uri()) {
+                                $url = $processor->get_raw_url();
+                                foreach ($context->css_url_replacements as $replacement) {
+                                    $prefix = $replacement['prefix'];
+                                    $origin_bytes = strlen($replacement['origin']);
+                                    // Hosts ignore case, paths do not. Require a path boundary
+                                    // so /blog does not rewrite /blogger or another host's suffix.
+                                    if (strlen($url) < strlen($prefix)
+                                        || strncasecmp($url, $replacement['origin'], $origin_bytes) !== 0
+                                        || substr($url, $origin_bytes, strlen($prefix) - $origin_bytes) !== substr($prefix, $origin_bytes)
+                                        || (strlen($url) > strlen($prefix) && strpos('/?#', $url[strlen($prefix)]) === false)) {
+                                        continue;
+                                    }
+                                    $processor->set_raw_url($replacement['target'] . substr($url, strlen($prefix)));
+                                    break;
+                                }
+                            }
+                            // Write each completed URL before another replacement can grow
+                            // the output buffer. An unfinished token stays in the parser.
+                            $this->write_file_chunk($context, $processor->flush_processed_css());
+                        }
+                        $data = $processor->flush_processed_css();
                     }
+                    $this->write_file_chunk($context, $data);
                 } catch (RuntimeException $error) {
                     if ($context->css_url_rewriter !== null) {
                         throw new RuntimeException("Cannot rewrite CSS file {$context->file_path}: " . $error->getMessage(), 0, $error);
@@ -10941,6 +11010,30 @@ class ImportClient
             $record['size'] = $event_size;
         }
         return $record;
+    }
+
+    /**
+     * Writes one output string and counts only bytes accepted by the file handle.
+     *
+     * The count is saved with the source cursor after a complete HTTP part.
+     * A short write fails the run; resume uses the preceding saved offsets.
+     *
+     * @param StreamingContext $context Open file and its written byte count.
+     * @param string           $bytes   Raw file bytes or completed, edited CSS.
+     */
+    private function write_file_chunk(StreamingContext $context, string $bytes): void
+    {
+        $written = fwrite($context->file_handle, $bytes);
+        if ($written === false || $written !== strlen($bytes)) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Paths and byte counts are CLI error text.
+            throw new RuntimeException(
+                "Write failed for {$context->file_path}: wrote " .
+                ( $written === false ? "0" : $written ) . "/" . strlen($bytes) .
+                " bytes (disk full?)"
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
+        $context->file_bytes_written += $written;
     }
 
     /**

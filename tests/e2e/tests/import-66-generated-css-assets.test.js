@@ -116,14 +116,14 @@ add_action('wp_enqueue_scripts', function () {
         if (temporaryDirectory) cleanupTempDir(temporaryDirectory);
     });
 
-    it('keeps both generated stylesheet files and only changes mapped URL prefixes', () => {
+    it('keeps both generated stylesheet files and rewrites mapped URL values', () => {
         assert.equal(readFileSync(join(flatDirectory, stylesheetPath), 'utf8'), stylesheet
             .replaceAll(`url("${sourceUrl}`, `url("${targetUrl}`)
             .replaceAll(`url("${escapedSourceUrl}`, `url("${targetUrl}`)
             .replaceAll(`@import "${sourceUrl}`, `@import "${targetUrl}`)
             .replaceAll(`image-set("${sourceUrl}`, `image-set("${targetUrl}`));
         assert.equal(readFileSync(join(flatDirectory, importedStylesheetPath), 'utf8'),
-            importedStylesheet.replaceAll(`//${new URL(sourceUrl).host}`, `//${new URL(targetUrl).host}`));
+            importedStylesheet.replace(`url(//${new URL(sourceUrl).host}${fontPath})`, `url("//${new URL(targetUrl).host}${fontPath}")`));
         assert.equal(readFileSync(join(getSiteDir(site), stylesheetPath), 'utf8'), stylesheet, 'Source CSS must not change');
     });
 

@@ -618,9 +618,17 @@ CSS rewriting uses the shared DataLiberation processor to find `url()`, bare
 `@import` strings, and `image-set()` strings. It matches HTTP(S) and
 protocol-relative URL bases after decoding CSS escapes. Comments, displayed
 text, relative URLs, other domains, URLs containing user information, and
-other file types stay unchanged. The unmatched URL suffix keeps its original
-spelling. Interrupted downloads retain URL context and the unfinished CSS
-token with the file cursor, so a URL split across requests is rewritten once.
+other file types stay unchanged. Replacements use the existing CSS value setter:
+it quotes unquoted URLs and writes the decoded value with CSS escaping.
+For example, `url(https://old.example/a.png)` becomes
+`url("https://new.example/a.png")`.
+
+The caller feeds `append_bytes()`, scans with `next_url()`, edits with
+`set_raw_url()`, and marks the real file end with `input_finished()`. Completed
+output is flushed after each URL. The shared parser cursor is an opaque string
+with no source bytes. An HTTP part can end inside a URL, so Reprint saves its
+unfinished bytes separately beside that cursor. Resume supplies those bytes
+before appending the next HTTP part. A URL split across requests is rewritten once.
 
 The processor keeps each unfinished CSS token and parses it again when more
 bytes arrive. A large comment or embedded image therefore increases memory

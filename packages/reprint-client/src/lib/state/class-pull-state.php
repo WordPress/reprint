@@ -86,12 +86,19 @@ class PullState
      */
     public ?array $css_url_mapping = null;
     /**
-     * Unfinished CSS token and URL context at the saved fetch cursor.
+     * CSS parser state and unfinished source bytes at the saved HTTP part.
      *
      * Restore it together with current_file_bytes, which counts transformed
      * output bytes rather than source bytes. Null means no active CSS rewriter.
      *
-     * @var array<string,mixed>|null
+     * The parser cursor contains no source bytes. The HTTP cursor starts
+     * after those bytes, so Reprint must save and supply them on resume.
+     *
+     * @var array|null {
+     *     @type string $parser_cursor     Opaque DataLiberation cursor.
+     *     @type string $pending_input_b64 Unfinished source bytes, base64 encoded for JSON.
+     * }
+     * @phpstan-var array{parser_cursor:string,pending_input_b64:string}|null
      */
     public ?array $current_css_cursor = null;
     /** @var int|null Expected SQL file size recorded for crash recovery. */

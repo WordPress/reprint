@@ -129,9 +129,14 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
         const result = runImporter(importUrl, temporaryDirectory, 'files-pull', {
             secret: getSiteSecret(site), autoResume: false, extraArgs: downloadArguments(),
         });
-        assert.equal(result.exitCode, 0, result.stdout + result.stderr);
+        assert.equal(result.exitCode, 3, result.stdout + result.stderr);
+        assert.match(result.stdout + result.stderr, /missing completion chunk/);
         assert.equal(readHookState(site).fired, true, 'The real source response must be cut off');
         assert.equal(readHookState(site).offset, 2 * chunkBytes, 'The cutoff must follow two source parts');
+        const resumed = runImporter(importUrl, temporaryDirectory, 'files-pull', {
+            secret: getSiteSecret(site), autoResume: false, extraArgs: downloadArguments(),
+        });
+        assert.equal(resumed.exitCode, 0, resumed.stdout + resumed.stderr);
         assert.equal(readFileSync(join(fsRootDir(temporaryDirectory), sourcePath), 'utf8'), sourceCss.replaceAll(sourceUrl, targetUrl));
         assert.equal(readFileSync(sourcePath, 'utf8'), sourceCss, 'Source bytes must not change');
     }, 180000);
@@ -164,7 +169,8 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
         }
         assert.ok(savedPart, `The importer must save a CSS part while the source request is open:\n${output}`);
         assert.equal(readHookState(site).offset, 2 * chunkBytes);
-        assert.ok(Buffer.from(savedPart.current_css_cursor.css.pending_b64, 'base64').toString().includes(sourceUrl.slice(0, 10)));
+        assert.equal(typeof savedPart.current_css_cursor.parser_cursor, 'string');
+        assert.ok(Buffer.from(savedPart.current_css_cursor.pending_input_b64, 'base64').toString().includes(sourceUrl.slice(0, 10)));
         assert.equal(child.kill('SIGKILL'), true);
         assert.deepEqual(await exited, [null, 'SIGKILL']);
         writeHookState(site, { action: null, fired: true, release: true });

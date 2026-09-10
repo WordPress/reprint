@@ -16,6 +16,17 @@ class StreamingContext {
      * @var \WordPress\DataLiberation\URL\CSSURLProcessor|null
      */
     public $css_url_rewriter = null;
+    /**
+     * Rules shared by CSS files in the current request, longest source first.
+     *
+     * @var array[] {
+     *     @type string $origin   Source scheme and host, or //host for protocol-relative URLs.
+     *     @type string $prefix   Source origin and path to replace.
+     *     @type string $target   Replacement base before CSS escaping.
+     *     @type int    $position Input order, used to break equal-length ties.
+     * }
+     */
+    public $css_url_replacements = [];
     public $file_path = null;
     public $file_ctime = null;
     // Remote file fields shown in progress output. The path stays base64 on

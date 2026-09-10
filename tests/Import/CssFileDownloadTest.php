@@ -80,8 +80,19 @@ class CssFileDownloadTest extends TestCase {
             . '.a{background:url(https://\\6f ld.example/photo.jpg)}'
             . '@import "https://old.example/theme.css";', 4000);
         $expected_css = str_repeat('/* https://old.example stays in this comment */'
-            . '.a{background:url(http://old.example/local/photo.jpg)}'
+            . '.a{background:url("http://old.example/local/photo.jpg")}'
             . '@import "http://old.example/local/theme.css";', 4000);
+        // Exercise matching through the real downloader, not a second test-only rewriter.
+        $css .= '@import "https://old.example/assets/theme.css";'
+            . '.font{src:url(//old.example/font.woff2)}'
+            . '.escaped{src:url(https:\\/\\/old.example\\/photo.jpg)}'
+            . '.ip{src:url(https://source.example/font.woff2)}'
+            . '.other{src:url(https://old.example.org/a),url(https://old.example:8080/a),url(../a),url(data:image/png;base64,AAAB),url(https://user@old.example/a)}';
+        $expected_css .= '@import "http://old.example/local/styles/theme.css";'
+            . '.font{src:url("//old.example/local/font.woff2")}'
+            . '.escaped{src:url("http://old.example/local/photo.jpg")}'
+            . '.ip{src:url("http://127.0.0.1:8881/font.woff2")}'
+            . '.other{src:url(https://old.example.org/a),url(https://old.example:8080/a),url(../a),url(data:image/png;base64,AAAB),url(https://user@old.example/a)}';
         file_put_contents($this->source . $relative, $css);
         file_put_contents($this->source . '/unchanged.txt', $css);
         $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/files');
@@ -110,7 +121,11 @@ class InterruptedCssDownload extends ImportClient {
 $client = new InterruptedCssDownload($argv[1], $argv[2] . '/state', $argv[2] . '/files');
 $client->run([
     'command' => $argv[3],
-    'rewrite_url' => [['https://old.example', 'http://old.example/local']],
+    'rewrite_url' => [
+        ['https://old.example', 'http://old.example/local'],
+        ['https://old.example/assets', 'http://old.example/local/styles'],
+        ['https://source.example', 'http://127.0.0.1:8881'],
+    ],
     'progress' => 'jsonl',
 ]);
 exit($client->exit_code);
