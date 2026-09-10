@@ -31,6 +31,10 @@ live progress. A caller does not need its last update to read the final error.
 }
 ```
 
+`--progress=compact --report` prints short progress followed by the final report.
+Compact mode alone does not enable reports. Neither option creates an additional
+progress log; `progress.json` snapshots and `audit.log` are unchanged.
+
 `command` is the outer command the caller invoked. Preflight inside `pull`,
 `pull-files`, or `pull-db` does not produce a separate final report.
 

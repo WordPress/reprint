@@ -70,6 +70,17 @@ final class CommandReportTest extends TestCase {
         $this->assertTrue(json_decode($records[0], true)['data']['ok']);
     }
 
+    public function testCompactAddsAReportOnlyWhenRequestedWithoutCreatingAProgressLog(): void
+    {
+        $plain = $this->run_command('preflight', ['--progress=compact']);
+        $this->assertSame(0, $plain['exit_code'], $plain['stderr']);
+        $this->assertTrue(json_decode($plain['stdout'], true, 512, JSON_THROW_ON_ERROR)['data']['ok']);
+        $result = $this->run_command('preflight', ['--progress=compact', '--report']);
+        $this->read_report($result);
+        $this->assertCount(2, explode("\n", trim($result['stdout'])));
+        $this->assertFileDoesNotExist($this->root . '/state/progress.jsonl');
+    }
+
     public function testPipelineFailureProducesOnlyTheOuterReport(): void
     {
         file_put_contents($this->root . '/response.json', json_encode([
