@@ -632,6 +632,42 @@ The command returns one of four exit codes:
 - 2: partial completion, needs re-running
 - 3: temporary transfer failure, retry the same command later
 
+If the site URL changes, pass `--new-site-url` or `--rewrite-url FROM TO`
+to the first `files-pull` as well. The download rewrites mapped URLs in `.css`
+files, including generated stylesheets under uploads. It preserves the files
+instead of flushing builder caches. `pull` applies its URL mappings to both
+CSS downloads and the database; `pull-files` also accepts these options.
+
+CSS rewriting uses the shared DataLiberation processor to find `url()`, bare
+`@import` strings, and `image-set()` strings. It matches HTTP(S) and
+protocol-relative URL bases after decoding CSS escapes. Comments, displayed
+text, relative URLs, other domains, URLs containing user information, and
+other file types stay unchanged. Replacements use the existing CSS value setter:
+it quotes unquoted URLs and writes the decoded value with CSS escaping.
+For example, `url(https://old.example/a.png)` becomes
+`url("https://new.example/a.png")`.
+
+The caller feeds `append_bytes()`, scans with `next_url()`, edits with
+`set_raw_url()`, and marks the real file end with `input_finished()`. Completed
+output is flushed after each URL. The shared parser cursor is an opaque string
+with no source bytes. An HTTP part can end inside a URL, so Reprint saves its
+unfinished bytes separately beside that cursor. Resume supplies those bytes
+before appending the next HTTP part. A URL split across requests is rewritten once.
+
+The processor keeps each unfinished CSS token and parses it again when more
+bytes arrive. A large comment or embedded image therefore increases memory
+use and saved state size; token size is not capped. Completed input is released.
+Malformed string and URL tokens stay unchanged. More than 128 nested
+`image-set()` functions are rejected. An error names the stylesheet; the
+partial file is not marked complete.
+
+File URL mappings remain bound to the saved remote index. Later downloads
+reuse them when the options are omitted. A full `pull` also checks for changed
+mappings when resume skips the completed file stage, before applying the
+database. To use different mappings, start
+with a new state directory and an empty filesystem root. A later `db-apply`
+or `db-rewrite-urls` does not change files already downloaded.
+
 #### Step 5 — Apply the database with domain rewriting.
 
 If the site's domain is changing (e.g. migrating from `https://old-site.com`

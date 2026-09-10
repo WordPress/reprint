@@ -193,6 +193,15 @@
     "empty-geometry-cross-engine": {
       "port": 8141
     },
+    "generated-css-assets": {
+      "port": 8150
+    },
+    "css-download-failures": {
+      "port": 8151
+    },
+    "css-pipeline-resume": {
+      "port": 8152
+    },
     "wpengine-plugin-inventory": {
       "port": 8142
     },

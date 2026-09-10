@@ -69,6 +69,19 @@ class PullStateTest extends TestCase
         $this->assertSame('mirror', \PullState::from_array($array)->files_pull_mode);
     }
 
+    /** State written before CSS rewriting must resume with raw downloads, not acquire new mappings. */
+    public function testStateLoadsThePreCssCheckpointWithoutEnablingRewriting(): void
+    {
+        $data = json_decode(file_get_contents(__DIR__ . '/../fixtures/pull-state-before-css-rewriting.json'), true);
+        $this->assertArrayNotHasKey('css_url_mapping', $data);
+        $this->assertArrayNotHasKey('current_css_cursor', $data);
+        $this->assertArrayNotHasKey('include_host_plugins', $data);
+        $state = \PullState::from_array($data);
+        $this->assertSame([], $state->css_url_mapping);
+        $this->assertNull($state->current_css_cursor);
+        $this->assertFalse($state->include_host_plugins);
+    }
+
     public function testIncludeHostPluginsRoundTripsAndDefaultsForOlderState(): void
     {
         $state = new \PullState();

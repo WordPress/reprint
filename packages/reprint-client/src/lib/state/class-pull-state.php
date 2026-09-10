@@ -76,6 +76,31 @@ class PullState
     public ?string $current_file = null;
     /** @var int|null Expected bytes written to the current file. */
     public ?int $current_file_bytes = null;
+    /**
+     * URL replacements reused while this remote file index is retained.
+     *
+     * Null means no download has selected mappings yet. An empty array means
+     * copy CSS unchanged, including when resuming state from an older client.
+     *
+     * @var array<string,string>|null
+     */
+    public ?array $css_url_mapping = null;
+    /**
+     * CSS parser state and unfinished source bytes at the saved HTTP part.
+     *
+     * Restore it together with current_file_bytes, which counts transformed
+     * output bytes rather than source bytes. Null means no active CSS rewriter.
+     *
+     * The parser cursor contains no source bytes. The HTTP cursor starts
+     * after those bytes, so Reprint must save and supply them on resume.
+     *
+     * @var array|null {
+     *     @type string $parser_cursor     Opaque DataLiberation cursor.
+     *     @type string $pending_input_b64 Unfinished source bytes, base64 encoded for JSON.
+     * }
+     * @phpstan-var array{parser_cursor:string,pending_input_b64:string}|null
+     */
+    public ?array $current_css_cursor = null;
     /** @var int|null Expected SQL file size recorded for crash recovery. */
     public ?int $sql_bytes = null;
     /** @var int SQL statements counted while streaming db.sql. */
@@ -123,7 +148,15 @@ class PullState
         $state = new self();
         // State written before the host-plugin setting existed used automatic
         // cleanup. Keep that behavior when resuming those imports.
-        $data += ['files_pull_mode' => 'catch-up', 'include_host_plugins' => false];
+        // State from clients predating CSS rewriting has neither CSS field.
+        // An empty mapping keeps those downloads byte-for-byte copies. Starting
+        // rewriting on resume could otherwise join raw and rewritten file bytes.
+        $data += [
+            'files_pull_mode' => 'catch-up',
+            'include_host_plugins' => false,
+            'css_url_mapping' => [],
+            'current_css_cursor' => null,
+        ];
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
         $state->preflight = $data['preflight'];
@@ -152,6 +185,8 @@ class PullState
         $state->fetch = FetchListProgressState::from_array($data['fetch']);
         $state->current_file = $data['current_file'];
         $state->current_file_bytes = $data['current_file_bytes'];
+        $state->css_url_mapping = $data['css_url_mapping'];
+        $state->current_css_cursor = $data['current_css_cursor'];
         $state->sql_bytes = $data['sql_bytes'];
         $state->sql_statements_counted = $data['sql_statements_counted'];
         $state->apply = DatabaseApplyCommandState::from_array($data['apply']);
@@ -259,6 +294,8 @@ class PullState
             'fetch' => $this->fetch->to_array(),
             'current_file' => $this->current_file,
             'current_file_bytes' => $this->current_file_bytes,
+            'css_url_mapping' => $this->css_url_mapping,
+            'current_css_cursor' => $this->current_css_cursor,
             'sql_bytes' => $this->sql_bytes,
             'sql_statements_counted' => $this->sql_statements_counted,
             'apply' => $this->apply->to_array(),
