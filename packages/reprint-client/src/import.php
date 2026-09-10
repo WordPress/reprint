@@ -2894,7 +2894,7 @@ class ImportClient
             $context->file_path = null;
             $context->file_ctime = null;
 
-            $context->on_chunk = function ($chunk) use ($path, $context, &$downloaded) {
+            $context->on_chunk = function ($chunk) use ($path, $dir_files, $context, &$downloaded) {
                 $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
                 if ($chunk_type === "file") {
@@ -2902,6 +2902,13 @@ class ImportClient
                     $remote_absolute_path = base64_decode($raw, true);
                     if ($remote_absolute_path === false || $remote_absolute_path === "") {
                         return;
+                    }
+
+                    // The requested paths also come from the source's preflight response.
+                    assert_valid_path($remote_absolute_path, "remote runtime file path");
+                    if (!in_array($remote_absolute_path, $dir_files, true)) {
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This exception is logged as CLI text.
+                        throw new \RuntimeException("The source returned an unrequested runtime file: {$remote_absolute_path}");
                     }
 
                     $is_first = ($chunk["headers"]["x-first-chunk"] ?? "0") === "1";
@@ -2942,7 +2949,7 @@ class ImportClient
 
             try {
                 $this->fetch_streaming($url, null, $context, $post_data, "file_fetch");
-            } catch (\RuntimeException $e) {
+            } catch (\RuntimeException | \InvalidArgumentException $e) {
                 $this->audit_log(
                     "Fetch failed for directory {$directory} (non-fatal): " .
                         substr($e->getMessage(), 0, 200),
