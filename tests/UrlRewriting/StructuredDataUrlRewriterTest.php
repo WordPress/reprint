@@ -1332,7 +1332,7 @@ class StructuredDataUrlRewriterTest extends TestCase
             ],
             'IPv4 address' => [
                 '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
-                '<a href="https://192.0.2.1/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://192.0.2.1/media/image.jpg">Image</a>[vc_video link="https:\/\/192.0.2.1\/media\/video.mp4"]',
                 ['https://old-site.com' => 'https://192.0.2.1'],
             ],
             'IPv6 address' => [

@@ -72,8 +72,8 @@ class CautiousURLBaseRewriteMapping {
                 $hosts[] = $parsed->host;
                 $hosts[] = $authority;
             }
-            foreach (array_unique($hosts) as $host) {
-                if ($path_set !== []) {
+            if ($path_set !== []) {
+                foreach (array_unique($hosts) as $host) {
                     $this->excluded_paths[$host] = [
                         'paths' => isset($this->excluded_paths[$host])
                             ? $this->excluded_paths[$host]['paths'] + $path_set : $path_set,
