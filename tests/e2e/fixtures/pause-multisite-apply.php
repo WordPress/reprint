@@ -28,5 +28,5 @@ $reprint_client->run([
     'include_host_plugins' => false,
     'target_engine' => 'mysql', 'target_host' => '127.0.0.1',
     'target_user' => 'e2e_admin', 'target_pass' => 'e2e_password', 'target_db' => $argv[4],
-    'new_site_url' => 'http://localhost:9247', 'site_admin' => 'shared',
+    'new_site_url' => $argv[8], 'site_admin' => 'shared',
 ]);
