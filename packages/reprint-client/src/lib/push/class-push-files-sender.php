@@ -257,6 +257,7 @@ final class PushFilesSender
      *     @type string                  $document_root           Required remote absolute document root.
      *     @type string                  $push_state_directory    Required local push state directory.
      *     @type string                  $remote_reprint_api_url  Required remote Reprint API URL.
+     *     @type array<string,string>    $request_context_headers Required header-name-to-value map selected by ImportClient.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
      *     @type string[]                $excluded_paths          Additional document-root-relative paths this push must not change. Default empty.
      *     @type bool                    $allow_http              Explicit plain-HTTP opt-in. Default false.
@@ -384,6 +385,7 @@ final class PushFilesSender
 
         $push_stream_client_options = [
             'remote_reprint_api_url' => $options['remote_reprint_api_url'] ?? null,
+            'request_context_headers' => $options['request_context_headers'] ?? null,
             'hmac_client' => $options['hmac_client'] ?? null,
             'allow_http' => $options['allow_http'] ?? false,
         ];
