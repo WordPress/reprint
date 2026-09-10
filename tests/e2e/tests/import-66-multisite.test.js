@@ -127,11 +127,11 @@ define('BLOG_ID_CURRENT_SITE', 1);
                 assert.equal(Number(comment.user_id), fixture.users.commenter);
                 const [[term]] = await imported.query(`SELECT m.meta_value FROM \`${selected.prefix}term_relationships\` r JOIN \`${selected.prefix}term_taxonomy\` t USING (term_taxonomy_id) JOIN \`${selected.prefix}termmeta\` m USING (term_id) WHERE r.object_id=100 AND m.meta_key='site_marker'`);
                 assert.equal(term.meta_value, `site-${selectedId}`);
-                // /sibling is outside /shop, but inside the main site's root base.
-                // URL rules do not read the site directory to identify nested sites.
-                const siblingOrigin = selectedId === 1 ? targetUrl : `http://127.0.0.1:${sourcePort}`;
+                // The main site's root also contains /sibling. Its saved path
+                // set keeps those links remote without adding rewrite rules.
+                const siblingOrigin = `http://127.0.0.1:${sourcePort}`;
                 assert.ok(post.post_content.includes(`${siblingOrigin}/sibling/`));
-                const relativeOrigin = selectedId === 1 ? '' : siblingOrigin;
+                const relativeOrigin = siblingOrigin;
                 assert.ok(post.post_content.includes(`href="${relativeOrigin}/sibling/?p=100"`));
                 assert.ok(post.post_content.includes('href="/local-page"'));
             } finally {
