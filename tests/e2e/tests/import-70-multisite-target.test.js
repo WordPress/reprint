@@ -441,7 +441,7 @@ describe('Pull a selected site into a fresh single site', () => {
         try {
             await connection.query(`CREATE DATABASE \`${database}\``);
             clientProcess = startClient([join(import.meta.dirname, '../fixtures/pause-multisite-apply.php'),
-                clientPath, url, directory, database, 'database-cleanup', 'after', marker]);
+                clientPath, url, directory, database, 'database-cleanup', 'after', marker, targetUrl]);
             for (let attempt = 0; attempt < 600 && !existsSync(marker); ++attempt) {
                 if (clientProcess.child.exitCode !== null || clientProcess.child.signalCode !== null) break;
                 await sleep(100);
