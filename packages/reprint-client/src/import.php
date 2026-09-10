@@ -2700,7 +2700,7 @@ class ImportClient
         // example.com (the hostname, without scheme, port, or path), not the full
         // site URL, with the decoded server copy. Hostinger's plain-domain
         // replacement leaves the base64 value unchanged.
-        $domain_error = null;
+        $preflight_error = null;
         $wordpress = null;
         if (is_array($payload)) {
             $wordpress = $payload["database"]["wp"] ?? null;
@@ -2717,21 +2717,44 @@ class ImportClient
                 ? base64_decode($encoded_domain, true)
                 : false;
             if (!is_string($plain_domain) || $plain_domain === "") {
-                $domain_error = "The preflight response contains a WordPress home URL without a valid domain: "
+                $preflight_error = "The preflight response contains a WordPress home URL without a valid domain: "
                     . json_encode($home) . ".";
             } elseif ($decoded_domain === false || $decoded_domain === "") {
-                $domain_error = "The preflight response contains an invalid base64 WordPress home domain: "
+                $preflight_error = "The preflight response contains an invalid base64 WordPress home domain: "
                     . json_encode($encoded_domain) . ".";
             } elseif ($plain_domain !== $decoded_domain) {
-                $domain_error = "The preflight response changed the site domain from "
+                $preflight_error = "The preflight response changed the site domain from "
                     . "'{$decoded_domain}' to '{$plain_domain}'. A host response filter likely rewrote the response body.";
             }
         }
-        if ($domain_error !== null && is_array($payload)) {
+        if ($preflight_error === null && !empty($wordpress['multisite']['enabled'])) {
+            $preflight_error = $this->get_multisite_preflight_error($wordpress['multisite']['selection'] ?? null);
+        }
+        if ($preflight_error !== null && is_array($payload)) {
             // Keep the response available for diagnosis, but mark it failed so
-            // pulls stop instead of downloading with rewritten URLs.
+            // pulls stop instead of using rejected source metadata.
             $payload["ok"] = false;
-            $payload["error"] = $domain_error;
+            $payload["error"] = $preflight_error;
+        }
+
+        $nested_site_paths_file = null;
+        if ($preflight_error === null && !empty($wordpress['multisite']['enabled'])
+            && isset($wordpress['multisite']['selection']['nested_site_paths'])) {
+            // Progress saves must not encode and write a million paths again.
+            // Publish this immutable list before the small preflight record.
+            // A stopped write leaves the preceding preflight/list pair usable;
+            // a later preflight with different paths gets a different file.
+            $paths_json = json_encode($wordpress['multisite']['selection']['nested_site_paths'], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+            $nested_site_paths_file = 'multisite-paths-' . hash('sha256', $paths_json) . '.json';
+            $path = wp_join_unix_paths($this->pull_state_directory, $nested_site_paths_file);
+            if (!is_file($path)) {
+                if (file_put_contents($path . '.tmp', $paths_json) !== strlen($paths_json) || !rename($path . '.tmp', $path)) {
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, not HTML.
+                    throw new RuntimeException('Cannot save multisite child paths to ' . $path . '.');
+                }
+            }
+            unset($paths_json, $wordpress, $result['json'], $result['body']);
+            unset($payload['database']['wp']['multisite']['selection']['nested_site_paths']);
         }
 
         $entry = [
@@ -2741,8 +2764,9 @@ class ImportClient
             "elapsed" => (float) ($result["elapsed"] ?? 0),
             "ok" => is_array($payload) ? ($payload["ok"] ?? null) : null,
             "data" => $payload,
-            "error" => $domain_error ?? $result["error"] ?? null,
-            "error_code" => $domain_error !== null ? "PREFLIGHT_FAILED" : ( $result["error_code"] ?? null ),
+            "nested_site_paths_file" => $nested_site_paths_file,
+            "error" => $preflight_error ?? $result["error"] ?? null,
+            "error_code" => $preflight_error !== null ? "PREFLIGHT_FAILED" : ( $result["error_code"] ?? null ),
             "response_body_preview" => $payload === null && isset($result["body"])
                 ? substr((string) $result["body"], 0, 200)
                 : null,
@@ -2763,7 +2787,7 @@ class ImportClient
             $this->get_state()->remote_protocol_version = null;
         }
 
-        if ($domain_error !== null) {
+        if ($preflight_error !== null) {
             $this->save_state();
             $this->audit_log(
                 "PREFLIGHT RESULT | " . json_encode($entry),
@@ -2826,6 +2850,66 @@ class ImportClient
         $this->fetch_runtime_files();
 
         $this->apply_reported_request_body_limit();
+    }
+
+    /**
+     * Check selected-site metadata at the HTTP response boundary, before saving
+     * it as a usable preflight. Old sources without nested_site_paths still
+     * work, but cannot protect child-site links below the selected URL base.
+     *
+     * @param mixed $selection Decoded database.wp.multisite.selection from JSON.
+     * @return string|null The first invalid field, or null when the response is usable.
+     */
+    private function get_multisite_preflight_error($selection): ?string
+    {
+        if (!is_array($selection)) {
+            return 'The preflight response lacks a multisite selection object. Update the remote Reprint Server.';
+        }
+        foreach (['site_id', 'network_id'] as $field) {
+            $value = $selection[$field] ?? null;
+            // JSON IDs must be integers, not floats or strings that PHP can cast.
+            if (!is_int($value) || $value < 1) {
+                return 'The preflight multisite ' . $field . ' must be a positive integer; received ' . json_encode($value) . '.';
+            }
+        }
+        $prefix = $selection['base_prefix'] ?? null;
+        // This is WordPress's wpdb::set_prefix() alphabet, not MySQL's identifier
+        // grammar. It also excludes SQL quote bytes before table names are built.
+        if (!is_string($prefix) || preg_match('/\A[A-Za-z0-9_]+\z/', $prefix) !== 1) {
+            return 'The preflight multisite base_prefix must contain only ASCII letters, digits and underscores; received ' . json_encode($prefix) . '.';
+        }
+        foreach (['home_url', 'site_url', 'content_url', 'uploads_url', 'network_content_url'] as $field) {
+            $value = $selection[$field] ?? null;
+            $url = is_string($value) ? WPURL::parse($value) : false;
+            // Keep the source spelling: it must match URLs in the dump.
+            // WHATWG also accepts https:example.test; source bases need ://.
+            if (!$url || !in_array($url->protocol, ['http:', 'https:'], true)
+                || stripos($value, $url->protocol . '//') !== 0
+                || $url->username !== '' || $url->password !== ''
+                || strpbrk($url->href, '?#') !== false) {
+                return 'The preflight multisite ' . $field . ' must contain HTTP(S) URLs without credentials, queries or fragments; received ' . json_encode($value) . '.';
+            }
+        }
+        if (array_key_exists('nested_site_paths', $selection)) {
+            if (!is_array($selection['nested_site_paths'])) {
+                return 'The preflight multisite nested_site_paths must be an object of source origins and path lists.';
+            }
+            foreach ($selection['nested_site_paths'] as $origin => $paths) {
+                $url = is_string($origin) ? WPURL::parse($origin) : false;
+                if (!$url || !in_array($url->protocol, ['http:', 'https:'], true)
+                    || stripos($origin, $url->protocol . '//') !== 0
+                    || $url->username !== '' || $url->password !== '' || $url->pathname !== '/'
+                    || strpbrk($url->href, '?#') !== false || !is_array($paths)) {
+                    return 'The preflight multisite nested_site_paths requires an HTTP(S) origin and a path list; received origin ' . json_encode($origin) . '.';
+                }
+                foreach ($paths as $path) {
+                    if (!is_string($path) || $path === '' || $path[0] !== '/') {
+                        return 'Each preflight multisite nested_site_paths entry must start with /; received ' . json_encode($path) . '.';
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -3020,7 +3104,8 @@ class ImportClient
 
     /**
      * Assert that a preflight has already been run and stored in state.
-     * All commands except preflight/preflight-assert call this before starting work.
+     * Commands which use saved source data must reject a failed report. Local
+     * SQL commands can run without preflight, but cannot use a rejected report.
      */
     private function require_preflight(): void
     {
@@ -5010,6 +5095,7 @@ class ImportClient
             );
         }
 
+        $this->require_preflight();
         $preflight_data = $entry["data"];
         $webhost = $this->get_state()->webhost ?? "other";
 
@@ -6571,6 +6657,11 @@ class ImportClient
      */
     private function resolve_new_site_url_option(array &$options): void
     {
+        // Local SQL commands can run without preflight, but cannot use a
+        // rejected saved report even when URL mappings were given explicitly.
+        if ($this->get_state()->preflight_record() !== null) {
+            $this->require_preflight();
+        }
         if (empty($options["new_site_url"])) {
             return;
         }
@@ -6956,6 +7047,7 @@ class ImportClient
             $this->get_state()->active_resumable_command->remote_cursor = null;
             $this->get_state()->apply = new DatabaseApplyCommandState();
             $this->get_state()->apply->remote_paths_removed_from_local_site = $apply_state->remote_paths_removed_from_local_site;
+            $this->get_state()->apply->nested_site_paths_file = $this->get_state()->preflight_record()['nested_site_paths_file'] ?? null;
             if (!empty($url_mapping)) {
                 $this->get_state()->apply->rewrite_url = $url_mapping;
             }
@@ -6988,7 +7080,7 @@ class ImportClient
         if (!empty($url_mapping)) {
             $table_prefix = $this->get_state()->get('preflight.database.wp.table_prefix');
             $stmt_rewriter = new SqlStatementRewriter(
-                new StructuredDataUrlRewriter($url_mapping),
+                new StructuredDataUrlRewriter($url_mapping, $this->load_multisite_nested_site_paths()),
                 $table_prefix,
             );
             $this->audit_log(
@@ -7312,6 +7404,28 @@ class ImportClient
         $this->progress->show_lifecycle_line(
             "db-apply complete ({$statements_executed} statements executed)\n",
         );
+    }
+
+    /**
+     * Load child-site paths once when opening a database rewrite operation.
+     * Progress records retain the file name, not this list. A new PHP process
+     * reads the same saved list on resume, without asking WordPress again.
+     *
+     * @return array<string, string[]> Source HTTP(S) origin => child-site paths.
+     */
+    private function load_multisite_nested_site_paths(): array
+    {
+        $filename = $this->get_state()->apply->nested_site_paths_file;
+        if ($filename === null) {
+            return [];
+        }
+        $path = wp_join_unix_paths($this->pull_state_directory, $filename);
+        $json = file_get_contents($path);
+        if ($json === false) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, not HTML.
+            throw new RuntimeException('Cannot read the saved multisite child paths at ' . $path . '.');
+        }
+        return json_decode($json, true, 512, JSON_THROW_ON_ERROR);
     }
 
     /** Returns progress-screen counters for the SQL apply phase. */

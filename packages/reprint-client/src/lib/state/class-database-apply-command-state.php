@@ -18,6 +18,14 @@ class DatabaseApplyCommandState {
     /** @var array<string,string>|null URL rewrite map selected for db-apply. */
     public ?array $rewrite_url = null;
 
+    /**
+     * Immutable child-site path file selected when apply starts. A separate
+     * preflight may find new sites, but must not change an unfinished SQL apply.
+     *
+     * @var string|null
+     */
+    public ?string $nested_site_paths_file = null;
+
     /** @var string|null Runtime target database engine: mysql or sqlite. */
     public ?string $target_engine = null;
 
@@ -49,10 +57,12 @@ class DatabaseApplyCommandState {
     public static function from_array(array $data): self
     {
         $state = new self();
+        $data += ['nested_site_paths_file' => null];
         \reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->statements_executed = $data['statements_executed'];
         $state->bytes_read = $data['bytes_read'];
         $state->rewrite_url = $data['rewrite_url'];
+        $state->nested_site_paths_file = $data['nested_site_paths_file'];
         $state->target_engine = $data['target_engine'];
         $state->target_db = $data['target_db'];
         $state->target_host = $data['target_host'];
@@ -70,6 +80,7 @@ class DatabaseApplyCommandState {
             'statements_executed' => $this->statements_executed,
             'bytes_read' => $this->bytes_read,
             'rewrite_url' => $this->rewrite_url,
+            'nested_site_paths_file' => $this->nested_site_paths_file,
             'target_engine' => $this->target_engine,
             'target_db' => $this->target_db,
             'target_host' => $this->target_host,
