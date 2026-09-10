@@ -57,16 +57,14 @@ final class RetryLaterExitCodeTest extends TestCase {
     }
 
     /** @dataProvider temporary_failures */
-    public function testEveryRetryableFailureExitsThreeAndCountsStalledRequests(string $command, int $http_status, string $endpoint): void
+    public function testRetryableFailureExitsThreeAfterInternalRetryLimit(string $command, int $http_status, string $endpoint): void
     {
         file_put_contents($this->root . '/proxy-status', (string) $http_status);
         file_put_contents($this->root . '/proxy-endpoint', $endpoint);
-        for ($attempt = 1; $attempt <= 6; ++$attempt) {
-            $result = $this->run_command($command);
-            $this->assertSame(3, $result['exit_code'], $result['output']);
-            $this->assert_error_details($result, $attempt, $http_status > 0 ? $http_status : 200, $http_status === -1 ? 18 : null);
-            $this->assertSame($attempt, substr_count(file_get_contents($this->root . '/requests.log'), $endpoint . "\n"));
-        }
+        $result = $this->run_command($command);
+        $this->assertSame(3, $result['exit_code'], $result['output']);
+        $this->assert_error_details($result, 3, $http_status > 0 ? $http_status : 200, $http_status === -1 ? 18 : null);
+        $this->assertSame(3, substr_count(file_get_contents($this->root . '/requests.log'), $endpoint . "\n"));
 
         if ($command === 'db-index') {
             return; // This fixture has no database; the real file endpoints below can recover.
@@ -100,33 +98,34 @@ final class RetryLaterExitCodeTest extends TestCase {
         ];
     }
 
-    public function testChangingTemporaryErrorsDoesNotResetTheFailureCount(): void
+    public function testLaterRunGetsTheFullInternalRetryLimit(): void
     {
-        foreach ([520, 503, 0] as $attempt => $http_status) {
-            file_put_contents($this->root . '/proxy-status', (string) $http_status);
-            $result = $this->run_command('files-pull');
-            $this->assertSame(3, $result['exit_code'], $result['output']);
-            $this->assert_error_details($result, $attempt + 1, $http_status > 0 ? $http_status : 200);
-        }
+        file_put_contents($this->root . '/proxy-status', '503');
+
+        $first_result = $this->run_command('files-pull');
+        $this->assertSame(3, $first_result['exit_code'], $first_result['output']);
+        $this->assertSame(3, substr_count(file_get_contents($this->root . '/requests.log'), "file_index\n"));
+
+        $later_result = $this->run_command('files-pull');
+        $this->assertSame(3, $later_result['exit_code'], $later_result['output']);
+        $this->assertSame(6, substr_count(file_get_contents($this->root . '/requests.log'), "file_index\n"));
     }
 
     public function testSuccessfulIndexResetsFailureCountBeforeFileDownload(): void
     {
         file_put_contents($this->root . '/proxy-status', '520');
-        for ($attempt = 1; $attempt <= 2; ++$attempt) {
-            $result = $this->run_command('files-pull');
-            $this->assertSame(3, $result['exit_code'], $result['output']);
-            $this->assert_error_details($result, $attempt, 520);
-        }
+        $result = $this->run_command('files-pull');
+        $this->assertSame(3, $result['exit_code'], $result['output']);
+        $this->assert_error_details($result, 3, 520);
 
         file_put_contents($this->root . '/proxy-endpoint', 'file_fetch');
         $result = $this->run_command('files-pull');
         $this->assertSame(3, $result['exit_code'], $result['output']);
-        $this->assert_error_details($result, 1, 520);
+        $this->assert_error_details($result, 3, 520);
     }
 
     /** @dataProvider interrupted_endpoints */
-    public function testInterruptionAfterProgressSavesCursorAndResumes(string $endpoint): void
+    public function testInterruptionAfterProgressRetriesAndCompletes(string $endpoint): void
     {
         if ($endpoint === 'file_index') {
             for ($entry = 0; $entry < 100; ++$entry) {
@@ -136,15 +135,11 @@ final class RetryLaterExitCodeTest extends TestCase {
         file_put_contents($this->root . '/proxy-status', '-2');
         file_put_contents($this->root . '/proxy-endpoint', $endpoint);
         $result = $this->run_command('files-pull');
-        $this->assertSame(3, $result['exit_code'], $result['output']);
-        $this->assert_error_details($result, 0, 200);
-        $state_file = $this->root . '/state/remotes/' . md5($this->remote_reprint_api_url) . '/pull/state.json';
-        $state = json_decode(file_get_contents($state_file), true);
-        $this->assertNotNull($state[$endpoint === 'file_index' ? 'index' : 'fetch']['cursor']);
-
-        file_put_contents($this->root . '/proxy-status', '200');
-        $result = $this->run_command('files-pull');
         $this->assertSame(0, $result['exit_code'], $result['output']);
+        $this->assertGreaterThan(
+            1,
+            substr_count(file_get_contents($this->root . '/requests.log'), $endpoint . "\n"),
+        );
         $this->assertSame(
             file_get_contents($this->root . '/remote/example.txt'),
             file_get_contents($this->root . '/files' . $this->root . '/remote/example.txt')
@@ -195,6 +190,7 @@ final class RetryLaterExitCodeTest extends TestCase {
             if ($failures === null) {
                 $this->assertArrayNotHasKey('consecutive_failures_without_progress', $record);
             } else {
+                $this->assertSame('Reprint\\Importer\\RetryLaterException', $record['exception']);
                 $this->assertSame($failures, $record['consecutive_failures_without_progress'] ?? null, $line);
             }
             if ($curl_errno === null) {

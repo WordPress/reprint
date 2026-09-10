@@ -366,12 +366,12 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         writeHookState(site, { scan_count: 0 });
 
         const recovered = runFilesPull(mirrorTempDir, 'mirror', {
-            autoResume: true,
+            autoResume: false,
         });
         assert.equal(
             recovered.exitCode,
             0,
-            `Expected a later process to recover from the interrupted mirror pull\nstderr: ${recovered.stderr}\nstdout: ${recovered.stdout}`,
+            `Expected one process to recover from the interrupted mirror pull\nstderr: ${recovered.stderr}\nstdout: ${recovered.stdout}`,
         );
         assert.ok(
             readHookState(site).scan_count >= 5,
@@ -386,7 +386,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         assert.equal(
             recoveredState.active_resumable_command.completion_state,
             'complete',
-            'Expected the mirror pull to complete after the caller retries',
+            'Expected the mirror pull to complete after the internal retry',
         );
 
         assertTreesMatch(getSiteDir(site), localSiteRoot(mirrorTempDir), {

@@ -6,7 +6,7 @@
  * After preflight reports base64 path support, the proxy also rejects clear
  * path query values. Before forwarding each streaming endpoint, it returns two
  * potentially transient HTTP errors. The third request reaches the real E2E
- * site. The test runner resumes after each exit 3 until the pull recovers.
+ * site, so Reprint must recover without hitting its three-failure limit.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -78,7 +78,7 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         pullResult = runImporter(importUrl, outputDirectory, 'pull', {
             secret: getSiteSecret(site),
             skipPreflight: true,
-            autoResume: true,
+            autoResume: false,
             timeout: 120000,
             wallTimeout: 240000,
             extraArgs: [
@@ -240,10 +240,10 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
                 );
                 assert.ok(
                     retryLine.includes(
-                        `consecutive_failures_without_progress=${index + 1}`,
+                        `consecutive_failures_without_progress=${index + 1}/3`,
                     ),
                     `Expected ${endpoint} HTTP ${expectedStatus} to record ` +
-                    `failure ${index + 1} without progress`,
+                    `failure ${index + 1} of 3`,
                 );
                 assert.ok(
                     retryLine.includes('cursor_moved=no'),

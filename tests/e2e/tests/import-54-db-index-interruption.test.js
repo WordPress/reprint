@@ -2,8 +2,8 @@
  * Test 54: Database index response interruption.
  *
  * The source exits after sending its table-stat parts but before sending the
- * completion part. The first db-index invocation must retain partial state;
- * a later invocation resumes from the last complete table-stat part.
+ * completion part. The same db-index invocation must retry from the last
+ * complete table-stat part without duplicating rows.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -38,7 +38,7 @@ describe('Import: Database Index Response Interruption', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('first run exits retryable when the completion part is interrupted', () => {
+    it('same run retries when the completion part is interrupted', () => {
         writeTestHooks(site, [
             'function test_hook_before_completion($status, $gz, $boundary) {',
             `    if (file_exists('${hookState}')) { return; }`,
@@ -54,8 +54,8 @@ describe('Import: Database Index Response Interruption', () => {
 
         assert.equal(
             result.exitCode,
-            3,
-            `Expected exit 3 after the interrupted db-index response\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
+            0,
+            `Expected db-index to retry the interrupted response\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
         );
         assert.deepEqual(
             readHookState(site),
@@ -68,22 +68,13 @@ describe('Import: Database Index Response Interruption', () => {
         );
         assert.equal(
             state.active_resumable_command.completion_state,
-            'partial',
-            'Expected db-index to retain a partial checkpoint',
+            'complete',
+            'Expected db-index to complete after the internal retry',
         );
     });
 
-    it('resume completes without duplicating table rows', () => {
+    it('internal retry does not duplicate table rows', () => {
         removeTestHooks(site);
-
-        const result = runImporter(importUrl(), tempDir, 'db-index', {
-            secret: getSiteSecret(site),
-        });
-        assert.equal(
-            result.exitCode,
-            0,
-            `Expected db-index resume to complete\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
-        );
 
         const lines = readFileSync(
             join(tempDir, 'db-tables.jsonl'),

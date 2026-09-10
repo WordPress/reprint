@@ -16,7 +16,7 @@ require_once __DIR__ . '/class-pull-failure-reported-exception.php';
  * High-level pull commands — orchestrate lower-level commands into
  * resumable pipelines.
  *
- * Each step resumes automatically after an interrupted response (exit code 2).
+ * Each step retries automatically after a temporary interrupted response.
  * If the process is interrupted, re-running the same high-level command
  * resumes from the last completed step. Like `git pull` composes fetch +
  * merge, `pull` composes preflight → files-pull → db-pull → db-apply →
@@ -886,9 +886,9 @@ class Pull
     }
 
     /**
-     * Continue healthy partial work, resetting completion_state to
-     * "in_progress" so the handler resumes on the next call. Temporary
-     * streaming failures throw and leave the next invocation to the caller.
+     * Continue partial work, resetting completion_state to "in_progress" so
+     * the handler resumes on the next call. This includes temporary streaming
+     * failures below Reprint's no-progress retry limit.
      */
     private function run_until_complete(string $stage, callable $handler): void
     {
