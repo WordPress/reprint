@@ -121,13 +121,46 @@ final class CommandReportTest extends TestCase {
         $this->assertSame('aborted', $aborted['status']);
     }
 
-    public function testPartialDownloadIsNotReportedAsComplete(): void
+    /** @dataProvider retryable_commands */
+    public function testRetryableReportKeepsExitCodeAndStalledRequestCount(string $command): void
     {
-        $this->run_command('preflight');
-        // db-pull first saves its db-index phase and returns to the caller.
-        $result = $this->run_command('db-pull', ['--report']);
-        $report = $this->read_report($result);
-        $this->assertSame(2, $report['exit_code'], $result['stdout'] . $result['stderr']);
+        $preflight = $this->run_command('preflight');
+        $preflight_data = json_decode($preflight['stdout'], true)['data'];
+        file_put_contents($this->root . '/response.json', json_encode([
+            'http_code' => 520,
+            'body' => 'Upstream unavailable',
+            'preflight_body' => json_encode($preflight_data),
+        ]));
+        for ($attempt = 1; $attempt <= 2; ++$attempt) {
+            $report = $this->read_report($this->run_command($command, ['--report']));
+            $this->assertSame(3, $report['exit_code']);
+            $this->assertSame('error', $report['status']);
+            $this->assertSame('SERVER_ERROR', $report['error_code']);
+            $this->assertSame(520, $report['http_code']);
+            $this->assertSame($attempt, $report['consecutive_failures_without_progress']);
+            $this->assertSame($command === 'pull-files' ? 'files-pull' : null, $report['failed_stage']);
+            $this->assertArrayNotHasKey('retry_after_seconds', $report);
+        }
+    }
+
+    public static function retryable_commands(): array
+    {
+        return [['files-pull'], ['pull-files']];
+    }
+
+    public function testPartialReportIsNotReportedAsComplete(): void
+    {
+        // Check the report's exit-code mapping directly. Low-level pulls now
+        // continue through healthy phase boundaries in the same process.
+        $script = 'require $argv[1]; reprint_write_command_report("db-pull", 2, ["report" => true], null); exit(2);';
+        exec(
+            escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($script) . ' '
+                . escapeshellarg(__DIR__ . '/../../packages/reprint-client/src/import.php'),
+            $output,
+            $exit_code
+        );
+        $report = $this->read_report(['exit_code' => $exit_code, 'stdout' => implode("\n", $output), 'stderr' => '']);
+        $this->assertSame(2, $report['exit_code']);
         $this->assertSame('partial', $report['status']);
         $this->assertNull($report['error']);
     }
