@@ -254,13 +254,59 @@ It can be interrupted and resumed at any time — just re-run the same command:
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
-The command returns one of three exit codes:
+The command returns one of four exit codes:
 
 - 0: sync completed
 - 1: failure
 - 2: partial completion, needs re-running
+- 3: temporary transfer failure, retry the same command later
 
-Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
+Run again immediately after exit `2`. After exit `3`, wait before running the
+same command with the same state directory and filesystem root. Reprint keeps
+its saved progress. Exit `1` requires checking the error instead of scheduling
+an automatic retry.
+
+Every retryable streaming failure stops the current invocation with exit `3`.
+Reprint does not retry the failed request in that process or change it to exit
+`1` after repeated failures. The caller decides when to retry and when to stop.
+
+JSON error records on stdout and stderr include
+`consecutive_failures_without_progress`. The count survives separate CLI runs:
+a first stalled request reports `1`, the next reports `2`, and so on. A
+successful response or a failed response that advances the durable cursor resets
+the count to `0`. A different temporary error does not reset it. Exit `2` remains
+healthy partial completion.
+
+The records retain `error` and `error_code`, and include the original
+`exception` class, `http_code` when received, and a nonzero `curl_errno` when
+available. For example, an HTTP 520 before any transfer progress reports:
+
+```json
+{
+  "status": "error",
+  "error": "The remote server crashed (HTTP 520).\n\nThis is a problem on the remote server. Check its PHP error log for details.",
+  "error_code": "SERVER_ERROR",
+  "message": "Error: The remote server crashed (HTTP 520).\n\nThis is a problem on the remote server. Check its PHP error log for details.",
+  "exception": "Reprint\\Importer\\TransientInterruptionException",
+  "http_code": 520,
+  "consecutive_failures_without_progress": 1
+}
+```
+
+This applies to temporary streaming failures in file and database transfers,
+including those reached through `pull`, `pull-files`, and `pull-db`:
+
+- HTTP `400`, `408`, `413`, `418`, `421`, `425`, `429`, `500`, `502`, `503`,
+  `504`, and `520–524` without an explicit Reprint error.
+- Unmarked HTTP `401` or `403` after a signed request.
+- cURL timeouts, connection resets during transfer, empty or cut-short
+  responses, invalid compressed responses, and HTTP/2 or HTTP/3 stream errors.
+- Multipart responses missing their boundary or completion marker.
+
+Explicit Reprint errors (JSON containing a matching HTTP `code`) remain fatal.
+Preflight failures, DNS lookup failures, refused connections, certificate errors,
+and local errors keep their existing classification. Reprint does not suggest a
+wait time, schedule retries, or track human action.
 
 **File pull modes**
 
@@ -314,27 +360,40 @@ stay: this includes Redis Cache, WP Rocket, SiteGround's Speed and Security
 Optimizers, and Force Strong Passwords. Generic cache drop-ins are excluded only
 when current preflight paths identify WP Cloud or WP Engine.
 
-The choice is saved for that remote in the state directory. Later pulls skip
-the same plugins, `db-apply` deactivates excluded regular plugins, and
-`apply-runtime` removes their local copies without repeating the flag.
-Integrations such as Studio that need this cleanup must request it before
-starting the imported WordPress site. Targets such as wp.com can keep the
-plugins and run their own cleanup. Preserved host plugins may prevent WordPress
-from booting in an environment that lacks the source host's services.
+The pull choice is saved for that remote in the state directory. Later pulls
+use the same selection, and `db-apply` deactivates excluded regular plugins.
+`--include-host-plugins` selects preservation again. Existing state keeps its
+saved choice; only new state defaults to preservation. Changing the choice
+during an unfinished pull requires `--abort` first. Neither flag overrides
+explicit `--exclude` paths or the generated-file skip rules above.
 
-`--include-host-plugins` explicitly selects preservation again. Both flags are
-accepted by `pull`, `pull-files`, `pull-db`, `files-pull`, `db-apply`, and
-`apply-runtime`, and cannot be combined. Changing the choice during an
-unfinished pull requires `--abort` first. Neither flag overrides explicit
-`--exclude` paths or the generated-file skip rules above.
+**Local runtime cleanup is separate.** `apply-runtime` removes the listed local
+copies by default, including plugins that were downloaded by a preserving pull.
+Portable plugins stay. Pass `apply-runtime --include-host-plugins` to leave the
+local copies in place for that invocation. `apply-runtime --exclude-host-plugins`
+explicitly requests the default cleanup. Neither flag changes the saved pull
+selection, and the two flags cannot be combined.
 
-Existing state keeps its saved choice, including imports from older versions
-that excluded host plugins by default. Only new state defaults to preservation.
+The high-level `pull` command prepares a local runtime and uses this default
+cleanup regardless of its download selection. Integrations such as Studio can
+pull files unchanged, then call `apply-runtime` before starting WordPress.
+Targets such as wp.com can keep the plugins and run their own cleanup without
+calling `apply-runtime`. Preserved host plugins may prevent WordPress from
+booting without the source host's services.
+
+Runtime cleanup records its document-root-relative paths before deleting any
+local copy. `files-diff` and `files-push` exclude those paths, so a later theme
+push does not delete the source host's plugins. The record survives command
+resets, database imports, and later runtime opt-outs: skipping a later cleanup
+does not restore files already removed. Finish an interrupted files-push, or
+finish or abort an interrupted files-pull, before applying runtime cleanup.
+This protects the recorded file paths; it does not make other local runtime or
+database changes suitable for production.
+
 To fetch plugins skipped by a completed pull, start another `pull-files` with
 `--include-host-plugins`, or abort the completed `files-pull` and run it again
-with that flag. The flag cannot restore plugin activation removed by an earlier
-import. Enabling cleanup does not make the resulting local changes safe to push
-back to the source host.
+with that flag. This cannot restore plugin activation removed by an earlier
+import. Runtime setup itself does not connect to or edit the database.
 
 Mirror mode requires `--state-dir` to be outside `--fs-root`, because the state
 files must not appear in the local tree being compared. The selected mode is
@@ -516,11 +575,12 @@ environment variable). The host string also supports `host:port` and
 `host:/path/to/socket` formats (same as WordPress `DB_HOST`), but
 `--mysql-port` takes precedence when both are specified.
 
-The command returns one of three exit codes:
+The command returns one of four exit codes:
 
 - 0: sync completed
 - 1: failure
 - 2: partial completion, needs re-running
+- 3: temporary transfer failure, retry the same command later
 
 #### Step 4 — Download files delta.
 
@@ -541,11 +601,12 @@ since the initial sync, and apply that delta in the local directory:
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
-The command returns one of three exit codes:
+The command returns one of four exit codes:
 
 - 0: sync completed
 - 1: failure
 - 2: partial completion, needs re-running
+- 3: temporary transfer failure, retry the same command later
 
 If the site URL changes, pass `--new-site-url` or `--rewrite-url FROM TO`
 to the first `files-pull` as well. The download rewrites mapped URLs in `.css`
@@ -686,9 +747,9 @@ server is independent — you implement one interface without touching the other
 Currently supported source hosts: WP Cloud (with on-the-fly thumbnail
 generation for missing image sizes and auto-detection of extra directories from
 `auto_prepend_file`/`auto_append_file` INI values), WP Engine, and a generic default.
-The saved host-plugin choice described above also governs cleanup of existing
-local copies during `apply-runtime`. New imports preserve them unless
-`--exclude-host-plugins` requests cleanup.
+`apply-runtime` removes known host-plugin copies by default, independently of
+the saved download selection. Pass `apply-runtime --include-host-plugins` to
+skip that local cleanup. See the host-plugin section above for push exclusions.
 Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in
 development server, and WordPress Playground CLI.
 
@@ -759,41 +820,124 @@ Pass `--step=N` and `--steps=N` to your `import.php` calls to embed the pipeline
 the progress file. For example, a four-step pipeline would pass `--step=1 --steps=4` for the
 preflight, `--step=2 --steps=4` for db-index, and so on.
 
-The file contains a flat JSON object:
+The file uses one versioned shape for every command. Fields that do not apply
+to the current phase are `null` instead of disappearing:
 
 ```json
 {
+  "schema_version": 1,
   "step": 2,
   "steps": 4,
   "command": "files-pull",
   "status": "in_progress",
-  "phase": "index",
+  "phase": "fetch",
+  "message": "Downloading files",
+  "progress": {
+    "items": {
+      "unit": "files",
+      "done": 41,
+      "total": 83
+    },
+    "bytes": {
+      "done": 7340032,
+      "total": 52428800
+    },
+    "current_file": {
+      "path_b64": "L3dwLWNvbnRlbnQvdXBsb2Fkcy9sYXJnZS56aXA=",
+      "bytes_done": 5242880,
+      "bytes_total": 20971520
+    },
+    "current_table": null
+  },
   "error": null,
+  "error_code": null,
+  "reason": null,
+  "detail": null,
   "ts": 1707600000.123
 }
 ```
 
-| Field     | Type              | Description |
-|-----------|-------------------|-------------|
-| `step`    | `int \| null`     | Current pipeline step (1-indexed). `null` when `--step` is not passed. |
-| `steps`   | `int \| null`     | Total pipeline steps. `null` when `--steps` is not passed. |
-| `command` | `string \| null`  | Current command name (`preflight`, `files-pull`, `db-pull`, etc.). |
-| `status`  | `string`          | One of `in_progress`, `partial`, `complete`, `error`, `aborted`. |
-| `phase`   | `string \| null`  | Sub-phase within the command (e.g. `index`, `diff`, `fetch`), or `null`. Derived from the internal state's `stage` field. |
-| `error`   | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
-| `ts`      | `float`           | Unix timestamp with microsecond precision (`microtime(true)`). |
+| Field            | Type              | Description |
+|------------------|-------------------|-------------|
+| `schema_version` | `int`             | Version of this documented progress-screen shape. Currently `1`. |
+| `step`           | `int \| null`     | Current pipeline step (1-indexed). `null` when `--step` is not passed. |
+| `steps`          | `int \| null`     | Total pipeline steps. `null` when `--steps` is not passed. |
+| `command`        | `string \| null`  | Current command name (`preflight`, `files-pull`, `db-pull`, etc.). |
+| `status`         | `string`          | Command status. Common values are `in_progress`, `partial`, `complete`, `error`, and `aborted`; files-push also uses `interrupted`, `restart`, and `failed`. |
+| `phase`          | `string \| null`  | Durable phase within the command, such as `index`, `diff`, `fetch`, or `sql`. |
+| `message`        | `string \| null`  | Short action text suitable for the main progress label. Read numeric progress from `progress` instead of parsing this text. |
+| `progress`       | `object`          | Stable progress-screen counters described below. |
+| `error`          | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
+| `error_code`     | `string \| null`  | Machine-readable error code when one is available. |
+| `reason`         | `string \| null`  | Files-push terminal reason when one is available. |
+| `detail`         | `string \| null`  | Files-push terminal detail when one is available. |
+| `ts`             | `float`           | Unix timestamp with microsecond precision (`microtime(true)`). |
 
-During the file fetch phase, progress and heartbeat records also include
-structured file counters:
+`progress.items` is either `null` or `{ "unit", "done", "total" }`.
+The unit says what is counted: `files`, `tables`, `local_paths`, `records`, or
+`statements`. `total` is `null` when Reprint cannot know the total before
+finishing the work. `progress.bytes` is either `null` or `{ "done", "total" }`
+for the current byte-bounded phase. `progress.current_file` is either `null` or
+`{ "path_b64", "bytes_done", "bytes_total" }`. The path is base64 because
+filesystem names are arbitrary bytes. During a file fetch, the item and byte
+totals cover the paths selected by the current pull. A delta pull therefore
+reports only changed paths. The byte total adds regular-file content sizes;
+directories and symlinks add zero bytes.
 
-| Field         | Type           | Description |
-|---------------|----------------|-------------|
-| `files_done`  | `int`          | Files already processed (cumulative across restarts). Derived from the fetch list byte offset plus the current batch count. |
-| `files_total` | `int`          | Total non-empty entries in the fetch list. Fixed once the diff phase completes. |
+During `db-pull`, `progress.items` counts exported tables and
+`progress.current_table` reports row progress for the active table. MySQL's
+table row count is an estimate, so `rows_total_is_estimate` is always `true`.
+The exporter loads estimates with the table list, then supplies the current
+table's estimate with SQL progress. Reporting progress does not read the local
+table index or search the exporter's table list:
 
-Both fields are emitted together only when the fetch list exists — they
-are absent during the index and diff phases. `files_done` grows monotonically
-up to `files_total` and survives exit-code-2 restarts.
+```json
+{
+  "command": "db-pull",
+  "phase": "sql",
+  "message": "Downloading SQL dump",
+  "progress": {
+    "items": {
+      "unit": "tables",
+      "done": 2,
+      "total": 12
+    },
+    "bytes": {
+      "done": 500100,
+      "total": null
+    },
+    "current_file": null,
+    "current_table": {
+      "name": "wp_posts",
+      "rows_done": 500,
+      "rows_total": 12000,
+      "rows_total_is_estimate": true
+    }
+  }
+}
+```
+
+Reprint replaces `progress.json` atomically at most once per second while a
+command is active. A terminal, partial, cleared, or error state is written
+immediately. A polling UI can therefore read this file without parsing JSONL.
+The JSONL records that report screen progress carry the same `schema_version`
+and nested `progress` object, while their event-specific top-level fields stay
+available for existing consumers.
+Ordinary log events, such as a skipped path, do not replace the screen's action
+label. File counts include every processed path, including failed or skipped
+paths, directories and symlinks. Live updates and resume use the same rule.
+If a batch must be downloaded again, its old batch counts are cleared first.
+A new file reports its own path and size even after an error in the previous file.
+Completed file bytes exclude failed files and use their downloaded size, not
+the earlier index size. The existing fetch checkpoint saves completed bytes
+before and within the current batch. This keeps byte counts stable after
+resume without another file scan. Failed files or source size changes can make
+completed bytes differ from the planned byte total.
+
+Finish or abort active file downloads with the previous build before updating.
+Old checkpoints with saved fetch progress lack the completed-byte counts and
+cannot resume in this build. Cleared fetch checkpoints, including those left by
+completed pulls, load with zero completed bytes. Retained indexes are unchanged.
 
 Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl`. The
 default `auto` mode uses terminal progress when its output stream is a TTY and
@@ -822,13 +966,13 @@ offsets, target-confirmed counts and byte offsets, and phase milestones advance
 the bar. The percentage describes lifecycle progress, not elapsed time or an
 estimated completion time.
 
-These terminal-only details do not change machine output. The JSONL
-presentation emits `push_progress` records. After planning completes, those
-records, the final result, and `progress.json` include `files_done` and
-`files_total` together. `files_total` is the number of local paths selected by
-the plan; `files_done` advances only after the target confirms the request
-containing each path, and both counts survive exit-code-2 restarts. The fields
-are absent while the plan is still being built.
+The JSONL presentation emits `push_progress` records. After planning completes,
+their legacy `files_done` and `files_total` fields remain available. The same
+counts also appear in `progress.items` with the `local_paths` unit. During a
+byte-bounded files-push phase, `progress.bytes` reports the durable byte
+position and total. The final result and `progress.json` use the same nested
+progress object. Target-confirmed counts and byte positions survive
+exit-code-2 restarts.
 
 #### `<remote-state-directory>/pull/state.json` — the pull state store
 

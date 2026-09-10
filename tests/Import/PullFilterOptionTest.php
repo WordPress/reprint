@@ -870,7 +870,8 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
     }
 
-    public function testPullDerivesFlatDocumentRootFromFlattenTo(): void
+    /** @dataProvider hostPluginPullSelections */
+    public function testPullDerivesFlatDocumentRootFromFlattenTo(?bool $include_host_plugins): void
     {
         $client = new PullBridgeFakeClient($this->stateDir, $this->filesystem_root);
         $flatten_to = $this->tempDir . '/flattened-site';
@@ -882,7 +883,7 @@ class PullFilterOptionTest extends TestCase
             "flatten_to" => $flatten_to,
             "runtime" => "playground-cli",
             "start_runtime" => "none",
-        ]);
+        ] + ( $include_host_plugins === null ? [] : ['include_host_plugins' => $include_host_plugins] ));
         ob_end_clean();
 
         // The pull pipeline must hand apply-runtime a flat_document_root
@@ -890,6 +891,12 @@ class PullFilterOptionTest extends TestCase
         // flattened layout instead of the raw download tree.
         $this->assertIsArray($client->apply_runtime_options);
         $this->assertSame($flatten_to, $client->apply_runtime_options["flat_document_root"]);
+        $this->assertArrayNotHasKey('include_host_plugins', $client->apply_runtime_options);
+    }
+
+    public static function hostPluginPullSelections(): array
+    {
+        return [[null], [true], [false]];
     }
 
 }

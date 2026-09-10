@@ -14,6 +14,13 @@ final class MultipartPushStreamClientTest extends TestCase {
 
     private const SECRET = 'multipart-stream-client-test-secret';
 
+    private const REQUEST_CONTEXT_HEADERS = [
+        'User-Agent' => 'Multipart-Test/1.0',
+        'Accept-Language' => 'pl-PL,pl;q=0.9',
+        'Referer' => 'https://request-context.example/wp-admin/upload.php',
+        'X-Reprint-Test-Context' => 'forwarded',
+    ];
+
     public function testSendPartPutsMultipartBytesOnTheWireBeforeFinishRequest(): void {
         if (!function_exists('curl_init') || PHP_VERSION_ID < 80100) {
             $this->markTestSkipped('Caller-driven multipart upload requires PHP curl with CURL_READFUNC_PAUSE support.');
@@ -21,7 +28,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -50,6 +57,9 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertTrue($client->has_sent_parts());
         $received .= $this->read_available($connection);
         $this->assertStringContainsString('Content-Type: multipart/mixed; boundary=reprint-', $received);
+        $this->assertStringContainsString('X-Auth-Signature: ', $received);
+        $this->assertStringContainsString('X-Auth-Nonce: ', $received);
+        $this->assertStringContainsString('X-Auth-Timestamp: ', $received);
         $this->assertStringContainsString('X-Chunk-Type: file', $received);
         $this->assertStringContainsString("a\0b", $received, 'The raw part payload is on the network before finish_request().');
         $this->assertTrue($client->send_part([
@@ -68,7 +78,9 @@ final class MultipartPushStreamClientTest extends TestCase {
         fclose($listener);
 
         $result = $client->finish_request();
-        $this->assertStringContainsString("Referer: http://{$address}/wp-admin/upload.php\r\n", $received);
+        foreach (self::REQUEST_CONTEXT_HEADERS as $name => $value) {
+            $this->assertStringContainsString("{$name}: {$value}\r\n", $received);
+        }
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertSame(2, $result['parts_sent']);
         $this->assertFalse($client->has_sent_parts());
@@ -156,7 +168,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             exit(0);
         }
 
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -190,7 +202,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -222,7 +234,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'start_bytes' => 512,
             'max_bytes' => 512,
         ]);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -257,8 +269,20 @@ final class MultipartPushStreamClientTest extends TestCase {
     public function testPlainHttpRequiresAnExplicitOptIn(): void {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('allow_http is true');
-        new MultipartPushStreamClient([
+        $this->newClient([
             'remote_reprint_api_url' => 'http://example.test/?reprint-api=1',
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+        ]);
+    }
+
+    public function testRequestContextHeadersAreRequired(): void {
+        if (PHP_VERSION_ID < 80100) {
+            $this->markTestSkipped('Push request context validation requires PHP 8.1+.');
+        }
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('request_context_headers');
+        new MultipartPushStreamClient([
+            'remote_reprint_api_url' => 'https://example.test/?reprint-api=1',
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
         ]);
     }
@@ -270,7 +294,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -319,7 +343,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'start_bytes' => 512,
             'max_bytes' => 2048,
         ]);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -353,7 +377,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -398,7 +422,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -470,7 +494,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             exit(0);
         }
 
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -490,7 +514,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertSame('The target response exceeded 1048576 bytes.', $result['detail']);
     }
 
-    public function testPushControlRequestsSendSameOriginWordPressAdminReferer(): void {
+    public function testPushControlRequestsSendRequestContextHeaders(): void {
         if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
             $this->markTestSkipped('Raw push-request coverage requires PHP curl and pcntl.');
         }
@@ -517,15 +541,28 @@ final class MultipartPushStreamClientTest extends TestCase {
                     }
                     $request .= $piece;
                 }
-                if (strpos($request, "Referer: http://{$address}/wp-admin/upload.php\r\n") === false) {
-                    fclose($connection);
-                    fclose($listener);
-                    exit(3);
+                foreach (self::REQUEST_CONTEXT_HEADERS as $name => $value) {
+                    if (strpos($request, "{$name}: {$value}\r\n") === false) {
+                        fclose($connection);
+                        fclose($listener);
+                        exit(3);
+                    }
                 }
                 if (strpos($request, "{$method} /?reprint-api=1&endpoint={$endpoint}&") !== 0) {
                     fclose($connection);
                     fclose($listener);
                     exit(4);
+                }
+                if (
+                    strpos($request, "Accept: application/json\r\n") === false
+                    || strpos($request, "X-Auth-Signature: ") === false
+                    || strpos($request, "X-Auth-Nonce: ") === false
+                    || strpos($request, "X-Auth-Timestamp: ") === false
+                    || strpos($request, "Content-Type: multipart/mixed") !== false
+                ) {
+                    fclose($connection);
+                    fclose($listener);
+                    exit(5);
                 }
                 $response = (string) json_encode(['status' => $response_status]);
                 fwrite(
@@ -538,7 +575,7 @@ final class MultipartPushStreamClientTest extends TestCase {
                 exit(0);
             }
 
-            $client = new MultipartPushStreamClient([
+            $client = $this->newClient([
                 'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
                 'allow_http' => true,
                 'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -572,7 +609,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'application/json'
         );
 
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -613,7 +650,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             true
         );
 
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -696,7 +733,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             exit(0);
         }
 
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -781,7 +818,7 @@ final class MultipartPushStreamClientTest extends TestCase {
                 exit(0);
             }
 
-            $client = new MultipartPushStreamClient([
+            $client = $this->newClient([
                 'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
                 'allow_http' => true,
                 'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -820,7 +857,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -863,7 +900,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -946,7 +983,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             exit(0);
         }
 
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -1027,7 +1064,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             exit(0);
         }
 
-        $client = new MultipartPushStreamClient([
+        $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -1131,5 +1168,12 @@ final class MultipartPushStreamClientTest extends TestCase {
             }
         } while (microtime(true) < $deadline);
         return $received;
+    }
+
+    /** @param array<string,mixed> $options */
+    private function newClient(array $options): MultipartPushStreamClient {
+        $options['request_context_headers'] =
+            $options['request_context_headers'] ?? self::REQUEST_CONTEXT_HEADERS;
+        return new MultipartPushStreamClient($options);
     }
 }

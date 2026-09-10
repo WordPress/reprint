@@ -166,21 +166,63 @@ The target database is an input to `apply-runtime`: it takes the same `--target-
 
 With cleanup requested, `files-pull` omits matching remote-index entries before the fetch list is built, so their file bodies are not downloaded. `apply-runtime` still removes matching local paths because an older import or pre-existing local tree may already contain them. At the end of `db-apply`, the importer removes matching regular plugin directories from the `active_plugins` option while the target database connection is still open. We skip WordPress's `deactivate_plugins()` because WordPress has not booted and the excluded plugin code may already be absent.
 
-New `PullState` objects preserve host plugins. `--exclude-host-plugins` sets the existing `include_host_plugins` field to false; `--include-host-plugins` sets it to true. Both flags together are rejected. The choice is saved for that remote and survives command resets. Existing state keeps its saved value; state written before this field existed retains the former cleanup behavior. `ImportClient::get_excluded_plugins()` returns an empty list for all three consumers when it is enabled: file pulls keep the plugins, `db-apply` leaves them active, and `apply-runtime` leaves local copies in place. Targets such as wp.com can then run their own cleanup after import. Local setup integrations such as Studio must explicitly request cleanup before starting WordPress when they need it. Host runtime detection and explicit file exclusions still apply.
+New `PullState` objects preserve host plugins. `--exclude-host-plugins` sets the existing `include_host_plugins` field to false; `--include-host-plugins` sets it to true. Both flags together are rejected. This saved choice controls file downloads and `db-apply` deactivation, and survives command resets. Existing state keeps its saved value; state written before this field existed retains the former cleanup behavior.
+
+`apply-runtime` removes known host-plugin paths by default, independently of the saved pull choice. Its `--include-host-plugins` flag skips cleanup for that invocation; neither runtime flag changes the saved pull choice. The high-level `pull` pipeline does not forward its download flag to runtime setup, so resuming without the flag makes the same cleanup choice. Runtime setup does not connect to the database.
+
+Before removal, runtime setup adds the document-root-relative paths to `apply.remote_paths_removed_from_local_site`. Keep this record across command resets and fresh database applies. Later runtime opt-outs must not clear it: skipping cleanup does not restore removed files. `files-diff` reads the record and prefixes the remote document root for its filesystem-root-wide plan. `files-push` passes it as additional exclusions to `PushFilesSender`, which combines them with target exclusions before planning and retains the combined list across resume. Runtime cleanup rejects an unfinished files-push or files-pull, so it cannot change an active plan's exclusions. Host runtime detection and explicit download exclusions still apply.
 
 Pantheon's `mu-plugins/loader.php` and `mu-plugins/pantheon-mu-plugin` stay together. The loader requires `pantheon-mu-plugin/pantheon.php` even outside Pantheon; removing only the package causes a fatal error. The package's platform features require `PANTHEON_ENVIRONMENT`, so they do not run when that environment value is absent locally. The generic `loader.php` name is not enough to identify a file that can be deleted.
 
 ### SQL Streaming Crash Recovery
 
-Direct MySQL output keeps incomplete SQL only in memory while one importer process requests more source responses. Existing SQL statement-size, fragment, time, and memory budgets may split SQL across multipart parts or put several regular INSERT statements in one part. File output adds a harmless cursor comment after each complete SQL group. `db-apply` reads those groups and sends them through the same MySQL importer as direct output. The importer runs one complete group, updates `__reprint_db_pull_progress_<uuid>` with the exporter cursor and the optional `db.sql` byte offset, and commits the target transaction. A replacement file importer reads that target row and seeks directly to the next group. Table replacement and oversized-value updates remain separate groups. The UUID makes an accidental table-name clash unlikely and changes whenever the table schema changes. Reprint logs and excludes that internal name from every source dump. For transactional target tables, the imported rows and position commit together. If the importer process stops, its replacement waits for the old target connection, reapplies `db-session-setup.sql`, and continues from the position stored in the target database. Repeated INSERT statements skip rows identified by a non-null unique key, which also permits keyed MyISAM tables to continue. Nontransactional tables without such a key, and nontransactional oversized-value UPDATE sequences, require a fresh import. Completed file applies remove the internal cursor table.
+Direct MySQL output keeps incomplete SQL only in memory while one importer process requests more source responses. A retryable source failure ends that process with exit 3. The next invocation requests any incomplete group again from the last position committed in the target database. Existing SQL statement-size, fragment, time, and memory budgets may split SQL across multipart parts or put several regular INSERT statements in one part. File output adds a harmless cursor comment after each complete SQL group. `db-apply` reads those groups and sends them through the same MySQL importer as direct output. The importer runs one complete group, updates `__reprint_db_pull_progress_<uuid>` with the exporter cursor and the optional `db.sql` byte offset, and commits the target transaction. A replacement file importer reads that target row and seeks directly to the next group. Table replacement and oversized-value updates remain separate groups. The UUID makes an accidental table-name clash unlikely and changes whenever the table schema changes. Reprint logs and excludes that internal name from every source dump. For transactional target tables, the imported rows and position commit together. If the importer process stops, its replacement waits for the old target connection, reapplies `db-session-setup.sql`, and continues from the position stored in the target database. Repeated INSERT statements skip rows identified by a non-null unique key, which also permits keyed MyISAM tables to continue. Nontransactional tables without such a key, and nontransactional oversized-value UPDATE sequences, require a fresh import. Completed file applies remove the internal cursor table.
 
 ### Progress Tracking
 
-During the file fetch phase, progress and heartbeat records include `files_done` (cumulative across restarts, derived from fetch list byte offset + current batch count) and `files_total` (total fetch list entries, fixed after the diff phase). Both are emitted together only when the fetch list exists.
+`progress.json` has one versioned progress-screen shape across commands. Active
+updates are limited to one atomic replacement per second; terminal updates are
+immediate. JSONL records that carry screen progress use the same nested
+`progress` object. Its `items` member reports counted units, `bytes` reports the
+current byte-bounded phase, `current_file` reports base64 path plus file byte
+progress during files-pull, and `current_table` reports table row progress
+during db-pull.
 
-During files-push, progress records include `files_done` and `files_total` together after planning. The completed count advances only at target-confirmed request boundaries and survives resume.
+`ProgressReporter` retains one screen snapshot, handles JSONL output and
+progress-file writes, and rebuilds file counters from the fetch list and its
+saved cursor, including processed paths inside a resumed batch. Failed or skipped
+paths, directories and symlinks count as processed paths with zero file bytes.
+Ordinary log messages do not replace the screen label. The fetch list stores
+only the base64 path and content size; directories and symlinks have size zero.
+The fetch checkpoint stores completed file bytes before and within the current
+batch. A passed path may have failed or changed size, so the fetch list cannot
+rebuild those byte counts. They are saved with the existing cursor writes.
+A failed response discards unsaved counts in memory before the next request
+replays those parts; this does not reread the fetch list.
+The exporter loads row estimates with its table list and includes the current
+estimate in the SQL cursor. Progress updates read the current table entry in
+memory; they do not scan the table list or open `db-tables.jsonl`.
 
-Interactive non-verbose files-push output uses one stage-weighted progress bar for the complete lifecycle. The percentage precedes a label which changes only at major lifecycle stages; while pushing local paths, target-confirmed file bytes appear beside the planned file byte total. These terminal-only details are not added to JSONL or `progress.json`.
+During the file fetch phase, progress and heartbeat records keep the legacy
+`files_done` and `files_total` fields and also report them through
+`progress.items`. The current file byte count changes while one large file is
+streaming, even before the completed file count advances. File and byte totals
+cover the paths selected by this pull, so a delta pull counts only changed
+paths.
+
+During db-pull SQL streaming, `progress.items` counts selected base tables and
+`current_table` reports rows processed against the estimate supplied by the
+SQL exporter. The estimate is marked by `rows_total_is_estimate`.
+
+During files-push, progress records include `files_done` and `files_total`
+together after planning. The nested object reports those target-confirmed local
+paths and the current phase's durable byte position. Both survive resume.
+
+Interactive non-verbose files-push output uses one stage-weighted progress bar
+for the complete lifecycle. The percentage precedes a label which changes only
+at major lifecycle stages; while pushing local paths, target-confirmed file
+bytes appear beside the planned file byte total. Machine output reports the raw
+counts rather than the terminal-only stage-weighted percentage.
 
 Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl` for that invocation. `auto` uses terminal output on a TTY and JSONL otherwise; `tty` and `jsonl` force either presentation without changing command state. Explicit `tty` and `jsonl` modes cannot be combined with `--verbose`.
 

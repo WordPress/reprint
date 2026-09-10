@@ -61,6 +61,23 @@ if (!function_exists('plugin_dir_path')) {
     }
 }
 
+if (!function_exists('is_multisite')) {
+    function is_multisite(): bool {
+        return !empty($GLOBALS['reprint_server_test_multisite']);
+    }
+}
+if (!function_exists('get_site_option')) {
+    function get_site_option(string $name, $default = false) {
+        return $GLOBALS['reprint_server_test_network_options'][$name] ?? $default;
+    }
+}
+if (!function_exists('update_site_option')) {
+    function update_site_option(string $name, $value): bool {
+        $GLOBALS['reprint_server_test_network_options'][$name] = $value;
+        return true;
+    }
+}
+
 if (!function_exists('get_option')) {
     function get_option(string $name, $default = false) {
         if (array_key_exists($name, $GLOBALS['reprint_server_test_options'])) {
@@ -466,6 +483,8 @@ abstract class ReprintServerPluginTestCase extends TestCase
         $this->original_get = $_GET;
         $this->original_reprint_server_push_enabled_environment = getenv('REPRINT_SERVER_PUSH_ENABLED');
 
+        $GLOBALS['reprint_server_test_multisite'] = false;
+        $GLOBALS['reprint_server_test_network_options'] = [];
         $GLOBALS['reprint_server_test_options'] = [];
         $GLOBALS['reprint_server_registered_settings'] = [];
         $GLOBALS['reprint_server_settings_errors'] = [];
@@ -507,6 +526,7 @@ abstract class ReprintServerPluginTestCase extends TestCase
             putenv('REPRINT_SERVER_PUSH_ENABLED=' . $this->original_reprint_server_push_enabled_environment);
         }
 
+        $GLOBALS['reprint_server_test_multisite'] = false;
         parent::tearDown();
     }
 

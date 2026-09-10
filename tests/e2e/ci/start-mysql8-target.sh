@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Starts the separate Oracle MySQL 8 target used by the cross-engine E2E test.
+# Starts Oracle MySQL 8 for the cross-engine target and multisite source query tests.
 set -euo pipefail
 
 container="reprint-e2e-mysql8-target"

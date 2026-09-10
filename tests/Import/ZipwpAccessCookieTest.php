@@ -142,6 +142,11 @@ final class ZipwpAccessCookieTest extends TestCase {
     {
         $client = new \MultipartPushStreamClient([
             'remote_reprint_api_url' => 'http://demo.zipwp.to/',
+            'request_context_headers' => [
+                'User-Agent' => 'Reprint/1.0',
+                'Accept-Language' => 'en-US,en;q=0.9',
+                'Referer' => 'http://demo.zipwp.to/wp-admin/upload.php',
+            ],
             'allow_http' => true,
             'hmac_client' => new \Site_Export_HMAC_Client('zipwp-test-secret'),
             'connect_timeout' => 2,

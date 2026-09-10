@@ -57,7 +57,7 @@ export function createHmacClient(siteName) {
  * @param {string} siteName - Site name
  * @param {string} endpoint - API endpoint
  * @param {Object} params - Query parameters
- * @param {Object} options - Additional options (method, body, rawResponse, followRedirects)
+ * @param {Object} options - Additional options (method, body, rawResponse, followRedirects, signal)
  * @returns {Promise<Object>} Parsed response or raw response
  */
 export async function apiRequest(siteName, endpoint, params = {}, options = {}) {
@@ -77,6 +77,7 @@ export async function apiRequest(siteName, endpoint, params = {}, options = {}) 
         method,
         headers,
         redirect: options.followRedirects === false ? 'manual' : 'follow',
+        signal: options.signal,
     };
     if (body && method !== 'GET') {
         fetchOptions.body = body;
@@ -331,7 +332,8 @@ export function runImporter(url, outputDir, command, options = {}) {
         command !== 'preflight-assert'
     ) {
         let attempts = 0;
-        while (result.exitCode === 2 && attempts < maxResumeAttempts) {
+        // This test runner chooses the retry limit; the CLI does not retry errors itself.
+        while ([2, 3].includes(result.exitCode) && attempts < maxResumeAttempts) {
             if (Date.now() - wallStart > wallTimeout) {
                 result = {
                     ...result,
@@ -349,11 +351,11 @@ export function runImporter(url, outputDir, command, options = {}) {
             };
         }
 
-        if (result.exitCode === 2) {
+        if ([2, 3].includes(result.exitCode)) {
             result = {
                 ...result,
                 exitCode: 1,
-                stderr: `${result.stderr}\nExceeded max resume attempts (${maxResumeAttempts}) while command remained partial.`,
+                stderr: `${result.stderr}\nExceeded max resume attempts (${maxResumeAttempts}) while command remained partial or retryable.`,
             };
         }
     }
@@ -657,9 +659,9 @@ export function clearHookState(siteName) {
  * Make a file_fetch request with a base64 path record file_list upload.
  * Uses multipart/form-data to upload the file list as a file.
  */
-export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
+export async function apiRequestWithFileList(siteName, filePaths, params = {}, options = {}) {
     const client = createHmacClient(siteName);
-    const url = new URL(getSiteUrl(siteName));
+    const url = new URL(options.url || getSiteUrl(siteName));
     url.searchParams.set('endpoint', 'file_fetch');
     for (const [k, v] of Object.entries(params)) {
         setApiRequestParameter(url, k, v);

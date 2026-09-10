@@ -2815,6 +2815,11 @@ final class PushEndpointsTest extends TestCase {
             'document_root' => '/',
             'push_state_directory' => $push_state_directory,
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
+            'request_context_headers' => [
+                'User-Agent' => 'Reprint/1.0',
+                'Accept-Language' => 'en-US,en;q=0.9',
+                'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
+            ],
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
@@ -3000,8 +3005,13 @@ final class PushEndpointsTest extends TestCase {
         ];
     }
 
-    public function testDefaultPullThenThemePushPreservesHostPlugins(): void
+    /** @dataProvider hostPluginRuntimeOptions */
+    public function testDefaultPullThenThemePushPreservesHostPlugins(?array $runtime_options, ?string $resume_phase = null): void
     {
+        $this->writeDocrootConfiguration([
+            'document_root' => $this->docroot,
+            'maximum_part_bytes' => 256,
+        ]);
         $remote_document_root = (string) realpath($this->docroot);
         $filesystem_root = $this->root . '/pulled-files';
         $state_directory = $this->root . '/pull-push-state';
@@ -3046,15 +3056,75 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame($contents, file_get_contents($local_document_root . '/' . $document_root_relative_path));
         }
 
+        if ($runtime_options !== null) {
+            $runtime_command = [
+                PHP_BINARY,
+                __DIR__ . '/../packages/reprint-client/bin/reprint-client',
+                'apply-runtime',
+                $this->remote_reprint_api_url,
+                '--state-dir=' . $state_directory,
+                '--fs-root=' . $filesystem_root,
+                '--runtime=php-builtin',
+                '--output-dir=' . $this->root . '/runtime',
+                '--target-engine=mysql',
+                '--target-db=local-wordpress',
+                '--target-user=local-user',
+            ];
+            exec(implode(' ', array_map('escapeshellarg', array_merge($runtime_command, $runtime_options))) . ' 2>&1', $runtime_output, $runtime_exit);
+            $this->assertSame(0, $runtime_exit, implode("\n", $runtime_output));
+            foreach ($host_plugin_files as $document_root_relative_path => $contents) {
+                $this->assertFileDoesNotExist($local_document_root . '/' . $document_root_relative_path);
+            }
+            // Deleting the now-empty parents must not delete their host plugins remotely.
+            rmdir($local_document_root . '/wp-content/mu-plugins');
+            rmdir($local_document_root . '/wp-content/plugins');
+        }
+
         file_put_contents($local_document_root . '/' . $theme_document_root_relative_path, 'body { color: blue; }');
+        $diff = $this->runFilesDiffCli($filesystem_root, $state_directory);
+        if ($resume_phase !== null) {
+            $runtime_state = json_decode(file_get_contents($client->pull_state_directory . '/state.json'), true, 512, JSON_THROW_ON_ERROR);
+            $sender_options = $this->filesPushSenderOptions($filesystem_root, $this->filesPushStateDirectory($state_directory));
+            $sender_options['document_root'] = $remote_document_root;
+            $sender_options['excluded_paths'] = $runtime_state['apply']['remote_paths_removed_from_local_site'];
+            $sender = $this->startSender($sender_options);
+            try {
+                $this->takeSenderStepsUntilPhase($sender, $resume_phase);
+                $sender->cancel();
+            } finally {
+                $this->closeSender($sender);
+            }
+            // Runtime cleanup cannot change the exclusions of an unfinished push.
+            $repeated_runtime_output = [];
+            exec(implode(' ', array_map('escapeshellarg', $runtime_command)) . ' 2>&1', $repeated_runtime_output, $repeated_runtime_exit);
+            $this->assertSame(1, $repeated_runtime_exit);
+            $this->assertStringContainsString('Finish the interrupted files-push', implode("\n", $repeated_runtime_output));
+        }
         $pushed = $this->runFilesPushCli($filesystem_root, $state_directory, [], $remote_document_root);
 
         $this->assertSame(0, $pushed['exit'], $pushed['output']);
         $this->assertSame(1, $this->lastCliJsonLine($pushed['stdout'])['files_total']);
         $this->assertSame('body { color: blue; }', file_get_contents($remote_document_root . '/' . $theme_document_root_relative_path));
         foreach ($host_plugin_files as $document_root_relative_path => $contents) {
+            $this->assertFileExists($remote_document_root . '/' . $document_root_relative_path);
             $this->assertSame($contents, file_get_contents($remote_document_root . '/' . $document_root_relative_path));
         }
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $this->assertSame(1, $this->lastCliJsonLine($diff['stdout'])['local_paths_to_push']);
+        $this->assertSame(0, $this->lastCliJsonLine($diff['stdout'])['local_paths_to_delete']);
+    }
+
+    public static function hostPluginRuntimeOptions(): array
+    {
+        return [
+            'download only' => [null],
+            'default local setup' => [[]],
+            'explicit local cleanup' => [['--exclude-host-plugins']],
+            'resume before create' => [[], 'creating'],
+            'resume before plan' => [[], 'starting_plan'],
+            'resume during plan' => [[], 'planning'],
+            'resume before upload' => [[], 'pushing_paths'],
+        ];
     }
 
     public function testFilesPushCliPushesFromDocumentRootBelowFilesystemRoot(): void
@@ -3144,7 +3214,18 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNotEmpty($upload_progress_records);
         $this->assertSame(0, $upload_progress_records[0]['files_done'] ?? null);
         $this->assertSame(4, $upload_progress_records[0]['files_total'] ?? null);
-        $this->assertSame('Uploading — 0 / 4 files', $upload_progress_records[0]['message'] ?? null);
+        $this->assertSame('Uploading files', $upload_progress_records[0]['message'] ?? null);
+        $this->assertSame(1, $upload_progress_records[0]['schema_version'] ?? null);
+        $this->assertSame([
+            'unit' => 'local_paths',
+            'done' => 0,
+            'total' => 4,
+        ], $upload_progress_records[0]['progress']['items'] ?? null);
+        $this->assertSame(0, $upload_progress_records[0]['progress']['bytes']['done'] ?? null);
+        $this->assertSame(
+            strlen($initial_contents) + strlen('delete me later'),
+            $upload_progress_records[0]['progress']['bytes']['total'] ?? null
+        );
         $push_state_directory = $this->filesPushStateDirectory($state_directory);
         $this->assertSame($initial_contents, file_get_contents($this->docroot . '/nested/multi-chunk.bin'));
         $this->assertSame('delete me later', file_get_contents($this->docroot . '/delete-later.txt'));
@@ -3166,12 +3247,33 @@ final class PushEndpointsTest extends TestCase {
             JSON_THROW_ON_ERROR
         );
         $this->assertSame(
-            ['command', 'status', 'phase', 'reason', 'detail', 'files_done', 'files_total', 'ts'],
+            [
+                'schema_version',
+                'step',
+                'steps',
+                'command',
+                'status',
+                'phase',
+                'message',
+                'progress',
+                'error',
+                'error_code',
+                'reason',
+                'detail',
+                'ts',
+            ],
             array_keys($progress)
         );
+        $this->assertSame(1, $progress['schema_version']);
         $this->assertSame('complete', $progress['status']);
-        $this->assertSame(4, $progress['files_done']);
-        $this->assertSame(4, $progress['files_total']);
+        $this->assertSame([
+            'unit' => 'local_paths',
+            'done' => 4,
+            'total' => 4,
+        ], $progress['progress']['items']);
+        $this->assertNull($progress['progress']['bytes']);
+        $this->assertNull($progress['progress']['current_file']);
+        $this->assertNull($progress['progress']['current_table']);
         $audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringNotContainsString(self::SECRET, $audit . $initial['output']);
         $this->assertStringNotContainsString('cursor', $audit . json_encode($progress));
@@ -3650,6 +3752,11 @@ final class PushEndpointsTest extends TestCase {
             'document_root' => '/',
             'push_state_directory' => $push_state_directory,
             'remote_reprint_api_url' => $this->remote_reprint_api_url,
+            'request_context_headers' => [
+                'User-Agent' => 'Reprint/1.0',
+                'Accept-Language' => 'en-US,en;q=0.9',
+                'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
+            ],
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 4 * 1024 * 1024,
@@ -3904,6 +4011,11 @@ final class PushEndpointsTest extends TestCase {
             'document_root' => '/',
             'push_state_directory' => $push_state_directory,
             'remote_reprint_api_url' => $this->remote_reprint_api_url,
+            'request_context_headers' => [
+                'User-Agent' => 'Reprint/1.0',
+                'Accept-Language' => 'en-US,en;q=0.9',
+                'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
+            ],
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 64,
@@ -4189,6 +4301,11 @@ final class PushEndpointsTest extends TestCase {
     {
         return new MultipartPushStreamClient([
             'remote_reprint_api_url' => $remote_reprint_api_url ?? $this->remote_reprint_api_url,
+            'request_context_headers' => [
+                'User-Agent' => 'Reprint/1.0',
+                'Accept-Language' => 'en-US,en;q=0.9',
+                'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
+            ],
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client($secret),
             'chunk_bytes' => 4,

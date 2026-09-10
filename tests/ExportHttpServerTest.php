@@ -6,6 +6,38 @@ use PHPUnit\Framework\TestCase;
 
 final class ExportHttpServerTest extends TestCase
 {
+    /** A request cannot inject the source's trusted multisite selection. */
+    public function testRequestCannotSupplyTrustedMultisiteContext(): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        $config = $server->normalize_config(['endpoint' => 'sql_chunk', '_multisite' => ['site_id' => 8]]);
+        $this->assertArrayNotHasKey('_multisite', $config);
+    }
+
+    /** Old clients must not import a selected dump as an ordinary site. */
+    public function testMultisiteRequiresAnExplicitClientMode(): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer([
+            'multisite' => ['site_id' => 7, 'network_id' => 1, 'base_prefix' => 'wp_'],
+        ]);
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('one-site network');
+        $server->normalize_config(['endpoint' => 'preflight']);
+    }
+
+    /** Server context wins over any request-supplied site or table prefix. */
+    public function testMultisiteModeUsesTheTrustedSite(): void
+    {
+        $context = ['site_id' => 7, 'network_id' => 1, 'base_prefix' => 'wp_'];
+        $server = new \WordPress\Reprint\Server\HTTPServer(['multisite' => $context]);
+        $config = $server->normalize_config([
+            'endpoint' => 'sql_chunk',
+            'multisite_mode' => 'one-site-network-v1',
+            '_multisite' => ['site_id' => 8, 'base_prefix' => 'other_'],
+        ]);
+        $this->assertSame($context, $config['_multisite']);
+    }
+
     public function testParsesJsonBodyAndCastsKnownTypes(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer();

@@ -300,6 +300,12 @@ Use these names verbatim:
 `sender.json` and `excluded_paths.json` live directly under the local push
 state directory. The sender creates `plan/` for one active plan. PushPlan
 copies the sender-owned exclusions to `plan/excluded_paths.json` when it starts.
+The sender combines target exclusions with the caller's additional excluded
+paths before starting that plan. `files-push` supplies the local runtime cleanup
+record from `apply.remote_paths_removed_from_local_site` as caller exclusions.
+Those document-root-relative paths are saved before local removal and retained
+across command resets and later runtime opt-outs. Runtime cleanup rejects an
+unfinished files-push, keeping the active plan's exclusions unchanged.
 `fresh_local_index.jsonl`, `patch_base_index.jsonl`,
 `local_paths_to_push.jsonl`, `local_paths_to_delete`, and
 `deleted_directories_stack.jsonl` live inside it.
@@ -323,7 +329,8 @@ committed byte offset in `fresh_local_index.jsonl`. During `diffing`, it
 contains the output offsets and the complete FileSyncPatchPlanner cursor. PushPlan
 stores that nested cursor without unpacking or rebuilding it. The active
 deletion roots file is append-only; each entry links to the preceding active
-directory. The exclusions have a maximum of 100 paths. The `sender.json`
+directory. The target exclusions and caller exclusions each have a maximum of 100 paths.
+The combined plan exclusions therefore contain at most 200 paths. The `sender.json`
 phases are `creating`, `finishing_previous_commit`,
 `starting_plan`, `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
 `saving_local_index`, `completing`, `removing`, and `discarding_plan`. It stores
@@ -400,6 +407,11 @@ changes to non-empty directories select no operation. The final JSONL record
 has `status: "complete"`, `local_paths_to_push`, and
 `local_paths_to_delete`.
 
+Files-diff reads saved local runtime exclusions from pull state when available.
+It prepends the saved remote document root to these document-root-relative paths
+because its plan covers the whole filesystem root. It still makes no target
+request and does not require preflight when there is no runtime cleanup record.
+
 files-diff persists nothing between runs. It runs one complete PushPlan in
 `files-diff-plan/` while its command holds the state-directory-wide Reprint
 process lock, streams both finished path lists from the beginning, and removes
@@ -451,11 +463,16 @@ counts. The CLI maps that snapshot onto labels and stage weights. PushPlan and
 PushFilesSender do not calculate terminal percentages or choose output format.
 
 The JSONL presentation emits `push_progress` records. `files_done` and
-`files_total` appear together after planning in those records, the final
-result, and `progress.json`; they are absent while the plan is still being
-built. `files_total` is the selected local-path count.
-`files_done` is the target-confirmed local-path count, so an open, failed, or
-canceled request does not advance it. Both counts survive resume.
+`files_total` appear together after planning in those records and remain as
+legacy top-level fields. The same values appear in `progress.items` with the
+`local_paths` unit. `progress.bytes` reports the durable byte position and
+total for the current byte-bounded phase. The final result and `progress.json`
+use the same nested progress object. `files_total` is the selected local-path
+count. `files_done` is the target-confirmed local-path count, so an open,
+failed, or canceled request does not advance it. Both counts survive resume.
+
+The shared progress object also reserves `current_file` for files-pull and
+`current_table` for db-pull. They are `null` during files-push.
 
 Files-push lifecycle lines use these command-first names verbatim: `START
 files-push`, `RESUME files-push`, `PHASE files-push`, `PARTIAL files-push`,

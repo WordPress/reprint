@@ -22,6 +22,17 @@ require_once __DIR__ . "/class-database-rows-reader.php";
  *   (STAGE_OVERSIZED_SPATIAL) → (EMIT_OVERSIZED_UPDATE) → … →
  *   EMIT_FOOTER → FINISHED
  *
+ * Selected-site exports finish the content table group before collecting site
+ * members from network usermeta, then export users and profiles:
+ *
+ *   content tables → COLLECT_SITE_MEMBERS → users → usermeta → footer
+ *
+ * Posts, comments and links save their user IDs alongside each content batch.
+ * Omitted or row-filtered content uses COLLECT_CONTENT_USER_IDS while visiting
+ * that table, with the same table/primary-key cursor. Membership has only one
+ * input table and its own last_scanned_usermeta_id. Both ID-only reads and the
+ * boundaries before and after membership collection emit checkpoint statements.
+ *
  * All values are base64-encoded in the SQL output (via FROM_BASE64('...')). This avoids
  * charset-related corruption: MySQL interprets string literals according to the
  * connection charset, but base64 is pure ASCII and the decoded bytes are assigned
@@ -81,6 +92,8 @@ class MySQLDumpProducer
      */
     public const NONZERO_SRID_CONTEXT_VERSION = 'v1';
 
+    private const STATE_COLLECT_CONTENT_USER_IDS = "collect_content_user_ids";
+    private const STATE_COLLECT_SITE_MEMBERS = "collect_site_members";
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
     const STATE_NEXT_TABLE = "next_table";
@@ -222,6 +235,14 @@ class MySQLDumpProducer
         }
     }
 
+    /** Releases a partially consumed source query and the selected site's lock. */
+    public function close(): void
+    {
+        if ($this->row_reader !== null) {
+            $this->row_reader->close();
+        }
+    }
+
     public function get_sql_fragment(): ?string
     {
         return $this->current_sql_fragment;
@@ -269,13 +290,43 @@ class MySQLDumpProducer
 
                 case self::STATE_NEXT_TABLE:
                     if ($this->move_to_next_table()) {
-                        $this->state = $this->emit_create_table
-                            ? self::STATE_CREATE_TABLE
-                            : self::STATE_TABLE_HEADER;
+                        $this->state = $this->row_reader->get_current_table_export_mode() === 'rows'
+                            ? ( $this->emit_create_table ? self::STATE_CREATE_TABLE : self::STATE_TABLE_HEADER )
+                            : self::STATE_COLLECT_CONTENT_USER_IDS;
+                    } elseif ($this->row_reader->start_user_tables()) {
+                        // Only the end of the content group enters membership
+                        // collection. Checkpoint before the first metadata read.
+                        $this->state = self::STATE_COLLECT_SITE_MEMBERS;
+                        $this->current_sql_fragment = "-- Begin site membership collection\nDO 0;";
+                        $this->current_fragment_must_be_its_own_part = true;
+                        return true;
                     } else {
                         $this->state = self::STATE_EMIT_FOOTER;
                     }
                     break;
+
+                case self::STATE_COLLECT_CONTENT_USER_IDS:
+                    if ($this->row_reader->collect_content_user_ids_step()) {
+                        // A complete harmless statement carries the ID cursor
+                        // through the normal SQL/target commit path.
+                        $this->current_sql_fragment = "-- Collect content user IDs\nDO 0;";
+                        $this->current_fragment_must_be_its_own_part = true;
+                        return true;
+                    }
+                    $this->state = $this->row_reader->get_current_table_export_mode() === 'user_ids'
+                        ? self::STATE_NEXT_TABLE
+                        : ( $this->emit_create_table ? self::STATE_CREATE_TABLE : self::STATE_TABLE_HEADER );
+                    break;
+
+                case self::STATE_COLLECT_SITE_MEMBERS:
+                    if ($this->row_reader->collect_site_members_step()) {
+                        $this->current_sql_fragment = "-- Collect site members\nDO 0;";
+                    } else {
+                        $this->state = self::STATE_NEXT_TABLE;
+                        $this->current_sql_fragment = "-- Begin user and profile export\nDO 0;";
+                    }
+                    $this->current_fragment_must_be_its_own_part = true;
+                    return true;
 
                 case self::STATE_EMIT_FOOTER:
                     $this->emit_sql_footer();
@@ -346,9 +397,17 @@ class MySQLDumpProducer
         $reader_cursor_before_current_record = $this->reader_cursor_before_retained_record;
         if ($this->row_reader->get_current_record() === null) {
             $reader_cursor_before_current_record = $this->row_reader->get_cursor_state();
-            if (!$this->row_reader->next_record()) {
+            $read_result = $this->row_reader->next_record();
+            if ($read_result === false) {
                 $this->state = self::STATE_NEXT_TABLE;
                 return false;
+            }
+            if ($read_result === null) {
+                // Rejected candidates still need a checkpoint. Do not search
+                // the next batch inside this step when no SQL row was found.
+                $this->current_sql_fragment = 'DO 0; /* selected-user batch complete */';
+                $this->current_fragment_must_be_its_own_part = true;
+                return true;
             }
         }
 
@@ -434,15 +493,16 @@ class MySQLDumpProducer
         return true;
     }
 
-    /** Emits one row with a leading comma, or closes the open INSERT when no row remains. */
+    /** Emits one row, or closes the INSERT at table EOF or a consumed candidate batch. */
     private function emit_row()
     {
         $reader_cursor_before_current_record = $this->row_reader->get_cursor_state();
-        if (!$this->row_reader->next_record()) {
+        $read_result = $this->row_reader->next_record();
+        if ($read_result !== true) {
             $this->current_sql_fragment = $this->on_duplicate_key() . ';';
             $this->current_statement_size = 0;
             $this->current_insert_has_nonzero_srid_context = false;
-            $this->state = self::STATE_NEXT_TABLE;
+            $this->state = $read_result === false ? self::STATE_NEXT_TABLE : self::STATE_START_INSERT;
             return true;
         }
 
@@ -826,6 +886,31 @@ class MySQLDumpProducer
             $cursor_data["current_column_names_hash"] = $current_column_names_hash;
         }
         $cursor_data["state"] = $this->state;
+        $tables_total = (int) ( $cursor_data["tables_total"] ?? 0 );
+        $current_table_number = $cursor_data["current_table_number"] ?? null;
+        $tables_done = (int) ( $cursor_data["tables_before_current"] ?? 0 );
+        $progress_current_table = null;
+        if ($this->state === self::STATE_FINISHED || $this->state === self::STATE_EMIT_FOOTER) {
+            $tables_done = $tables_total;
+        } elseif ($this->state === self::STATE_NEXT_TABLE) {
+            $tables_done = $current_table_number ?? $tables_done;
+        } elseif ($current_table_number !== null) {
+            $tables_done = $current_table_number - 1;
+            $progress_current_table = [
+                "name" => $cursor_data["current_table"],
+                "rows_done" => (int) ( $cursor_data["current_table_rows_processed"] ?? 0 ),
+                "rows_total" => $cursor_data["current_table_rows_estimated"] ?? null,
+            ];
+        }
+        $cursor_data["progress"] = [
+            "tables" => [
+                "done" => $tables_done,
+                "total" => $tables_total,
+            ],
+            "current_table" => $progress_current_table,
+        ];
+        // These values come from the table list, not the saved resume position.
+        unset($cursor_data["current_table_number"], $cursor_data["tables_before_current"], $cursor_data["tables_total"], $cursor_data["current_table_rows_estimated"]);
         $cursor_data["rows_in_batch"] = $this->rows_in_batch;
         $cursor_data["current_insert_has_nonzero_srid_context"] =
             $this->current_insert_has_nonzero_srid_context;
@@ -1781,6 +1866,8 @@ class MySQLDumpProducer
         $chunk = $this->read_next_oversized_chunk($current);
         $formatted_chunk = $this->format_value($chunk['value'], $data_type);
 
+        // The target row is already selected. Its membership records may not
+        // have been imported yet, so only its primary key belongs in this UPDATE.
         $where_parts = [];
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
             $where_parts[] = $this->row_reader->build_comparison($pk_col, $pk_value, "=");
@@ -1919,7 +2006,7 @@ class MySQLDumpProducer
         $quoted_table = $this->row_reader->quote_identifier($this->row_reader->get_current_table());
         $quoted_column = $this->row_reader->quote_identifier($column);
 
-        $where_parts = [];
+        $where_parts = $this->row_reader->get_current_row_selection_conditions(true);
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
             $where_parts[] = $this->row_reader->build_comparison($pk_col, $pk_value, "=");
         }
@@ -1928,7 +2015,7 @@ class MySQLDumpProducer
         $value_expression = $character_string
             ? "SUBSTRING({$quoted_column}, {$start}, {$length})"
             : "SUBSTRING(CAST({$quoted_column} AS BINARY), {$start}, {$length})";
-        $sql = "SELECT CAST({$value_expression} AS BINARY) AS value_chunk,"
+        $sql = $this->row_reader->get_select_prefix() . " CAST({$value_expression} AS BINARY) AS value_chunk,"
              . " CHAR_LENGTH({$value_expression}) AS value_length"
              . " FROM {$quoted_table} WHERE {$where_clause}";
         $stmt = $this->db->prepare($sql);

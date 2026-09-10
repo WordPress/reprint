@@ -112,14 +112,16 @@ const KEPT_FILES = new Map([
 ]);
 
 describe.each([
-    ['other', 'siteground-plugins', false],
-    ['wpengine', 'wpengine-plugin-inventory', false],
-    ['wpengine', 'wpengine-plugin-inventory', true],
-])('Import: source-host plugins (%s, %s, include=%s)', (host, site, includeHostPlugins) => {
+    ['other', 'siteground-plugins', false, false],
+    ['wpengine', 'wpengine-plugin-inventory', false, false],
+    ['wpengine', 'wpengine-plugin-inventory', true, false],
+    ['wpengine', 'wpengine-plugin-inventory', true, true],
+])('Import: source-host plugins (%s, %s, include=%s, keep-runtime=%s)', (host, site, includeHostPlugins, keepRuntimeHostPlugins) => {
     const platformPaths = host === 'wpengine'
         ? [...EXCLUDED_PATHS, 'wp-content/object-cache.php', 'wp-content/advanced-cache.php']
         : EXCLUDED_PATHS;
     const excludedPaths = includeHostPlugins ? [] : platformPaths;
+    const runtimeExcludedPaths = keepRuntimeHostPlugins ? [] : platformPaths;
     const keptFiles = new Map([...KEPT_FILES].filter(([path]) => !platformPaths.includes(path)));
     let tempDir;
     let runtimeDir;
@@ -311,7 +313,7 @@ describe.each([
         });
     });
 
-    describe('apply-runtime follows the saved host-plugin policy', () => {
+    describe('apply-runtime chooses cleanup independently of the pull', () => {
         beforeAll(() => {
             const flatDir = join(tempDir, 'flattened');
             const flatResult = runImporter(importUrl(), tempDir, 'flat-docroot', {
@@ -323,7 +325,7 @@ describe.each([
 
             // Simulate copies left by an older import. Download filtering
             // cannot remove files which already exist locally.
-            writeExcludedPluginFiles(flatDir, excludedPaths);
+            writeExcludedPluginFiles(flatDir, runtimeExcludedPaths);
 
             execFileSync('php', [
                 CLIENT_PATH,
@@ -334,6 +336,7 @@ describe.each([
                 `--runtime=php-builtin`,
                 `--output-dir=${runtimeDir}`,
                 `--port=9999`,
+                ...(keepRuntimeHostPlugins ? ['--include-host-plugins'] : []),
             ], {
                 encoding: 'utf-8',
                 timeout: 30000,
@@ -342,14 +345,14 @@ describe.each([
 
         it('all excluded paths and their nested files are absent after migration', () => {
             const flatDir = join(tempDir, 'flattened');
-            for (const path of excludedPaths) {
+            for (const path of runtimeExcludedPaths) {
                 assert.ok(!existsSync(join(flatDir, path)), `${path} should be absent after migration`);
                 assert.ok(existsSync(join(getSiteDir(site), path)), `Migration must not remove the source path: ${path}`);
             }
             const state = JSON.parse(readFileSync(
                 join(pullStateDirectory(tempDir, importUrl()), 'state.json'), 'utf-8',
             ));
-            assert.deepEqual(state.apply.remote_paths_removed_from_local_site.sort(), [...excludedPaths].sort(),
+            assert.deepEqual(state.apply.remote_paths_removed_from_local_site.sort(), [...runtimeExcludedPaths].sort(),
                 'The source fixtures must cover the complete exclusion list');
         });
 
@@ -358,7 +361,7 @@ describe.each([
             for (const [path, contents] of keptFiles) {
                 assert.equal(readFileSync(join(flatDir, path), 'utf-8'), contents, `${path} should survive migration unchanged`);
             }
-            for (const path of [...PORTABLE_PATHS, ...(includeHostPlugins ? platformPaths : [])]) {
+            for (const path of [...PORTABLE_PATHS, ...(keepRuntimeHostPlugins ? platformPaths : [])]) {
                 assert.ok(existsSync(join(flatDir, path)), `${path} should survive runtime cleanup`);
             }
             assert.ok(existsSync(join(flatDir, 'wp-content/plugins/reprint-server')));
@@ -407,8 +410,8 @@ describe.each([
                 echo 'loaded';
             `, muPluginsDir], { encoding: 'utf-8', timeout: 10000 });
             assert.equal(output, 'loaded');
-            assert.equal(existsSync(join(muPluginsDir, 'mu-plugin.php')), includeHostPlugins);
-            assert.equal(existsSync(join(muPluginsDir, 'wpengine-common')), includeHostPlugins);
+            assert.equal(existsSync(join(muPluginsDir, 'mu-plugin.php')), keepRuntimeHostPlugins);
+            assert.equal(existsSync(join(muPluginsDir, 'wpengine-common')), keepRuntimeHostPlugins);
         });
     });
 });

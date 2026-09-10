@@ -39,7 +39,11 @@ class DatabaseApplyCommandState {
     /** @var string|null Runtime SQLite database path. */
     public ?string $target_sqlite_path = null;
 
-    /** @var string[] Remote paths intentionally removed while applying runtime state. */
+    /**
+     * @var string[] Document-root-relative paths selected for local runtime removal.
+     * Saved before removal and retained across command resets. Diff and push
+     * exclude these paths, including when setup stopped partway through cleanup.
+     */
     public array $remote_paths_removed_from_local_site = [];
 
     public static function from_array(array $data): self

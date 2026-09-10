@@ -2,6 +2,7 @@
 
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Server\relative_path_under;
+use function WordPress\Reprint\Server\normalize_excluded_paths;
 use function WordPress\Reprint\Server\trim_right_slash;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Sender failures are CLI/API values, never HTML output.
@@ -60,8 +61,10 @@ use function WordPress\Reprint\Server\trim_right_slash;
  * receiver-confirmed work before sending more data.
  *
  * A new sender calls `push_create` to learn target-owned exclusions before
- * starting PushPlan. The plan builds the fresh local index and diffs it against
- * the local index for this remote Reprint API URL, one bounded step at a time.
+ * starting PushPlan. Caller exclusions are added to that policy, and the combined
+ * list stays with the active plan across resume. The plan builds the fresh local
+ * index and diffs it against the local index for this remote Reprint API URL,
+ * one bounded step at a time.
  * That index contains the most recent fresh scan the sender finished saving
  * after the target confirmed its corresponding files-push commit, and is also
  * read by files-diff. After planning
@@ -154,7 +157,10 @@ final class PushFilesSender
     /** @var string Path where the serialized sender state is stored. */
     private string $state_path;
 
-    /** @var string Target exclusions stored once for the active push. */
+    /** @var list<string> Caller exclusions, combined with target exclusions before planning. */
+    private array $excluded_paths;
+
+    /** @var string Combined exclusions stored once for the active push. */
     private string $excluded_paths_path;
 
     /** @var ReprintProcessLock Reprint process lock owned by the caller. */
@@ -251,7 +257,9 @@ final class PushFilesSender
      *     @type string                  $document_root           Required remote absolute document root.
      *     @type string                  $push_state_directory    Required local push state directory.
      *     @type string                  $remote_reprint_api_url  Required remote Reprint API URL.
+     *     @type array<string,string>    $request_context_headers Required header-name-to-value map selected by ImportClient.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
+     *     @type string[]                $excluded_paths          Additional document-root-relative paths this push must not change. Default empty.
      *     @type bool                    $allow_http              Explicit plain-HTTP opt-in. Default false.
      *     @type int|float|string        $chunk_bytes             Maximum bytes read from one local file. Default 4 MiB.
      *     @type int|float|string        $connect_timeout         Connect phase seconds. Default 30.
@@ -365,6 +373,11 @@ final class PushFilesSender
         if (!$process_lock->is_held()) {
             throw new InvalidArgumentException('PushFilesSender requires a held Reprint process lock.');
         }
+        $excluded_paths = array_key_exists('excluded_paths', $options) ? $options['excluded_paths'] : [];
+        if (!is_array($excluded_paths)) {
+            throw new InvalidArgumentException('excluded_paths must be an array.');
+        }
+        $this->excluded_paths = normalize_excluded_paths($excluded_paths);
         $request_sizer_options = $options['request_sizer_options'] ?? [];
         if (!is_array($request_sizer_options)) {
             throw new InvalidArgumentException('request_sizer_options must be an array.');
@@ -372,6 +385,7 @@ final class PushFilesSender
 
         $push_stream_client_options = [
             'remote_reprint_api_url' => $options['remote_reprint_api_url'] ?? null,
+            'request_context_headers' => $options['request_context_headers'] ?? null,
             'hmac_client' => $options['hmac_client'] ?? null,
             'allow_http' => $options['allow_http'] ?? false,
         ];
@@ -672,7 +686,10 @@ final class PushFilesSender
             }
         }
         $this->create_plan_directory();
-        $this->store_excluded_paths($response['excluded_paths_b64']);
+        $this->store_excluded_paths(array_values(array_unique(array_merge(
+            $response['excluded_paths_b64'],
+            array_map('base64_encode', $this->excluded_paths)
+        ))));
 
         $this->push_stream_client->set_max_part_bytes($response['max_part_bytes']);
         $this->push_stream_client->apply_reported_limits([$response['post_max_bytes']]);

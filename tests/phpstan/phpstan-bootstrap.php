@@ -17,3 +17,6 @@ if (!function_exists('trailingslashit')) {
         return rtrim($value, '/\\') . '/';
     }
 }
+
+// Function declarations only; the WordPress integration is not executed here.
+require_once __DIR__ . '/../../reprint-server-wp/wordpress/multisite.php';

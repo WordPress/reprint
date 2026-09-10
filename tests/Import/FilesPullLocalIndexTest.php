@@ -258,6 +258,11 @@ final class FilesPullLocalIndexTest extends TestCase
                 'push_state_directory' => $pushStateDirectory,
                 'remote_reprint_api_url' =>
                     $remoteReprintApiUrl,
+                'request_context_headers' => [
+                    'User-Agent' => 'Reprint/1.0',
+                    'Accept-Language' => 'en-US,en;q=0.9',
+                    'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
+                ],
                 'hmac_client' => new \Site_Export_HMAC_Client('secret'),
                 'allow_http' => true,
             ], $processLock);
@@ -294,6 +299,14 @@ final class FilesPullLocalIndexTest extends TestCase
         $this->assertSame('longer local edit', file_get_contents($this->localTree . '/edited.txt'));
         $this->assertSame($pulledContents, file_get_contents($this->localTree . '/' . self::PULLED_PATH));
         $this->assertFileDoesNotExist($this->localTree . '/unchanged.txt');
+        $progress = json_decode(
+            (string) file_get_contents($this->stateDirectory . '/progress.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertSame(1, $progress['progress']['items']['total']);
+        $this->assertSame(strlen($pulledContents), $progress['progress']['bytes']['total']);
 
         $diff = $this->runFilesDiff();
         $this->assertSame(0, $diff['exit'], $diff['output']);

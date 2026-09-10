@@ -58,7 +58,7 @@ class PullState
     public ?string $local_followed_symlinks_root_fingerprint = null;
     public string $fs_root_nonempty_behavior = 'error';
     public string $filter = 'none';
-    /** Keep host platform plugins through file download, db-apply, and apply-runtime. */
+    /** Keep host platform plugins through file download and db-apply. */
     public bool $include_host_plugins = true;
     /** @var string|null User-Agent that worked during preflight. */
     public ?string $user_agent = null;

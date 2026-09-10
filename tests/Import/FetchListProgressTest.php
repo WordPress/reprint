@@ -67,7 +67,8 @@ class FetchListProgressTest extends TestCase
      */
     private function writeFetchList(
         int $count,
-        ?string $fetchListFilePath = null
+        ?string $fetchListFilePath = null,
+        bool $includeSizes = false
     ): string
     {
         $fetchListFilePath =
@@ -77,7 +78,12 @@ class FetchListProgressTest extends TestCase
         for ($i = 0; $i < $count; $i++) {
             fwrite(
                 $fetchListFileHandle,
-                json_encode(["path" => base64_encode("/file-{$i}.txt")]) . "\n"
+                json_encode(
+                    array_merge(
+                        ["path" => base64_encode("/file-{$i}.txt")],
+                        $includeSizes ? ["size" => ( $i + 1 ) * 100] : []
+                    )
+                ) . "\n"
             );
         }
         fclose($fetchListFileHandle);
@@ -113,8 +119,8 @@ class FetchListProgressTest extends TestCase
     private function readCounters(\ImportClient $client, \ReflectionClass $reflection): array
     {
         return [
-            'total' => $reflection->getProperty('fetch_list_total')->getValue($client),
-            'done' => $reflection->getProperty('fetch_list_done')->getValue($client),
+            'total' => $reflection->getProperty('progress_reporter')->getValue($client)->get_file_details()['items']['total'],
+            'done' => $reflection->getProperty('progress_reporter')->getValue($client)->get_file_details()['items']['done'],
         ];
     }
 
@@ -135,6 +141,32 @@ class FetchListProgressTest extends TestCase
     // ---------------------------------------------------------------
     // Tests
     // ---------------------------------------------------------------
+
+    public function testCompletedPreviousCheckpointCanBeAbortedAfterUpdating(): void
+    {
+        $this->writeState([
+            'active_resumable_command' => ['command_name' => 'files-pull', 'completion_state' => 'complete'],
+        ]);
+        $state_file = $this->pullStateDirectory . '/state.json';
+        $previous_state = json_decode(file_get_contents($state_file), true);
+        // The completed fetch object serialized by the previous build (52f1d6cc).
+        $previous_state['fetch'] = [
+            'offset' => 0,
+            'next_offset' => 0,
+            'batch_file' => null,
+            'cursor' => null,
+            'batch_entries' => 0,
+        ];
+        file_put_contents($state_file, json_encode($previous_state));
+        $client = $this->makeClient();
+        $client->run([
+            'command' => 'files-pull', 'abort' => true, 'verbose' => false, 'secret' => null, 'tuning_config' => [],
+        ]);
+        $saved_state = json_decode(file_get_contents($state_file), true);
+        $this->assertNull($saved_state['active_resumable_command']['completion_state']);
+        $this->assertSame(0, $saved_state['fetch']['file_bytes_before_batch']);
+        $this->assertSame(0, $saved_state['fetch']['file_bytes_in_batch']);
+    }
 
     public function testFreshDownloadShowsZeroDone()
     {
@@ -194,6 +226,70 @@ class FetchListProgressTest extends TestCase
         $counters = $this->readCounters($client, $reflection);
         $this->assertSame(100, $counters['total']);
         $this->assertSame(40, $counters['done']);
+    }
+
+    public function testResumedDownloadReportsSelectedFileByteTotals()
+    {
+        $listFile = $this->writeFetchList(4, null, true);
+        $offset = $this->byteOffsetAfterLines($listFile, 2);
+
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "fetch",
+            ],
+            "fetch" => [
+                "offset" => $offset,
+                "next_offset" => $offset,
+                "batch_file" => null,
+                "batch_entries" => 0,
+                "file_bytes_before_batch" => 300,
+                "cursor" => null,
+            ],
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        try {
+            $reflection->getMethod('fetch_files_from_list')->invoke($client, $listFile);
+        } catch (\Exception $e) {
+            $this->assertNotSame('', $e->getMessage());
+        }
+
+        $this->assertSame(
+            1000,
+            $reflection->getProperty('progress_reporter')->getValue($client)->get_file_details()['bytes']['total'] ?? null
+        );
+        $this->assertSame(
+            300,
+            $reflection->getProperty('progress_reporter')->getValue($client)->get_file_details()['bytes']['done'] ?? null
+        );
+    }
+
+    public function testOldFetchListKeepsByteTotalsUnknown()
+    {
+        $listFile = $this->writeFetchList(4);
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "fetch",
+            ],
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        try {
+            $reflection->getMethod('fetch_files_from_list')->invoke($client, $listFile);
+        } catch (\Exception $e) {
+            $this->assertNotSame('', $e->getMessage());
+        }
+
+        $this->assertNull(
+            $reflection->getProperty('progress_reporter')->getValue($client)->get_file_details()['bytes']['total'] ?? null
+        );
+        $this->assertNull(
+            $reflection->getProperty('progress_reporter')->getValue($client)->get_file_details()['bytes']['done'] ?? null
+        );
     }
 
     public function testDoneNeverExceedsTotal()
@@ -371,6 +467,113 @@ class FetchListProgressTest extends TestCase
         }
     }
 
+    public function testRestartingBatchKeepsEarlierCounts(): void
+    {
+        $list_file = $this->writeFetchList(4, null, true);
+        $fetch = new \Reprint\Importer\State\FetchListProgressState();
+        $fetch->file_bytes_before_batch = 100;
+        $fetch->file_bytes_in_batch = 200;
+        $fetch->offset = $this->byteOffsetAfterLines($list_file, 1);
+        $fetch->next_offset = $this->byteOffsetAfterLines($list_file, 3);
+        $fetch->cursor = base64_encode(json_encode([
+            'path' => base64_encode('/file-1.txt'), 'bytes' => 0,
+        ]));
+        $progress = new \Reprint\Importer\ProgressReporter($this->stateDir . '/progress.json');
+        $progress->load_file_list($list_file, $fetch);
+        $this->assertSame(300, $progress->get_file_details()['bytes']['done']);
+        $this->assertSame(2, $progress->get_file_details()['items']['done']);
+        $progress->complete_path(300);
+        $progress->restart_file_batch();
+        $this->assertSame(100, $progress->get_file_details()['bytes']['done']);
+        $this->assertSame(1, $progress->get_file_details()['items']['done']);
+        $progress->complete_path(200);
+        $progress->complete_path(300);
+        $progress->complete_file_batch(2);
+        $this->assertSame(600, $progress->get_file_details()['bytes']['done']);
+        $this->assertSame(3, $progress->get_file_details()['items']['done']);
+        $this->assertSame(0, $progress->get_batch_files_done());
+        $this->assertSame(1000, $progress->get_file_details()['bytes']['total']);
+    }
+
+    public function testFileProgressRestoresOnlyTheSavedBoundary(): void
+    {
+        $list_file = $this->writeFetchList(4, null, true);
+        $fetch = new \Reprint\Importer\State\FetchListProgressState();
+        $progress = new \Reprint\Importer\ProgressReporter($this->stateDir . '/progress.json');
+        $progress->load_file_list($list_file, $fetch);
+        $progress->complete_path(100);
+        $this->assertSame(0, $fetch->file_bytes_in_batch);
+        $progress->checkpoint_file_progress($fetch);
+        $this->assertSame(100, $fetch->file_bytes_in_batch);
+        $progress->complete_path(200);
+        $this->assertSame(100, $fetch->file_bytes_in_batch);
+        $this->assertSame(300, $progress->get_file_details()['bytes']['done']);
+        $progress->restore_file_progress($fetch);
+        $this->assertSame(1, $progress->get_file_details()['items']['done']);
+        $this->assertSame(100, $progress->get_file_details()['bytes']['done']);
+    }
+
+    public function testResettingFileCountersKeepsTheScreenSnapshot(): void
+    {
+        $list_file = $this->writeFetchList(4, null, true);
+        $fetch = new \Reprint\Importer\State\FetchListProgressState();
+        $fetch->file_bytes_before_batch = 100;
+        $fetch->file_bytes_in_batch = 200;
+        $fetch->offset = $this->byteOffsetAfterLines($list_file, 1);
+        $fetch->next_offset = $this->byteOffsetAfterLines($list_file, 3);
+        $fetch->cursor = base64_encode(json_encode([
+            'path' => base64_encode('/file-1.txt'), 'bytes' => 0,
+        ]));
+        $progress_file = $this->stateDir . '/progress.json';
+        $reporter = new \Reprint\Importer\ProgressReporter($progress_file);
+        $reporter->load_file_list($list_file, $fetch);
+        $details = $reporter->get_file_details();
+        $this->assertSame(2, $details['items']['done']);
+        $this->assertSame(300, $details['bytes']['done']);
+        $context = ['command' => 'files-pull', 'phase' => 'fetch', 'status' => 'in_progress'];
+        $reporter->update($context, ['message' => 'Downloading files', 'progress' => $details]);
+        $reporter->write_file();
+
+        $reporter->reset_file_counters();
+        $this->assertSame(\Reprint\Importer\ProgressReporter::EMPTY_DETAILS, $reporter->get_file_details());
+        $this->assertSame(0, $reporter->get_batch_files_done());
+        $reporter->update($context);
+        $reporter->write_file(true);
+        $snapshot = json_decode(file_get_contents($progress_file), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('Downloading files', $snapshot['message']);
+        $this->assertSame($details, $snapshot['progress']);
+
+        $next_list_file = $this->writeFetchList(2, $this->pullStateDirectory . '/next-fetch-list.jsonl', true);
+        $reporter->load_file_list($next_list_file, new \Reprint\Importer\State\FetchListProgressState());
+        $this->assertSame(['unit' => 'files', 'done' => 0, 'total' => 2], $reporter->get_file_details()['items']);
+        $this->assertSame(['done' => 0, 'total' => 300], $reporter->get_file_details()['bytes']);
+    }
+
+    public function testResumedBatchUsesRemotePathOrder(): void
+    {
+        $list_file = $this->pullStateDirectory . '/fetch-list.jsonl';
+        foreach (['/z' => 100, '/a' => 200, '/m' => 300] as $path => $size) {
+            file_put_contents($list_file, json_encode([
+                'path' => base64_encode($path), 'size' => $size,
+            ]) . "\n", FILE_APPEND);
+        }
+        $fetch = new \Reprint\Importer\State\FetchListProgressState();
+        $fetch->file_bytes_in_batch = 200;
+        $fetch->next_offset = filesize($list_file);
+        $fetch->cursor = base64_encode(json_encode([
+            'path' => base64_encode('/m'), 'bytes' => 10,
+        ]));
+        $progress = new \Reprint\Importer\ProgressReporter($this->stateDir . '/progress.json');
+        $progress->load_file_list($list_file, $fetch);
+        $context = new \Reprint\Importer\StreamingContext();
+        $context->remote_file_path = '/m';
+        $context->remote_file_size = 300;
+        $context->file_bytes_written = 10;
+        $this->assertSame(210, $progress->get_file_details($context)['bytes']['done']);
+        $this->assertSame(1, $progress->get_file_details($context)['items']['done']);
+        $this->assertSame(600, $progress->get_file_details($context)['bytes']['total']);
+    }
+
     public function testFilesDoneIncludesFilesPulled()
     {
         $listFile = $this->writeFetchList(100);
@@ -392,17 +595,14 @@ class FetchListProgressTest extends TestCase
                 ->invoke($client, $listFile);
         } catch (\Exception $e) {}
 
-        // Simulate 5 files written in this invocation
-        $reflection->getProperty('files_pulled')->setValue($client, 5);
-
-        $done = $reflection->getProperty('fetch_list_done')->getValue($client);
-        $pulled = $reflection->getProperty('files_pulled')->getValue($client);
-        $total = $reflection->getProperty('fetch_list_total')->getValue($client);
-
-        // files_done as emitted in progress records = done + pulled
-        $filesDone = $done + $pulled;
-        $this->assertSame(45, $filesDone); // 40 from offset + 5 pulled
-        $this->assertSame(100, $total);
-        $this->assertLessThanOrEqual($total, $filesDone);
+        // Five completed files add to the paths before the saved batch offset.
+        $progress = $reflection->getProperty('progress_reporter')->getValue($client);
+        for ($file = 0; $file < 5; ++$file) {
+            $progress->complete_path(0);
+        }
+        $items = $progress->get_file_details()['items'];
+        $this->assertSame(45, $items['done']); // 40 from offset + 5 pulled.
+        $this->assertSame(100, $items['total']);
+        $this->assertLessThanOrEqual($items['total'], $items['done']);
     }
 }
