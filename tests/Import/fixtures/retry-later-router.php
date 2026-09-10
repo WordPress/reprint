@@ -41,6 +41,7 @@ function test_hook_before_index_batch(&$batch_items, $stack) {
     global $reprint_endpoint, $reprint_status, $streaming_context;
     static $batches = 0;
     if (++$batches === 2 && $reprint_status === -2 && $reprint_endpoint === 'file_index') {
+        file_put_contents('proxy-status', '200');
         $streaming_context['gz']->write("--{$streaming_context['boundary']}\r\n");
         $streaming_context['gz']->finish();
         exit;
@@ -50,6 +51,7 @@ function test_hook_before_index_batch(&$batch_items, $stack) {
 function test_hook_before_completion($status, $stream, $boundary) {
     global $reprint_endpoint, $reprint_status;
     if ($reprint_status === -2 && $reprint_endpoint === file_get_contents('proxy-endpoint')) {
+        file_put_contents('proxy-status', '200');
         $stream->write("--{$boundary}\r\n");
         $stream->finish();
         exit;

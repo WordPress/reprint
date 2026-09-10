@@ -285,35 +285,33 @@ The command returns one of four exit codes:
 - 2: partial completion, needs re-running
 - 3: temporary transfer failure, retry the same command later
 
-Run again immediately after exit `2`. After exit `3`, wait before running the
-same command with the same state directory and filesystem root. Reprint keeps
-its saved progress. Exit `1` requires checking the error instead of scheduling
-an automatic retry.
+Run again immediately after exit `2`. Reprint retries temporary streaming
+failures itself. It stops with exit `3` only after three consecutive failed
+requests do not advance the durable cursor. A successful request or a failed
+request that advances the cursor resets that count.
 
-Every retryable streaming failure stops the current invocation with exit `3`.
-Reprint does not retry the failed request in that process or change it to exit
-`1` after repeated failures. The caller decides when to retry and when to stop.
+After exit `3`, a caller may wait and run the same command later with the same
+state directory and filesystem root. Reprint keeps its saved progress and gives
+the later run a new internal retry allowance. Scheduling that later run is
+optional; without it, a person can run the command again. Exit `1` requires
+checking the error instead of scheduling an automatic retry.
 
-JSON error records on stdout and stderr include
-`consecutive_failures_without_progress`. The count survives separate CLI runs:
-a first stalled request reports `1`, the next reports `2`, and so on. A
-successful response or a failed response that advances the durable cursor resets
-the count to `0`. A different temporary error does not reset it. Exit `2` remains
-healthy partial completion.
-
-The records retain `error` and `error_code`, and include the original
-`exception` class, `http_code` when received, and a nonzero `curl_errno` when
-available. For example, an HTTP 520 before any transfer progress reports:
+JSON error records on stdout and stderr for exit `3` include
+`consecutive_failures_without_progress`, which is `3` when the internal limit
+is reached. The records retain `error` and `error_code`, and include the
+reported `exception` class, `http_code` when received, and a nonzero
+`curl_errno` when available. For example, repeated HTTP 520 responses without
+transfer progress report:
 
 ```json
 {
   "status": "error",
-  "error": "The remote server crashed (HTTP 520).\n\nThis is a problem on the remote server. Check its PHP error log for details.",
+  "error": "The remote request failed 3 consecutive times without cursor progress during file_index. Try the command again later. Last failure: The remote server crashed (HTTP 520).\n\nThis is a problem on the remote server. Check its PHP error log for details.",
   "error_code": "SERVER_ERROR",
-  "message": "Error: The remote server crashed (HTTP 520).\n\nThis is a problem on the remote server. Check its PHP error log for details.",
-  "exception": "Reprint\\Importer\\TransientInterruptionException",
+  "message": "Error: The remote request failed 3 consecutive times without cursor progress during file_index. Try the command again later. Last failure: The remote server crashed (HTTP 520).\n\nThis is a problem on the remote server. Check its PHP error log for details.",
+  "exception": "Reprint\\Importer\\RetryLaterException",
   "http_code": 520,
-  "consecutive_failures_without_progress": 1
+  "consecutive_failures_without_progress": 3
 }
 ```
 
@@ -329,8 +327,8 @@ including those reached through `pull`, `pull-files`, and `pull-db`:
 
 Explicit Reprint errors (JSON containing a matching HTTP `code`) remain fatal.
 Preflight failures, DNS lookup failures, refused connections, certificate errors,
-and local errors keep their existing classification. Reprint does not suggest a
-wait time, schedule retries, or track human action.
+and local errors keep their existing classification. Reprint does not choose a
+wait time or schedule later runs.
 
 **File pull modes**
 

@@ -21,6 +21,7 @@ use Reprint\Importer\NullableSpatialColumnStatementRewriter;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\ProgressReporter;
 use Reprint\Importer\Pull\PullFailureReportedException;
+use Reprint\Importer\RetryLaterException;
 use Reprint\Importer\SpatialSridGuard;
 use Reprint\Importer\State\DatabaseApplyCommandState;
 use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
@@ -202,6 +203,12 @@ class ImportClient
     private const DATABASE_IMPORT_SPATIAL_STAGING_TABLE =
         self::DATABASE_IMPORT_POSITION_TABLE_PREFIX . "spatial";
     private const SQL_GROUP_MARKER = "-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 ";
+
+    /**
+     * Maximum number of consecutive temporary request failures with no cursor
+     * progress before the importer asks its caller to retry later.
+     */
+    private const MAX_CONSECUTIVE_INTERRUPTED_RESPONSES = 3;
 
     /** Maximum response header bytes retained for failed request audit logging. */
     private const MAX_AUDIT_RESPONSE_HEADER_BYTES = 65536;
@@ -1012,6 +1019,16 @@ class ImportClient
         }
 
         $this->state = $this->load_state_with_request_context();
+
+        // Exit 3 ends one retry cycle. A later CLI run gets the same internal
+        // retry allowance instead of inheriting an already exhausted count.
+        if (
+            $this->state->consecutive_interrupted_responses >=
+            self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES
+        ) {
+            $this->state->consecutive_interrupted_responses = 0;
+            $this->save_state();
+        }
 
         if ($command === "pull-metadata") {
             $this->run_pull_metadata();
@@ -3378,10 +3395,12 @@ class ImportClient
      * - Prior completed files-pull → delta mode (re-index, diff, fetch changes)
      * - In-progress files-pull → resume from saved state
      *
-     * Both modes share the same pipeline: index → diff → fetch. Healthy partial
-     * responses continue in this process while PHP has memory headroom.
+     * Both modes share the same pipeline: index → diff → fetch. Partial source
+     * responses and temporary request failures continue in this process while
+     * PHP has memory headroom.
      * Otherwise the saved partial state leaves exit code 2 for the next process.
-     * A retryable streaming failure saves progress and throws for CLI exit 3.
+     * Three consecutive temporary request failures without cursor progress end
+     * the process with exit code 3.
      */
     public function run_files_pull(): void
     {
@@ -4133,7 +4152,10 @@ class ImportClient
             }
 
             $current_cursor = $this->get_state()->index->cursor ?? null;
-            if ($current_cursor === $last_cursor) {
+            if (
+                $current_cursor === $last_cursor
+                && $this->get_state()->consecutive_interrupted_responses === 0
+            ) {
                 throw new RuntimeException(
                     "files-index made no progress (cursor unchanged)",
                 );
@@ -4291,7 +4313,10 @@ class ImportClient
                 }
 
                 $current_cursor = $this->get_state()->index->cursor ?? null;
-                if ($current_cursor === $last_cursor) {
+                if (
+                    $current_cursor === $last_cursor
+                    && $this->get_state()->consecutive_interrupted_responses === 0
+                ) {
                     throw new RuntimeException(
                         "files-index (symlink follow) made no progress (cursor unchanged)",
                     );
@@ -8007,13 +8032,13 @@ class ImportClient
             }
             $this->pull_index_journal->apply_pending_records();
             $this->get_state()->active_resumable_command->completion_state = "partial";
-            $this->record_interrupted_response(
+            $this->assert_can_retry_after_interrupted_response(
                 "file_fetch",
                 $cursor_before,
                 $durable_cursor,
                 $e,
             );
-            throw $e;
+            return false;
         }
         $this->get_state()->consecutive_interrupted_responses = 0;
         $wall_time = microtime(true) - $request_start;
@@ -8305,13 +8330,13 @@ class ImportClient
             fclose($next_remote_index_file_handle);
             $this->get_state()->index->cursor = $cursor;
             $this->get_state()->active_resumable_command->completion_state = "partial";
-            $this->record_interrupted_response(
+            $this->assert_can_retry_after_interrupted_response(
                 "file_index",
                 $cursor_before,
                 $cursor,
                 $e,
             );
-            throw $e;
+            return false;
         }
         $this->get_state()->consecutive_interrupted_responses = 0;
         $wall_time = microtime(true) - $request_start;
@@ -9464,13 +9489,18 @@ class ImportClient
                     $this->get_state()->sql_bytes = $sql_bytes_written;
                     $this->get_state()->sql_statements_counted = $sql_statements_counted;
                     $this->get_state()->active_resumable_command->completion_state = "partial";
-                    $this->record_interrupted_response(
+                    $this->assert_can_retry_after_interrupted_response(
                         "sql_chunk",
                         $cursor_before,
                         $mode === "mysql" ? $durable_mysql_cursor : $cursor,
                         $e,
                     );
-                    throw $e;
+                    $retry_log = "SQL RETRY | requesting again from the durable cursor | mode={$mode}";
+                    if ($sql_buffer !== "") {
+                        $retry_log .= " | buffered_sql=" . strlen($sql_buffer) . " bytes";
+                    }
+                    $this->audit_log($retry_log, true);
+                    continue;
                 }
                 if ($remote_sql_error !== null) {
                     throw new RuntimeException(
@@ -10048,13 +10078,13 @@ class ImportClient
                     $this->get_state()->db_index->bytes = $bytes_written;
                     $this->get_state()->db_index->updated_at = (string) time();
                     $this->get_state()->active_resumable_command->completion_state = "partial";
-                    $this->record_interrupted_response(
+                    $this->assert_can_retry_after_interrupted_response(
                         "db_index",
                         $cursor_before,
                         $cursor,
                         $e,
                     );
-                    throw $e;
+                    continue;
                 }
                 $this->get_state()->consecutive_interrupted_responses = 0;
                 $wall_time = microtime(true) - $request_start;
@@ -12105,10 +12135,19 @@ class ImportClient
         }
     }
 
+    /** Whether the next request is the last immediate retry before exit 3. */
+    private function is_next_request_final_retry_attempt(): bool
+    {
+        // The current failure has not been counted yet.
+        $failures = $this->get_state()->consecutive_interrupted_responses + 1;
+
+        return self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES - $failures <= 1;
+    }
+
     /**
      * Record one interrupted request after its durable cursor has been saved
-     * in command state. The caller rethrows the original error and exits 3;
-     * only the caller of the CLI decides when to retry or stop.
+     * in command state. Reprint retries while the failure count remains below
+     * the limit. Reaching the limit asks the caller to try the command later.
      *
      * A durable cursor advance resets the no-progress count, even if the
      * response later failed. Different temporary errors share the count.
@@ -12118,7 +12157,7 @@ class ImportClient
      * @param ?string                        $cursor_after  Last durable cursor after the request.
      * @param TransientInterruptionException $exception     Original request failure.
      */
-    protected function record_interrupted_response(
+    protected function assert_can_retry_after_interrupted_response(
         string $phase,
         ?string $cursor_before,
         ?string $cursor_after,
@@ -12133,12 +12172,25 @@ class ImportClient
         $count = $this->get_state()->consecutive_interrupted_responses;
         $this->audit_log(
             "TEMPORARY REQUEST FAILURE | {$phase} | " .
-                "consecutive_failures_without_progress={$count}" .
+                "consecutive_failures_without_progress={$count}/" .
+                self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES .
                 " | cursor_moved=" .
                 ($cursor_after !== $cursor_before ? "yes" : "no") .
                 " | " . $exception->getMessage(),
             true,
         );
+
+        if ($count >= self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The remote failure is rendered only as CLI text.
+            throw new RetryLaterException(
+                "The remote request failed {$count} consecutive times " .
+                "without cursor progress during {$phase}. Try the command again later. " .
+                "Last failure: " . $exception->getMessage(),
+                0,
+                $exception,
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
     }
 
     /**
@@ -12146,10 +12198,10 @@ class ImportClient
      *
      * @param Throwable $exception Failure being reported, not a previous cause.
      * @return array {
-     *     @type string $exception                             Original exception class.
+     *     @type string $exception                             Reported exception class.
      *     @type int    $http_code                             HTTP status when received with the failure. Otherwise omitted.
      *     @type int    $curl_errno                            Nonzero cURL error number. Otherwise omitted.
-     *     @type int    $consecutive_failures_without_progress Consecutive stalled requests, only for retryable failures.
+     *     @type int    $consecutive_failures_without_progress Consecutive stalled requests when the retry-later limit is reached.
      * }
      */
     public function get_error_details(Throwable $exception): array
@@ -12161,7 +12213,7 @@ class ImportClient
         if ($this->last_curl_errno > 0) {
             $details['curl_errno'] = $this->last_curl_errno;
         }
-        if ($exception instanceof TransientInterruptionException) {
+        if ($exception instanceof RetryLaterException) {
             $details['consecutive_failures_without_progress'] =
                 $this->get_state()->consecutive_interrupted_responses;
         }
@@ -12842,6 +12894,7 @@ class ImportClient
                     "http_code" => $http_code,
                     "timeout" => false,
                     "curl_errno" => 0,
+                    "final_attempt" => $this->is_next_request_final_retry_attempt(),
                 ]);
             }
 
@@ -15090,7 +15143,7 @@ if (
             }
             fwrite(STDERR, $json . "\n");
         }
-        $reprint_exit_code = $e instanceof TransientInterruptionException ? 3 : 1;
+        $reprint_exit_code = $e instanceof RetryLaterException ? 3 : 1;
         $GLOBALS['REPRINT_PULL_EXIT_CODE'] = $reprint_exit_code;
         if (!defined('EXIT_AFTER_PULL') || EXIT_AFTER_PULL) {
             exit( (int) $reprint_exit_code );
