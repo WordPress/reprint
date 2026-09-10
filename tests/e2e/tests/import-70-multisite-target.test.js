@@ -328,7 +328,7 @@ describe('Pull a selected site into a fresh single site', () => {
         assert.deepEqual(observations, [0, false, false, false, 1]);
     });
 
-    it('checks numeric URL aliases before apply and stores one normalized target URL', async () => {
+    it('rejects invalid targets and stores one normalized IPv4 destination', async () => {
         const directory = createTempDir('e2e-multisite-input');
         directories.push(directory);
         const database = 'e2e_multisite_input_target';
@@ -339,7 +339,7 @@ describe('Pull a selected site into a fresh single site', () => {
         const connection = await createMysqlConnection();
         try {
             await connection.query(`CREATE DATABASE \`${database}\``);
-            for (const target of ['http://127.1', 'http://2130706433', 'http://0x7f000001', 'http://[::1]']) {
+            for (const target of ['http://256.1.1.1', 'http://[invalid]', 'https://target.test:65536', 'https://target.test/path']) {
                 const result = runImporter(url, directory, 'db-apply', {
                     secret: getSiteSecret(site), autoResume: false,
                     extraArgs: [...targetArgs(database).filter(arg => !arg.startsWith('--new-site-url=')),
@@ -353,11 +353,11 @@ describe('Pull a selected site into a fresh single site', () => {
             const result = runImporter(url, directory, 'db-apply', {
                 secret: getSiteSecret(site), autoResume: false,
                 extraArgs: [...targetArgs(database).filter(arg => !arg.startsWith('--new-site-url=')),
-                    '--new-site-url=HTTPS://TARGET.TEST:443/'],
+                    '--new-site-url=HTTP://0x7f000001:9247/'],
             });
             assert.equal(result.exitCode, 0, result.stdout + result.stderr);
             const [[home]] = await connection.query(`SELECT option_value FROM \`${database}\`.network_7_options WHERE option_name='home'`);
-            assert.equal(home.option_value, 'https://target.test');
+            assert.equal(home.option_value, targetUrl);
         } finally { await connection.end(); }
     });
 
@@ -444,7 +444,7 @@ describe('Pull a selected site into a fresh single site', () => {
             try {
                 await connection.query(`CREATE DATABASE \`${database}\``);
                 clientProcess = startClient([join(import.meta.dirname, '../fixtures/pause-multisite-apply.php'),
-                    clientPath, url, directory, database, stage, when, marker]);
+                    clientPath, url, directory, database, stage, when, marker, targetUrl]);
                 for (let attempt = 0; attempt < 600 && !existsSync(marker); ++attempt) {
                     if (clientProcess.child.exitCode !== null || clientProcess.child.signalCode !== null) break;
                     await sleep(100);
