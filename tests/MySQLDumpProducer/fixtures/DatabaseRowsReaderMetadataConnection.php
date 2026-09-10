@@ -14,7 +14,7 @@ final class DatabaseRowsReaderMetadataConnection {
     public $queries = [];
 
     /**
-     * @param string[]   $tables     Tables returned by SHOW FULL TABLES.
+     * @param string[]   $tables     Tables returned by table discovery.
      * @param array[]|null $index_rows Rows returned by SHOW INDEX.
      */
     public function __construct(array $tables, $index_rows = null)
@@ -28,6 +28,11 @@ final class DatabaseRowsReaderMetadataConnection {
     public function query(string $query): DatabaseRowsReaderMetadataStatement
     {
         $this->queries[] = $query;
+        if ($query === 'SHOW TABLE STATUS;') {
+            return new DatabaseRowsReaderMetadataStatement(array_map(static function ($table) {
+                return ['Name' => $table, 'Engine' => 'InnoDB', 'Rows' => 12000];
+            }, $this->tables));
+        }
         if ($query === 'SHOW FULL TABLES') {
             return new DatabaseRowsReaderMetadataStatement(array_map(static function ($table) {
                 return ['table' => $table, 'type' => 'BASE TABLE'];

@@ -202,70 +202,34 @@ class FilesPullStateTest extends TestCase
 
     public function testSavingStateThrottlesOnlyInProgressProgressFileWrites()
     {
-        $client = $this->getMockBuilder(\ImportClient::class)
-            ->setConstructorArgs([
-                'http://fake.url',
-                $this->stateDir,
-                $this->filesystem_root,
-            ])
-            ->onlyMethods(['write_progress_file'])
-            ->getMock();
-        $written_completion_states = [];
-        $client->method('write_progress_file')
-            ->willReturnCallback(function () use (
-                $client,
-                &$written_completion_states
-            ): void {
-                $written_completion_states[] =
-                    $client->get_state()
-                        ->active_resumable_command
-                        ->completion_state;
-            });
-
-        $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getProperty('last_progress_file_write')
-            ->setValue($client, microtime(true));
-        $client->get_state()->active_resumable_command->completion_state =
-            'in_progress';
+        $client = $this->makeClient();
+        $command = $client->get_state()->active_resumable_command;
+        $command->completion_state = 'in_progress';
+        $client->write_progress_file();
+        $progress_file = $this->stateDir . '/progress.json';
+        $first_write = file_get_contents($progress_file);
         $client->save_state();
+        $this->assertSame($first_write, file_get_contents($progress_file));
 
-        $client->get_state()->active_resumable_command->completion_state = null;
-        $client->save_state();
-
-        $client->get_state()->active_resumable_command->completion_state =
-            'partial';
-        $client->save_state();
-
-        $client->get_state()->active_resumable_command->completion_state =
-            'complete';
-        $client->save_state();
-
-        $this->assertSame(
-            [null, 'partial', 'complete'],
-            $written_completion_states
-        );
+        foreach ([null, 'partial', 'complete'] as $status) {
+            $command->completion_state = $status;
+            $client->save_state();
+            $snapshot = json_decode(file_get_contents($progress_file), true);
+            $this->assertSame($status ?? 'in_progress', $snapshot['status']);
+        }
     }
 
     public function testSavingStateRefreshesInProgressProgressAfterThrottle()
     {
-        $client = $this->getMockBuilder(\ImportClient::class)
-            ->setConstructorArgs([
-                'http://fake.url',
-                $this->stateDir,
-                $this->filesystem_root,
-            ])
-            ->onlyMethods(['write_progress_file'])
-            ->getMock();
-        $client->expects($this->once())
-            ->method('write_progress_file');
-
-        $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getProperty('last_progress_file_write')
-            ->setValue($client, microtime(true) - 1.1);
-        $client->get_state()->active_resumable_command->completion_state =
-            'in_progress';
-
+        $client = $this->makeClient();
+        $client->get_state()->active_resumable_command->completion_state = 'in_progress';
+        $client->write_progress_file();
+        $progress_file = $this->stateDir . '/progress.json';
+        $first_write = json_decode(file_get_contents($progress_file), true);
+        usleep(1100000);
         $client->save_state();
+        $next_write = json_decode(file_get_contents($progress_file), true);
+        $this->assertGreaterThan($first_write['ts'], $next_write['ts']);
     }
 
     public function testShutdownFlushesTheLatestProgressFile()
@@ -417,6 +381,9 @@ class FilesPullStateTest extends TestCase
 
         // Step 2: new client, try run_files_pull
         [$client2, $reflection2] = $this->prepareClient();
+        $progress_stream = fopen('php://memory', 'w+b');
+        $this->assertIsResource($progress_stream);
+        $reflection2->getProperty('progress_fd')->setValue($client2, $progress_stream);
 
         try {
             $reflection2->getMethod('run_files_pull')->invoke($client2);
@@ -431,6 +398,16 @@ class FilesPullStateTest extends TestCase
             "After abort + re-run, the sync should start fresh, not report 'already complete'",
         );
         $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
+        rewind($progress_stream);
+        $starting_progress = json_decode(
+            trim( (string) fgets($progress_stream) ),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        fclose($progress_stream);
+        $this->assertSame('starting', $starting_progress['event']);
+        $this->assertSame('Indexing files', $starting_progress['message']);
     }
 
     // ---------------------------------------------------------------

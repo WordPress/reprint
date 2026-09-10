@@ -294,6 +294,14 @@ final class FilesPullLocalIndexTest extends TestCase
         $this->assertSame('longer local edit', file_get_contents($this->localTree . '/edited.txt'));
         $this->assertSame($pulledContents, file_get_contents($this->localTree . '/' . self::PULLED_PATH));
         $this->assertFileDoesNotExist($this->localTree . '/unchanged.txt');
+        $progress = json_decode(
+            (string) file_get_contents($this->stateDirectory . '/progress.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertSame(1, $progress['progress']['items']['total']);
+        $this->assertSame(strlen($pulledContents), $progress['progress']['bytes']['total']);
 
         $diff = $this->runFilesDiff();
         $this->assertSame(0, $diff['exit'], $diff['output']);

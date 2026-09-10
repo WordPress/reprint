@@ -72,6 +72,40 @@ class DatabaseRowsReaderTest extends MySQLDumpProducerTestBase {
         $this->assertNotContains('__reprint_db_pull_progress_another_schema', $tables);
     }
 
+    public function testTableDiscoverySuppliesRowEstimatesAndExcludesViews(): void
+    {
+        $this->pdo->exec('CREATE TABLE counted_rows (id INT PRIMARY KEY) ENGINE=MyISAM');
+        $this->pdo->exec('INSERT INTO counted_rows VALUES (1), (2), (3)');
+        $this->pdo->exec('CREATE VIEW counted_rows_view AS SELECT * FROM counted_rows');
+        $reader = new DatabaseRowsReader($this->pdo);
+        $reader->initialize_tables_to_process();
+        $this->assertTrue($reader->move_to_next_table());
+        $cursor = $reader->get_cursor_state();
+        $this->assertSame('counted_rows', $cursor['current_table']);
+        $this->assertSame(3, $cursor['current_table_rows_estimated']);
+        $this->assertSame(1, $cursor['tables_total']);
+        $this->assertFalse($reader->move_to_next_table());
+    }
+
+    public function testNumericTableNamesRemainStringsAcrossResume(): void
+    {
+        $this->pdo->exec('CREATE TABLE `123` (id INT PRIMARY KEY)');
+        foreach ([[], ['tables_to_process' => ['123']]] as $options) {
+            $reader = new DatabaseRowsReader($this->pdo, $options);
+            if (!$reader->has_initialized_tables()) {
+                $reader->initialize_tables_to_process();
+            }
+            $this->assertTrue($reader->move_to_next_table());
+            $cursor = $reader->get_cursor_state();
+            $this->assertSame('123', $cursor['current_table']);
+            $reader->close();
+            $reader = new DatabaseRowsReader($this->pdo, $options);
+            $this->assertTrue($reader->restore_cursor_state($cursor));
+            $this->assertSame($cursor, $reader->get_cursor_state());
+            $reader->close();
+        }
+    }
+
     public function testReturnsStructuredRecordsWithoutFormattingSql(): void
     {
         $this->pdo->exec(

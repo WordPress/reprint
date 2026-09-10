@@ -17,11 +17,17 @@ final class DatabaseRowsReaderMetadataTest extends TestCase {
 
         $this->assertTrue($reader->move_to_next_table());
         $this->assertSame('z_table', $reader->get_current_table());
+        $queries_before_progress = $database->queries;
+        for ($update = 0; $update < 100; ++$update) {
+            $this->assertSame(12000, $reader->get_cursor_state()['current_table_rows_estimated']);
+            $this->assertSame(1, $reader->get_cursor_state()['current_table_number']);
+        }
+        $this->assertSame($queries_before_progress, $database->queries);
         $this->assertTrue($reader->move_to_next_table());
         $this->assertSame('A_table', $reader->get_current_table());
         $this->assertSame(
             [
-                'SHOW FULL TABLES',
+                'SHOW TABLE STATUS;',
                 'SHOW INDEX FROM `z_table`',
                 'SHOW FULL COLUMNS FROM `z_table`',
                 'SHOW INDEX FROM `A_table`',
@@ -29,6 +35,20 @@ final class DatabaseRowsReaderMetadataTest extends TestCase {
             ],
             $database->queries
         );
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function testProgressDoesNotSearchTheTableList(): void
+    {
+        $reader = new DatabaseRowsReader(new DatabaseRowsReaderMetadataConnection(['first', 'second']));
+        $reader->initialize_tables_to_process();
+        $reader->move_to_next_table();
+        $reader->move_to_next_table();
+        require __DIR__ . '/fixtures/forbid-progress-table-search.php';
+        $this->assertSame(2, $reader->get_cursor_state()['current_table_number']);
     }
 
     public function testUsesReturnedOrderWhenPrimaryKeyPositionsAreNotUsable(): void

@@ -26,10 +26,7 @@ class InterruptingDatabaseUrlRewriteClient extends \ImportClient {
             !$this->stop_requested
             && $this->get_state()->database_url_rewrite->records_processed >= $this->stop_after_records
         ) {
-            $shutdown_requested = ( new \ReflectionClass(\ImportClient::class) )
-                ->getProperty('shutdown_requested');
-            $shutdown_requested->setAccessible(true);
-            $shutdown_requested->setValue($this, true);
+            $this->handle_database_url_rewrite_shutdown(SIGINT);
             $this->stop_requested = true;
         }
     }
