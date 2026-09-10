@@ -191,7 +191,10 @@ define('BLOG_ID_CURRENT_SITE', 1);
             assert.equal(inspection.upload_url, `${targetUrl}/${uploadRelative}`);
             assert.ok(inspection.new_url.startsWith(inspection.upload_url + '/'));
             assert.equal(Number(inspection.thumbnail), 200);
-            assert.equal(inspection.settings.url, inspection.attachment);
+            // This plugin option has no URL schema. Site 1 shares its host
+            // with child sites, so its unknown strings stay remote rather
+            // than guessing path bounds. Attachment APIs still use local media.
+            assert.equal(inspection.settings.url, selectedId === 1 ? selected.media_url : inspection.attachment);
             assert.equal(inspection.settings.sibling_media, fixture.sites[8].media_url);
             assert.deepEqual(inspection.settings.cross_site_reference, { site_id: 8, post_id: 100 });
             assert.equal(inspection.thumbnail_metadata.width, 150);
