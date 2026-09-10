@@ -2851,8 +2851,8 @@ class ImportClient
      * preserving their directory structure.
      *
      * Issues one file_fetch request per parent directory so that an
-     * inaccessible directory doesn't block the others.  All errors
-     * are caught and logged as non-fatal.
+     * inaccessible directory doesn't block the others. Download failures
+     * are logged as non-fatal; invalid received paths stop the caller.
      *
      * @return int Number of files successfully downloaded.
      */
@@ -2894,7 +2894,7 @@ class ImportClient
             $context->file_path = null;
             $context->file_ctime = null;
 
-            $context->on_chunk = function ($chunk) use ($path, $context, &$downloaded) {
+            $context->on_chunk = function ($chunk) use ($path, $dir_files, $context, &$downloaded) {
                 $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
                 if ($chunk_type === "file") {
@@ -2902,6 +2902,11 @@ class ImportClient
                     $remote_absolute_path = base64_decode($raw, true);
                     if ($remote_absolute_path === false || $remote_absolute_path === "") {
                         return;
+                    }
+
+                    if (!in_array($remote_absolute_path, $dir_files, true)) {
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This exception is logged as CLI text.
+                        throw new \RuntimeException("The source returned an unrequested runtime file: {$remote_absolute_path}");
                     }
 
                     $is_first = ($chunk["headers"]["x-first-chunk"] ?? "0") === "1";
@@ -2947,12 +2952,12 @@ class ImportClient
                     "Fetch failed for directory {$directory} (non-fatal): " .
                         substr($e->getMessage(), 0, 200),
                 );
-            }
+            } finally {
+                @unlink($tmp);
 
-            @unlink($tmp);
-
-            if ($context->file_handle) {
-                fclose($context->file_handle);
+                if ($context->file_handle) {
+                    fclose($context->file_handle);
+                }
             }
         }
 
@@ -11908,8 +11913,22 @@ class ImportClient
         &$current_chunk
     ): callable {
         return function ($event) use ($context, &$current_chunk) {
+            $headers = $event["headers"];
+            if (!$current_chunk) {
+                // Entry paths must be checked even when this caller ignores
+                // the part. Symlink targets are different: ../ may be valid
+                // there, and the symlink handler checks the resolved target.
+                foreach ([
+                    "x-file-path", "x-directory-path", "x-symlink-path",
+                    "x-index-path", "x-filesystem-root",
+                ] as $path_header) {
+                    if (isset($headers[$path_header]) && $headers[$path_header] !== "") {
+                        $this->assert_valid_received_path($headers[$path_header], $path_header);
+                    }
+                }
+            }
+
             if ($event["type"] === "body") {
-                $headers = $event["headers"];
                 $chunk_type = $headers["x-chunk-type"] ?? "";
                 if ($chunk_type === "file") {
                     if (!$current_chunk) {
@@ -11951,8 +11970,13 @@ class ImportClient
                         $event["data"];
                 }
             } elseif ($event["type"] === "complete") {
-                $headers = $event["headers"];
                 $chunk_type = $headers["x-chunk-type"] ?? "";
+                if ($chunk_type === "error") {
+                    $error = json_decode($current_chunk["body"] ?? "", true);
+                    if (is_array($error) && isset($error["path"]) && $error["path"] !== "") {
+                        $this->assert_valid_received_path($error["path"], "remote error path");
+                    }
+                }
                 if ($chunk_type === "file" && !empty($current_chunk["body_streamed"])) {
                     if ($context->on_chunk) {
                         $close_headers = $headers;
@@ -11986,6 +12010,24 @@ class ImportClient
                 $current_chunk = null;
             }
         };
+    }
+
+    /**
+     * Validate one base64-encoded entry path before dispatching its part.
+     *
+     * @param mixed  $encoded_path Path field received in a header or JSON body.
+     * @param string $label        Name of the received path field.
+     */
+    private function assert_valid_received_path($encoded_path, string $label): void
+    {
+        $path = is_string($encoded_path) ? base64_decode($encoded_path, true) : false;
+        if ($path === false) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol validation error rendered as CLI text.
+            throw new \InvalidArgumentException("{$label} must contain a base64-encoded path; received " . json_encode($encoded_path, JSON_INVALID_UTF8_SUBSTITUTE));
+        }
+        // Runtime-file requests also come from the source's preflight response,
+        // so matching a request does not replace path validation.
+        assert_valid_path($path, $label);
     }
 
     /**
