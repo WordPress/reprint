@@ -21,7 +21,7 @@ class ProgressReporter {
     private array $snapshot = [];
     /** Timestamp of the last successful progress.json replacement. */
     private float $last_file_write = 0;
-    /** Timestamp of the last emitted JSONL record, independent of file writes. */
+    /** Timestamp of the last formatted JSONL record, independent of snapshot writes. */
     private float $last_output = 0;
 
     /** Live counters; completed bytes are copied to the fetch checkpoint only at durable fetch boundaries. */
@@ -118,31 +118,27 @@ class ProgressReporter {
     }
 
     /**
-     * Emits a JSONL event. False lets the caller save its checkpoint on a broken pipe.
+     * Formats a JSONL event before the caller writes its log and filters compact output.
      *
      * @param array $event {
      *     Progress event, retaining its event-specific fields.
      *     @type array  $progress Optional screen counters; adds schema_version when present.
      *     @type string $status   Optional lifecycle status; starting, complete and error bypass throttling.
      * }
-     * @param resource $stream Progress output stream.
-     * @param bool     $force  Whether this event bypasses JSONL throttling.
+     * @param bool $force Whether this event bypasses JSONL throttling.
+     * @return string|null Encoded event with a newline, or null while throttled.
      */
-    public function output_jsonl(array $event, $stream, bool $force = false): bool {
+    public function format_jsonl(array $event, bool $force = false): ?string {
         $is_status_change = in_array($event['status'] ?? null, ['starting', 'complete', 'error'], true);
         $now = microtime(true);
         if (!$force && !$is_status_change && $now - $this->last_output < self::REPORT_INTERVAL) {
-            return true;
+            return null;
         }
         if (isset($event['progress']) && is_array($event['progress'])) {
             $event['schema_version'] = self::SCHEMA_VERSION;
         }
-        if (@fwrite($stream, json_encode($event, JSON_INVALID_UTF8_SUBSTITUTE) . "\n") === false) {
-            return false;
-        }
-        @flush();
         $this->last_output = $now;
-        return true;
+        return json_encode($event, JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR) . "\n";
     }
 
     /**

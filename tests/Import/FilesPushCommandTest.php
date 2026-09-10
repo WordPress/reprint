@@ -144,7 +144,7 @@ final class FilesPushCommandTest extends TestCase
 
         $this->assertSame(1, $result['exit'], $result['output']);
         $this->assertSame(
-            "Invalid --progress value: rich. Valid values: auto, tty, jsonl\n",
+            "Invalid --progress value: rich. Valid values: auto, tty, jsonl, compact\n",
             $result['stderr']
         );
         $this->assertNoSenderState($this->stateDirectory);
@@ -167,7 +167,7 @@ final class FilesPushCommandTest extends TestCase
             $this->fail('The invalid progress mode was accepted.');
         } catch (\InvalidArgumentException $exception) {
             $this->assertSame(
-                'Invalid --progress value: rich. Valid values: auto, tty, jsonl',
+                'Invalid --progress value: rich. Valid values: auto, tty, jsonl, compact',
                 $exception->getMessage()
             );
         } finally {
@@ -184,7 +184,7 @@ final class FilesPushCommandTest extends TestCase
 
     public function testFilesPushRejectsVerboseWithAnExplicitProgressMode(): void
     {
-        foreach (['tty', 'jsonl'] as $progressMode) {
+        foreach (array_diff(ImportClient::PROGRESS_OUTPUT_MODES, ['auto']) as $progressMode) {
             $result = $this->runFilesPush(
                 'https://example.test/?reprint-api=1',
                 ['--secret=token', '--progress=' . $progressMode, '--verbose']

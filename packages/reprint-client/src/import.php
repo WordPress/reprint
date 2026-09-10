@@ -189,7 +189,7 @@ class ImportClient
     ];
 
     /** Progress output modes accepted by every command. */
-    public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl'];
+    public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl', 'compact'];
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
@@ -307,7 +307,7 @@ class ImportClient
     /** @var bool Whether the current progress stream is a TTY. */
     private $is_tty;
 
-    /** @var string Progress output mode for this invocation: auto, tty, or jsonl. */
+    /** @var string Progress output mode for this invocation: auto, tty, jsonl, or compact. */
     private $progress_output_mode = 'auto';
 
     /** @var PullState Persistent pull state loaded from / saved to $pull_state_file. */
@@ -440,6 +440,12 @@ class ImportClient
 
     /** @var string|null Machine-readable HTTP, cURL, or preflight error code for reporting. */
     public $last_error_code = null;
+
+    /** @var resource|null Full JSONL stream retained while compact output is active. */
+    private $progress_log_handle = null;
+
+    /** @var array{string|null, string|null}|null Last command and stage printed in compact mode. */
+    private ?array $last_compact_stage = null;
 
     /** @var TerminalProgress Renders progress and lifecycle output to the terminal. */
     private TerminalProgress $progress;
@@ -864,7 +870,7 @@ class ImportClient
      *   - command: Required. One of the entries in self::COMMANDS.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
-     *   - progress: Optional progress output mode: auto, tty, or jsonl
+     *   - progress: Optional progress output mode: auto, tty, jsonl, or compact
      * @param ReprintProcessLock|null $process_lock Optional lock already held
      *                                               for this state directory.
      */
@@ -944,6 +950,27 @@ class ImportClient
         }
         // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         $this->progress_output_mode = $progress_output_mode;
+        $this->last_compact_stage = null;
+        if (is_resource($this->progress_log_handle)) {
+            fclose($this->progress_log_handle);
+            $this->progress_log_handle = null;
+        }
+        if ($progress_output_mode === 'compact') {
+            $progress_log_file = wp_join_unix_paths($this->state_dir, 'progress.jsonl');
+            $previous_umask = umask(0077);
+            $this->progress_log_handle = @fopen($progress_log_file, 'a+b');
+            umask($previous_umask);
+            if ($this->progress_log_handle === false) {
+                $this->progress_log_handle = null;
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, not HTML.
+                throw new RuntimeException("Could not open the full progress log for append: {$progress_log_file}");
+            }
+            // A process can die during a write. Keep an unfinished last record
+            // separate from this invocation's first record.
+            if (fseek($this->progress_log_handle, -1, SEEK_END) === 0 && fread($this->progress_log_handle, 1) !== "\n") {
+                $this->append_progress_log("\n");
+            }
+        }
         $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
 
         // Local runtime cleanup is recorded in pull state. Read it for diff
@@ -1708,7 +1735,7 @@ class ImportClient
      *
      *     @type string $secret             HMAC connection token.
      *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
-     *     @type string $progress           Progress output mode: auto, tty, or jsonl.
+     *     @type string $progress           Progress output mode: auto, tty, jsonl, or compact.
      *     @type array  $files_push_context Optional context already validated by the CLI entry point.
      * }
      * @param ReprintProcessLock $process_lock Lock held for the command's state directory.
@@ -1936,6 +1963,7 @@ class ImportClient
         if ($result_json === false) {
             $result_json = '{"command":"files-push","status":"error","message":"Could not encode the files-push result."}';
         }
+        $this->append_progress_log($result_json . "\n");
         @fwrite($this->progress_fd, $result_json . "\n");
         @flush();
     }
@@ -3001,7 +3029,10 @@ class ImportClient
         $entry["error_code"] = $this->last_error_code;
         $entry["message"] = $error === null ? "Preflight passed." : "Error: " . $error['message'];
         // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
-        echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
+        $entry_json = json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
+        $this->append_progress_log($entry_json);
+        // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Encoded CLI JSON, not HTML.
+        echo $entry_json;
         $this->write_progress_file($entry["error"]);
         exit($error === null ? 0 : 1);
     }
@@ -3571,6 +3602,13 @@ class ImportClient
         }
 
         if ($stage === "local-index") {
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "stage",
+                "command" => "files-pull",
+                "stage" => "local-index",
+                "message" => "Indexing local files",
+            ], true);
             $this->ensure_local_index_exists();
             MappedRemoteIndexBuilder::build([
                 "remote_index_file" => $this->next_remote_index_file,
@@ -3601,6 +3639,13 @@ class ImportClient
         $starting_mirror_stage = false;
         $starting_fetch_stage = false;
         if ($stage === "diff") {
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "stage",
+                "command" => "files-pull",
+                "stage" => "diff",
+                "message" => "Comparing file indexes",
+            ], true);
             $complete = $this->compare_remote_indexes_and_build_fetch_list();
             if (!$complete) {
                 $this->get_state()->active_resumable_command->completion_state = "partial";
@@ -3619,6 +3664,13 @@ class ImportClient
         }
 
         if ($stage === "mirror") {
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "stage",
+                "command" => "files-pull",
+                "stage" => "mirror",
+                "message" => "Planning local file changes",
+            ], true);
             if ($starting_mirror_stage) {
                 $this->pull_index_journal->open();
             }
@@ -3667,6 +3719,13 @@ class ImportClient
         }
 
         if ($stage === "fetch") {
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "stage",
+                "command" => "files-pull",
+                "stage" => "fetch",
+                "message" => "Downloading files",
+            ], true);
             $complete = $this->fetch_files_from_list($this->fetch_list_file);
             if (!$complete) {
                 $this->get_state()->active_resumable_command->completion_state = "partial";
@@ -5580,7 +5639,9 @@ class ImportClient
             "moved" => $moved,
         ];
         if (!$this->progress->is_mode('pipeline')) {
-            fwrite($this->progress_fd, json_encode($result) . "\n");
+            $result_json = json_encode($result) . "\n";
+            $this->append_progress_log($result_json);
+            fwrite($this->progress_fd, $result_json);
         }
         $this->output_progress(array_merge(["type" => "merge_wp_content_complete"], $result));
     }
@@ -6000,7 +6061,9 @@ class ImportClient
             "force_replaced" => $forced,
         ];
         if (!$this->progress->is_mode('pipeline')) {
-            fwrite($this->progress_fd, json_encode($result) . "\n");
+            $result_json = json_encode($result) . "\n";
+            $this->append_progress_log($result_json);
+            fwrite($this->progress_fd, $result_json);
         }
         $this->output_progress(array_merge(["type" => "flat_docroot_complete"], $result));
     }
@@ -13260,11 +13323,83 @@ class ImportClient
         if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             return;
         }
-        if (!$this->progress_reporter->output_jsonl($data, $this->progress_fd, $force)) {
+        $compact_data = $data;
+        if ($this->progress_output_mode === 'compact') {
+            $type = $data['type'] ?? null;
+            $status = $data['status'] ?? null;
+            $command = $data['command'] ?? $context['command'];
+            $phase = $data['stage'] ?? $context['phase'] ?? $data['phase'] ?? null;
+            $stage = [$command, $phase];
+            $is_attention = isset($data['error']) || isset($data['error_message'])
+                || in_array($type, ['warning', 'error', 'symlink_error', 'volatile_files', 'interrupt', 'state_saved', 'state_save_error'], true);
+            // Request-completion records have a phase and counters, but no
+            // command or message. Keep those in the log, not the short output.
+            $is_result = in_array($status, ['complete', 'partial', 'error', 'aborted', 'failed', 'interrupted', 'restart'], true)
+                && ( isset($data['command']) || isset($data['message']) || !isset($data['phase']) );
+            if ($is_attention || $is_result) {
+                $force = true;
+            } elseif ($type === 'lifecycle') {
+                if (in_array($data['event'] ?? null, ['starting', 'resuming', 'stage'], true)
+                    && $stage === $this->last_compact_stage
+                ) {
+                    $compact_data = null;
+                } else {
+                    $this->last_compact_stage = $stage;
+                    $force = true;
+                }
+            } elseif ($status === 'starting' || isset($data['progress'])) {
+                if ($stage === $this->last_compact_stage) {
+                    $compact_data = null;
+                } else {
+                    $this->last_compact_stage = $stage;
+                    $compact_data = [
+                        'type' => 'lifecycle',
+                        'event' => 'stage',
+                        'command' => $command,
+                        'stage' => $phase,
+                        'message' => $status === 'starting' || $type === 'push_progress'
+                            ? ( $data['message'] ?? $phase )
+                            : "Starting {$command} stage: {$phase}",
+                    ];
+                    $force = true;
+                }
+            } else {
+                $compact_data = null;
+            }
+        }
+
+        $line = $this->progress_reporter->format_jsonl($data, $force);
+        if ($line === null) {
+            return;
+        }
+        // Write the normal JSONL record before hiding or shortening it. The
+        // snapshot above and the retained log never depend on compact filtering.
+        $this->append_progress_log($line);
+        if ($compact_data === null) {
+            return;
+        }
+        if ($compact_data !== $data) {
+            $line = json_encode($compact_data, JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR) . "\n";
+        }
+        if (@fwrite($this->progress_fd, $line) === false) {
             // Broken pipe — save state and exit cleanly.
             $this->save_state();
             $this->write_progress_file();
             exit(0);
+        }
+        @flush();
+    }
+
+    /** Appends one encoded record or the separator after an interrupted record. */
+    private function append_progress_log(string $line): void
+    {
+        if (is_resource($this->progress_log_handle)) {
+            if (@fwrite($this->progress_log_handle, $line) !== strlen($line)) {
+                fclose($this->progress_log_handle);
+                $this->progress_log_handle = null;
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, not HTML.
+                throw new RuntimeException("Could not append the full progress record to {$this->state_dir}/progress.jsonl");
+            }
         }
     }
 }
@@ -13386,7 +13521,7 @@ if (
             'type' => 'value',
             'target' => 'progress',
             'placeholder' => 'MODE',
-            'help' => 'Progress output: auto, tty, or jsonl (default: auto)',
+            'help' => 'Progress output: auto, tty, jsonl, or compact (default: auto). Compact keeps stages and saves the full log in progress.jsonl.',
             'help_section' => 'global',
             'commands' => ImportClient::COMMANDS,
             'valid_values' => ImportClient::PROGRESS_OUTPUT_MODES,
@@ -14358,7 +14493,7 @@ if (
         "files-diff" => [
             "level" => "low",
             "short" => "Compare local files with the local index",
-            "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl]",
+            "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl|compact]",
             "description" =>
                 "Shows which local paths a files-push would send or delete, comparing\n" .
                 "the filesystem root at --fs-root with the local index for this remote\n" .
@@ -14400,7 +14535,8 @@ if (
                 "  auto   Use tty on a terminal and jsonl otherwise (default)\n" .
                 "  tty    Force the single interactive progress bar\n" .
                 "  jsonl  Force one JSON object per line\n" .
-                "Explicit tty and jsonl modes cannot be combined with --verbose.\n" .
+                "  compact  Print stage changes; save the full progress stream in progress.jsonl\n" .
+                "Explicit tty, jsonl, and compact modes cannot be combined with --verbose.\n" .
                 "\n" .
                 "Exit outcomes:\n" .
                 "  0  File push complete\n" .

@@ -937,7 +937,7 @@ Old checkpoints with saved fetch progress lack the completed-byte counts and
 cannot resume in this build. Cleared fetch checkpoints, including those left by
 completed pulls, load with zero completed bytes. Retained indexes are unchanged.
 
-Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl`. The
+Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl|compact`. The
 default `auto` mode uses terminal progress when its output stream is a TTY and
 JSONL otherwise. Use `--progress=tty` to force the terminal presentation when
 output is captured, or `--progress=jsonl` to force structured progress in a
@@ -949,12 +949,37 @@ php reprint.phar files-push "$URL" --state-dir="$STATE_DIR" \
 ```
 
 The selected mode applies only to that invocation and is not retained in
-command state. Explicit `tty` and `jsonl` modes cannot be combined with
+command state. Explicit `tty`, `jsonl`, and `compact` modes cannot be combined with
 `--verbose`.
 
 The selector governs progress, lifecycle, and status output. It does not
 reformat a command's data result, such as preflight or pull-metadata JSON,
 files-stats JSON, or SQL written with `--sql-output=stdout`.
+
+Use `--progress=compact` to print command starts, stage changes, command results,
+warnings, and errors as JSON lines. It hides per-file records, preserve-local
+skips, repeated counters and stage labels, per-request results, and debug chatter.
+Warnings and errors remain individual records; compact mode does not group them
+or add a final report.
+
+```bash
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" \
+    --fs-root="$FS_ROOT" --secret="$SECRET" --progress=compact
+```
+
+Compact mode appends the full normal JSONL progress stream to
+`$STATE_DIR/progress.jsonl` before filtering output. The log retains the usual
+one-second counter sampling, with stage changes, warnings, and errors written
+immediately. It is separate from `audit.log`. New logs have mode `0600` because
+records can contain local paths and preflight data. Existing logs are appended,
+not truncated or rotated. After an interrupted write, the next invocation adds
+a newline so the unfinished record cannot absorb the next record. A reader may
+therefore encounter an incomplete JSON line after a killed process.
+
+A log-open or log-write failure stops the command rather than silently losing
+the full log. `progress.json` still receives its normal snapshot updates.
+Other progress modes do not create `progress.jsonl`. With `--sql-output=stdout`,
+SQL stays on stdout and compact progress goes to stderr.
 
 The files-push terminal presentation uses one stage-weighted progress bar. The
 percentage comes first, followed by a major stage such as `Indexing`, `Pushing`,

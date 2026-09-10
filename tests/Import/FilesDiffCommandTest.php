@@ -388,7 +388,7 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertSame(1, $result['exit'], $result['output']);
         $this->assertSame('', $result['stdout']);
         $this->assertSame(
-            "Invalid --progress value: pretty. Valid values: auto, tty, jsonl\n",
+            "Invalid --progress value: pretty. Valid values: auto, tty, jsonl, compact\n",
             $result['stderr']
         );
     }
