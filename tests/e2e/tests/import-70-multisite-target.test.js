@@ -125,13 +125,17 @@ describe('Pull a selected site into a fresh single site', () => {
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
         server.stdout.on('data', data => { serverLog += data; });
         server.stderr.on('data', data => { serverLog += data; });
+        // Keep the first request failure and exit reason; later connection
+        // refusals cannot explain why a server stopped after accepting a request.
+        server.on('exit', (code, signal) => { serverLog += `PHP server exited: code=${code}, signal=${signal}\n`; });
         let response;
+        let firstRequestError;
         let lastRequestError;
         for (let attempt = 0; attempt < 100; ++attempt) {
             try { response = await fetch(`${targetUrl}/?p=100`); break; }
-            catch (error) { lastRequestError = error; await sleep(100); }
+            catch (error) { firstRequestError ??= error; lastRequestError = error; await sleep(100); }
         }
-        assert.ok(response, serverLog + '\n' + inspect(lastRequestError));
+        assert.ok(response, serverLog + '\n' + inspect({ firstRequestError, lastRequestError }, { depth: 4 }));
         const html = await response.text();
         assert.equal(response.status, 200, html + serverLog);
         assert.ok(html.includes('Only site 7'));
