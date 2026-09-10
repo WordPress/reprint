@@ -1,5 +1,6 @@
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
+import { inspect } from 'node:util';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -125,11 +126,12 @@ describe('Pull a selected site into a fresh single site', () => {
         server.stdout.on('data', data => { serverLog += data; });
         server.stderr.on('data', data => { serverLog += data; });
         let response;
+        let lastRequestError;
         for (let attempt = 0; attempt < 100; ++attempt) {
             try { response = await fetch(`${targetUrl}/?p=100`); break; }
-            catch { await sleep(100); }
+            catch (error) { lastRequestError = error; await sleep(100); }
         }
-        assert.ok(response, serverLog);
+        assert.ok(response, serverLog + '\n' + inspect(lastRequestError));
         const html = await response.text();
         assert.equal(response.status, 200, html + serverLog);
         assert.ok(html.includes('Only site 7'));
