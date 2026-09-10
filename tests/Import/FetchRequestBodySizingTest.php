@@ -342,6 +342,55 @@ class FetchRequestBodySizingTest extends TestCase
         ];
     }
 
+    /** Large path lists stay outside progress JSON and remain readable in a new process. */
+    public function testPreflightStoresChildPathsSeparatelyFromProgress(): void
+    {
+        $paths = [];
+        for ($id = 0; $id < 10000; ++$id) {
+            $paths[] = '/shop/child-' . $id . '/';
+        }
+        $paths_by_origin = ['https://network.test' => $paths];
+        $payload = json_encode(['ok' => true, 'protocol_version' => 3, 'database' => ['wp' => [
+            'multisite' => ['enabled' => true, 'selection' => [
+                'site_id' => 7, 'network_id' => 1, 'base_prefix' => 'wp_',
+                'home_url' => 'https://network.test/shop', 'site_url' => 'https://network.test/shop',
+                'content_url' => 'https://network.test/wp-content',
+                'uploads_url' => 'https://network.test/wp-content/uploads/sites/7',
+                'network_content_url' => 'https://network.test/wp-content',
+                'nested_site_paths' => $paths_by_origin,
+            ]],
+        ]]]);
+        [$url, $pid] = $this->startJsonServer(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen($payload)
+            . "\r\nConnection: close\r\n\r\n" . $payload
+        );
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        \write_current_pull_state($client, []);
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection->getProperty('state')->setValue($client, $reflection->getMethod('load_state')->invoke($client));
+        $client->run_preflight();
+        pcntl_waitpid($pid, $status);
+        $record = $client->get_state()->preflight_record();
+        $this->assertTrue($record['ok']);
+        $this->assertArrayNotHasKey('nested_site_paths', $record['data']['database']['wp']['multisite']['selection']);
+        $directory = $reflection->getProperty('pull_state_directory')->getValue($client);
+        $path_file = $directory . '/' . $record['nested_site_paths_file'];
+        $this->assertSame($paths_by_origin, json_decode(file_get_contents($path_file), true));
+
+        // db-apply pins this reference before its first SQL group. Subsequent
+        // progress saves contain that small reference, never the loaded set.
+        $client->get_state()->apply->nested_site_paths_file = $record['nested_site_paths_file'];
+        for ($step = 0; $step < 3; ++$step) {
+            $client->get_state()->apply->statements_executed = $step;
+            $reflection->getMethod('save_state')->invoke($client);
+            $this->assertLessThan(20000, strlen(file_get_contents($directory . '/state.json')));
+        }
+        $next = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $reflection->getProperty('state')->setValue($next, $reflection->getMethod('load_state')->invoke($next));
+        $this->assertSame($paths_by_origin, $reflection->getMethod('load_multisite_nested_site_paths')->invoke($next));
+        $this->assertSame($record['nested_site_paths_file'], $next->get_state()->apply->nested_site_paths_file);
+    }
+
     /** @dataProvider rejectedPreflightCommandProvider */
     public function testPullReportsTheRewrittenDomain(string $command, bool $resume): void
     {
@@ -461,6 +510,121 @@ class FetchRequestBodySizingTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage($preflight['data']['error']);
         $reflection->getMethod('require_preflight')->invoke($next_client);
+    }
+
+    /** Malformed or older source responses must not become usable saved selections.
+     * @dataProvider rejectedMultisiteSelectionProvider
+     * @param array $selection Source response fields, including malformed values under test.
+     */
+    public function testPreflightRejectsIncompleteMultisiteSelections(array $selection, string $field): void
+    {
+        $payload = json_encode(['ok' => true, 'protocol_version' => 3, 'database' => ['wp' => [
+            'multisite' => ['enabled' => true, 'selection' => $selection],
+        ]]]);
+        [$url, $pid] = $this->startJsonServer("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            . 'Content-Length: ' . strlen($payload) . "\r\nConnection: close\r\n\r\n" . $payload);
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        try {
+            $client->run_preflight();
+        } finally {
+            pcntl_waitpid($pid, $status);
+        }
+        $record = $client->get_state()->preflight_record();
+        $this->assertFalse($record['data']['ok']);
+        $this->assertSame('PREFLIGHT_FAILED', $record['error_code']);
+        $this->assertStringContainsString($field, $record['error']);
+        // Resume reads the response that this request saved, not a hand-written state file.
+        $next_client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $reflection = new \ReflectionClass($next_client);
+        $reflection->getProperty('state')->setValue($next_client, $reflection->getMethod('load_state')->invoke($next_client));
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage($field);
+        $reflection->getMethod('require_preflight')->invoke($next_client);
+    }
+
+    /**
+     * Local commands must reject the report saved by a real failed HTTP preflight.
+     *
+     * @dataProvider localPreflightConsumers
+     */
+    public function testLocalCommandsRejectFailedPreflight(string $command, bool $automatic_mapping): void
+    {
+        $payload = json_encode(['ok' => true, 'protocol_version' => 3, 'database' => ['wp' => [
+            'multisite' => ['enabled' => true, 'selection' => [
+                'site_id' => 7, 'network_id' => 1, 'base_prefix' => 'wp_`',
+                'home_url' => 'https://network.test/shop', 'site_url' => 'https://network.test/shop',
+                'content_url' => 'https://network.test/wp-content',
+                'network_content_url' => 'https://network.test/wp-content',
+                'uploads_url' => 'https://network.test/wp-content/uploads/sites/7',
+            ]],
+        ]]]);
+        [$url, $pid] = $this->startJsonServer("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            . 'Content-Length: ' . strlen($payload) . "\r\nConnection: close\r\n\r\n" . $payload);
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        try {
+            $client->run_preflight();
+        } finally {
+            pcntl_waitpid($pid, $status);
+        }
+        $error = $client->get_state()->preflight_record()['error'];
+        $this->assertStringContainsString('base_prefix', $error);
+        file_put_contents($this->stateDir . '/db.sql', 'CREATE TABLE must_not_be_imported (id INT);');
+        $options = [
+            'command' => $command, 'site_admin' => 'chosen',
+            'target_engine' => 'mysql', 'target_user' => 'unused', 'target_db' => 'unused',
+            'runtime' => 'php', 'output_dir' => $this->tempDir . '/runtime',
+        ];
+        if ($automatic_mapping) {
+            $options['new_site_url'] = 'https://target.test';
+        } else {
+            $options['rewrite_url'] = [['https://network.test/shop', 'https://target.test']];
+        }
+        // The next command loads the state written above. It must stop before
+        // opening the unused database or creating runtime configuration files.
+        $next_client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage($error);
+        $next_client->run($options);
+    }
+
+    /** Exercise both URL options; neither permits using a rejected selection. */
+    public static function localPreflightConsumers(): array
+    {
+        return [
+            ['db-apply', true], ['db-apply', false],
+            ['db-rewrite-urls', true], ['db-rewrite-urls', false],
+            ['apply-runtime', true],
+        ];
+    }
+
+    /** Missing fields and wrong types must be rejected at the HTTP response boundary. */
+    public static function rejectedMultisiteSelectionProvider(): array
+    {
+        $selection = [
+            'site_id' => 7, 'network_id' => 1, 'base_prefix' => 'wp_',
+            'home_url' => 'https://network.test/shop', 'site_url' => 'https://network.test/shop',
+            'content_url' => 'https://network.test/wp-content',
+            'uploads_url' => 'https://network.test/wp-content/uploads/sites/7',
+            'network_content_url' => 'https://network.test/wp-content',
+        ];
+        $cases = [];
+        foreach (array_keys($selection) as $field) {
+            $missing = $selection;
+            unset($missing[$field]);
+            $cases['missing ' . $field] = [$missing, $field];
+        }
+        foreach ([
+            ['base_prefix', []], ['base_prefix', "wp_`"], ['base_prefix', "wp_\n"],
+            ['site_id', 0], ['site_id', '7'], ['network_id', -1], ['network_id', 1.5],
+            ['home_url', []], ['site_url', 'https://'], ['home_url', 'https:network.test/shop'], ['uploads_url', 'file:///uploads'],
+            ['nested_site_paths', null], ['nested_site_paths', 'invalid'],
+            ['nested_site_paths', ['file:///tmp' => ['/shop/news/']]],
+            ['nested_site_paths', ['https://network.test' => ['relative/path']]],
+            ['nested_site_paths', ['https://network.test' => [123]]],
+        ] as [$field, $value]) {
+            $cases[$field . '=' . json_encode($value)] = [array_replace($selection, [$field => $value]), $field];
+        }
+        return $cases;
     }
 
     public static function rejectedPreflightDomainProvider(): array

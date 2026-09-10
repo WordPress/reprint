@@ -32,6 +32,7 @@ use WordPress\Reprint\Server\MultisiteDatabaseSelection;
  *     @type string $home_url Selected home URL.
  *     @type string $site_url Selected WordPress URL.
  *     @type string $content_url Shared content URL.
+ *     @type string $network_content_url Shared network content URL.
  * }
  */
 function get_multisite_export_context(): array {
@@ -88,6 +89,8 @@ function get_multisite_export_context(): array {
         }
     }
 
+    // Distinct hosts need no exclusions. Preflight separately collects paths
+    // for child sites below these bases; ordinary export requests do not.
     return [
         'site_id' => $site_id,
         'network_id' => $network_id,
@@ -100,5 +103,90 @@ function get_multisite_export_context(): array {
         'home_url' => get_option('home'),
         'site_url' => get_option('siteurl'),
         'content_url' => content_url(),
+        'network_content_url' => network_site_url('/wp-content'),
     ];
+}
+
+/**
+ * List only child-site paths that a selected home/site URL could rewrite.
+ *
+ * Selecting network.test/shop needs /shop/news/, but not /sibling/ or sites
+ * on other domains. A root selection can need every path on that domain.
+ * Read the indexed site directory once per preflight, not per SQL/file request.
+ * Keep short strings only: wpdb::get_results() would retain one PHP object per
+ * row as well as the path list. MYSQLI_USE_RESULT reads one row at a time.
+ *
+ * This list intentionally grows with matching sites. One million 20-byte paths
+ * cost about 62 MiB as a PHP 8.4 list, before JSON encoding. No page list, URL
+ * object, regex or upload-site ID list is created for those sites.
+ *
+ * @param array $source {
+ *     Source context returned by get_multisite_export_context().
+ *
+ *     @type int    $site_id Selected site ID.
+ *     @type string $base_prefix Network table prefix.
+ *     @type string $home_url Selected home URL.
+ *     @type string $site_url Selected WordPress URL.
+ * }
+ * @return array<string, string[]> Source HTTP(S) origin => child-site paths.
+ */
+function get_multisite_nested_site_paths(array $source): array {
+    global $wpdb;
+
+    $origins = [];
+    foreach (array_unique([$source['home_url'], $source['site_url']]) as $url) {
+        $parts = wp_parse_url($url);
+        $domain = strtolower($parts['host']) . ( isset($parts['port']) ? ':' . $parts['port'] : '' );
+        $default_port = strtolower($parts['scheme']) === 'https' ? 443 : 80;
+        $authority = ( $parts['port'] ?? null ) === $default_port ? strtolower($parts['host']) : $domain;
+        $origin = strtolower($parts['scheme']) . '://' . $authority;
+        $path = rtrim($parts['path'] ?? '', '/') . '/';
+        // HTTP home plus HTTPS siteurl on one host still needs one path list.
+        $origins[$authority]['origin'] = $origin;
+        // A default port in home/siteurl need not appear in blogs.domain.
+        $origins[$authority]['domains'][$domain] = true;
+        $origins[$authority]['domains'][$authority] = true;
+        $origins[$authority]['paths'][] = $path;
+    }
+
+    if (!$wpdb->dbh instanceof \mysqli) {
+        throw new \RuntimeException('Reading multisite child paths requires a MySQLi WordPress connection; observed ' . gettype($wpdb->dbh) . '.');
+    }
+    $paths_by_origin = [];
+    foreach ($origins as $authority => $selection) {
+        $origin = $selection['origin'];
+        $conditions = [];
+        foreach (array_unique($selection['paths']) as $path) {
+            $conditions[] = $wpdb->prepare('(path LIKE %s AND path <> %s)', $wpdb->esc_like($path) . '%', $path);
+        }
+        // No network ID filter: a site in another network can still have a
+        // matching host/path. Archived sites must also keep their old links.
+        $query = $wpdb->prepare(
+            // phpcs:ignore WordPress.DB.PreparedSQL -- WordPress checks the table prefix; each path condition above is prepared, and domains use placeholders.
+            "SELECT path FROM `{$source['base_prefix']}blogs` WHERE domain IN (" . implode(',', array_fill(0, count($selection['domains']), '%s')) . ") AND blog_id <> %d AND (" . implode(' OR ', $conditions) . ')',
+            array_merge(array_keys($selection['domains']), [$source['site_id']])
+        );
+        // wpdb normally removes its escaped-percent placeholders in query().
+        // The direct unbuffered call must do that too, or LIKE '/shop/%'
+        // reaches MySQL with a placeholder string instead of its wildcard.
+        $query = $wpdb->remove_placeholder_escape($query);
+        $rows = mysqli_query($wpdb->dbh, $query, MYSQLI_USE_RESULT);
+        if ($rows === false) {
+            throw new \RuntimeException('Cannot read multisite child paths: ' . mysqli_error($wpdb->dbh));
+        }
+        $paths_by_origin[$origin] = [];
+        try {
+            // Do not issue another query on this connection until free_result().
+            // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition -- Fetch one row until MySQL reaches EOF.
+            while ($row = mysqli_fetch_row($rows)) {
+                $paths_by_origin[$origin][] = $row[0];
+            }
+            if (mysqli_errno($wpdb->dbh) !== 0) {
+                throw new \RuntimeException('Reading multisite child paths stopped: ' . mysqli_error($wpdb->dbh));
+            }
+        } finally {
+            mysqli_free_result($rows);
+        }
+    }
+    return $paths_by_origin;
 }
