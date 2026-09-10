@@ -199,6 +199,9 @@
     "css-download-failures": {
       "port": 8151
     },
+    "css-pipeline-resume": {
+      "port": 8152
+    },
     "wpengine-plugin-inventory": {
       "port": 8142
     },

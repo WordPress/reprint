@@ -345,6 +345,15 @@ class Pull
             }
         }
 
+        // Downloaded CSS already uses the saved target URLs. When resume
+        // skips files-pull, still check its options before the database can
+        // be applied with different URLs. Reuse the file-stage checks rather
+        // than keeping a second mapping comparison here.
+        $files_pull_index = array_search('files-pull', $stages, true);
+        if ($files_pull_index !== false && $start_index > $files_pull_index) {
+            $this->client->prepare_files_pull_options($options);
+        }
+
         $host = parse_url($this->client->remote_reprint_api_url, PHP_URL_HOST) ?? $this->client->remote_reprint_api_url;
         $bold = "\033[1m";
         $r = "\033[0m";

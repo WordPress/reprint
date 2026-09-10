@@ -638,7 +638,9 @@ Malformed string and URL tokens stay unchanged. More than 128 nested
 partial file is not marked complete.
 
 File URL mappings remain bound to the saved remote index. Later downloads
-reuse them when the options are omitted. To use different mappings, start
+reuse them when the options are omitted. A full `pull` also checks for changed
+mappings when resume skips the completed file stage, before applying the
+database. To use different mappings, start
 with a new state directory and an empty filesystem root. A later `db-apply`
 or `db-rewrite-urls` does not change files already downloaded.
 
