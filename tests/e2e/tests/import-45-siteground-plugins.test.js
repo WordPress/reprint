@@ -429,7 +429,7 @@ function writeExcludedPluginFiles(root, paths) {
         if (path.endsWith('.php')) {
             mkdirSync(dirname(absolutePath), { recursive: true });
             const contents = path.endsWith('/mu-plugin.php')
-                ? "<?php require_once __DIR__ . '/wpengine-common/plugin.php';"
+                ? "<?php\n/* Plugin Name: WP Engine System */\nrequire_once __DIR__ . '/wpengine-common/plugin.php';"
                 : '<?php // Source-host MU-plugin fixture';
             writeFileSync(absolutePath, contents);
         } else {
