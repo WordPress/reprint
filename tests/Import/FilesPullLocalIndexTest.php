@@ -129,6 +129,20 @@ final class FilesPullLocalIndexTest extends TestCase
         ]], $this->filesDiffRecords($diff['stdout']));
     }
 
+    public function testInvalidRemoteIndexPathStopsThePullBeforeFetchingFiles(): void
+    {
+        $this->writeRemoteOverrides([
+            'added_files' => ['../../../../outside.txt' => 'must not be downloaded'],
+        ]);
+
+        $pull = $this->runFilesPull();
+
+        $this->assertSame(1, $pull['exit'], $pull['output']);
+        $this->assertStringContainsString('must not contain dot-segments', $pull['output']);
+        $this->assertFileDoesNotExist($this->root . '/outside.txt');
+        $this->assertFileDoesNotExist($this->localTree . '/' . self::PULLED_PATH);
+    }
+
     public function testFilesPullTransfersAPathContainingInvalidUtf8Bytes(): void
     {
         $path = "binary-\xff.txt";

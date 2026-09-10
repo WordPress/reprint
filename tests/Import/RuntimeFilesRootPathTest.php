@@ -87,8 +87,8 @@ final class RuntimeFilesRootPathTest extends TestCase
         $this->assertSame(['/'], $request['directory']);
     }
 
-    /** @dataProvider rejected_runtime_paths */
-    public function testPreflightRejectsInvalidOrUnrequestedRuntimeFiles(
+    /** @dataProvider invalid_runtime_paths */
+    public function testPreflightStopsOnInvalidRuntimePaths(
         string $returned_path,
         string $requested_path,
         string $reason
@@ -107,7 +107,12 @@ final class RuntimeFilesRootPathTest extends TestCase
             $this->filesystem_root,
         );
 
-        $client->run_preflight();
+        try {
+            $client->run_preflight();
+            $this->fail('An invalid received path must stop preflight.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString($reason, $exception->getMessage());
+        }
 
         $this->assertSame(
             'keep this local file',
@@ -115,19 +120,10 @@ final class RuntimeFilesRootPathTest extends TestCase
             'A source response must not overwrite files outside runtime_files.',
         );
         $runtime_directory = $this->state_directory . '/runtime_files';
-        $this->assertSame(['.', '..', 'append'], scandir($runtime_directory));
-        $this->assertSame(
-            'runtime file at root',
-            file_get_contents($runtime_directory . '/append/runtime.php'),
-            'Rejecting one directory must not block a valid runtime file in another.',
-        );
-        $this->assertStringContainsString(
-            $reason,
-            file_get_contents($this->state_directory . '/audit.log'),
-        );
+        $this->assertSame(['.', '..'], scandir($runtime_directory));
 
         $requests = file($this->request_log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        $this->assertCount(3, $requests);
+        $this->assertCount(2, $requests, 'No further directory may be fetched after an invalid path.');
         $request = json_decode($requests[1], true, 512, JSON_THROW_ON_ERROR);
         $this->assertSame('file_fetch', $request['endpoint']);
         $this->assertSame([['path' => base64_encode($requested_path)]], $request['files']);
@@ -136,16 +132,80 @@ final class RuntimeFilesRootPathTest extends TestCase
     /**
      * @return array<string,array{string,string,string}> Returned path, requested path, and rejection reason.
      */
-    public static function rejected_runtime_paths(): array
+    public static function invalid_runtime_paths(): array
     {
         return [
             'relative traversal' => ['../../outside.txt', '/runtime.php', 'must be an absolute path'],
             'absolute traversal' => ['/../../outside.txt', '/runtime.php', 'must not contain dot-segments'],
             'traversal also listed in preflight' => ['/../../outside.txt', '/../../outside.txt', 'must not contain dot-segments'],
             'dot segment also listed in preflight' => ['/./runtime.php', '/./runtime.php', 'must not contain dot-segments'],
-            'unrequested file in the requested directory' => ['/unexpected.php', '/runtime.php', 'unrequested runtime file'],
             'relative filename' => ['relative.php', '/runtime.php', 'must be an absolute path'],
             'NUL byte' => ["/runtime.php\0suffix", '/runtime.php', 'must not contain NUL bytes'],
+        ];
+    }
+
+    public function testPreflightKeepsDownloadingAfterAnUnrequestedFile(): void
+    {
+        $client = new \ImportClient(
+            $this->target_url . '&' . http_build_query([
+                'returned_path' => base64_encode('/unexpected.php'),
+                'requested_path' => base64_encode('/runtime.php'),
+            ]),
+            $this->state_directory,
+            $this->filesystem_root,
+        );
+
+        $client->run_preflight();
+
+        $runtime_directory = $this->state_directory . '/runtime_files';
+        $this->assertSame(['.', '..', 'append'], scandir($runtime_directory));
+        $this->assertSame(
+            'runtime file at root',
+            file_get_contents($runtime_directory . '/append/runtime.php'),
+        );
+        $this->assertStringContainsString(
+            'unrequested runtime file',
+            file_get_contents($this->state_directory . '/audit.log'),
+        );
+    }
+
+    /** @dataProvider received_path_fields */
+    public function testInvalidPathsStopEvenWhenTheRuntimeDownloaderIgnoresThePart(
+        string $chunk_type,
+        string $path_header
+    ): void {
+        $client = new \ImportClient(
+            $this->target_url . '&' . http_build_query([
+                'returned_path' => base64_encode('/../../outside.txt'),
+                'requested_path' => base64_encode('/runtime.php'),
+                'chunk_type' => $chunk_type,
+                'path_header' => $path_header,
+            ]),
+            $this->state_directory,
+            $this->filesystem_root,
+        );
+
+        try {
+            $client->run_preflight();
+            $this->fail('Every received entry path must be checked before dispatch.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString('must not contain dot-segments', $exception->getMessage());
+        }
+
+        $this->assertSame(['.', '..'], scandir($this->state_directory . '/runtime_files'));
+        $this->assertCount(2, file($this->request_log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
+    }
+
+    /** @return array<string,list<string>> Part type and path header for each case. */
+    public static function received_path_fields(): array
+    {
+        return [
+            'directory' => ['directory', 'X-Directory-Path'],
+            'symlink entry' => ['symlink', 'X-Symlink-Path'],
+            'index entry' => ['index', 'X-Index-Path'],
+            'missing file' => ['missing', 'X-File-Path'],
+            'filesystem root' => ['metadata', 'X-Filesystem-Root'],
+            'error path' => ['error', ''],
         ];
     }
 
@@ -210,6 +270,19 @@ $write_part = static function (array $headers, string $body = '') use ($boundary
 };
 
 header('Content-Type: multipart/mixed; boundary=' . $boundary);
+if (isset($_GET['chunk_type'])) {
+    $headers = array('X-Chunk-Type' => $_GET['chunk_type']);
+    $body = '';
+    if ($_GET['chunk_type'] === 'error') {
+        $body = json_encode(array('path' => $returned_path, 'error_type' => 'file_missing'));
+    } else {
+        $headers[$_GET['path_header']] = $returned_path;
+    }
+    $write_part($headers, $body);
+    echo "--{$boundary}--\r\n";
+    return;
+}
+
 $write_part(array(
     'X-Chunk-Type' => 'file',
     'X-File-Path' => $returned_path,
