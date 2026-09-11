@@ -44,6 +44,14 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	private $parsed_url;
 	private $base_url_string;
 	private $base_url_object;
+	/**
+	 * Base allowed by the current field, or null when only absolute URLs count.
+	 * `/photo.jpg` in an HTML href uses the site base; the same string in an
+	 * unknown block setting does not. Retain that context until URL parsing.
+	 *
+	 * @var string|null
+	 */
+	private $current_url_base;
 	private $css_url_processor;
 	private $css_url_processor_updated;
 
@@ -93,8 +101,23 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		return $this->raw_url;
 	}
 
+	/** Parse a cache miss; repeated links can be replaced without another URL parse. */
 	public function get_parsed_url() {
+		if ( null === $this->parsed_url && null !== $this->raw_url ) {
+			// Full HTTP(S) URLs need no base. Shorthand such as `https:photo.jpg`
+			// still does: with an HTTPS base at /shop/, it means /shop/photo.jpg.
+			// This prefix check selects the base argument; WPURL validates the URL.
+			$this->parsed_url = WPURL::parse(
+				$this->raw_url,
+				$this->has_absolute_http_url_prefix( $this->raw_url ) ? null : $this->current_url_base
+			);
+		}
 		return $this->parsed_url;
+	}
+
+	/** Include the field's relative-URL context in cache keys, even before parsing. */
+	public function get_url_base(): ?string {
+		return $this->current_url_base;
 	}
 
 	/** Flush the current token, then discard its URL and CSS parser state. */
@@ -103,6 +126,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 
 		$this->raw_url                    = null;
 		$this->parsed_url                 = null;
+		$this->current_url_base           = null;
 		$this->inspecting_html_attributes = null;
 		$this->css_url_processor          = null;
 		$this->in_style_element           = false;
@@ -126,7 +150,25 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 
 	/** Visit URL attributes, then a STYLE body; block fields use their own parser. */
 	public function next_url_in_current_token() {
+		while ( $this->next_raw_url_in_current_token() ) {
+			if ( false !== $this->get_parsed_url() ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Read the next decoded URL field without parsing the URL itself.
+	 *
+	 * HTML, CSS, and block parsers still identify and decode the field. The
+	 * rewriter checks its bounded cache next, then calls get_parsed_url() on a
+	 * miss. Call next_url_in_current_token() when invalid URLs must be skipped.
+	 */
+	public function next_raw_url_in_current_token() {
 		$this->raw_url = null;
+		$this->parsed_url = null;
+		$this->current_url_base = $this->base_url_string;
 		switch ( parent::get_token_type() ) {
 			case '#tag':
 				if ( ! $this->in_style_element && $this->next_url_attribute() ) {
@@ -223,11 +265,6 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 				continue;
 			}
 			$this->raw_url    = $this->css_url_processor->get_raw_url();
-			$this->parsed_url = WPURL::parse( $this->raw_url, $this->base_url_string );
-			if ( false === $this->parsed_url ) {
-				continue;
-			}
-
 			return true;
 		}
 
@@ -299,14 +336,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 			 * be correctly recognized as a URL.
 			 * Without a base URL, this Processor would incorrectly skip it.
 			 */
-			$parsed_url = WPURL::parse( $url_maybe, $this->base_url_string );
-
-			if ( false === $parsed_url ) {
-				array_pop( $this->inspecting_html_attributes );
-				continue;
-			}
 			$this->raw_url    = $url_maybe;
-			$this->parsed_url = $parsed_url;
 
 			return true;
 		}
@@ -372,21 +402,15 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 				)
 			);
 
-			$parsed_url = false;
 			if ( $is_relative_url_block_attribute ) {
 				// Known relative URL attribute – let's parse with the base URL.
-				$parsed_url = WPURL::parse( $url_maybe, $this->base_url_string );
+				$this->current_url_base = $this->base_url_string;
 			} else {
 				// Other attributes – let's parse without a base URL (and only detect absolute URLs).
-				$parsed_url = WPURL::parse( $url_maybe );
-			}
-
-			if ( false === $parsed_url ) {
-				continue;
+				$this->current_url_base = null;
 			}
 
 			$this->raw_url    = $url_maybe;
-			$this->parsed_url = $parsed_url;
 			return true;
 		}
 
@@ -450,7 +474,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 				'old_base_url' => $base_url,
 				'new_base_url' => $to_url,
 				'raw_url'      => $this->get_raw_url(),
-				'is_relative'  => ! WPURL::can_parse( $this->get_raw_url() ),
+				'is_relative'  => ! $this->is_url_absolute(),
 			)
 		);
 
@@ -469,7 +493,20 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	 * @return bool Whether the currently matched URL is absolute.
 	 */
 	public function is_url_absolute() {
-		return WPURL::can_parse( $this->get_raw_url() );
+		if ( ! $this->get_parsed_url() ) {
+			return false;
+		}
+		// The current URL has already passed the parser. A full HTTP(S)
+		// prefix proves it is absolute without parsing the same URL again.
+		return $this->has_absolute_http_url_prefix( $this->get_raw_url() )
+			|| WPURL::can_parse( $this->get_raw_url() );
+	}
+
+	/**
+	 * Recognize a full HTTP(S) prefix, not shorthand such as `https:photo.jpg`.
+	 */
+	private function has_absolute_http_url_prefix( string $url ): bool {
+		return 0 === strncasecmp( $url, 'https://', 8 ) || 0 === strncasecmp( $url, 'http://', 7 );
 	}
 
 	public function get_inspected_attribute_name() {

@@ -1707,6 +1707,43 @@ class StructuredDataUrlRewriterTest extends TestCase
 
     // --- cache bounds ---
 
+    /** The same relative string may be an href, a URL field, or an unrelated setting. */
+    public function testUrlCacheKeepsRelativeUrlContextsSeparate(): void
+    {
+        // The caption's href takes these values through the block parser,
+        // rather than the existing quick reject for URL-free database values.
+        $caption = '<a href="https://other.example/">Other</a>';
+        $cases = [
+            ['<a href="/shop/photo.jpg">Photo</a>', '<a href="/photo.jpg">Photo</a>'],
+            [
+                '<!-- wp:image ' . json_encode(['url' => '/shop/photo.jpg', 'caption' => $caption]) . ' /-->',
+                ['url' => '/photo.jpg', 'caption' => $caption],
+            ],
+            [
+                '<!-- wp:custom ' . json_encode(['label' => '/shop/photo.jpg', 'caption' => $caption]) . ' /-->',
+                ['label' => '/shop/photo.jpg', 'caption' => $caption],
+            ],
+            [
+                '<!-- wp:custom ' . json_encode(['html' => '<a href="/shop/photo.jpg">Photo</a>']) . ' /-->',
+                ['html' => '<a href="/shop/photo.jpg">Photo</a>'],
+            ],
+        ];
+        foreach ([$cases, array_reverse($cases)] as $orderedCases) {
+            $rewriter = new StructuredDataUrlRewriter(['https://source.example/shop' => 'https://target.example']);
+            foreach ($orderedCases as [$input, $expected]) {
+                $output = $rewriter->rewrite_known_block_markup_value($input);
+                if (is_array($expected)) {
+                    $parser = new StructuredBlockMarkupUrlProcessor($output);
+                    $this->assertTrue($parser->next_token());
+                    $this->assertSame($expected, $parser->get_block_attributes());
+                    $this->assertFalse($parser->next_token());
+                } else {
+                    $this->assertSame($expected, $output);
+                }
+            }
+        }
+    }
+
     /** Reads a private member so the bound itself is asserted, not a proxy for it. */
     private function readPrivate(StructuredDataUrlRewriter $rewriter, string $member)
     {

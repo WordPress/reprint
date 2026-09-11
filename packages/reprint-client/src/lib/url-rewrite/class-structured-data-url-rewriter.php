@@ -768,12 +768,15 @@ class StructuredDataUrlRewriter
                     }
 
                     $token_type = $p->get_token_type() ?? '';
-                    while ( $p->next_url_in_current_token() ) {
+                    while ( $p->next_raw_url_in_current_token() ) {
                         $raw_url = $p->get_raw_url();
 
                         $url_cache_key = null;
                         if (strlen($raw_url) <= self::URL_REWRITE_CACHE_MAX_INPUT_BYTES) {
-                            $url_cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
+                            // `/photo.jpg` in a known href can use the site base;
+                            // the same string in an unknown block field cannot.
+                            $url_cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type
+                                . "\0" . $p->get_url_base() . "\0" . $raw_url;
 
                             $cached = $this->get_cached_url_rewrite($url_cache_key);
                             if ($cached !== null) {
@@ -785,6 +788,12 @@ class StructuredDataUrlRewriter
                         }
 
                         $parsed_url = $p->get_parsed_url();
+                        if ( $parsed_url === false ) {
+                            if ( $url_cache_key !== null ) {
+                                $this->set_cached_url_rewrite($url_cache_key, false);
+                            }
+                            continue;
+                        }
                         $decoded_path = rawurldecode($parsed_url->pathname);
                         $excluded = $this->cautious_url_base_rewrite_mapping->excludes_path($parsed_url->host, $parsed_url->pathname);
                         $converted = false;
@@ -812,7 +821,7 @@ class StructuredDataUrlRewriter
                                     'raw_url'      => $raw_url,
                                     // Identity rules retain the source origin. A relative
                                     // sibling link would otherwise point into the target.
-                                    'is_relative'  => !$excluded && ! WPURL::can_parse($raw_url)
+                                    'is_relative'  => !$excluded && ! $p->is_url_absolute()
                                         && $from_url->toString() !== $mapping['to_url']->toString(),
                                 )
                             );
@@ -900,6 +909,13 @@ class StructuredDataUrlRewriter
      * validate those two guesses before changing nested values.
      */
     private function rewrite_inferred_block_attribute_string( string $value ): string {
+        // Divi settings include many labels, colors, and sizes. Apply the same
+        // quick reject as rewrite() before trying their possible formats.
+        if ( ! $this->maybe_contains_rewritable_urls( $value )
+            && ! $this->value_might_contain_hidden_shortcode_url( $value ) ) {
+            return $value;
+        }
+
         // 1. Serialized PHP is a complete outer format. Check it before HTML,
         // JSON, or CSS that may appear inside one of its string values. The
         // coarse existing gate checks only the first `a`, `s`, `O`, or `C`
