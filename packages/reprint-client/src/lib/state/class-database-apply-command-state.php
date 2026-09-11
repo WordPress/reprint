@@ -9,6 +9,9 @@ namespace Reprint\Importer\State;
  */
 class DatabaseApplyCommandState {
 
+    /** @var string|null Explicit imported user selected to administer a single site. */
+    public ?string $site_admin = null;
+
     /** @var int SQL statements successfully executed. */
     public int $statements_executed = 0;
 
@@ -57,7 +60,8 @@ class DatabaseApplyCommandState {
     public static function from_array(array $data): self
     {
         $state = new self();
-        $data += ['nested_site_paths_file' => null];
+        $data += ['site_admin' => null, 'nested_site_paths_file' => null];
+        $state->site_admin = $data['site_admin'];
         \reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->statements_executed = $data['statements_executed'];
         $state->bytes_read = $data['bytes_read'];
@@ -77,6 +81,7 @@ class DatabaseApplyCommandState {
     public function to_array(): array
     {
         return [
+            'site_admin' => $this->site_admin,
             'statements_executed' => $this->statements_executed,
             'bytes_read' => $this->bytes_read,
             'rewrite_url' => $this->rewrite_url,

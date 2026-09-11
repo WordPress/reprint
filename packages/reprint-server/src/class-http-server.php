@@ -291,9 +291,11 @@ final class HTTPServer {
     public function normalize_config(array $config, array $server = []): array {
         unset($config['_multisite']);
         if ($this->multisite !== null) {
+            // This existing wire value names the selected-site export format.
+            // It does not require the client to create a multisite target.
             if (( $config['multisite_mode'] ?? null ) !== 'one-site-network-v1') {
                 throw new InvalidArgumentException(
-                    'This source requires a Reprint client that supports pulling one site into a one-site network. Update the client.'
+                    'This source requires a Reprint client that supports exporting one selected network site. Update the client.'
                 );
             }
             if (!in_array($config['endpoint'] ?? '', ['preflight', 'sql_chunk', 'file_index', 'file_fetch'], true)) {
