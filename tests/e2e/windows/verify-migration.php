@@ -66,9 +66,16 @@ foreach (['runtime', 'raw-runtime'] as $runtime) {
         posix_kill(-$server_pid, SIGTERM);
         proc_close($server);
     }
-    $connection = @stream_socket_client('tcp://127.0.0.1:8881', $error_number, $error_message, 0.1);
-    if (is_resource($connection)) {
+    // proc_close waits for the shell; its PHP child may still be exiting.
+    for ($attempt = 0; $attempt < 50; ++$attempt) {
+        $connection = @stream_socket_client('tcp://127.0.0.1:8881', $error_number, $error_message, 0.1);
+        if (!is_resource($connection)) {
+            break;
+        }
         fclose($connection);
+        usleep(100000);
+    }
+    if ($attempt === 50) {
         throw new RuntimeException('The ' . $runtime . ' server is still listening after cleanup.');
     }
 }
