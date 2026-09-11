@@ -23,14 +23,6 @@ jobs:
           php-version: '8.3'
           extensions: pdo_mysql, mysqli, curl, mbstring, zip
           coverage: none
-      - name: Start native Windows MySQL
-        shell: pwsh
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          mysqld --initialize-insecure --datadir="$env:RUNNER_TEMP/mysql-data"
-          Start-Process mysqld -ArgumentList "--datadir=$env:RUNNER_TEMP/mysql-data", '--bind-address=127.0.0.1', '--port=3308', '--console' -RedirectStandardOutput "$env:RUNNER_TEMP/source.mysql.stdout.log" -RedirectStandardError "$env:RUNNER_TEMP/source.mysql.stderr.log"
-          mysqladmin --host=127.0.0.1 --port=3308 --user=root --wait=30 ping
-          mysql --host=127.0.0.1 --port=3308 --user=root --execute="ALTER USER 'root'@'localhost' IDENTIFIED BY 'root'"
       - uses: Vampire/setup-wsl@v7
         with:
           distribution: Ubuntu-24.04
@@ -45,11 +37,15 @@ jobs:
           COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --no-interaction --prefer-dist
           service mariadb start
           mariadb -e "CREATE DATABASE migration_target; CREATE USER 'migration'@'127.0.0.1' IDENTIFIED BY 'migration'; GRANT ALL ON migration_target.* TO 'migration'@'127.0.0.1';"
-      - name: Prepare native Windows WordPress source
+      - name: Run Windows-to-Linux migration
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
+          mysqld --initialize-insecure --datadir="$env:RUNNER_TEMP/mysql-data"
+          Start-Process mysqld -ArgumentList "--datadir=$env:RUNNER_TEMP/mysql-data", '--bind-address=127.0.0.1', '--port=3308', '--console' -RedirectStandardOutput "$env:RUNNER_TEMP/source.mysql.stdout.log" -RedirectStandardError "$env:RUNNER_TEMP/source.mysql.stderr.log"
+          mysqladmin --host=127.0.0.1 --port=3308 --user=root --wait=30 ping
+          mysql --host=127.0.0.1 --port=3308 --user=root --execute="ALTER USER 'root'@'localhost' IDENTIFIED BY 'root'"
           composer install --working-dir=reprint-server-wp --no-dev --no-interaction --prefer-dist
           Invoke-WebRequest https://wordpress.org/wordpress-6.7.zip -OutFile "$env:RUNNER_TEMP/wordpress.zip"
           Expand-Archive "$env:RUNNER_TEMP/wordpress.zip" "$env:RUNNER_TEMP/wordpress"
@@ -60,13 +56,8 @@ jobs:
           php tests/e2e/windows/prepare-source.php D:\spacewww\nihaokids.nl "http://${windowsHost}:8081" "$env:GITHUB_WORKSPACE/source-manifest.json"
           New-NetFirewallRule -DisplayName ReprintMigration -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8081 | Out-Null
           Start-Process php -ArgumentList '-S', '0.0.0.0:8081', '-t', 'D:\spacewww\nihaokids.nl' -RedirectStandardOutput "$env:RUNNER_TEMP/source.stdout.log" -RedirectStandardError "$env:RUNNER_TEMP/source.stderr.log"
-      - name: Migrate and verify the site on Linux
-        shell: wsl-bash {0}
-        run: |
-          windows_host=$(ip route show default | cut -d ' ' -f 3)
-          source_manifest="$PWD/source-manifest.json"
-          cd /root/reprint
-          bash tests/e2e/windows/migrate.sh "http://${windows_host}:8081" "$source_manifest"
+          $sourceManifest = (wsl -d Ubuntu-24.04 -- wslpath -a "$env:GITHUB_WORKSPACE/source-manifest.json").Trim()
+          wsl -d Ubuntu-24.04 -- bash -c "cd /root/reprint && bash tests/e2e/windows/migrate.sh 'http://${windowsHost}:8081' '$sourceManifest'"
       - name: Collect migration logs
         if: always()
         shell: pwsh
