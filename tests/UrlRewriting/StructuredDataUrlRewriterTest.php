@@ -41,29 +41,42 @@ class StructuredDataUrlRewriterTest extends TestCase
         }
     }
 
-    /** Each parsed field uses the original mapping once, including unchanged URLs. */
-    public function testParsedUrlsAreNotRewrittenAgainByTheTextFallback(): void
+    /** A child-site link stays remote, including a selected-site URL in its query. */
+    public function testChildSiteUrlsKeepTheirQueryData(): void
     {
-        $rewriter = new StructuredDataUrlRewriter([
-            'https://old.example' => 'https://middle.example',
-            'https://middle.example' => 'https://last.example',
+        $rewriter = new StructuredDataUrlRewriter(['https://network.test/shop' => 'https://target.test'], [
+            'https://network.test' => ['/shop/news/'],
         ]);
+        $child_url = 'https://network.test/shop/news/article?return=https://network.test/shop/article';
         foreach ([
-            '<a href="https://old.example/page">link</a>',
-            '<img src="https://old.example/image.png" srcset="https://old.example/small.png 1x">',
-            '<div style="background:url(https://old.example/image.png)"></div>',
-            '<style>.hero{background:url(https://old.example/image.png)}</style>',
-            '<style style="background:url(https://old.example/inline.png)">.hero{background:url(https://old.example/body.png)}</style><img src="https://old.example/after.png">',
-            '<script type="application/json">{"url":"https://old.example/page"}</script>',
-            '<!-- wp:image {"url":"https://old.example/image.png","settings":{"url":"https://old.example/nested.png"}} /-->',
+            '<a href="' . $child_url . '">child</a>',
+            '<!-- wp:image {"url":"' . $child_url . '"} /-->',
         ] as $input) {
             $output = $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
-            $this->assertStringContainsString('middle.example', $output, $input);
-            $this->assertStringNotContainsString('old.example', $output, $input);
-            $this->assertStringNotContainsString('last.example', $output, $input);
+            $parser = new StructuredBlockMarkupUrlProcessor($output);
+            $this->assertTrue($parser->next_url(), $output);
+            $this->assertSame($child_url, $parser->get_raw_url());
+            $this->assertFalse($parser->next_url(), $output);
         }
-        $input = '<a href="https://archive.example/?url=https://old.example/page">archive</a>';
-        $this->assertSame($input, $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
+    }
+
+    /** Finishing a style attribute must not discard the STYLE body or the next tag. */
+    public function testStyleAttributeAndStyleBodyKeepSeparateUrls(): void
+    {
+        $rewriter = new StructuredDataUrlRewriter(['https://source.test' => 'https://target.test']);
+        $input = '<style style="background:url(https://source.test/inline.png)">'
+            . '.hero{background:url(https://source.test/body.png)}</style>'
+            . '<img src="https://source.test/after.png">';
+        $parser = new StructuredBlockMarkupUrlProcessor($rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
+        $urls = [];
+        while ($parser->next_url()) {
+            $urls[] = $parser->get_raw_url();
+        }
+        $this->assertSame([
+            'https://target.test/inline.png',
+            'https://target.test/body.png',
+            'https://target.test/after.png',
+        ], $urls);
     }
 
     /** The CSS parser resolves escapes before selecting a child site or the target. */
@@ -77,20 +90,6 @@ class StructuredDataUrlRewriterTest extends TestCase
         $output = $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
         $this->assertStringContainsString('https://network.test/news/image.png', $output);
         $this->assertStringContainsString('https://target.test/selected/image.png', $output);
-    }
-
-    /** Rejected URL fields and non-URL CSS tokens must not receive a second guess. */
-    public function testDeclaredUrlFieldsDoNotFallBackAfterParserRejection(): void
-    {
-        $rewriter = new StructuredDataUrlRewriter(['https://old.example' => 'https://new.example']);
-        foreach ([
-            '<a href="http://[invalid]/?url=https://old.example/page">link</a>',
-            '<!-- wp:image {"url":"http://[invalid]/?url=https://old.example/page"} /-->',
-            '<style>/* https://old.example/page */.a{content:"https://old.example/page"}</style>',
-            '<div style="content:\'https://old.example/page\'"></div>',
-        ] as $input) {
-            $this->assertSame($input, $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
-        }
     }
 
     /** CSS escapes need parsing even when HTML permits spaces around the equals sign. */
@@ -1532,12 +1531,11 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $result);
     }
 
-    /** A query value is not declared to contain a second URL; keep it as URL data. */
-    public function testKnownBlockMarkupKeepsEmbeddedQueryUrl(): void
+    public function testKnownBlockMarkupCautiouslyRewritesEmbeddedQueryUrl(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<a href="https://webarchive.org?url=https://old-site.com/about">Archive</a>';
-        $expected = $input;
+        $expected = '<a href="https://webarchive.org?url=https://new-site.com/about">Archive</a>';
 
         $this->assertSame($expected, $rewriter->rewrite_known_block_markup_value($input));
     }
@@ -1816,7 +1814,7 @@ class StructuredDataUrlRewriterTest extends TestCase
             'protocol-relative' => ['//old-site.com/uploads/c.jpg', '/uploads/c.jpg'],
             'relative no-slash' => ['uploads/d.jpg', '/uploads/d.jpg'],
             'relative dotted'   => ['../uploads/e.jpg', '/uploads/e.jpg'],
-            'query embedded'    => ['/page?ref=https://old-site.com/x', '/page?ref=https://old-site.com/x'],
+            'query embedded'    => ['/page?ref=https://old-site.com/x', '/page?ref=https://new-site.com/x'],
         ];
 
         $rewriter = $this->createRewriter();

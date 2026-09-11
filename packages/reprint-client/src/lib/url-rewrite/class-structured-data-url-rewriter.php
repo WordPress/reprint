@@ -632,9 +632,9 @@ class StructuredDataUrlRewriter
      * Rewrite a decoded value already known by the SQL layer to be block markup.
      *
      * HTML attributes, block-comment JSON, and CSS URL fields use their
-     * parsers. Only unparsed values enter cautious source-base replacement;
-     * a parsed URL is not scanned again for URLs inside its query or fragment.
-     * Block string leaves use the existing format inference before fallback.
+     * parsers. Block string leaves use format inference; other token content
+     * keeps the cautious source-base replacement from the plain-text path.
+     * That fallback leaves hosts with child-site exclusions unchanged.
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
@@ -697,15 +697,14 @@ class StructuredDataUrlRewriter
     }
 
     /**
-     * Rewrite declared URL fields once, then visit only unparsed content.
+     * Rewrite parsed URLs while keeping child-site links at the source.
      *
      * The HTML, CSS and block parsers supply complete URLs for child-path
-     * checks. A parser rejection or a URL outside the source base is final.
-     * For example, an external href with a source URL in its query remains
-     * one external URL; its query does not become another rewrite input.
+     * checks. The text fallback cannot determine where a path ends, so it
+     * leaves all URLs on a source host with child-site exclusions unchanged.
      *
      * Block attributes are already decoded by BlockMarkupProcessor. Visit
-     * their remaining string leaves rather than scan the raw JSON again.
+     * their string leaves rather than scan the raw JSON again.
      * This costs a walk of one block's attribute tree, not the whole export.
      * Changed attributes use the block encoder, including its whitespace
      * and escaping rules. There is no raw-comment fast path alongside it.
@@ -752,11 +751,19 @@ class StructuredDataUrlRewriter
                     $resolve_relative_urls ? $base_url : null
                 );
                 while ( $p->next_token() ) {
-                    if ( $p->has_json_script_body() ) {
-                        $script_body = $p->get_modifiable_text();
-                        $rewritten_script_body = $this->rewrite( $script_body, self::BLOCK_MARKUP );
-                        if ( $rewritten_script_body !== $script_body ) {
-                            $p->set_modifiable_text( $rewritten_script_body );
+                    // A declared JSON media type supplies the script body's format.
+                    // Other script bodies keep the cautious raw-token scan below.
+                    if ( 'SCRIPT' === $p->get_tag() && ! $p->is_tag_closer() ) {
+                        $type = $p->get_attribute( 'type' );
+                        if ( is_string( $type ) && 1 === preg_match(
+                            '/\Aapplication\/(?:[a-z0-9!#$&^_.+-]+\+)?json\z/',
+                            strtolower( trim( explode( ';', $type, 2 )[0] ) )
+                        ) ) {
+                            $script_body = $p->get_modifiable_text();
+                            $rewritten_script_body = $this->rewrite( $script_body, self::BLOCK_MARKUP );
+                            if ( $rewritten_script_body !== $script_body ) {
+                                $p->set_modifiable_text( $rewritten_script_body );
+                            }
                         }
                     }
 
@@ -825,23 +832,12 @@ class StructuredDataUrlRewriter
                         }
                     }
                     if ( '#block-comment' === $p->get_token_type() ) {
-                        // The block parser already knows the JSON field boundaries.
-                        // URL fields consumed above must not be rewritten a second
-                        // time when a target is also another mapping's source.
+                        // BlockMarkupProcessor supplies one decoded attribute tree.
+                        // Use its setter for nested values too; mixing those edits
+                        // with raw replacements can duplicate the block comment.
                         $attributes = $p->get_block_attributes();
                         if ( is_array( $attributes ) ) {
-                            $url_keys = $p->get_url_block_attribute_keys();
-                            $rewritten_attributes = $attributes;
-                            foreach ( $attributes as $key => $value ) {
-                                if ( isset( $url_keys[ $key ] ) ) {
-                                    continue;
-                                }
-                                if ( is_array( $value ) ) {
-                                    $rewritten_attributes[ $key ] = $this->rewrite_inferred_block_attribute_values( $value );
-                                } elseif ( is_string( $value ) ) {
-                                    $rewritten_attributes[ $key ] = $this->rewrite_inferred_block_attribute_string( $value );
-                                }
-                            }
+                            $rewritten_attributes = $this->rewrite_inferred_block_attribute_values( $attributes );
                             if ( $rewritten_attributes !== $attributes ) {
                                 $p->set_block_attributes( $rewritten_attributes );
                             }

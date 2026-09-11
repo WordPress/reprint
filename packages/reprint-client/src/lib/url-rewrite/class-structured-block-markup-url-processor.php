@@ -16,15 +16,11 @@ use WordPress\DataLiberation\URL\WPURL;
  * [vc_video link="https:\/\/source.example\/media\/video.mp4"]
  * ```
  *
- * Declared URL fields are final after parsing, including rejected values.
- * The fallback never scans them again. For example, with A -> B and B -> C
- * mappings, a parsed URL from A must stop at B.
- *
- * The fallback changes only source-base bytes inside unparsed values. HTML
- * attribute values and raw-text element bodies use the HTML decoder/setter,
- * so changed values can have different quotes, entities, or newline spelling.
- * Ordinary text and comments keep raw-token replacement: shortcode syntax
- * such as the example above never passes through the HTML text encoder.
+ * Decoding and serializing that URL could change its slashes, quotes,
+ * entities, query, or fragment. After structured URLs have been handled,
+ * replace_url_bases_in_current_token() changes only configured source-base
+ * bytes in the raw token. The surrounding bytes never pass through the HTML
+ * text encoder.
  *
  * @TODO Contribute this structured processor back to the PHP toolkit after
  *       its Reprint behavior has stabilized.
@@ -51,19 +47,8 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	private $css_url_processor;
 	private $css_url_processor_updated;
 
-	/** @var CSSURLProcessor|null CSS in the current STYLE body, separate from its style attribute. */
-	private $style_element_processor;
-	/** @var bool Whether a CSS URL edit must be written back to the current STYLE body. */
-	private $style_element_updated = false;
-	/**
-	 * Top-level block fields reserved for URL parsing in the current token.
-	 * For wp:image's `url`, a parse failure still excludes it from the fallback.
-	 * An unknown field is reserved only if its whole value parsed as a URL.
-	 * Nested fields stay with the caller's format inference.
-	 *
-	 * @var array<string, true>
-	 */
-	private $url_block_attribute_keys = array();
+	/** @var bool Whether the CSS parser reads a STYLE body instead of a style attribute. */
+	private $in_style_element = false;
 
 	/**
 	 * The list of names of URL-related HTML attributes that may be available on
@@ -92,14 +77,13 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		if ( $this->css_url_processor_updated ) {
 			if ( null !== $this->css_url_processor ) {
 				$updated_css = $this->css_url_processor->get_updated_css();
-				$this->set_attribute( 'style', $updated_css );
+				if ( $this->in_style_element ) {
+					$this->set_modifiable_text( $updated_css );
+				} else {
+					$this->set_attribute( 'style', $updated_css );
+				}
 			}
 			$this->css_url_processor_updated = false;
-		}
-
-		if ( $this->style_element_updated ) {
-			$this->set_modifiable_text( $this->style_element_processor->get_updated_css() );
-			$this->style_element_updated = false;
 		}
 
 		return parent::get_updated_html();
@@ -121,11 +105,10 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		$this->parsed_url                 = null;
 		$this->inspecting_html_attributes = null;
 		$this->css_url_processor          = null;
-		$this->style_element_processor    = null;
-		$this->url_block_attribute_keys = array();
+		$this->in_style_element           = false;
 		/*
-		 * The update flags are cleared by get_updated_html() above. Flush
-		 * before discarding the CSS processors, or their pending edits are lost.
+		 * The update flag is cleared by get_updated_html() above. Flush
+		 * before discarding the CSS parser, or its pending edits are lost.
 		 */
 
 		return parent::next_token();
@@ -146,7 +129,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		$this->raw_url = null;
 		switch ( parent::get_token_type() ) {
 			case '#tag':
-				if ( null === $this->style_element_processor && $this->next_url_attribute() ) {
+				if ( ! $this->in_style_element && $this->next_url_attribute() ) {
 					return true;
 				}
 				return $this->next_url_in_style_element();
@@ -158,87 +141,44 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	}
 
 	/**
-	 * Rewrite only content which has no declared URL syntax.
+	 * Replace configured URL bases in the current raw token.
 	 *
-	 * Known URL attributes and CSS never enter the byte scanner, even when
-	 * their parser rejected a value or the mapping kept it unchanged. Other
-	 * attribute values use the HTML parser's decoder and setter: nested text
-	 * keeps its meaning, though the attribute's quote/entity spelling may change.
-	 * Text and comment tokens retain the raw-byte replacement path.
+	 * Applying pending structured changes first keeps the token span current.
+	 * The cautious processor then changes only configured source-base bytes in
+	 * opaque text and unsupported subsyntaxes, preserving every other byte.
 	 *
 	 * @param CautiousURLBaseRewriteMapping $prepared_url_mapping Prepared URL mapping.
-	 * @return bool Whether unparsed content changed.
+	 * @return bool Whether the token changed.
 	 */
 	public function replace_url_bases_in_current_token( CautiousURLBaseRewriteMapping $prepared_url_mapping ): bool {
-		if ( '#block-comment' === $this->get_token_type() ) {
-			// The caller visits the remaining parsed JSON fields individually.
-			return false;
-		}
-		if ( '#tag' === $this->get_token_type() ) {
-			$changed = false;
-			$url_attributes = self::HTML_ATTRIBUTES_TO_ACCEPT_RELATIVE_URLS_FROM[ $this->get_tag() ] ?? array();
-			foreach ( $this->get_attribute_names_with_prefix( '' ) ?? array() as $name ) {
-				if ( 'style' === $name || in_array( $name, $url_attributes, true ) ) {
-					continue;
-				}
-				$value = $this->get_attribute( $name );
-				if ( ! is_string( $value ) ) {
-					continue;
-				}
-				$rewritten = $this->replace_unparsed_url_bases( $value, $prepared_url_mapping );
-				if ( $rewritten !== $value ) {
-					$changed = $this->set_attribute( $name, $rewritten ) || $changed;
-				}
-			}
-			if ( 'STYLE' !== $this->get_tag() && ! $this->has_json_script_body() ) {
-				$value = $this->get_modifiable_text();
-				$rewritten = $this->replace_unparsed_url_bases( $value, $prepared_url_mapping );
-				if ( $rewritten !== $value ) {
-					$changed = $this->set_modifiable_text( $rewritten ) || $changed;
-				}
-			}
-			return $changed;
-		}
-
 		$html = $this->get_updated_html();
 		if ( ! $this->set_bookmark( 'cautious URL base replacement' ) ) {
 			return false;
 		}
+
 		$token_span = $this->bookmarks['cautious URL base replacement'];
 		$this->release_bookmark( 'cautious URL base replacement' );
 		$raw_token = substr( $html, $token_span->start, $token_span->length );
-		$updated_token = $this->replace_unparsed_url_bases( $raw_token, $prepared_url_mapping );
-		if ( $updated_token === $raw_token ) {
-			return false;
-		}
-		$this->lexical_updates[] = new WP_HTML_Text_Replacement( $token_span->start, $token_span->length, $updated_token );
-		return true;
-	}
-
-	/** Identify script bodies whose declared media type requires JSON parsing. */
-	public function has_json_script_body(): bool {
-		if ( '#tag' !== $this->get_token_type() || $this->is_tag_closer() || 'SCRIPT' !== $this->get_tag() ) {
-			return false;
-		}
-		$type = $this->get_attribute( 'type' );
-		return is_string( $type ) && 1 === preg_match(
-			'/\Aapplication\/(?:[a-z0-9!#$&^_.+-]+\+)?json\z/',
-			strtolower( trim( explode( ';', $type, 2 )[0] ) )
+		$processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules(
+			$raw_token,
+			$prepared_url_mapping
 		);
-	}
-
-	/** @return array<string, true> Current block fields which must not enter format inference. */
-	public function get_url_block_attribute_keys(): array {
-		return $this->url_block_attribute_keys;
-	}
-
-	/** Replace base bytes within one value whose inner syntax is unknown. */
-	private function replace_unparsed_url_bases( string $value, CautiousURLBaseRewriteMapping $mapping ): string {
-		$processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules( $value, $mapping );
 		while ( $processor->next_url() ) {
 			$processor->replace_url_base();
 		}
-		return $processor->get_updated_text();
+
+		$updated_token = $processor->get_updated_text();
+		if ( $updated_token === $raw_token ) {
+			return false;
+		}
+
+		$this->lexical_updates[] = new WP_HTML_Text_Replacement(
+			$token_span->start,
+			$token_span->length,
+			$updated_token
+		);
+
+		return true;
 	}
 
 	/** Visit declared CSS URLs in the STYLE body once, after the tag's attributes. */
@@ -246,24 +186,17 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		if ( 'STYLE' !== $this->get_tag() || $this->is_tag_closer() ) {
 			return false;
 		}
-		if ( null === $this->style_element_processor ) {
-			$this->style_element_processor = new CSSURLProcessor( $this->get_modifiable_text() );
+		if ( ! $this->in_style_element ) {
+			// Attribute edits were flushed before reaching the body. The same
+			// CSS loop can now read the body instead.
+			$this->css_url_processor = new CSSURLProcessor( $this->get_modifiable_text() );
+			$this->in_style_element = true;
 		}
-		while ( $this->style_element_processor->next_url() ) {
-			if ( $this->style_element_processor->is_data_uri() ) {
-				continue;
-			}
-			$this->raw_url = $this->style_element_processor->get_raw_url();
-			$this->parsed_url = WPURL::parse( $this->raw_url, $this->base_url_string );
-			if ( false !== $this->parsed_url ) {
-				return true;
-			}
-		}
-		return false;
+		return $this->next_url_in_css();
 	}
 
 	/**
-	 * Advances to the next CSS URL in the `style` attribute of the current tag token.
+	 * Advances to the next CSS URL in the style attribute or STYLE body.
 	 *
 	 * @return bool Whether a CSS URL was found.
 	 */
@@ -381,7 +314,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		return false;
 	}
 
-	/** Parse top-level block URL fields and record which fields the fallback must skip. */
+	/** Parse top-level block URL fields, resolving relative URLs only for known fields. */
 	private function next_url_block_attribute() {
 		while ( $this->next_block_attribute() ) {
 			$url_maybe = $this->get_block_attribute_value();
@@ -448,9 +381,6 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 				$parsed_url = WPURL::parse( $url_maybe );
 			}
 
-			if ( $is_relative_url_block_attribute || false !== $parsed_url ) {
-				$this->url_block_attribute_keys[ $this->get_block_attribute_key() ] = true;
-			}
 			if ( false === $parsed_url ) {
 				continue;
 			}
@@ -481,10 +411,6 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		$this->parsed_url = $parsed_url;
 		switch ( parent::get_token_type() ) {
 			case '#tag':
-				if ( null !== $this->style_element_processor ) {
-					$this->style_element_updated = true;
-					return $this->style_element_processor->set_raw_url( $raw_url );
-				}
 				// Check if we're processing a CSS URL.
 				if ( null !== $this->css_url_processor ) {
 					$this->css_url_processor_updated = true;
