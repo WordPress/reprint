@@ -3,6 +3,7 @@
 use PHPUnit\Framework\TestCase;
 use function WordPress\Reprint\Server\assert_valid_path;
 use function WordPress\Reprint\Server\normalize_path;
+use function WordPress\Reprint\Server\path_is_descendant_of;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\path_remainder_under;
 use function WordPress\Reprint\Server\trim_right_slash;
@@ -28,6 +29,9 @@ class WindowsPathTest extends TestCase
         $this->assertTrue(path_is_same_as_or_descendant_of('D:/site', 'D:/'));
         $this->assertFalse(path_is_same_as_or_descendant_of('D:/site-old', 'D:/site'));
         $this->assertFalse(path_is_same_as_or_descendant_of('E:/site', 'D:/'));
+        $this->assertFalse(path_is_same_as_or_descendant_of('D:/site', '/'));
+        $this->assertTrue(path_is_descendant_of('D:\\site', 'd:/'));
+        $this->assertFalse(path_is_descendant_of('D:\\site', 'd:/site'));
         $this->assertSame('/upload.txt', path_remainder_under('D:\\site\\upload.txt', 'd:/site'));
     }
 

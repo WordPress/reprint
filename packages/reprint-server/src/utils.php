@@ -442,9 +442,9 @@ if (!function_exists(__NAMESPACE__ . '\\path_is_same_as_or_descendant_of')) {
  * ancestor.
  *
  * Either argument may be a list. The result is true when any candidate-and-
- * ancestor pair matches. The filesystem root matches every absolute path and
- * cannot use the normal ancestor-plus-slash prefix because that would produce
- * `//`.
+ * ancestor pair matches. `/` matches Unix absolute paths; a drive root such as
+ * `D:/` matches only that drive. Roots cannot use the normal ancestor-plus-slash
+ * prefix because that would add a second slash.
  *
  * Examples:
  *
