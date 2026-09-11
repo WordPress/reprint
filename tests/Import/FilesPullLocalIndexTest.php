@@ -1681,11 +1681,11 @@ uksort($remote_index, static function (string $left, string $right): int {
     );
 });
 
-$endpoint = $_GET['endpoint'] ?? null;
-$request_cursor = $_GET['cursor'] ?? null;
+$endpoint = $_POST['endpoint'] ?? null;
+$request_cursor = $_POST['cursor'] ?? null;
 $selected_directories = array_map(
     'base64_decode',
-    (array) ($_GET['directory'] ?? array())
+    (array) ($_POST['directory'] ?? array())
 );
 if ($endpoint === 'file_index' && count($selected_directories) > 0) {
     $remote_index = array_filter(

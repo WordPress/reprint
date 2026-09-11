@@ -38,7 +38,7 @@ class CssFileDownloadTest extends TestCase {
         $router = $this->root . '/router.php';
         file_put_contents($router, '<?php require ' . var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true)
             . '; require ' . var_export(dirname(__DIR__, 2) . '/packages/reprint-server/src/export.php', true)
-            . '; $_GET["chunk_size"] = 16384; (new WordPress\\Reprint\\Server\\HTTPServer())->handle_request();');
+            . '; $_POST["chunk_size"] = 16384; (new WordPress\\Reprint\\Server\\HTTPServer())->handle_request();');
         $this->server = proc_open(
             [PHP_BINARY, '-S', $address, $router],
             [0 => ['pipe', 'r'], 1 => ['file', $this->root . '/server.log', 'a'], 2 => ['file', $this->root . '/server.log', 'a']],

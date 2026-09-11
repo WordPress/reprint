@@ -215,9 +215,9 @@ final class RuntimeFilesRootPathTest extends TestCase
         file_put_contents($router, sprintf(<<<'PHP'
 <?php
 $request = array(
-    'endpoint' => $_GET['endpoint'] ?? null,
-    'directory' => isset($_GET['directory'])
-        ? (array) $_GET['directory']
+    'endpoint' => $_POST['endpoint'] ?? null,
+    'directory' => isset($_POST['directory'])
+        ? (array) $_POST['directory']
         : null,
     'files' => isset($_FILES['file_list'])
         ? json_decode(file_get_contents($_FILES['file_list']['tmp_name']), true)
@@ -236,7 +236,7 @@ if ($request['endpoint'] === 'preflight') {
         'protocol_version' => 2,
         'runtime' => array(
             'ini_get_all' => array(
-                'auto_prepend_file' => base64_decode($_GET['requested_path'], true),
+                'auto_prepend_file' => base64_decode($_POST['requested_path'], true),
                 'auto_append_file' => '/append/runtime.php',
             ),
         ),
@@ -255,8 +255,8 @@ if (
 }
 
 $returned_path = $request['files'][0]['path'];
-if ($request['directory'] !== array('/append') && isset($_GET['returned_path'])) {
-    $returned_path = $_GET['returned_path'];
+if ($request['directory'] !== array('/append') && isset($_POST['returned_path'])) {
+    $returned_path = $_POST['returned_path'];
 }
 
 $boundary = 'runtime-files-root-path-test';
@@ -270,13 +270,13 @@ $write_part = static function (array $headers, string $body = '') use ($boundary
 };
 
 header('Content-Type: multipart/mixed; boundary=' . $boundary);
-if (isset($_GET['chunk_type'])) {
-    $headers = array('X-Chunk-Type' => $_GET['chunk_type']);
+if (isset($_POST['chunk_type'])) {
+    $headers = array('X-Chunk-Type' => $_POST['chunk_type']);
     $body = '';
-    if ($_GET['chunk_type'] === 'error') {
+    if ($_POST['chunk_type'] === 'error') {
         $body = json_encode(array('path' => $returned_path, 'error_type' => 'file_missing'));
     } else {
-        $headers[$_GET['path_header']] = $returned_path;
+        $headers[$_POST['path_header']] = $returned_path;
     }
     $write_part($headers, $body);
     echo "--{$boundary}--\r\n";

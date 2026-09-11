@@ -344,13 +344,26 @@ final class ExportHttpServerTest extends TestCase
         ]);
 
         $server->handle_request([
-            'get' => ['endpoint' => 'preflight'],
-            'post' => [],
-            'server' => ['REQUEST_METHOD' => 'GET'],
+            'get' => ['endpoint' => 'db_index', 'directory' => '/query-only', 'max_exec' => 99],
+            'post' => ['endpoint' => 'preflight'],
+            'server' => ['REQUEST_METHOD' => 'POST'],
             'body' => '',
         ]);
 
         $this->assertSame([['endpoint' => 'preflight']], $calls);
+    }
+
+    public function testExportEndpointCannotComeFromTheQueryString(): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('endpoint');
+        $server->handle_request([
+            'get' => ['endpoint' => 'preflight'],
+            'post' => [],
+            'server' => ['REQUEST_METHOD' => 'POST'],
+            'body' => '',
+        ]);
     }
 
     public function testPushEndpointsNeverReadAJsonRequestBody(): void

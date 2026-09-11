@@ -5,11 +5,12 @@
  * are stripped to exercise continuation from the request parameters alone.
  */
 import http from 'node:http';
+import { readRequestEndpoint } from './request-endpoint.js';
 import { appendFileSync } from 'node:fs';
 
 const [backend, logPath] = process.argv.slice(2);
 const backendUrl = new URL(backend);
-const server = http.createServer((request, response) => {
+const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
     const blocked = [...url.searchParams.keys()].some(
         key => !['reprint-api', 'site-export-api'].includes(key),
@@ -17,7 +18,7 @@ const server = http.createServer((request, response) => {
     appendFileSync(logPath, JSON.stringify({
         method: request.method,
         path: request.url,
-        endpoint: url.searchParams.get('endpoint'),
+        endpoint: blocked ? url.searchParams.get('endpoint') : await readRequestEndpoint(request),
         blocked,
     }) + '\n');
     if (blocked) {
