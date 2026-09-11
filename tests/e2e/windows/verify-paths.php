@@ -8,7 +8,7 @@ foreach ($manifest['path_cases'] as $name => $case) {
     $root = '/root/path-tests/' . $name;
     $log_path = '/root/migration/path-' . $name . '.log';
     $command = [
-        PHP_BINARY, 'packages/reprint-client/src/import.php', 'files-pull', $source['home'] . '/?reprint-api',
+        PHP_BINARY, 'packages/reprint-client/src/import.php', 'pull-files', $source['home'] . '/?reprint-api',
         '--secret=windows-migration-secret', '--state-dir=' . $root . '/state', '--fs-root=' . $root . '/files',
         '--include=' . $case['source'], '--progress=jsonl',
     ];
