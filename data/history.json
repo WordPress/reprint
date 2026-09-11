@@ -23827,6 +23827,85 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "f8cdc5e471e768a337fa15778b9bf45a21a67cd4",
+      "shortSha": "f8cdc5e",
+      "date": "2026-09-11T10:49:35+02:00",
+      "message": "Preserve excluded URL bases and retain forward scan positions (#794)",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+ plus targeted file-transfer scenarios",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.10",
+        "importer": "/home/runner/work/reprint/reprint/packages/reprint-client/bin/reprint-client",
+        "preflightImporter": "/home/runner/work/reprint/reprint/packages/reprint-client/bin/reprint-client",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 200.10194000000047,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 6408.265554999998,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 80343.16902599999,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 64032.05051500001,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 81.085522999987,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-pull",
+          "elapsedMs": 115462.023977,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-apply",
+          "elapsedMs": 457518.648593,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-untuned-random",
+          "elapsedMs": 112071.32920899999,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-binary-compression",
+          "elapsedMs": 84.72460100008175,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull-large-part-peak-memory",
+          "elapsedMs": 20510.862349999952,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
