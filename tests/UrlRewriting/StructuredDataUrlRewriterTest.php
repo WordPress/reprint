@@ -69,6 +69,32 @@ class StructuredDataUrlRewriterTest extends TestCase
         }
     }
 
+    /** A canonical absolute child URL already has its final bytes. */
+    public function testCanonicalChildUrlsDoNotReserializeTheirEnclosingFormat(): void
+    {
+        $rewriter = new StructuredDataUrlRewriter(['https://network.test' => 'https://target.test'], [
+            'https://network.test' => ['/news/'],
+        ]);
+        foreach ([
+            '<style>.child{background:url(https://network.test/news/photo.png)}</style>',
+            "<a href='https://network.test/news/article'>Child</a>",
+            '<!-- wp:image { "url": "https://network.test/news/photo.png" } /-->',
+        ] as $input) {
+            $this->assertSame($input, $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
+        }
+
+        // These still need a changed URL: relative child links must stay on
+        // the source host, and dot segments must be resolved before the lookup.
+        $this->assertSame(
+            '<a href="https://network.test/news/article">Child</a>',
+            $rewriter->rewrite('<a href="/news/article">Child</a>', StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+        $this->assertSame(
+            '<a href="https://network.test/news/article">Child</a>',
+            $rewriter->rewrite('<a href="https://network.test/shop/../news/article">Child</a>', StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
     /** A child-site link stays remote, including a selected-site URL in its query. */
     public function testChildSiteUrlsKeepTheirQueryData(): void
     {

@@ -31,6 +31,13 @@ Until selected-site rewriting lands on trunk, the trunk side of those extra rows
 uses its ordinary rewrite path as a reference. It does not claim that trunk can
 keep child-site links remote. The URL correctness tests cover those links.
 
+The three `selected-site-child-paths-*` cases also supply a child site at
+`/news/`. Their content points to `/article/...`, so each parsed URL must pass
+the child-path lookup before it can move. Trunk ignores the child-path argument;
+these particular outputs remain comparable because no input points to `/news/`.
+The URL tests separately check matched child links, relative links and dot segments.
+These cases measure lookup misses, not the cost of loading a large site directory.
+
 ## Reading the numbers
 
 Each case contains 128 distinct values with 32 entries each. One PHP process

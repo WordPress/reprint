@@ -864,6 +864,16 @@ class StructuredDataUrlRewriter
                         } else {
                             $decoded_path = rawurldecode($parsed_url->pathname);
                             $excluded = $this->cautious_url_base_rewrite_mapping->excludes_path($parsed_url->host, $parsed_url->pathname);
+                            // A canonical absolute child URL is already final. Do
+                            // not clone it or rewrite its HTML/CSS/JSON container.
+                            // Relative links and dot segments still use the normal
+                            // conversion below to keep the child at the source.
+                            if ($excluded && $raw_url === $parsed_url->toString()) {
+                                if ($url_cache_key !== null) {
+                                    $this->set_cached_url_rewrite($url_cache_key, false);
+                                }
+                                continue;
+                            }
                             foreach ($parsed_mapping as $mapping) {
                                 $from_url = $mapping['from_url'];
                                 if (!$from_url || !$mapping['to_url']

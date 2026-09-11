@@ -9,7 +9,8 @@ require __DIR__ . '/url-rewrite-fixtures.php';
 if (( $argv[1] ?? '' ) === '--list') {
     echo json_encode(array_merge(
         REPRINT_URL_REWRITE_BENCHMARK_CASES,
-        array_map(static function ($scenario) { return 'selected-site-' . $scenario; }, REPRINT_URL_REWRITE_BENCHMARK_CASES)
+        array_map(static function ($scenario) { return 'selected-site-' . $scenario; }, REPRINT_URL_REWRITE_BENCHMARK_CASES),
+        array_map(static function ($scenario) { return 'selected-site-child-paths-' . $scenario; }, REPRINT_URL_REWRITE_CHILD_PATH_BENCHMARK_CASES)
     )) . "\n";
     exit;
 }
@@ -27,7 +28,10 @@ function reprint_benchmark_url_rewrite(string $build_path, string $scenario): vo
     require $root . '/packages/reprint-client/src/lib/url-rewrite/load.php';
 
     $selected_site = strpos($scenario, 'selected-site-') === 0;
-    $corpus = $selected_site ? substr($scenario, strlen('selected-site-')) : $scenario;
+    $with_child_paths = strpos($scenario, 'selected-site-child-paths-') === 0;
+    $prefix = $with_child_paths ? 'selected-site-child-paths-' : 'selected-site-';
+    $corpus = $selected_site ? substr($scenario, strlen($prefix)) : $scenario;
+    $child_paths = $with_child_paths ? ['https://source.example' => ['/news/']] : [];
 
     // Fixed-size corpus; generation, loading PHP and output checks are not timed.
     // Each sample uses fresh caches, then reuses one rewriter across distinct rows,
@@ -44,11 +48,11 @@ function reprint_benchmark_url_rewrite(string $build_path, string $scenario): vo
         $outputs = [];
         $start = hrtime(true);
         $mapping = ['https://source.example' => 'https://destination.example'];
-        // [] selects the multisite parser path even without child paths. Trunk
+        // An array selects the multisite parser path, even when empty. Trunk
         // predates that argument and PHP ignores it there: its ordinary rewrite
         // is the reference time for the same input and expected output.
         $rewriter = $selected_site
-            ? new StructuredDataUrlRewriter($mapping, [])
+            ? new StructuredDataUrlRewriter($mapping, $child_paths)
             : new StructuredDataUrlRewriter($mapping);
         foreach ($fixtures as $fixture) {
             $outputs[] = $corpus === 'serialized-options'

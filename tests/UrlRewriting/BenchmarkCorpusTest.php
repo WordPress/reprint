@@ -13,7 +13,11 @@ class BenchmarkCorpusTest extends TestCase {
     public function testBenchmarkCorpusRewritesWithoutLosingContent(string $scenario): void
     {
         $fixture = reprint_url_rewrite_benchmark_fixture($scenario, 7);
-        foreach ([null, []] as $selected_site_child_paths) {
+        $selections = [null, []];
+        if (in_array($scenario, REPRINT_URL_REWRITE_CHILD_PATH_BENCHMARK_CASES, true)) {
+            $selections[] = ['https://source.example' => ['/news/']];
+        }
+        foreach ($selections as $selected_site_child_paths) {
             $rewriter = new StructuredDataUrlRewriter(
                 ['https://source.example' => 'https://destination.example'],
                 $selected_site_child_paths

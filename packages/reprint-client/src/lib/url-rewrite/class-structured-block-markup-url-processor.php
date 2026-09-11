@@ -134,7 +134,9 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 
 	/** Flush the current token, then discard its URL and CSS parser state. */
 	public function next_token(): bool {
-		$this->get_updated_html();
+		// The parent flushes this token through our get_updated_html() before
+		// moving on. Keep the CSS parser alive until that flush has finished.
+		$has_token = parent::next_token();
 
 		$this->raw_url                    = null;
 		$this->parsed_url                 = null;
@@ -142,12 +144,8 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		$this->inspecting_html_attributes = null;
 		$this->css_url_processor          = null;
 		$this->in_style_element           = false;
-		/*
-		 * The update flag is cleared by get_updated_html() above. Flush
-		 * before discarding the CSS parser, or its pending edits are lost.
-		 */
-
-		return parent::next_token();
+		// get_updated_html() cleared the update flag before we dropped its parser.
+		return $has_token;
 	}
 
 	public function next_url() {
@@ -358,6 +356,24 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 
 	/** Parse top-level block URL fields, resolving relative URLs only for known fields. */
 	private function next_url_block_attribute() {
+		// Divi stores its strings below arrays such as module.content. This
+		// reader accepts only top-level strings; the rewriter visits nested
+		// values separately. Before starting the attribute iterator, avoid
+		// building paths to nested fields when none can be accepted here.
+		// Once the iterator has a path, do not repeat this scan for each URL.
+		if ( false === $this->get_block_attribute_path() ) {
+			$has_top_level_string = false;
+			foreach ( $this->get_block_attributes() ?: array() as $value ) {
+				if ( is_string( $value ) ) {
+					$has_top_level_string = true;
+					break;
+				}
+			}
+			if ( ! $has_top_level_string ) {
+				return false;
+			}
+		}
+
 		while ( $this->next_block_attribute() ) {
 			$url_maybe = $this->get_block_attribute_value();
 			if ( ! is_string( $url_maybe ) ||

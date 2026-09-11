@@ -14,6 +14,14 @@ const REPRINT_URL_REWRITE_BENCHMARK_CASES = [
     'serialized-options',
 ];
 
+// These corpora use declared URL fields. A child-path lookup can distinguish
+// /article/... from /news/...; opaque strings deliberately cannot do that.
+const REPRINT_URL_REWRITE_CHILD_PATH_BENCHMARK_CASES = [
+    'style-elements',
+    'blocks-nested-html',
+    'blocks-repeated-urls',
+];
+
 /**
  * Build one post or option. IDs vary both the value and its URLs so whole-value
  * cache hits cannot hide parsing costs. The repeated-URL case varies only text.
