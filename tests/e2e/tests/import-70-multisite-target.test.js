@@ -426,6 +426,84 @@ describe('Pull a selected site into a fresh single site', () => {
         }
     }, 180000);
 
+    it('resumes cleanup after MySQL rejects the plugin-list replacement without losing site plugins', async () => {
+        const directory = createTempDir('e2e-multisite-rejected-activation');
+        directories.push(directory);
+        const database = 'e2e_multisite_rejected_activation';
+        databases.push(database);
+        const url = `${fixture.sites[7].url}/?reprint-api`;
+        const dump = runImporter(url, directory, 'db-pull', { secret: getSiteSecret(site), autoResume: false });
+        assert.equal(dump.exitCode, 0, dump.stdout + dump.stderr);
+        const connection = await createMysqlConnection();
+        const marker = join(directory, 'paused');
+        const statePath = join(pullStateDirectory(directory, url), 'state.json');
+        let clientProcess;
+        try {
+            await connection.query(`CREATE DATABASE \`${database}\``);
+            clientProcess = startClient([join(import.meta.dirname, '../fixtures/pause-multisite-apply.php'),
+                clientPath, url, directory, database, 'database-cleanup', 'after', marker, targetUrl]);
+            for (let attempt = 0; attempt < 600 && !existsSync(marker); ++attempt) {
+                if (clientProcess.child.exitCode !== null || clientProcess.child.signalCode !== null) break;
+                await sleep(100);
+            }
+            assert.ok(existsSync(marker), clientProcess.output());
+            process.kill(-clientProcess.child.pid, 'SIGKILL');
+            assert.equal((await clientProcess.finished).signal, 'SIGKILL');
+            assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).active_resumable_command.current_stage, 'database-cleanup');
+
+            // Inject one real SQL statement failure, after the dump is committed.
+            // Earlier cleanup writes succeed; only the activation write fails.
+            await connection.query(`CREATE TRIGGER \`${database}\`.reject_activation BEFORE INSERT ON \`${database}\`.network_7_options
+                FOR EACH ROW BEGIN
+                    IF NEW.option_name = 'active_plugins' THEN
+                        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Injected activation write failure';
+                    END IF;
+                END`);
+            const rejected = runImporter(url, directory, 'db-apply', {
+                secret: getSiteSecret(site), autoResume: false, extraArgs: targetArgs(database),
+            });
+            assert.equal(rejected.exitCode, 1, rejected.stdout + rejected.stderr);
+            assert.ok((rejected.stdout + rejected.stderr).includes('Injected activation write failure'));
+            assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).active_resumable_command.current_stage, 'database-cleanup');
+            const [[partialGrant]] = await connection.query(`SELECT meta_value FROM \`${database}\`.network_usermeta m
+                JOIN \`${database}\`.network_users u ON m.user_id=u.ID WHERE u.user_login='shared' AND meta_key='network_7_capabilities'`);
+            assert.ok(partialGrant.meta_value.includes('s:13:"administrator";b:1;'), 'Earlier cleanup writes must have reached MySQL');
+            const [activation] = await connection.query(`SELECT option_value FROM \`${database}\`.network_7_options WHERE option_name='active_plugins'`);
+            assert.deepEqual(activation.map(row => row.option_value), ['a:1:{i:0;s:19:"a-local-fixture.php";}'],
+                'The site-only plugin list must survive a rejected replacement');
+
+            await connection.query(`DROP TRIGGER \`${database}\`.reject_activation`);
+            const resumed = runImporter(url, directory, 'db-apply', {
+                secret: getSiteSecret(site), autoResume: false, extraArgs: targetArgs(database),
+            });
+            assert.equal(resumed.exitCode, 0, resumed.stdout + resumed.stderr);
+            const [[merged]] = await connection.query(`SELECT option_value FROM \`${database}\`.network_7_options WHERE option_name='active_plugins'`);
+            assert.equal(merged.option_value, 'a:2:{i:0;s:19:"network-fixture.php";i:1;s:19:"a-local-fixture.php";}',
+                'Resume must keep network-first order and remove the excluded cache plugin');
+            const [grants] = await connection.query(`SELECT meta_key, meta_value FROM \`${database}\`.network_usermeta m
+                JOIN \`${database}\`.network_users u ON m.user_id=u.ID WHERE u.user_login='shared'
+                AND meta_key IN ('network_7_capabilities', 'network_7_user_level') ORDER BY meta_key`);
+            assert.deepEqual(grants.map(row => [row.meta_key, row.meta_value]), [
+                ['network_7_capabilities', 'a:2:{s:6:"editor";b:1;s:13:"administrator";b:1;}'],
+                ['network_7_user_level', '10'],
+            ], 'Repeated cleanup must preserve the existing role without adding duplicate grants');
+            const [[member]] = await connection.query(`SELECT meta_value FROM \`${database}\`.network_usermeta m
+                JOIN \`${database}\`.network_users u ON m.user_id=u.ID WHERE u.user_login='shop-member' AND meta_key='network_7_capabilities'`);
+            assert.equal(member.meta_value, 'a:1:{s:10:"subscriber";b:1;}');
+            const [[post]] = await connection.query(`SELECT post_content FROM \`${database}\`.network_7_posts WHERE ID=100`);
+            assert.equal(post.post_content, 'Only site 7');
+            const [tables] = await connection.query(`SHOW TABLES FROM \`${database}\``);
+            assert.ok(tables.every(row => !Object.values(row)[0].startsWith('__reprint_')));
+            assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).active_resumable_command.completion_state, 'complete');
+        } finally {
+            if (clientProcess && clientProcess.child.exitCode === null && clientProcess.child.signalCode === null) {
+                process.kill(-clientProcess.child.pid, 'SIGKILL');
+                await clientProcess.finished;
+            }
+            await connection.end();
+        }
+    }, 180000);
+
     // Kill on both sides of each durable boundary: before progress-table creation,
     // before SQL starts, and before cleanup. No private state is rewritten.
     for (const [stage, when] of ['database-initialize', 'sql', 'database-cleanup']
