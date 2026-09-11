@@ -100,7 +100,8 @@ class FileTreeProducer
                 "The 'paths' option is required and must be an array"
             );
         }
-        $this->paths = $options["paths"];
+        // Sort and resume using the same spelling that file chunks carry.
+        $this->paths = array_map(__NAMESPACE__ . '\\normalize_path_separators', $options["paths"]);
 
         if (isset($options["cursor"])) {
             $this->initialize_from_cursor($options["cursor"]);
@@ -402,7 +403,7 @@ class FileTreeProducer
         }
 
         clearstatcache(true, $path);
-        if ($path[0] === "/" && (file_exists($path) || is_link($path))) {
+        if (is_absolute_path($path) && (file_exists($path) || is_link($path))) {
             return $path;
         }
 
@@ -412,10 +413,6 @@ class FileTreeProducer
             if (file_exists($candidate) || is_link($candidate)) {
                 return $candidate;
             }
-        }
-
-        if ($path[0] === "/") {
-            return null;
         }
 
         return null;

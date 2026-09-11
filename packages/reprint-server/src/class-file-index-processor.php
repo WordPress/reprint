@@ -792,6 +792,8 @@ final class FileIndexProcessor {
             return false;
         }
 
+        $canonical_directory = normalize_path_separators($canonical_directory);
+
         // When following links is disabled, every canonical directory must
         // remain inside a configured root. Reject one that crosses that
         // boundary, then continue with the remaining stack.
@@ -890,7 +892,7 @@ final class FileIndexProcessor {
             return "";
         }
         $canonical_storage_path = realpath($storage_path);
-        return $canonical_storage_path !== false ? $canonical_storage_path : $storage_path;
+        return normalize_path_separators($canonical_storage_path !== false ? $canonical_storage_path : $storage_path);
     }
 
     /**

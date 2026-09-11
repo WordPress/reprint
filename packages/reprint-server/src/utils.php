@@ -233,10 +233,17 @@ if (!function_exists(__NAMESPACE__ . '\\normalize_path')) {
 /**
  * Resolve ".." and "." segments in a path without touching the filesystem.
  *
- * Unlike realpath(), this works on paths that don't exist yet.
+ * Unlike realpath(), this works on paths that don't exist yet. Windows drive
+ * paths use forward slashes and retain their drive root, even on a Unix client.
  */
 function normalize_path(string $path): string
 {
+    $path = normalize_path_separators($path);
+    $root = "/";
+    if (preg_match('~^[A-Z]:/~', $path)) {
+        $root = substr($path, 0, 3);
+        $path = substr($path, 3);
+    }
     $parts = explode("/", $path);
     $resolved = [];
     foreach ($parts as $part) {
@@ -249,7 +256,7 @@ function normalize_path(string $path): string
             $resolved[] = $part;
         }
     }
-    return "/" . implode("/", $resolved);
+    return $root . implode("/", $resolved);
 }
 }
 
@@ -258,8 +265,9 @@ if (!function_exists(__NAMESPACE__ . '\\trim_right_slash')) {
  * Removes trailing slashes without changing the filesystem root into an empty path.
  *
  * Unlike rtrim($path, '/'), this returns `/` for both the filesystem root and
- * an empty input. It only changes the lexical spelling; it does not validate
- * the path or resolve dot segments and symlinks.
+ * an empty input. Windows drive paths use forward slashes and keep `D:/`
+ * intact. It only changes the lexical spelling; it does not validate the path
+ * or resolve dot segments and symlinks.
  *
  * Examples:
  *
@@ -272,7 +280,12 @@ if (!function_exists(__NAMESPACE__ . '\\trim_right_slash')) {
  */
 function trim_right_slash(string $path): string
 {
-    return rtrim($path, '/') ?: '/';
+    $path = normalize_path_separators($path);
+    $trimmed = rtrim($path, '/');
+    if (preg_match('~^[A-Z]:/+$~', $path)) {
+        return $trimmed . '/';
+    }
+    return $trimmed ?: '/';
 }
 }
 
@@ -467,8 +480,10 @@ function path_is_same_as_or_descendant_of($path, $ancestor): bool
     if (!is_string($path) || !is_string($ancestor)) {
         throw new InvalidArgumentException('Path containment expects strings or lists of strings.');
     }
-    if ($ancestor === "/") {
-        return str_starts_with($path, "/");
+    $path = normalize_path_separators($path);
+    $ancestor = normalize_path_separators($ancestor);
+    if ($ancestor === "/" || preg_match('~^[A-Z]:/$~', $ancestor)) {
+        return str_starts_with($path, $ancestor);
     }
     return $path === $ancestor || str_starts_with($path, $ancestor . "/");
 }
@@ -517,7 +532,7 @@ function path_is_descendant_of($path, $ancestor): bool
     if (!path_is_same_as_or_descendant_of($path, $ancestor)) {
         return false;
     }
-    return $path !== $ancestor;
+    return normalize_path_separators($path) !== normalize_path_separators($ancestor);
 }
 }
 
@@ -530,8 +545,8 @@ if (!function_exists(__NAMESPACE__ . '\\path_remainder_under')) {
  */
 function path_remainder_under(string $path, string $prefix): ?string
 {
-    $path = rtrim($path, "/");
-    $prefix = rtrim($prefix, "/");
+    $path = rtrim(normalize_path_separators($path), "/");
+    $prefix = rtrim(normalize_path_separators($prefix), "/");
 
     if ($path === $prefix) {
         return "";
@@ -586,7 +601,8 @@ function relative_path_under(string $path, string $root): ?string
 if (!function_exists(__NAMESPACE__ . '\\assert_valid_path')) {
 /**
  * Validates that a path is a non-empty absolute string without NUL bytes
- * or dot-segments (. or ..).
+ * or dot-segments (. or ..). Windows drive paths may use either separator;
+ * drive-relative paths such as `D:site` are not absolute.
  *
  * Useful anywhere untrusted or remote paths need to be checked before
  * use — both the exporter (directory config) and the importer (remote
@@ -598,11 +614,11 @@ if (!function_exists(__NAMESPACE__ . '\\assert_valid_path')) {
  */
 function assert_valid_path(string $path, string $label = "path"): void
 {
-    $path = trim($path);
+    $path = normalize_path_separators(trim($path));
     if ($path === "") {
         throw new InvalidArgumentException("{$label} must be a non-empty string");
     }
-    if ($path[0] !== "/") {
+    if (!is_absolute_path($path)) {
         throw new InvalidArgumentException("{$label} must be an absolute path: {$path}");
     }
     if (strpos($path, "\0") !== false) {
@@ -615,6 +631,39 @@ function assert_valid_path(string $path, string $label = "path"): void
             );
         }
     }
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\normalize_path_separators')) {
+/**
+ * Uses forward slashes and an uppercase drive letter for Windows drive paths.
+ *
+ * Recognize the path itself rather than the current OS: a Linux importer reads
+ * Windows source paths too. Unix paths keep every backslash byte in their names.
+ * Dot segments are left intact so validation can reject them before use.
+ *
+ * @param string $path Native or remote filesystem path.
+ * @return string Slash-delimited Windows drive path, or the unchanged Unix path.
+ */
+function normalize_path_separators(string $path): string
+{
+    if (preg_match('~^[a-zA-Z]:[/\\\\]~', $path)) {
+        return strtoupper($path[0]) . str_replace('\\', '/', substr($path, 1));
+    }
+    return $path;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\is_absolute_path')) {
+/**
+ * Recognizes Unix roots and Windows drive roots without consulting local disk.
+ *
+ * @param string $path Native or remote filesystem path.
+ * @return bool Whether the path is rooted rather than relative to a working directory.
+ */
+function is_absolute_path(string $path): bool
+{
+    return $path !== '' && ( $path[0] === '/' || preg_match('~^[a-zA-Z]:[/\\\\]~', $path) === 1 );
 }
 }
 

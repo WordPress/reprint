@@ -2,6 +2,7 @@
 
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Server\assert_valid_path;
+use function WordPress\Reprint\Server\normalize_path_separators;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\path_remainder_under;
 
@@ -17,6 +18,10 @@ use function WordPress\Reprint\Server\path_remainder_under;
  * scope keeps its remote spelling under the local filesystem root. A followed
  * symlink target outside that scope goes under the configured local followed
  * symlinks root instead.
+ *
+ * Windows drive paths use forward slashes beneath the local root: D:\site\a.txt
+ * becomes /local/D:/site/a.txt. The drive stays in the path so D: and E: do not
+ * collide. Unix paths keep literal backslashes in their filenames.
  *
  * Copied targets and rewritten symlink destinations both use this mapping, so
  * a rewritten link points to the place where its target was copied.
@@ -71,6 +76,7 @@ final class RemoteToLocalPathMapper
     public function remote_path_to_local_path(string $remote_absolute_path): string
     {
         assert_valid_path($remote_absolute_path, "remote absolute path");
+        $remote_absolute_path = normalize_path_separators($remote_absolute_path);
         $local_absolute_path = null;
         $longest_remote_prefix_length = -1;
         foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
