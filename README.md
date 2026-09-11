@@ -971,7 +971,7 @@ Old checkpoints with saved fetch progress lack the completed-byte counts and
 cannot resume in this build. Cleared fetch checkpoints, including those left by
 completed pulls, load with zero completed bytes. Retained indexes are unchanged.
 
-Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl`. The
+Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl|compact`. The
 default `auto` mode uses terminal progress when its output stream is a TTY and
 JSONL otherwise. Use `--progress=tty` to force the terminal presentation when
 output is captured, or `--progress=jsonl` to force structured progress in a
@@ -983,12 +983,33 @@ php reprint.phar files-push "$URL" --state-dir="$STATE_DIR" \
 ```
 
 The selected mode applies only to that invocation and is not retained in
-command state. Explicit `tty` and `jsonl` modes cannot be combined with
+command state. Explicit `tty`, `jsonl`, and `compact` modes cannot be combined with
 `--verbose`.
 
 The selector governs progress, lifecycle, and status output. It does not
 reformat a command's data result, such as preflight or pull-metadata JSON,
 files-stats JSON, or SQL written with `--sql-output=stdout`.
+
+Use `--progress=compact` to print command starts, stage changes, command results,
+warnings, and errors as JSON lines. During a stage, it prints item and byte
+counters at most once every 30 seconds, only when they changed. These updates
+omit individual file paths and table names. They come from existing progress
+events, so a blocked request or a stage without item/byte counters stays quiet.
+It hides per-file records, preserve-local skips, repeated stage labels,
+per-request results, receive-rate diagnostics, and debug chatter.
+Warnings and errors, including rejected symlink targets, remain individual
+records; compact mode does not group them or add a final report.
+
+```bash
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" \
+    --fs-root="$FS_ROOT" --secret="$SECRET" --progress=compact
+```
+
+Compact mode only changes the displayed output. It does not save the omitted
+records or create `progress.jsonl`. `progress.json` still receives the latest
+progress snapshot, and `audit.log` remains available for troubleshooting.
+Use `--progress=jsonl` when the caller wants the full progress stream.
+With `--sql-output=stdout`, SQL stays on stdout and compact progress goes to stderr.
 
 The files-push terminal presentation uses one stage-weighted progress bar. The
 percentage comes first, followed by a major stage such as `Indexing`, `Pushing`,

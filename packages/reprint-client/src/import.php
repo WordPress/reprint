@@ -192,7 +192,7 @@ class ImportClient
     ];
 
     /** Progress output modes accepted by every command. */
-    public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl'];
+    public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl', 'compact'];
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
@@ -316,7 +316,7 @@ class ImportClient
     /** @var bool Whether the current progress stream is a TTY. */
     private $is_tty;
 
-    /** @var string Progress output mode for this invocation: auto, tty, or jsonl. */
+    /** @var string Progress output mode for this invocation: auto, tty, jsonl, or compact. */
     private $progress_output_mode = 'auto';
 
     /** @var PullState Persistent pull state loaded from / saved to $pull_state_file. */
@@ -449,6 +449,13 @@ class ImportClient
 
     /** @var string|null Machine-readable HTTP, cURL, or preflight error code for reporting. */
     public $last_error_code = null;
+
+    /** @var array{string|null, string|null}|null Last command and stage printed in compact mode. */
+    private ?array $last_compact_stage = null;
+    /** Item and byte counters at the last compact update or stage change. */
+    private array $last_compact_counters = [];
+    /** Monotonic seconds at the last compact update or stage change. */
+    private float $last_compact_progress_time = 0;
 
     /** @var TerminalProgress Renders progress and lifecycle output to the terminal. */
     private TerminalProgress $progress;
@@ -896,7 +903,7 @@ class ImportClient
      *   - command: Required. One of the entries in self::COMMANDS.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
-     *   - progress: Optional progress output mode: auto, tty, or jsonl
+     *   - progress: Optional progress output mode: auto, tty, jsonl, or compact
      * @param ReprintProcessLock|null $process_lock Optional lock already held
      *                                               for this state directory.
      */
@@ -976,6 +983,9 @@ class ImportClient
         }
         // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         $this->progress_output_mode = $progress_output_mode;
+        $this->last_compact_stage = null;
+        $this->last_compact_counters = [];
+        $this->last_compact_progress_time = 0;
         $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
 
         // Local runtime cleanup is recorded in pull state. Read it for diff
@@ -1750,7 +1760,7 @@ class ImportClient
      *
      *     @type string $secret             HMAC connection token.
      *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
-     *     @type string $progress           Progress output mode: auto, tty, or jsonl.
+     *     @type string $progress           Progress output mode: auto, tty, jsonl, or compact.
      *     @type array  $files_push_context Optional context already validated by the CLI entry point.
      * }
      * @param ReprintProcessLock $process_lock Lock held for the command's state directory.
@@ -3620,6 +3630,13 @@ class ImportClient
         }
 
         if ($stage === "local-index") {
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "stage",
+                "command" => "files-pull",
+                "stage" => "local-index",
+                "message" => "Indexing local files",
+            ], true);
             $this->ensure_local_index_exists();
             MappedRemoteIndexBuilder::build([
                 "remote_index_file" => $this->next_remote_index_file,
@@ -3650,6 +3667,13 @@ class ImportClient
         $starting_mirror_stage = false;
         $starting_fetch_stage = false;
         if ($stage === "diff") {
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "stage",
+                "command" => "files-pull",
+                "stage" => "diff",
+                "message" => "Comparing file indexes",
+            ], true);
             $complete = $this->compare_remote_indexes_and_build_fetch_list();
             if (!$complete) {
                 $this->get_state()->active_resumable_command->completion_state = "partial";
@@ -3668,6 +3692,13 @@ class ImportClient
         }
 
         if ($stage === "mirror") {
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "stage",
+                "command" => "files-pull",
+                "stage" => "mirror",
+                "message" => "Planning local file changes",
+            ], true);
             if ($starting_mirror_stage) {
                 $this->pull_index_journal->open();
             }
@@ -3716,6 +3747,13 @@ class ImportClient
         }
 
         if ($stage === "fetch") {
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "stage",
+                "command" => "files-pull",
+                "stage" => "fetch",
+                "message" => "Downloading files",
+            ], true);
             $complete = $this->fetch_files_from_list($this->fetch_list_file);
             if (!$complete) {
                 $this->get_state()->active_resumable_command->completion_state = "partial";
@@ -13487,13 +13525,14 @@ class ImportClient
      * Suppressed when the terminal presentation is active without verbose logs.
      *
      * @param array $data Progress data to output
-     * @param bool $force Force output regardless of throttle
+     * @param bool $force Bypass ordinary JSONL throttling, not compact filtering.
      */
     public function output_progress(array $data, bool $force = false): void
     {
         $context = ($data['command'] ?? null) === 'files-push'
             ? $data + ['step' => $this->pipeline_step, 'steps' => $this->pipeline_steps]
             : $this->progress_context();
+        // Compact filtering must not prevent live snapshot updates.
         $this->progress_reporter->update($context, $data);
         $this->progress_reporter->write_file();
 
@@ -13501,6 +13540,70 @@ class ImportClient
         if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             return;
         }
+        if ($this->progress_output_mode === 'compact') {
+            $type = $data['type'] ?? null;
+            $status = $data['status'] ?? null;
+            $command = $data['command'] ?? $context['command'];
+            $phase = $data['stage'] ?? $context['phase'] ?? $data['phase'] ?? null;
+            $stage = [$command, $phase];
+            $now = hrtime(true) / 1e9;
+            $counters = [
+                'items' => $data['progress']['items'] ?? null,
+                'bytes' => $data['progress']['bytes'] ?? null,
+            ];
+            $is_attention = isset($data['error']) || isset($data['error_message'])
+                || in_array($type, ['warning', 'error', 'symlink_error', 'symlink_follow_rejected', 'volatile_files', 'interrupt', 'state_saved', 'state_save_error'], true);
+            // Request-completion records have a phase and counters, but no
+            // command or message. Omit those from compact output.
+            $is_result = in_array($status, ['complete', 'partial', 'error', 'aborted', 'failed', 'interrupted', 'restart'], true)
+                && ( isset($data['command']) || isset($data['message']) || !isset($data['phase']) );
+            if ($is_attention || $is_result) {
+                $force = true;
+            } elseif ($type === 'lifecycle') {
+                if (in_array($data['event'] ?? null, ['starting', 'resuming', 'stage'], true)
+                    && $stage === $this->last_compact_stage
+                ) {
+                    return;
+                }
+                $force = true;
+            } elseif ($status === 'starting' || isset($data['progress'])) {
+                if ($stage === $this->last_compact_stage) {
+                    // Compare with the last printed counters, not every hidden event.
+                    // Repeated labels and per-file/table details are not progress.
+                    if (!isset($data['progress']) || $now - $this->last_compact_progress_time < 30
+                        || $counters === $this->last_compact_counters
+                        || ( $counters['items'] === null && $counters['bytes'] === null )
+                    ) {
+                        return;
+                    }
+                    $data = [
+                        'heartbeat' => true,
+                        'command' => $command,
+                        'phase' => $phase,
+                        'progress' => $counters + ['current_file' => null, 'current_table' => null],
+                    ];
+                } else {
+                    $data = [
+                        'type' => 'lifecycle',
+                        'event' => 'stage',
+                        'command' => $command,
+                        'stage' => $phase,
+                        'message' => $status === 'starting' || $type === 'push_progress'
+                            ? ( $data['message'] ?? $phase )
+                            : "Starting {$command} stage: {$phase}",
+                    ];
+                }
+                $force = true;
+            } else {
+                return;
+            }
+            if (!$is_attention && !$is_result) {
+                $this->last_compact_stage = $stage;
+                $this->last_compact_counters = $counters;
+                $this->last_compact_progress_time = $now;
+            }
+        }
+
         if (!$this->progress_reporter->output_jsonl($data, $this->progress_fd, $force)) {
             // Broken pipe — save state and exit cleanly.
             $this->save_state();
@@ -13627,7 +13730,7 @@ if (
             'type' => 'value',
             'target' => 'progress',
             'placeholder' => 'MODE',
-            'help' => 'Progress output: auto, tty, or jsonl (default: auto)',
+            'help' => 'Progress output: auto, tty, jsonl, or compact (default: auto). Compact keeps stage changes, 30-second counter updates, results, warnings, and errors.',
             'help_section' => 'global',
             'commands' => ImportClient::COMMANDS,
             'valid_values' => ImportClient::PROGRESS_OUTPUT_MODES,
@@ -14599,7 +14702,7 @@ if (
         "files-diff" => [
             "level" => "low",
             "short" => "Compare local files with the local index",
-            "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl]",
+            "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl|compact]",
             "description" =>
                 "Shows which local paths a files-push would send or delete, comparing\n" .
                 "the filesystem root at --fs-root with the local index for this remote\n" .
@@ -14641,7 +14744,8 @@ if (
                 "  auto   Use tty on a terminal and jsonl otherwise (default)\n" .
                 "  tty    Force the single interactive progress bar\n" .
                 "  jsonl  Force one JSON object per line\n" .
-                "Explicit tty and jsonl modes cannot be combined with --verbose.\n" .
+                "  compact  Print stage changes, 30-second counter updates, results, warnings, and errors\n" .
+                "Explicit tty, jsonl, and compact modes cannot be combined with --verbose.\n" .
                 "\n" .
                 "Exit outcomes:\n" .
                 "  0  File push complete\n" .

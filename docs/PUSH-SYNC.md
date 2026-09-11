@@ -494,10 +494,15 @@ target parameters are rejected. The local push state directory must be outside
 the filesystem root so planning cannot index its own changing files.
 
 Like every `ImportClient` command, files-push accepts
-`--progress=auto|tty|jsonl` for one invocation. The default `auto` mode uses
+`--progress=auto|tty|jsonl|compact` for one invocation. The default `auto` mode uses
 terminal progress when its output stream is a TTY and JSONL otherwise. `tty`
-and `jsonl` force the corresponding presentation; they are not stored in
-sender state and cannot be combined with `--verbose`.
+and `jsonl` force the corresponding presentation. `compact` prints stage changes,
+command results, warnings, and errors without saving the omitted records.
+Within a stage, it prints changed item and byte counters at most once every
+30 seconds, without per-file details. These updates require an existing progress
+event; there is no separate timer that prints while a request is blocked.
+`progress.json` snapshots and `audit.log` are unchanged. These modes are not
+stored in sender state and cannot be combined with `--verbose`.
 
 One process starts or resumes exactly one sender. Before every `next_step()` it
 checks whether another step may begin. The wall-clock admission deadline is 80
@@ -560,7 +565,7 @@ before setup changes its local files.
 
 ## Local files-diff command
 
-`reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl]`
+`reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl|compact]`
 reports a local minimized push operation plan before target exclusions: the
 local paths a files-push would send or delete, compared against the same
 filtered patch base used by files-push. The retained local index is not
