@@ -60,6 +60,20 @@ final class ExportHttpServerTest extends TestCase
         $this->assertTrue($config['create_table_query']);
     }
 
+    public function testJsonBodyParametersOverrideQueryParameters(): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        $config = $server->parse_http_config(
+            ['endpoint' => 'preflight', 'directory' => '/query'],
+            [],
+            ['CONTENT_TYPE' => 'application/json'],
+            '{"endpoint":"db_index","directory":"/body"}'
+        );
+
+        $this->assertSame('db_index', $config['endpoint']);
+        $this->assertSame('/body', $config['directory']);
+    }
+
     public function testParsesBase64EncodedPathParameters(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer();

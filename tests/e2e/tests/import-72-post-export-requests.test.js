@@ -11,7 +11,7 @@ import {
 } from '../lib/test-helpers.js';
 import { HmacClient } from '../lib/hmac-client.js';
 
-describe('Export: GET and POST rollout', () => {
+describe('Export: query and POST parameter rollout', () => {
     const site = 'basic';
     let directory;
     let firewall;
@@ -48,6 +48,7 @@ describe('Export: GET and POST rollout', () => {
         'reads POST %s parameters through the WordPress plugin', async contentType => {
             // Exercise the JSON-string form as well as nested values in later pulls.
             const params = {
+                endpoint: 'db_index',
                 directory: getSiteDir(site),
                 skip_rows: JSON.stringify([{
                     table_name_without_prefix: 'postmeta',
@@ -64,7 +65,7 @@ describe('Export: GET and POST rollout', () => {
                 body = new URLSearchParams(params).toString();
                 signedBody = body;
             }
-            const response = await fetch(`${firewallUrl}&endpoint=db_index`, {
+            const response = await fetch(firewallUrl, {
                 method: 'POST', body,
                 headers: {
                     ...new HmacClient(getSiteSecret(site)).getAuthHeaders(signedBody),
@@ -79,14 +80,42 @@ describe('Export: GET and POST rollout', () => {
     it('accepts multipart file lists with the pull options in form fields', async () => {
         const fileList = JSON.stringify([{ path: Buffer.from(join(getSiteDir(site), 'test-data', 'hello.txt')).toString('base64') }]);
         const body = new FormData();
+        body.set('endpoint', 'file_fetch');
         body.set('directory', getSiteDir(site));
         body.set('file_list', new Blob([fileList], { type: 'application/json' }), 'files.json');
-        const response = await fetch(`${firewallUrl}&endpoint=file_fetch`, {
+        const response = await fetch(firewallUrl, {
             method: 'POST', body,
             headers: new HmacClient(getSiteSecret(site)).getAuthHeaders(fileList),
         });
         assert.equal(response.status, 200, await response.clone().text());
         assert.match(await response.text(), /Hello World/);
+    });
+
+    it.each(['application/json', 'application/x-www-form-urlencoded'])(
+        'uses POST %s parameters before query parameters during rollout', async contentType => {
+            const params = { endpoint: 'db_index', directory: getSiteDir(site) };
+            const body = contentType === 'application/json'
+                ? JSON.stringify(params) : new URLSearchParams(params).toString();
+            const response = await fetch(`${getSiteUrl(site)}&endpoint=preflight&directory=/missing-query-directory`, {
+                method: 'POST', body,
+                headers: {
+                    ...new HmacClient(getSiteSecret(site)).getAuthHeaders(body),
+                    'Content-Type': contentType,
+                },
+            });
+            assert.equal(response.status, 200, await response.clone().text());
+            assert.match(response.headers.get('content-type'), /multipart\/mixed/);
+        },
+    );
+
+    it('blocks an endpoint query parameter even on a POST request', async () => {
+        const body = new URLSearchParams({ endpoint: 'preflight' }).toString();
+        const response = await fetch(`${firewallUrl}&endpoint=preflight`, {
+            method: 'POST', body,
+            headers: new HmacClient(getSiteSecret(site)).getAuthHeaders(body),
+        });
+        assert.equal(response.status, 403);
+        assert.equal(response.headers.get('x-query-firewall'), 'blocked');
     });
 
     it('rejects the reported nested base64 query before it reaches PHP', async () => {
@@ -101,8 +130,8 @@ describe('Export: GET and POST rollout', () => {
             {},
             new HmacClient(getSiteSecret(site)).getAuthHeaders('{"directory":"/different"}'),
         ]) {
-            const response = await fetch(`${firewallUrl}&endpoint=preflight`, {
-                method: 'POST', body: JSON.stringify({ directory: getSiteDir(site) }),
+            const response = await fetch(firewallUrl, {
+                method: 'POST', body: JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(site) }),
                 headers: { ...headers, 'Content-Type': 'application/json' },
             });
             assert.equal(response.status, 403);
