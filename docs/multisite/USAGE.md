@@ -146,11 +146,11 @@ but the same absolute URL in an unsupported plugin field stays remote. Hosts
 without child-site exclusions retain the cautious source-base replacement.
 This fallback no longer scans or copies a path suffix to guess a site's scope.
 
-Parsed fields never enter the fallback again. A URL inside another URL's query
-is query data, not a second rewrite input. STYLE bodies use the CSS parser;
-CSS comments and ordinary quoted strings remain unchanged. Changed HTML
-attributes can use different quote/entity spelling. Changed block attributes
-use the block parser's JSON encoder; whitespace and escaping can change.
+STYLE bodies use the CSS parser. Non-block markup also keeps raw source-base
+replacement. For source hosts without child-site exclusions, that fallback can
+change source URLs inside query values, CSS strings and comments. Changed URL
+attributes use HTML escaping. Block attributes use the block parser's JSON
+encoder; whitespace and escaping can change.
 
 A failed preflight report remains saved for diagnosis. `db-apply`,
 `db-rewrite-urls`, and `apply-runtime` reject that saved error before using its
