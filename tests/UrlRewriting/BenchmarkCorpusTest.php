@@ -13,12 +13,21 @@ class BenchmarkCorpusTest extends TestCase {
     public function testBenchmarkCorpusRewritesWithoutLosingContent(string $scenario): void
     {
         $fixture = reprint_url_rewrite_benchmark_fixture($scenario, 7);
-        $rewriter = new StructuredDataUrlRewriter(['https://source.example' => 'https://destination.example']);
-        $output = $scenario === 'serialized-options'
-            ? $rewriter->rewrite($fixture['input'])
-            : $rewriter->rewrite_known_block_markup_value($fixture['input']);
+        $selections = [null, []];
+        if (in_array($scenario, REPRINT_URL_REWRITE_CHILD_PATH_BENCHMARK_CASES, true)) {
+            $selections[] = ['https://source.example' => ['/news/']];
+        }
+        foreach ($selections as $selected_site_child_paths) {
+            $rewriter = new StructuredDataUrlRewriter(
+                ['https://source.example' => 'https://destination.example'],
+                $selected_site_child_paths
+            );
+            $output = $scenario === 'serialized-options'
+                ? $rewriter->rewrite($fixture['input'])
+                : $rewriter->rewrite_known_block_markup_value($fixture['input']);
 
-        reprint_check_url_rewrite_benchmark_output($output, $fixture['expected']);
+            reprint_check_url_rewrite_benchmark_output($output, $fixture['expected']);
+        }
         $next = reprint_url_rewrite_benchmark_fixture($scenario, 8);
         $this->assertNotSame($fixture['input'], $next['input'], 'Rows must not become whole-value cache hits.');
     }

@@ -44,8 +44,22 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	private $parsed_url;
 	private $base_url_string;
 	private $base_url_object;
+	/**
+	 * Base allowed by the current field, or null when only absolute URLs count.
+	 * `/photo.jpg` in an HTML href uses the site base; the same string in an
+	 * unknown block setting does not. Retain that context until URL parsing.
+	 *
+	 * @var string|null
+	 */
+	private $current_url_base;
 	private $css_url_processor;
 	private $css_url_processor_updated;
+
+	/** @var bool Whether the CSS parser reads a STYLE body instead of a style attribute. */
+	private $in_style_element = false;
+
+	/** @var bool Whether to parse STYLE bodies as CSS instead of leaving them to raw-text rewriting. */
+	private $parse_style_elements;
 
 	/**
 	 * The list of names of URL-related HTML attributes that may be available on
@@ -63,17 +77,31 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	 */
 	private $inspecting_html_attributes;
 
-	public function __construct( $html, ?string $base_url_string = null ) {
+	/**
+	 * @param string      $html                 HTML or block markup to visit.
+	 * @param string|null $base_url_string      Base for known relative URL fields.
+	 * @param bool        $parse_style_elements Decode CSS URLs in STYLE bodies.
+	 *     False preserves the ordinary import's raw-text path; selected-site
+	 *     imports need decoded CSS paths to distinguish child-site links.
+	 *     Inline style attributes are parsed in either mode.
+	 */
+	public function __construct( $html, ?string $base_url_string = null, bool $parse_style_elements = false ) {
 		parent::__construct( $html );
 		$this->base_url_string = $base_url_string;
+		$this->parse_style_elements = $parse_style_elements;
 		$this->base_url_object = $base_url_string ? WPURL::parse( $base_url_string ) : null;
 	}
 
+	/** Flush CSS edits before the parent applies this token's HTML and block edits. */
 	public function get_updated_html(): string {
 		if ( $this->css_url_processor_updated ) {
 			if ( null !== $this->css_url_processor ) {
 				$updated_css = $this->css_url_processor->get_updated_css();
-				$this->set_attribute( 'style', $updated_css );
+				if ( $this->in_style_element ) {
+					$this->set_modifiable_text( $updated_css );
+				} else {
+					$this->set_attribute( 'style', $updated_css );
+				}
 			}
 			$this->css_url_processor_updated = false;
 		}
@@ -85,23 +113,39 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		return $this->raw_url;
 	}
 
+	/** Parse a cache miss; repeated links can be replaced without another URL parse. */
 	public function get_parsed_url() {
+		if ( null === $this->parsed_url && null !== $this->raw_url ) {
+			// Full HTTP(S) URLs need no base. Shorthand such as `https:photo.jpg`
+			// still does: with an HTTPS base at /shop/, it means /shop/photo.jpg.
+			// This prefix check selects the base argument; WPURL validates the URL.
+			$this->parsed_url = WPURL::parse(
+				$this->raw_url,
+				$this->has_absolute_http_url_prefix( $this->raw_url ) ? null : $this->current_url_base
+			);
+		}
 		return $this->parsed_url;
 	}
 
+	/** Include the field's relative-URL context in cache keys, even before parsing. */
+	public function get_url_base(): ?string {
+		return $this->current_url_base;
+	}
+
+	/** Flush the current token, then discard its URL and CSS parser state. */
 	public function next_token(): bool {
-		$this->get_updated_html();
+		// The parent flushes this token through our get_updated_html() before
+		// moving on. Keep the CSS parser alive until that flush has finished.
+		$has_token = parent::next_token();
 
 		$this->raw_url                    = null;
 		$this->parsed_url                 = null;
+		$this->current_url_base           = null;
 		$this->inspecting_html_attributes = null;
 		$this->css_url_processor          = null;
-		/*
-		 * Do not reset css_url_processor_updated – it is reset in
-		 * get_updated_html() which is called in parent::next_token().
-		 */
-
-		return parent::next_token();
+		$this->in_style_element           = false;
+		// get_updated_html() cleared the update flag before we dropped its parser.
+		return $has_token;
 	}
 
 	public function next_url() {
@@ -114,11 +158,33 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		return false;
 	}
 
+	/** Visit URL attributes, then a STYLE body; block fields use their own parser. */
 	public function next_url_in_current_token() {
+		while ( $this->next_raw_url_in_current_token() ) {
+			if ( false !== $this->get_parsed_url() ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Read the next decoded URL field without parsing the URL itself.
+	 *
+	 * HTML, CSS, and block parsers still identify and decode the field. The
+	 * rewriter checks its bounded cache next, then calls get_parsed_url() on a
+	 * miss. Call next_url_in_current_token() when invalid URLs must be skipped.
+	 */
+	public function next_raw_url_in_current_token() {
 		$this->raw_url = null;
+		$this->parsed_url = null;
+		$this->current_url_base = $this->base_url_string;
 		switch ( parent::get_token_type() ) {
 			case '#tag':
-				return $this->next_url_attribute();
+				if ( ! $this->in_style_element && $this->next_url_attribute() ) {
+					return true;
+				}
+				return $this->parse_style_elements && $this->next_url_in_style_element();
 			case '#block-comment':
 				return $this->next_url_block_attribute();
 			default:
@@ -167,8 +233,22 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		return true;
 	}
 
+	/** Visit declared CSS URLs in the STYLE body once, after the tag's attributes. */
+	private function next_url_in_style_element(): bool {
+		if ( 'STYLE' !== $this->get_tag() || $this->is_tag_closer() ) {
+			return false;
+		}
+		if ( ! $this->in_style_element ) {
+			// Attribute edits were flushed before reaching the body. The same
+			// CSS loop can now read the body instead.
+			$this->css_url_processor = new CSSURLProcessor( $this->get_modifiable_text() );
+			$this->in_style_element = true;
+		}
+		return $this->next_url_in_css();
+	}
+
 	/**
-	 * Advances to the next CSS URL in the `style` attribute of the current tag token.
+	 * Advances to the next CSS URL in the style attribute or STYLE body.
 	 *
 	 * @return bool Whether a CSS URL was found.
 	 */
@@ -195,11 +275,6 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 				continue;
 			}
 			$this->raw_url    = $this->css_url_processor->get_raw_url();
-			$this->parsed_url = WPURL::parse( $this->raw_url, $this->base_url_string );
-			if ( false === $this->parsed_url ) {
-				continue;
-			}
-
 			return true;
 		}
 
@@ -271,14 +346,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 			 * be correctly recognized as a URL.
 			 * Without a base URL, this Processor would incorrectly skip it.
 			 */
-			$parsed_url = WPURL::parse( $url_maybe, $this->base_url_string );
-
-			if ( false === $parsed_url ) {
-				array_pop( $this->inspecting_html_attributes );
-				continue;
-			}
 			$this->raw_url    = $url_maybe;
-			$this->parsed_url = $parsed_url;
 
 			return true;
 		}
@@ -286,7 +354,26 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		return false;
 	}
 
+	/** Parse top-level block URL fields, resolving relative URLs only for known fields. */
 	private function next_url_block_attribute() {
+		// Divi stores its strings below arrays such as module.content. This
+		// reader accepts only top-level strings; the rewriter visits nested
+		// values separately. Before starting the attribute iterator, avoid
+		// building paths to nested fields when none can be accepted here.
+		// Once the iterator has a path, do not repeat this scan for each URL.
+		if ( false === $this->get_block_attribute_path() ) {
+			$has_top_level_string = false;
+			foreach ( $this->get_block_attributes() ?: array() as $value ) {
+				if ( is_string( $value ) ) {
+					$has_top_level_string = true;
+					break;
+				}
+			}
+			if ( ! $has_top_level_string ) {
+				return false;
+			}
+		}
+
 		while ( $this->next_block_attribute() ) {
 			$url_maybe = $this->get_block_attribute_value();
 			if ( ! is_string( $url_maybe ) ||
@@ -343,21 +430,15 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 				)
 			);
 
-			$parsed_url = false;
 			if ( $is_relative_url_block_attribute ) {
 				// Known relative URL attribute – let's parse with the base URL.
-				$parsed_url = WPURL::parse( $url_maybe, $this->base_url_string );
+				$this->current_url_base = $this->base_url_string;
 			} else {
 				// Other attributes – let's parse without a base URL (and only detect absolute URLs).
-				$parsed_url = WPURL::parse( $url_maybe );
-			}
-
-			if ( false === $parsed_url ) {
-				continue;
+				$this->current_url_base = null;
 			}
 
 			$this->raw_url    = $url_maybe;
-			$this->parsed_url = $parsed_url;
 			return true;
 		}
 
@@ -421,7 +502,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 				'old_base_url' => $base_url,
 				'new_base_url' => $to_url,
 				'raw_url'      => $this->get_raw_url(),
-				'is_relative'  => ! WPURL::can_parse( $this->get_raw_url() ),
+				'is_relative'  => ! $this->is_url_absolute(),
 			)
 		);
 
@@ -440,7 +521,20 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	 * @return bool Whether the currently matched URL is absolute.
 	 */
 	public function is_url_absolute() {
-		return WPURL::can_parse( $this->get_raw_url() );
+		if ( ! $this->get_parsed_url() ) {
+			return false;
+		}
+		// The current URL has already passed the parser. A full HTTP(S)
+		// prefix proves it is absolute without parsing the same URL again.
+		return $this->has_absolute_http_url_prefix( $this->get_raw_url() )
+			|| WPURL::can_parse( $this->get_raw_url() );
+	}
+
+	/**
+	 * Recognize a full HTTP(S) prefix, not shorthand such as `https:photo.jpg`.
+	 */
+	private function has_absolute_http_url_prefix( string $url ): bool {
+		return 0 === strncasecmp( $url, 'https://', 8 ) || 0 === strncasecmp( $url, 'http://', 7 );
 	}
 
 	public function get_inspected_attribute_name() {
