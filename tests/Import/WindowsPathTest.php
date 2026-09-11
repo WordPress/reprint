@@ -16,8 +16,8 @@ class WindowsPathTest extends TestCase
     /** The default WordPress ABSPATH mixes native separators with a trailing slash. */
     public function test_accepts_windows_wordpress_directory(): void
     {
-        assert_valid_path('D:\\spacewww\\nihaokids.nl/', 'directory entry');
-        $this->assertSame('D:/spacewww/nihaokids.nl', normalize_path('D:\\spacewww\\nihaokids.nl/'));
+        assert_valid_path('D:\\Sites\\example.test/', 'directory entry');
+        $this->assertSame('D:/Sites/example.test', normalize_path('D:\\Sites\\example.test/'));
         $this->assertSame('D:/', normalize_path('d:\\site\\..\\..'));
         $this->assertSame('D:/', trim_right_slash('D:/'));
     }

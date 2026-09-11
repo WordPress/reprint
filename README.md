@@ -83,12 +83,12 @@ php reprint.phar pull https://example.com --secret=TOKEN \
 
 ### Windows source to Linux target
 
-A source site at `D:\spacewww\nihaokids.nl` can be pulled with the same command
+A source site at `D:\Sites\example.test` can be pulled with the same command
 on Linux. Update both the source plugin and the client to include Windows path
 support. Drive-letter paths accept backslashes, forward slashes, or both.
 
-By default, a file such as `D:\spacewww\nihaokids.nl\index.php` is saved under
-`--fs-root` as `D:/spacewww/nihaokids.nl/index.php`. Keeping the drive letter
+By default, a file such as `D:\Sites\example.test\index.php` is saved under
+`--fs-root` as `D:/Sites/example.test/index.php`. Keeping the drive letter
 prevents files from different drives from colliding. Add
 `--flatten-to=/var/www/site` to place the WordPress files directly in that
 directory instead.

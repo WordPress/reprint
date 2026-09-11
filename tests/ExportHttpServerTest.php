@@ -82,7 +82,7 @@ final class ExportHttpServerTest extends TestCase
     public function testParsesWindowsPathParameters(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer();
-        foreach (['D:\\spacewww\\nihaokids.nl/', 'D:/spacewww/nihaokids.nl'] as $path) {
+        foreach (['D:\\Sites\\example.test/', 'D:/Sites/example.test'] as $path) {
             $config = $server->parse_http_config([
                 'endpoint' => 'file_index',
                 'directory' => [$path, base64_encode($path)],
