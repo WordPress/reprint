@@ -15,12 +15,21 @@ not a CI failure threshold.
 | `html` | HTML links with distinct URLs. |
 | `style-elements` | CSS URLs inside STYLE elements. |
 | `blocks-literal-urls` | Plain URLs inside nested Divi attributes. |
-| `blocks-nested-html` | HTML in `module.content.value`, with distinct URLs. This exercised the raw-JSON fast path removed in #795. |
+| `blocks-nested-html` | HTML in `module.content.value`, with distinct URLs. Ordinary imports keep the raw-JSON fast path; selected-site imports parse the nested strings. |
 | `blocks-repeated-urls` | The same HTML shape with one repeated URL and distinct surrounding text. |
 | `blocks-escaped-quotes` | Nested HTML with JSON `\u0022` quotes. This already needed parsing before #795. |
 | `blocks-encoded-shortcodes` | A nested WPBakery shortcode whose base64 body hides HTML links. |
 | `blocks-no-source-urls` | Distinct block values that need no URL changes. |
 | `serialized-options` | PHP-serialized options, including string-length updates. |
+
+Each corpus runs twice. `url-rewrite-*` uses ordinary import settings.
+`url-rewrite-selected-site-*` selects a multisite migration with no child paths,
+so the report shows the extra format parsing separately. Both modes receive the
+same inputs and must produce the same target content.
+
+Until selected-site rewriting lands on trunk, the trunk side of those extra rows
+uses its ordinary rewrite path as a reference. It does not claim that trunk can
+keep child-site links remote. The URL correctness tests cover those links.
 
 ## Reading the numbers
 
@@ -48,6 +57,7 @@ From the repository root, with dependencies installed:
 ```sh
 node tests/e2e/benchmark/bench-url-rewrite.mjs /absolute/path/to/reprint.phar > urls.json
 php tests/e2e/benchmark/bench-url-rewrite.php /absolute/path/to/checkout blocks-nested-html
+php tests/e2e/benchmark/bench-url-rewrite.php /absolute/path/to/checkout selected-site-blocks-nested-html
 ```
 
 To compare two builds, run the same harness against each PHAR. Do not copy the

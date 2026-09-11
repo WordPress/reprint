@@ -24,7 +24,7 @@ class StructuredBlockMarkupUrlProcessorTest extends TestCase {
                 '<style>a{background:url("' . $rawUrl . '")}</style>',
                 '<!-- wp:image ' . json_encode(['url' => $rawUrl]) . ' /-->',
             ] as $markup) {
-                $processor = new StructuredBlockMarkupUrlProcessor($markup, 'https://source.example/shop/');
+                $processor = new StructuredBlockMarkupUrlProcessor($markup, 'https://source.example/shop/', true);
                 $this->assertSame($absoluteUrl !== false, $processor->next_url(), $markup);
                 if ($absoluteUrl !== false) {
                     $this->assertSame($absoluteUrl, $processor->get_parsed_url()->toString(), $markup);

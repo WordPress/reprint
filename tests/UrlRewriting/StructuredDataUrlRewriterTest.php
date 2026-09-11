@@ -17,11 +17,39 @@ class StructuredDataUrlRewriterTest extends TestCase
         ]);
     }
 
+    /** An empty child-path list still selects the multisite parser path. */
+    public function testOrdinaryImportsKeepTheRawStyleAndBlockPaths(): void
+    {
+        $mapping = ['https://source.test' => 'https://target.test'];
+        $ordinary = new StructuredDataUrlRewriter($mapping);
+        $selected_site = new StructuredDataUrlRewriter($mapping, []);
+        $style = '<style>.hero{background:url(//source.test/photo.png)}</style>';
+        $this->assertSame(
+            '<style>.hero{background:url(//target.test/photo.png)}</style>',
+            $ordinary->rewrite($style, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+        $this->assertSame(
+            '<style>.hero{background:url("/photo.png")}</style>',
+            $selected_site->rewrite($style, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+
+        // Ordinary Divi values need only source-base replacement. The selected
+        // site must parse the path before deciding whether a child site matches.
+        $block = '<!-- wp:divi/text { "settings": {"text":"https://source.test/page"} } /-->';
+        $this->assertSame(
+            str_replace('source.test', 'target.test', $block),
+            $ordinary->rewrite($block, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+        $parser = new StructuredBlockMarkupUrlProcessor($selected_site->rewrite($block, StructuredDataUrlRewriter::BLOCK_MARKUP));
+        $this->assertTrue($parser->next_token());
+        $this->assertSame(['settings' => ['text' => 'https://target.test/page']], $parser->get_block_attributes());
+    }
+
     /** Destination characters are escaped by the known format, not rejected globally. */
     public function testTargetHostRestrictionsStayInTheUnknownTextFallback(): void
     {
         foreach (['a"b.test', "a'b.test", 'a&b.test', '[::1]', 'target.test.'] as $host) {
-            $rewriter = new StructuredDataUrlRewriter(['https://source.test' => 'https://' . $host]);
+            $rewriter = new StructuredDataUrlRewriter(['https://source.test' => 'https://' . $host], []);
             foreach ([
                 '<a href="https://source.test/page">link</a>',
                 '<style>a{background:url("https://source.test/page")}</style>',
@@ -29,7 +57,7 @@ class StructuredDataUrlRewriterTest extends TestCase
                 '<!-- wp:image {"url":"https://source.test/page"} /-->',
             ] as $input) {
                 $output = $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
-                $parser = new StructuredBlockMarkupUrlProcessor($output);
+                $parser = new StructuredBlockMarkupUrlProcessor($output, null, true);
                 $this->assertTrue($parser->next_url(), $output);
                 $this->assertSame('https://' . $host . '/page', $parser->get_raw_url(), $output);
                 $this->assertFalse($parser->next_url(), $output);
@@ -63,11 +91,11 @@ class StructuredDataUrlRewriterTest extends TestCase
     /** Finishing a style attribute must not discard the STYLE body or the next tag. */
     public function testStyleAttributeAndStyleBodyKeepSeparateUrls(): void
     {
-        $rewriter = new StructuredDataUrlRewriter(['https://source.test' => 'https://target.test']);
+        $rewriter = new StructuredDataUrlRewriter(['https://source.test' => 'https://target.test'], []);
         $input = '<style style="background:url(https://source.test/inline.png)">'
             . '.hero{background:url(https://source.test/body.png)}</style>'
             . '<img src="https://source.test/after.png">';
-        $parser = new StructuredBlockMarkupUrlProcessor($rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
+        $parser = new StructuredBlockMarkupUrlProcessor($rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP), null, true);
         $urls = [];
         while ($parser->next_url()) {
             $urls[] = $parser->get_raw_url();
@@ -95,7 +123,7 @@ class StructuredDataUrlRewriterTest extends TestCase
     /** CSS escapes need parsing even when HTML permits spaces around the equals sign. */
     public function testStyleAttributeWithWhitespaceReachesTheCssParser(): void
     {
-        $rewriter = new StructuredDataUrlRewriter(['https://network.test' => 'https://target.test']);
+        $rewriter = new StructuredDataUrlRewriter(['https://network.test' => 'https://target.test'], []);
         $input = '<div STYLE = "background:url(https://network\\2e test/image.png)"></div>';
         $this->assertStringContainsString('target.test/image.png', $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
     }
@@ -119,7 +147,7 @@ class StructuredDataUrlRewriterTest extends TestCase
                     'url' => 'https://old.example/image-' . $index,
                 ]) . ' /-->';
             }
-            $rewriter = new StructuredDataUrlRewriter(['https://old.example' => 'https://new.example']);
+            $rewriter = new StructuredDataUrlRewriter(['https://old.example' => 'https://new.example'], []);
             $output = $rewriter->rewrite($content, StructuredDataUrlRewriter::BLOCK_MARKUP);
             $this->assertSame($block_count, substr_count($output, '<!-- wp:divi/text '));
             $this->assertSame(2 * $block_count, substr_count($output, 'new.example'));
@@ -172,7 +200,7 @@ class StructuredDataUrlRewriterTest extends TestCase
             ['https://network.test/a+b', 'https://network.test/a%20b/photo.jpg', null],
             ['https://network.test/a+b', 'https://network.test/a+b/photo.jpg', 'https://target.test/photo.jpg'],
         ] as [$source, $input, $expected]) {
-            $rewriter = new StructuredDataUrlRewriter([$source => 'https://target.test']);
+            $rewriter = new StructuredDataUrlRewriter([$source => 'https://target.test'], []);
             $this->assertSame('<img src="' . ($expected ?? $input) . '">', $rewriter->rewrite(
                 '<img src="' . $input . '">', StructuredDataUrlRewriter::BLOCK_MARKUP
             ), $input);
@@ -1185,7 +1213,7 @@ class StructuredDataUrlRewriterTest extends TestCase
             ],
             'style element body' => [
                 '<style>.hero{background-image:url(https://old-site.com/hero.jpg)}</style>',
-                '<style>.hero{background-image:url("https://new-site.com/hero.jpg")}</style>',
+                '<style>.hero{background-image:url(https://new-site.com/hero.jpg)}</style>',
             ],
             'meta content attribute' => [
                 '<meta property="og:image" content="https://old-site.com/social.jpg">',

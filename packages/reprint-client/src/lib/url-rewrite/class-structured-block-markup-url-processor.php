@@ -58,6 +58,9 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	/** @var bool Whether the CSS parser reads a STYLE body instead of a style attribute. */
 	private $in_style_element = false;
 
+	/** @var bool Whether to parse STYLE bodies as CSS instead of leaving them to raw-text rewriting. */
+	private $parse_style_elements;
+
 	/**
 	 * The list of names of URL-related HTML attributes that may be available on
 	 * the current token. They will be inspected by next_url_attribute().
@@ -74,9 +77,18 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	 */
 	private $inspecting_html_attributes;
 
-	public function __construct( $html, ?string $base_url_string = null ) {
+	/**
+	 * @param string      $html                 HTML or block markup to visit.
+	 * @param string|null $base_url_string      Base for known relative URL fields.
+	 * @param bool        $parse_style_elements Decode CSS URLs in STYLE bodies.
+	 *     False preserves the ordinary import's raw-text path; selected-site
+	 *     imports need decoded CSS paths to distinguish child-site links.
+	 *     Inline style attributes are parsed in either mode.
+	 */
+	public function __construct( $html, ?string $base_url_string = null, bool $parse_style_elements = false ) {
 		parent::__construct( $html );
 		$this->base_url_string = $base_url_string;
+		$this->parse_style_elements = $parse_style_elements;
 		$this->base_url_object = $base_url_string ? WPURL::parse( $base_url_string ) : null;
 	}
 
@@ -174,7 +186,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 				if ( ! $this->in_style_element && $this->next_url_attribute() ) {
 					return true;
 				}
-				return $this->next_url_in_style_element();
+				return $this->parse_style_elements && $this->next_url_in_style_element();
 			case '#block-comment':
 				return $this->next_url_block_attribute();
 			default:
