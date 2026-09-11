@@ -7196,7 +7196,12 @@ class ImportClient
         if (!empty($url_mapping)) {
             $table_prefix = $this->get_state()->get('preflight.database.wp.table_prefix');
             $stmt_rewriter = new SqlStatementRewriter(
-                new StructuredDataUrlRewriter($url_mapping, $this->load_multisite_nested_site_paths()),
+                new StructuredDataUrlRewriter(
+                    $url_mapping,
+                    // A domain-based network can have no child paths. Select the
+                    // multisite parser from preflight, not from the list's size.
+                    is_array($selection) ? $this->load_multisite_nested_site_paths() : null
+                ),
                 $table_prefix,
             );
             $this->audit_log(
