@@ -24,10 +24,16 @@ foreach (['runtime', 'raw-runtime'] as $runtime) {
     if (!is_file($start_script)) {
         throw new RuntimeException('The Linux runtime start.sh was not generated.');
     }
-    $server = proc_open(['bash', $start_script], [0 => ['pipe', 'r'], 1 => ['file', '/root/migration/runtime.log', 'a'], 2 => ['file', '/root/migration/runtime.log', 'a']], $pipes);
+    // start.sh launches a PHP child. Give both processes a group so cleanup
+    // cannot leave the old runtime answering requests for the next test.
+    $server = proc_open(['setsid', 'bash', $start_script], [0 => ['pipe', 'r'], 1 => ['file', '/root/migration/runtime.log', 'a'], 2 => ['file', '/root/migration/runtime.log', 'a']], $pipes);
+    $server_pid = proc_get_status($server)['pid'];
     try {
         $response = false;
         for ($attempt = 0; $attempt < 50; ++$attempt) {
+            if (!proc_get_status($server)['running']) {
+                throw new RuntimeException('The ' . $runtime . ' process exited before serving WordPress.');
+            }
             $response = @file_get_contents('http://127.0.0.1:8881/migration-check.php');
             if ($response !== false) {
                 break;
@@ -54,11 +60,15 @@ foreach (['runtime', 'raw-runtime'] as $runtime) {
         if (file_get_contents('http://127.0.0.1:8881/wp-content/uploads/migration/hello.txt') !== "Hello from Windows!\r\n") {
             throw new RuntimeException('The migrated upload could not be served.');
         }
-        printf("PASS: migrated %d source files, empty directory, WordPress database, nested URLs, homepage, and upload from Windows to Linux.\n", count($manifest['files']));
+        printf("PASS: %s serves %d migrated source files, empty directory, WordPress database, nested URLs, homepage, and upload on Linux.\n", $runtime, count($manifest['files']));
     } finally {
         fclose($pipes[0]);
-        proc_terminate($server);
+        posix_kill(-$server_pid, SIGTERM);
         proc_close($server);
     }
-
+    $connection = @stream_socket_client('tcp://127.0.0.1:8881', $error_number, $error_message, 0.1);
+    if (is_resource($connection)) {
+        fclose($connection);
+        throw new RuntimeException('The ' . $runtime . ' server is still listening after cleanup.');
+    }
 }
