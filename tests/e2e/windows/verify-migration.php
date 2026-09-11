@@ -19,11 +19,11 @@ foreach ($manifest['files'] as $relative_path => $expected_hash) {
 if (!is_dir('/root/migration/site/wp-content/uploads/migration/empty directory')) {
     throw new RuntimeException('The empty source directory was not migrated.');
 }
-$start_scripts = glob('/root/migration/runtime/start.sh');
-if (count($start_scripts) !== 1) {
-    throw new RuntimeException('Expected one generated Linux start.sh; found ' . json_encode($start_scripts));
+$start_script = '/root/migration/runtime/start.sh';
+if (!is_file($start_script)) {
+    throw new RuntimeException('The Linux runtime start.sh was not generated.');
 }
-$server = proc_open(['bash', $start_scripts[0]], [0 => ['pipe', 'r'], 1 => ['file', '/root/migration/runtime.log', 'a'], 2 => ['file', '/root/migration/runtime.log', 'a']], $pipes);
+$server = proc_open(['bash', $start_script], [0 => ['pipe', 'r'], 1 => ['file', '/root/migration/runtime.log', 'a'], 2 => ['file', '/root/migration/runtime.log', 'a']], $pipes);
 try {
     $response = false;
     for ($attempt = 0; $attempt < 50; ++$attempt) {

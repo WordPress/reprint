@@ -52,18 +52,18 @@ jobs:
           New-Item -ItemType Directory -Force D:\spacewww | Out-Null
           Move-Item "$env:RUNNER_TEMP/wordpress/wordpress" D:\spacewww\nihaokids.nl
           Copy-Item -Recurse reprint-server-wp D:\spacewww\nihaokids.nl\wp-content\plugins\reprint-server
-          $windowsHost = (wsl -d Ubuntu-24.04 -- bash -c "ip route show default | cut -d ' ' -f 3").Trim()
+          $windowsHost = (wsl -d Ubuntu-24.04 --exec bash -c "ip route show default | cut -d ' ' -f 3").Trim()
           php tests/e2e/windows/prepare-source.php D:\spacewww\nihaokids.nl "http://${windowsHost}:8081" "$env:GITHUB_WORKSPACE/source-manifest.json"
           New-NetFirewallRule -DisplayName ReprintMigration -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8081 | Out-Null
           Start-Process php -ArgumentList '-S', '0.0.0.0:8081', '-t', 'D:\spacewww\nihaokids.nl' -RedirectStandardOutput "$env:RUNNER_TEMP/source.stdout.log" -RedirectStandardError "$env:RUNNER_TEMP/source.stderr.log"
-          $sourceManifest = (wsl -d Ubuntu-24.04 -- wslpath -a "$env:GITHUB_WORKSPACE/source-manifest.json").Trim()
-          wsl -d Ubuntu-24.04 -- bash -c "cd /root/reprint && bash tests/e2e/windows/migrate.sh 'http://${windowsHost}:8081' '$sourceManifest'"
+          $sourceManifest = (wsl -d Ubuntu-24.04 --exec wslpath -a "$env:GITHUB_WORKSPACE/source-manifest.json").Trim()
+          wsl -d Ubuntu-24.04 --exec bash -c "cd /root/reprint && bash tests/e2e/windows/migrate.sh 'http://${windowsHost}:8081' '$sourceManifest'"
       - name: Collect migration logs
         if: always()
         shell: pwsh
         run: |
           Get-Content "$env:RUNNER_TEMP/source.stderr.log" -ErrorAction SilentlyContinue
-          wsl -d Ubuntu-24.04 -- bash -c 'if [ -d /root/migration ]; then find /root/migration -name "*.log" -exec tail -100 {} \;; fi'
+          wsl -d Ubuntu-24.04 --exec bash -c 'if [ -d /root/migration ]; then find /root/migration -name "*.log" -exec tail -100 {} \;; fi'
       - uses: actions/upload-artifact@v4
         if: always()
         with:

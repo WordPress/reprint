@@ -21,7 +21,9 @@ $config = <<<'PHP'
  define('DB_COLLATE', '');
  define('DISABLE_WP_CRON', true);
  $table_prefix = 'wp_';
- define('ABSPATH', __DIR__ . '/');
+ if (!defined('ABSPATH')) {
+     define('ABSPATH', __DIR__ . '/');
+ }
  require_once ABSPATH . 'wp-settings.php';
 PHP;
 file_put_contents($site_directory . '/wp-config.php', $config);
