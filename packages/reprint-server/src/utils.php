@@ -233,10 +233,21 @@ if (!function_exists(__NAMESPACE__ . '\\normalize_path')) {
 /**
  * Resolve ".." and "." segments in a path without touching the filesystem.
  *
- * Unlike realpath(), this works on paths that don't exist yet.
+ * Unlike realpath(), this works on paths that don't exist yet. Windows drive
+ * paths use forward slashes and retain their drive or share root, even on a
+ * Unix client. Parent segments cannot climb above a share root.
  */
 function normalize_path(string $path): string
 {
+    $path = normalize_path_separators($path);
+    $share_root = windows_share_root($path);
+    $root = $share_root !== null ? $share_root . '/' : "/";
+    if ($share_root !== null) {
+        $path = ltrim(substr($path, strlen($share_root)), '/');
+    } elseif (preg_match('~^[A-Z]:/~', $path)) {
+        $root = substr($path, 0, 3);
+        $path = substr($path, 3);
+    }
     $parts = explode("/", $path);
     $resolved = [];
     foreach ($parts as $part) {
@@ -249,7 +260,9 @@ function normalize_path(string $path): string
             $resolved[] = $part;
         }
     }
-    return "/" . implode("/", $resolved);
+    return $share_root !== null && $resolved === []
+        ? $share_root
+        : $root . implode("/", $resolved);
 }
 }
 
@@ -258,8 +271,9 @@ if (!function_exists(__NAMESPACE__ . '\\trim_right_slash')) {
  * Removes trailing slashes without changing the filesystem root into an empty path.
  *
  * Unlike rtrim($path, '/'), this returns `/` for both the filesystem root and
- * an empty input. It only changes the lexical spelling; it does not validate
- * the path or resolve dot segments and symlinks.
+ * an empty input. Windows drive paths use forward slashes and keep `D:/`
+ * intact. It only changes the lexical spelling; it does not validate the path
+ * or resolve dot segments and symlinks.
  *
  * Examples:
  *
@@ -272,7 +286,12 @@ if (!function_exists(__NAMESPACE__ . '\\trim_right_slash')) {
  */
 function trim_right_slash(string $path): string
 {
-    return rtrim($path, '/') ?: '/';
+    $path = normalize_path_separators($path);
+    $trimmed = rtrim($path, '/');
+    if (preg_match('~^[A-Z]:/+$~', $path)) {
+        return $trimmed . '/';
+    }
+    return $trimmed ?: '/';
 }
 }
 
@@ -429,9 +448,9 @@ if (!function_exists(__NAMESPACE__ . '\\path_is_same_as_or_descendant_of')) {
  * ancestor.
  *
  * Either argument may be a list. The result is true when any candidate-and-
- * ancestor pair matches. The filesystem root matches every absolute path and
- * cannot use the normal ancestor-plus-slash prefix because that would produce
- * `//`.
+ * ancestor pair matches. `/` matches Unix absolute paths; a drive root such as
+ * `D:/` matches only that drive. Roots cannot use the normal ancestor-plus-slash
+ * prefix because that would add a second slash.
  *
  * Examples:
  *
@@ -467,8 +486,10 @@ function path_is_same_as_or_descendant_of($path, $ancestor): bool
     if (!is_string($path) || !is_string($ancestor)) {
         throw new InvalidArgumentException('Path containment expects strings or lists of strings.');
     }
-    if ($ancestor === "/") {
-        return str_starts_with($path, "/");
+    $path = normalize_path_separators($path);
+    $ancestor = normalize_path_separators($ancestor);
+    if ($ancestor === "/" || preg_match('~^[A-Z]:/$~', $ancestor)) {
+        return str_starts_with($path, $ancestor);
     }
     return $path === $ancestor || str_starts_with($path, $ancestor . "/");
 }
@@ -517,7 +538,7 @@ function path_is_descendant_of($path, $ancestor): bool
     if (!path_is_same_as_or_descendant_of($path, $ancestor)) {
         return false;
     }
-    return $path !== $ancestor;
+    return normalize_path_separators($path) !== normalize_path_separators($ancestor);
 }
 }
 
@@ -530,8 +551,8 @@ if (!function_exists(__NAMESPACE__ . '\\path_remainder_under')) {
  */
 function path_remainder_under(string $path, string $prefix): ?string
 {
-    $path = rtrim($path, "/");
-    $prefix = rtrim($prefix, "/");
+    $path = rtrim(normalize_path_separators($path), "/");
+    $prefix = rtrim(normalize_path_separators($prefix), "/");
 
     if ($path === $prefix) {
         return "";
@@ -586,7 +607,8 @@ function relative_path_under(string $path, string $root): ?string
 if (!function_exists(__NAMESPACE__ . '\\assert_valid_path')) {
 /**
  * Validates that a path is a non-empty absolute string without NUL bytes
- * or dot-segments (. or ..).
+ * or dot-segments (. or ..). Windows drive and UNC paths may use either
+ * separator below their root; drive-relative paths such as `D:site` are rejected.
  *
  * Useful anywhere untrusted or remote paths need to be checked before
  * use — both the exporter (directory config) and the importer (remote
@@ -598,11 +620,11 @@ if (!function_exists(__NAMESPACE__ . '\\assert_valid_path')) {
  */
 function assert_valid_path(string $path, string $label = "path"): void
 {
-    $path = trim($path);
+    $path = normalize_path_separators(trim($path));
     if ($path === "") {
         throw new InvalidArgumentException("{$label} must be a non-empty string");
     }
-    if ($path[0] !== "/") {
+    if (!is_absolute_path($path)) {
         throw new InvalidArgumentException("{$label} must be an absolute path: {$path}");
     }
     if (strpos($path, "\0") !== false) {
@@ -615,6 +637,76 @@ function assert_valid_path(string $path, string $label = "path"): void
             );
         }
     }
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\normalize_path_separators')) {
+/**
+ * Uses single forward slashes below a Windows drive or UNC share root.
+ *
+ * Keep a UNC root spelled `\\SERVER\SHARE` so it cannot be confused with a
+ * Unix path starting with `//`. Drive letters, server names, and share names
+ * are case-insensitive; filenames retain their case and every other byte.
+ * Recognize the path itself rather than the current OS: a Linux importer reads
+ * Windows source paths too. Unix paths keep every backslash byte in their names.
+ * Dot segments below the root stay intact so validation can reject them.
+ *
+ * @param string $path Native or remote filesystem path.
+ * @return string Windows path with a stable root spelling, or the unchanged Unix path.
+ */
+function normalize_path_separators(string $path): string
+{
+    if (preg_match('~^[a-zA-Z]:[/\\\\]~', $path)) {
+        return strtoupper($path[0]) . preg_replace('~[/\\\\]+~', '/', substr($path, 1));
+    }
+    $share_root = windows_share_root($path);
+    if ($share_root !== null) {
+        $tail = preg_replace('~[/\\\\]+~', '/', substr($path, strlen($share_root)));
+        return $share_root . ( $tail === '/' ? '' : $tail );
+    }
+    return $path;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\is_absolute_path')) {
+/**
+ * Recognizes Unix, Windows drive, and UNC share roots without consulting disk.
+ *
+ * @param string $path Native or remote filesystem path.
+ * @return bool Whether the path is rooted rather than relative to a working directory.
+ */
+function is_absolute_path(string $path): bool
+{
+    return $path !== '' && (
+        $path[0] === '/'
+        || preg_match('~^[a-zA-Z]:[/\\\\]~', $path) === 1
+        || windows_share_root($path) !== null
+    );
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\windows_share_root')) {
+/**
+ * Returns the server and share of an explicitly Windows UNC path.
+ *
+ * Only a leading pair of backslashes identifies UNC without reinterpreting a
+ * Unix `//` path. This parser accepts ordinary UNC paths, not device
+ * namespaces or incomplete shares. Use a normal drive or share spelling
+ * instead of the `\\?\` device prefix.
+ *
+ * @param string $path Native or remote filesystem path.
+ * @return string|null Canonical `\\SERVER\SHARE` root, or null for other paths.
+ */
+function windows_share_root(string $path): ?string
+{
+    if (
+        preg_match('~^\\\\\\\\([^\\\\/]+)[\\\\/]([^\\\\/]+)~', $path, $parts) !== 1
+        || in_array($parts[1], ['.', '..', '?'], true)
+        || in_array($parts[2], ['.', '..'], true)
+    ) {
+        return null;
+    }
+    return '\\\\' . strtoupper($parts[1]) . '\\' . strtoupper($parts[2]);
 }
 }
 

@@ -1,0 +1,82 @@
+name: Windows migration
+
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-to-linux:
+    name: Pull Windows WordPress into Linux (${{ matrix.source }})
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [drive, share]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, mysqli, curl, mbstring, zip
+          coverage: none
+      - uses: Vampire/setup-wsl@v7
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          additional-packages: php-cli php-mysql php-curl php-mbstring php-xml php-zip composer mariadb-server
+      - name: Prepare Linux client and database
+        shell: wsl-bash {0}
+        run: |
+          mkdir -p /root/reprint
+          tar --exclude=.git -cf - . | tar -xf - -C /root/reprint
+          cd /root/reprint
+          COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --no-interaction --prefer-dist
+          service mariadb start
+          mariadb -e "CREATE DATABASE migration_target; CREATE USER 'migration'@'127.0.0.1' IDENTIFIED BY 'migration'; GRANT ALL ON migration_target.* TO 'migration'@'127.0.0.1';"
+      # Keep the native server processes alive until the Linux pull has finished.
+      - name: Run Windows-to-Linux migration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          mysqld --initialize-insecure --datadir="$env:RUNNER_TEMP/mysql-data"
+          Start-Process mysqld -ArgumentList "--datadir=$env:RUNNER_TEMP/mysql-data", '--bind-address=127.0.0.1', '--port=3308', '--console' -RedirectStandardOutput "$env:RUNNER_TEMP/source.mysql.stdout.log" -RedirectStandardError "$env:RUNNER_TEMP/source.mysql.stderr.log"
+          mysqladmin --host=127.0.0.1 --port=3308 --user=root --wait=30 ping
+          mysql --host=127.0.0.1 --port=3308 --user=root --execute="ALTER USER 'root'@'localhost' IDENTIFIED BY 'root'"
+          composer install --working-dir=reprint-server-wp --no-dev --no-interaction --prefer-dist
+          Invoke-WebRequest https://wordpress.org/wordpress-6.7.zip -OutFile "$env:RUNNER_TEMP/wordpress.zip"
+          Expand-Archive "$env:RUNNER_TEMP/wordpress.zip" "$env:RUNNER_TEMP/wordpress"
+          $siteDirectory = 'D:\Migration Sites\Example café'
+          New-Item -ItemType Directory -Force (Split-Path $siteDirectory) | Out-Null
+          Move-Item -LiteralPath "$env:RUNNER_TEMP/wordpress/wordpress" -Destination $siteDirectory
+          Copy-Item -Recurse reprint-server-wp "$siteDirectory/wp-content/plugins/reprint-server"
+          if ('${{ matrix.source }}' -eq 'share') {
+            $siteDirectory = '\\localhost\D$' + $siteDirectory.Substring(2)
+          }
+          $windowsHost = (wsl -d Ubuntu-24.04 --exec bash -c "ip route show default | cut -d ' ' -f 3").Trim()
+          php tests/e2e/windows/prepare-source.php "$siteDirectory" "http://${windowsHost}:8081" "$env:GITHUB_WORKSPACE/source-manifest.json"
+          New-NetFirewallRule -DisplayName ReprintMigration -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8081 | Out-Null
+          Start-Process php -ArgumentList '-S', '0.0.0.0:8081', '-t', ('"' + $siteDirectory + '"') -RedirectStandardOutput "$env:RUNNER_TEMP/source.stdout.log" -RedirectStandardError "$env:RUNNER_TEMP/source.stderr.log"
+          $sourceManifest = (wsl -d Ubuntu-24.04 --exec wslpath -a "$env:GITHUB_WORKSPACE/source-manifest.json").Trim()
+          wsl -d Ubuntu-24.04 --exec bash -c "cd /root/reprint && bash tests/e2e/windows/migrate.sh 'http://${windowsHost}:8081' '$sourceManifest'"
+      - name: Collect migration logs
+        if: always()
+        shell: pwsh
+        run: |
+          Get-Content "$env:RUNNER_TEMP/source.stderr.log" -ErrorAction SilentlyContinue
+          wsl -d Ubuntu-24.04 --exec bash -c 'if [ -d /root/migration ]; then mkdir -p migration-logs; find /root/migration -name "*.log" -exec cp {} migration-logs/ \; -exec tail -100 {} \;; fi'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-migration-logs-${{ matrix.source }}
+          path: |
+            ${{ runner.temp }}/source.*.log
+            migration-logs/

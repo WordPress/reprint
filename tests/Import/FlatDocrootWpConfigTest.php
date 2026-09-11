@@ -35,15 +35,17 @@ class FlatDocrootWpConfigTest extends TestCase
     /**
      * WP Cloud layout: wp-config.php in /srv/htdocs/ (parent of ABSPATH),
      * ABSPATH at /srv/htdocs/wordpress/. Phase 1c should symlink it.
+     * The same convention must work for a Windows drive or network share.
+     *
+     * @dataProvider source_wordpress_roots
+     * @param string $abspath Source WordPress directory.
+     * @param string $local_parent_path Relative destination of its parent.
      */
-    public function testSymlinksWpConfigFromAbspathParent(): void
+    public function testSymlinksWpConfigFromAbspathParent(string $abspath, string $local_parent_path): void
     {
-        $abspath = '/srv/htdocs/wordpress/';
-        $parentDir = '/srv/htdocs';
-
         // Create the filesystem layout under fsRoot
-        $localAbspath = $this->fsRoot . $abspath;
-        $localParent = $this->fsRoot . $parentDir;
+        $localParent = $this->fsRoot . '/' . $local_parent_path;
+        $localAbspath = $localParent . '/wordpress/';
         mkdir($localAbspath, 0755, true);
 
         // wp-config.php lives in the parent of ABSPATH
@@ -83,6 +85,16 @@ class FlatDocrootWpConfigTest extends TestCase
             file_get_contents($wpConfigFlat),
             'wp-config.php should contain the parent directory content',
         );
+    }
+
+    /** @return array[] Source ABSPATH and the corresponding Linux parent path. */
+    public static function source_wordpress_roots(): array
+    {
+        return [
+            'Unix' => ['/srv/htdocs/wordpress/', 'srv/htdocs'],
+            'Windows drive' => ['D:\\Sites\\wordpress/', 'D:/Sites'],
+            'Windows share' => ['\\\\server\\share\\Sites\\wordpress/', 'UNC/SERVER/SHARE/Sites'],
+        ];
     }
 
     /**

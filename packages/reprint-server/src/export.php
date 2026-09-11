@@ -20,6 +20,7 @@ use function WordPress\Reprint\Server\build_pdo_dsn;
 use function WordPress\Reprint\Server\generate_random_bytes;
 use function WordPress\Reprint\Server\json_encode_or_throw;
 use function WordPress\Reprint\Server\normalize_path;
+use function WordPress\Reprint\Server\normalize_path_separators;
 use function WordPress\Reprint\Server\parse_size;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\trim_right_slash;
@@ -1402,7 +1403,7 @@ function resolve_directories(array $config): array
             );
         }
 
-        $directories[] = $real_directory;
+        $directories[] = normalize_path_separators($real_directory);
     }
 
     if (empty($directories)) {
@@ -1500,7 +1501,7 @@ function resolve_file_index_roots(array $config): array
         }
         $roots[] = [
             "requested_path" => $requested_path,
-            "resolved_path" => $resolved_path,
+            "resolved_path" => normalize_path_separators($resolved_path),
             "type" => $type,
         ];
     }
@@ -1558,7 +1559,7 @@ function resolve_file_index_start_root(
 
     return [
         "requested_path" => $requested_path,
-        "resolved_path" => $resolved_path,
+        "resolved_path" => normalize_path_separators($resolved_path),
         "type" => "directory",
     ];
 }
