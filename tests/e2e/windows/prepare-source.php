@@ -5,14 +5,18 @@ if (PHP_OS_FAMILY !== 'Windows') {
     throw new RuntimeException('The source must run native Windows PHP.');
 }
 [$script, $site_directory, $site_url, $manifest_path] = $argv;
-$database = new PDO('mysql:host=127.0.0.1', 'root', 'root');
+$database = new PDO('mysql:host=127.0.0.1;port=3308', 'root', 'root');
+$database_os = $database->query('SELECT @@version_compile_os')->fetchColumn();
+if (stripos($database_os, 'win') !== 0) {
+    throw new RuntimeException('The source database must run on Windows; got ' . $database_os);
+}
 $database->exec('CREATE DATABASE migration_source');
 $config = <<<'PHP'
 <?php
  define('DB_NAME', 'migration_source');
  define('DB_USER', 'root');
  define('DB_PASSWORD', 'root');
- define('DB_HOST', '127.0.0.1');
+ define('DB_HOST', '127.0.0.1:3308');
  define('DB_CHARSET', 'utf8mb4');
  define('DB_COLLATE', '');
  define('DISABLE_WP_CRON', true);

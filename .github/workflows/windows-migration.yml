@@ -28,9 +28,9 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           mysqld --initialize-insecure --datadir="$env:RUNNER_TEMP/mysql-data"
-          Start-Process mysqld -ArgumentList "--datadir=$env:RUNNER_TEMP/mysql-data", '--bind-address=127.0.0.1', '--console' -RedirectStandardOutput "$env:RUNNER_TEMP/source.mysql.stdout.log" -RedirectStandardError "$env:RUNNER_TEMP/source.mysql.stderr.log"
-          mysqladmin --host=127.0.0.1 --user=root --wait=30 ping
-          mysql --host=127.0.0.1 --user=root --execute="ALTER USER 'root'@'localhost' IDENTIFIED BY 'root'"
+          Start-Process mysqld -ArgumentList "--datadir=$env:RUNNER_TEMP/mysql-data", '--bind-address=127.0.0.1', '--port=3308', '--console' -RedirectStandardOutput "$env:RUNNER_TEMP/source.mysql.stdout.log" -RedirectStandardError "$env:RUNNER_TEMP/source.mysql.stderr.log"
+          mysqladmin --host=127.0.0.1 --port=3308 --user=root --wait=30 ping
+          mysql --host=127.0.0.1 --port=3308 --user=root --execute="ALTER USER 'root'@'localhost' IDENTIFIED BY 'root'"
       - uses: Vampire/setup-wsl@v7
         with:
           distribution: Ubuntu-24.04
