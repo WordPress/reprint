@@ -33,7 +33,10 @@
  * Instead, the processor performs one narrow operation: find the configured
  * source base as bytes and replace that entire slice with a target domain and
  * optional path. It replaces the literal protocol separately when the mapping
- * changes it. It does not decode, normalize, or re-encode the input.
+ * changes it. A source host with child-site exclusions stays unchanged in this
+ * fallback, including selected-site links. Only callers with parsed URL fields
+ * can decide which site a complete path selects; this scanner does not guess
+ * path boundaries or copy the remaining text into a temporary URL.
  *
  * Supported sources:
  *
@@ -67,8 +70,12 @@
  *   protocol-relative or scheme-less candidate has no scheme colon to copy, so
  *   its target port uses a literal `:`. This may not match the escaping rules
  *   of the surrounding text.
- * - Target user information, queries, fragments, IPv4/IPv6 addresses, and
- *   Unicode domains are not supported. Punycode domains are supported.
+ * - A same-URL mapping is an exclusion: it wins over shorter source bases and
+ *   retains the matched bytes, including IP hosts and original slash escaping.
+ * - Target user information, queries, fragments, IPv6 addresses, and
+ *   Unicode domains are not supported. Punycode domains, IPv4 addresses, and
+ *   hosts with a trailing dot are supported. These limits apply only to this
+ *   fallback; they do not restrict the migration destination.
  * - Unicode source domains and paths are not supported.
  *
  * CSS hexadecimal escapes such as https\3a \2f \2f ... and percent-encoded
@@ -119,6 +126,20 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
      */
     private array $url_mappings = [];
 
+    /** Prepared rules and the shared child-site path set; never copied per value. */
+    private CautiousURLBaseRewriteMapping $url_mapping;
+
+    /**
+     * One lookahead match per mapping, not a list of all URLs in the value.
+     * A missing entry has not been searched; null means no match remains.
+     * Input text does not change while scanning: replacements are queued.
+     * Keep each match until the cursor passes it, and do not repeat a search
+     * which already reached the end of the value.
+     *
+     * @var array<int, array<int|string, array{string, int}>|null>
+     */
+    private array $next_matches = [];
+
     private string $text;
 
     private int $bytes_already_scanned = 0;
@@ -157,6 +178,7 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     )
     {
         $this->text = $text;
+        $this->url_mapping = $url_mapping;
         $this->url_mappings = $url_mapping->get_entries();
     }
 
@@ -190,6 +212,14 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     public function replace_url_base(): bool
     {
         if ($this->matched_url === null) {
+            return false;
+        }
+
+        // A host shared with child sites needs a parsed path to select a site.
+        // This scanner knows only the source base, not where the URL ends or
+        // which escapes its surrounding format uses. Keep such URLs remote;
+        // the HTML, CSS and block URL parsers make path decisions elsewhere.
+        if ($this->url_mapping->has_excluded_paths_for_host($this->matched_url['source_authority'])) {
             return false;
         }
 
@@ -263,15 +293,21 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
     private function find_next_url_base(): ?array
     {
         $next_match = null;
-        foreach ($this->url_mappings as $mapping) {
-            $found = preg_match(
-                $mapping['pattern'],
-                $this->text,
-                $matches,
-                PREG_OFFSET_CAPTURE,
-                $this->bytes_already_scanned
-            );
-            if ($found !== 1) {
+        foreach ($this->url_mappings as $mapping_index => $mapping) {
+            if (!array_key_exists($mapping_index, $this->next_matches)
+                || ( $this->next_matches[$mapping_index] !== null
+                    && $this->next_matches[$mapping_index]['authority'][1] < $this->bytes_already_scanned )) {
+                $found = preg_match(
+                    $mapping['pattern'],
+                    $this->text,
+                    $matches,
+                    PREG_OFFSET_CAPTURE,
+                    $this->bytes_already_scanned
+                );
+                $this->next_matches[$mapping_index] = $found === 1 ? $matches : null;
+            }
+            $matches = $this->next_matches[$mapping_index];
+            if ($matches === null) {
                 continue;
             }
 
@@ -297,12 +333,17 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                 $target_port = $target_port_colon . $mapping['target_port'];
             }
 
+            // An exclusion must preserve the actual matched bytes, including
+            // mixed slash escaping. Rebuilding an equal URL base can change them.
+            $unchanged_base = $mapping['source_authority'] === $mapping['target_domain']
+                    . ( $mapping['target_port'] === null ? '' : ':' . $mapping['target_port'] )
+                && $mapping['source_path'] === $mapping['target_path'];
             $next_match = array_merge(
                 $mapping,
                 [
                     'start'         => $authority_start,
                     'base_length'   => strlen($matches['base'][0]),
-                    'replacement'   => $mapping['target_domain'] . $target_port . str_replace(
+                    'replacement'   => $unchanged_base ? $matches['base'][0] : $mapping['target_domain'] . $target_port . str_replace(
                         '/',
                         $target_path_slash,
                         $mapping['target_path']

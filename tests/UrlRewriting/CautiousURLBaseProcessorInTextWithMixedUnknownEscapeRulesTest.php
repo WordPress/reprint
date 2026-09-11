@@ -7,6 +7,38 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.php';
 
 class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends TestCase {
+    /** Child-site prefixes use complete path segments and normalized host keys. */
+    public function testChildPathLookupUsesSegmentsWithoutChangingUrlBytes(): void
+    {
+        $mapping = new CautiousURLBaseRewriteMapping(['https://network.test:443' => 'https://target.test'], [
+            'https://network.test' => ['/shop/news/'],
+        ]);
+        foreach (['network.test', 'NETWORK.TEST:443'] as $host) {
+            foreach (['/shop/news', '/shop/news/article', '/shop/NEWS/article', '/shop/%6eews/article'] as $path) {
+                $this->assertTrue($mapping->excludes_path($host, $path));
+            }
+            foreach (['/shop', '/shop/newsletter', '/shop/newspaper/article'] as $path) {
+                $this->assertFalse($mapping->excludes_path($host, $path));
+            }
+        }
+        $this->assertFalse($mapping->excludes_path('other.test', '/shop/news'));
+    }
+
+    /** Missing source bases must not rescan the remaining text for every match. */
+    public function testRepeatedUploadUrlsKeepTheNextMatchPerRule(): void
+    {
+        $input = str_repeat('https://network.test/uploads/sites/7/photo.jpg ', 16000);
+        $start = microtime(true);
+        $output = $this->rewrite($input, [
+            'https://network.test' => 'https://target.test',
+            'http://network.test' => 'https://target.test',
+            'https://network.test/uploads' => 'https://network.test/uploads',
+            'https://network.test/uploads/sites/7' => 'https://target.test/uploads/sites/7',
+        ]);
+        $this->assertSame(str_replace('network.test', 'target.test', $input), $output);
+        $this->assertLessThan(5, microtime(true) - $start);
+    }
+
     /**
      * These are opaque text leaves only. Do not add complete PHP serializations,
      * JSON documents, or known block markup: StructuredDataUrlRewriter handles
@@ -33,6 +65,65 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
         array $mapping
     ): void {
         $this->assertSame($expected, $this->rewrite($input, $mapping));
+    }
+
+    /** Match numeric sources as written; IPv4 targets need no new escaping characters. */
+    public function testNumericHostAliasesAreClassifiedByTheToolkitParser(): void
+    {
+        foreach (['127.1', '2130706433', '0x7f000001', '0177.0.0.1', '[::1]'] as $host) {
+            $this->assertSame('https://target.test/post', $this->rewrite('http://' . $host . '/post', [
+                'http://' . $host => 'https://target.test',
+            ]));
+            $this->assertSame($host === '[::1]' ? 'https://source.test/post' : 'http://' . $host . '/post', $this->rewrite('https://source.test/post', [
+                'https://source.test' => 'http://' . $host,
+            ]));
+        }
+        $this->assertSame('https://source.test/post', $this->rewrite('https://source.test/post', [
+            'https://source.test' => 'https://site.123',
+        ]));
+    }
+
+    /** An exclusion wins over a broader rule without rewriting the excluded bytes. */
+    public function testSameUrlRulesPreserveMixedSlashEscapes(): void
+    {
+        foreach (['https://network.test', 'http://127.0.0.1:8142'] as $origin) {
+            $input = $origin . '\\/wp-content/uploads/sites/8/photo.jpg';
+            $this->assertSame($input, $this->rewrite($input, [
+                $origin . '/wp-content' => 'https://target.test/wp-content',
+                $origin . '/wp-content/uploads/sites/8' => $origin . '/wp-content/uploads/sites/8',
+            ]));
+        }
+    }
+
+    /** Later matches stay available while earlier, overlapping rules are consumed. */
+    public function testRetainedMatchesStayInTextOrderAcrossOverlappingRules(): void
+    {
+        $source = 'https://network.test';
+        $target = 'https://target.test';
+        $input = implode(' ', [
+            $source . '/first', $source . '/uploads/sites/70/a.jpg',
+            $source . '/uploads/sites/7/b.jpg', $source . '/last',
+            $source . '/uploads/sites/7/c.jpg', $source . '/uploads/main.jpg',
+        ]);
+        $expected = implode(' ', [
+            $target . '/first', $source . '/uploads/sites/70/a.jpg',
+            $target . '/uploads/sites/7/b.jpg', $target . '/last',
+            $target . '/uploads/sites/7/c.jpg', $source . '/uploads/main.jpg',
+        ]);
+        $this->assertSame($expected, $this->rewrite($input, [
+            $source => $target,
+            $source . '/uploads' => $source . '/uploads',
+            $source . '/uploads/sites/7' => $target . '/uploads/sites/7',
+        ]));
+    }
+
+    /** A root slash belongs to the stored URL, including when a rule preserves it. */
+    public function testSameUrlRuleDoesNotDuplicateTheRootSlash(): void
+    {
+        $input = 'https://network.test/sibling/post';
+        $this->assertSame($input, $this->rewrite($input, [
+            'https://network.test/' => 'https://network.test/',
+        ]));
     }
 
     public function testPreparedMappingCanBeReusedForDifferentTextValues(): void
@@ -74,6 +165,16 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
         $eight_backslash_separator = str_repeat('\\', 8) . '/';
 
         return [
+            'target is an IPv4 address' => [
+                'https://source.example/media/logo.png',
+                'https://192.0.2.1/logo.png',
+                ['https://source.example/media' => 'https://192.0.2.1'],
+            ],
+            'target host ends in a dot' => [
+                'https://source.example/photo.png',
+                'https://target.example./photo.png',
+                ['https://source.example' => 'https://target.example.'],
+            ],
             'unquoted CSS URL preserves its terminator' => [
                 '.hero{background-image:url(https://source.example/wp-content/uploads/2026/01/hero.jpg);}',
                 '.hero{background-image:url(https://destination.example/wp-content/uploads/2026/01/hero.jpg);}',
@@ -408,11 +509,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://source.example/media/logo.png',
                 'https://source.example/media/logo.png',
                 ['https://source.example/media' => 'https://destination.example/archive%2Fmedia'],
-            ],
-            'target is an IPv4 address' => [
-                'https://source.example/media/logo.png',
-                'https://source.example/media/logo.png',
-                ['https://source.example/media' => 'https://192.0.2.1'],
             ],
             'target is an IPv6 address' => [
                 'https://source.example/media/logo.png',
