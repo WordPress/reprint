@@ -1367,6 +1367,7 @@ final class PushEndpointsTest extends TestCase {
         $headers = ( new Site_Export_HMAC_Client(self::SECRET) )->get_curl_headers();
         $handle = curl_init($url);
         curl_setopt_array($handle, [
+            CURLOPT_POSTFIELDS => '',
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_RETURNTRANSFER => true,
         ]);

@@ -56,7 +56,7 @@ export function createHmacClient(siteName) {
  * Make an authenticated HTTP request to the export API.
  * @param {string} siteName - Site name
  * @param {string} endpoint - API endpoint
- * @param {Object} params - Query parameters
+ * @param {Object} params - Pull parameters (JSON body unless a custom body is supplied)
  * @param {Object} options - Additional options (method, body, rawResponse, followRedirects, signal)
  * @returns {Promise<Object>} Parsed response or raw response
  */
@@ -64,12 +64,13 @@ export async function apiRequest(siteName, endpoint, params = {}, options = {}) 
     const client = createHmacClient(siteName);
     const url = new URL(options.url || getSiteUrl(siteName));
     url.searchParams.set('endpoint', endpoint);
-    for (const [k, v] of Object.entries(params)) {
-        setApiRequestParameter(url, k, v);
+    const method = options.method || 'POST';
+    const body = options.body ?? (method === 'GET' ? '' : JSON.stringify(params));
+    if (method === 'GET' || options.body !== undefined) {
+        for (const [k, v] of Object.entries(params)) {
+            setApiRequestParameter(url, k, v);
+        }
     }
-
-    const body = options.body || '';
-    const method = options.method || 'GET';
     const headers = client.getAuthHeaders(body);
     headers['Accept-Encoding'] = 'gzip';
 

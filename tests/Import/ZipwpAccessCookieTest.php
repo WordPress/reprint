@@ -72,7 +72,7 @@ final class ZipwpAccessCookieTest extends TestCase {
     public function testPreflightSendsCookieOnlyToZipwpSubdomains(string $remote_reprint_api_url, bool $expects_cookie): void
     {
         $client = $this->create_client($remote_reprint_api_url);
-        $result = ( new \ReflectionMethod($client, 'fetch_json') )->invoke($client, $remote_reprint_api_url);
+        $result = ( new \ReflectionMethod($client, 'fetch_json') )->invoke($client, $remote_reprint_api_url, []);
         $cookie = trim(file_get_contents($this->root . '/cookie.log'));
 
         if ($expects_cookie) {
@@ -133,7 +133,7 @@ final class ZipwpAccessCookieTest extends TestCase {
     {
         $remote_reprint_api_url = 'http://demo.zipwp.to/?endpoint=preflight';
         $client = $this->create_client($remote_reprint_api_url, 'wrong-token');
-        $result = ( new \ReflectionMethod($client, 'fetch_json') )->invoke($client, $remote_reprint_api_url);
+        $result = ( new \ReflectionMethod($client, 'fetch_json') )->invoke($client, $remote_reprint_api_url, []);
         $this->assertSame(401, $result['http_code']);
         $this->assertSame('AUTH_SECRET_MISMATCH', $result['error_code']);
     }

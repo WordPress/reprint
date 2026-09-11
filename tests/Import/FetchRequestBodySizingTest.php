@@ -10,7 +10,7 @@ use Reprint\Importer\Tuning\AdaptiveTuner;
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
 /**
- * The JSON path list uploaded to file_fetch is the only request body a pull
+ * The JSON path list uploaded to file_fetch is the large request body a pull
  * sends, and a web server in front of the source can refuse it for being too
  * large. Reprint sizes that body from limits PHP reports, which say nothing
  * about what the server ahead of PHP will accept, so the size has to be able

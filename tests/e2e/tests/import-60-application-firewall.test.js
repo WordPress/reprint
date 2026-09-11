@@ -157,8 +157,7 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
             `Expected Accept-Language en-US,en;q=0.9, got ` +
             requestRecords.map(record => JSON.stringify(record.acceptLanguage)).join(', '),
         );
-        assert.ok(requestRecords.some(record => record.method === 'GET'));
-        assert.ok(requestRecords.some(record => record.method === 'POST'));
+        assert.ok(requestRecords.every(record => record.method === 'POST'));
         assert.ok(
             requestRecords.some(
                 record =>
@@ -179,20 +178,14 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         }
     });
 
-    it('base64-encodes filesystem path query values', () => {
-        const encodedPaths = readRequestRecords()
-            .filter(record => record.isReprintRequest && record.endpoint !== 'preflight')
-            .flatMap(record => {
-                const url = new URL(record.path, firewallOrigin);
-                return ['directory', 'list_dir', 'pulled_before']
-                    .flatMap(parameter => url.searchParams.getAll(parameter));
-            });
-
-        assert.ok(encodedPaths.length > 0, 'Expected path query values');
-        for (const encodedPath of encodedPaths) {
-            const decodedPath = Buffer.from(encodedPath, 'base64');
-            assert.equal(decodedPath.toString('base64'), encodedPath);
-            assert.ok(decodedPath.toString().startsWith('/'));
+    it('keeps filesystem paths out of query strings', () => {
+        const records = readRequestRecords().filter(record => record.isReprintRequest);
+        assert.ok(records.length > 0);
+        for (const record of records) {
+            const url = new URL(record.path, firewallOrigin);
+            for (const parameter of url.searchParams.keys()) {
+                assert.ok(['reprint-api', 'endpoint'].includes(parameter), parameter);
+            }
         }
     });
 

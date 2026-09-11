@@ -216,8 +216,8 @@ final class RuntimeFilesRootPathTest extends TestCase
 <?php
 $request = array(
     'endpoint' => $_GET['endpoint'] ?? null,
-    'directory' => isset($_GET['directory'])
-        ? (array) $_GET['directory']
+    'directory' => isset($_POST['directory'])
+        ? (array) $_POST['directory']
         : null,
     'files' => isset($_FILES['file_list'])
         ? json_decode(file_get_contents($_FILES['file_list']['tmp_name']), true)

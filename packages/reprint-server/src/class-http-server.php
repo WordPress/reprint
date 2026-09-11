@@ -88,6 +88,13 @@ final class HTTPServer {
         // buffer an upload or let a control request buffer an unused body.
         $endpoint = $get['endpoint'] ?? null;
         $uses_push_request_contract = is_string($endpoint) && strpos($endpoint, 'push_') === 0;
+        if (!$uses_push_request_contract && strtoupper($server['REQUEST_METHOD'] ?? 'POST') !== 'POST') {
+            http_response_code(405);
+            header('Allow: POST, OPTIONS');
+            header('Content-Type: application/octet-stream');
+            echo json_encode(['error' => 'Pull endpoints require POST. Update the Reprint client before retrying.', 'code' => 405]);
+            return;
+        }
         $body = '';
         if ($uses_push_request_contract) {
             // $_POST must not override the signed query endpoint after the

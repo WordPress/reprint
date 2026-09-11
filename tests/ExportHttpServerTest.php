@@ -332,7 +332,7 @@ final class ExportHttpServerTest extends TestCase
         $server->handle_request([
             'get' => ['endpoint' => 'preflight'],
             'post' => [],
-            'server' => ['REQUEST_METHOD' => 'GET'],
+            'server' => ['REQUEST_METHOD' => 'POST'],
             'body' => '',
         ]);
 
