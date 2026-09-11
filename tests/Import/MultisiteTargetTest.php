@@ -14,7 +14,7 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
     public function test_url_mapping_does_not_replace_the_network_origin(): void
     {
         $mapping = $this->target()->get_url_mapping();
-        $rewriter = new StructuredDataUrlRewriter($mapping);
+        $rewriter = new StructuredDataUrlRewriter($mapping, []);
         $this->assertSame('https://network.test/sibling/post', $rewriter->rewrite('https://network.test/sibling/post'));
         $this->assertSame('http://localhost:9000/post', $rewriter->rewrite('https://network.test/shop/post'));
         $serialized = serialize(['photo' => 'https://network.test/wp-content/uploads/sites/7/photo.jpg']);
@@ -39,7 +39,7 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
             'uploads_url'=>'http://127.0.0.1:8142/shop/wp-content/uploads/sites/7',
         ];
         $target = new MultisiteTarget($source, 'http://localhost:9000');
-        $rewriter = new StructuredDataUrlRewriter($target->get_url_mapping());
+        $rewriter = new StructuredDataUrlRewriter($target->get_url_mapping(), []);
         $this->assertSame('http://localhost:9000/wp-content/uploads/sites/7/photo.png', $rewriter->rewrite('http://127.0.0.1:8142/wp-content/uploads/sites/7/photo.png'));
         $this->assertSame('http://127.0.0.1:8142/wp-content/uploads/sites/8/photo.png', $rewriter->rewrite('http://127.0.0.1:8142/wp-content/uploads/sites/8/photo.png'));
         $this->assertSame('http://127.0.0.1:8142/wp-content/uploads/main.png', $rewriter->rewrite('http://127.0.0.1:8142/wp-content/uploads/main.png'));
@@ -70,7 +70,7 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
                 ];
                 foreach (['http://localhost:9000', $source_origin] as $target_url) {
                     $target = new MultisiteTarget($source, $target_url);
-                    $rewriter = new StructuredDataUrlRewriter($target->get_url_mapping());
+                    $rewriter = new StructuredDataUrlRewriter($target->get_url_mapping(), []);
                     foreach (['http', 'https'] as $scheme) {
                         $origin = $scheme . '://network.test';
                         $cases = [$origin . $site_path . '/post' => $target_url . '/post'];
@@ -126,7 +126,7 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
             $this->assertCount(count($mapping), $large_network_mapping);
             $this->assertSame($mapping, $large_network_mapping);
             $this->assertLessThanOrEqual(20, count($mapping));
-            $rewriter = new StructuredDataUrlRewriter($mapping);
+            $rewriter = new StructuredDataUrlRewriter($mapping, []);
             foreach (array_unique(['', $path]) as $content_path) {
                 foreach (['http', 'https'] as $scheme) {
                     $base = $scheme . '://network.test' . $content_path . '/wp-content/uploads';
@@ -152,7 +152,7 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
             'content_url'=>'https://shop.network.test/wp-content',
             'network_content_url'=>'https://network.test/wp-content',
             'uploads_url'=>'https://shop.network.test/wp-content/uploads/sites/7',
-        ], 'https://target.test'))->get_url_mapping());
+        ], 'https://target.test'))->get_url_mapping(), []);
         foreach (['http', 'https'] as $scheme) {
             foreach (['shop.network.test', 'news.network.test', 'other.shop.network.test', 'shop.network.test.evil.test'] as $host) {
                 $input = $scheme . '://' . $host . '/article';
@@ -174,7 +174,7 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
                 'content_url'=>$home . '/wp-content',
                 'network_content_url'=>'https://network.test/wp-content',
                 'uploads_url'=>$home . '/wp-content/uploads/sites/7',
-            ], 'https://target.test'))->get_url_mapping());
+            ], 'https://target.test'))->get_url_mapping(), []);
             $this->assertSame('<a href="https://target.test/post">link</a>', $rewriter->rewrite(
                 '<a href="' . $home . '/post">link</a>', StructuredDataUrlRewriter::BLOCK_MARKUP
             ));
@@ -184,7 +184,7 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
     /** A URL below /shop cannot tell us whether /shop/news is a separate site. */
     public function test_overlapping_site_paths_follow_the_selected_base(): void
     {
-        $rewriter = new StructuredDataUrlRewriter($this->target()->get_url_mapping());
+        $rewriter = new StructuredDataUrlRewriter($this->target()->get_url_mapping(), []);
         $this->assertSame('http://localhost:9000/news/article', $rewriter->rewrite('https://network.test/shop/news/article'));
         $this->assertSame('https://network.test/news/article', $rewriter->rewrite('https://network.test/news/article'));
         $this->assertSame('https://network.test/shopping/article', $rewriter->rewrite('https://network.test/shopping/article'));
@@ -389,7 +389,7 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
             'network_content_url'=>'https://network.test/wp-content',
             'uploads_url'=>'https://network.test/wp-content/uploads/sites/7',
         ], 'https://target.test');
-        $rewriter = new StructuredDataUrlRewriter($target->get_url_mapping());
+        $rewriter = new StructuredDataUrlRewriter($target->get_url_mapping(), []);
         $input = str_repeat('https://network.test/wp-content/uploads/sites/7/photo.jpg ', 16000);
         $start = microtime(true);
         $output = $rewriter->rewrite($input);
