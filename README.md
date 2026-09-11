@@ -81,6 +81,23 @@ php reprint.phar pull https://example.com --secret=TOKEN \
 
 **All options** — run `php reprint.phar pull --help` for the full list.
 
+### Windows source to Linux target
+
+A source site at `D:\spacewww\nihaokids.nl` can be pulled with the same command
+on Linux. Update both the source plugin and the client to include Windows path
+support. Drive-letter paths accept backslashes, forward slashes, or both.
+
+By default, a file such as `D:\spacewww\nihaokids.nl\index.php` is saved under
+`--fs-root` as `D:/spacewww/nihaokids.nl/index.php`. Keeping the drive letter
+prevents files from different drives from colliding. Add
+`--flatten-to=/var/www/site` to place the WordPress files directly in that
+directory instead.
+
+The Windows migration CI job runs native Windows PHP and MySQL as the source,
+then performs one complete pull into Linux under WSL2. It checks file hashes,
+empty directories, database table row counts, URL rewriting, and the running
+WordPress site.
+
 ## Composer packages
 
 The server and client are published as separate Composer packages:

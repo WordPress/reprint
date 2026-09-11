@@ -2,7 +2,7 @@ name: Windows migration
 
 on:
   push:
-    branches: [trunk, codex/windows-to-linux-migration]
+    branches: [trunk]
   pull_request:
   workflow_dispatch:
 
