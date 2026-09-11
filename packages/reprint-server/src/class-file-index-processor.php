@@ -6,6 +6,7 @@ require_once __DIR__ . '/utils.php';
 
 use InvalidArgumentException;
 use LogicException;
+use RuntimeException;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Traversal failures become API or CLI values, never HTML output.
 
@@ -386,13 +387,15 @@ final class FileIndexProcessor {
         }
 
         // Select exactly one name for this step. Move the cursor first so every
-        // later outcome, including omission or disappearance, settles the name.
+        // omission or disappearance settles the name. An uninspectable UNC
+        // entry below rolls this cursor back instead of claiming disappearance.
         $frame_index = count($this->directory_stack) - 1;
         $entry_name = $this->current_directory_names[$this->current_directory_position];
         ++$this->current_directory_position;
         // Set "after" before any skip or stat call. The cursor must move past
         // a cache path or a path that disappears between scandir() and lstat(),
         // or every resumed request would inspect that same name again.
+        $previous_entry_name = $this->directory_stack[$frame_index]["after"];
         $this->directory_stack[$frame_index]["after"] = $entry_name;
         $path = wp_join_unix_paths($this->current_directory, $entry_name);
 
@@ -420,10 +423,22 @@ final class FileIndexProcessor {
         }
 
         // A name returned by scandir() may disappear before inspection. Its
-        // cursor is already settled, so continuation moves to the next name.
+        // cursor is already settled, so continuation moves to the next name
+        // unless a UNC API limit makes disappearance impossible to infer.
         clearstatcache(true, $path);
         $stat = @lstat($path);
         if ($stat === false) {
+            if (windows_share_root($path) !== null) {
+                // PHP may list a long UNC filename but fail to inspect it. Do
+                // not treat that API limit as a deletion. Keep the cursor before
+                // this entry so another attempt cannot silently skip the file.
+                $this->directory_stack[$frame_index]["after"] = $previous_entry_name;
+                --$this->current_directory_position;
+                throw new RuntimeException(
+                    "Cannot inspect Windows share path: {$path}. PHP returned no file metadata. " .
+                    "Check source access; for long UNC paths, configure the source with a drive-letter path."
+                );
+            }
             $this->step_status = self::STATUS_PATH_UNAVAILABLE;
             return true;
         }

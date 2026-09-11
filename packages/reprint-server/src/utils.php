@@ -607,8 +607,8 @@ function relative_path_under(string $path, string $root): ?string
 if (!function_exists(__NAMESPACE__ . '\\assert_valid_path')) {
 /**
  * Validates that a path is a non-empty absolute string without NUL bytes
- * or dot-segments (. or ..). Windows drive paths may use either separator;
- * drive-relative paths such as `D:site` are not absolute.
+ * or dot-segments (. or ..). Windows drive and UNC paths may use either
+ * separator below their root; drive-relative paths such as `D:site` are rejected.
  *
  * Useful anywhere untrusted or remote paths need to be checked before
  * use — both the exporter (directory config) and the importer (remote
@@ -690,8 +690,9 @@ if (!function_exists(__NAMESPACE__ . '\\windows_share_root')) {
  * Returns the server and share of an explicitly Windows UNC path.
  *
  * Only a leading pair of backslashes identifies UNC without reinterpreting a
- * Unix `//` path. Device namespaces and incomplete shares are not file roots.
- * PHP realpath() cannot resolve the `\\?\` spellings used by device paths.
+ * Unix `//` path. This parser accepts ordinary UNC paths, not device
+ * namespaces or incomplete shares. Use a normal drive or share spelling
+ * instead of the `\\?\` device prefix.
  *
  * @param string $path Native or remote filesystem path.
  * @return string|null Canonical `\\SERVER\SHARE` root, or null for other paths.

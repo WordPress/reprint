@@ -13,6 +13,7 @@ if ! grep -q 'Windows migration post' /root/migration/source-homepage.log; then
     echo 'The source WordPress homepage does not render the fixture post.'
     exit 1
 fi
+curl --connect-timeout 5 --max-time 10 -fsS "$source_url/migration-check.php" > /root/migration/source.json
 php packages/reprint-client/src/import.php pull "$source_url/?reprint-api" \
     --secret=windows-migration-secret \
     --state-dir=/root/migration/state --fs-root=/root/migration/files \
