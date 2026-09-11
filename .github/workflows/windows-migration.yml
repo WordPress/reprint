@@ -16,6 +16,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: true
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
@@ -48,16 +50,16 @@ jobs:
           Move-Item "$env:RUNNER_TEMP/wordpress/wordpress" D:\spacewww\nihaokids.nl
           Copy-Item -Recurse reprint-server-wp D:\spacewww\nihaokids.nl\wp-content\plugins\reprint-server
           $windowsHost = (wsl -d Ubuntu-24.04 -- bash -c "ip route show default | cut -d ' ' -f 3").Trim()
-          php tests/e2e/windows/prepare-source.php D:\spacewww\nihaokids.nl "http://${windowsHost}:8081" "$env:RUNNER_TEMP/source-manifest.json"
+          php tests/e2e/windows/prepare-source.php D:\spacewww\nihaokids.nl "http://${windowsHost}:8081" "$env:GITHUB_WORKSPACE/source-manifest.json"
           New-NetFirewallRule -DisplayName ReprintMigration -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8081 | Out-Null
           Start-Process php -ArgumentList '-S', '0.0.0.0:8081', '-t', 'D:\spacewww\nihaokids.nl' -RedirectStandardOutput "$env:RUNNER_TEMP/source.stdout.log" -RedirectStandardError "$env:RUNNER_TEMP/source.stderr.log"
       - name: Migrate and verify the site on Linux
         shell: wsl-bash {0}
         run: |
           windows_host=$(ip route show default | cut -d ' ' -f 3)
-          runner_temp=$(wslpath "${RUNNER_TEMP}")
+          source_manifest="$PWD/source-manifest.json"
           cd /root/reprint
-          bash tests/e2e/windows/migrate.sh "http://${windows_host}:8081" "$runner_temp/source-manifest.json"
+          bash tests/e2e/windows/migrate.sh "http://${windows_host}:8081" "$source_manifest"
       - name: Collect migration logs
         if: always()
         shell: pwsh

@@ -19,7 +19,7 @@ foreach ($manifest['files'] as $relative_path => $expected_hash) {
 if (!is_dir('/root/migration/site/wp-content/uploads/migration/empty directory')) {
     throw new RuntimeException('The empty source directory was not migrated.');
 }
-$start_scripts = glob('/root/migration/state/remotes/*/runtime/start.sh');
+$start_scripts = glob('/root/migration/runtime/start.sh');
 if (count($start_scripts) !== 1) {
     throw new RuntimeException('Expected one generated Linux start.sh; found ' . json_encode($start_scripts));
 }
