@@ -25,6 +25,7 @@ import { performance } from 'node:perf_hooks';
 import { createConnection } from 'mysql2/promise';
 import { ensureSite } from '../lib/site-setup.js';
 import { HmacClient } from '../lib/hmac-client.js';
+import { runUrlRewriteBenchmarks } from './bench-url-rewrite.mjs';
 import {
     getSiteUrl, getSiteSecret, getSiteDir, fsRootDir,
 } from '../lib/test-helpers.js';
@@ -612,8 +613,8 @@ async function main() {
 
     // Optional stage filter — when BENCH_STAGES is set (comma-separated
     // list of stage names), only those stages run on both sides of the
-    // PR-vs-trunk comparison. This is how each PR limits its perf comment
-    // to the single scenario it actually changes.
+    // PR-vs-trunk comparison. URL cases below always run; a focused pipeline
+    // measurement must not remove the URL comparison from other PRs.
     const stageFilter = (process.env.BENCH_STAGES || '')
         .split(',')
         .map((s) => s.trim())
@@ -718,6 +719,15 @@ async function main() {
         });
         results.push(largePartPull);
         console.log(`   ${largePartPull.ok ? 'ok' : 'FAIL'} in ${fmtMs(largePartPull.elapsedMs)} (${fmtDetails(largePartPull.details)})`);
+    }
+
+    // Load library code from the selected PHAR, not from this harness checkout.
+    // Local source runs use the checkout root instead of the CLI entry point.
+    const urlBuild = IMPORTER_PATH.endsWith('.phar') ? IMPORTER_PATH : join(dirname(IMPORTER_PATH), '../../..');
+    const urlResults = runUrlRewriteBenchmarks(urlBuild, PHP_BINARY);
+    results.push(...urlResults);
+    for (const result of urlResults) {
+        console.log(`-> ${result.stage}: ${result.ok ? fmtMs(result.elapsedMs) : result.stderr}`);
     }
 
     const phpVersion = execFileSync(PHP_BINARY, ['-r', 'echo PHP_VERSION;'], { encoding: 'utf-8' }).trim();

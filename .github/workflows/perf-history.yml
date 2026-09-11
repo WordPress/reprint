@@ -92,7 +92,7 @@ jobs:
       - name: Bench trunk
         working-directory: tests/e2e
         env:
-          CLIENT_PATH: ${{ github.workspace }}/phars/trunk/reprint.phar
+          IMPORTER_PATH: ${{ github.workspace }}/phars/trunk/reprint.phar
           BENCH_LABEL: trunk
           BENCH_JSON_OUT: bench-trunk.json
           BENCH_MD_OUT: bench-trunk.md
