@@ -23,6 +23,14 @@ jobs:
           php-version: '8.3'
           extensions: pdo_mysql, mysqli, curl, mbstring, zip
           coverage: none
+      - name: Start native Windows MySQL
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          mysqld --initialize-insecure --datadir="$env:RUNNER_TEMP/mysql-data"
+          Start-Process mysqld -ArgumentList "--datadir=$env:RUNNER_TEMP/mysql-data", '--bind-address=127.0.0.1', '--console' -RedirectStandardOutput "$env:RUNNER_TEMP/source.mysql.stdout.log" -RedirectStandardError "$env:RUNNER_TEMP/source.mysql.stderr.log"
+          mysqladmin --host=127.0.0.1 --user=root --wait=30 ping
+          mysql --host=127.0.0.1 --user=root --execute="ALTER USER 'root'@'localhost' IDENTIFIED BY 'root'"
       - uses: Vampire/setup-wsl@v7
         with:
           distribution: Ubuntu-24.04
@@ -42,7 +50,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          Start-Service MySQL
           composer install --working-dir=reprint-server-wp --no-dev --no-interaction --prefer-dist
           Invoke-WebRequest https://wordpress.org/wordpress-6.7.zip -OutFile "$env:RUNNER_TEMP/wordpress.zip"
           Expand-Archive "$env:RUNNER_TEMP/wordpress.zip" "$env:RUNNER_TEMP/wordpress"
@@ -65,7 +72,7 @@ jobs:
         shell: pwsh
         run: |
           Get-Content "$env:RUNNER_TEMP/source.stderr.log" -ErrorAction SilentlyContinue
-          wsl -d Ubuntu-24.04 -- bash -c 'find /root/migration -name "*.log" -exec tail -100 {} \;'
+          wsl -d Ubuntu-24.04 -- bash -c 'if [ -d /root/migration ]; then find /root/migration -name "*.log" -exec tail -100 {} \;; fi'
       - uses: actions/upload-artifact@v4
         if: always()
         with:

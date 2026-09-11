@@ -7,7 +7,7 @@ if ($manifest['os'] !== 'Windows' || $source['os'] !== 'Windows' || PHP_OS_FAMIL
     throw new RuntimeException('Expected a native Windows source and a Linux target.');
 }
 foreach ($manifest['files'] as $relative_path => $expected_hash) {
-    // Runtime generation replaces the source database credentials in wp-config.php.
+    // Flattening may rewrite paths in wp-config.php; the runtime supplies target DB constants.
     if ($relative_path === 'wp-config.php') {
         continue;
     }

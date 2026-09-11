@@ -39,6 +39,7 @@ mkdir($upload_directory, 0777, true);
 mkdir($upload_directory . '/empty directory');
 file_put_contents($upload_directory . '/large file.bin', str_repeat("Windows to Linux\0\xff\r\n", 300000));
 file_put_contents($upload_directory . '/hello.txt', "Hello from Windows!\r\n");
+file_put_contents($upload_directory . '/zażółć 你好.txt', "Unicode filename on Windows\n");
 update_option('migration_nested_urls', ['image' => ['url' => $site_url . '/wp-content/uploads/migration/hello.txt']]);
 $post_id = wp_insert_post([
     'post_title' => 'Windows migration post',
@@ -53,8 +54,15 @@ file_put_contents($site_directory . '/migration-check.php', <<<'PHP'
 <?php
 require __DIR__ . '/wp-load.php';
 header('Content-Type: application/json');
+$table_rows = [];
+foreach ($wpdb->tables() as $table) {
+    // Loading WordPress may create or expire caches on either host.
+    $where = $table === $wpdb->options ? " WHERE option_name NOT REGEXP '^_(site_)?transient_'" : '';
+    $table_rows[$table] = (int) $wpdb->get_var("SELECT COUNT(*) FROM `$table`$where");
+}
 echo json_encode([
     'os' => PHP_OS_FAMILY,
+    'table_rows' => $table_rows,
     'home' => home_url(),
     'siteurl' => site_url(),
     'nested' => get_option('migration_nested_urls'),
