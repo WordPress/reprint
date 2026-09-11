@@ -731,7 +731,7 @@ class DatabaseRowsReader {
         $selection_identity = $this->multisite_selection === null ? null : $this->multisite_selection->get_identity();
         if (( $cursor_data["multisite_selection"] ?? null ) !== $selection_identity) {
             throw new \InvalidArgumentException(
-                "Cannot resume this database cursor: the selected multisite site changed. Run db-pull --abort and start again."
+                "Cannot resume this database cursor: the selected multisite site changed or its export rules changed. Run db-pull --abort and start again."
             );
         }
         if ($this->multisite_selection !== null) {
@@ -884,6 +884,11 @@ class DatabaseRowsReader {
             $select_parts = [];
             foreach ($this->current_column_types as $column => $column_info) {
                 $quoted_column = $this->quote_identifier($column);
+                $column_expression = $this->get_column_read_expression($column);
+                if ($column_expression !== $quoted_column) {
+                    $select_parts[] = "{$column_expression} AS {$quoted_column}";
+                    continue;
+                }
                 if (
                     $this->maximum_inline_spatial_bytes !== null &&
                     $this->is_spatial_type($column_info["data_type"])
@@ -936,6 +941,24 @@ class DatabaseRowsReader {
         }
 
         return $query;
+    }
+
+    /**
+     * Returns SQL for a column read, with source login secrets replaced.
+     * For a selected-site export of `network_users`, user_pass returns the
+     * SQL literal '*' and user_activation_key returns ''. Other columns use
+     * their backtick-quoted names. Row queries and resumed value reads both
+     * use this method, so the same replacements apply to both read paths.
+     */
+    public function get_column_read_expression(string $column): string
+    {
+        if ($this->multisite_selection !== null && $this->current_table !== null) {
+            $replacements = $this->multisite_selection->get_column_replacements($this->current_table);
+            if (array_key_exists($column, $replacements)) {
+                return "'" . str_replace("'", "''", $replacements[$column]) . "'";
+            }
+        }
+        return $this->quote_identifier($column);
     }
 
     /** Returns an internal SELECT alias which cannot collide with a real column. */

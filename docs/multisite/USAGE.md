@@ -58,9 +58,28 @@ bootstrap includes are not used in that configuration.
 Core site tables; members and users referenced by posts, comments, or links;
 core profile fields and the selected site's roles; selected network settings;
 shared core, plugin, theme, language, and mu-plugin code; selected media.
-Users keep their IDs and password hashes, but sessions and application
-passwords do not move. LOGIN uses the target database's normal login matching,
+Users keep their IDs, but source password hashes, password-reset keys, sessions,
+and application passwords do not move. The exporter replaces each password
+hash with an unusable marker and clears the reset key before sending SQL.
+LOGIN uses the target database's normal login matching,
 so a different letter case still selects the same imported user ID.
+
+After the full migration and runtime setup complete, set a new password for
+LOGIN on the target using [WP-CLI](https://developer.wordpress.org/cli/commands/user/reset-password/):
+
+```sh
+wp --path=/absolute/path/to/target user reset-password LOGIN --skip-email --show-password
+```
+
+Use the same LOGIN passed to --site-admin. This generates and displays a new
+target password without sending a password-change email. Run it only against
+the target, not the source network. Keep the displayed password private; it
+does not need to enter Reprint's arguments or saved state. Other imported users
+also need new target passwords. The source accounts remain unchanged.
+
+Exports started with the earlier credential-preserving rules cannot resume
+under these rules. Start a fresh export with a fresh state directory and empty
+target database; a partial old dump may already contain source credentials.
 
 Network-active plugins join the site's active_plugins list, without duplicate
 entries. Reprint stays inactive. Host plugins stay enabled by default; use

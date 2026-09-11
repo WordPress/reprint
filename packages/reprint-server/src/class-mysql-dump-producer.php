@@ -2004,7 +2004,7 @@ class MySQLDumpProducer
         bool $character_string
     ): array {
         $quoted_table = $this->row_reader->quote_identifier($this->row_reader->get_current_table());
-        $quoted_column = $this->row_reader->quote_identifier($column);
+        $column_expression = $this->row_reader->get_column_read_expression($column);
 
         $where_parts = $this->row_reader->get_current_row_selection_conditions(true);
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
@@ -2013,8 +2013,8 @@ class MySQLDumpProducer
         $where_clause = implode(" AND ", $where_parts);
 
         $value_expression = $character_string
-            ? "SUBSTRING({$quoted_column}, {$start}, {$length})"
-            : "SUBSTRING(CAST({$quoted_column} AS BINARY), {$start}, {$length})";
+            ? "SUBSTRING({$column_expression}, {$start}, {$length})"
+            : "SUBSTRING(CAST({$column_expression} AS BINARY), {$start}, {$length})";
         $sql = $this->row_reader->get_select_prefix() . " CAST({$value_expression} AS BINARY) AS value_chunk,"
              . " CHAR_LENGTH({$value_expression}) AS value_length"
              . " FROM {$quoted_table} WHERE {$where_clause}";
