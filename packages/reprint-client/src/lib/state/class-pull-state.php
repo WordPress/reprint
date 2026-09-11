@@ -44,7 +44,13 @@ class PullState
 
     /** Resume checkpoint for a lower-level command run directly or inside a pull pipeline. */
     public ResumableCommandCheckpointState $active_resumable_command;
-    /** @var array<string,mixed>|null Verbatim preflight record; read it through preflight_record() or get(). */
+    /**
+     * Preflight record; read it through preflight_record() or get(). The importer
+     * moves multisite child paths to an immutable file before storing this record,
+     * so progress saves do not encode and write the entire path list again.
+     *
+     * @var array<string,mixed>|null
+     */
     private ?array $preflight = null;
     public ?int $remote_protocol_version = null;
     /** @var string|null Source WordPress version saved with state. */
@@ -203,9 +209,10 @@ class PullState
     }
 
     /**
-     * The verbatim preflight record, for code that reports what the server
-     * said (pipeline status, pull metadata, host analyzers). Code that needs
-     * an effective config value uses get() instead.
+     * The preflight record, for code that reports what the server said
+     * (pipeline status, pull metadata, host analyzers). Multisite child paths
+     * are stored separately; nested_site_paths_file names that immutable file.
+     * Code that needs an effective config value uses get() instead.
      *
      * @return array<string,mixed>|null
      */
