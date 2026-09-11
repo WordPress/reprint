@@ -68,15 +68,17 @@ if (base) {
         const t = baseByStage[r.stage];
         prTotal += r.elapsedMs;
         if (t) baseTotal += t.elapsedMs;
-        const delta = t ? fmtDelta(r.elapsedMs, t.elapsedMs) : '—';
-        const status = r.ok ? '✓' : '✗ exit ' + r.exitCode;
+        const delta = t && r.ok && t.ok ? fmtDelta(r.elapsedMs, t.elapsedMs) : '—';
+        const status = !r.ok ? '✗ PR exit ' + r.exitCode
+            : t && !t.ok ? '✗ ' + baselineLabel + ' exit ' + t.exitCode : '✓';
         const details = [
             fmtDetails(r.details),
             t && fmtDetails(t.details) ? `${baselineLabel}: ${fmtDetails(t.details)}` : '',
         ].filter(Boolean).join('<br>');
         lines.push(`| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${t ? fmtMs(t.elapsedMs) : '—'} | ${delta} | ${status} | ${details} |`);
     }
-    lines.push(`| **Total** | **${fmtMs(prTotal)}** | **${fmtMs(baseTotal)}** | **${fmtDelta(prTotal, baseTotal)}** | | |`);
+    const comparable = pr.results.every(result => result.ok && baseByStage[result.stage]?.ok);
+    lines.push(`| **Total** | **${fmtMs(prTotal)}** | **${fmtMs(baseTotal)}** | **${comparable ? fmtDelta(prTotal, baseTotal) : '—'}** | | |`);
 } else {
     lines.push(`_${baselineLabel} baseline unavailable — showing PR numbers only._`);
     lines.push('');
@@ -92,6 +94,10 @@ if (base) {
 
 lines.push('');
 lines.push('<sub>Numbers carry runner noise; treat single-run deltas as directional, not authoritative.</sub>');
+if (pr.results.some(result => result.stage.startsWith('url-rewrite-'))) {
+    lines.push('');
+    lines.push('URL rows show the median of five samples, using the same inputs and PHP binary for both builds. Each sample starts with fresh caches and reuses one rewriter across 128 distinct values. Input generation and output checks are outside the timer. Every output must pass before a speed is reported.');
+}
 
 const historyUrl = (() => {
     if (process.env.PERF_HISTORY_URL) return process.env.PERF_HISTORY_URL;
