@@ -5,6 +5,11 @@ Every PR runs these cases in addition to the pipeline stages selected by
 change in the existing performance comment. JSON artifacts retain all five
 samples and the path of the implementation loaded from each build.
 
+Changes above 5% in either direction stay visible. Changes of 5% or less go in
+a collapsed second table. Each row's detailed metrics are also collapsed.
+Failed or unavailable comparisons stay visible. This is a display threshold,
+not a CI failure threshold.
+
 | Case | What it measures |
 | --- | --- |
 | `html` | HTML links with distinct URLs. |
