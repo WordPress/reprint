@@ -62,6 +62,8 @@ class WindowsPathTest extends TestCase
     {
         $this->assertTrue(path_is_same_as_or_descendant_of('D:\\site\\upload.txt', 'd:/site'));
         $this->assertTrue(path_is_same_as_or_descendant_of('D:/site', 'D:/'));
+        $this->assertTrue(path_is_same_as_or_descendant_of('D:/site/upload.txt', 'd:\\\\site'));
+        $this->assertTrue(path_is_same_as_or_descendant_of('\\\\SERVER\\SHARE/site/file.txt', '\\\\server\\share\\\\site'));
         $this->assertFalse(path_is_same_as_or_descendant_of('D:/site-old', 'D:/site'));
         $this->assertFalse(path_is_same_as_or_descendant_of('E:/site', 'D:/'));
         $this->assertFalse(path_is_same_as_or_descendant_of('D:/site', '/'));

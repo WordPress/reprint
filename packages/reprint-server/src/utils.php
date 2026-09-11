@@ -642,7 +642,7 @@ function assert_valid_path(string $path, string $label = "path"): void
 
 if (!function_exists(__NAMESPACE__ . '\\normalize_path_separators')) {
 /**
- * Uses forward slashes below a Windows drive or UNC share root.
+ * Uses single forward slashes below a Windows drive or UNC share root.
  *
  * Keep a UNC root spelled `\\SERVER\SHARE` so it cannot be confused with a
  * Unix path starting with `//`. Drive letters, server names, and share names
@@ -657,11 +657,11 @@ if (!function_exists(__NAMESPACE__ . '\\normalize_path_separators')) {
 function normalize_path_separators(string $path): string
 {
     if (preg_match('~^[a-zA-Z]:[/\\\\]~', $path)) {
-        return strtoupper($path[0]) . str_replace('\\', '/', substr($path, 1));
+        return strtoupper($path[0]) . preg_replace('~[/\\\\]+~', '/', substr($path, 1));
     }
     $share_root = windows_share_root($path);
     if ($share_root !== null) {
-        $tail = str_replace('\\', '/', substr($path, strlen($share_root)));
+        $tail = preg_replace('~[/\\\\]+~', '/', substr($path, strlen($share_root)));
         return $share_root . ( $tail === '/' ? '' : $tail );
     }
     return $path;

@@ -7,17 +7,21 @@ if (PHP_OS_FAMILY !== 'Windows') {
 [$script, $site_directory, $site_url, $manifest_path] = $argv;
 // These files live outside WordPress so each --include spelling is tested on its own.
 foreach (['C', 'D'] as $drive) {
-    $directory = $drive . ':/Reprint path cases/Mixed Case';
+    $directory = $drive . ':/Reprint path cases/Mixed Case [v1] #100%';
     mkdir($directory, 0777, true);
     file_put_contents($directory . '/hello.txt', 'source drive ' . $drive);
+    if (file_get_contents($directory . '/HELLO.TXT') !== 'source drive ' . $drive) {
+        throw new RuntimeException('Expected case-insensitive lookup on the Windows source.');
+    }
 }
 $path_cases = [
-    'drive' => ['source' => 'C:\\Reprint path cases\\Mixed Case', 'destination' => 'C:/Reprint path cases/Mixed Case', 'content' => 'source drive C'],
-    'forward' => ['source' => 'D:/Reprint path cases/Mixed Case', 'destination' => 'D:/Reprint path cases/Mixed Case', 'content' => 'source drive D'],
-    'lowercase-drive' => ['source' => 'd:\\Reprint path cases\\Mixed Case', 'destination' => 'D:/Reprint path cases/Mixed Case', 'content' => 'source drive D'],
-    'mixed' => ['source' => 'D:\\Reprint path cases/Mixed Case\\', 'destination' => 'D:/Reprint path cases/Mixed Case', 'content' => 'source drive D'],
-    'share' => ['source' => '\\\\localhost\\d$\\Reprint path cases\\Mixed Case', 'destination' => 'UNC/LOCALHOST/D$/Reprint path cases/Mixed Case', 'content' => 'source drive D'],
-    'mixed-share' => ['source' => '\\\\localhost\\d$/Reprint path cases/Mixed Case', 'destination' => 'UNC/LOCALHOST/D$/Reprint path cases/Mixed Case', 'content' => 'source drive D'],
+    'drive' => ['source' => 'C:\\Reprint path cases\\Mixed Case [v1] #100%', 'destination' => 'C:/Reprint path cases/Mixed Case [v1] #100%/hello.txt', 'content' => 'source drive C'],
+    'duplicate-separators' => ['source' => 'D:\\\\Reprint path cases\\\\Mixed Case [v1] #100%', 'destination' => 'D:/Reprint path cases/Mixed Case [v1] #100%/hello.txt', 'content' => 'source drive D'],
+    'forward' => ['source' => 'D:/Reprint path cases/Mixed Case [v1] #100%', 'destination' => 'D:/Reprint path cases/Mixed Case [v1] #100%/hello.txt', 'content' => 'source drive D'],
+    'lowercase-drive' => ['source' => 'd:\\Reprint path cases\\Mixed Case [v1] #100%', 'destination' => 'D:/Reprint path cases/Mixed Case [v1] #100%/hello.txt', 'content' => 'source drive D'],
+    'mixed' => ['source' => 'D:\\Reprint path cases/Mixed Case [v1] #100%\\', 'destination' => 'D:/Reprint path cases/Mixed Case [v1] #100%/hello.txt', 'content' => 'source drive D'],
+    'share' => ['source' => '\\\\localhost\\d$\\Reprint path cases\\Mixed Case [v1] #100%', 'destination' => 'UNC/LOCALHOST/D$/Reprint path cases/Mixed Case [v1] #100%/hello.txt', 'content' => 'source drive D'],
+    'mixed-share' => ['source' => '\\\\localhost\\d$/Reprint path cases/Mixed Case [v1] #100%', 'destination' => 'UNC/LOCALHOST/D$/Reprint path cases/Mixed Case [v1] #100%/hello.txt', 'content' => 'source drive D'],
 ];
 // NTFS accepts these names; ext4 cannot store their 256-byte UTF-8 components.
 $long_name = str_repeat('é', 126) . '.txt';
@@ -34,12 +38,19 @@ foreach (['file', 'directory'] as $type) {
     }
     $path_cases['long-' . $type] = ['source' => $directory, 'error' => 'File name too long'];
 }
-$probe_file = 'D:\\Reprint path cases\\' . str_repeat('a', 251) . '.txt';
-file_put_contents($probe_file, 'UNC length probe');
-$native_share_path = '\\\\localhost\\D$' . substr($probe_file, 2);
-foreach (['native' => $native_share_path, 'mixed' => '\\\\localhost\\D$' . str_replace('\\', '/', substr($probe_file, 2)), 'extended' => '\\\\?\\UNC\\localhost\\D$' . substr($probe_file, 2)] as $form => $probe_path) {
-    printf("UNC LENGTH PROBE %s\n", json_encode(['form' => $form, 'read' => @file_get_contents($probe_path), 'realpath' => @realpath($probe_path)]));
-}
+// PHP can read long drive paths, but its UNC API fails on this same NTFS file.
+$long_directory = 'D:/Reprint UNC length case';
+mkdir($long_directory);
+file_put_contents($long_directory . '/' . str_repeat('a', 251) . '.txt', 'long UNC file');
+$path_cases['long-share'] = ['source' => '\\\\localhost\\D$\\Reprint UNC length case', 'error' => 'Cannot inspect Windows share path'];
+
+// Test >260 total characters and a 255-byte component through a drive path.
+$long_relative_path = str_repeat('nested/', 45) . str_repeat('a', 251) . '.txt';
+$long_drive_root = 'D:/Reprint long drive path';
+mkdir(dirname($long_drive_root . '/' . $long_relative_path), 0777, true);
+file_put_contents($long_drive_root . '/' . $long_relative_path, 'long drive file');
+$path_cases['long-drive'] = ['source' => $long_drive_root, 'destination' => $long_drive_root . '/' . $long_relative_path, 'content' => 'long drive file'];
+
 $database = new PDO('mysql:host=127.0.0.1;port=3308', 'root', 'root');
 $database_os = $database->query('SELECT @@version_compile_os')->fetchColumn();
 if (stripos($database_os, 'win') !== 0) {
@@ -88,8 +99,6 @@ $portable_paths = [
     'café.txt',
     ' leading space/.hidden',
     '%2e%2e/literal percent.txt',
-    str_repeat('a', 251) . '.txt',
-    str_repeat('nested/', 45) . 'long path.txt',
 ];
 foreach ($portable_paths as $relative_path) {
     $file_path = str_replace('/', '\\', $upload_directory . '/' . $relative_path);

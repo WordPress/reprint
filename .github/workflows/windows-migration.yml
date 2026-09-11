@@ -54,7 +54,7 @@ jobs:
           composer install --working-dir=reprint-server-wp --no-dev --no-interaction --prefer-dist
           Invoke-WebRequest https://wordpress.org/wordpress-6.7.zip -OutFile "$env:RUNNER_TEMP/wordpress.zip"
           Expand-Archive "$env:RUNNER_TEMP/wordpress.zip" "$env:RUNNER_TEMP/wordpress"
-          $siteDirectory = 'D:\Migration Sites\Example [v1] #100% café'
+          $siteDirectory = 'D:\Migration Sites\Example café'
           New-Item -ItemType Directory -Force (Split-Path $siteDirectory) | Out-Null
           Move-Item -LiteralPath "$env:RUNNER_TEMP/wordpress/wordpress" -Destination $siteDirectory
           Copy-Item -Recurse reprint-server-wp "$siteDirectory/wp-content/plugins/reprint-server"
