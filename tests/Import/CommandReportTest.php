@@ -142,13 +142,14 @@ final class CommandReportTest extends TestCase {
             'body' => 'Upstream unavailable',
             'preflight_body' => json_encode($preflight_data),
         ]));
+        // Each invocation exhausts its own three-request retry allowance.
         for ($attempt = 1; $attempt <= 2; ++$attempt) {
             $report = $this->read_report($this->run_command($command, ['--report']));
             $this->assertSame(3, $report['exit_code']);
             $this->assertSame('error', $report['status']);
             $this->assertSame('SERVER_ERROR', $report['error_code']);
             $this->assertSame(520, $report['http_code']);
-            $this->assertSame($attempt, $report['consecutive_failures_without_progress']);
+            $this->assertSame(3, $report['consecutive_failures_without_progress']);
             $this->assertSame($command === 'pull-files' ? 'files-pull' : null, $report['failed_stage']);
             $this->assertArrayNotHasKey('retry_after_seconds', $report);
         }
