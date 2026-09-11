@@ -4,8 +4,9 @@ set -euo pipefail
 source_url=$1
 source_manifest=$2
 [[ $(uname -s) == Linux ]]
+uname -a
 mkdir -p /root/migration
-curl --retry 10 --retry-connrefused --retry-delay 1 -fsS "$source_url/migration-check.php" > /root/migration/source.json
+curl --connect-timeout 5 --max-time 10 --retry 10 --retry-connrefused --retry-delay 1 -fsS "$source_url/migration-check.php" > /root/migration/source.json
 php packages/reprint-client/src/import.php pull "$source_url/?reprint-api" \
     --secret=windows-migration-secret \
     --state-dir=/root/migration/state --fs-root=/root/migration/files \

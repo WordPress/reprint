@@ -199,6 +199,8 @@ final class HTTPServer {
     }
 
     /**
+     * Parses HTTP values, including raw or base64-encoded Unix and Windows paths.
+     *
      * @param array<string, mixed> $get
      * @param array<string, mixed> $post
      * @param array<string, mixed> $server
@@ -246,9 +248,9 @@ final class HTTPServer {
                 $decoded_paths = [];
                 foreach ($path_values as $path_key => $path_value) {
                     // Do not decode first: PHP accepts a raw path such as /tmp
-                    // as strict base64 and turns it into unrelated bytes. Raw
-                    // absolute paths start with /; their base64 form starts with L.
-                    if (is_string($path_value) && substr($path_value, 0, 1) === '/') {
+                    // as strict base64 and turns it into unrelated bytes. Check
+                    // for Unix roots and Windows drive roots before decoding.
+                    if (is_string($path_value) && is_absolute_path($path_value)) {
                         $decoded_path = $path_value;
                     } else {
                         $decoded_path = is_string($path_value)
@@ -257,8 +259,7 @@ final class HTTPServer {
                     }
                     if (
                         $decoded_path === false
-                        || $decoded_path === ''
-                        || substr($decoded_path, 0, 1) !== '/'
+                        || !is_absolute_path($decoded_path)
                     ) {
                         $entry = is_array($value) ? ' entry ' . $path_key : '';
                         $observed = is_string($path_value)

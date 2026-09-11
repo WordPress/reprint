@@ -78,6 +78,23 @@ final class ExportHttpServerTest extends TestCase
         $this->assertSame(['/srv/site/removed'], $config['pulled_before']);
     }
 
+    /** Windows clients and Linux clients can send either source-path spelling. */
+    public function testParsesWindowsPathParameters(): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        foreach (['D:\\spacewww\\nihaokids.nl/', 'D:/spacewww/nihaokids.nl'] as $path) {
+            $config = $server->parse_http_config([
+                'endpoint' => 'file_index',
+                'directory' => [$path, base64_encode($path)],
+                'list_dir' => base64_encode($path),
+                'pulled_before' => [base64_encode($path)],
+            ]);
+            $this->assertSame([$path, $path], $config['directory']);
+            $this->assertSame($path, $config['list_dir']);
+            $this->assertSame([$path], $config['pulled_before']);
+        }
+    }
+
     public function testRejectsInvalidBase64EncodedPathParameter(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer();
