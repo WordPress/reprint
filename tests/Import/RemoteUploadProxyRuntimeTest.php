@@ -161,23 +161,40 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         );
     }
 
-    public function testApplyRuntimeFindsRootAbspathInTheRawDownload(): void
-    {
-        mkdir($this->fsRoot . '/remote-document-root');
+    /**
+     * The source document root and WordPress core may map to different local directories.
+     *
+     * @dataProvider raw_runtime_paths
+     * @param string $document_root Remote document root.
+     * @param string $abspath Remote WordPress core directory.
+     * @param string $local_document_root Mapped document root below fsRoot.
+     * @param string $local_abspath Mapped WordPress core below fsRoot.
+     */
+    public function testApplyRuntimeFindsMappedAbspathInTheRawDownload(
+        string $document_root,
+        string $abspath,
+        string $local_document_root,
+        string $local_abspath
+    ): void {
+        mkdir($this->fsRoot . $local_document_root, 0755, true);
+        if ($local_abspath !== '') {
+            mkdir($this->fsRoot . $local_abspath, 0755, true);
+            file_put_contents($this->fsRoot . $local_abspath . '/index.php', "<?php // WordPress core");
+        }
         file_put_contents(
-            $this->fsRoot . '/remote-document-root/index.php',
+            $this->fsRoot . $local_document_root . '/index.php',
             "<?php echo 'document root';\n",
         );
         $this->writeState([
             'preflight' => [
                 'data' => [
                     'runtime' => [
-                        'document_root' => '/remote-document-root',
+                        'document_root' => $document_root,
                     ],
                     'database' => [
                         'wp' => [
                             'paths_urls' => [
-                                'abspath' => '/',
+                                'abspath' => $abspath,
                             ],
                         ],
                     ],
@@ -197,13 +214,23 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             ob_end_clean();
         }
         $runtime = file_get_contents($this->outputDir . '/runtime.php');
-        $resolved_filesystem_root = realpath($this->fsRoot);
+        $resolved_filesystem_root = realpath($this->fsRoot . $local_abspath);
         $this->assertIsString($resolved_filesystem_root);
 
         $this->assertStringContainsString(
             "\$wordpress_core_dir = '" . addslashes($resolved_filesystem_root) . "';",
             $runtime,
         );
+    }
+
+    /** @return array[] Source paths and their corresponding Linux locations. */
+    public static function raw_runtime_paths(): array
+    {
+        return [
+            'Unix root' => ['/remote-document-root', '/', '/remote-document-root', ''],
+            'Windows drive' => ['D:\\Sites', 'D:\\WordPress', '/D:/Sites', '/D:/WordPress'],
+            'Windows share' => ['\\\\server\\share\\Sites', '\\\\server\\share\\WordPress', '/UNC/SERVER/SHARE/Sites', '/UNC/SERVER/SHARE/WordPress'],
+        ];
     }
 
     public function testApplyRuntimeAddsProxyForEssentialFilesFilter(): void
@@ -245,6 +272,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             $runtime,
         );
     }
+
 
     public function testApplyRuntimeAddsProxyWhileFilesPullIsIncomplete(): void
     {

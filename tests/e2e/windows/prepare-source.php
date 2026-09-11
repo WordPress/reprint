@@ -34,6 +34,12 @@ foreach (['file', 'directory'] as $type) {
     }
     $path_cases['long-' . $type] = ['source' => $directory, 'error' => 'File name too long'];
 }
+$probe_file = 'D:\\Reprint path cases\\' . str_repeat('a', 251) . '.txt';
+file_put_contents($probe_file, 'UNC length probe');
+$native_share_path = '\\\\localhost\\D$' . substr($probe_file, 2);
+foreach (['native' => $native_share_path, 'mixed' => '\\\\localhost\\D$' . str_replace('\\', '/', substr($probe_file, 2)), 'extended' => '\\\\?\\UNC\\localhost\\D$' . substr($probe_file, 2)] as $form => $probe_path) {
+    printf("UNC LENGTH PROBE %s\n", json_encode(['form' => $form, 'read' => @file_get_contents($probe_path), 'realpath' => @realpath($probe_path)]));
+}
 $database = new PDO('mysql:host=127.0.0.1;port=3308', 'root', 'root');
 $database_os = $database->query('SELECT @@version_compile_os')->fetchColumn();
 if (stripos($database_os, 'win') !== 0) {
@@ -86,7 +92,7 @@ $portable_paths = [
     str_repeat('nested/', 45) . 'long path.txt',
 ];
 foreach ($portable_paths as $relative_path) {
-    $file_path = $upload_directory . '/' . $relative_path;
+    $file_path = str_replace('/', '\\', $upload_directory . '/' . $relative_path);
     if (!is_dir(dirname($file_path))) {
         mkdir(dirname($file_path), 0777, true);
     }

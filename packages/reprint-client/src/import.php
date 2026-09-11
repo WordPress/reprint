@@ -5085,18 +5085,14 @@ class ImportClient
         } else {
             // --fs-root: the raw download directory. The remote site's
             // document_root tells us where the web root lived on the
-            // source server. Files are downloaded preserving the full
-            // remote absolute path, so the local document root is --fs-root +
-            // document_root.
+            // source server. Use the same path mapping as the file pull,
+            // including Windows share roots and explicit remaps.
             $remote_doc_root = $this->clean_preflight_path(
                 $preflight_data["runtime"]["document_root"] ?? null,
             );
 
             if ($remote_doc_root !== null) {
-                $raw_local_document_root = wp_join_unix_paths(
-                    $this->filesystem_root,
-                    $remote_doc_root
-                );
+                $raw_local_document_root = $this->path_mapper()->remote_path_to_local_path($remote_doc_root);
             } else {
                 $raw_local_document_root = $this->filesystem_root;
             }
@@ -5203,18 +5199,18 @@ class ImportClient
 
         // Resolve the path to WordPress's index.php. On standard hosts it
         // lives in the filesystem root. On WPCloud the ABSPATH is a different
-        // directory (e.g. /wordpress/core/X.Y.Z) which maps to
-        // filesystem root + ABSPATH when using --fs-root.
+        // directory (e.g. /wordpress/core/X.Y.Z). Resolve that source path
+        // through the same mapper used to download the files.
         $paths_urls = $preflight_data["database"]["wp"]["paths_urls"] ?? [];
         $abspath = $this->clean_preflight_path($paths_urls["abspath"] ?? null);
         if (!empty($flat_document_root)) {
             // Flattened layout: index.php is at the top level.
             $wordpress_index_php = wp_join_unix_paths($local_document_root, 'index.php');
         } elseif ($abspath !== null) {
-            // Raw download: ABSPATH is relative to the download root,
-            // not the local document root (which is filesystem root + document root).
+            // Raw download: map ABSPATH from the source, not relative to the
+            // local document root, which may be a different source directory.
             $wordpress_index_php = realpath(
-                wp_join_unix_paths($this->filesystem_root, $abspath, 'index.php')
+                $this->path_mapper()->remote_path_to_local_path(wp_join_unix_paths($abspath, 'index.php'))
             ) ?: '';
         } else {
             $wordpress_index_php = wp_join_unix_paths($local_document_root, 'index.php');
@@ -5620,7 +5616,7 @@ class ImportClient
             $content_dir = wp_join_unix_paths($abspath, "wp-content");
         }
 
-        $destination_wp_content = wp_join_unix_paths($this->filesystem_root, $content_dir);
+        $destination_wp_content = $this->path_mapper()->remote_path_to_local_path($content_dir);
         $source_wp_content = $from;
 
         $component_destinations = [];
@@ -5631,10 +5627,7 @@ class ImportClient
         ] as $conventional_name => $preflight_path) {
             $component_dir = $this->clean_preflight_path($state->get($preflight_path));
             if ($component_dir !== null) {
-                $component_destinations[$conventional_name] = wp_join_unix_paths(
-                    $this->filesystem_root,
-                    $component_dir
-                );
+                $component_destinations[$conventional_name] = $this->path_mapper()->remote_path_to_local_path($component_dir);
             }
         }
 
@@ -5781,7 +5774,7 @@ class ImportClient
         }
 
         // Map remote absolute paths to local absolute paths within filesystem root
-        $local_abspath = wp_join_unix_paths($this->filesystem_root, $abspath);
+        $local_abspath = $this->path_mapper()->remote_path_to_local_path($abspath);
         if (!is_dir($local_abspath)) {
             throw new RuntimeException(
                 "WordPress ABSPATH directory not found in filesystem root: {$local_abspath} " .
@@ -5790,22 +5783,22 @@ class ImportClient
         }
 
         $local_wp_admin = $wp_admin_path !== null
-            ? wp_join_unix_paths($this->filesystem_root, $wp_admin_path)
+            ? $this->path_mapper()->remote_path_to_local_path($wp_admin_path)
             : null;
         $local_wp_includes = $wp_includes_path !== null
-            ? wp_join_unix_paths($this->filesystem_root, $wp_includes_path)
+            ? $this->path_mapper()->remote_path_to_local_path($wp_includes_path)
             : null;
         $local_content_dir = $content_dir !== null
-            ? wp_join_unix_paths($this->filesystem_root, $content_dir)
+            ? $this->path_mapper()->remote_path_to_local_path($content_dir)
             : null;
         $local_plugins_dir = $plugins_dir !== null
-            ? wp_join_unix_paths($this->filesystem_root, $plugins_dir)
+            ? $this->path_mapper()->remote_path_to_local_path($plugins_dir)
             : null;
         $local_mu_plugins_dir = $mu_plugins_dir !== null
-            ? wp_join_unix_paths($this->filesystem_root, $mu_plugins_dir)
+            ? $this->path_mapper()->remote_path_to_local_path($mu_plugins_dir)
             : null;
         $local_uploads_basedir = $uploads_basedir !== null
-            ? wp_join_unix_paths($this->filesystem_root, $uploads_basedir)
+            ? $this->path_mapper()->remote_path_to_local_path($uploads_basedir)
             : null;
 
         // Determine which components are "detached" — located outside
@@ -5945,10 +5938,8 @@ class ImportClient
         $wp_config_in_flatten = wp_join_unix_paths($flatten_to, "wp-config.php");
         if (!file_exists($wp_config_in_flatten)) {
             $parent_of_abspath = dirname($abspath);
-            $local_parent_wp_config = wp_join_unix_paths(
-                $this->filesystem_root,
-                $parent_of_abspath,
-                "wp-config.php"
+            $local_parent_wp_config = $this->path_mapper()->remote_path_to_local_path(
+                wp_join_unix_paths($parent_of_abspath, "wp-config.php")
             );
             if (file_exists($local_parent_wp_config)) {
                 $this->flatten_place_symlink(
@@ -6729,11 +6720,8 @@ class ImportClient
                         "--target-sqlite-path option is required but was missing.",
                     );
                 }
-                $target_path = wp_join_unix_paths(
-                    $this->filesystem_root,
-                    $content_dir,
-                    'database',
-                    '.ht.sqlite'
+                $target_path = $this->path_mapper()->remote_path_to_local_path(
+                    wp_join_unix_paths($content_dir, 'database', '.ht.sqlite')
                 );
                 $this->audit_log(
                     "DB-APPLY | defaulting SQLite path to: {$target_path}"
