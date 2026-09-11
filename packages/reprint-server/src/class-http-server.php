@@ -213,7 +213,7 @@ final class HTTPServer {
         if ($content_type_main === 'application/json' && $body !== '') {
             $json_data = json_decode($body, true);
             if (is_array($json_data)) {
-                $params = array_merge($json_data, $params);
+                $params = array_merge($params, $json_data);
             }
         }
 
