@@ -21,7 +21,8 @@ use function WordPress\Reprint\Server\path_remainder_under;
  *
  * Windows drive paths use forward slashes beneath the local root: D:\site\a.txt
  * becomes /local/D:/site/a.txt. The drive stays in the path so D: and E: do not
- * collide. Unix paths keep literal backslashes in their filenames.
+ * collide. A UNC path `\\SERVER\SHARE/file.txt` becomes
+ * /local/UNC/SERVER/SHARE/file.txt. Unix paths keep literal backslashes in names.
  *
  * Copied targets and rewritten symlink destinations both use this mapping, so
  * a rewritten link points to the place where its target was copied.
@@ -99,6 +100,11 @@ final class RemoteToLocalPathMapper
             return $local_absolute_path;
         }
 
+        $local_relative_path = $remote_absolute_path;
+        if (substr($remote_absolute_path, 0, 2) === '\\\\') {
+            $local_relative_path = 'UNC/' . str_replace('\\', '/', substr($remote_absolute_path, 2));
+        }
+
         if (
             $this->local_followed_symlinks_root !== null
             && !path_is_same_as_or_descendant_of(
@@ -108,11 +114,11 @@ final class RemoteToLocalPathMapper
         ) {
             return wp_join_unix_paths(
                 $this->local_followed_symlinks_root,
-                $remote_absolute_path
+                $local_relative_path
             );
         }
 
-        return wp_join_unix_paths($this->filesystem_root, $remote_absolute_path);
+        return wp_join_unix_paths($this->filesystem_root, $local_relative_path);
     }
 
     /**

@@ -234,13 +234,17 @@ if (!function_exists(__NAMESPACE__ . '\\normalize_path')) {
  * Resolve ".." and "." segments in a path without touching the filesystem.
  *
  * Unlike realpath(), this works on paths that don't exist yet. Windows drive
- * paths use forward slashes and retain their drive root, even on a Unix client.
+ * paths use forward slashes and retain their drive or share root, even on a
+ * Unix client. Parent segments cannot climb above a share root.
  */
 function normalize_path(string $path): string
 {
     $path = normalize_path_separators($path);
-    $root = "/";
-    if (preg_match('~^[A-Z]:/~', $path)) {
+    $share_root = windows_share_root($path);
+    $root = $share_root !== null ? $share_root . '/' : "/";
+    if ($share_root !== null) {
+        $path = ltrim(substr($path, strlen($share_root)), '/');
+    } elseif (preg_match('~^[A-Z]:/~', $path)) {
         $root = substr($path, 0, 3);
         $path = substr($path, 3);
     }
@@ -256,7 +260,9 @@ function normalize_path(string $path): string
             $resolved[] = $part;
         }
     }
-    return $root . implode("/", $resolved);
+    return $share_root !== null && $resolved === []
+        ? $share_root
+        : $root . implode("/", $resolved);
 }
 }
 
@@ -636,19 +642,27 @@ function assert_valid_path(string $path, string $label = "path"): void
 
 if (!function_exists(__NAMESPACE__ . '\\normalize_path_separators')) {
 /**
- * Uses forward slashes and an uppercase drive letter for Windows drive paths.
+ * Uses forward slashes below a Windows drive or UNC share root.
  *
+ * Keep a UNC root spelled `\\SERVER\SHARE` so it cannot be confused with a
+ * Unix path starting with `//`. Drive letters, server names, and share names
+ * are case-insensitive; filenames retain their case and every other byte.
  * Recognize the path itself rather than the current OS: a Linux importer reads
  * Windows source paths too. Unix paths keep every backslash byte in their names.
- * Dot segments are left intact so validation can reject them before use.
+ * Dot segments below the root stay intact so validation can reject them.
  *
  * @param string $path Native or remote filesystem path.
- * @return string Slash-delimited Windows drive path, or the unchanged Unix path.
+ * @return string Windows path with a stable root spelling, or the unchanged Unix path.
  */
 function normalize_path_separators(string $path): string
 {
     if (preg_match('~^[a-zA-Z]:[/\\\\]~', $path)) {
         return strtoupper($path[0]) . str_replace('\\', '/', substr($path, 1));
+    }
+    $share_root = windows_share_root($path);
+    if ($share_root !== null) {
+        $tail = str_replace('\\', '/', substr($path, strlen($share_root)));
+        return $share_root . ( $tail === '/' ? '' : $tail );
     }
     return $path;
 }
@@ -656,14 +670,42 @@ function normalize_path_separators(string $path): string
 
 if (!function_exists(__NAMESPACE__ . '\\is_absolute_path')) {
 /**
- * Recognizes Unix roots and Windows drive roots without consulting local disk.
+ * Recognizes Unix, Windows drive, and UNC share roots without consulting disk.
  *
  * @param string $path Native or remote filesystem path.
  * @return bool Whether the path is rooted rather than relative to a working directory.
  */
 function is_absolute_path(string $path): bool
 {
-    return $path !== '' && ( $path[0] === '/' || preg_match('~^[a-zA-Z]:[/\\\\]~', $path) === 1 );
+    return $path !== '' && (
+        $path[0] === '/'
+        || preg_match('~^[a-zA-Z]:[/\\\\]~', $path) === 1
+        || windows_share_root($path) !== null
+    );
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\windows_share_root')) {
+/**
+ * Returns the server and share of an explicitly Windows UNC path.
+ *
+ * Only a leading pair of backslashes identifies UNC without reinterpreting a
+ * Unix `//` path. Device namespaces and incomplete shares are not file roots.
+ * PHP realpath() cannot resolve the `\\?\` spellings used by device paths.
+ *
+ * @param string $path Native or remote filesystem path.
+ * @return string|null Canonical `\\SERVER\SHARE` root, or null for other paths.
+ */
+function windows_share_root(string $path): ?string
+{
+    if (
+        preg_match('~^\\\\\\\\([^\\\\/]+)[\\\\/]([^\\\\/]+)~', $path, $parts) !== 1
+        || in_array($parts[1], ['.', '..', '?'], true)
+        || in_array($parts[2], ['.', '..'], true)
+    ) {
+        return null;
+    }
+    return '\\\\' . strtoupper($parts[1]) . '\\' . strtoupper($parts[2]);
 }
 }
 

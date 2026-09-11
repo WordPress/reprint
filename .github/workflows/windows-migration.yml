@@ -11,7 +11,11 @@ permissions:
 
 jobs:
   windows-to-linux:
-    name: Pull Windows WordPress into Linux
+    name: Pull Windows WordPress into Linux (${{ matrix.source }})
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [drive, share]
     runs-on: windows-2025
     timeout-minutes: 30
     steps:
@@ -54,7 +58,9 @@ jobs:
           New-Item -ItemType Directory -Force (Split-Path $siteDirectory) | Out-Null
           Move-Item -LiteralPath "$env:RUNNER_TEMP/wordpress/wordpress" -Destination $siteDirectory
           Copy-Item -Recurse reprint-server-wp "$siteDirectory/wp-content/plugins/reprint-server"
-          php tests/e2e/windows/probe-paths.php
+          if ('${{ matrix.source }}' -eq 'share') {
+            $siteDirectory = '\\localhost\D$' + $siteDirectory.Substring(2)
+          }
           $windowsHost = (wsl -d Ubuntu-24.04 --exec bash -c "ip route show default | cut -d ' ' -f 3").Trim()
           php tests/e2e/windows/prepare-source.php "$siteDirectory" "http://${windowsHost}:8081" "$env:GITHUB_WORKSPACE/source-manifest.json"
           New-NetFirewallRule -DisplayName ReprintMigration -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8081 | Out-Null
@@ -70,7 +76,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-migration-logs
+          name: windows-migration-logs-${{ matrix.source }}
           path: |
             ${{ runner.temp }}/source.*.log
             migration-logs/

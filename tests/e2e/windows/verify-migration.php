@@ -59,3 +59,33 @@ try {
     proc_terminate($server);
     proc_close($server);
 }
+
+// Use a fresh pull for each spelling; a shared state could hide a skipped selection.
+foreach ($manifest['path_cases'] as $name => $case) {
+    $root = '/root/path-tests/' . $name;
+    $log_path = '/root/migration/path-' . $name . '.log';
+    $command = [
+        PHP_BINARY, 'packages/reprint-client/src/import.php', 'files-pull', $source['home'] . '/?reprint-api',
+        '--secret=windows-migration-secret', '--state-dir=' . $root . '/state', '--fs-root=' . $root . '/files',
+        '--include=' . $case['source'], '--progress=jsonl',
+    ];
+    $process = proc_open($command, [0 => ['pipe', 'r'], 1 => ['file', $log_path, 'w'], 2 => ['file', $log_path, 'a']], $pipes);
+    fclose($pipes[0]);
+    $exit_code = proc_close($process);
+    $log = file_get_contents($log_path);
+    if (isset($case['error'])) {
+        if ($exit_code === 0 || strpos($log, $case['error']) === false) {
+            throw new RuntimeException('Expected a clear failure for ' . $name . ', got exit ' . $exit_code . ":\n" . $log);
+        }
+        printf("PASS: %s fails with %s, without reporting success.\n", $name, $case['error']);
+        continue;
+    }
+    if ($exit_code !== 0) {
+        throw new RuntimeException('Path pull failed for ' . $name . ":\n" . $log);
+    }
+    $local_file = $root . '/files/' . $case['destination'] . '/hello.txt';
+    if (!is_file($local_file) || file_get_contents($local_file) !== $case['content']) {
+        throw new RuntimeException('Path pull lost or misplaced the source file: ' . $local_file . "\n" . $log);
+    }
+    printf("PASS: %s -> %s\n", $case['source'], $local_file);
+}
