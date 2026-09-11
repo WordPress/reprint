@@ -190,6 +190,9 @@
       "port": 8137,
       "noPdoMysql": true
     },
+    "multisite": {
+      "port": 8147
+    },
     "empty-geometry-cross-engine": {
       "port": 8141
     },
