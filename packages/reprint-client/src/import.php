@@ -11702,13 +11702,13 @@ class ImportClient
     }
 
     /**
-     * Keep routing in the URL and put pull options in the POST body.
+     * Keep only the API marker in the URL; send export parameters in the body.
      *
      * @param array $params Endpoint-specific pull options, including tuning,
      *                      path selections, table selections, and row filters.
      * @return array {
-     *     @type string $url    API URL with endpoint and embedder routing keys.
-     *     @type array  $params Pull options to send in the POST body.
+     *     @type string $url    API URL with only its routing marker.
+     *     @type array  $params Endpoint and options to send in the POST body.
      * }
      */
     private function build_request(
@@ -11716,15 +11716,31 @@ class ImportClient
         ?string $cursor,
         array $params = []
     ): array {
+        $url = explode('#', $this->remote_reprint_api_url, 2)[0];
+        $query_start = strpos($url, '?');
+        if ($query_start !== false) {
+            $query = substr($url, $query_start + 1);
+            parse_str($query, $url_params);
+            unset($url_params['reprint-api'], $url_params['site-export-api']);
+            $params = array_merge($url_params, $params);
+            $query_parts = array_filter(explode('&', $query), static function ($part) {
+                $key = urldecode(explode('=', $part, 2)[0]);
+                return in_array($key, ['reprint-api', 'site-export-api'], true);
+            });
+            $url = substr($url, 0, $query_start);
+            if ($query_parts) {
+                $url .= '?' . implode('&', $query_parts);
+            }
+        }
+        // Keep endpoint before multipart file data so hosts can route the
+        // request without first reading a potentially large file list.
+        unset($params['endpoint']);
+        $params = ['endpoint' => $endpoint] + $params;
         $preflight_record = $this->get_state()->preflight_record();
         // Preflight keeps the legacy path parameters so a new client can learn
         // whether an older server supports the base64 form before using it.
         $server_supports_base64_paths = $endpoint !== 'preflight'
             && !empty($preflight_record['data']['capabilities']['base64_path_parameters']);
-        $url = $server_supports_base64_paths
-            ? self::encode_url_path_parameters($this->remote_reprint_api_url)
-            : $this->remote_reprint_api_url;
-
         if ($server_supports_base64_paths) {
             foreach (["directory", "list_dir", "pulled_before"] as $parameter) {
                 if (!array_key_exists($parameter, $params)) {
@@ -11739,60 +11755,11 @@ class ImportClient
                 }
             }
         }
-        if ($cursor) {
+        if ($cursor !== null) {
             // Include the cursor in the body when hosts strip custom headers.
             $params["cursor"] = $cursor;
         }
-        // Pull paths may also come from the saved remote URL. Move those into
-        // the body, but retain unrelated routing keys supplied by an embedder.
-        $query_start = strpos($url, '?');
-        if ($query_start !== false) {
-            $query = substr($url, $query_start + 1);
-            parse_str($query, $url_params);
-            $body_keys = array_merge(['directory', 'list_dir', 'pulled_before'], array_keys($params));
-            foreach ($body_keys as $key) {
-                if (!array_key_exists($key, $params) && array_key_exists($key, $url_params)) {
-                    $params[$key] = $url_params[$key];
-                }
-            }
-            $query_parts = array_filter(explode('&', $query), static function ($part) use ($body_keys) {
-                $key = preg_replace('/\[.*\]$/', '', urldecode(explode('=', $part, 2)[0]));
-                return $key !== 'endpoint' && !in_array($key, $body_keys, true);
-            });
-            $url = substr($url, 0, $query_start) . '?' . implode('&', $query_parts);
-        }
-        $separator = strpos($url, '?') === false ? '?' : '&';
-        return ['url' => $url . $separator . 'endpoint=' . rawurlencode($endpoint), 'params' => $params];
-    }
-
-    /**
-     * Base64-encode path parameters already present in an API URL.
-     */
-    private static function encode_url_path_parameters(string $url): string
-    {
-        $query_start = strpos($url, '?');
-        if ($query_start === false) {
-            return $url;
-        }
-
-        $url_prefix = substr($url, 0, $query_start + 1);
-        $query_parts = explode('&', substr($url, $query_start + 1));
-        foreach ($query_parts as $index => $query_part) {
-            $value_start = strpos($query_part, '=');
-            if ($value_start === false) {
-                continue;
-            }
-            $decoded_key = urldecode(substr($query_part, 0, $value_start));
-            $key = preg_replace('/\[.*\]$/', '', $decoded_key);
-            if (!in_array($key, ['directory', 'list_dir', 'pulled_before'], true)) {
-                continue;
-            }
-            $path = urldecode(substr($query_part, $value_start + 1));
-            $query_parts[$index] = substr($query_part, 0, $value_start)
-                . '=' . rawurlencode(base64_encode($path));
-        }
-
-        return $url_prefix . implode('&', $query_parts);
+        return ['url' => $url, 'params' => $params];
     }
 
     /**

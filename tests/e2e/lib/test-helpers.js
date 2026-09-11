@@ -56,19 +56,21 @@ export function createHmacClient(siteName) {
  * Make an authenticated HTTP request to the export API.
  * @param {string} siteName - Site name
  * @param {string} endpoint - API endpoint
- * @param {Object} params - Pull parameters (JSON body unless a custom body is supplied)
+ * @param {Object} params - Export parameters sent in the JSON body
  * @param {Object} options - Additional options (method, body, rawResponse, followRedirects, signal)
  * @returns {Promise<Object>} Parsed response or raw response
  */
 export async function apiRequest(siteName, endpoint, params = {}, options = {}) {
     const client = createHmacClient(siteName);
     const url = new URL(options.url || getSiteUrl(siteName));
-    url.searchParams.set('endpoint', endpoint);
     const method = options.method || 'POST';
-    const body = options.body ?? (method === 'GET' ? '' : JSON.stringify(params));
-    if (method === 'GET' || options.body !== undefined) {
+    const body = method === 'GET' ? '' : JSON.stringify({
+        endpoint, ...params, ...(options.body ? JSON.parse(options.body) : {}),
+    });
+    if (method === 'GET') {
+        url.searchParams.set('endpoint', endpoint);
         for (const [k, v] of Object.entries(params)) {
-            setApiRequestParameter(url, k, v);
+            setApiRequestParameter(url.searchParams, k, v);
         }
     }
     const headers = client.getAuthHeaders(body);
@@ -663,9 +665,10 @@ export function clearHookState(siteName) {
 export async function apiRequestWithFileList(siteName, filePaths, params = {}, options = {}) {
     const client = createHmacClient(siteName);
     const url = new URL(options.url || getSiteUrl(siteName));
-    url.searchParams.set('endpoint', 'file_fetch');
+    const fields = new URLSearchParams();
+    fields.set('endpoint', 'file_fetch');
     for (const [k, v] of Object.entries(params)) {
-        setApiRequestParameter(url, k, v);
+        setApiRequestParameter(fields, k, v);
     }
 
     const fileListJson = JSON.stringify(filePaths.map(path => ({
@@ -674,6 +677,9 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}, o
 
     // Create form data with file upload
     const formData = new FormData();
+    for (const [key, value] of fields) {
+        formData.append(key, value);
+    }
     const blob = new Blob([fileListJson], { type: 'application/json' });
     formData.append('file_list', blob, 'file_list.json');
 
@@ -743,13 +749,13 @@ function isJsonApiResponseContentType(contentType) {
     return contentType.includes('application/octet-stream');
 }
 
-function setApiRequestParameter(url, parameter, value) {
+function setApiRequestParameter(parameters, parameter, value) {
     const pathParameters = ['directory', 'list_dir', 'pulled_before'];
     const values = Array.isArray(value) ? value : [value];
-    url.searchParams.delete(parameter);
-    url.searchParams.delete(`${parameter}[]`);
+    parameters.delete(parameter);
+    parameters.delete(`${parameter}[]`);
     for (const item of values) {
-        url.searchParams.append(
+        parameters.append(
             Array.isArray(value) ? `${parameter}[]` : parameter,
             pathParameters.includes(parameter)
                 ? Buffer.from(String(item)).toString('base64')

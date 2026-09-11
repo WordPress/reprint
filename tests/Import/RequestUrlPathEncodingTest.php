@@ -45,7 +45,7 @@ final class RequestUrlPathEncodingTest extends TestCase
             'list_dir' => '/srv/site',
             'pulled_before' => ['/srv/site/removed'],
         ]);
-        $query = $request['params'];
+        $post_params = $request['params'];
         parse_str((string) parse_url($request['url'], PHP_URL_QUERY), $url_query);
         $this->assertArrayNotHasKey('directory', $url_query);
         $this->assertArrayNotHasKey('list_dir', $url_query);
@@ -53,12 +53,12 @@ final class RequestUrlPathEncodingTest extends TestCase
 
         $this->assertSame(
             [base64_encode('/srv/site'), base64_encode($binary_path)],
-            $query['directory']
+            $post_params['directory']
         );
-        $this->assertSame(base64_encode('/srv/site'), $query['list_dir']);
+        $this->assertSame(base64_encode('/srv/site'), $post_params['list_dir']);
         $this->assertSame(
             [base64_encode('/srv/site/removed')],
-            $query['pulled_before']
+            $post_params['pulled_before']
         );
     }
 
@@ -76,7 +76,7 @@ final class RequestUrlPathEncodingTest extends TestCase
         $build_request = (new \ReflectionClass($client))->getMethod('build_request');
 
         $request = $build_request->invoke($client, 'file_index', null);
-        $query = $request['params'];
+        $post_params = $request['params'];
         parse_str((string) parse_url($request['url'], PHP_URL_QUERY), $url_query);
         $this->assertArrayNotHasKey('directory', $url_query);
         $this->assertArrayNotHasKey('list_dir', $url_query);
@@ -84,9 +84,11 @@ final class RequestUrlPathEncodingTest extends TestCase
 
         $this->assertSame(
             [base64_encode('/srv/site'), base64_encode('/srv/shared')],
-            $query['directory']
+            $post_params['directory']
         );
-        $this->assertSame('value', $url_query['unrelated']);
+        $this->assertSame(['reprint-api' => ''], $url_query);
+        $this->assertSame('file_index', $post_params['endpoint']);
+        $this->assertSame('value', $post_params['unrelated']);
     }
 
     public function testFallsBackToRawPathsWithoutServerCapability(): void
@@ -101,14 +103,14 @@ final class RequestUrlPathEncodingTest extends TestCase
         $request = $build_request->invoke($client, 'file_index', null, [
             'list_dir' => '/srv/site',
         ]);
-        $query = $request['params'];
+        $post_params = $request['params'];
         parse_str((string) parse_url($request['url'], PHP_URL_QUERY), $url_query);
         $this->assertArrayNotHasKey('directory', $url_query);
         $this->assertArrayNotHasKey('list_dir', $url_query);
         $this->assertArrayNotHasKey('pulled_before', $url_query);
 
-        $this->assertSame('/srv/site', $query['directory']);
-        $this->assertSame('/srv/site', $query['list_dir']);
+        $this->assertSame('/srv/site', $post_params['directory']);
+        $this->assertSame('/srv/site', $post_params['list_dir']);
     }
 
     public function testPreflightKeepsRawPathsAfterCapabilityWasRecorded(): void
@@ -124,14 +126,14 @@ final class RequestUrlPathEncodingTest extends TestCase
         $build_request = (new \ReflectionClass($client))->getMethod('build_request');
 
         $request = $build_request->invoke($client, 'preflight', null);
-        $query = $request['params'];
+        $post_params = $request['params'];
         parse_str((string) parse_url($request['url'], PHP_URL_QUERY), $url_query);
         $this->assertArrayNotHasKey('directory', $url_query);
         $this->assertArrayNotHasKey('list_dir', $url_query);
         $this->assertArrayNotHasKey('pulled_before', $url_query);
 
-        $this->assertSame('/srv/site', $query['directory']);
-        $this->assertArrayNotHasKey('directory_b64', $query);
+        $this->assertSame('/srv/site', $post_params['directory']);
+        $this->assertArrayNotHasKey('directory_b64', $post_params);
     }
 
     public function testCursorAndRowFiltersTravelInThePostBody(): void
@@ -153,8 +155,8 @@ final class RequestUrlPathEncodingTest extends TestCase
             $client, 'sql_chunk', $cursor, $params
         );
 
-        $this->assertSame('https://example.com/?site-export-api&route=export&endpoint=sql_chunk', $request['url']);
-        $this->assertSame($params + ['cursor' => $cursor], $request['params']);
+        $this->assertSame('https://example.com/?site-export-api', $request['url']);
+        $this->assertSame(['endpoint' => 'sql_chunk', 'route' => 'export'] + $params + ['cursor' => $cursor], $request['params']);
     }
 
     private function remove_tree(string $path): void

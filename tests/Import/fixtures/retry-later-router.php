@@ -2,8 +2,8 @@
 
 // Model an upstream outage in front of the real Reprint endpoint. The test
 // controls the proxy response, never the importer's private state.
-// phpcs:ignore WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput -- Local proxy fixture reads the request endpoint; no WordPress form is involved.
-$reprint_endpoint = $_GET['endpoint'] ?? '';
+// phpcs:ignore WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput -- Local proxy fixture reads the request endpoint; no WordPress form is involved.
+$reprint_endpoint = $_POST['endpoint'] ?? '';
 file_put_contents('requests.log', $reprint_endpoint . "\n", FILE_APPEND);
 // Supply site metadata without requiring a WordPress database. File indexes
 // and file contents below are produced by the real endpoint.

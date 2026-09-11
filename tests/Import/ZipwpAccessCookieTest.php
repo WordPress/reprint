@@ -72,7 +72,7 @@ final class ZipwpAccessCookieTest extends TestCase {
     public function testPreflightSendsCookieOnlyToZipwpSubdomains(string $remote_reprint_api_url, bool $expects_cookie): void
     {
         $client = $this->create_client($remote_reprint_api_url);
-        $result = ( new \ReflectionMethod($client, 'fetch_json') )->invoke($client, $remote_reprint_api_url, []);
+        $result = ( new \ReflectionMethod($client, 'fetch_json') )->invoke($client, $remote_reprint_api_url, ['endpoint' => 'preflight']);
         $cookie = trim(file_get_contents($this->root . '/cookie.log'));
 
         if ($expects_cookie) {
@@ -88,23 +88,23 @@ final class ZipwpAccessCookieTest extends TestCase {
     public static function remote_urls(): array
     {
         return [
-            'temporary site' => ['http://demo.zipwp.to/?endpoint=preflight', true],
-            'nested subdomain and port' => ['http://one.demo.zipwp.to:8080/?endpoint=preflight', true],
-            'mixed case' => ['http://Demo.ZIPWP.TO/?endpoint=preflight', true],
-            'trailing DNS dot' => ['http://demo.zipwp.to./?endpoint=preflight', true],
-            'bare domain' => ['http://zipwp.to/?endpoint=preflight', false],
-            'unrelated domain' => ['http://example.test/?endpoint=preflight', false],
-            'missing label boundary' => ['http://notzipwp.to/?endpoint=preflight', false],
-            'suffix in another domain' => ['http://demo.zipwp.to.example.test/?endpoint=preflight', false],
-            'suffix in path' => ['http://example.test/demo.zipwp.to?endpoint=preflight', false],
-            'suffix in query' => ['http://example.test/?endpoint=preflight&site=demo.zipwp.to', false],
-            'suffix in user info' => ['http://demo.zipwp.to@example.test/?endpoint=preflight', false],
+            'temporary site' => ['http://demo.zipwp.to/?reprint-api', true],
+            'nested subdomain and port' => ['http://one.demo.zipwp.to:8080/?reprint-api', true],
+            'mixed case' => ['http://Demo.ZIPWP.TO/?reprint-api', true],
+            'trailing DNS dot' => ['http://demo.zipwp.to./?reprint-api', true],
+            'bare domain' => ['http://zipwp.to/?reprint-api', false],
+            'unrelated domain' => ['http://example.test/?reprint-api', false],
+            'missing label boundary' => ['http://notzipwp.to/?reprint-api', false],
+            'suffix in another domain' => ['http://demo.zipwp.to.example.test/?reprint-api', false],
+            'suffix in path' => ['http://example.test/demo.zipwp.to?reprint-api', false],
+            'suffix in query' => ['http://example.test/?reprint-api&site=demo.zipwp.to', false],
+            'suffix in user info' => ['http://demo.zipwp.to@example.test/?reprint-api', false],
         ];
     }
 
     public function testStreamingDownloadsPassTheTemporarySitePage(): void
     {
-        $remote_reprint_api_url = 'http://demo.zipwp.to/?endpoint=file_fetch';
+        $remote_reprint_api_url = 'http://demo.zipwp.to/?reprint-api';
         $client = $this->create_client($remote_reprint_api_url);
         $fetch = new \ReflectionMethod($client, 'fetch_streaming');
         $file_list_path = $this->root . '/file-list.json';
@@ -123,6 +123,7 @@ final class ZipwpAccessCookieTest extends TestCase {
                 }
             };
             $fetch->invoke($client, $remote_reprint_api_url, null, $context, [
+                'endpoint' => 'file_fetch',
                 'file_list' => new \CURLFile($file_list_path, 'application/json', 'file-list.json'),
             ], 'file_fetch');
             $this->assertSame('temporary site contents', $received);
@@ -131,9 +132,9 @@ final class ZipwpAccessCookieTest extends TestCase {
 
     public function testCookieDoesNotReplaceTheReprintConnectionToken(): void
     {
-        $remote_reprint_api_url = 'http://demo.zipwp.to/?endpoint=preflight';
+        $remote_reprint_api_url = 'http://demo.zipwp.to/?reprint-api';
         $client = $this->create_client($remote_reprint_api_url, 'wrong-token');
-        $result = ( new \ReflectionMethod($client, 'fetch_json') )->invoke($client, $remote_reprint_api_url, []);
+        $result = ( new \ReflectionMethod($client, 'fetch_json') )->invoke($client, $remote_reprint_api_url, ['endpoint' => 'preflight']);
         $this->assertSame(401, $result['http_code']);
         $this->assertSame('AUTH_SECRET_MISMATCH', $result['error_code']);
     }

@@ -1363,11 +1363,12 @@ final class PushEndpointsTest extends TestCase {
     {
         file_put_contents($this->push_authorization_configuration_path, '');
         file_put_contents($this->reprint_configuration_path, $this->docroot . '/invalid-push-directory');
-        $url = $this->remote_reprint_api_url . '&endpoint=preflight';
-        $headers = ( new Site_Export_HMAC_Client(self::SECRET) )->get_curl_headers();
+        $url = $this->remote_reprint_api_url;
+        $post_body = 'endpoint=preflight';
+        $headers = ( new Site_Export_HMAC_Client(self::SECRET) )->get_curl_headers($post_body);
         $handle = curl_init($url);
         curl_setopt_array($handle, [
-            CURLOPT_POSTFIELDS => '',
+            CURLOPT_POSTFIELDS => $post_body,
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_RETURNTRANSFER => true,
         ]);

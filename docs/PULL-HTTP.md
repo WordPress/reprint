@@ -1,24 +1,12 @@
-# Pull request rollout
+# Export parameter rollout
 
-Pull endpoints require POST. An authenticated GET receives HTTP 405 with `Allow: POST, OPTIONS`
-and an instruction to update the client. There is no GET fallback in the client.
-
-Deploy the GET/POST-compatible exporter from [PR #800](https://github.com/WordPress/reprint/pull/800) first. Only then deploy
-the POST client and the exporter that rejects GET. Existing GET clients cannot
-use the POST-only exporter. Push request methods and authentication are unchanged.
-
-Pull endpoints accept `application/json`, `application/x-www-form-urlencoded`,
-and `multipart/form-data` request bodies. Keep the API routing marker
-(`?reprint-api` or `?site-export-api`) and `endpoint` in the URL. The client
-also preserves unrelated routing keys in an embedder-supplied API URL. Put pull
-options such as `directory`, `cursor`, and `skip_rows` in the body. A firewall
-may reject base64 values or nested parameter names in a query string before
-WordPress receives the request.
-
-For example, POST to `/?reprint-api&endpoint=db_index` with this JSON body:
+Keep the API routing marker (`?reprint-api` or the legacy `?site-export-api`)
+in the URL. Every export parameter, including `endpoint`, belongs in the POST
+body. For example, POST to `/?reprint-api` with:
 
 ```json
 {
+  "endpoint": "db_index",
   "skip_rows": [
     {
       "table_name_without_prefix": "postmeta",
@@ -29,17 +17,27 @@ For example, POST to `/?reprint-api&endpoint=db_index` with this JSON body:
 }
 ```
 
-Sign the exact body bytes with the existing HMAC client. Multipart file-list
-uploads use the existing file-content signature. Do not sign a GET request
-and reuse its empty-body signature for a POST body.
+Deploy the query/POST-compatible exporter from
+[PR #800](https://github.com/WordPress/reprint/pull/800) first. Then deploy the
+POST client before deploying this exporter, which no longer reads export
+parameters from the query string. Old query-based clients cannot use this
+exporter. An endpoint supplied only in the query is missing, even on POST.
+Query values cannot supply defaults or override body values.
 
-The query-firewall E2E fixture rejects every query key except the API routing
-markers and `endpoint`. It passes request bodies and response streams through
-unchanged. This models the reported query rejection; it does not promise that
-all firewalls accept all POST bodies.
+The exporter accepts `application/json`, `application/x-www-form-urlencoded`,
+and `multipart/form-data`. Sign the exact JSON or URL-encoded body bytes with
+the existing HMAC client. Multipart file-list uploads retain their existing
+file-content signature. The separate push request contract is unchanged.
 
 The client sends URL-encoded forms for preflight and streaming pull commands.
-File-list downloads retain multipart uploads, with the options in form fields.
-Base64 path encoding is still used when supported, so arbitrary filename bytes
-survive PHP form parsing. Cursors travel in the body as well as the existing
-header; the strict-WAF test removes that header and checks SQL continuation.
+File-list downloads retain multipart uploads, with endpoint and options before
+the file part. Base64 path encoding is still used when supported, so arbitrary
+filename bytes survive PHP form parsing. Cursors travel in the body as well as
+the existing header; the strict-WAF test removes that header and checks SQL
+continuation.
+
+The strict query-firewall fixture permits only the routing marker in the URL.
+It rejects `endpoint` and every other query parameter even on POST requests.
+Request bodies and response streams pass through unchanged. This models the
+reported query rejection; it does not promise that all firewalls accept all
+POST bodies.

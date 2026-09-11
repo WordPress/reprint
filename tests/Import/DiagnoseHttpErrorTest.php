@@ -365,7 +365,7 @@ class DiagnoseHttpErrorTest extends TestCase
         );
         $reflection = new \ReflectionClass(\ImportClient::class);
         $method = $reflection->getMethod('fetch_json');
-        $result = $method->invoke($client, 'http://' . $address . '/?reprint-api=1&endpoint=preflight', []);
+        $result = $method->invoke($client, 'http://' . $address . '/?reprint-api=1', ['endpoint' => 'preflight']);
         pcntl_waitpid($child, $status);
         fclose($listener);
 
@@ -429,7 +429,7 @@ class DiagnoseHttpErrorTest extends TestCase
         );
         $reflection = new \ReflectionClass(\ImportClient::class);
         $method = $reflection->getMethod('fetch_json');
-        $result = $method->invoke($client, 'http://' . $address . '/?reprint-api=1&endpoint=preflight', []);
+        $result = $method->invoke($client, 'http://' . $address . '/?reprint-api=1', ['endpoint' => 'preflight']);
         pcntl_waitpid($child, $status);
         fclose($listener);
 

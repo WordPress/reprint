@@ -88,19 +88,15 @@ final class HTTPServer {
         // buffer an upload or let a control request buffer an unused body.
         $endpoint = $get['endpoint'] ?? null;
         $uses_push_request_contract = is_string($endpoint) && strpos($endpoint, 'push_') === 0;
-        if (!$uses_push_request_contract && strtoupper($server['REQUEST_METHOD'] ?? 'POST') !== 'POST') {
-            http_response_code(405);
-            header('Allow: POST, OPTIONS');
-            header('Content-Type: application/octet-stream');
-            echo json_encode(['error' => 'Pull endpoints require POST. Update the Reprint client before retrying.', 'code' => 405]);
-            return;
-        }
         $body = '';
         if ($uses_push_request_contract) {
             // $_POST must not override the signed query endpoint after the
             // router has applied push authorization to that query endpoint.
             $post = [];
         } else {
+            // The plugin handles the query routing marker. Export parameters
+            // come only from the body, even if a query value has no POST match.
+            $get = [];
             $body = array_key_exists('body', $request)
                 ? (string) $request['body']
                 : ( $this->is_json_content_type($server) ? call_user_func($this->body_reader) : '' );
@@ -220,7 +216,7 @@ final class HTTPServer {
         if ($content_type_main === 'application/json' && $body !== '') {
             $json_data = json_decode($body, true);
             if (is_array($json_data)) {
-                $params = array_merge($json_data, $params);
+                $params = array_merge($params, $json_data);
             }
         }
 

@@ -8,6 +8,7 @@
  * not a complete Hostinger proxy.
  */
 import http from 'node:http';
+import { readRequestEndpoint } from './request-endpoint.js';
 import { appendFileSync, readFileSync } from 'node:fs';
 
 const [backendUrlString, contentTypePath, requestLogPath] = process.argv.slice(2);
@@ -15,8 +16,8 @@ const backendUrl = new URL(backendUrlString);
 const previewDomain = 'preview.example.test';
 const maxPreflightBytes = 1024 * 1024;
 
-const server = http.createServer((request, response) => {
-    const endpoint = new URL(request.url, backendUrl).searchParams.get('endpoint');
+const server = http.createServer(async (request, response) => {
+    const endpoint = await readRequestEndpoint(request);
     appendFileSync(requestLogPath, `${JSON.stringify({ endpoint })}\n`);
     const upstreamRequest = http.request({
         hostname: backendUrl.hostname,

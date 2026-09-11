@@ -92,11 +92,11 @@ class OnlyCliParseTest extends TestCase
 <?php
 $log = %s;
 file_put_contents($log, json_encode(array(
-    'endpoint' => $_GET['endpoint'] ?? null,
-    'directory' => isset($_GET['directory'])
-        ? array_map('base64_decode', (array) $_GET['directory'])
+    'endpoint' => $_POST['endpoint'] ?? null,
+    'directory' => isset($_POST['directory'])
+        ? array_map('base64_decode', (array) $_POST['directory'])
         : null,
-    'exclude_path' => $_GET['exclude_path'] ?? null,
+    'exclude_path' => $_POST['exclude_path'] ?? null,
 ), JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND);
 
 $boundary = 'reprint-test-boundary';

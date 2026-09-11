@@ -1,23 +1,24 @@
 /**
- * Strict query firewall: only API routing keys may reach WordPress in a URL.
+ * Strict query firewall: only the API routing marker may reach WordPress in a URL.
  * This models the reported base64 query rejection, not a complete WAF engine.
  * Request bodies and streaming responses pass through unchanged. Cursor headers
  * are stripped to exercise continuation from the request parameters alone.
  */
 import http from 'node:http';
+import { readRequestEndpoint } from './request-endpoint.js';
 import { appendFileSync } from 'node:fs';
 
 const [backend, logPath] = process.argv.slice(2);
 const backendUrl = new URL(backend);
-const server = http.createServer((request, response) => {
+const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
     const blocked = [...url.searchParams.keys()].some(
-        key => !['reprint-api', 'site-export-api', 'endpoint'].includes(key),
+        key => !['reprint-api', 'site-export-api'].includes(key),
     );
     appendFileSync(logPath, JSON.stringify({
         method: request.method,
         path: request.url,
-        endpoint: url.searchParams.get('endpoint'),
+        endpoint: blocked ? url.searchParams.get('endpoint') : await readRequestEndpoint(request),
         blocked,
     }) + '\n');
     if (blocked) {

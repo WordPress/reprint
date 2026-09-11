@@ -184,7 +184,7 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         for (const record of records) {
             const url = new URL(record.path, firewallOrigin);
             for (const parameter of url.searchParams.keys()) {
-                assert.ok(['reprint-api', 'endpoint'].includes(parameter), parameter);
+                assert.ok(parameter === 'reprint-api', parameter);
             }
         }
     });

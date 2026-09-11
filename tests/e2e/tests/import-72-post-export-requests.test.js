@@ -13,7 +13,7 @@ import {
 } from '../lib/test-helpers.js';
 import { HmacClient } from '../lib/hmac-client.js';
 
-describe('Export: POST-only pull requests', () => {
+describe('Export: POST body parameters with a query routing marker', () => {
     const site = 'post-requests';
     const importDb = 'e2e_post_requests_import';
     let directory;
@@ -49,18 +49,19 @@ describe('Export: POST-only pull requests', () => {
         await connection.end();
     });
 
-    it.each(['preflight', 'file_index', 'file_fetch', 'db_index', 'sql_chunk'])(
-        'rejects authenticated GET %s with a POST instruction', async endpoint => {
-            const response = await fetch(`${getSiteUrl(site)}&endpoint=${endpoint}`, {
+    it.each(['GET', 'POST'])(
+        'does not read an export endpoint from the query on %s', async method => {
+            const response = await fetch(`${getSiteUrl(site)}&endpoint=preflight`, {
+                method,
                 headers: new HmacClient(getSiteSecret(site)).getAuthHeaders(),
             });
-            assert.equal(response.status, 405);
-            assert.equal(response.headers.get('allow'), 'POST, OPTIONS');
-            assert.match((await response.json()).error, /POST/);
+            assert.equal(response.status, 400);
+            assert.match((await response.json()).error, /endpoint/);
         },
     );
 
     it('completes a file and database pull through the strict query firewall', async () => {
+        writeFileSync(join(directory, 'requests.jsonl'), '');
         const output = join(directory, 'pull');
         const importUrl = `${firewallUrl}&directory=${encodeURIComponent(getSiteDir(site))}`;
         const connection = await createMysqlConnection();
@@ -118,6 +119,7 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
         'reads POST %s parameters through the WordPress plugin', async contentType => {
             // Exercise the JSON-string form as well as nested values in later pulls.
             const params = {
+                endpoint: 'db_index',
                 directory: getSiteDir(site),
                 skip_rows: JSON.stringify([{
                     table_name_without_prefix: 'postmeta',
@@ -134,7 +136,7 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
                 body = new URLSearchParams(params).toString();
                 signedBody = body;
             }
-            const response = await fetch(`${firewallUrl}&endpoint=db_index`, {
+            const response = await fetch(firewallUrl, {
                 method: 'POST', body,
                 headers: {
                     ...new HmacClient(getSiteSecret(site)).getAuthHeaders(signedBody),
@@ -149,14 +151,42 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
     it('accepts multipart file lists with the pull options in form fields', async () => {
         const fileList = JSON.stringify([{ path: Buffer.from(join(getSiteDir(site), 'test-data', 'hello.txt')).toString('base64') }]);
         const body = new FormData();
+        body.set('endpoint', 'file_fetch');
         body.set('directory', getSiteDir(site));
         body.set('file_list', new Blob([fileList], { type: 'application/json' }), 'files.json');
-        const response = await fetch(`${firewallUrl}&endpoint=file_fetch`, {
+        const response = await fetch(firewallUrl, {
             method: 'POST', body,
             headers: new HmacClient(getSiteSecret(site)).getAuthHeaders(fileList),
         });
         assert.equal(response.status, 200, await response.clone().text());
         assert.match(await response.text(), /Hello World/);
+    });
+
+    it.each(['application/json', 'application/x-www-form-urlencoded'])(
+        'ignores conflicting query parameters with a POST %s body', async contentType => {
+            const params = { endpoint: 'db_index', directory: getSiteDir(site) };
+            const body = contentType === 'application/json'
+                ? JSON.stringify(params) : new URLSearchParams(params).toString();
+            const response = await fetch(`${getSiteUrl(site)}&endpoint=preflight&directory=/missing-query-directory&max_exec=not-a-number`, {
+                method: 'POST', body,
+                headers: {
+                    ...new HmacClient(getSiteSecret(site)).getAuthHeaders(body),
+                    'Content-Type': contentType,
+                },
+            });
+            assert.equal(response.status, 200, await response.clone().text());
+            assert.match(response.headers.get('content-type'), /multipart\/mixed/);
+        },
+    );
+
+    it('blocks an endpoint query parameter even on a POST request', async () => {
+        const body = new URLSearchParams({ endpoint: 'preflight' }).toString();
+        const response = await fetch(`${firewallUrl}&endpoint=preflight`, {
+            method: 'POST', body,
+            headers: new HmacClient(getSiteSecret(site)).getAuthHeaders(body),
+        });
+        assert.equal(response.status, 403);
+        assert.equal(response.headers.get('x-query-firewall'), 'blocked');
     });
 
     it('rejects the reported nested base64 query before it reaches PHP', async () => {
@@ -171,8 +201,8 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
             {},
             new HmacClient(getSiteSecret(site)).getAuthHeaders('{"directory":"/different"}'),
         ]) {
-            const response = await fetch(`${firewallUrl}&endpoint=preflight`, {
-                method: 'POST', body: JSON.stringify({ directory: getSiteDir(site) }),
+            const response = await fetch(firewallUrl, {
+                method: 'POST', body: JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(site) }),
                 headers: { ...headers, 'Content-Type': 'application/json' },
             });
             assert.equal(response.status, 403);
