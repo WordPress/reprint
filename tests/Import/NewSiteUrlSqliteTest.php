@@ -207,6 +207,41 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertSame('My Test Blog', $blogname[0]['option_value']);
     }
 
+    /** Ordinary db-apply must not select the more expensive multisite CSS path. */
+    public function testOrdinaryApplyKeepsRawStyleBodyRewriting(): void
+    {
+        $exportUrl = 'https://old-site.example.com/?reprint-api';
+        $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
+        $content = '<style>.hero{background:url(https://old-site.example.com/photo.png)}</style>';
+        $tableCursor = base64_encode(json_encode(['current_table' => 'wp_posts']));
+        $completeCursor = base64_encode(json_encode(['current_table' => null]));
+        file_put_contents($this->tempDir . '/db.sql',
+            "CREATE TABLE `wp_posts` (`ID` bigint NOT NULL PRIMARY KEY, `post_content` longtext NOT NULL);\n" .
+            self::SQL_GROUP_MARKER . $tableCursor . "\n" .
+            "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES (1, FROM_BASE64('" . base64_encode($content) . "'));\n" .
+            self::SQL_GROUP_MARKER . $completeCursor . "\n"
+        );
+        $this->writeState($exportUrl);
+        $client = new \ImportClient($exportUrl, $this->tempDir, $this->tempDir . '/fs-root');
+        $client->run([
+            'command' => 'db-apply',
+            'abort' => false,
+            'verbose' => false,
+            'secret' => null,
+            'tuning_config' => [],
+            'target_engine' => 'sqlite',
+            'target_sqlite_path' => $sqlitePath,
+            'target_db' => 'wp_test',
+            'new_site_url' => 'https://brand-new.example.com',
+        ]);
+
+        $rows = $this->querySqlite($sqlitePath, 'SELECT post_content FROM wp_posts', 'wp_test');
+        $this->assertSame(
+            '<style>.hero{background:url(https://brand-new.example.com/photo.png)}</style>',
+            $rows[0]['post_content']
+        );
+    }
+
     /** A new db-apply does not inherit URL replacements from an older apply. */
     public function testFreshApplyDoesNotReuseAnOlderUrlMapping(): void
     {
