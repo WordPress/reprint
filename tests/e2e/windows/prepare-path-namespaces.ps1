@@ -11,6 +11,8 @@ using Microsoft.Win32.SafeHandles;
 public static class NamespaceFixtures {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     static extern SafeFileHandle CreateFileW(string name, uint access, uint sharing, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern bool CreateDirectoryW(string name, IntPtr security);
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool WriteFile(SafeFileHandle file, byte[] bytes, uint length, out uint written, IntPtr overlapped);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
@@ -26,6 +28,10 @@ public static class NamespaceFixtures {
             if (!WriteFile(file, bytes, (uint)bytes.Length, out written, IntPtr.Zero) || written != bytes.Length)
                 throw new Win32Exception(Marshal.GetLastWin32Error(), name);
         }
+    }
+    /// <summary>Creates a directory without removing its trailing dot or space.</summary>
+    public static void Directory(string name) {
+        if (!CreateDirectoryW(name, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error(), name);
     }
     /// <summary>Returns the real volume GUID for a fixture drive.</summary>
     public static string Volume(string root) {
@@ -84,4 +90,33 @@ $cases['reserved-file'] = @{source="$root\Mixed Case\NUL.txt"; destination='D:/R
 $cases['physical-device'] = @{source='\\.\PhysicalDrive0'; error='Windows device names cannot select migration files'}
 [NamespaceFixtures]::Write("\\?\$root\Mixed Case\hello.txt:notes", 'attached stream bytes')
 [NamespaceFixtures]::Write("\\?\$root\Mixed Case\hello.txt:large", ('0123456789' * 600000))
+
+# Both spellings exist. A source that lowercases names would silently lose a file.
+New-Item -ItemType Directory -Force "$root\case-sensitive" | Out-Null
+fsutil.exe file setCaseSensitiveInfo "$root\case-sensitive" enable
+if ($LASTEXITCODE -ne 0) { throw 'Could not enable case-sensitive names for the native fixture.' }
+[NamespaceFixtures]::Write("\\?\$root\case-sensitive\item.txt", 'lowercase file')
+[NamespaceFixtures]::Write("\\?\$root\case-sensitive\ITEM.txt", 'uppercase file')
+$cases['case-sensitive-directory'] = @{
+    source="$root\case-sensitive"
+    files=@(
+        @{destination='D:/Reprint namespace cases/case-sensitive/item.txt'; content='lowercase file'},
+        @{destination='D:/Reprint namespace cases/case-sensitive/ITEM.txt'; content='uppercase file'}
+    )
+}
+New-Item -ItemType Directory -Force "$root\folder" | Out-Null
+[NamespaceFixtures]::Write("\\?\$root\folder\hello.txt", 'ordinary folder')
+foreach ($name in @('folder.', 'folder ')) {
+    [NamespaceFixtures]::Directory("\\?\$root\$name")
+    [NamespaceFixtures]::Write("\\?\$root\$name\hello.txt", "literal $name")
+    $cases['literal-directory-' + $cases.Count] = @{source="\\?\$root\$name"; destination="D:/Reprint namespace cases/$name/hello.txt"; content="literal $name"}
+}
+# Equivalent local-volume inputs must not create separate Linux trees.
+$cases['combined-volume-aliases'] = @{
+    source=@($spellings['literal-drive'], $spellings['device-drive'], $spellings['volume-guid'], $spellings['global-root'], $spellings['folder-case'])
+    destination=$destination
+    content='namespace file'
+    unique_basename='hello.txt'
+}
+
 $cases | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ManifestPath -Encoding utf8NoBOM

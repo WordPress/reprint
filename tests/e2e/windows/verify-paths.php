@@ -12,8 +12,11 @@ foreach ($manifest['path_cases'] as $name => $case) {
         $command = [
             PHP_BINARY, 'packages/reprint-client/src/import.php', 'pull-files', $source['home'] . '/?reprint-api',
             '--secret=windows-migration-secret', '--state-dir=' . $root . '/state', '--fs-root=' . $root . '/files',
-            '--include=' . $case['source'], '--progress=jsonl',
+            '--progress=jsonl',
         ];
+        foreach ((array) $case['source'] as $selection) {
+            $command[] = '--include=' . $selection;
+        }
         // A repeated failure must not resume past an uninspected or unwritten file.
         for ($attempt = 1; $attempt <= (isset($case['error']) ? 2 : 1); ++$attempt) {
             $process = proc_open($command, [0 => ['pipe', 'r'], 1 => ['file', $log_path, 'w'], 2 => ['file', $log_path, 'a']], $pipes);
@@ -32,14 +35,28 @@ foreach ($manifest['path_cases'] as $name => $case) {
         if (isset($case['error'])) {
             continue;
         }
-        $local_file = $root . '/files/' . $case['destination'];
-        if (!is_file($local_file) || file_get_contents($local_file) !== $case['content']) {
-            throw new RuntimeException('Path pull lost or misplaced the source file: ' . $local_file . "\n" . $log);
+        $expected_files = $case['files'] ?? [$case];
+        foreach ($expected_files as $expected_file) {
+            $local_file = $root . '/files/' . $expected_file['destination'];
+            if (!is_file($local_file) || file_get_contents($local_file) !== $expected_file['content']) {
+                throw new RuntimeException('Path pull lost or misplaced the source file: ' . $local_file . "\n" . $log);
+            }
+            if (basename($local_file) === 'hello.txt' && file_exists(dirname($local_file) . '/HELLO.TXT')) {
+                throw new RuntimeException('The Linux target must preserve filename case, not emulate Windows lookup.');
+            }
         }
-        if (basename($local_file) === 'hello.txt' && file_exists(dirname($local_file) . '/HELLO.TXT')) {
-            throw new RuntimeException('The Linux target must preserve filename case, not emulate Windows lookup.');
+        if (isset($case['unique_basename'])) {
+            $copies = 0;
+            foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root . '/files', FilesystemIterator::SKIP_DOTS)) as $file) {
+                if ($file->getFilename() === $case['unique_basename']) {
+                    ++$copies;
+                }
+            }
+            if ($copies !== 1) {
+                throw new RuntimeException('Equivalent volume paths created ' . $copies . ' copies of ' . $case['unique_basename']);
+            }
         }
-        printf("PASS: %s -> %s\n", $case['source'], $local_file);
+        printf("PASS: %s copied %d expected files.\n", $name, count($expected_files));
     } catch (Throwable $error) {
         $failures[] = $name;
         printf("FAIL: %s: %s\n", $name, $error->getMessage());

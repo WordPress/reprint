@@ -13,7 +13,7 @@ $native = FFI::cdef('
     DWORD GetLastError(void);
 ', 'kernel32.dll');
 foreach ($cases as $name => $case) {
-    if (isset($case['error'])) {
+    if (isset($case['error']) || isset($case['files']) || is_array($case['source'])) {
         continue;
     }
     $path = str_replace('/', '\\', $case['source']);
