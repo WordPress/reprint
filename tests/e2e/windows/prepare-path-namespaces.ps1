@@ -80,9 +80,23 @@ foreach ($entry in @{ 'directory-relative'='.\relative source'; 'drive-relative'
     $cases[$entry.Key] = @{source=$entry.Value; destination="$pwd/relative source/hello.txt".Replace('\', '/'); content='relative file'}
 }
 [NamespaceFixtures]::Write("\\?\$root\Mixed Case\trailing", 'different file without the suffix')
-foreach ($name in @('trailing.', 'trailing ', 'NUL.txt', 'COM1.txt', 'COM¹.txt')) {
+$literalNames = @('trailing.', 'trailing ', 'NUL.txt', 'COM1.txt', 'COM¹.txt')
+foreach ($name in $literalNames) {
     [NamespaceFixtures]::Write("\\?\$root\Mixed Case\$name", "literal $name")
     $cases['literal-name-' + $cases.Count] = @{source="\\?\$root\Mixed Case\$name"; destination="D:/Reprint namespace cases/Mixed Case/$name"; content="literal $name"}
+}
+# Selecting the parent must preserve every literal child too. Checking hello.txt
+# alone misses a traversal that reads the ordinary sibling for a trailing name.
+foreach ($key in $spellings.Keys) {
+    $directory = $cases[$key].destination.Substring(0, $cases[$key].destination.Length - 'hello.txt'.Length)
+    $files = @(
+        @{destination=($directory + 'hello.txt'); content='namespace file'},
+        @{destination=($directory + 'trailing'); content='different file without the suffix'}
+    )
+    foreach ($name in $literalNames) {
+        $files += @{destination=($directory + $name); content="literal $name"}
+    }
+    $cases[$key]['files'] = $files
 }
 # PHP's ordinary drive spelling can read an existing literal NUL.txt file.
 # An actual device has no file suffix; the physical-device test covers rejection.
@@ -116,6 +130,7 @@ $cases['combined-volume-aliases'] = @{
     source=@($spellings['literal-drive'], $spellings['device-drive'], $spellings['volume-guid'], $spellings['global-root'], $spellings['folder-case'])
     destination=$destination
     content='namespace file'
+    files=$cases['literal-drive'].files
     unique_basename='hello.txt'
 }
 

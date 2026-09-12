@@ -13,7 +13,7 @@ $native = FFI::cdef('
     DWORD GetLastError(void);
 ', 'kernel32.dll');
 foreach ($cases as $name => $case) {
-    if (isset($case['error']) || isset($case['files']) || is_array($case['source'])) {
+    if (isset($case['error']) || !isset($case['destination']) || is_array($case['source'])) {
         continue;
     }
     $path = str_replace('/', '\\', $case['source']);
@@ -23,9 +23,7 @@ foreach ($cases as $name => $case) {
     $wide_bytes = mb_convert_encoding($path, 'UTF-16LE', 'UTF-8') . "\0\0";
     $wide_path = $native->new('WCHAR[' . (strlen($wide_bytes) / 2) . ']');
     FFI::memcpy($wide_path, $wide_bytes, strlen($wide_bytes));
-    printf("WIN32: opening %s\n", $name);
     $handle = $native->CreateFileW($wide_path, 0x80000000, 7, null, 3, 0x02000000, null);
-    printf("WIN32: %s handle returned\n", $name);
     // Casting void* directly to a scalar dereferences the opaque Windows handle.
     if (FFI::cast('intptr_t *', FFI::addr($handle))[0] === -1) {
         printf("WIN32: %s open error %d\n", $name, $native->GetLastError());
@@ -33,11 +31,9 @@ foreach ($cases as $name => $case) {
         try {
             $final_path = $native->new('WCHAR[32768]');
             $length = $native->GetFinalPathNameByHandleW($handle, $final_path, 32768, 0);
-            printf("WIN32: %s final path returned %d\n", $name, $length);
             $buffer = $native->new('char[64]');
             $read = $native->new('DWORD');
             $read_ok = $native->ReadFile($handle, $buffer, 64, FFI::addr($read), null);
-            printf("WIN32: %s read returned %d\n", $name, $read->cdata);
             printf("WIN32: %s\n", json_encode([
                 'case' => $name,
                 'final_path' => $length ? mb_convert_encoding(FFI::string(FFI::cast('char *', FFI::addr($final_path[0])), $length * 2), 'UTF-8', 'UTF-16LE') : false,
