@@ -73,12 +73,14 @@ New-Item -ItemType Directory -Force '.\relative source' | Out-Null
 foreach ($entry in @{ 'directory-relative'='.\relative source'; 'drive-relative'='D:relative source' }.GetEnumerator()) {
     $cases[$entry.Key] = @{source=$entry.Value; destination="$pwd/relative source/hello.txt".Replace('\', '/'); content='relative file'}
 }
+[NamespaceFixtures]::Write("\\?\$root\Mixed Case\trailing", 'different file without the suffix')
 foreach ($name in @('trailing.', 'trailing ', 'NUL.txt', 'COM1.txt', 'COM¹.txt')) {
     [NamespaceFixtures]::Write("\\?\$root\Mixed Case\$name", "literal $name")
     $cases['literal-name-' + $cases.Count] = @{source="\\?\$root\Mixed Case\$name"; destination="D:/Reprint namespace cases/Mixed Case/$name"; content="literal $name"}
 }
-# This names a device through normal Win32 lookup, not the literal NUL.txt above.
-$cases['reserved-device'] = @{source="$root\Mixed Case\NUL.txt"; error='Windows device names cannot select migration files'}
+# PHP's ordinary drive spelling can read an existing literal NUL.txt file.
+# An actual device has no file suffix; the physical-device test covers rejection.
+$cases['reserved-file'] = @{source="$root\Mixed Case\NUL.txt"; destination='D:/Reprint namespace cases/Mixed Case/NUL.txt'; content='literal NUL.txt'}
 $cases['physical-device'] = @{source='\\.\PhysicalDrive0'; error='Windows device names cannot select migration files'}
 [NamespaceFixtures]::Write("\\?\$root\Mixed Case\hello.txt:notes", 'attached stream bytes')
 [NamespaceFixtures]::Write("\\?\$root\Mixed Case\hello.txt:large", ('0123456789' * 600000))

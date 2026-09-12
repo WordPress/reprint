@@ -42,7 +42,7 @@ foreach (['file', 'directory'] as $type) {
 $long_directory = 'D:/Reprint UNC length case';
 mkdir($long_directory);
 file_put_contents($long_directory . '/' . str_repeat('a', 251) . '.txt', 'long UNC file');
-$path_cases['long-share'] = ['source' => '\\\\localhost\\D$\\Reprint UNC length case', 'error' => 'Cannot inspect Windows share path'];
+$path_cases['long-share'] = ['source' => '\\\\localhost\\D$\\Reprint UNC length case', 'destination' => 'UNC/LOCALHOST/D$/Reprint UNC length case/' . str_repeat('a', 251) . '.txt', 'content' => 'long UNC file'];
 
 // Test >260 total characters and a 255-byte component through a drive path.
 $long_relative_path = str_repeat('nested/', 45) . str_repeat('a', 251) . '.txt';
