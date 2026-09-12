@@ -6,11 +6,11 @@ $native = FFI::cdef('
     typedef unsigned short WCHAR;
     typedef unsigned long DWORD;
     typedef void *HANDLE;
-    HANDLE __stdcall CreateFileW(const WCHAR *, DWORD, DWORD, void *, DWORD, DWORD, HANDLE);
-    DWORD __stdcall GetFinalPathNameByHandleW(HANDLE, WCHAR *, DWORD, DWORD);
-    int __stdcall ReadFile(HANDLE, void *, DWORD, DWORD *, void *);
-    int __stdcall CloseHandle(HANDLE);
-    DWORD __stdcall GetLastError(void);
+    HANDLE CreateFileW(const WCHAR *, DWORD, DWORD, void *, DWORD, DWORD, HANDLE);
+    DWORD GetFinalPathNameByHandleW(HANDLE, WCHAR *, DWORD, DWORD);
+    int ReadFile(HANDLE, void *, DWORD, DWORD *, void *);
+    int CloseHandle(HANDLE);
+    DWORD GetLastError(void);
 ', 'kernel32.dll');
 foreach ($cases as $name => $case) {
     if (isset($case['error']) || isset($case['files']) || is_array($case['source'])) {
