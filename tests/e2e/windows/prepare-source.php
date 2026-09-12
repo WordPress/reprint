@@ -51,6 +51,8 @@ mkdir(dirname($long_drive_root . '/' . $long_relative_path), 0777, true);
 file_put_contents($long_drive_root . '/' . $long_relative_path, 'long drive file');
 $path_cases['long-drive'] = ['source' => $long_drive_root, 'destination' => $long_drive_root . '/' . $long_relative_path, 'content' => 'long drive file'];
 
+$path_cases = array_merge($path_cases, json_decode(file_get_contents(dirname(__DIR__, 3) . '/namespace-cases.json'), true, 512, JSON_THROW_ON_ERROR));
+
 $database = new PDO('mysql:host=127.0.0.1;port=3308', 'root', 'root');
 $database_os = $database->query('SELECT @@version_compile_os')->fetchColumn();
 if (stripos($database_os, 'win') !== 0) {
