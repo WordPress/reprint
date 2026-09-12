@@ -25,7 +25,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
-          extensions: pdo_mysql, mysqli, curl, mbstring, zip
+          extensions: pdo_mysql, mysqli, curl, mbstring, zip, ffi
+          ini-values: ffi.enable=true
           coverage: none
       - uses: Vampire/setup-wsl@v7
         with:
@@ -62,6 +63,8 @@ jobs:
             $siteDirectory = '\\localhost\D$' + $siteDirectory.Substring(2)
           }
           $windowsHost = (wsl -d Ubuntu-24.04 --exec bash -c "ip route show default | cut -d ' ' -f 3").Trim()
+          ./tests/e2e/windows/prepare-path-namespaces.ps1 "$env:GITHUB_WORKSPACE/namespace-cases.json"
+          php tests/e2e/windows/probe-native-paths.php "$env:GITHUB_WORKSPACE/namespace-cases.json"
           php tests/e2e/windows/prepare-source.php "$siteDirectory" "http://${windowsHost}:8081" "$env:GITHUB_WORKSPACE/source-manifest.json"
           New-NetFirewallRule -DisplayName ReprintMigration -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8081 | Out-Null
           Start-Process php -ArgumentList '-S', '0.0.0.0:8081', '-t', ('"' + $siteDirectory + '"') -RedirectStandardOutput "$env:RUNNER_TEMP/source.stdout.log" -RedirectStandardError "$env:RUNNER_TEMP/source.stderr.log"
