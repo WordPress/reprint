@@ -38,8 +38,13 @@ foreach ($manifest['path_cases'] as $name => $case) {
         $expected_files = $case['files'] ?? [$case];
         foreach ($expected_files as $expected_file) {
             $local_file = $root . '/files/' . $expected_file['destination'];
-            if (!is_file($local_file) || file_get_contents($local_file) !== $expected_file['content']) {
-                throw new RuntimeException('Path pull lost or misplaced the source file: ' . $local_file . "\n" . $log);
+            $actual_content = is_file($local_file) ? file_get_contents($local_file) : false;
+            if ($actual_content !== $expected_file['content']) {
+                $actual = $actual_content === false ? 'missing file' : strlen($actual_content) . ' bytes, SHA-256 ' . hash('sha256', $actual_content);
+                throw new RuntimeException(
+                    'Path pull did not preserve ' . $local_file . ': expected ' . strlen($expected_file['content'])
+                    . ' bytes, SHA-256 ' . hash('sha256', $expected_file['content']) . '; got ' . $actual . "\n" . $log
+                );
             }
             if (basename($local_file) === 'hello.txt' && file_exists(dirname($local_file) . '/HELLO.TXT')) {
                 throw new RuntimeException('The Linux target must preserve filename case, not emulate Windows lookup.');

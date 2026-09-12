@@ -79,7 +79,8 @@ New-Item -ItemType Directory -Force '.\relative source' | Out-Null
 foreach ($entry in @{ 'directory-relative'='.\relative source'; 'drive-relative'='D:relative source' }.GetEnumerator()) {
     $cases[$entry.Key] = @{source=$entry.Value; destination="$pwd/relative source/hello.txt".Replace('\', '/'); content='relative file'}
 }
-[NamespaceFixtures]::Write("\\?\$root\Mixed Case\trailing", 'different file without the suffix')
+# The ordinary sibling has the same size as both literal trailing-name files.
+[NamespaceFixtures]::Write("\\?\$root\Mixed Case\trailing", 'ordinary sibling!')
 $literalNames = @('trailing.', 'trailing ', 'NUL.txt', 'COM1.txt', 'COM¹.txt')
 foreach ($name in $literalNames) {
     [NamespaceFixtures]::Write("\\?\$root\Mixed Case\$name", "literal $name")
@@ -91,7 +92,7 @@ foreach ($key in $spellings.Keys) {
     $directory = $cases[$key].destination.Substring(0, $cases[$key].destination.Length - 'hello.txt'.Length)
     $files = @(
         @{destination=($directory + 'hello.txt'); content='namespace file'},
-        @{destination=($directory + 'trailing'); content='different file without the suffix'}
+        @{destination=($directory + 'trailing'); content='ordinary sibling!'}
     )
     foreach ($name in $literalNames) {
         $files += @{destination=($directory + $name); content="literal $name"}
