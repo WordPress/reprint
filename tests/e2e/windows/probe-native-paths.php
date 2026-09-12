@@ -23,6 +23,7 @@ foreach ($cases as $name => $case) {
     $wide_bytes = mb_convert_encoding($path, 'UTF-16LE', 'UTF-8') . "\0\0";
     $wide_path = $native->new('WCHAR[' . (strlen($wide_bytes) / 2) . ']');
     FFI::memcpy($wide_path, $wide_bytes, strlen($wide_bytes));
+    printf("WIN32: opening %s\n", $name);
     $handle = $native->CreateFileW($wide_path, 0x80000000, 7, null, 3, 0x02000000, null);
     if (FFI::cast('intptr_t', $handle)->cdata === -1) {
         printf("WIN32: %s open error %d\n", $name, $native->GetLastError());
@@ -35,7 +36,7 @@ foreach ($cases as $name => $case) {
             $read_ok = $native->ReadFile($handle, $buffer, 64, FFI::addr($read), null);
             printf("WIN32: %s\n", json_encode([
                 'case' => $name,
-                'final_path' => $length ? mb_convert_encoding(FFI::string(FFI::cast('char *', $final_path), $length * 2), 'UTF-8', 'UTF-16LE') : false,
+                'final_path' => $length ? mb_convert_encoding(FFI::string(FFI::cast('char *', FFI::addr($final_path[0])), $length * 2), 'UTF-8', 'UTF-16LE') : false,
                 'read_matches' => $read_ok && FFI::string($buffer, $read->cdata) === $case['content'],
             ], JSON_UNESCAPED_SLASHES));
         } finally {
