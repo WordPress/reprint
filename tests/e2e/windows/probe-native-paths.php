@@ -26,7 +26,8 @@ foreach ($cases as $name => $case) {
     printf("WIN32: opening %s\n", $name);
     $handle = $native->CreateFileW($wide_path, 0x80000000, 7, null, 3, 0x02000000, null);
     printf("WIN32: %s handle returned\n", $name);
-    if (FFI::cast('intptr_t', $handle)->cdata === -1) {
+    // Casting void* directly to a scalar dereferences the opaque Windows handle.
+    if (FFI::cast('intptr_t *', FFI::addr($handle))[0] === -1) {
         printf("WIN32: %s open error %d\n", $name, $native->GetLastError());
     } else {
         try {
