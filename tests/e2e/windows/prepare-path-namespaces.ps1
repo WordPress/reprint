@@ -125,6 +125,15 @@ foreach ($name in @('folder.', 'folder ')) {
     [NamespaceFixtures]::Write("\\?\$root\$name\hello.txt", "literal $name")
     $cases['literal-directory-' + $cases.Count] = @{source="\\?\$root\$name"; destination="D:/Reprint namespace cases/$name/hello.txt"; content="literal $name"}
 }
+# A normal parent selection must preserve literal directory names found below it.
+$cases['literal-directory-parent'] = @{
+    source=$root
+    files=@(
+        @{destination='D:/Reprint namespace cases/folder/hello.txt'; content='ordinary folder'},
+        @{destination='D:/Reprint namespace cases/folder./hello.txt'; content='literal folder.'},
+        @{destination='D:/Reprint namespace cases/folder /hello.txt'; content='literal folder '}
+    ) + $cases['literal-drive'].files + $cases['case-sensitive-directory'].files
+}
 # Equivalent local-volume inputs must not create separate Linux trees.
 $cases['combined-volume-aliases'] = @{
     source=@($spellings['literal-drive'], $spellings['device-drive'], $spellings['volume-guid'], $spellings['global-root'], $spellings['folder-case'])
