@@ -185,8 +185,15 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 					return $this->next_url_in_style_element();
 				}
 				// Start the STYLE body only after its attributes have been read.
-				return $this->next_url_attribute()
-					|| ( $this->parse_style_elements && $this->next_url_in_style_element() );
+				if ( $this->next_url_attribute() ) {
+					return true;
+				}
+
+				if ( $this->parse_style_elements ) {
+					return $this->next_url_in_style_element();
+				}
+
+				return false;
 			case '#block-comment':
 				return $this->next_url_block_attribute();
 			default:
