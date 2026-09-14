@@ -117,7 +117,8 @@ class WpcloudHostAnalyzer implements HostAnalyzer
             if (!is_string($path) || $path === '' || $path[0] !== '/') {
                 continue;
             }
-            $dir = trim_right_slash(dirname($path));
+            // WP Cloud's platform paths use Unix rules, even on a Windows client.
+            $dir = trim_right_slash(dirname($path), 'unix');
             if ($dir !== '/') {
                 $dirs[] = $dir;
             }

@@ -78,6 +78,38 @@ final class ExportHttpServerTest extends TestCase
         $this->assertSame(['/srv/site/removed'], $config['pulled_before']);
     }
 
+    /** A Windows server accepts either separator, regardless of the client OS. */
+    public function testParsesWindowsPathParameters(): void
+    {
+        if (PHP_OS !== 'WINNT') {
+            $this->markTestSkipped('Windows request paths require a Windows source host.');
+        }
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        foreach (['D:\\Sites\\example.test/', 'D:/Sites/example.test', '\\\\server\\share\\Sites'] as $path) {
+            $config = $server->parse_http_config([
+                'endpoint' => 'file_index',
+                'directory' => [$path, base64_encode($path)],
+                'list_dir' => base64_encode($path),
+                'pulled_before' => [base64_encode($path)],
+            ]);
+            $this->assertSame([$path, $path], $config['directory']);
+            $this->assertSame($path, $config['list_dir']);
+            $this->assertSame([$path], $config['pulled_before']);
+        }
+    }
+
+    /** Linux must not accept a Windows-looking relative filename as an absolute root. */
+    public function testUnixServerRejectsWindowsLookingRelativeRequestPath(): void
+    {
+        if (PHP_OS === 'WINNT') {
+            $this->markTestSkipped('Unix request validation requires a Unix source host.');
+        }
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('must be an absolute path');
+        $server->parse_http_config(['endpoint' => 'file_index', 'directory' => ['D:\\photos']]);
+    }
+
     public function testRejectsInvalidBase64EncodedPathParameter(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer();

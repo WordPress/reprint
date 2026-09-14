@@ -163,7 +163,7 @@ namespace {
     require $argv[1];
     echo \WordPress\Reprint\Server\build_pdo_dsn('localhost', 'wordpress');
     echo '|';
-    echo \WordPress\Reprint\Server\trim_right_slash('/srv/site/');
+    echo \WordPress\Reprint\Server\trim_right_slash('/srv/site/', 'unix');
 }
 PHP;
 

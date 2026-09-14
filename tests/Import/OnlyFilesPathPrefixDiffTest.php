@@ -176,7 +176,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
         $reflection->getProperty('pull_index_journal')
             ->getValue($client)
-            ->apply_pending_records();
+            ->apply_pending_records('unix');
 
         $this->assertFileDoesNotExist($inside);
         $this->assertFileExists($outside);
@@ -205,7 +205,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 
         [$client, $reflection] = $this->prepareCompleteSyncClient(['/var/www/html']);
         $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
-        $reflection->getProperty('pull_index_journal')->getValue($client)->apply_pending_records();
+        $reflection->getProperty('pull_index_journal')->getValue($client)->apply_pending_records('unix');
 
         $this->assertDirectoryDoesNotExist(
             $this->filesystem_root . '/shared/theme',
@@ -237,7 +237,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $r->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
         $r->getProperty('pull_index_journal')
             ->getValue($client)
-            ->apply_pending_records();
+            ->apply_pending_records('unix');
 
         // Unselected file AND its index entry survive.
         $this->assertFileExists($unselected);
@@ -263,7 +263,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
         $reflection->getProperty('pull_index_journal')
             ->getValue($client)
-            ->apply_pending_records();
+            ->apply_pending_records('unix');
 
         $this->assertFileExists($excluded);
         $this->assertContains(
@@ -365,7 +365,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $r->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
         $r->getProperty('pull_index_journal')
             ->getValue($client)
-            ->apply_pending_records();
+            ->apply_pending_records('unix');
 
         // The selected root, its matched contents, and its index entry survive…
         $this->assertDirectoryExists($this->filesystem_root . '/wp-content/themes');
@@ -389,7 +389,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
         $reflection->getProperty('pull_index_journal')
             ->getValue($client)
-            ->apply_pending_records();
+            ->apply_pending_records('unix');
 
         $this->assertFileDoesNotExist($local);
         $this->assertNotContains('/wp-config.php', $this->readRemoteIndexEntryPaths());
@@ -451,7 +451,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
         $reflection->getProperty('pull_index_journal')
             ->getValue($client)
-            ->apply_pending_records();
+            ->apply_pending_records('unix');
 
         $this->assertFileDoesNotExist($selected);
         $this->assertFileExists($unrelated);
@@ -476,7 +476,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
         $reflection->getProperty('pull_index_journal')
             ->getValue($client)
-            ->apply_pending_records();
+            ->apply_pending_records('unix');
 
         $this->assertFileDoesNotExist($inside);
         $this->assertDirectoryDoesNotExist($this->filesystem_root . '/var/www/html/wp-content');

@@ -100,7 +100,10 @@ class FileTreeProducer
                 "The 'paths' option is required and must be an array"
             );
         }
-        $this->paths = $options["paths"];
+        // Sort and resume using the same spelling that file chunks carry.
+        $this->paths = array_map(static function (string $path): string {
+            return normalize_path_separators($path, native_path_format());
+        }, $options["paths"]);
 
         if (isset($options["cursor"])) {
             $this->initialize_from_cursor($options["cursor"]);
@@ -185,7 +188,7 @@ class FileTreeProducer
         if ($path !== null && $byte_offset > 0) {
             // Resuming mid-file.
             clearstatcache(true, $path);
-            $size = @filesize($path);
+            $size = @filesize(source_io_path($path));
             if ($size === false) {
                 // File disappeared; treat as completed.
                 $this->current_file_meta = null;
@@ -213,10 +216,10 @@ class FileTreeProducer
     private function normalize_directories($directories): array
     {
         if (is_string($directories)) {
-            return [trim_right_slash($directories)];
+            return [trim_right_slash($directories, native_path_format())];
         }
         return array_map(function ($d) {
-            return trim_right_slash($d);
+            return trim_right_slash($d, native_path_format());
         }, $directories);
     }
 
@@ -346,7 +349,7 @@ class FileTreeProducer
             }
 
             if ($info["type"] === "link") {
-                $target = @readlink($resolved_path);
+                $target = @source_readlink($resolved_path);
                 $this->last_emitted_path = $resolved_path;
                 $this->last_emitted_ctime = $info["ctime"];
                 $this->current_chunk = [
@@ -402,20 +405,16 @@ class FileTreeProducer
         }
 
         clearstatcache(true, $path);
-        if ($path[0] === "/" && (file_exists($path) || is_link($path))) {
+        if (is_absolute_path($path, native_path_format()) && (file_exists(source_io_path($path)) || is_link(source_io_path($path)))) {
             return $path;
         }
 
         foreach ($this->directories as $dir) {
             $candidate = wp_join_unix_paths($dir, $path);
             clearstatcache(true, $candidate);
-            if (file_exists($candidate) || is_link($candidate)) {
+            if (file_exists(source_io_path($candidate)) || is_link(source_io_path($candidate))) {
                 return $candidate;
             }
-        }
-
-        if ($path[0] === "/") {
-            return null;
         }
 
         return null;
@@ -432,7 +431,7 @@ class FileTreeProducer
                 $this->multisite_selection->assert_path_allowed($file["path"]);
             }
             clearstatcache(true, $file["path"]);
-            $pre_stat = @lstat($file["path"]);
+            $pre_stat = @lstat(source_io_path($file["path"]));
             if ($pre_stat === false || (($pre_stat["mode"] & 0170000) !== 0100000)) {
                 $this->streaming_file_handle = null;
                 $this->current_file_meta = null;
@@ -449,7 +448,7 @@ class FileTreeProducer
                 return;
             }
 
-            $this->streaming_file_handle = @fopen($file["path"], "r");
+            $this->streaming_file_handle = @fopen(source_io_path($file["path"]), "r");
             if (!$this->streaming_file_handle) {
                 $this->streaming_file_handle = null;
                 $this->current_file_meta = null;
@@ -516,11 +515,15 @@ class FileTreeProducer
 
         // Detect whether the file changed while we were reading it.
         clearstatcache(true, $file["path"]);
-        $stat = @stat($file["path"]);
+        $stat = @stat(source_io_path($file["path"]));
         if ($stat === false) {
             $changed = true;
             $error_type = "file_missing";
         } else {
+            // feof() can stay false until another read, even after an exact
+            // final chunk. Use the fresh size instead of emitting an empty-read
+            // error on the next step. This also works for native Windows streams.
+            $is_last = $is_last || $stat["size"] === $this->streaming_file_offset;
             $now_ctime = $stat["ctime"];
             if ($now_ctime !== $file["ctime"]) {
                 $changed = true;
@@ -684,7 +687,7 @@ class FileTreeProducer
     private function lstat_path(string $path): ?array
     {
         clearstatcache(true, $path);
-        $stat = @lstat($path);
+        $stat = @lstat(source_io_path($path));
         if ($stat === false) {
             return null;
         }
