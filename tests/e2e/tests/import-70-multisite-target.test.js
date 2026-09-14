@@ -1,5 +1,6 @@
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
+import { inspect } from 'node:util';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -124,12 +125,17 @@ describe('Pull a selected site into a fresh single site', () => {
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
         server.stdout.on('data', data => { serverLog += data; });
         server.stderr.on('data', data => { serverLog += data; });
+        // Keep the first request failure and exit reason; later connection
+        // refusals cannot explain why a server stopped after accepting a request.
+        server.on('exit', (code, signal) => { serverLog += `PHP server exited: code=${code}, signal=${signal}\n`; });
         let response;
+        let firstRequestError;
+        let lastRequestError;
         for (let attempt = 0; attempt < 100; ++attempt) {
             try { response = await fetch(`${targetUrl}/?p=100`); break; }
-            catch { await sleep(100); }
+            catch (error) { firstRequestError ??= error; lastRequestError = error; await sleep(100); }
         }
-        assert.ok(response, serverLog);
+        assert.ok(response, serverLog + '\n' + inspect({ firstRequestError, lastRequestError }, { depth: 4 }));
         const html = await response.text();
         assert.equal(response.status, 200, html + serverLog);
         assert.ok(html.includes('Only site 7'));
@@ -141,10 +147,12 @@ describe('Pull a selected site into a fresh single site', () => {
         assert.equal(await newUpload.text(), 'New target upload');
         const loginPage = await fetch(`${targetUrl}/wp-login.php`);
         const cookie = loginPage.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+        const targetPassword = runWp(documentRoot, ['user', 'reset-password', 'shared', '--skip-email', '--porcelain']).trim();
+        assert.ok(targetPassword.length > 0);
         const login = await fetch(`${targetUrl}/wp-login.php`, {
             method: 'POST', redirect: 'manual',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-            body: new URLSearchParams({ log: 'shared', pwd: 'multisite-password', testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
+            body: new URLSearchParams({ log: 'shared', pwd: targetPassword, testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
         });
         assert.equal(login.status, 302, await login.text());
         const authCookies = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');

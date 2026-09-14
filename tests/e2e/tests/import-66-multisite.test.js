@@ -108,6 +108,9 @@ define('BLOG_ID_CURRENT_SITE', 1);
                 assert.ok(!tableNames.includes('network_8_posts'));
                 assert.ok(!tableNames.includes('network_9_posts'));
                 assert.ok(!tableNames.includes(selectedId === 7 ? 'network_posts' : 'network_7_posts'));
+                const [credentials] = await imported.query('SELECT user_pass, user_activation_key FROM network_users');
+                assert.ok(credentials.length > 0);
+                assert.ok(credentials.every(user => user.user_pass === '*' && user.user_activation_key === ''), 'Imported accounts must not retain source login credentials');
                 const [sites] = await imported.query('SELECT blog_id FROM network_blogs');
                 assert.deepEqual(sites.map(row => Number(row.blog_id)), [selectedId]);
                 const [networks] = await imported.query('SELECT id FROM network_site');
@@ -230,10 +233,20 @@ define('BLOG_ID_CURRENT_SITE', 1);
             if (selectedId === 7) {
                 const loginPage = await fetch(`${targetUrl}/wp-login.php`);
                 const cookie = loginPage.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+                const oldLogin = await fetch(`${targetUrl}/wp-login.php`, {
+                    method: 'POST', redirect: 'manual',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+                    body: new URLSearchParams({ log: 'chosen', pwd: 'multisite-password', testcookie: '1' }),
+                });
+                assert.equal(oldLogin.status, 200);
+                assert.ok(!oldLogin.headers.getSetCookie().some(value => value.startsWith('wordpress_logged_in_')), 'The source password must not sign in at the target');
+                const targetPassword = wp(target.documentRoot, ['user', 'reset-password', 'chosen', '--skip-email', '--porcelain']).trim();
+                assert.ok(targetPassword.length > 0);
+                assert.notEqual(targetPassword, 'multisite-password');
                 const login = await fetch(`${targetUrl}/wp-login.php`, {
                     method: 'POST', redirect: 'manual',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-                    body: new URLSearchParams({ log: 'chosen', pwd: 'multisite-password', testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
+                    body: new URLSearchParams({ log: 'chosen', pwd: targetPassword, testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
                 });
                 assert.equal(login.status, 302, await login.text());
                 const authCookies = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');

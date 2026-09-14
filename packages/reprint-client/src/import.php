@@ -14283,7 +14283,7 @@ if (
             'type' => 'value-or-next',
             'target' => 'site_admin',
             'placeholder' => 'LOGIN',
-            'help' => 'Imported user who will administer the new single site',
+            'help' => 'Imported user who will administer the new single site; set a fresh target password after import (docs/multisite/USAGE.md)',
             'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
