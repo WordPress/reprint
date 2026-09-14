@@ -2666,7 +2666,7 @@ class ImportClient
      */
     public function run_preflight(): void
     {
-        $url = $this->build_url("preflight", null, []);
+        ["url" => $url, "params" => $post_data] = $this->build_request("preflight", null);
         $this->audit_log("PREFLIGHT REQUEST | {$url}", false);
 
         // Try each User-Agent until one gets a JSON response.
@@ -2684,7 +2684,7 @@ class ImportClient
         foreach ($user_agents as $ua) {
             $this->get_state()->user_agent = $ua;
             $this->request_context_headers['User-Agent'] = $ua;
-            $result = $this->fetch_json($url);
+            $result = $this->fetch_json($url, $post_data);
             $payload = $result["json"] ?? null;
             if ($payload !== null) {
                 $this->audit_log("USER-AGENT OK | {$ua}", false);
@@ -2914,7 +2914,8 @@ class ImportClient
             $post_data = [
                 "file_list" => new \CURLFile($tmp, "application/json", "file_list"),
             ];
-            $url = $this->build_url("file_fetch", null, ["directory" => [$directory]]);
+            ["url" => $url, "params" => $request_params] = $this->build_request("file_fetch", null, ["directory" => [$directory]]);
+            $post_data = array_merge($request_params, $post_data);
 
             $context = new StreamingContext();
             $context->file_handle = null;
@@ -7832,7 +7833,8 @@ class ImportClient
         if (!empty($fetch_directories)) {
             $params["directory"] = $fetch_directories;
         }
-        $url = $this->build_url("file_fetch", $cursor, $params);
+        ["url" => $url, "params" => $request_params] = $this->build_request("file_fetch", $cursor, $params);
+        $post_data = array_merge($request_params, $post_data ?? []);
         $this->audit_log("Downloading file fetch from {$url}");
         $this->audit_log("POST data: " . json_encode($post_data));
 
@@ -8201,7 +8203,7 @@ class ImportClient
         if ($paths_pulled_before !== []) {
             $params["pulled_before"] = $paths_pulled_before;
         }
-        $url = $this->build_url("file_index", $cursor, $params);
+        ["url" => $url, "params" => $post_data] = $this->build_request("file_index", $cursor, $params);
         $context = new StreamingContext();
 
         $context->on_chunk = function ($chunk) use (
@@ -8356,7 +8358,7 @@ class ImportClient
         $cursor_before = $cursor;
         $request_start = microtime(true);
         try {
-            $this->fetch_streaming($url, $cursor, $context, null, "file_index");
+            $this->fetch_streaming($url, $cursor, $context, $post_data, "file_index");
         } catch (TransientInterruptionException $e) {
             fclose($next_remote_index_file_handle);
             $this->get_state()->index->cursor = $cursor;
@@ -9264,7 +9266,7 @@ class ImportClient
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
                 $params["skip_tables"] = [self::DATABASE_IMPORT_POSITION_TABLE];
-                $url = $this->build_url("sql_chunk", $cursor, $params);
+                ["url" => $url, "params" => $post_data] = $this->build_request("sql_chunk", $cursor, $params);
 
                 $context = new StreamingContext();
                 $remote_sql_error = null;
@@ -9500,7 +9502,7 @@ class ImportClient
                 $cursor_before = $mode === "mysql" ? $durable_mysql_cursor : $cursor;
                 $request_start = microtime(true);
                 try {
-                    $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
+                    $this->fetch_streaming($url, $cursor, $context, $post_data, "sql_chunk");
                 } catch (TransientInterruptionException $e) {
                     if ($remote_sql_error !== null) {
                         throw new RuntimeException(
@@ -9999,7 +10001,7 @@ class ImportClient
                 $params = [
                     "tables_per_batch" => 1000,
                 ];
-                $url = $this->build_url("db_index", $cursor, $params);
+                ["url" => $url, "params" => $post_data] = $this->build_request("db_index", $cursor, $params);
 
                 $context = new StreamingContext();
                 $context->on_chunk = function ($chunk) use (
@@ -10097,7 +10099,7 @@ class ImportClient
                         $url,
                         $cursor,
                         $context,
-                        null,
+                        $post_data,
                         "db_index",
                     );
                 } catch (TransientInterruptionException $e) {
@@ -11700,23 +11702,45 @@ class ImportClient
     }
 
     /**
-     * Build request URL with endpoint and cursor.
+     * Keep only the API marker in the URL; send export parameters in the body.
+     *
+     * @param array $params Endpoint-specific pull options, including tuning,
+     *                      path selections, table selections, and row filters.
+     * @return array {
+     *     @type string $url    API URL with only its routing marker.
+     *     @type array  $params Endpoint and options to send in the POST body.
+     * }
      */
-    private function build_url(
+    private function build_request(
         string $endpoint,
         ?string $cursor,
         array $params = []
-    ): string {
+    ): array {
+        $url = explode('#', $this->remote_reprint_api_url, 2)[0];
+        $query_start = strpos($url, '?');
+        if ($query_start !== false) {
+            $query = substr($url, $query_start + 1);
+            parse_str($query, $url_params);
+            unset($url_params['reprint-api'], $url_params['site-export-api']);
+            $params = array_merge($url_params, $params);
+            $query_parts = array_filter(explode('&', $query), static function ($part) {
+                $key = urldecode(explode('=', $part, 2)[0]);
+                return in_array($key, ['reprint-api', 'site-export-api'], true);
+            });
+            $url = substr($url, 0, $query_start);
+            if ($query_parts) {
+                $url .= '?' . implode('&', $query_parts);
+            }
+        }
+        // Keep endpoint before multipart file data so hosts can route the
+        // request without first reading a potentially large file list.
+        unset($params['endpoint']);
+        $params = ['endpoint' => $endpoint] + $params;
         $preflight_record = $this->get_state()->preflight_record();
         // Preflight keeps the legacy path parameters so a new client can learn
         // whether an older server supports the base64 form before using it.
         $server_supports_base64_paths = $endpoint !== 'preflight'
             && !empty($preflight_record['data']['capabilities']['base64_path_parameters']);
-        $url = $server_supports_base64_paths
-            ? self::encode_url_path_parameters($this->remote_reprint_api_url)
-            : $this->remote_reprint_api_url;
-        $separator = strpos($url, "?") === false ? "?" : "&";
-
         if ($server_supports_base64_paths) {
             foreach (["directory", "list_dir", "pulled_before"] as $parameter) {
                 if (!array_key_exists($parameter, $params)) {
@@ -11731,44 +11755,11 @@ class ImportClient
                 }
             }
         }
-        $params["endpoint"] = $endpoint;
-        if ($cursor) {
-            // Also include cursor in query params as a fallback when headers are stripped.
+        if ($cursor !== null) {
+            // Include the cursor in the body when hosts strip custom headers.
             $params["cursor"] = $cursor;
         }
-        $params["_cache_bust"] = time() . "-" . rand(0, 999999);
-
-        return $url . $separator . http_build_query($params);
-    }
-
-    /**
-     * Base64-encode and rename path parameters already present in an API URL.
-     */
-    private static function encode_url_path_parameters(string $url): string
-    {
-        $query_start = strpos($url, '?');
-        if ($query_start === false) {
-            return $url;
-        }
-
-        $url_prefix = substr($url, 0, $query_start + 1);
-        $query_parts = explode('&', substr($url, $query_start + 1));
-        foreach ($query_parts as $index => $query_part) {
-            $value_start = strpos($query_part, '=');
-            if ($value_start === false) {
-                continue;
-            }
-            $decoded_key = urldecode(substr($query_part, 0, $value_start));
-            $key = preg_replace('/\[.*\]$/', '', $decoded_key);
-            if (!in_array($key, ['directory', 'list_dir', 'pulled_before'], true)) {
-                continue;
-            }
-            $path = urldecode(substr($query_part, $value_start + 1));
-            $query_parts[$index] = substr($query_part, 0, $value_start)
-                . '=' . rawurlencode(base64_encode($path));
-        }
-
-        return $url_prefix . implode('&', $query_parts);
+        return ['url' => $url, 'params' => $params];
     }
 
     /**
@@ -12470,12 +12461,15 @@ class ImportClient
 
     /**
      * Fetch a JSON response for a lightweight request (non-streaming).
+     *
+     * @param array $post_data Pull options returned by build_request().
      */
-    private function fetch_json(string $url): array
+    private function fetch_json(string $url, array $post_data): array
     {
         $this->reset_request_error_state();
 
-        $this->audit_log("HTTP_REQUEST | GET | {$url}", false);
+        $this->audit_log("HTTP_REQUEST | POST | {$url}", false);
+        $body = http_build_query($post_data);
 
         $ch = curl_init($url);
         apply_curl_proxy_from_environment($ch);
@@ -12484,10 +12478,12 @@ class ImportClient
 
         $headers = [
             ...$this->get_base_headers("application/json"),
-            ...($this->get_hmac_headers()),
+            ...($this->get_hmac_headers($body)),
         ];
 
         curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $body,
             CURLOPT_FOLLOWLOCATION => false,
             // Bound the connect phase separately from the total timeout: a
             // stalled TCP connect would otherwise consume the whole 30s
@@ -12591,7 +12587,7 @@ class ImportClient
         $this->reset_request_error_state();
 
         // Log HTTP request details
-        $log_parts = ["HTTP_REQUEST", $post_data ? "POST" : "GET", $url];
+        $log_parts = ["HTTP_REQUEST", "POST", $url];
 
         if ($post_data && isset($post_data["file_list"])) {
             $file_list_part = $post_data["file_list"];
@@ -12638,35 +12634,50 @@ class ImportClient
             $headers[] = "X-Export-Cursor: {$cursor}";
         }
 
-        // Configure POST data if provided.  We need to know the body
+        // Configure POST data. We need to know the body
         // content BEFORE generating HMAC headers so the content hash
         // can be included in the signature.
         $body_for_signing = '';
-        if ($post_data !== null) {
-            curl_setopt($ch, CURLOPT_POST, true);
-            $has_file = false;
+        $post_data = $post_data ?? [];
+        curl_setopt($ch, CURLOPT_POST, true);
+        $has_file = false;
+        foreach ($post_data as $value) {
+            if ($value instanceof CURLFile) {
+                $has_file = true;
+                break;
+            }
+        }
+        if ($has_file) {
+            // For CURLFile uploads, sign the raw file content — this
+            // is the logical payload the server will receive, even
+            // though curl wraps it in multipart framing.
             foreach ($post_data as $value) {
                 if ($value instanceof CURLFile) {
-                    $has_file = true;
-                    break;
+                    $body_for_signing .= file_get_contents(
+                        $value->getFilename(),
+                    );
                 }
             }
-            if ($has_file) {
-                // For CURLFile uploads, sign the raw file content — this
-                // is the logical payload the server will receive, even
-                // though curl wraps it in multipart framing.
-                foreach ($post_data as $value) {
-                    if ($value instanceof CURLFile) {
-                        $body_for_signing .= file_get_contents(
-                            $value->getFilename(),
-                        );
+            // cURL requires flat multipart field names. PHP reconstructs the
+            // bracketed names as arrays, just as it does for URL-encoded forms.
+            $multipart_fields = [];
+            foreach ($post_data as $key => $value) {
+                if (!is_array($value)) {
+                    $multipart_fields[$key] = $value;
+                    continue;
+                }
+                foreach (explode('&', http_build_query([$key => $value])) as $field) {
+                    if ($field === '') {
+                        continue;
                     }
+                    [$name, $encoded_value] = explode('=', $field, 2);
+                    $multipart_fields[urldecode($name)] = urldecode($encoded_value);
                 }
-                curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
-            } else {
-                $body_for_signing = http_build_query($post_data);
-                curl_setopt($ch, CURLOPT_POSTFIELDS, $body_for_signing);
             }
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $multipart_fields);
+        } else {
+            $body_for_signing = http_build_query($post_data);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $body_for_signing);
         }
 
         // Append HMAC auth headers now that we know the body content

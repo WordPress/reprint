@@ -12,6 +12,7 @@ const origin = new URL(getSiteUrl(site)).origin;
 const settingsUrl = `${origin}/wp-admin/network/settings.php?page=reprint-server`;
 const actionUrl = `${origin}/wp-admin/admin-post.php`;
 const option = 'reprint_server_connection_token';
+const preflightBody = JSON.stringify({ endpoint: 'preflight', multisite_mode: 'one-site-network-v1' });
 
 describe('Multisite network token administration over HTTP', () => {
     beforeAll(async () => {
@@ -37,14 +38,16 @@ describe('Multisite network token administration over HTTP', () => {
         });
         assert.equal(save.status, 302, await save.text());
         assert.equal(save.headers.get('location'), settingsUrl);
-        const accepted = await fetch(`${origin}/shop/?reprint-api&endpoint=preflight&multisite_mode=one-site-network-v1`, {
-            headers: new HmacClient(changedToken).getAuthHeaders(''),
+        const accepted = await fetch(`${origin}/shop/?reprint-api`, {
+            method: 'POST', body: preflightBody,
+            headers: { ...new HmacClient(changedToken).getAuthHeaders(preflightBody), 'Content-Type': 'application/json' },
         });
         const preflight = await accepted.json();
         assert.equal(accepted.status, 200, JSON.stringify(preflight));
         assert.equal(preflight.database.wp.multisite.selection.site_id, 7);
-        const rejected = await fetch(`${origin}/shop/?reprint-api&endpoint=preflight&multisite_mode=one-site-network-v1`, {
-            headers: new HmacClient(token).getAuthHeaders(''),
+        const rejected = await fetch(`${origin}/shop/?reprint-api`, {
+            method: 'POST', body: preflightBody,
+            headers: { ...new HmacClient(token).getAuthHeaders(preflightBody), 'Content-Type': 'application/json' },
         });
         assert.equal(rejected.status, 403, await rejected.text());
     });
@@ -95,8 +98,9 @@ describe('Multisite network token administration over HTTP', () => {
             assert.ok(savedHtml.includes(`value="${changedToken}"`));
             assert.ok(savedHtml.includes('<code>secret.php</code> override is active.'));
             for (const [connectionToken, status] of [[legacyToken, 200], [changedToken, 403]]) {
-                const response = await fetch(`${origin}/shop/?reprint-api&endpoint=preflight&multisite_mode=one-site-network-v1`, {
-                    headers: new HmacClient(connectionToken).getAuthHeaders(''),
+                const response = await fetch(`${origin}/shop/?reprint-api`, {
+                    method: 'POST', body: preflightBody,
+                    headers: { ...new HmacClient(connectionToken).getAuthHeaders(preflightBody), 'Content-Type': 'application/json' },
                 });
                 assert.equal(response.status, status, await response.text());
             }

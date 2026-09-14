@@ -8,6 +8,7 @@
  * transient HTTP errors, then streams later requests to the real E2E WordPress site.
  */
 import http from 'node:http';
+import { readRequestEndpoint } from './request-endpoint.js';
 import { appendFileSync } from 'node:fs';
 
 const [backendUrlString, requestLogPath] = process.argv.slice(2);
@@ -32,7 +33,7 @@ function writeRequestLog(record) {
     appendFileSync(requestLogPath, `${JSON.stringify(record)}\n`);
 }
 
-const server = http.createServer((request, response) => {
+const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, `http://${request.headers.host}`);
     const contentType = request.headers['content-type'] || '';
     const isReprintRequest =
@@ -45,7 +46,7 @@ const server = http.createServer((request, response) => {
     const userAgent = request.headers['user-agent'] || '';
     const expectedAcceptLanguage = 'en-US,en;q=0.9';
     const acceptLanguage = request.headers['accept-language'] || '';
-    const endpoint = requestUrl.searchParams.get('endpoint') || '';
+    const endpoint = await readRequestEndpoint(request) || '';
     const rawPathParameter = ['directory', 'list_dir', 'pulled_before']
         .flatMap(parameter => requestUrl.searchParams.getAll(parameter))
         .find(value => value.startsWith('/')) || null;
