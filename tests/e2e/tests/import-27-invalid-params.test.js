@@ -63,15 +63,13 @@ describe('Import: Invalid API Parameters', () => {
     });
 
     it('wrong HMAC secret returns 403', async () => {
-        const url = new URL(getSiteUrl(site));
-        url.searchParams.set('endpoint', 'preflight');
-        url.searchParams.set('directory', getSiteDir(site));
-
+        const requestBody = JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(site) });
         const wrongClient = createHmacClient('wrong-secret-value');
-        const headers = wrongClient.getAuthHeaders('');
+        const headers = wrongClient.getAuthHeaders(requestBody);
         headers['Accept-Encoding'] = 'gzip';
+        headers['Content-Type'] = 'application/json';
 
-        const response = await fetch(url.toString(), { headers });
+        const response = await fetch(getSiteUrl(site), { method: 'POST', headers, body: requestBody });
         assert.equal(response.status, 403, 'Expected 403 for wrong HMAC');
 
         const body = await response.json();
@@ -82,10 +80,11 @@ describe('Import: Invalid API Parameters', () => {
     });
 
     it('missing auth headers returns 403', async () => {
-        const url = new URL(getSiteUrl(site));
-        url.searchParams.set('endpoint', 'preflight');
-
-        const response = await fetch(url.toString());
+        const response = await fetch(getSiteUrl(site), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ endpoint: 'preflight' }),
+        });
         assert.equal(response.status, 403, 'Expected 403 for missing auth');
 
         const body = await response.json();

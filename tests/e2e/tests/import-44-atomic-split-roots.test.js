@@ -26,7 +26,7 @@ import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
     createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteDir,
+    getSiteDir,
     apiRequest,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -103,16 +103,14 @@ require_once constant('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR') . 'lib.p
         const wpDir = `${getSiteDir(site)}/__wp__`;
         const docRoot = getSiteDir(site);
 
-        // Build the URL with array-style directory[] params manually,
-        // then pass it to apiRequest via the url option.
-        const encodedWpDir = encodeURIComponent(Buffer.from(wpDir).toString('base64'));
-        const encodedDocRoot = encodeURIComponent(Buffer.from(docRoot).toString('base64'));
-        const url = `${getSiteUrl(site)}&directory%5B%5D=${encodedWpDir}&directory%5B%5D=${encodedDocRoot}`;
+        // Send both roots in one directory array so the test exercises
+        // parent/child traversal rather than indexing each root separately.
         const response = await apiRequest(site, 'file_index', {
+            directory: [wpDir, docRoot],
             list_dir: wpDir,
             follow_symlinks: '1',
             batch_size: '50000',
-        }, { url });
+        });
 
         assert.equal(response.status, 200,
             `file_index failed: ${JSON.stringify(response.json || response.text || '').slice(0, 500)}`);
