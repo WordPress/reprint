@@ -41,6 +41,9 @@ filename bytes survive PHP form parsing. Cursors travel in the body as well as
 the existing header; the strict-WAF test removes that header and checks SQL
 continuation.
 
+Multipart array fields use bracketed names built directly from their keys.
+They do not depend on PHP's `arg_separator.output` setting.
+
 The strict query-firewall fixture permits only the routing marker in the URL.
 It rejects `endpoint` and every other query parameter even on POST requests.
 Request bodies and response streams pass through unchanged. This models the

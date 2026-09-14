@@ -12661,18 +12661,21 @@ class ImportClient
             // cURL requires flat multipart field names. PHP reconstructs the
             // bracketed names as arrays, just as it does for URL-encoded forms.
             $multipart_fields = [];
-            foreach ($post_data as $key => $value) {
+            $append_field = static function (string $name, $value) use (&$append_field, &$multipart_fields): void {
                 if (!is_array($value)) {
-                    $multipart_fields[$key] = $value;
-                    continue;
+                    $multipart_fields[$name] = $value;
+                    return;
                 }
-                foreach (explode('&', http_build_query([$key => $value])) as $field) {
-                    if ($field === '') {
+                foreach ($value as $key => $child) {
+                    // Form arrays omit nulls and encode booleans as 0 or 1.
+                    if ($child === null) {
                         continue;
                     }
-                    [$name, $encoded_value] = explode('=', $field, 2);
-                    $multipart_fields[urldecode($name)] = urldecode($encoded_value);
+                    $append_field($name . '[' . $key . ']', is_bool($child) ? (int) $child : $child);
                 }
+            };
+            foreach ($post_data as $name => $value) {
+                $append_field( (string) $name, $value );
             }
             curl_setopt($ch, CURLOPT_POSTFIELDS, $multipart_fields);
         } else {
