@@ -362,8 +362,11 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		// Divi often uses {"module":{"content":{"value":"https://example.com/a"}}}.
 		// Here "module" is an array, so this reader has no string to return.
 		// Skip next_block_attribute(): it would build ["module","content","value"]
-		// only to discard it in the loop below. StructuredDataUrlRewriter handles
-		// those nested strings separately.
+		// only to discard it in the loop below. Returning false leaves this block
+		// comment current. StructuredDataUrlRewriter controls next_token(); in the
+		// selected-site path it reads get_block_attributes() and rewrites nested
+		// strings (using another parser for HTML). It passes changes back through
+		// set_block_attributes(); this processor writes the JSON before advancing.
 		// Check only before the iterator starts; later calls continue from its path.
 		if ( false === $this->get_block_attribute_path() ) {
 			$has_top_level_string = false;
