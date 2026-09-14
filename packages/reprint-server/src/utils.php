@@ -237,6 +237,7 @@ if (!function_exists(__NAMESPACE__ . '\\resolve_symlink_target_path')) {
  * Only a Windows source link may interpret those prefixes as absolute roots.
  * Join relative targets before normalizing so Unix backslashes remain names
  * and Windows backslashes become separators, including in parent segments.
+ * A Windows root-relative target uses the source link's drive or share root.
  *
  * @param string $symlink_path Absolute source link path with normalized separators.
  * @param string $target Target spelling returned by the source's readlink().
@@ -244,9 +245,18 @@ if (!function_exists(__NAMESPACE__ . '\\resolve_symlink_target_path')) {
  */
 function resolve_symlink_target_path(string $symlink_path, string $target): string
 {
-    $absolute_target = str_starts_with($symlink_path, '/')
-        ? str_starts_with($target, '/')
-        : is_absolute_path($target);
+    if (str_starts_with($symlink_path, '/')) {
+        $absolute_target = str_starts_with($target, '/');
+    } else {
+        $target = str_replace('/', '\\', $target);
+        // One leading separator is relative to the source drive or share root.
+        // Two identify a UNC target, including an original //server/share spelling.
+        if (str_starts_with($target, '\\') && !str_starts_with($target, '\\\\')) {
+            $root = windows_share_root($symlink_path) ?? substr($symlink_path, 0, 3);
+            return normalize_path(wp_join_unix_paths($root, substr($target, 1)));
+        }
+        $absolute_target = is_absolute_path($target);
+    }
     return normalize_path($absolute_target ? $target : wp_join_unix_paths(dirname($symlink_path), $target));
 }
 }

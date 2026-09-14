@@ -170,6 +170,10 @@ class WindowsPathTest extends TestCase
             ['D:/site/link', '\\\\server\\share\\image.jpg', '\\\\SERVER\\SHARE/image.jpg'],
             ['\\\\SERVER\\SHARE/site/link', '..\\photos/image.jpg', '\\\\SERVER\\SHARE/photos/image.jpg'],
             ['\\\\SERVER\\SHARE/site/link', '../../image.jpg', '\\\\SERVER\\SHARE/image.jpg'],
+            ['D:/site/link', '/photos/image.jpg', 'D:/photos/image.jpg'],
+            ['D:/site/link', '\\photos\\image.jpg', 'D:/photos/image.jpg'],
+            ['\\\\SERVER\\SHARE/site/link', '/photos/image.jpg', '\\\\SERVER\\SHARE/photos/image.jpg'],
+            ['D:/site/link', '//server/share/photos/image.jpg', '\\\\SERVER\\SHARE/photos/image.jpg'],
             ['D:/link', 'image.jpg', 'D:/image.jpg'],
         ];
     }
