@@ -49,36 +49,16 @@ describe('Export: POST body parameters with a query routing marker', () => {
         await connection.end();
     });
 
-    it('accepts legacy query parameters for GET exports and multipart uploads', async () => {
-        const url = new URL(getSiteUrl(site));
-        url.searchParams.delete('reprint-api');
-        url.searchParams.set('site-export-api', '');
-        url.searchParams.set('endpoint', 'db_index');
-        url.searchParams.set('directory', getSiteDir(site));
-        url.searchParams.set('skip_rows[0][table_name_without_prefix]', 'postmeta');
-        url.searchParams.set('skip_rows[0][column]', 'meta_key');
-        url.searchParams.set('skip_rows[0][value_base64]', Buffer.from('_edit_lock').toString('base64'));
-        const index = await fetch(url, {
-            headers: new HmacClient(getSiteSecret(site)).getAuthHeaders(),
-        });
-        assert.equal(index.status, 200, await index.clone().text());
-        assert.match(index.headers.get('content-type'), /multipart\/mixed/);
-        await index.arrayBuffer();
-
-        // Older clients send the endpoint and options in the URL, but still
-        // upload the file list as a multipart file. Keep that body intact.
-        url.searchParams.set('endpoint', 'file_fetch');
-        const fileList = JSON.stringify([{ path: Buffer.from(join(getSiteDir(site), 'test-data', 'hello.txt')).toString('base64') }]);
-        const body = new FormData();
-        body.set('file_list', new Blob([fileList], { type: 'application/json' }), 'files.json');
-        const files = await fetch(url, {
-            method: 'POST', body,
-            headers: new HmacClient(getSiteSecret(site)).getAuthHeaders(fileList),
-        });
-        assert.equal(files.status, 200, await files.clone().text());
-        assert.match(files.headers.get('content-type'), /multipart\/mixed/);
-        assert.match(await files.text(), /Hello World/);
-    });
+    it.each(['GET', 'POST'])(
+        'does not read an export endpoint from the query on %s', async method => {
+            const response = await fetch(`${getSiteUrl(site)}&endpoint=preflight`, {
+                method,
+                headers: new HmacClient(getSiteSecret(site)).getAuthHeaders(),
+            });
+            assert.equal(response.status, 400);
+            assert.match((await response.json()).error, /endpoint/);
+        },
+    );
 
     it('completes a file and database pull through the strict query firewall', async () => {
         writeFileSync(join(directory, 'requests.jsonl'), '');
@@ -183,7 +163,7 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
     });
 
     it.each(['application/json', 'application/x-www-form-urlencoded'])(
-        'uses POST %s parameters before query parameters during rollout', async contentType => {
+        'ignores conflicting query parameters with a POST %s body', async contentType => {
             const params = { endpoint: 'db_index', directory: getSiteDir(site) };
             const body = contentType === 'application/json'
                 ? JSON.stringify(params) : new URLSearchParams(params).toString();

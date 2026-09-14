@@ -17,17 +17,12 @@ body. For example, POST to `/?reprint-api` with:
 }
 ```
 
-[PR #800](https://github.com/WordPress/reprint/pull/800) ships the POST client
-and the compatible exporter together. The exporter still accepts query
-parameters from older clients. When a parameter appears in both places, the
-POST value wins for JSON and form bodies. Existing multipart file-list uploads
-keep their file part and file-content signature, including when an older client
-sends the endpoint and options in the query string.
-
-Deploy this release before merging
-[PR #801](https://github.com/WordPress/reprint/pull/801), which only removes the
-exporter's query-parameter fallback. Do not remove that fallback until clients
-have moved to POST parameters.
+Deploy [PR #800](https://github.com/WordPress/reprint/pull/800), which ships
+the POST client and compatible exporter, before this exporter. This release
+removes the query-parameter fallback. Old query-based clients cannot use it,
+so only deploy it after clients have moved to POST parameters. An endpoint
+supplied only in the query is missing, even on POST. Query values cannot supply
+defaults or override body values.
 
 The exporter accepts `application/json`, `application/x-www-form-urlencoded`,
 and `multipart/form-data`. Sign the exact JSON or URL-encoded body bytes with
@@ -50,6 +45,6 @@ Request bodies and response streams pass through unchanged. This models the
 reported query rejection; it does not promise that all firewalls accept all
 POST bodies.
 
-A backward-compatibility test bypasses the strict WAF and sends legacy GET
-query parameters, then uploads a multipart file list with its endpoint and
-options still in the query. Normal export requests in the other tests use POST parameters.
+The legacy-query test now checks that GET and POST requests with a query-only
+endpoint are rejected. Multipart uploads with POST parameters still pass through
+the existing file-list parser.

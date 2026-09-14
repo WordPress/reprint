@@ -94,6 +94,9 @@ final class HTTPServer {
             // router has applied push authorization to that query endpoint.
             $post = [];
         } else {
+            // The plugin handles the query routing marker. Export parameters
+            // come only from the body, even if a query value has no POST match.
+            $get = [];
             $body = array_key_exists('body', $request)
                 ? (string) $request['body']
                 : ( $this->is_json_content_type($server) ? call_user_func($this->body_reader) : '' );
