@@ -181,10 +181,12 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		$this->current_url_base = $this->base_url_string;
 		switch ( parent::get_token_type() ) {
 			case '#tag':
-				if ( ! $this->in_style_element && $this->next_url_attribute() ) {
-					return true;
+				if ( $this->in_style_element ) {
+					return $this->next_url_in_style_element();
 				}
-				return $this->parse_style_elements && $this->next_url_in_style_element();
+				// Start the STYLE body only after its attributes have been read.
+				return $this->next_url_attribute()
+					|| ( $this->parse_style_elements && $this->next_url_in_style_element() );
 			case '#block-comment':
 				return $this->next_url_block_attribute();
 			default:
@@ -356,11 +358,13 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 
 	/** Parse top-level block URL fields, resolving relative URLs only for known fields. */
 	private function next_url_block_attribute() {
-		// Divi stores its strings below arrays such as module.content. This
-		// reader accepts only top-level strings; the rewriter visits nested
-		// values separately. Before starting the attribute iterator, avoid
-		// building paths to nested fields when none can be accepted here.
-		// Once the iterator has a path, do not repeat this scan for each URL.
+		// This reader accepts "url" in {"url":"https://example.com/a"}.
+		// Divi often uses {"module":{"content":{"value":"https://example.com/a"}}}.
+		// Here "module" is an array, so this reader has no string to return.
+		// Skip next_block_attribute(): it would build ["module","content","value"]
+		// only to discard it in the loop below. StructuredDataUrlRewriter handles
+		// those nested strings separately.
+		// Check only before the iterator starts; later calls continue from its path.
 		if ( false === $this->get_block_attribute_path() ) {
 			$has_top_level_string = false;
 			foreach ( $this->get_block_attributes() ?: array() as $value ) {
@@ -516,7 +520,11 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	}
 
 	/**
-	 * Returns true if the currently matched URL is absolute.
+	 * Returns true if the raw URL can be parsed without a base URL.
+	 *
+	 * get_parsed_url() can resolve href="photo.jpg" against a site base such
+	 * as https://example.com/shop/. Parsing then succeeds, but "photo.jpg"
+	 * still needs that base. can_parse() below checks without one.
 	 *
 	 * @return bool Whether the currently matched URL is absolute.
 	 */
@@ -524,8 +532,9 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		if ( ! $this->get_parsed_url() ) {
 			return false;
 		}
-		// The current URL has already passed the parser. A full HTTP(S)
-		// prefix proves it is absolute without parsing the same URL again.
+		// A full HTTP(S) URL has already passed the parser without a base.
+		// Skip a second parse for that case. Other forms still need the check:
+		// "mailto:hello@example.com" can stand alone; "../photo.jpg" cannot.
 		return $this->has_absolute_http_url_prefix( $this->get_raw_url() )
 			|| WPURL::can_parse( $this->get_raw_url() );
 	}

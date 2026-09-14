@@ -16,7 +16,9 @@ class StructuredBlockMarkupUrlProcessorTest extends TestCase {
             ['HTTPS://source.example/photo.jpg', 'https://source.example/photo.jpg', true],
             ['https:photo.jpg', 'https://source.example/shop/photo.jpg', true],
             ['//source.example/photo.jpg', 'https://source.example/photo.jpg', false],
+            ['photo.jpg', 'https://source.example/shop/photo.jpg', false],
             ['../photo.jpg', 'https://source.example/photo.jpg', false],
+            ['mailto:hello@example.com', 'mailto:hello@example.com', true],
             ['https://invalid host/photo.jpg', false, false],
         ] as [$rawUrl, $absoluteUrl, $isAbsolute]) {
             foreach ([

@@ -179,7 +179,7 @@ class StructuredDataUrlRewriterTest extends TestCase
     {
         $rewriter = new StructuredDataUrlRewriter(['https://source.test' => 'https://target.test'], []);
         $input = '<style style="background:url(https://source.test/inline.png)">'
-            . '.hero{background:url(https://source.test/body.png)}</style>'
+            . '.hero{background:url(https://source.test/body.png),url(https://source.test/body-two.png)}</style>'
             . '<img src="https://source.test/after.png">';
         $parser = new StructuredBlockMarkupUrlProcessor($rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP), null, true);
         $urls = [];
@@ -189,6 +189,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame([
             'https://target.test/inline.png',
             'https://target.test/body.png',
+            'https://target.test/body-two.png',
             'https://target.test/after.png',
         ], $urls);
     }
