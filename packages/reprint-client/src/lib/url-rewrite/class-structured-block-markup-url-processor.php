@@ -533,8 +533,9 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 			return false;
 		}
 		// A full HTTP(S) URL has already passed the parser without a base.
-		// Skip a second parse for that case. Other forms still need the check:
-		// "mailto:hello@example.com" can stand alone; "../photo.jpg" cannot.
+		// Skip a second parse for that case. Other HTTP(S) forms still need
+		// the check: "https:photo.jpg" parses without a base, but "https:"
+		// only parses with one.
 		return $this->has_absolute_http_url_prefix( $this->get_raw_url() )
 			|| WPURL::can_parse( $this->get_raw_url() );
 	}
