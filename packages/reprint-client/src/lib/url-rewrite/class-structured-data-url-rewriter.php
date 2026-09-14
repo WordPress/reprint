@@ -50,11 +50,12 @@ class StructuredDataUrlRewriter
     private CautiousURLBaseRewriteMapping $cautious_url_base_rewrite_mapping;
 
     /**
-     * Whether this rewriter was given a selected site's child-path list.
-     * An empty list still means a selected-site migration: a domain-based
-     * network can have no child sites under the selected site's URL.
+     * Whether we are extracting one site from a multisite network.
+     * False for ordinary single-site migrations. True even when the selected
+     * site has no child-site URL paths, such as on a domain-based network.
+     * This flag does not select whole-network migration.
      */
-    private bool $is_selected_site_migration;
+    private bool $is_multisite_to_single_site_migration;
 
     /**
      * A literal < or > in a source base can cross HTML token boundaries.
@@ -113,17 +114,20 @@ class StructuredDataUrlRewriter
 
     /**
      * @param array<string, string> $url_mapping Source URL => target URL mapping.
-     * @param array<string, string[]>|null $selected_site_child_paths Source HTTP(S)
-     *     origin => child-site paths, for a selected-site migration. For example,
-     *     ['https://network.test' => ['/shop/news/']] keeps that child site remote.
-     *     Pass [] when the selected site has no child paths. Null means an
-     *     ordinary import, which keeps the cheaper raw-text paths for block
-     *     attributes and STYLE bodies. The importer chooses from its selection.
+     * @param array<string, string[]>|null $selected_site_child_paths Other network
+     *     sites' paths below the selected site's URL, keyed by source HTTP(S) origin.
+     *     Pass null for an ordinary single-site migration. This keeps the cheaper
+     *     raw-text paths for block attributes and STYLE bodies.
+     *     Pass an array when extracting one network site into a single site,
+     *     even [] when there are no child-site paths. For example,
+     *     ['https://network.test' => ['/shop/news/']] keeps that child site's pages
+     *     at the source while migrating /shop. Neither null nor an array selects
+     *     whole-network migration. The importer chooses from its saved selection.
      *     Paths are prepared once and shared by HTML and text rewriting.
      */
     public function __construct(array $url_mapping, ?array $selected_site_child_paths = null)
     {
-        $this->is_selected_site_migration = $selected_site_child_paths !== null;
+        $this->is_multisite_to_single_site_migration = $selected_site_child_paths !== null;
         $this->cautious_url_base_rewrite_mapping = new CautiousURLBaseRewriteMapping($url_mapping, $selected_site_child_paths ?? []);
         $wpbakery_url_rewriter = new WPBakeryUrlRewriter(
             function (string $value): string {
@@ -159,7 +163,7 @@ class StructuredDataUrlRewriter
 
         $from_urls = array_keys($url_mapping);
         $this->base_url = $from_urls[0] ?? '';
-        if ($this->is_selected_site_migration) {
+        if ($this->is_multisite_to_single_site_migration) {
             // The first source is the site's base for relative links, not an asset
             // rule. A base path describes a directory even without a trailing slash.
             $this->base_url = $this->base_url !== '' ? rtrim($this->base_url, '/') . '/' : '';
@@ -544,7 +548,7 @@ class StructuredDataUrlRewriter
     private function maybe_contains_rewritable_urls(string $value): bool
     {
         if (stripos($value, 'href=') !== false || stripos($value, 'src=') !== false
-            || ( $this->is_selected_site_migration && stripos($value, 'style') !== false )) {
+            || ( $this->is_multisite_to_single_site_migration && stripos($value, 'style') !== false )) {
             return true;
         }
 
@@ -731,12 +735,13 @@ class StructuredDataUrlRewriter
      * checks. The text fallback cannot determine where a path ends, so it
      * leaves all URLs on a source host with child-site exclusions unchanged.
      *
-     * Selected-site migrations visit the decoded block attribute strings so
-     * child paths are checked after each enclosing format has been decoded.
+     * Extracting one site from a multisite network visits the decoded block
+     * attribute strings so child paths are checked after each enclosing format
+     * has been decoded, even when the selected site has no child-site paths.
      * This costs a walk of one block's attribute tree, not the whole export.
      * Changed attributes use the block encoder, including its whitespace and
-     * escaping rules. Ordinary imports keep the raw-comment fast path when
-     * no string needs format decoding or a serialized length update.
+     * escaping rules. Ordinary single-site migrations keep the raw-comment fast
+     * path when no string needs format decoding or a serialized length update.
      *
      * Example:
      *
@@ -775,7 +780,7 @@ class StructuredDataUrlRewriter
                 // then scan the final text once instead of copying, reparsing and
                 // scanning each tag. Block comments keep their separate path:
                 // scanning their raw JSON would also change attribute names.
-                if ($this->is_selected_site_migration && !$this->source_bases_contain_html_syntax
+                if ($this->is_multisite_to_single_site_migration && !$this->source_bases_contain_html_syntax
                     && strpos($content, '<!--') === false) {
                     $p = new WP_HTML_Tag_Processor($content);
                     $has_document_wrapper = false;
@@ -829,10 +834,10 @@ class StructuredDataUrlRewriter
                 $p = new StructuredBlockMarkupUrlProcessor(
                     $content,
                     $base_url,
-                    $this->is_selected_site_migration
+                    $this->is_multisite_to_single_site_migration
                 );
                 while ( $p->next_token() ) {
-                    if ( $this->is_selected_site_migration && '#block-comment' === $p->get_token_type() ) {
+                    if ( $this->is_multisite_to_single_site_migration && '#block-comment' === $p->get_token_type() ) {
                         // Read and write this block through one decoded attribute tree.
                         // A top-level url can hold /about; module.content can hold HTML
                         // such as <a href="https://source.test/about">Read</a>. Rewrite
@@ -1020,7 +1025,7 @@ class StructuredDataUrlRewriter
         // objects for every field instead of parsing each source and target
         // again for every leaf value.
         $converted = false;
-        if (!$this->is_selected_site_migration) {
+        if (!$this->is_multisite_to_single_site_migration) {
             foreach ($this->parsed_mapping as $mapping) {
                 if (is_child_url_of($parsed_url, $mapping['from_url'])) {
                     $converted = WPURL::replace_base_url($parsed_url, [

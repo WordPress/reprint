@@ -81,8 +81,10 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	 * @param string      $html                 HTML or block markup to visit.
 	 * @param string|null $base_url_string      Base for known relative URL fields.
 	 * @param bool        $parse_style_elements Decode CSS URLs in STYLE bodies.
-	 *     False preserves the ordinary import's raw-text path; selected-site
-	 *     imports need decoded CSS paths to distinguish child-site links.
+	 *     Ordinary single-site migrations pass false to keep the raw-text path.
+	 *     Extracting one site from a multisite network passes true: decoded CSS
+	 *     paths distinguish that site's links from links to other network sites.
+	 *     It stays true even when there are no child-site paths.
 	 *     Inline style attributes are parsed in either mode.
 	 */
 	public function __construct( $html, ?string $base_url_string = null, bool $parse_style_elements = false ) {
@@ -370,9 +372,10 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		// Here "module" is an array, so this reader has no string to return.
 		// Skip next_block_attribute(): it would build ["module","content","value"]
 		// only to discard it in the loop below. This fast reject remains for ordinary
-		// imports and direct URL-iterator callers. Selected-site imports skip this
-		// iterator: StructuredDataUrlRewriter walks get_block_attributes() once and
-		// returns changes through set_block_attributes() before the next token.
+		// single-site imports and direct URL-iterator callers. Multisite-to-single-site
+		// imports skip this iterator: StructuredDataUrlRewriter walks
+		// get_block_attributes() once and returns changes through set_block_attributes()
+		// before the next token.
 		// Check only before the iterator starts; later calls continue from its path.
 		if ( false === $this->get_block_attribute_path() ) {
 			$has_top_level_string = false;
