@@ -22,18 +22,14 @@ foreach (['backslash', 'forward-slash', 'root-relative', 'absolute-forward-slash
         if ($reprint_ordinary_contents !== 'namespace file') {
             throw new RuntimeException('The source link must read its target before migration: ' . $reprint_link_path);
         }
-        if ($reprint_spelling === 'forward-slash' && WindowsFilesystem::available()) {
-            $reprint_api = (new ReflectionClass(WindowsFilesystem::class))->getStaticPropertyValue('api');
-            foreach ([$reprint_link_file, '\\\\?\\' . str_replace('/', '\\', $reprint_link_file)] as $reprint_native_path) {
-                $reprint_wide = mb_convert_encoding($reprint_native_path, 'UTF-16LE', 'UTF-8') . "\0\0";
-                $reprint_buffer = $reprint_api->new('WCHAR[' . (strlen($reprint_wide) / 2) . ']');
-                FFI::memcpy($reprint_buffer, $reprint_wide, strlen($reprint_wide));
-                $reprint_handle = $reprint_api->CreateFileW($reprint_buffer, 0, 7, null, 3, 0x02000000, null);
-                $reprint_invalid = $reprint_api->cast('intptr_t *', FFI::addr($reprint_handle))[0] === -1;
-                echo json_encode(['direct_native_path' => $reprint_native_path, 'opened' => !$reprint_invalid, 'error' => $reprint_api->GetLastError()]) . "\n";
-                if (!$reprint_invalid) { $reprint_api->CloseHandle($reprint_handle); }
+        if (file_get_contents(source_io_path($reprint_link_file)) !== 'namespace file') {
+            throw new RuntimeException('The exact reader changed link target contents: ' . $reprint_link_path);
+        }
+        if ($reprint_kind === 'directory' && WindowsFilesystem::available()) {
+            if (!in_array('trailing.', scandir(source_io_path($reprint_link_path)), true)
+                || file_get_contents(source_io_path($reprint_link_path . '/trailing.')) !== 'literal trailing.') {
+                throw new RuntimeException('Resolving a link must not normalize its literal descendants: ' . $reprint_link_path);
             }
-            echo json_encode(['php_realpath' => realpath($reprint_link_file), 'stored_target' => WindowsFilesystem::readlink($reprint_link_path)]) . "\n";
         }
     }
 }
@@ -64,6 +60,16 @@ if (($argv[1] ?? '') === '--without-ffi') {
 if (!WindowsFilesystem::available()) {
     throw new RuntimeException('The Windows CI host must provide the native source reader.');
 }
+// A relative forward-slash cycle must end at a bounded link-resolution limit.
+try {
+    file_get_contents(source_io_path('D:/Reprint link cases/cycle-a'));
+    throw new LogicException('A cyclic source link must not open as a file.');
+} catch (RuntimeException $error) {
+    if (strpos($error->getMessage(), 'after 32 symbolic links') === false) {
+        throw $error;
+    }
+}
+
 $path = WindowsFilesystem::resolve_input('\\\\?\\D:\\Reprint namespace cases\\Mixed Case\\trailing.');
 $uri = source_io_path($path);
 $stat = lstat($uri);

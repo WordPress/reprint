@@ -258,6 +258,13 @@ final class WindowsFilesystem {
         $this->entry = self::$api->new('FIND_DATA');
         $pattern = rtrim(self::native_path(self::decode_uri($uri)), '\\') . '\\*';
         $this->handle = self::$api->FindFirstFileW(self::wide($pattern), \FFI::addr($this->entry));
+        if (self::invalid_handle($this->handle) && self::$api->GetLastError() === 123) {
+            $resolved = self::realpath_native(self::native_path(self::decode_uri($uri)));
+            if ($resolved !== false) {
+                $pattern = rtrim(self::native_path($resolved), '\\') . '\\*';
+                $this->handle = self::$api->FindFirstFileW(self::wide($pattern), \FFI::addr($this->entry));
+            }
+        }
         if (self::invalid_handle($this->handle)) {
             $error = self::$api->GetLastError();
             $this->handle = null;
@@ -308,15 +315,67 @@ final class WindowsFilesystem {
     /** Opens only existing filesystem entries, optionally without following the final link. */
     private static function open(string $native_path, int $access, bool $no_follow) {
         self::assert_available();
-        $handle = self::$api->CreateFileW(self::wide($native_path), $access, 7, null, 3, 0x02000000 | ( $no_follow ? 0x00200000 : 0 ), null);
-        if (self::invalid_handle($handle)) {
+        // PHP resolves stored forward slashes in relative link targets, but
+        // CreateFileW returns ERROR_INVALID_NAME for those same readable links.
+        // Keep ordinary files on the one-open path. On that error, resolve one
+        // actual link at a time without handing literal filenames back to PHP.
+        // Match PHP's 32-link ceiling so relative link cycles also terminate.
+        for ($resolved_links = 0; $resolved_links <= 32; ++$resolved_links) {
+            $handle = self::$api->CreateFileW(self::wide($native_path), $access, 7, null, 3, 0x02000000 | ( $no_follow ? 0x00200000 : 0 ), null);
+            if (!self::invalid_handle($handle)) {
+                return $handle;
+            }
             $error = self::$api->GetLastError();
-            if ($error === 2 || $error === 3) {
+            if ($error !== 123) {
+                break;
+            }
+            if ($resolved_links === 32) {
+                throw new RuntimeException('Cannot resolve Windows path after 32 symbolic links: ' . $native_path);
+            }
+            $resolved_path = self::resolve_link_prefix($native_path, $no_follow);
+            if ($resolved_path === null) {
+                break;
+            }
+            $native_path = $resolved_path;
+        }
+        if ($error === 2 || $error === 3) {
+            return null;
+        }
+        throw new RuntimeException('Cannot open Windows path ' . $native_path . '; Windows error ' . $error);
+    }
+
+    /** Replaces the first link prefix, retaining every later filename byte and no-follow behavior. */
+    private static function resolve_link_prefix(string $native_path, bool $no_follow): ?string {
+        $path = self::canonical_path($native_path);
+        $prefix = windows_share_root($path) ?? substr($path, 0, 3);
+        $parts = explode('/', ltrim(substr($path, strlen($prefix)), '/'));
+        $limit = count($parts) - ( $no_follow ? 1 : 0 );
+        for ($position = 0; $position < $limit; ++$position) {
+            $prefix = wp_join_unix_paths($prefix, $parts[$position]);
+            // Inspect prefixes without following their final link. Do not call
+            // open() here: an invalid non-link name must not recurse into itself.
+            $handle = self::$api->CreateFileW(self::wide(self::native_path($prefix)), 0, 7, null, 3, 0x02200000, null);
+            if (self::invalid_handle($handle)) {
                 return null;
             }
-            throw new RuntimeException('Cannot open Windows path ' . $native_path . '; Windows error ' . $error);
+            try {
+                $stat = self::handle_stat($handle);
+            } finally {
+                self::$api->CloseHandle($handle);
+            }
+            if (( $stat['mode'] & 0170000 ) !== 0120000) {
+                continue;
+            }
+            $target = self::readlink($prefix);
+            if ($target === false) {
+                return null;
+            }
+            return self::native_path(wp_join_unix_paths(
+                resolve_symlink_target_path($prefix, $target),
+                implode('/', array_slice($parts, $position + 1))
+            ));
         }
-        return $handle;
+        return null;
     }
 
     /** Reads PHP-compatible stat fields from the actual handle, not a normalized alias. */

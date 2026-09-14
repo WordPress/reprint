@@ -24,7 +24,14 @@ public static class NamespaceFixtures {
     static extern bool CreateSymbolicLinkW(string name, string target, uint flags);
     /// <summary>Stores a real Windows link target with the requested slash spelling.</summary>
     public static void Link(string name, string target, bool directory) {
-        if (!CreateSymbolicLinkW(name, target, directory ? 1u : 0u)) throw new Win32Exception(Marshal.GetLastWin32Error(), name);
+        // PowerShell's location need not be the native process's current directory.
+        var previous = Environment.CurrentDirectory;
+        try {
+            Environment.CurrentDirectory = System.IO.Path.GetDirectoryName(name);
+            if (!CreateSymbolicLinkW(name, target, directory ? 1u : 0u)) throw new Win32Exception(Marshal.GetLastWin32Error(), name);
+        } finally {
+            Environment.CurrentDirectory = previous;
+        }
     }
     /// <summary>Writes exact bytes through the literal Win32 filename.</summary>
     public static void Write(string name, string content) {
@@ -200,6 +207,8 @@ foreach ($spelling in @('backslash', 'forward-slash', 'root-relative', 'absolute
         }
     }
 }
+[NamespaceFixtures]::Link("$linkRoot\cycle-a", './cycle-b', $false)
+[NamespaceFixtures]::Link("$linkRoot\cycle-b", './cycle-a', $false)
 $cases['junction-not-followed'] = @{
     source="\\?\$linkRoot\junction"
     files=@()
