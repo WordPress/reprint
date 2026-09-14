@@ -3,6 +3,7 @@
 use PHPUnit\Framework\TestCase;
 use function WordPress\Reprint\Server\assert_valid_path;
 use function WordPress\Reprint\Server\normalize_path;
+use function WordPress\Reprint\Server\normalize_path_separators;
 use function WordPress\Reprint\Server\path_is_descendant_of;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\path_remainder_under;
@@ -33,6 +34,7 @@ class WindowsPathTest extends TestCase
     {
         assert_valid_path($remote_path);
         $mapper = new RemoteToLocalPathMapper('/local', []);
+        $this->assertSame($expected_path, normalize_path_separators($remote_path));
         $this->assertSame($expected_path, normalize_path($remote_path));
         $this->assertSame('/local/' . $expected_path, $mapper->remote_path_to_local_path($remote_path));
     }
@@ -95,6 +97,7 @@ class WindowsPathTest extends TestCase
         $mapper = new RemoteToLocalPathMapper('/local', []);
         $this->assertSame('/local/UNC/SERVER/MEDIA/Sites/photo.jpg', $mapper->remote_path_to_local_path($remote));
         $this->assertSame('/local/C:/UNC/SERVER/MEDIA/Sites/photo.jpg', $mapper->remote_path_to_local_path('C:\\UNC\\SERVER\\MEDIA\\Sites\\photo.jpg'));
+        $this->assertSame('//server/media/name\\with\\backslashes', normalize_path_separators('//server/media/name\\with\\backslashes'));
         $this->assertSame('/local/server/media/name\\with\\backslashes', $mapper->remote_path_to_local_path('//server/media/name\\with\\backslashes'));
     }
 
@@ -129,14 +132,29 @@ class WindowsPathTest extends TestCase
         ];
     }
 
-    /** Backslashes are ordinary filename bytes on Unix, not path separators. */
-    public function test_preserves_unix_backslashes(): void
+    /**
+     * Backslashes in a known absolute Unix path must remain filename bytes.
+     *
+     * @dataProvider unix_backslash_paths
+     * @param string $path Absolute Unix path whose components contain backslashes.
+     */
+    public function test_preserves_unix_backslashes(string $path): void
     {
-        $path = '/site/name\\with\\backslashes.txt';
         assert_valid_path($path);
+        $this->assertSame($path, normalize_path_separators($path));
         $this->assertSame($path, normalize_path($path));
         $mapper = new RemoteToLocalPathMapper('/local', ['/site']);
         $this->assertSame('/local' . $path, $mapper->remote_path_to_local_path($path));
+    }
+
+    /** @return array[] Absolute Unix paths for the documented separator cases. */
+    public static function unix_backslash_paths(): array
+    {
+        return [
+            ['/site/name\\with\\backslashes.txt'],
+            ['/site/workspace\\group\\user/www'],
+            ['/site/D:\\photos'],
+        ];
     }
 
     /**
@@ -161,7 +179,12 @@ class WindowsPathTest extends TestCase
             ['/site/link', '\\\\server\\share', '/site/\\\\server\\share'],
             ['/site/link', 'D:\\..\\photos', '/site/D:\\..\\photos'],
             ['/site/link', '/shared/photo\\old', '/shared/photo\\old'],
+            ['/site/link', '/photos/image.jpg', '/photos/image.jpg'],
+            ['/site/link', '\\photos\\image.jpg', '/site/\\photos\\image.jpg'],
+            ['/site/link', '//server/share/photos/image.jpg', '/server/share/photos/image.jpg'],
+            ['/site/workspace\\group\\user/link', 'www/image.jpg', '/site/workspace\\group\\user/www/image.jpg'],
             ['/site/link', "../photo\xff\\old", "/photo\xff\\old"],
+            ['D:/site/link', 'D:\\photos', 'D:/photos'],
             ['D:/site/link', '..\\photos\\image.jpg', 'D:/photos/image.jpg'],
             ['D:/site/link', '../photos/image.jpg', 'D:/photos/image.jpg'],
             ['D:/site/link', '..\\photos/image.jpg', 'D:/photos/image.jpg'],

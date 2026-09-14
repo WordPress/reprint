@@ -94,6 +94,13 @@ final class WindowsFilesystem {
      * GetLongPathName expands spelling and case without replacing a junction or
      * symlink with its target. Only a volume namespace root is resolved by handle;
      * descendants must retain their names for the index's no-follow checks.
+     *
+     * This method runs on the Windows source. It can distinguish raw inputs
+     * that the shared string helpers cannot: /site uses the current drive,
+     * D:site uses that drive's current directory, and //server/share is a UNC
+     * share. GetFullPathNameW supplies that context before separator conversion.
+     * The returned path uses a drive root or a backslash UNC root. The Linux
+     * client must not apply its own current directory to these inputs.
      */
     public static function resolve_input(string $path): string {
         self::assert_available();

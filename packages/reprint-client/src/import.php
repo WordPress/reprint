@@ -10799,6 +10799,12 @@ class ImportClient
     /**
      * Resolves Windows source input on the remote host, never against the client cwd.
      *
+     * The preflight capability selects Windows rules; the raw prefix cannot.
+     * For example, //server/share could also name an absolute Unix path.
+     * Send the input before normalizing separators. The native Windows resolver
+     * returns a drive path or a share with a leading pair of backslashes, so
+     * later shared helpers do not have to guess what a leading "//" means.
+     *
      * @param string $raw Source selection from the CLI.
      * @param array<string,string|null> $tokens Remote path token values.
      */

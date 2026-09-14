@@ -233,6 +233,23 @@ if (!function_exists(__NAMESPACE__ . '\\resolve_symlink_target_path')) {
 /**
  * Resolves a link target using the source link's path format, not the current OS.
  *
+ * The source link path must already use Reprint's absolute path format:
+ * /site/link for Unix, D:/site/link for a drive, or \\SERVER\SHARE/site/link
+ * for a Windows share. A raw //server/share/link is not enough to identify
+ * the source format. Resolve that Windows input on the source first.
+ *
+ * The target alone does not identify its format. For the same target:
+ *
+ *     Source link       Target       Absolute target
+ *     /site/gallery     D:\photos    /site/D:\photos
+ *     E:/site/gallery   D:\photos    D:/photos
+ *
+ * The first row must keep its backslash. If it became D:/photos, the client
+ * would not find the indexed Unix target or update the link after --remap.
+ * The source link also supplies the base directory for relative targets.
+ * Windows CLI inputs such as D:photos need the source process's current
+ * directory for that drive; this link resolver does not supply that state.
+ *
  * A target such as `D:\photos` or `\\server\share` is relative on Unix.
  * Only a Windows source link may interpret those prefixes as absolute roots.
  * Join relative targets before normalizing so Unix backslashes remain names
@@ -245,6 +262,8 @@ if (!function_exists(__NAMESPACE__ . '\\resolve_symlink_target_path')) {
  */
 function resolve_symlink_target_path(string $symlink_path, string $target): string
 {
+    // In the required source-link format, only Unix paths start with "/".
+    // Check that known path before interpreting any separator in the target.
     if (str_starts_with($symlink_path, '/')) {
         $absolute_target = str_starts_with($target, '/');
     } else {
@@ -646,6 +665,10 @@ if (!function_exists(__NAMESPACE__ . '\\assert_valid_path')) {
  * use — both the exporter (directory config) and the importer (remote
  * paths from the server) share this validation.
  *
+ * This checks accepted path syntax, not the source operating system.
+ * D:\photos passes as Windows syntax even when it is a relative Unix name.
+ * A successful check therefore cannot establish the source path format.
+ *
  * @param string $path  The path to validate.
  * @param string $label Human-readable label for error messages (e.g. "directory", "remote path").
  * @throws InvalidArgumentException When the path fails any check.
@@ -676,19 +699,48 @@ if (!function_exists(__NAMESPACE__ . '\\normalize_path_separators')) {
 /**
  * Uses single forward slashes below a Windows drive or UNC share root.
  *
+ * Path rules, indexes, and file transfers need one spelling for each path.
+ * For example, a selection of D:/site must match D:\site\photo.jpg.
+ *
+ * This function has no source OS or base directory. It checks the prefix:
+ *
+ *     Input                              Output
+ *     d:\site\photo.jpg                  D:/site/photo.jpg
+ *     \\server\share\photo.jpg            \\SERVER\SHARE/photo.jpg
+ *     /site/workspace\group\user/www      /site/workspace\group\user/www
+ *     //server/share/photo\old.jpg        //server/share/photo\old.jpg
+ *
+ * The last two inputs match neither Windows prefix. They return unchanged.
+ * In the third row, workspace\group\user is one Unix directory name.
+ * Replacing every backslash would select three directories instead.
+ *
+ * These rules require input in the supported absolute source path forms.
+ * Absolute alone is not enough: //server/share can be a Unix path or a
+ * Windows share. Resolve that raw Windows input on the source to a share
+ * with a leading pair of backslashes before calling this helper. Windows
+ * namespace inputs and paths relative to a drive also need source resolution.
+ *
+ * A bare D:\photos can be a relative Unix name. This helper would change it
+ * to D:/photos. For a link target, use resolve_symlink_target_path() first;
+ * it can use the source link's path to distinguish those two meanings.
+ * This input requirement is not enforced here. Neither this helper nor
+ * is_absolute_path() can infer the source OS from an arbitrary string.
+ *
  * Keep a UNC root spelled `\\SERVER\SHARE` so it cannot be confused with a
  * Unix path starting with `//`. Drive letters, server names, and share names
  * are case-insensitive; filenames retain their case and every other byte.
- * These are absolute paths: a Linux importer also reads Windows source paths.
+ * Do not use the current OS: a Linux importer also reads Windows source paths.
  * Absolute Unix paths keep every backslash byte in their names. A relative
  * name can resemble a Windows root; resolve it against its source path first.
  * Dot segments below the root stay intact so validation can reject them.
  *
- * @param string $path Native or remote filesystem path.
+ * @param string $path Absolute path in the source forms described above.
  * @return string Windows path with a stable root spelling, or the unchanged Unix path.
  */
 function normalize_path_separators(string $path): string
 {
+    // The drive prefix selects Windows rules. A colon elsewhere, such as
+    // /site/D:\photos, must not change the Unix filename that contains it.
     if (preg_match('~^[a-zA-Z]:[/\\\\]~', $path)) {
         return strtoupper($path[0]) . preg_replace('~[/\\\\]+~', '/', substr($path, 1));
     }
@@ -697,6 +749,8 @@ function normalize_path_separators(string $path): string
         $tail = preg_replace('~[/\\\\]+~', '/', substr($path, strlen($share_root)));
         return $share_root . ( $tail === '/' ? '' : $tail );
     }
+    // This also preserves leading "//". A raw forward-slash Windows share
+    // must be resolved where the source OS is known, not guessed here.
     return $path;
 }
 }
@@ -705,8 +759,13 @@ if (!function_exists(__NAMESPACE__ . '\\is_absolute_path')) {
 /**
  * Recognizes Unix, Windows drive, and UNC share roots without consulting disk.
  *
+ * A true result means that one supported syntax matched. It does not prove
+ * that the path is absolute on the source OS. For example, D:\photos matches
+ * Windows syntax but remains a relative name on Unix. Resolve link targets
+ * with resolve_symlink_target_path() before using this cross-format check.
+ *
  * @param string $path Native or remote filesystem path.
- * @return bool Whether the path is rooted rather than relative to a working directory.
+ * @return bool Whether the path has a supported Unix, drive, or share root prefix.
  */
 function is_absolute_path(string $path): bool
 {
