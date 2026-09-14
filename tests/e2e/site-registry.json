@@ -214,6 +214,9 @@
     "multisite-files": {
       "port": 8145
     },
+    "multisite-target": {
+      "port": 8146
+    },
     "multisite-query-budget": {
       "port": 8148
     }
