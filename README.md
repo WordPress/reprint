@@ -99,6 +99,23 @@ The default layout under `--fs-root` keeps different drives and shares separate:
 Add `--flatten-to=/var/www/site` to place WordPress directly in that directory.
 Unix filename bytes, including literal backslashes, are unchanged.
 
+The source also accepts file paths with `\\?\` or `\\.\` prefixes, including
+UNC paths, volume GUIDs and `GLOBALROOT\Device\HarddiskVolumeN` paths. Volume
+aliases resolve to their drive path before the client selects files. Relative
+selections such as `.\site`, `\site` and `D:site` use the Windows source process's
+current directory and drive, never the Linux client's. Prefer a full path when
+the source process's working directory is not known.
+
+These namespace and relative selections, and exact filename reads, require
+**64-bit PHP 7.4+ with FFI and mbstring enabled** on the source. Reprint uses
+read-only Windows file handles for indexing and file
+chunks. This preserves trailing dots and spaces, reserved filenames such as
+`NUL.txt`, and long UNC names that PHP's ordinary file functions may change or
+fail to read. FFI is optional for ordinary paths. The native reader is disabled
+when `open_basedir` is set; Reprint does not bypass that host restriction. If
+native reads are unavailable, a literal trailing-name entry stops the pull
+instead of silently copying another file or omitting it.
+
 There are limits that a migration cannot hide:
 
 * A Linux filesystem may reject a name that Windows accepts. The ext4 target in
@@ -107,12 +124,10 @@ There are limits that a migration cannot hide:
   the source; Reprint reports the filesystem error rather than renaming them.
 * Windows normally resolves `HELLO.TXT` to `hello.txt`; Linux does not. Reprint preserves
   the actual filename case. Correct wrong-case references in site code or URLs.
-* The Windows PHP 8.3 runtime in CI cannot read some long UNC paths that it can
-  read through a drive letter. Use a drive-letter source path for those trees.
-  An uninspectable share entry must fail the pull, not disappear from its index.
-* Drive-relative paths (`C:site`), current-drive paths (`\site`), incomplete
-  shares, and device namespaces (`\\?\…`, `\\.\…`) are not supported source
-  selections. Use a full drive-letter path or an ordinary UNC share path.
+* Physical devices and named pipes are not migration files and are rejected.
+  A UNC path must name both a server and a share.
+* NTFS alternate data streams are not migrated. Only each file's main contents
+  are copied; no stream sidecar files are created.
 
 These distinctions follow the [Windows path rules](https://learn.microsoft.com/en-us/dotnet/standard/io/file-path-formats)
 and [filesystem name limits](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation).
@@ -120,7 +135,8 @@ The CI workflow runs the same full WordPress migration from a drive and a
 network share, with native Windows PHP/MySQL and a Linux client under WSL2.
 It checks hashes, empty directories, database table row counts, URL rewriting,
 and both raw and flattened runtimes. Separate path pulls cover punctuation,
-Unicode, long names, case differences, and clear failures at filesystem limits.
+Unicode, long names, namespace aliases, relative paths, literal trailing names,
+case-sensitive siblings, and clear failures at filesystem limits.
 
 ## Composer packages
 

@@ -394,7 +394,7 @@ final class HTTPServer {
             call_user_func($handler, $config);
             return;
         }
-        if ($endpoint === 'preflight') {
+        if ($endpoint === 'preflight' || $endpoint === 'resolve_windows_path') {
             call_user_func($handler, $config);
             return;
         }
@@ -421,6 +421,7 @@ final class HTTPServer {
             'sql_chunk' => 'endpoint_sql_chunk',
             'db_index' => 'endpoint_db_index',
             'preflight' => 'endpoint_preflight',
+            'resolve_windows_path' => 'endpoint_resolve_windows_path',
         ];
         if ($this->push_endpoints !== null) {
             foreach (self::PUSH_ENDPOINT_METHODS as $endpoint => $method) {

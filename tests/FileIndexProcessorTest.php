@@ -51,6 +51,46 @@ final class FileIndexProcessorTest extends TestCase {
         $this->assertDirectoryScanHookRuns();
     }
 
+    public function testSelectedEmptyDirectoryIsIndexedOnceAcrossResume(): void
+    {
+        $directory = $this->tempDir . '/empty.';
+        mkdir($directory);
+        foreach ([false, true] as $resume) {
+            $result = $this->runProcessor($directory, $resume);
+            $this->assertCount(1, $result['entries']);
+            $this->assertSame((string) realpath($directory), $result['entries'][0]['path']);
+            $this->assertSame('dir', $result['entries'][0]['type']);
+            $this->assertTrue($result['entries'][0]['empty']);
+        }
+    }
+
+    public function testEmptyDirectorySelectedWithItsParentIsNotRepeated(): void
+    {
+        $directory = $this->tempDir . '/empty';
+        mkdir($directory);
+        $processor = $this->startProcessor([$this->tempDir, $directory], $this->tempDir, false, '');
+        $entries = [];
+        while ($processor->next_index_step()) {
+            $entries = array_merge($entries, $processor->get_index_entries());
+        }
+        $processor->close();
+        $this->assertSame([(string) realpath($directory)], array_column($entries, 'path'));
+    }
+
+    public function testEmptySelectedRootsStillRespectDefaultAndStorageExclusions(): void
+    {
+        foreach (['.git', 'private-state'] as $name) {
+            $directory = $this->tempDir . '/' . $name;
+            mkdir($directory);
+            $storage = $name === 'private-state' ? $directory : '';
+            $processor = $this->startProcessor([$directory], $directory, false, $storage);
+            while ($processor->next_index_step()) {
+                $this->assertSame([], $processor->get_index_entries());
+            }
+            $processor->close();
+        }
+    }
+
     public function testResumeAfterEveryStepMatchesOneOpenProcessor(): void
     {
         $docroot = $this->tempDir . '/site';
@@ -131,7 +171,11 @@ final class FileIndexProcessorTest extends TestCase {
         );
         $this->assertTrue($processor->next_index_step());
         $this->assertSame(FileIndexProcessor::STATUS_INDEXED, $processor->get_step_status());
-        $this->assertSame($vanishingDirectory, $processor->get_index_entries()[0]['path']);
+        // Empty directories are emitted after their own listing, not while
+        // scheduling them from the parent. Stop at that scheduling boundary.
+        $cursor = $processor->get_cursor();
+        $this->assertSame($vanishingDirectory, base64_decode(end($cursor['stack'])['dir'], true));
+        $this->assertSame([], $processor->get_index_entries());
 
         rmdir($vanishingDirectory);
 
@@ -230,9 +274,10 @@ final class FileIndexProcessorTest extends TestCase {
         );
         $this->assertTrue($processor->next_index_step());
         $this->assertSame(
-            FileIndexProcessor::STATUS_DIRECTORY_COMPLETE,
+            FileIndexProcessor::STATUS_INDEXED,
             $processor->get_step_status()
         );
+        $this->assertTrue($processor->get_index_entries()[0]['empty']);
         $this->assertFalse($processor->next_index_step());
         $this->assertFalse($processor->next_index_step());
         $cursor = json_encode($processor->get_cursor(), JSON_THROW_ON_ERROR);

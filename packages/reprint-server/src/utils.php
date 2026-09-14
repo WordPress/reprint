@@ -773,4 +773,67 @@ function wp_join_unix_paths(...$path_segments)
 }
 }
 
+if (!function_exists(__NAMESPACE__ . '\\source_io_path')) {
+/**
+ * Returns a read-only filesystem URI for exact Windows names, or the ordinary path.
+ *
+ * Use only at PHP file-I/O calls. Indexes, cursors and the wire retain the actual
+ * path. Without native reads, fail on names PHP would normalize rather than
+ * silently exporting a sibling or skipping the entry.
+ */
+function source_io_path(string $path): string {
+    if (PHP_OS !== 'WINNT') {
+        return $path;
+    }
+    if (!class_exists(WindowsFilesystem::class, false)) {
+        require_once __DIR__ . '/class-windows-filesystem.php';
+    }
+    if (WindowsFilesystem::available()) {
+        return 'reprint-windows://' . base64_encode($path);
+    }
+    if (preg_match('~[. ](?:[/\\\\]|$)~', $path)) {
+        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This is an API error, not HTML.
+        throw new \RuntimeException('Cannot read the exact Windows filename ' . $path . '. Use 64-bit PHP 7.4+ with FFI and mbstring enabled and open_basedir unset.');
+    }
+    return $path;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\source_realpath')) {
+/**
+ * Resolves source filesystem links without normalizing literal Windows filenames.
+ */
+function source_realpath(string $path) {
+    if (PHP_OS === 'WINNT') {
+        if (!class_exists(WindowsFilesystem::class, false)) {
+            require_once __DIR__ . '/class-windows-filesystem.php';
+        }
+        if (WindowsFilesystem::available()) {
+            return WindowsFilesystem::realpath($path);
+        }
+        source_io_path($path);
+    }
+    return realpath($path);
+}
+}
+
+
+if (!function_exists(__NAMESPACE__ . '\\source_readlink')) {
+/**
+ * Reads a source link target without normalizing a literal Windows link name.
+ */
+function source_readlink(string $path) {
+    if (PHP_OS === 'WINNT') {
+        if (!class_exists(WindowsFilesystem::class, false)) {
+            require_once __DIR__ . '/class-windows-filesystem.php';
+        }
+        if (WindowsFilesystem::available()) {
+            return WindowsFilesystem::readlink($path);
+        }
+        source_io_path($path);
+    }
+    return readlink($path);
+}
+}
+
 }

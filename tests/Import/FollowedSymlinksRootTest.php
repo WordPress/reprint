@@ -292,6 +292,24 @@ class FollowedSymlinksRootTest extends TestCase
 
     // ── Intermediate symlinks are repointed through the placement seam ──
 
+    public function testWindowsAbsoluteLinkTargetsFollowTheirDownloadedFiles(): void
+    {
+        foreach (['D:/shared', '\\\\SERVER\\SHARE/shared'] as $target) {
+            $client = $this->newClient();
+            $reflection = new \ReflectionClass($client);
+            $reflection->getProperty('follow_symlinks')->setValue($client, true);
+            $reflection->getProperty('next_remote_index_prefix_cache')->setValue($client, [$target => true]);
+            $result = $reflection->getMethod('rewrite_symlink_target_for_local_filesystem')->invoke(
+                $client,
+                'D:/site/link',
+                $this->root . '/D:/site/link',
+                $target
+            );
+            $expected = $target === 'D:/shared' ? '../shared' : '../../UNC/SERVER/SHARE/shared';
+            $this->assertSame($expected, $result);
+        }
+    }
+
     public function testIntermediateSymlinkRepointsIntoLocalFollowedSymlinksRoot(): void
     {
         // In-scope intermediate link whose relative target resolves to an

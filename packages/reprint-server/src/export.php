@@ -14,11 +14,16 @@ use WordPress\Reprint\Server\PdoConstants;
 use WordPress\Reprint\Server\ResourceBudget;
 use WordPress\Reprint\Server\SqliteDriverPDO;
 use WordPress\Reprint\Server\WpdbDriverPDO;
+use WordPress\Reprint\Server\WindowsFilesystem;
 
 use function WordPress\Reprint\Server\assert_valid_path;
 use function WordPress\Reprint\Server\build_pdo_dsn;
 use function WordPress\Reprint\Server\generate_random_bytes;
 use function WordPress\Reprint\Server\json_encode_or_throw;
+use function WordPress\Reprint\Server\is_absolute_path;
+use function WordPress\Reprint\Server\source_io_path;
+use function WordPress\Reprint\Server\source_realpath;
+use function WordPress\Reprint\Server\source_readlink;
 use function WordPress\Reprint\Server\normalize_path;
 use function WordPress\Reprint\Server\normalize_path_separators;
 use function WordPress\Reprint\Server\parse_size;
@@ -1387,12 +1392,12 @@ function resolve_directories(array $config): array
                 "directory entries must be non-empty strings"
             );
         }
-        $directory = trim($directory);
+        $directory = PHP_OS === 'WINNT' ? $directory : trim($directory);
         assert_valid_path($directory, "directory entry");
 
         clearstatcache(true, $directory);
-        $real_directory = @realpath($directory);
-        if ($real_directory === false || !is_dir($real_directory)) {
+        $real_directory = @source_realpath($directory);
+        if ($real_directory === false || !is_dir(source_io_path($real_directory))) {
             throw new InvalidArgumentException(
                 "directory entry is not an accessible directory: {$directory}\n" .
                     "Current working directory: " .
@@ -1453,11 +1458,11 @@ function resolve_file_index_roots(array $config): array
         if (!is_string($root_input)) {
             throw new InvalidArgumentException("directory entries must be non-empty strings");
         }
-        $root_input = trim($root_input);
+        $root_input = PHP_OS === 'WINNT' ? $root_input : trim($root_input);
         assert_valid_path($root_input, "directory entry");
         $requested_path = normalize_path($root_input);
         clearstatcache(true, $requested_path);
-        $stat = @lstat($requested_path);
+        $stat = @lstat(source_io_path($requested_path));
         if ($stat === false) {
             // The client sends `pulled_before` for selected paths an earlier pull
             // already saw. Absence there means the source deleted the path, so it
@@ -1480,8 +1485,8 @@ function resolve_file_index_roots(array $config): array
         }
 
         $mode = $stat["mode"] & STAT_TYPE_MASK;
-        $type = $mode === STAT_TYPE_LINK ? "symlink" : ( is_dir($requested_path) ? "directory" : "file" );
-        $resolved_path = @realpath($requested_path);
+        $type = $mode === STAT_TYPE_LINK ? "symlink" : ( is_dir(source_io_path($requested_path)) ? "directory" : "file" );
+        $resolved_path = @source_realpath($requested_path);
         if ($type === "symlink" && $resolved_path === false) {
             throw new InvalidArgumentException("Selected file-index root is a broken symlink: {$requested_path}");
         }
@@ -1550,8 +1555,8 @@ function resolve_file_index_start_root(
         );
     }
 
-    $resolved_path = @realpath($requested_path);
-    if ($resolved_path === false || !is_dir($resolved_path)) {
+    $resolved_path = @source_realpath($requested_path);
+    if ($resolved_path === false || !is_dir(source_io_path($resolved_path))) {
         throw new InvalidArgumentException(
             "Followed symlink target directory does not exist or is not accessible: {$requested_path}"
         );
@@ -1567,17 +1572,21 @@ function resolve_file_index_start_root(
 /** Returns the first symlink in a requested root's parent path. */
 function file_index_parent_symlink(string $requested_path): ?array
 {
-    $current = "/";
-    $parts = explode("/", trim(dirname($requested_path), "/"));
-    foreach ($parts as $part) {
-        if ($part === "") {
+    $parents = [];
+    $current = dirname($requested_path);
+    while (is_absolute_path($current)) {
+        $parents[] = $current;
+        $parent = dirname($current);
+        if ($parent === $current) {
+            break;
+        }
+        $current = $parent;
+    }
+    foreach (array_reverse($parents) as $current) {
+        if (!@is_link(source_io_path($current))) {
             continue;
         }
-        $current = wp_join_unix_paths($current, $part);
-        if (!@is_link($current)) {
-            continue;
-        }
-        $target = @readlink($current);
+        $target = @source_readlink($current);
         return ["path" => $current, "target" => $target === false ? "(unreadable)" : $target];
     }
     return null;
@@ -2529,6 +2538,7 @@ function endpoint_preflight(array $config): array
         "protocol_version" => EXPORT_PROTOCOL_VERSION,
         "capabilities" => [
             "base64_path_parameters" => true,
+            "windows_path_resolution" => PHP_OS === 'WINNT' && empty($config['_multisite']),
         ],
         "wp_detect" => [
             "found" => !empty($wp_detect["roots"]),
@@ -3716,3 +3726,47 @@ function parse_http_config(): array
     $server = new HTTPServer();
     return $server->parse_http_config($_GET, $_POST, $_SERVER, $body);
 }
+
+/**
+ * Resolves one Windows source selection before the client builds its path rules.
+ *
+ * The input travels as base64 because JSON cannot represent arbitrary path bytes.
+ * This endpoint shares the existing authenticated export access; it never reads
+ * file contents. Windows, not the Linux client, supplies relative-path context.
+ *
+ * @param array $config {
+ *     @type string $source_path_b64 Base64-encoded source selection.
+ * }
+ * @return array {
+ *     @type bool   $ok       True after successful resolution.
+ *     @type string $path_b64 Base64-encoded absolute source path.
+ * }
+ */
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These failures become JSON API errors.
+// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the export endpoint registry's existing function names.
+function endpoint_resolve_windows_path(array $config): array {
+    if (PHP_OS !== 'WINNT') {
+        throw new InvalidArgumentException('Windows path resolution requires a Windows source.');
+    }
+    $encoded = $config['source_path_b64'] ?? null;
+    $path = is_string($encoded) ? base64_decode($encoded, true) : false;
+    if ($path === false || $path === '' || strpos($path, "\0") !== false) {
+        throw new InvalidArgumentException('source_path_b64 must encode a non-empty Windows path without NUL bytes.');
+    }
+    require_once __DIR__ . '/class-windows-filesystem.php';
+    if (WindowsFilesystem::available()) {
+        $resolved = WindowsFilesystem::resolve_input($path);
+    } else {
+        assert_valid_path($path, 'Windows source path');
+        source_io_path($path);
+        $real = realpath($path);
+        $resolved = normalize_path_separators($real === false ? $path : $real);
+    }
+    $response = ['ok' => true, 'path_b64' => base64_encode($resolved)];
+    header('Content-Type: application/octet-stream');
+    // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- The response is JSON, not HTML.
+    echo json_encode_or_throw($response);
+    return $response;
+}
+
+// phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
