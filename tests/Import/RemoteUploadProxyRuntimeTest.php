@@ -169,12 +169,14 @@ class RemoteUploadProxyRuntimeTest extends TestCase
      * @param string $abspath Remote WordPress core directory.
      * @param string $local_document_root Mapped document root below fsRoot.
      * @param string $local_abspath Mapped WordPress core below fsRoot.
+     * @param string $path_format Format reported by the source preflight.
      */
     public function testApplyRuntimeFindsMappedAbspathInTheRawDownload(
         string $document_root,
         string $abspath,
         string $local_document_root,
-        string $local_abspath
+        string $local_abspath,
+        string $path_format
     ): void {
         mkdir($this->fsRoot . $local_document_root, 0755, true);
         if ($local_abspath !== '') {
@@ -188,6 +190,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $this->writeState([
             'preflight' => [
                 'data' => [
+                    'path_format' => $path_format,
                     'runtime' => [
                         'document_root' => $document_root,
                     ],
@@ -223,13 +226,13 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         );
     }
 
-    /** @return array[] Source paths and their corresponding Linux locations. */
+    /** @return array[] Source paths, Linux locations, and explicit source format. */
     public static function raw_runtime_paths(): array
     {
         return [
-            'Unix root' => ['/remote-document-root', '/', '/remote-document-root', ''],
-            'Windows drive' => ['D:\\Sites', 'D:\\WordPress', '/D:/Sites', '/D:/WordPress'],
-            'Windows share' => ['\\\\server\\share\\Sites', '\\\\server\\share\\WordPress', '/UNC/SERVER/SHARE/Sites', '/UNC/SERVER/SHARE/WordPress'],
+            'Unix root' => ['/remote-document-root', '/', '/remote-document-root', '', 'unix'],
+            'Windows drive' => ['D:\\Sites', 'D:\\WordPress', '/D:/Sites', '/D:/WordPress', 'windows'],
+            'Windows share' => ['\\\\server\\share\\Sites', '\\\\server\\share\\WordPress', '/UNC/SERVER/SHARE/Sites', '/UNC/SERVER/SHARE/WordPress', 'windows'],
         ];
     }
 

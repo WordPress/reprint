@@ -40,8 +40,9 @@ class FlatDocrootWpConfigTest extends TestCase
      * @dataProvider source_wordpress_roots
      * @param string $abspath Source WordPress directory.
      * @param string $local_parent_path Relative destination of its parent.
+     * @param string $path_format Format reported by the source preflight.
      */
-    public function testSymlinksWpConfigFromAbspathParent(string $abspath, string $local_parent_path): void
+    public function testSymlinksWpConfigFromAbspathParent(string $abspath, string $local_parent_path, string $path_format): void
     {
         // Create the filesystem layout under fsRoot
         $localParent = $this->fsRoot . '/' . $local_parent_path;
@@ -57,6 +58,7 @@ class FlatDocrootWpConfigTest extends TestCase
         $this->writeState([
             'preflight' => [
                 'data' => [
+                    'path_format' => $path_format,
                     'database' => [
                         'wp' => [
                             'table_prefix' => 'wp_',
@@ -87,13 +89,13 @@ class FlatDocrootWpConfigTest extends TestCase
         );
     }
 
-    /** @return array[] Source ABSPATH and the corresponding Linux parent path. */
+    /** @return array[] Source ABSPATH, Linux parent path, and explicit source format. */
     public static function source_wordpress_roots(): array
     {
         return [
-            'Unix' => ['/srv/htdocs/wordpress/', 'srv/htdocs'],
-            'Windows drive' => ['D:\\Sites\\wordpress/', 'D:/Sites'],
-            'Windows share' => ['\\\\server\\share\\Sites\\wordpress/', 'UNC/SERVER/SHARE/Sites'],
+            'Unix' => ['/srv/htdocs/wordpress/', 'srv/htdocs', 'unix'],
+            'Windows drive' => ['D:\\Sites\\wordpress/', 'D:/Sites', 'windows'],
+            'Windows share' => ['\\\\server\\share\\Sites\\wordpress/', 'UNC/SERVER/SHARE/Sites', 'windows'],
         ];
     }
 
