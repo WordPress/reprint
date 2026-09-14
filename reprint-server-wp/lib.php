@@ -578,6 +578,9 @@ function handle_api_request(array $options = []): void {
         if (function_exists('is_multisite') && is_multisite()) {
             require_once __DIR__ . '/wordpress/multisite.php';
             $server_options['multisite'] = get_multisite_export_context();
+            if ($endpoint === 'preflight') {
+                $server_options['multisite']['nested_site_paths'] = get_multisite_nested_site_paths($server_options['multisite']);
+            }
         }
         if (HTTPServer::is_push_endpoint($endpoint)) {
             // Push changes the web server's document root. ABSPATH remains the
