@@ -89,6 +89,7 @@ class RemapResolveTest extends TestCase
         return $c;
     }
 
+    /** One remap contains two formats: Windows source and Unix destination. */
     public function testRemoteWindowsFormatDoesNotChangeLocalUnixRemapNames(): void
     {
         $client = $this->client([]);
@@ -100,6 +101,7 @@ class RemapResolveTest extends TestCase
         );
     }
 
+    /** Native backslashes must be converted before the Unix client finds a source parent. */
     public function testWindowsRuntimePathsAreResolvedBeforeClientDirname(): void
     {
         $client = $this->client([]);

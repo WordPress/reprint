@@ -147,6 +147,7 @@ final class RemoteIndexReaderTest extends TestCase
         \RemoteIndexReader::decode_index_line("\n", 'unix');
     }
 
+    /** Readers validate with source rules but preserve the bytes that set index order. */
     public function testIndexValidationUsesSourceFormatWithoutChangingSortBytes(): void
     {
         foreach (['unix', 'windows'] as $path_format) {

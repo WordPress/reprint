@@ -200,6 +200,7 @@ class PullStateTest extends TestCase
         $this->assertSame('wp_', $state->get('preflight.database.wp.table_prefix'));
     }
 
+    /** A resumed pull must use the same source rules as its first process. */
     public function testSourceFormatSurvivesSavingAndLoadingPreflight(): void
     {
         foreach (['unix', 'windows'] as $path_format) {
@@ -210,6 +211,7 @@ class PullStateTest extends TestCase
         }
     }
 
+    /** A missing field follows the old contract, even when other values look Windows-like. */
     public function testLegacyPreflightUsesUnixRulesWithoutInspectingPathsOrCapabilities(): void
     {
         $state = new \PullState();

@@ -220,6 +220,7 @@ class HostImportRulesTest extends TestCase {
         );
     }
 
+    /** Source plugin paths and layout comparisons must not use the Unix client rules. */
     public function testWindowsPreflightPathsUseWindowsRulesForPluginAndRuntimeMappings(): void
     {
         $preflight_data = $this->preflight([], []);
