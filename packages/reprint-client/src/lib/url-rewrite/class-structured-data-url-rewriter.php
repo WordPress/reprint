@@ -832,10 +832,43 @@ class StructuredDataUrlRewriter
                     $this->is_selected_site_migration
                 );
                 while ( $p->next_token() ) {
+                    if ( $this->is_selected_site_migration && '#block-comment' === $p->get_token_type() ) {
+                        // Read and write this block through one decoded attribute tree.
+                        // A top-level url can hold /about; module.content can hold HTML
+                        // such as <a href="https://source.test/about">Read</a>. Rewrite
+                        // nested strings with their own parsers, then pass the tree back.
+                        // The processor writes the JSON before advancing to another token.
+                        // Do not also queue raw edits against the old block-comment bytes:
+                        // mixing those edits with set_block_attributes() can duplicate it.
+                        $attributes = $p->get_block_attributes();
+                        if ( is_array( $attributes ) ) {
+                            $rewritten_attributes = $attributes;
+                            foreach ( $attributes as $name => $value ) {
+                                if ( is_array( $value ) ) {
+                                    $rewritten_attributes[ $name ] = $this->rewrite_inferred_block_attribute_values( $value );
+                                } elseif ( is_string( $value ) ) {
+                                    // Keep whole-URL detection for top-level strings. Only
+                                    // declared URL fields get a base for relative URLs.
+                                    $rewritten = $this->rewrite_url_field( $value, $p->get_block_attribute_url_base( $name ) );
+                                    if ( $rewritten !== false ) {
+                                        $value = $rewritten['raw_url'];
+                                    }
+                                    // A query or fragment can contain another source URL,
+                                    // e.g. /login?next=https://source.test/account.
+                                    $rewritten_attributes[ $name ] = $this->rewrite_inferred_block_attribute_string( $value );
+                                }
+                            }
+                            if ( $rewritten_attributes !== $attributes ) {
+                                $p->set_block_attributes( $rewritten_attributes );
+                            }
+                        }
+                        continue;
+                    }
+
                     $parsed_nested_block_attributes = false;
                     $block_comment_may_hide_rewritable_url = false;
                     $block_comment_text = '';
-                    if ( ! $this->is_selected_site_migration && '#block-comment' === $p->get_token_type() ) {
+                    if ( '#block-comment' === $p->get_token_type() ) {
                         $block_comment_text = $p->get_modifiable_text();
                         $block_comment_may_hide_rewritable_url =
                             $this->value_might_contain_source_domain( $block_comment_text )
@@ -874,18 +907,7 @@ class StructuredDataUrlRewriter
                             $p->set_url($rewritten['raw_url'], $rewritten['parsed_url']);
                         }
                     }
-                    if ( $this->is_selected_site_migration && '#block-comment' === $p->get_token_type() ) {
-                        // BlockMarkupProcessor supplies one decoded attribute tree.
-                        // Use its setter for nested values too; mixing those edits
-                        // with raw replacements can duplicate the block comment.
-                        $attributes = $p->get_block_attributes();
-                        if ( is_array( $attributes ) ) {
-                            $rewritten_attributes = $this->rewrite_inferred_block_attribute_values( $attributes );
-                            if ( $rewritten_attributes !== $attributes ) {
-                                $p->set_block_attributes( $rewritten_attributes );
-                            }
-                        }
-                    } elseif ( ! $parsed_nested_block_attributes ) {
+                    if ( ! $parsed_nested_block_attributes ) {
                         $p->replace_url_bases_in_current_token( $this->cautious_url_base_rewrite_mapping );
                     }
                 }

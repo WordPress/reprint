@@ -215,6 +215,100 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('target.test/image.png', $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
     }
 
+    /** Relative URL rules apply to declared top-level fields, not names found deeper in JSON. */
+    public function testSelectedSiteBlockWalkKeepsFieldAndNestedStringRules(): void
+    {
+        $rewriter = new StructuredDataUrlRewriter(['https://network.test/shop' => 'https://target.test'], [
+            'https://network.test' => ['/shop/news/'],
+        ]);
+        $attributes = [
+            'url' => '/shop/image.jpg',
+            'href' => '/shop/news/article',
+            'caption' => '/shop/image.jpg',
+            'custom' => 'https://network.test/shop/custom',
+            'settings' => [
+                'url' => '/shop/image.jpg',
+                'content' => '<a href="https://network.test/shop/article">Read</a>'
+                    . '<img src="https://network.test/shop/news/image.jpg">',
+                'items' => [false, 17, null, '<img src="https://network.test/shop/second.jpg">'],
+            ],
+        ];
+        $input = '<!-- wp:image ' . json_encode($attributes) . ' /-->';
+        $expected = $attributes;
+        $expected['url'] = '/image.jpg';
+        $expected['href'] = 'https://network.test/shop/news/article';
+        $expected['custom'] = 'https://target.test/custom';
+        $expected['settings']['content'] = '<a href="https://target.test/article">Read</a>'
+            . '<img src="https://network.test/shop/news/image.jpg">';
+        $expected['settings']['items'][3] = '<img src="https://target.test/second.jpg">';
+
+        $output = $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
+        $this->assertSame($expected, $this->getBlockAttributes($output, 'wp:image'));
+        $this->assertSame(1, substr_count($output, '<!-- wp:image '));
+    }
+
+    /** Rewriting a whole URL must retain the existing scan of links inside its query or fragment. */
+    public function testSelectedSiteBlockFieldsRewriteEmbeddedRedirectUrls(): void
+    {
+        $rewriter = new StructuredDataUrlRewriter(['https://network.test/shop' => 'https://target.test'], []);
+        $attributes = [
+            'url' => 'https://network.test/shop/login?next=https://network.test/shop/account',
+            'custom' => 'https://network.test/shop/page#next=https://network.test/shop/article',
+        ];
+        $output = $rewriter->rewrite(
+            '<!-- wp:image ' . json_encode($attributes) . ' /-->',
+            StructuredDataUrlRewriter::BLOCK_MARKUP
+        );
+        $this->assertSame([
+            'url' => 'https://target.test/login?next=https://target.test/account',
+            'custom' => 'https://target.test/page#next=https://target.test/article',
+        ], $this->getBlockAttributes($output, 'wp:image'));
+    }
+
+    /** Both rewrite paths must use the existing hook, including removal of a core URL field. */
+    public function testBlockFieldHookCanAddAndRemoveRelativeUrlRules(): void
+    {
+        $hook = 'url_processor_is_relative_url_block_attribute';
+        $previous_filters = $GLOBALS['reprint_test_filters'][$hook] ?? [];
+        $contexts = [];
+        $GLOBALS['reprint_test_filters'][$hook] = [[
+            'priority' => 10,
+            'accepted_args' => 2,
+            'callback' => static function ($is_url, $context) use (&$contexts) {
+                $contexts[] = $context;
+                return $context['block_name'] === 'wp:image' && $context['attribute_name'] === 'custom';
+            },
+        ]];
+        try {
+            foreach ([null, []] as $selection) {
+                $contexts = [];
+                $rewriter = new StructuredDataUrlRewriter(['https://network.test/shop' => 'https://target.test'], $selection);
+                $attributes = [
+                    'url' => '/shop/default.jpg',
+                    'custom' => '/shop/custom.jpg',
+                    'settings' => [
+                        'custom' => '/shop/nested.jpg',
+                        'content' => '<img src="https://network.test/shop/content.jpg">',
+                    ],
+                    'enabled' => true,
+                ];
+                $output = $rewriter->rewrite(
+                    '<!-- wp:image ' . json_encode($attributes) . ' /-->',
+                    StructuredDataUrlRewriter::BLOCK_MARKUP
+                );
+                $attributes['custom'] = '/custom.jpg';
+                $attributes['settings']['content'] = '<img src="https://target.test/content.jpg">';
+                $this->assertSame($attributes, $this->getBlockAttributes($output, 'wp:image'));
+                $this->assertSame([
+                    ['block_name' => 'wp:image', 'attribute_name' => 'url'],
+                    ['block_name' => 'wp:image', 'attribute_name' => 'custom'],
+                ], $contexts);
+            }
+        } finally {
+            $GLOBALS['reprint_test_filters'][$hook] = $previous_filters;
+        }
+    }
+
     /** Mixed URL fields and nested HTML must not queue overlapping block-comment edits. */
     #[RunInSeparateProcess]
     #[PreserveGlobalState(false)]

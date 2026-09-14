@@ -362,11 +362,10 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		// Divi often uses {"module":{"content":{"value":"https://example.com/a"}}}.
 		// Here "module" is an array, so this reader has no string to return.
 		// Skip next_block_attribute(): it would build ["module","content","value"]
-		// only to discard it in the loop below. Returning false leaves this block
-		// comment current. StructuredDataUrlRewriter controls next_token(); in the
-		// selected-site path it reads get_block_attributes() and rewrites nested
-		// strings (using another parser for HTML). It passes changes back through
-		// set_block_attributes(); this processor writes the JSON before advancing.
+		// only to discard it in the loop below. This fast reject remains for ordinary
+		// imports and direct URL-iterator callers. Selected-site imports skip this
+		// iterator: StructuredDataUrlRewriter walks get_block_attributes() once and
+		// returns changes through set_block_attributes() before the next token.
 		// Check only before the iterator starts; later calls continue from its path.
 		if ( false === $this->get_block_attribute_path() ) {
 			$has_top_level_string = false;
@@ -386,70 +385,68 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 			if ( ! is_string( $url_maybe ) ||
 				count( $this->get_block_attribute_path() ) > 1
 			) {
-				// @TODO: support arrays, objects, and other non-string data structures.
+				// This iterator reports only top-level URL fields. The rewriter
+				// handles nested strings separately; non-string values stay unchanged.
 				continue;
 			}
 
-			/**
-			 * Decide whether the current block attribute holds a URL.
-			 *
-			 * Known URL attributes can be assumed to hold a URL and be
-			 * parsed with the base URL. For example, a "/about-us" value
-			 * in a wp:navigation-link block's `url` attribute is a
-			 * relative URL to the `/about-us` page.
-			 *
-			 * Other attributes may or may not contain URLs, but we cannot assume
-			 * they do. A value `/about-us` could be a relative URL or a class name.
-			 * In those cases, we'll let go of relative URLs and only detect
-			 * absolute URLs to avoid treating every string as a URL. This requires
-			 * parsing without a base URL.
-			 */
-			$is_relative_url_block_attribute = (
-				isset( self::BLOCK_ATTRIBUTES_TO_ACCEPT_RELATIVE_URLS_FROM[ $this->get_block_name() ] ) &&
-				in_array( $this->get_block_attribute_key(), self::BLOCK_ATTRIBUTES_TO_ACCEPT_RELATIVE_URLS_FROM[ $this->get_block_name() ], true )
-			);
-
-			/**
-			 * Filters whether a block attribute is known to contain a relative URL.
-			 *
-			 * This filter allows extending the list of block attributes that are
-			 * recognized as containing URLs. When a block attribute is marked as
-			 * a known URL attribute, it will be parsed with the base URL, allowing
-			 * relative URLs to be properly resolved.
-			 *
-			 * @since 6.8.0
-			 *
-			 * @param bool  $is_relative_url_block_attribute Whether the block attribute is known to contain a relative URL.
-			 * @param array $context {
-			 *     Context information about the block attribute.
-			 *
-			 *     @type string $block_name      The name of the block (e.g., 'wp:image', 'wp:button').
-			 *     @type string $attribute_name  The name of the attribute (e.g., 'url', 'href').
-			 * }
-			 */
-			$is_relative_url_block_attribute = apply_filters(
-				// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Toolkit extension hook.
-				'url_processor_is_relative_url_block_attribute',
-				$is_relative_url_block_attribute,
-				array(
-					'block_name' => $this->get_block_name(),
-					'attribute_name' => $this->get_block_attribute_key(),
-				)
-			);
-
-			if ( $is_relative_url_block_attribute ) {
-				// Known relative URL attribute – let's parse with the base URL.
-				$this->current_url_base = $this->base_url_string;
-			} else {
-				// Other attributes – let's parse without a base URL (and only detect absolute URLs).
-				$this->current_url_base = null;
-			}
+			$this->current_url_base = $this->get_block_attribute_url_base( $this->get_block_attribute_key() );
 
 			$this->raw_url    = $url_maybe;
 			return true;
 		}
 
 		return false;
+	}
+
+	/**
+	 * Return the site base only for a declared top-level block URL field.
+	 *
+	 * In wp:navigation-link, url="/about-us" names a page relative to the site.
+	 * In an unknown field, "/about-us" could also be a class name. That field
+	 * gets no base, so only absolute URLs can be parsed.
+	 *
+	 * Callers pass only top-level string fields. A nested key named "url"
+	 * does not inherit the block's URL rule.
+	 *
+	 * @param string|int $attribute_name Top-level key in the decoded block JSON.
+	 * @return string|null Site base, or null when only absolute URLs count.
+	 */
+	public function get_block_attribute_url_base( $attribute_name ): ?string {
+		$is_relative_url_block_attribute = (
+			isset( self::BLOCK_ATTRIBUTES_TO_ACCEPT_RELATIVE_URLS_FROM[ $this->get_block_name() ] ) &&
+			in_array( $attribute_name, self::BLOCK_ATTRIBUTES_TO_ACCEPT_RELATIVE_URLS_FROM[ $this->get_block_name() ], true )
+		);
+
+		/**
+		 * Filters whether a block attribute is known to contain a relative URL.
+		 *
+		 * This filter allows extending the list of block attributes that are
+		 * recognized as containing URLs. When a block attribute is marked as
+		 * a known URL attribute, it will be parsed with the base URL, allowing
+		 * relative URLs to be properly resolved.
+		 *
+		 * @since 6.8.0
+		 *
+		 * @param bool  $is_relative_url_block_attribute Whether the block attribute is known to contain a relative URL.
+		 * @param array $context {
+		 *     Context information about the block attribute.
+		 *
+		 *     @type string $block_name      The name of the block (e.g., 'wp:image', 'wp:button').
+		 *     @type string $attribute_name  The name of the attribute (e.g., 'url', 'href').
+		 * }
+		 */
+		$is_relative_url_block_attribute = apply_filters(
+			// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Toolkit extension hook.
+			'url_processor_is_relative_url_block_attribute',
+			$is_relative_url_block_attribute,
+			array(
+				'block_name' => $this->get_block_name(),
+				'attribute_name' => $attribute_name,
+			)
+		);
+
+		return $is_relative_url_block_attribute ? $this->base_url_string : null;
 	}
 
 	/**
