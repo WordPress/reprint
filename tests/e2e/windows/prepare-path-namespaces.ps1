@@ -19,6 +19,12 @@ public static class NamespaceFixtures {
     static extern bool GetVolumeNameForVolumeMountPointW(string root, StringBuilder name, uint length);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     static extern uint QueryDosDeviceW(string name, StringBuilder target, uint length);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern bool CreateSymbolicLinkW(string name, string target, uint flags);
+    /// <summary>Stores a real Windows link target with the requested slash spelling.</summary>
+    public static void Link(string name, string target, bool directory) {
+        if (!CreateSymbolicLinkW(name, target, directory ? 1u : 0u)) throw new Win32Exception(Marshal.GetLastWin32Error(), name);
+    }
     /// <summary>Writes exact bytes through the literal Win32 filename.</summary>
     public static void Write(string name, string content) {
         using (var file = CreateFileW(name, 0x40000000, 7, IntPtr.Zero, 2, 0x80, IntPtr.Zero)) {
@@ -171,6 +177,25 @@ $cases['file-link-followed'] = @{
     destination='D:/Reprint link cases/file-link'
     content='namespace file'
     links=@('D:/Reprint link cases/file-link')
+}
+# Relative targets must use their source link's directory, even on the Linux client.
+foreach ($separator in @('backslash', 'forward-slash')) {
+    foreach ($kind in @('directory', 'file')) {
+        $name = "relative-$separator-$kind"
+        $target = '..\Reprint namespace cases\Mixed Case'
+        $sourceTarget = "$root\Mixed Case"
+        if ($kind -eq 'file') { $target += '\hello.txt'; $sourceTarget += '\hello.txt' }
+        if ($separator -eq 'forward-slash') { $target = $target.Replace('\', '/') }
+        [NamespaceFixtures]::Link("$linkRoot\$name", $target, $kind -eq 'directory')
+        $local = "D:/Reprint link cases/$name"
+        $cases[$name] = @{
+            source="$linkRoot\$name"
+            destination=($local + $(if ($kind -eq 'directory') { '/hello.txt' } else { '' }))
+            content='namespace file'
+            links=@($local)
+            options=@('--remap', $sourceTarget, ':fs-root:/moved-target')
+        }
+    }
 }
 $cases['junction-not-followed'] = @{
     source="\\?\$linkRoot\junction"
