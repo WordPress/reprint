@@ -11,7 +11,7 @@ require dirname(__DIR__, 3) . '/packages/reprint-server/src/class-file-tree-prod
 // Check the fixtures through ordinary PHP as well as the exact reader. A created
 // link can still be broken; migration must not claim it copied readable content.
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI fixture errors, not HTML.
-foreach (['backslash', 'forward-slash', 'root-relative', 'absolute-forward-slash'] as $reprint_spelling) {
+foreach ((($argv[1] ?? '') === '--without-ffi' ? ['backslash', 'forward-slash', 'absolute-forward-slash'] : ['backslash', 'forward-slash', 'root-relative', 'absolute-forward-slash']) as $reprint_spelling) {
     foreach (['directory', 'file'] as $reprint_kind) {
         $reprint_link_path = 'D:/Reprint link cases/target-' . $reprint_spelling . '-' . $reprint_kind;
         if (!is_link($reprint_link_path)) {
@@ -19,6 +19,15 @@ foreach (['backslash', 'forward-slash', 'root-relative', 'absolute-forward-slash
         }
         $reprint_link_file = $reprint_link_path . ( $reprint_kind === 'directory' ? '/hello.txt' : '' );
         $reprint_ordinary_contents = @file_get_contents($reprint_link_file);
+        if ($reprint_spelling === 'root-relative' && WindowsFilesystem::available()) {
+            try {
+                $reprint_native_contents = @file_get_contents(source_io_path($reprint_link_file));
+            } catch (RuntimeException $error) {
+                $reprint_native_contents = $error->getMessage();
+            }
+            echo json_encode(['stored_root_relative_target' => WindowsFilesystem::readlink($reprint_link_path), 'ordinary_contents' => $reprint_ordinary_contents, 'native_contents' => $reprint_native_contents, 'php_error' => error_get_last()]) . "\n";
+            continue;
+        }
         if ($reprint_ordinary_contents !== 'namespace file') {
             throw new RuntimeException('The source link must read its target before migration: ' . $reprint_link_path);
         }
