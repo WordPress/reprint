@@ -19,22 +19,21 @@ foreach (['backslash', 'forward-slash', 'root-relative', 'absolute-forward-slash
         }
         $reprint_link_file = $reprint_link_path . ( $reprint_kind === 'directory' ? '/hello.txt' : '' );
         $reprint_ordinary_contents = @file_get_contents($reprint_link_file);
-        if ($reprint_spelling === 'forward-slash') {
-            if ($reprint_ordinary_contents !== false) {
-                throw new RuntimeException('A relative forward-slash target is readable through ordinary PHP: ' . $reprint_link_path);
-            }
-            if (WindowsFilesystem::available()) {
-                try {
-                    file_get_contents(source_io_path($reprint_link_file));
-                    throw new LogicException('An exact read followed a broken relative forward-slash target: ' . $reprint_link_path);
-                } catch (RuntimeException $error) {
-                    if (strpos($error->getMessage(), 'Windows error 123') === false) {
-                        throw $error;
-                    }
-                }
-            }
-        } elseif ($reprint_ordinary_contents !== 'namespace file' || file_get_contents(source_io_path($reprint_link_file)) !== 'namespace file') {
+        if ($reprint_ordinary_contents !== 'namespace file') {
             throw new RuntimeException('The source link must read its target before migration: ' . $reprint_link_path);
+        }
+        if ($reprint_spelling === 'forward-slash' && WindowsFilesystem::available()) {
+            $reprint_api = (new ReflectionClass(WindowsFilesystem::class))->getStaticPropertyValue('api');
+            foreach ([$reprint_link_file, '\\\\?\\' . str_replace('/', '\\', $reprint_link_file)] as $reprint_native_path) {
+                $reprint_wide = mb_convert_encoding($reprint_native_path, 'UTF-16LE', 'UTF-8') . "\0\0";
+                $reprint_buffer = $reprint_api->new('WCHAR[' . (strlen($reprint_wide) / 2) . ']');
+                FFI::memcpy($reprint_buffer, $reprint_wide, strlen($reprint_wide));
+                $reprint_handle = $reprint_api->CreateFileW($reprint_buffer, 0, 7, null, 3, 0x02000000, null);
+                $reprint_invalid = $reprint_api->cast('intptr_t *', FFI::addr($reprint_handle))[0] === -1;
+                echo json_encode(['direct_native_path' => $reprint_native_path, 'opened' => !$reprint_invalid, 'error' => $reprint_api->GetLastError()]) . "\n";
+                if (!$reprint_invalid) { $reprint_api->CloseHandle($reprint_handle); }
+            }
+            echo json_encode(['php_realpath' => realpath($reprint_link_file), 'stored_target' => WindowsFilesystem::readlink($reprint_link_path)]) . "\n";
         }
     }
 }

@@ -198,9 +198,6 @@ foreach ($spelling in @('backslash', 'forward-slash', 'root-relative', 'absolute
             links=@($local)
             options=@('--remap', $sourceTarget, ':fs-root:/moved-target')
         }
-        # CreateSymbolicLinkW stores relative slashes verbatim. Native-reader checks
-        # both ordinary and exact access before these unopenable links may fail a pull.
-        if ($spelling -eq 'forward-slash') { $cases[$name].error = 'Windows error 123' }
     }
 }
 $cases['junction-not-followed'] = @{
