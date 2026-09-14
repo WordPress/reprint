@@ -15,6 +15,7 @@ import { ensureSite } from '../lib/site-setup.js';
 describe('Import: Preflight domain rewriting', { timeout: 180000 }, () => {
     const site = 'basic';
     let proxyProcess;
+    let apiUrl;
     let importUrl;
     let outputDirectory;
     let contentTypePath;
@@ -35,7 +36,8 @@ describe('Import: Preflight domain rewriting', { timeout: 180000 }, () => {
             stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
         });
         const [ready] = await once(proxyProcess, 'message');
-        importUrl = `http://127.0.0.1:${ready.port}/?reprint-api&directory=` +
+        apiUrl = `http://127.0.0.1:${ready.port}/?reprint-api`;
+        importUrl = `${apiUrl}&directory=` +
             encodeURIComponent(getSiteDir(site));
     });
 
@@ -54,7 +56,9 @@ describe('Import: Preflight domain rewriting', { timeout: 180000 }, () => {
             autoResume: false,
             extraArgs: ['--include=' + join(getSiteDir(site), 'test-data/hello.txt')],
         };
-        const response = await apiRequest(site, 'preflight', {}, { url: importUrl, rawResponse: true });
+        const response = await apiRequest(site, 'preflight', {
+            directory: getSiteDir(site),
+        }, { url: apiUrl, rawResponse: true });
         const rewrittenPreflight = await response.json();
         assert.equal(response.status, 200);
         assert.equal(response.headers.get('content-type'), 'application/json');
@@ -83,7 +87,9 @@ describe('Import: Preflight domain rewriting', { timeout: 180000 }, () => {
 
         // Remove the override: the real endpoint must now supply octet-stream.
         writeFileSync(contentTypePath, '');
-        const restoredResponse = await apiRequest(site, 'preflight', {}, { url: importUrl, rawResponse: true });
+        const restoredResponse = await apiRequest(site, 'preflight', {
+            directory: getSiteDir(site),
+        }, { url: apiUrl, rawResponse: true });
         const restoredPreflight = await restoredResponse.json();
         assert.ok(restoredResponse.headers.get('content-type').startsWith('application/octet-stream'));
         assert.equal(new URL(restoredPreflight.database.wp.home).hostname, originalDomain);
