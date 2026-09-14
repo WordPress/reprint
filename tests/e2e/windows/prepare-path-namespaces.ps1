@@ -20,6 +20,7 @@ public static class NamespaceFixtures {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     static extern uint QueryDosDeviceW(string name, StringBuilder target, uint length);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.I1)]
     static extern bool CreateSymbolicLinkW(string name, string target, uint flags);
     /// <summary>Stores a real Windows link target with the requested slash spelling.</summary>
     public static void Link(string name, string target, bool directory) {
@@ -179,13 +180,15 @@ $cases['file-link-followed'] = @{
     links=@('D:/Reprint link cases/file-link')
 }
 # Relative targets must use their source link's directory, even on the Linux client.
-foreach ($separator in @('backslash', 'forward-slash')) {
+foreach ($spelling in @('backslash', 'forward-slash', 'root-relative', 'absolute-forward-slash')) {
     foreach ($kind in @('directory', 'file')) {
-        $name = "relative-$separator-$kind"
+        $name = "target-$spelling-$kind"
         $target = '..\Reprint namespace cases\Mixed Case'
+        if ($spelling -eq 'root-relative') { $target = '\Reprint namespace cases\Mixed Case' }
         $sourceTarget = "$root\Mixed Case"
         if ($kind -eq 'file') { $target += '\hello.txt'; $sourceTarget += '\hello.txt' }
-        if ($separator -eq 'forward-slash') { $target = $target.Replace('\', '/') }
+        if ($spelling -eq 'forward-slash') { $target = $target.Replace('\', '/') }
+        if ($spelling -eq 'absolute-forward-slash') { $target = $sourceTarget.Replace('\', '/') }
         [NamespaceFixtures]::Link("$linkRoot\$name", $target, $kind -eq 'directory')
         $local = "D:/Reprint link cases/$name"
         $cases[$name] = @{
@@ -195,6 +198,9 @@ foreach ($separator in @('backslash', 'forward-slash')) {
             links=@($local)
             options=@('--remap', $sourceTarget, ':fs-root:/moved-target')
         }
+        # CreateSymbolicLinkW stores relative slashes verbatim. Native-reader checks
+        # both ordinary and exact access before these unopenable links may fail a pull.
+        if ($spelling -eq 'forward-slash') { $cases[$name].error = 'Windows error 123' }
     }
 }
 $cases['junction-not-followed'] = @{

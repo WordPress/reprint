@@ -8,6 +8,40 @@ require dirname(__DIR__, 3) . '/packages/reprint-server/src/utils.php';
 require dirname(__DIR__, 3) . '/packages/reprint-server/src/class-windows-filesystem.php';
 require dirname(__DIR__, 3) . '/packages/reprint-server/src/class-file-tree-producer.php';
 
+// Check the fixtures through ordinary PHP as well as the exact reader. A created
+// link can still be broken; migration must not claim it copied readable content.
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI fixture errors, not HTML.
+foreach (['backslash', 'forward-slash', 'root-relative', 'absolute-forward-slash'] as $reprint_spelling) {
+    foreach (['directory', 'file'] as $reprint_kind) {
+        $reprint_link_path = 'D:/Reprint link cases/target-' . $reprint_spelling . '-' . $reprint_kind;
+        if (!is_link($reprint_link_path)) {
+            throw new RuntimeException('The fixture is not a real Windows symlink: ' . $reprint_link_path);
+        }
+        $reprint_link_file = $reprint_link_path . ( $reprint_kind === 'directory' ? '/hello.txt' : '' );
+        $reprint_ordinary_contents = @file_get_contents($reprint_link_file);
+        if ($reprint_spelling === 'forward-slash') {
+            if ($reprint_ordinary_contents !== false) {
+                throw new RuntimeException('A relative forward-slash target is readable through ordinary PHP: ' . $reprint_link_path);
+            }
+            if (WindowsFilesystem::available()) {
+                try {
+                    file_get_contents(source_io_path($reprint_link_file));
+                    throw new LogicException('An exact read followed a broken relative forward-slash target: ' . $reprint_link_path);
+                } catch (RuntimeException $error) {
+                    if (strpos($error->getMessage(), 'Windows error 123') === false) {
+                        throw $error;
+                    }
+                }
+            }
+        } elseif ($reprint_ordinary_contents !== 'namespace file' || file_get_contents(source_io_path($reprint_link_file)) !== 'namespace file') {
+            throw new RuntimeException('The source link must read its target before migration: ' . $reprint_link_path);
+        }
+    }
+}
+echo "PASS: source link spellings checked with ordinary and exact file access.\n";
+
+// phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+
 if (($argv[1] ?? '') === '--without-ffi') {
     if (WindowsFilesystem::available()) {
         throw new RuntimeException('Disabled FFI must not register native file access.');

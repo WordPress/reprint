@@ -229,6 +229,28 @@ function json_encode_or_throw($value, int $flags = 0): string
 }
 }
 
+if (!function_exists(__NAMESPACE__ . '\\resolve_symlink_target_path')) {
+/**
+ * Resolves a link target using the source link's path format, not the current OS.
+ *
+ * A target such as `D:\photos` or `\\server\share` is relative on Unix.
+ * Only a Windows source link may interpret those prefixes as absolute roots.
+ * Join relative targets before normalizing so Unix backslashes remain names
+ * and Windows backslashes become separators, including in parent segments.
+ *
+ * @param string $symlink_path Absolute source link path with normalized separators.
+ * @param string $target Target spelling returned by the source's readlink().
+ * @return string Absolute source target with dot segments resolved lexically.
+ */
+function resolve_symlink_target_path(string $symlink_path, string $target): string
+{
+    $absolute_target = str_starts_with($symlink_path, '/')
+        ? str_starts_with($target, '/')
+        : is_absolute_path($target);
+    return normalize_path($absolute_target ? $target : wp_join_unix_paths(dirname($symlink_path), $target));
+}
+}
+
 if (!function_exists(__NAMESPACE__ . '\\normalize_path')) {
 /**
  * Resolve ".." and "." segments in a path without touching the filesystem.
@@ -647,8 +669,9 @@ if (!function_exists(__NAMESPACE__ . '\\normalize_path_separators')) {
  * Keep a UNC root spelled `\\SERVER\SHARE` so it cannot be confused with a
  * Unix path starting with `//`. Drive letters, server names, and share names
  * are case-insensitive; filenames retain their case and every other byte.
- * Recognize the path itself rather than the current OS: a Linux importer reads
- * Windows source paths too. Unix paths keep every backslash byte in their names.
+ * These are absolute paths: a Linux importer also reads Windows source paths.
+ * Absolute Unix paths keep every backslash byte in their names. A relative
+ * name can resemble a Windows root; resolve it against its source path first.
  * Dot segments below the root stay intact so validation can reject them.
  *
  * @param string $path Native or remote filesystem path.

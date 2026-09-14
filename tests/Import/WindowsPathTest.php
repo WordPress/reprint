@@ -139,6 +139,41 @@ class WindowsPathTest extends TestCase
         $this->assertSame('/local' . $path, $mapper->remote_path_to_local_path($path));
     }
 
+    /**
+     * Link targets use the source format, including when read on another operating system.
+     *
+     * @dataProvider symlink_targets
+     * @param string $source_path Absolute source link with normalized separators.
+     * @param string $target Stored target, which can be relative.
+     * @param string $expected Expected absolute source path.
+     */
+    public function testResolvesLinkTargetsInTheirSourceFormat(string $source_path, string $target, string $expected): void
+    {
+        $this->assertSame($expected, \WordPress\Reprint\Server\resolve_symlink_target_path($source_path, $target));
+    }
+
+    /** @return array[] Source link, stored target, and the resolved source path. */
+    public static function symlink_targets(): array
+    {
+        return [
+            ['/site/link', 'D:\\photos', '/site/D:\\photos'],
+            ['/site/link', 'D:/photos', '/site/D:/photos'],
+            ['/site/link', '\\\\server\\share', '/site/\\\\server\\share'],
+            ['/site/link', 'D:\\..\\photos', '/site/D:\\..\\photos'],
+            ['/site/link', '/shared/photo\\old', '/shared/photo\\old'],
+            ['/site/link', "../photo\xff\\old", "/photo\xff\\old"],
+            ['D:/site/link', '..\\photos\\image.jpg', 'D:/photos/image.jpg'],
+            ['D:/site/link', '../photos/image.jpg', 'D:/photos/image.jpg'],
+            ['D:/site/link', '..\\photos/image.jpg', 'D:/photos/image.jpg'],
+            ['D:/site/link', 'e:\\photos\\image.jpg', 'E:/photos/image.jpg'],
+            ['D:/site/link', 'E:/photos/image.jpg', 'E:/photos/image.jpg'],
+            ['D:/site/link', '\\\\server\\share\\image.jpg', '\\\\SERVER\\SHARE/image.jpg'],
+            ['\\\\SERVER\\SHARE/site/link', '..\\photos/image.jpg', '\\\\SERVER\\SHARE/photos/image.jpg'],
+            ['\\\\SERVER\\SHARE/site/link', '../../image.jpg', '\\\\SERVER\\SHARE/image.jpg'],
+            ['D:/link', 'image.jpg', 'D:/image.jpg'],
+        ];
+    }
+
     /** Validation must reject traversal before normalization can erase it. */
     public function test_rejects_windows_parent_components(): void
     {

@@ -1278,12 +1278,9 @@ final class FileIndexProcessor {
         $intermediates = [];
         $raw_target = @source_readlink($path);
         if ($raw_target !== false && $raw_target !== "") {
-            if (!is_absolute_path($raw_target)) {
-                $raw_target = wp_join_unix_paths(dirname($path), $raw_target);
-            }
             // Resolve only textual dot segments. realpath() would skip the
             // intermediate links that this walk must inspect.
-            $absolute_raw_target = \WordPress\Reprint\Server\normalize_path($raw_target);
+            $absolute_raw_target = resolve_symlink_target_path($path, $raw_target);
             if (
                 $absolute_raw_target !== ""
                 && is_absolute_path($absolute_raw_target)

@@ -97,7 +97,11 @@ The default layout under `--fs-root` keeps different drives and shares separate:
 | `\\server\share\site\index.php` | `UNC/SERVER/SHARE/site/index.php` |
 
 Add `--flatten-to=/var/www/site` to place WordPress directly in that directory.
-Unix filename bytes, including literal backslashes, are unchanged.
+Unix filename bytes, including literal backslashes, are unchanged. A Unix
+symlink target named `D:\photos` is a relative name, not a Windows drive path.
+The source link's path format determines how its target is resolved. With
+symlink following enabled, links follow their copied targets through `--remap`,
+including links reached through another link outside the selected directory.
 
 The source also accepts file paths with `\\?\` or `\\.\` prefixes, including
 UNC paths, volume GUIDs and `GLOBALROOT\Device\HarddiskVolumeN` paths. Volume

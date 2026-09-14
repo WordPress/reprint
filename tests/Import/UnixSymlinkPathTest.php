@@ -147,6 +147,31 @@ final class UnixSymlinkPathTest extends TestCase {
     }
 
     /**
+     * Excluding slash-delimited directories must not exclude a literal backslash name.
+     *
+     * @dataProvider distinct_names
+     * @param string $literal Name containing literal backslashes.
+     * @param string $directories Separate slash-delimited directories.
+     */
+    public function testExclusionsKeepBackslashNamesDistinct(string $literal, string $directories): void
+    {
+        foreach ([$literal, $directories] as $name) {
+            mkdir($this->source . '/' . $name, 0700, true);
+            file_put_contents($this->source . '/' . $name . '/image.txt', $name);
+        }
+        $this->pull_files(['--include=' . $this->source, '--exclude=' . $this->source . '/' . $directories,
+            '--remap', $this->source, ':fs-root:/site']);
+        $this->assertSame($literal, file_get_contents($this->root . '/files/site/' . $literal . '/image.txt'));
+        $this->assertFileDoesNotExist($this->root . '/files/site/' . $directories . '/image.txt');
+    }
+
+    /** @return array[] Distinct Unix names which Windows separator replacement would conflate. */
+    public static function distinct_names(): array
+    {
+        return [['photo\\old', 'photo/old'], ['D:\\photos', 'D:/photos'], ['\\\\server\\share', 'server/share']];
+    }
+
+    /**
      * Seed file-only preflight metadata, then run the real CLI, index endpoint, and file endpoint.
      *
      * @param string[] $arguments Additional CLI path selections and remaps.

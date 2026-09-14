@@ -50,10 +50,10 @@ use function Reprint\Importer\write_local_index_entry;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
 use function WordPress\Reprint\Server\assert_valid_path;
-use function WordPress\Reprint\Server\is_absolute_path;
 use function WordPress\Reprint\Server\normalize_path;
 use function WordPress\Reprint\Server\parse_size;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Server\resolve_symlink_target_path;
 use function WordPress\Reprint\Server\path_is_descendant_of;
 use function WordPress\Reprint\Server\path_remainder_under;
 use function WordPress\Reprint\Server\realpath_with_missing_tail;
@@ -10209,9 +10209,7 @@ class ImportClient
     ): string {
         // Resolve to a remote absolute path (relative targets are based on
         // the source symlink's remote directory).
-        $remote_absolute_target = is_absolute_path($target)
-            ? normalize_path($target)
-            : normalize_path(wp_join_unix_paths(dirname($remote_absolute_path), $target));
+        $remote_absolute_target = resolve_symlink_target_path($remote_absolute_path, $target);
 
         // Only rewrite a target whose subtree was actually followed and indexed;
         // everything else keeps its original (portable) spelling.
