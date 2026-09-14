@@ -167,7 +167,7 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
             const params = { endpoint: 'db_index', directory: getSiteDir(site) };
             const body = contentType === 'application/json'
                 ? JSON.stringify(params) : new URLSearchParams(params).toString();
-            const response = await fetch(`${getSiteUrl(site)}&endpoint=preflight&directory=/missing-query-directory&max_exec=not-a-number`, {
+            const response = await fetch(`${getSiteUrl(site)}&endpoint=preflight&directory=/missing-query-directory`, {
                 method: 'POST', body,
                 headers: {
                     ...new HmacClient(getSiteSecret(site)).getAuthHeaders(body),

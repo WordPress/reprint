@@ -332,11 +332,13 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         }
     });
 
-    it('rejects a Reprint GET without the Referer', async () => {
+    it('rejects a Reprint POST without the Referer', async () => {
         const response = await fetch(
-            `${firewallOrigin}/?reprint-api&endpoint=preflight`,
+            `${firewallOrigin}/?reprint-api`,
             {
+                method: 'POST', body: 'endpoint=preflight',
                 headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
                     'Accept-Language': 'en-US,en;q=0.9',
                     'User-Agent': acceptedUserAgent,
                 },
@@ -347,11 +349,13 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         assert.equal(response.headers.get('x-app-firewall'), 'blocked');
     });
 
-    it('rejects a Reprint GET without the User-Agent', async () => {
+    it('rejects a Reprint POST without the User-Agent', async () => {
         const response = await fetch(
-            `${firewallOrigin}/?reprint-api&endpoint=preflight`,
+            `${firewallOrigin}/?reprint-api`,
             {
+                method: 'POST', body: 'endpoint=preflight',
                 headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
                     'Accept-Language': 'en-US,en;q=0.9',
                     Referer: `${firewallOrigin}/wp-admin/upload.php`,
                     'User-Agent': '',
@@ -363,11 +367,13 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         assert.equal(response.headers.get('x-app-firewall'), 'blocked');
     });
 
-    it('rejects a Reprint GET without Accept-Language', async () => {
+    it('rejects a Reprint POST without Accept-Language', async () => {
         const response = await fetch(
-            `${firewallOrigin}/?reprint-api&endpoint=preflight`,
+            `${firewallOrigin}/?reprint-api`,
             {
+                method: 'POST', body: 'endpoint=preflight',
                 headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
                     'Accept-Language': '',
                     Referer: `${firewallOrigin}/wp-admin/upload.php`,
                     'User-Agent': acceptedUserAgent,

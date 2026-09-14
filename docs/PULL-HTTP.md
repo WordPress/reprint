@@ -17,12 +17,12 @@ body. For example, POST to `/?reprint-api` with:
 }
 ```
 
-Deploy the query/POST-compatible exporter from
-[PR #800](https://github.com/WordPress/reprint/pull/800) first. Then deploy the
-POST client before deploying this exporter, which no longer reads export
-parameters from the query string. Old query-based clients cannot use this
-exporter. An endpoint supplied only in the query is missing, even on POST.
-Query values cannot supply defaults or override body values.
+Deploy [PR #800](https://github.com/WordPress/reprint/pull/800), which ships
+the POST client and compatible exporter, before this exporter. This release
+removes the query-parameter fallback. Old query-based clients cannot use it,
+so only deploy it after clients have moved to POST parameters. An endpoint
+supplied only in the query is missing, even on POST. Query values cannot supply
+defaults or override body values.
 
 The exporter accepts `application/json`, `application/x-www-form-urlencoded`,
 and `multipart/form-data`. Sign the exact JSON or URL-encoded body bytes with
@@ -41,3 +41,7 @@ It rejects `endpoint` and every other query parameter even on POST requests.
 Request bodies and response streams pass through unchanged. This models the
 reported query rejection; it does not promise that all firewalls accept all
 POST bodies.
+
+The legacy-query test now checks that GET and POST requests with a query-only
+endpoint are rejected. Multipart uploads with POST parameters still pass through
+the existing file-list parser.
