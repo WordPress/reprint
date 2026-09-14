@@ -5,6 +5,9 @@
   "dbHost": "127.0.0.1",
   "wpVersion": "6.7",
   "sites": {
+    "post-requests": {
+      "port": 8153
+    },
     "basic": {
       "port": 8081
     },

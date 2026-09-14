@@ -1025,7 +1025,20 @@ PHP);
                     }
                     $request .= $piece;
                 }
-                if (strpos($request, 'endpoint=sql_chunk') === false) {
+                // Headers and body may arrive in separate TCP reads.
+                $body_start = strpos($request, "\r\n\r\n") + 4;
+                preg_match('/Content-Length: (\d+)/i', substr($request, 0, $body_start), $length);
+                $remaining_bytes = $body_start + (int) ( $length[1] ?? 0 ) - strlen($request);
+                while ($remaining_bytes > 0) {
+                    $piece = fread($connection, $remaining_bytes);
+                    if ($piece === false || $piece === '') {
+                        exit(3);
+                    }
+                    $request .= $piece;
+                    $remaining_bytes -= strlen($piece);
+                }
+                parse_str(substr($request, $body_start), $params);
+                if (strpos($request, "POST /?reprint-api=1 HTTP/") !== 0 || ( $params['endpoint'] ?? '' ) !== 'sql_chunk') {
                     fclose($connection);
                     fclose($listener);
                     exit(4);
