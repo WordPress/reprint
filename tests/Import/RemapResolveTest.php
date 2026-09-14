@@ -89,6 +89,31 @@ class RemapResolveTest extends TestCase
         return $c;
     }
 
+    public function testRemoteWindowsFormatDoesNotChangeLocalUnixRemapNames(): void
+    {
+        $client = $this->client([]);
+        $client->get_state()->set_preflight_record(['data' => ['path_format' => 'windows']]);
+        $mappings = $this->call($client, 'resolve_remap', [[['d:\\site', ':fs-root:/workspace\\group\\user/www']]]);
+        $this->assertSame(
+            ['D:/site' => $this->root . '/workspace\\group\\user/www'],
+            $mappings
+        );
+    }
+
+    public function testWindowsRuntimePathsAreResolvedBeforeClientDirname(): void
+    {
+        $client = $this->client([]);
+        $client->get_state()->set_preflight_record(['data' => [
+            'path_format' => 'windows',
+            'wp_detect' => ['roots' => [['path' => 'D:\\site']]],
+            'runtime' => ['ini_get_all' => [
+                'auto_prepend_file' => 'E:\\scripts\\env.php',
+                'auto_append_file' => 'F:\\env.php',
+            ]],
+        ]]);
+        $this->assertSame(['D:/site', 'E:/scripts', 'F:/'], $this->call($client, 'get_export_directories'));
+    }
+
     public function testConstructorNormalizesFilesystemRoot(): void
     {
         $symlinkedFilesystemRoot = $this->tempDir . '/fs-root-symlink';

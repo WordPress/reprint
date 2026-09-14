@@ -8,6 +8,8 @@
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\trim_right_slash;
+use function WordPress\Reprint\Server\is_absolute_path;
+use function WordPress\Reprint\Server\preflight_path_format;
 
 /**
  * All known host analyzers.
@@ -207,11 +209,12 @@ function excluded_plugins(array $preflight_data): array
     }
 
     $paths_urls = $preflight_data['database']['wp']['paths_urls'] ?? [];
-    $clean_absolute_directory = static function ($path): ?string {
-        if (!is_string($path) || $path === '' || $path[0] !== '/') {
+    $remote_path_format = preflight_path_format($preflight_data);
+    $clean_absolute_directory = static function ($path) use ($remote_path_format): ?string {
+        if (!is_string($path) || !is_absolute_path($path, $remote_path_format)) {
             return null;
         }
-        return trim_right_slash($path);
+        return trim_right_slash($path, $remote_path_format);
     };
     $wordpress_absolute_path = $clean_absolute_directory($paths_urls['abspath'] ?? null);
     $content_directory = $clean_absolute_directory($paths_urls['content_dir'] ?? null);
@@ -295,11 +298,15 @@ function extract_php_ini(array $preflight_data): array
 function extract_constants(array $preflight_data): array
 {
     $paths_urls = $preflight_data['database']['wp']['paths_urls'] ?? [];
+    $remote_path_format = preflight_path_format($preflight_data);
     $abspath = $paths_urls['abspath'] ?? '';
     if ($abspath !== '') {
-        $abspath = trim_right_slash($abspath);
+        $abspath = trim_right_slash($abspath, $remote_path_format);
     }
     $content_dir = $paths_urls['content_dir'] ?? '';
+    if ($content_dir !== '') {
+        $content_dir = trim_right_slash($content_dir, $remote_path_format);
+    }
 
     $result = [];
 

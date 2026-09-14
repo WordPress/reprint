@@ -73,6 +73,13 @@ final class PathFormatTest extends TestCase {
         assert_valid_path('D:\\photos', 'unix', 'source path');
     }
 
+    /** Validation must check the actual bytes, including a final NUL byte. */
+    public function testValidationDoesNotTrimAwayInvalidPathBytes(): void {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('must not contain NUL bytes');
+        assert_valid_path("/site/photos\0", 'unix');
+    }
+
     /** Unknown formats must fail instead of silently selecting either set of rules. */
     public function testUnknownFormatIsRejected(): void {
         $this->expectException(InvalidArgumentException::class);

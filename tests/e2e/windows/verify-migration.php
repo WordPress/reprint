@@ -6,6 +6,14 @@ $source = json_decode(file_get_contents('/root/migration/source.json'), true, 51
 if ($manifest['os'] !== 'Windows' || $source['os'] !== 'Windows' || PHP_OS_FAMILY !== 'Linux') {
     throw new RuntimeException('Expected a native Windows source and a Linux target.');
 }
+$reprint_state_files = glob('/root/migration/state/remotes/*/pull/state.json');
+if (count($reprint_state_files) !== 1) {
+    throw new RuntimeException('Expected one saved pull state after the migration.');
+}
+$reprint_pull_state = json_decode(file_get_contents($reprint_state_files[0]), true, 512, JSON_THROW_ON_ERROR);
+if (( $reprint_pull_state['preflight']['data']['path_format'] ?? null ) !== 'windows') {
+    throw new RuntimeException('The Linux client did not retain the Windows source path format.');
+}
 foreach ($manifest['files'] as $relative_path => $expected_hash) {
     // Flattening may rewrite paths in wp-config.php; the runtime supplies target DB constants.
     if ($relative_path === 'wp-config.php') {

@@ -220,6 +220,23 @@ class HostImportRulesTest extends TestCase {
         );
     }
 
+    public function testWindowsPreflightPathsUseWindowsRulesForPluginAndRuntimeMappings(): void
+    {
+        $preflight_data = $this->preflight([], []);
+        $preflight_data['path_format'] = 'windows';
+        $preflight_data['database']['wp']['paths_urls'] = [
+            'abspath' => 'd:\\site/',
+            'content_dir' => 'D:/site\\wp-content',
+            'plugins_dir' => 'E:\\plugins',
+        ];
+        $plugins = array_column(\excluded_plugins($preflight_data), 'source_path', 'local_path');
+        $this->assertSame('E:/plugins/pressable-onepress-login', $plugins['wp-content/plugins/pressable-onepress-login']);
+        $this->assertSame([], \extract_constants($preflight_data));
+
+        $preflight_data['database']['wp']['paths_urls']['content_dir'] = 'E:\\content';
+        $this->assertSame(['WP_CONTENT_DIR' => '{fs-root}/wp-content'], \extract_constants($preflight_data));
+    }
+
     public function testExcludedPluginSourcePathsFallBackToWordpressAbsolutePath(): void
     {
         $preflight_data = $this->preflight([], []);

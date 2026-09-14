@@ -55,8 +55,11 @@ function sort_index_file(string $path): bool
             throw new RuntimeException('Invalid index path (base64 decode failed)');
         }
 
+        // This sorter also handles local relative names. Check slash-delimited
+        // components without treating backslashes or drive-like names as roots.
         assert_valid_path(
             $path[0] === '/' ? $path : '/' . $path,
+            'unix',
             'index path'
         );
         return $path;

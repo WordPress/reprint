@@ -16,6 +16,7 @@ use WordPress\Reprint\Server\SqliteDriverPDO;
 use WordPress\Reprint\Server\WpdbDriverPDO;
 use WordPress\Reprint\Server\WindowsFilesystem;
 
+use function WordPress\Reprint\Server\native_path_format;
 use function WordPress\Reprint\Server\assert_valid_path;
 use function WordPress\Reprint\Server\build_pdo_dsn;
 use function WordPress\Reprint\Server\generate_random_bytes;
@@ -681,7 +682,7 @@ function normalize_path_list(array $paths): array
         }
         $real = realpath($path);
         $final = $real !== false ? $real : $path;
-        $final = trim_right_slash($final);
+        $final = trim_right_slash($final, native_path_format());
         if ($final === "") {
             continue;
         }
@@ -1393,7 +1394,7 @@ function resolve_directories(array $config): array
             );
         }
         $directory = PHP_OS === 'WINNT' ? $directory : trim($directory);
-        assert_valid_path($directory, "directory entry");
+        assert_valid_path($directory, native_path_format(), "directory entry");
 
         clearstatcache(true, $directory);
         $real_directory = @source_realpath($directory);
@@ -1408,7 +1409,7 @@ function resolve_directories(array $config): array
             );
         }
 
-        $directories[] = normalize_path_separators($real_directory);
+        $directories[] = normalize_path_separators($real_directory, native_path_format());
     }
 
     if (empty($directories)) {
@@ -1459,8 +1460,8 @@ function resolve_file_index_roots(array $config): array
             throw new InvalidArgumentException("directory entries must be non-empty strings");
         }
         $root_input = PHP_OS === 'WINNT' ? $root_input : trim($root_input);
-        assert_valid_path($root_input, "directory entry");
-        $requested_path = normalize_path($root_input);
+        assert_valid_path($root_input, native_path_format(), "directory entry");
+        $requested_path = normalize_path($root_input, native_path_format());
         clearstatcache(true, $requested_path);
         $stat = @lstat(source_io_path($requested_path));
         if ($stat === false) {
@@ -1506,7 +1507,7 @@ function resolve_file_index_roots(array $config): array
         }
         $roots[] = [
             "requested_path" => $requested_path,
-            "resolved_path" => normalize_path_separators($resolved_path),
+            "resolved_path" => normalize_path_separators($resolved_path, native_path_format()),
             "type" => $type,
         ];
     }
@@ -1542,7 +1543,7 @@ function resolve_file_index_start_root(
     string $list_directory,
     bool $follow_symlinks
 ): array {
-    $requested_path = normalize_path($list_directory);
+    $requested_path = normalize_path($list_directory, native_path_format());
     foreach ($roots as $root) {
         if ($root["requested_path"] === $requested_path) {
             return $root;
@@ -1564,7 +1565,7 @@ function resolve_file_index_start_root(
 
     return [
         "requested_path" => $requested_path,
-        "resolved_path" => normalize_path_separators($resolved_path),
+        "resolved_path" => normalize_path_separators($resolved_path, native_path_format()),
         "type" => "directory",
     ];
 }
@@ -1574,7 +1575,7 @@ function file_index_parent_symlink(string $requested_path): ?array
 {
     $parents = [];
     $current = dirname($requested_path);
-    while (is_absolute_path($current)) {
+    while (is_absolute_path($current, native_path_format())) {
         $parents[] = $current;
         $parent = dirname($current);
         if ($parent === $current) {
@@ -2084,13 +2085,13 @@ function endpoint_preflight(array $config): array
                         // find the directory at the resolved location where
                         // files are actually downloaded.
                         $abspath_raw = defined("ABSPATH")
-                            ? trim_right_slash(ABSPATH)
+                            ? trim_right_slash(ABSPATH, native_path_format())
                             : null;
                         $abspath_resolved = null;
                         if ($abspath_raw !== null) {
                             $abspath_real = realpath($abspath_raw);
                             $abspath_resolved = $abspath_real !== false
-                                ? trim_right_slash($abspath_real)
+                                ? trim_right_slash($abspath_real, native_path_format())
                                 : $abspath_raw;
                         }
 
@@ -2383,21 +2384,21 @@ function endpoint_preflight(array $config): array
     // Scan each directory to list installed plugins, mu-plugins, and themes.
     $wp_runtime_paths = null;
     if ($db["wp"]["wp_load_loaded"]) {
-        $runtime_root = defined("ABSPATH") ? trim_right_slash(ABSPATH) : null;
+        $runtime_root = defined("ABSPATH") ? trim_right_slash(ABSPATH, native_path_format()) : null;
         $content_dir = defined("WP_CONTENT_DIR")
-            ? trim_right_slash(WP_CONTENT_DIR)
+            ? trim_right_slash(WP_CONTENT_DIR, native_path_format())
             : null;
         $plugins_dir = defined("WP_PLUGIN_DIR")
-            ? trim_right_slash(WP_PLUGIN_DIR)
+            ? trim_right_slash(WP_PLUGIN_DIR, native_path_format())
             : null;
         $mu_plugins_dir = defined("WPMU_PLUGIN_DIR")
-            ? trim_right_slash(WPMU_PLUGIN_DIR)
+            ? trim_right_slash(WPMU_PLUGIN_DIR, native_path_format())
             : null;
         $themes_dir = null;
         if (function_exists("get_theme_root")) {
             $themes_dir = get_theme_root();
             if (is_string($themes_dir)) {
-                $themes_dir = trim_right_slash($themes_dir);
+                $themes_dir = trim_right_slash($themes_dir, native_path_format());
             } else {
                 $themes_dir = null;
             }
@@ -2536,6 +2537,7 @@ function endpoint_preflight(array $config): array
         "error" => $preflight_error,
         "timestamp" => time(),
         "protocol_version" => EXPORT_PROTOCOL_VERSION,
+        "path_format" => native_path_format(),
         "capabilities" => [
             "base64_path_parameters" => true,
             "windows_path_resolution" => PHP_OS === 'WINNT' && empty($config['_multisite']),
@@ -3757,10 +3759,10 @@ function endpoint_resolve_windows_path(array $config): array {
     if (WindowsFilesystem::available()) {
         $resolved = WindowsFilesystem::resolve_input($path);
     } else {
-        assert_valid_path($path, 'Windows source path');
+        assert_valid_path($path, native_path_format(), 'Windows source path');
         source_io_path($path);
         $real = realpath($path);
-        $resolved = normalize_path_separators($real === false ? $path : $real);
+        $resolved = normalize_path_separators($real === false ? $path : $real, native_path_format());
     }
     $response = ['ok' => true, 'path_b64' => base64_encode($resolved)];
     header('Content-Type: application/octet-stream');

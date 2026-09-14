@@ -17,10 +17,10 @@ class WindowsPathTest extends TestCase
     /** The default WordPress ABSPATH mixes native separators with a trailing slash. */
     public function test_accepts_windows_wordpress_directory(): void
     {
-        assert_valid_path('D:\\Sites\\example.test/', 'directory entry');
-        $this->assertSame('D:/Sites/example.test', normalize_path('D:\\Sites\\example.test/'));
-        $this->assertSame('D:/', normalize_path('d:\\site\\..\\..'));
-        $this->assertSame('D:/', trim_right_slash('D:/'));
+        assert_valid_path('D:\\Sites\\example.test/', 'windows', 'directory entry');
+        $this->assertSame('D:/Sites/example.test', normalize_path('D:\\Sites\\example.test/', 'windows'));
+        $this->assertSame('D:/', normalize_path('d:\\site\\..\\..', 'windows'));
+        $this->assertSame('D:/', trim_right_slash('D:/', 'windows'));
     }
 
     /**
@@ -32,10 +32,10 @@ class WindowsPathTest extends TestCase
      */
     public function test_maps_portable_windows_filename_bytes(string $remote_path, string $expected_path): void
     {
-        assert_valid_path($remote_path);
-        $mapper = new RemoteToLocalPathMapper('/local', []);
-        $this->assertSame($expected_path, normalize_path_separators($remote_path));
-        $this->assertSame($expected_path, normalize_path($remote_path));
+        assert_valid_path($remote_path, 'windows');
+        $mapper = new RemoteToLocalPathMapper('/local', 'windows', []);
+        $this->assertSame($expected_path, normalize_path_separators($remote_path, 'windows'));
+        $this->assertSame($expected_path, normalize_path($remote_path, 'windows'));
         $this->assertSame('/local/' . $expected_path, $mapper->remote_path_to_local_path($remote_path));
     }
 
@@ -62,25 +62,29 @@ class WindowsPathTest extends TestCase
     /** Both spellings must describe the same selected Windows subtree. */
     public function test_compares_windows_paths_at_component_boundaries(): void
     {
-        $this->assertTrue(path_is_same_as_or_descendant_of('D:\\site\\upload.txt', 'd:/site'));
-        $this->assertTrue(path_is_same_as_or_descendant_of('D:/site', 'D:/'));
-        $this->assertTrue(path_is_same_as_or_descendant_of('D:/site/upload.txt', 'd:\\\\site'));
-        $this->assertTrue(path_is_same_as_or_descendant_of('\\\\SERVER\\SHARE/site/file.txt', '\\\\server\\share\\\\site'));
-        $this->assertFalse(path_is_same_as_or_descendant_of('D:/site-old', 'D:/site'));
-        $this->assertFalse(path_is_same_as_or_descendant_of('E:/site', 'D:/'));
-        $this->assertFalse(path_is_same_as_or_descendant_of('D:/site', '/'));
-        $this->assertTrue(path_is_descendant_of('D:\\site', 'd:/'));
-        $this->assertFalse(path_is_descendant_of('D:\\site', 'd:/site'));
-        $this->assertSame('/upload.txt', path_remainder_under('D:\\site\\upload.txt', 'd:/site'));
+        $path = normalize_path_separators('D:\\site\\upload.txt', 'windows');
+        $root = normalize_path_separators('d:/', 'windows');
+        $prefix = normalize_path_separators('d:\\\\site', 'windows');
+        $share_path = normalize_path_separators('\\\\SERVER\\SHARE/site/file.txt', 'windows');
+        $share_prefix = normalize_path_separators('\\\\server\\share\\\\site', 'windows');
+        $this->assertTrue(path_is_same_as_or_descendant_of($path, $prefix));
+        $this->assertTrue(path_is_same_as_or_descendant_of($prefix, $root));
+        $this->assertTrue(path_is_same_as_or_descendant_of($share_path, $share_prefix));
+        $this->assertFalse(path_is_same_as_or_descendant_of('D:/site-old', $prefix));
+        $this->assertFalse(path_is_same_as_or_descendant_of('E:/site', $root));
+        $this->assertFalse(path_is_same_as_or_descendant_of($prefix, '/'));
+        $this->assertTrue(path_is_descendant_of($prefix, $root));
+        $this->assertFalse(path_is_descendant_of($prefix, $prefix));
+        $this->assertSame('/upload.txt', path_remainder_under($path, $prefix));
     }
 
     /** Drive names remain separate under the Linux destination root. */
     public function test_maps_windows_paths_into_linux_filesystem(): void
     {
-        $mapper = new RemoteToLocalPathMapper('/local', ['D:/site']);
+        $mapper = new RemoteToLocalPathMapper('/local', 'windows', ['D:/site']);
         $this->assertSame('/local/D:/site/upload.txt', $mapper->remote_path_to_local_path('D:\\site\\upload.txt'));
         $this->assertSame('/local/E:/site/upload.txt', $mapper->remote_path_to_local_path('E:/site/upload.txt'));
-        $mapper = new RemoteToLocalPathMapper('/local', ['D:/site'], ['D:/site' => '/local/site']);
+        $mapper = new RemoteToLocalPathMapper('/local', 'windows', ['D:/site'], ['D:/site' => '/local/site']);
         $this->assertSame('/local/site/upload.txt', $mapper->remote_path_to_local_path('D:\\site\\upload.txt'));
     }
 
@@ -88,17 +92,32 @@ class WindowsPathTest extends TestCase
     public function test_maps_unc_share_paths_without_losing_the_share_root(): void
     {
         $remote = '\\\\server\\media\\Sites\\photo.jpg';
-        assert_valid_path($remote);
-        $this->assertSame('\\\\SERVER\\MEDIA/Sites/photo.jpg', normalize_path($remote));
-        $this->assertSame('\\\\SERVER\\MEDIA', normalize_path('\\\\server\\media\\site\\..\\..'));
-        $this->assertTrue(path_is_same_as_or_descendant_of($remote, '\\\\server\\media\\'));
-        $this->assertFalse(path_is_same_as_or_descendant_of($remote, '\\\\server\\media-old'));
-        $this->assertSame('/Sites/photo.jpg', path_remainder_under($remote, '\\\\server\\media'));
-        $mapper = new RemoteToLocalPathMapper('/local', []);
+        assert_valid_path($remote, 'windows');
+        $this->assertSame('\\\\SERVER\\MEDIA/Sites/photo.jpg', normalize_path($remote, 'windows'));
+        $this->assertSame('\\\\SERVER\\MEDIA', normalize_path('\\\\server\\media\\site\\..\\..', 'windows'));
+        $remote = normalize_path_separators($remote, 'windows');
+        $this->assertTrue(path_is_same_as_or_descendant_of($remote, normalize_path_separators('\\\\server\\media\\', 'windows')));
+        $this->assertFalse(path_is_same_as_or_descendant_of($remote, normalize_path_separators('\\\\server\\media-old', 'windows')));
+        $this->assertSame('/Sites/photo.jpg', path_remainder_under($remote, normalize_path_separators('\\\\server\\media', 'windows')));
+        $mapper = new RemoteToLocalPathMapper('/local', 'windows', []);
         $this->assertSame('/local/UNC/SERVER/MEDIA/Sites/photo.jpg', $mapper->remote_path_to_local_path($remote));
         $this->assertSame('/local/C:/UNC/SERVER/MEDIA/Sites/photo.jpg', $mapper->remote_path_to_local_path('C:\\UNC\\SERVER\\MEDIA\\Sites\\photo.jpg'));
-        $this->assertSame('//server/media/name\\with\\backslashes', normalize_path_separators('//server/media/name\\with\\backslashes'));
+        $mapper = new RemoteToLocalPathMapper('/local', 'unix', []);
+        $this->assertSame('//server/media/name\\with\\backslashes', normalize_path_separators('//server/media/name\\with\\backslashes', 'unix'));
         $this->assertSame('/local/server/media/name\\with\\backslashes', $mapper->remote_path_to_local_path('//server/media/name\\with\\backslashes'));
+    }
+
+    /** The same leading slashes select a Unix tree or a Windows share by format. */
+    public function test_maps_the_same_path_text_with_explicit_source_rules(): void
+    {
+        $path = '//server/share/photos';
+        $unix_mapper = new RemoteToLocalPathMapper('/local', 'unix', []);
+        $windows_mapper = new RemoteToLocalPathMapper('/local', 'windows', []);
+        $this->assertSame('/local/server/share/photos', $unix_mapper->remote_path_to_local_path($path));
+        $this->assertSame('/local/UNC/SERVER/SHARE/photos', $windows_mapper->remote_path_to_local_path($path));
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('must be an absolute path');
+        $unix_mapper->remote_path_to_local_path('D:\\photos');
     }
 
     /**
@@ -110,7 +129,7 @@ class WindowsPathTest extends TestCase
     public function test_rejects_unsupported_windows_path_forms(string $path): void
     {
         $this->expectException(InvalidArgumentException::class);
-        assert_valid_path($path);
+        assert_valid_path($path, 'windows');
     }
 
     /** @return array[] Unsupported spellings, kept separate from portable filenames. */
@@ -140,10 +159,10 @@ class WindowsPathTest extends TestCase
      */
     public function test_preserves_unix_backslashes(string $path): void
     {
-        assert_valid_path($path);
-        $this->assertSame($path, normalize_path_separators($path));
-        $this->assertSame($path, normalize_path($path));
-        $mapper = new RemoteToLocalPathMapper('/local', ['/site']);
+        assert_valid_path($path, 'unix');
+        $this->assertSame($path, normalize_path_separators($path, 'unix'));
+        $this->assertSame($path, normalize_path($path, 'unix'));
+        $mapper = new RemoteToLocalPathMapper('/local', 'unix', ['/site']);
         $this->assertSame('/local' . $path, $mapper->remote_path_to_local_path($path));
     }
 
@@ -164,40 +183,41 @@ class WindowsPathTest extends TestCase
      * @param string $source_path Absolute source link with normalized separators.
      * @param string $target Stored target, which can be relative.
      * @param string $expected Expected absolute source path.
+     * @param string $path_format Explicit source path format.
      */
-    public function testResolvesLinkTargetsInTheirSourceFormat(string $source_path, string $target, string $expected): void
+    public function testResolvesLinkTargetsInTheirSourceFormat(string $source_path, string $target, string $expected, string $path_format): void
     {
-        $this->assertSame($expected, \WordPress\Reprint\Server\resolve_symlink_target_path($source_path, $target));
+        $this->assertSame($expected, \WordPress\Reprint\Server\resolve_symlink_target_path($source_path, $target, $path_format));
     }
 
     /** @return array[] Source link, stored target, and the resolved source path. */
     public static function symlink_targets(): array
     {
         return [
-            ['/site/link', 'D:\\photos', '/site/D:\\photos'],
-            ['/site/link', 'D:/photos', '/site/D:/photos'],
-            ['/site/link', '\\\\server\\share', '/site/\\\\server\\share'],
-            ['/site/link', 'D:\\..\\photos', '/site/D:\\..\\photos'],
-            ['/site/link', '/shared/photo\\old', '/shared/photo\\old'],
-            ['/site/link', '/photos/image.jpg', '/photos/image.jpg'],
-            ['/site/link', '\\photos\\image.jpg', '/site/\\photos\\image.jpg'],
-            ['/site/link', '//server/share/photos/image.jpg', '/server/share/photos/image.jpg'],
-            ['/site/workspace\\group\\user/link', 'www/image.jpg', '/site/workspace\\group\\user/www/image.jpg'],
-            ['/site/link', "../photo\xff\\old", "/photo\xff\\old"],
-            ['D:/site/link', 'D:\\photos', 'D:/photos'],
-            ['D:/site/link', '..\\photos\\image.jpg', 'D:/photos/image.jpg'],
-            ['D:/site/link', '../photos/image.jpg', 'D:/photos/image.jpg'],
-            ['D:/site/link', '..\\photos/image.jpg', 'D:/photos/image.jpg'],
-            ['D:/site/link', 'e:\\photos\\image.jpg', 'E:/photos/image.jpg'],
-            ['D:/site/link', 'E:/photos/image.jpg', 'E:/photos/image.jpg'],
-            ['D:/site/link', '\\\\server\\share\\image.jpg', '\\\\SERVER\\SHARE/image.jpg'],
-            ['\\\\SERVER\\SHARE/site/link', '..\\photos/image.jpg', '\\\\SERVER\\SHARE/photos/image.jpg'],
-            ['\\\\SERVER\\SHARE/site/link', '../../image.jpg', '\\\\SERVER\\SHARE/image.jpg'],
-            ['D:/site/link', '/photos/image.jpg', 'D:/photos/image.jpg'],
-            ['D:/site/link', '\\photos\\image.jpg', 'D:/photos/image.jpg'],
-            ['\\\\SERVER\\SHARE/site/link', '/photos/image.jpg', '\\\\SERVER\\SHARE/photos/image.jpg'],
-            ['D:/site/link', '//server/share/photos/image.jpg', '\\\\SERVER\\SHARE/photos/image.jpg'],
-            ['D:/link', 'image.jpg', 'D:/image.jpg'],
+            ['/site/link', 'D:\\photos', '/site/D:\\photos', 'unix'],
+            ['/site/link', 'D:/photos', '/site/D:/photos', 'unix'],
+            ['/site/link', '\\\\server\\share', '/site/\\\\server\\share', 'unix'],
+            ['/site/link', 'D:\\..\\photos', '/site/D:\\..\\photos', 'unix'],
+            ['/site/link', '/shared/photo\\old', '/shared/photo\\old', 'unix'],
+            ['/site/link', '/photos/image.jpg', '/photos/image.jpg', 'unix'],
+            ['/site/link', '\\photos\\image.jpg', '/site/\\photos\\image.jpg', 'unix'],
+            ['/site/link', '//server/share/photos/image.jpg', '/server/share/photos/image.jpg', 'unix'],
+            ['/site/workspace\\group\\user/link', 'www/image.jpg', '/site/workspace\\group\\user/www/image.jpg', 'unix'],
+            ['/site/link', "../photo\xff\\old", "/photo\xff\\old", 'unix'],
+            ['D:/site/link', 'D:\\photos', 'D:/photos', 'windows'],
+            ['D:/site/link', '..\\photos\\image.jpg', 'D:/photos/image.jpg', 'windows'],
+            ['D:/site/link', '../photos/image.jpg', 'D:/photos/image.jpg', 'windows'],
+            ['D:/site/link', '..\\photos/image.jpg', 'D:/photos/image.jpg', 'windows'],
+            ['D:/site/link', 'e:\\photos\\image.jpg', 'E:/photos/image.jpg', 'windows'],
+            ['D:/site/link', 'E:/photos/image.jpg', 'E:/photos/image.jpg', 'windows'],
+            ['D:/site/link', '\\\\server\\share\\image.jpg', '\\\\SERVER\\SHARE/image.jpg', 'windows'],
+            ['\\\\SERVER\\SHARE/site/link', '..\\photos/image.jpg', '\\\\SERVER\\SHARE/photos/image.jpg', 'windows'],
+            ['\\\\SERVER\\SHARE/site/link', '../../image.jpg', '\\\\SERVER\\SHARE/image.jpg', 'windows'],
+            ['D:/site/link', '/photos/image.jpg', 'D:/photos/image.jpg', 'windows'],
+            ['D:/site/link', '\\photos\\image.jpg', 'D:/photos/image.jpg', 'windows'],
+            ['\\\\SERVER\\SHARE/site/link', '/photos/image.jpg', '\\\\SERVER\\SHARE/photos/image.jpg', 'windows'],
+            ['D:/site/link', '//server/share/photos/image.jpg', '\\\\SERVER\\SHARE/photos/image.jpg', 'windows'],
+            ['D:/link', 'image.jpg', 'D:/image.jpg', 'windows'],
         ];
     }
 
@@ -206,7 +226,7 @@ class WindowsPathTest extends TestCase
     {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('must not contain dot-segments');
-        assert_valid_path('D:\\site\\..\\outside');
+        assert_valid_path('D:\\site\\..\\outside', 'windows');
     }
 
     /** A drive-relative path depends on the source process's working directory. */
@@ -214,7 +234,7 @@ class WindowsPathTest extends TestCase
     {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('must be an absolute path');
-        $this->assertSame('D:', trim_right_slash('D:'));
-        assert_valid_path('D:site/file.txt');
+        $this->assertSame('D:', trim_right_slash('D:', 'windows'));
+        assert_valid_path('D:site/file.txt', 'windows');
     }
 }

@@ -101,7 +101,9 @@ class FileTreeProducer
             );
         }
         // Sort and resume using the same spelling that file chunks carry.
-        $this->paths = array_map(__NAMESPACE__ . '\\normalize_path_separators', $options["paths"]);
+        $this->paths = array_map(static function (string $path): string {
+            return normalize_path_separators($path, native_path_format());
+        }, $options["paths"]);
 
         if (isset($options["cursor"])) {
             $this->initialize_from_cursor($options["cursor"]);
@@ -214,10 +216,10 @@ class FileTreeProducer
     private function normalize_directories($directories): array
     {
         if (is_string($directories)) {
-            return [trim_right_slash($directories)];
+            return [trim_right_slash($directories, native_path_format())];
         }
         return array_map(function ($d) {
-            return trim_right_slash($d);
+            return trim_right_slash($d, native_path_format());
         }, $directories);
     }
 
@@ -403,7 +405,7 @@ class FileTreeProducer
         }
 
         clearstatcache(true, $path);
-        if (is_absolute_path($path) && (file_exists(source_io_path($path)) || is_link(source_io_path($path)))) {
+        if (is_absolute_path($path, native_path_format()) && (file_exists(source_io_path($path)) || is_link(source_io_path($path)))) {
             return $path;
         }
 

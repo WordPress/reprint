@@ -31,7 +31,7 @@ final class MappedRemoteIndexBuilderTest extends TestCase
         $mappedIndex = $this->root . '/mapped.jsonl';
         $this->writeRemoteIndex($remoteIndex, ['/remote/a', '/remote/b']);
         $mapper = new \RemoteToLocalPathMapper(
-            $this->root . '/files',
+            $this->root . '/files', 'unix',
             ['/remote'],
             [
                 '/remote/a' => $this->root . '/files/z',
@@ -85,7 +85,7 @@ final class MappedRemoteIndexBuilderTest extends TestCase
             'mapped_remote_index_file' => $this->root . '/mapped.jsonl',
             'filesystem_root' => $this->root . '/files',
             'path_mapper' => new \RemoteToLocalPathMapper(
-                $this->root . '/files',
+                $this->root . '/files', 'unix',
                 ['/remote'],
                 $resolvedMappings
             ),
@@ -123,7 +123,7 @@ final class MappedRemoteIndexBuilderTest extends TestCase
             '/remote/excluded/b.txt',
         ]);
         $mapper = new \RemoteToLocalPathMapper(
-            $this->root . '/files',
+            $this->root . '/files', 'unix',
             ['/remote'],
             [
                 '/remote/included' => $this->root . '/files/included',
@@ -170,7 +170,7 @@ final class MappedRemoteIndexBuilderTest extends TestCase
             'mapped_remote_index_file' => $mappedIndex,
             'filesystem_root' => $this->root . '/files',
             'path_mapper' => new \RemoteToLocalPathMapper(
-                $this->root . '/files',
+                $this->root . '/files', 'unix',
                 ['/srv'],
                 [
                     '/wordpress' => $this->root . '/files/srv/wordpress',
@@ -214,7 +214,7 @@ final class MappedRemoteIndexBuilderTest extends TestCase
             'mapped_remote_index_file' => $this->root . '/mapped.jsonl',
             'filesystem_root' => $this->root . '/files',
             'path_mapper' => new \RemoteToLocalPathMapper(
-                $this->root . '/files',
+                $this->root . '/files', 'unix',
                 ['/srv'],
                 [
                     '/wordpress' => $this->root . '/files/srv/wordpress',

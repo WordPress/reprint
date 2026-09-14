@@ -594,7 +594,7 @@ final class FileIndexProcessorTest extends TestCase {
             ? 'symlink'
             : ( is_dir($path) ? 'directory' : 'file' );
         return [
-            'requested_path' => \WordPress\Reprint\Server\normalize_path($path),
+            'requested_path' => \WordPress\Reprint\Server\normalize_path($path, \WordPress\Reprint\Server\native_path_format()),
             'resolved_path' => $resolvedPath,
             'type' => $type,
         ];

@@ -136,8 +136,8 @@ final class WindowsFilesystem {
                 throw new InvalidArgumentException('Windows device names cannot select migration files: ' . $path);
             }
         }
-        $canonical = normalize_path_separators($absolute);
-        assert_valid_path($canonical, 'Windows source path');
+        $canonical = normalize_path_separators($absolute, 'windows');
+        assert_valid_path($canonical, 'windows', 'Windows source path');
         $native = self::native_path($canonical);
         $length = self::$api->GetLongPathNameW(self::wide($native), $buffer, 32768);
         if ($length === 0) {
@@ -148,7 +148,7 @@ final class WindowsFilesystem {
             if ($error !== 2 && $error !== 3) {
                 throw new RuntimeException('Cannot resolve Windows path ' . $path . '; Windows error ' . $error);
             }
-            return trim_right_slash($canonical);
+            return trim_right_slash($canonical, 'windows');
         }
         return self::canonical_path(self::path_result($buffer, $length, $path));
     }
@@ -184,7 +184,7 @@ final class WindowsFilesystem {
             } elseif (substr($target, 0, 4) === '\\??\\') {
                 $target = substr($target, 4);
             }
-            return is_absolute_path($target) ? normalize_path_separators($target) : str_replace('\\', '/', $target);
+            return normalize_path_separators($target, 'windows');
         } finally {
             self::$api->CloseHandle($handle);
         }
@@ -378,7 +378,7 @@ final class WindowsFilesystem {
                 return null;
             }
             return self::native_path(wp_join_unix_paths(
-                resolve_symlink_target_path($prefix, $target),
+                resolve_symlink_target_path($prefix, $target, 'windows'),
                 implode('/', array_slice($parts, $position + 1))
             ));
         }
@@ -436,8 +436,8 @@ final class WindowsFilesystem {
     /** Converts canonical drive/share paths to literal native paths; no device objects are accepted. */
     private static function native_path(string $path): string {
         self::assert_available();
-        assert_valid_path($path, 'Windows source path');
-        $path = normalize_path_separators($path);
+        assert_valid_path($path, 'windows', 'Windows source path');
+        $path = normalize_path_separators($path, 'windows');
         if (preg_match('~^[A-Z]:/~', $path)) {
             return '\\\\?\\' . str_replace('/', '\\', $path);
         }
@@ -454,8 +454,8 @@ final class WindowsFilesystem {
         } elseif (substr($path, 0, 4) === '\\\\?\\') {
             $path = substr($path, 4);
         }
-        $path = trim_right_slash(normalize_path_separators($path));
-        assert_valid_path($path, 'Resolved Windows path');
+        $path = trim_right_slash($path, 'windows');
+        assert_valid_path($path, 'windows', 'Resolved Windows path');
         return $path;
     }
 

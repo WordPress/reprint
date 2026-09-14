@@ -828,7 +828,7 @@ final class FileIndexProcessor {
             return false;
         }
 
-        $canonical_directory = normalize_path_separators($canonical_directory);
+        $canonical_directory = normalize_path_separators($canonical_directory, native_path_format());
 
         // When following links is disabled, every canonical directory must
         // remain inside a configured root. Reject one that crosses that
@@ -928,7 +928,7 @@ final class FileIndexProcessor {
             return "";
         }
         $canonical_storage_path = source_realpath($storage_path);
-        return normalize_path_separators($canonical_storage_path !== false ? $canonical_storage_path : $storage_path);
+        return normalize_path_separators($canonical_storage_path !== false ? $canonical_storage_path : $storage_path, native_path_format());
     }
 
     /**
@@ -1104,7 +1104,7 @@ final class FileIndexProcessor {
         $requested_path = $root["requested_path"];
         if (
             $requested_path === ""
-            || \WordPress\Reprint\Server\normalize_path($requested_path) !== $requested_path
+            || \WordPress\Reprint\Server\normalize_path($requested_path, native_path_format()) !== $requested_path
         ) {
             throw new InvalidArgumentException("File-index root requested_path must be normalized");
         }
@@ -1280,10 +1280,10 @@ final class FileIndexProcessor {
         if ($raw_target !== false && $raw_target !== "") {
             // Resolve only textual dot segments. realpath() would skip the
             // intermediate links that this walk must inspect.
-            $absolute_raw_target = resolve_symlink_target_path($path, $raw_target);
+            $absolute_raw_target = resolve_symlink_target_path($path, $raw_target, native_path_format());
             if (
                 $absolute_raw_target !== ""
-                && is_absolute_path($absolute_raw_target)
+                && is_absolute_path($absolute_raw_target, native_path_format())
                 && $absolute_raw_target !== $resolved_target
             ) {
                 $intermediates = self::find_parent_symlinks($absolute_raw_target);
@@ -1309,7 +1309,7 @@ final class FileIndexProcessor {
         $entries = [];
         $parents = [];
         $current = $absolute_path;
-        while (is_absolute_path($current)) {
+        while (is_absolute_path($current, native_path_format())) {
             $parents[] = $current;
             $parent = dirname($current);
             if ($parent === $current) {

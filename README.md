@@ -99,7 +99,12 @@ The default layout under `--fs-root` keeps different drives and shares separate:
 Add `--flatten-to=/var/www/site` to place WordPress directly in that directory.
 Unix filename bytes, including literal backslashes, are unchanged. A Unix
 symlink target named `D:\photos` is a relative name, not a Windows drive path.
-The source link's path format determines how its target is resolved. With
+Preflight reports `path_format: "unix"` or `path_format: "windows"`. The client
+saves that field and passes it to path conversion and validation. It never
+selects the format from a path prefix. Thus `//server/share/photos` is a Unix
+path in Unix mode and a network share in Windows mode. Servers without the
+field retain the earlier Unix-only contract; an invalid field is rejected.
+A relative link target also needs the source link's directory. With
 symlink following enabled, a copied `gallery -> D:\photos` link is rewritten
 when `--remap` moves that target. Selecting a link also retains intermediate
 links needed to reach its downloaded content.

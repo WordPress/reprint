@@ -249,8 +249,8 @@ final class HTTPServer {
                 foreach ($path_values as $path_key => $path_value) {
                     // Do not decode first: PHP accepts a raw path such as /tmp
                     // as strict base64 and turns it into unrelated bytes. Check
-                    // for Unix roots and Windows drive roots before decoding.
-                    if (is_string($path_value) && is_absolute_path($path_value)) {
+                    // for an absolute root in this source host's format before decoding.
+                    if (is_string($path_value) && is_absolute_path($path_value, native_path_format())) {
                         $decoded_path = $path_value;
                     } else {
                         $decoded_path = is_string($path_value)
@@ -259,7 +259,7 @@ final class HTTPServer {
                     }
                     if (
                         $decoded_path === false
-                        || !is_absolute_path($decoded_path)
+                        || !is_absolute_path($decoded_path, native_path_format())
                     ) {
                         $entry = is_array($value) ? ' entry ' . $path_key : '';
                         $observed = is_string($path_value)

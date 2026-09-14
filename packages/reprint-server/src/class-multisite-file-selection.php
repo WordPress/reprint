@@ -73,7 +73,7 @@ class MultisiteFileSelection {
     {
         // Reject alternate spellings such as uploads/sites/7/../8/photo.jpg.
         // The containment checks must see the same path that the caller uses.
-        if (normalize_path($remote_absolute_path) !== $remote_absolute_path) {
+        if (normalize_path($remote_absolute_path, native_path_format()) !== $remote_absolute_path) {
             return false;
         }
         $source = $this->source;
