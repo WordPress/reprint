@@ -2,8 +2,6 @@
 
 namespace WordPress\Reprint\Server;
 
-require_once __DIR__ . '/utils.php';
-
 use InvalidArgumentException;
 
 /**
@@ -213,10 +211,10 @@ class FileTreeProducer
     private function normalize_directories($directories): array
     {
         if (is_string($directories)) {
-            return [trim_right_slash($directories)];
+            return [Utils::trim_right_slash($directories)];
         }
         return array_map(function ($d) {
-            return trim_right_slash($d);
+            return Utils::trim_right_slash($d);
         }, $directories);
     }
 
@@ -407,7 +405,7 @@ class FileTreeProducer
         }
 
         foreach ($this->directories as $dir) {
-            $candidate = wp_join_unix_paths($dir, $path);
+            $candidate = Utils::wp_join_unix_paths($dir, $path);
             clearstatcache(true, $candidate);
             if (file_exists($candidate) || is_link($candidate)) {
                 return $candidate;
@@ -666,7 +664,7 @@ class FileTreeProducer
         $low = 0;
         $high = count($entries);
         while ($low < $high) {
-            $mid = integer_divide($low + $high, 2);
+            $mid = Utils::integer_divide($low + $high, 2);
             if (strcmp($entries[$mid], $last) <= 0) {
                 $low = $mid + 1;
             } else {

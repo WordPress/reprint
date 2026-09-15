@@ -10,8 +10,6 @@ use LogicException;
 use RuntimeException;
 use Throwable;
 
-require_once __DIR__ . '/utils.php';
-
 /**
  * Exposes push-session operations through the exporter HTTP dispatcher.
  *
@@ -103,18 +101,18 @@ final class PushEndpoints {
         if (!is_array($excluded_paths)) {
             throw new InvalidArgumentException('Push endpoints require an excluded_paths array.');
         }
-        $excluded_paths = normalize_excluded_paths($excluded_paths);
+        $excluded_paths = Utils::normalize_excluded_paths($excluded_paths);
 
-        assert_valid_path($reprint_directory, 'Push endpoint reprint_directory');
-        assert_valid_path($docroot, 'Push endpoint docroot');
-        $canonical_reprint_directory = realpath_with_missing_tail(
+        Utils::assert_valid_path($reprint_directory, 'Push endpoint reprint_directory');
+        Utils::assert_valid_path($docroot, 'Push endpoint docroot');
+        $canonical_reprint_directory = Utils::realpath_with_missing_tail(
             $reprint_directory
         );
         $canonical_docroot = realpath($docroot);
         if ($canonical_docroot === false) {
-            $canonical_docroot = normalize_path($docroot);
+            $canonical_docroot = Utils::normalize_path($docroot);
         }
-        if (path_is_same_as_or_descendant_of($canonical_reprint_directory, $canonical_docroot)) {
+        if (Utils::path_is_same_as_or_descendant_of($canonical_reprint_directory, $canonical_docroot)) {
             throw new InvalidArgumentException(
                 'Push endpoints require reprint_directory ' . json_encode($reprint_directory)
                 . ' to be outside docroot ' . json_encode($docroot) . '; observed it inside that document root.'
@@ -139,7 +137,7 @@ final class PushEndpoints {
         } else {
             $post_max_size = ini_get('post_max_size');
             $parsed_post_max_bytes = is_string($post_max_size) && $post_max_size !== ''
-                ? parse_size($post_max_size)
+                ? Utils::parse_size($post_max_size)
                 : 0;
             $this->post_max_bytes = $parsed_post_max_bytes > 0 ? $parsed_post_max_bytes : null;
         }

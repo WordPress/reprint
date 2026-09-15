@@ -4,8 +4,6 @@ namespace WordPress\Reprint\Server;
 
 use InvalidArgumentException;
 
-require_once __DIR__ . '/utils.php';
-
 if (!class_exists('WordPress\\Reprint\\Server\\ResourceBudget', false)) {
     require_once __DIR__ . '/class-resource-budget.php';
 }
@@ -460,7 +458,7 @@ final class HTTPServer {
         );
 
         $memory_limit = ini_get('memory_limit');
-        $max_memory = $memory_limit === '-1' ? PHP_INT_MAX : parse_size((string) $memory_limit);
+        $max_memory = $memory_limit === '-1' ? PHP_INT_MAX : Utils::parse_size((string) $memory_limit);
 
         return new ResourceBudget(
             microtime(true),

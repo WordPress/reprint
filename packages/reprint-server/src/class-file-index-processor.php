@@ -2,8 +2,6 @@
 
 namespace WordPress\Reprint\Server;
 
-require_once __DIR__ . '/utils.php';
-
 use InvalidArgumentException;
 use LogicException;
 
@@ -394,7 +392,7 @@ final class FileIndexProcessor {
         // a cache path or a path that disappears between scandir() and lstat(),
         // or every resumed request would inspect that same name again.
         $this->directory_stack[$frame_index]["after"] = $entry_name;
-        $path = wp_join_unix_paths($this->current_directory, $entry_name);
+        $path = Utils::wp_join_unix_paths($this->current_directory, $entry_name);
 
         // Skip sibling paths before lstat() and before a directory can enter
         // the stack. Their names came from the parent listing, but skipping
@@ -413,7 +411,7 @@ final class FileIndexProcessor {
         }
         if (
             $this->storage_path !== ""
-            && \WordPress\Reprint\Server\path_is_same_as_or_descendant_of($path, $this->storage_path)
+            && Utils::path_is_same_as_or_descendant_of($path, $this->storage_path)
         ) {
             $this->step_status = self::STATUS_SKIPPED;
             return true;
@@ -448,7 +446,7 @@ final class FileIndexProcessor {
             $canonical_directory = realpath($path);
             if (
                 $canonical_directory === false
-                || !\WordPress\Reprint\Server\path_is_same_as_or_descendant_of($this->configured_directories, $canonical_directory)
+                || !Utils::path_is_same_as_or_descendant_of($this->configured_directories, $canonical_directory)
             ) {
                 $this->directory_stack[] = [
                     "dir" => $path,
@@ -797,7 +795,7 @@ final class FileIndexProcessor {
         // boundary, then continue with the remaining stack.
         if (
             !$this->follow_symlinks
-            && !\WordPress\Reprint\Server\path_is_same_as_or_descendant_of($canonical_directory, $this->configured_directories)
+            && !Utils::path_is_same_as_or_descendant_of($canonical_directory, $this->configured_directories)
         ) {
             array_pop($this->directory_stack);
             $this->directory_error = [
@@ -940,7 +938,7 @@ final class FileIndexProcessor {
         }
         if (
             $this->storage_path !== ""
-            && \WordPress\Reprint\Server\path_is_same_as_or_descendant_of($path_root, $this->storage_path)
+            && Utils::path_is_same_as_or_descendant_of($path_root, $this->storage_path)
         ) {
             $this->step_status = self::STATUS_SKIPPED;
             return;
@@ -1066,7 +1064,7 @@ final class FileIndexProcessor {
         $requested_path = $root["requested_path"];
         if (
             $requested_path === ""
-            || \WordPress\Reprint\Server\normalize_path($requested_path) !== $requested_path
+            || Utils::normalize_path($requested_path) !== $requested_path
         ) {
             throw new InvalidArgumentException("File-index root requested_path must be normalized");
         }
@@ -1241,11 +1239,11 @@ final class FileIndexProcessor {
         $raw_target = @readlink($path);
         if ($raw_target !== false && $raw_target !== "") {
             if ($raw_target[0] !== "/") {
-                $raw_target = wp_join_unix_paths(dirname($path), $raw_target);
+                $raw_target = Utils::wp_join_unix_paths(dirname($path), $raw_target);
             }
             // Resolve only textual dot segments. realpath() would skip the
             // intermediate links that this walk must inspect.
-            $absolute_raw_target = \WordPress\Reprint\Server\normalize_path($raw_target);
+            $absolute_raw_target = Utils::normalize_path($raw_target);
             if (
                 $absolute_raw_target !== ""
                 && $absolute_raw_target[0] === "/"
@@ -1283,7 +1281,7 @@ final class FileIndexProcessor {
                 $current = "/";
                 continue;
             }
-            $current = wp_join_unix_paths($current, $part);
+            $current = Utils::wp_join_unix_paths($current, $part);
             if (!@is_link($current)) {
                 continue;
             }

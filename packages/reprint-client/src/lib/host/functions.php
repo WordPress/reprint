@@ -5,9 +5,8 @@
  * Registry, detection logic, and shared preflight extraction helpers.
  */
 
+use WordPress\Reprint\Server\Utils;
 use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Server\trim_right_slash;
 
 /**
  * All known host analyzers.
@@ -211,7 +210,7 @@ function excluded_plugins(array $preflight_data): array
         if (!is_string($path) || $path === '' || $path[0] !== '/') {
             return null;
         }
-        return trim_right_slash($path);
+        return Utils::trim_right_slash($path);
     };
     $wordpress_absolute_path = $clean_absolute_directory($paths_urls['abspath'] ?? null);
     $content_directory = $clean_absolute_directory($paths_urls['content_dir'] ?? null);
@@ -297,7 +296,7 @@ function extract_constants(array $preflight_data): array
     $paths_urls = $preflight_data['database']['wp']['paths_urls'] ?? [];
     $abspath = $paths_urls['abspath'] ?? '';
     if ($abspath !== '') {
-        $abspath = trim_right_slash($abspath);
+        $abspath = Utils::trim_right_slash($abspath);
     }
     $content_dir = $paths_urls['content_dir'] ?? '';
 
@@ -309,7 +308,7 @@ function extract_constants(array $preflight_data): array
     if (
         $content_dir !== ''
         && $abspath !== ''
-        && !path_is_same_as_or_descendant_of($content_dir, $abspath)
+        && !Utils::path_is_same_as_or_descendant_of($content_dir, $abspath)
     ) {
         $result['WP_CONTENT_DIR'] = '{fs-root}/wp-content';
     }

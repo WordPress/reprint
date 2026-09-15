@@ -1,6 +1,6 @@
 <?php
 
-use function WordPress\Reprint\Server\assert_valid_path;
+use WordPress\Reprint\Server\Utils;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Index failures are CLI filesystem paths and values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
@@ -265,7 +265,7 @@ class RemoteIndexReader
         if ($path === "" || $path === false) {
             throw new RuntimeException("Invalid index path (base64 decode failed)");
         }
-        assert_valid_path($path, "index path");
+        Utils::assert_valid_path($path, "index path");
         $entry = [
             "path" => $path,
             "ctime" => (int) ( $data["ctime"] ?? 0 ),

@@ -3,8 +3,7 @@
 namespace Reprint\Importer;
 
 use RuntimeException;
-use function WordPress\Reprint\Server\assert_valid_path;
-use function WordPress\Reprint\Server\parse_size;
+use WordPress\Reprint\Server\Utils;
 
 require_once __DIR__ . '/external-merge-sort.php';
 
@@ -55,7 +54,7 @@ function sort_index_file(string $path): bool
             throw new RuntimeException('Invalid index path (base64 decode failed)');
         }
 
-        assert_valid_path(
+        Utils::assert_valid_path(
             $path[0] === '/' ? $path : '/' . $path,
             'index path'
         );
@@ -76,7 +75,7 @@ function sort_index_file(string $path): bool
     $memory_limit_raw = ini_get('memory_limit');
     $memory_limit = ($memory_limit_raw === '-1' || $memory_limit_raw === '' || $memory_limit_raw === '0')
         ? 0
-        : parse_size($memory_limit_raw);
+        : Utils::parse_size($memory_limit_raw);
     $memory_used = memory_get_usage(true);
     $available_memory = $memory_limit > 0
         ? (int) (($memory_limit - $memory_used) * 0.6)
