@@ -39,6 +39,7 @@ final class Utils
     public static function str_starts_with(string $haystack, string $needle): bool
     {
         if (function_exists('str_starts_with')) {
+            // phpcs:ignore PHPCompatibility.FunctionUse.NewFunctions.str_starts_withFound -- Guarded by function_exists() above.
             return \str_starts_with($haystack, $needle);
         }
 
@@ -55,6 +56,7 @@ final class Utils
     public static function str_contains(string $haystack, string $needle): bool
     {
         if (function_exists('str_contains')) {
+            // phpcs:ignore PHPCompatibility.FunctionUse.NewFunctions.str_containsFound -- Guarded by function_exists() above.
             return \str_contains($haystack, $needle);
         }
 
