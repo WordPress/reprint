@@ -769,7 +769,6 @@ class MultipartPushStreamClient
         if ($this->multi_handle !== null) {
             curl_multi_remove_handle($this->multi_handle, $this->curl_handle);
         }
-        curl_close($this->curl_handle);
         $this->curl_handle = null;
         $this->outbound_prefix = '';
         $this->outbound_payload = '';
@@ -883,7 +882,6 @@ class MultipartPushStreamClient
         $error = curl_error($handle);
         $http_code = (int) curl_getinfo($handle, CURLINFO_HTTP_CODE);
         $redirect_url = (string) curl_getinfo($handle, CURLINFO_REDIRECT_URL);
-        curl_close($handle);
         if ($response_too_large) {
             return [
                 'status' => 'failed',

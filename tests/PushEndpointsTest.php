@@ -898,7 +898,6 @@ final class PushEndpointsTest extends TestCase {
         $body = curl_exec($handle);
         $this->assertIsString($body);
         $this->assertSame(413, curl_getinfo($handle, CURLINFO_HTTP_CODE), $body);
-        curl_close($handle);
 
         $this->assertSame([
             'status' => 'rejected',
@@ -1374,7 +1373,6 @@ final class PushEndpointsTest extends TestCase {
         $this->assertIsString($body);
         $this->assertSame(200, curl_getinfo($handle, CURLINFO_HTTP_CODE), $body);
         $this->assertSame('application/octet-stream', curl_getinfo($handle, CURLINFO_CONTENT_TYPE));
-        curl_close($handle);
 
         $response = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
         $this->assertArrayHasKey('ok', $response);
@@ -1473,7 +1471,6 @@ final class PushEndpointsTest extends TestCase {
         $body = curl_exec($handle);
         $this->assertIsString($body);
         $this->assertSame(400, curl_getinfo($handle, CURLINFO_HTTP_CODE));
-        curl_close($handle);
         $response = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
         $this->assertSame('invalid_request', $response['reason']);
         $this->assertStringContainsString('multipart/mixed', $response['detail']);
@@ -1501,7 +1498,6 @@ final class PushEndpointsTest extends TestCase {
         $body = curl_exec($handle);
         $this->assertIsString($body);
         $this->assertSame(400, curl_getinfo($handle, CURLINFO_HTTP_CODE));
-        curl_close($handle);
         $response = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
         $this->assertSame('invalid_request', $response['reason']);
         $this->assertStringContainsString('multipart body ended before', $response['detail']);
@@ -4382,7 +4378,6 @@ final class PushEndpointsTest extends TestCase {
         $body = curl_exec($handle);
         $this->assertIsString($body);
         $http_code = (int) curl_getinfo($handle, CURLINFO_HTTP_CODE);
-        curl_close($handle);
 
         return [
             'http_code' => $http_code,
@@ -4440,7 +4435,6 @@ final class PushEndpointsTest extends TestCase {
         $response_body = curl_exec($handle);
         $this->assertIsString($response_body);
         $http_code = curl_getinfo($handle, CURLINFO_HTTP_CODE);
-        curl_close($handle);
 
         return [
             'http_code' => $http_code,
