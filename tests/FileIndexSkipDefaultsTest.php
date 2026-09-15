@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 use WordPress\Reprint\Server\ResourceBudget;
-use function WordPress\Reprint\Server\relative_path_under;
+use WordPress\Reprint\Server\Utils;
 
 /**
  * Coverage for the default deny-list applied by endpoint_file_index().
@@ -535,7 +535,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $siteRoot = realpath($siteDir) ?: $siteDir;
         $out = [];
         foreach ($entries as $e) {
-            $relativePath = relative_path_under($e['path'], $siteRoot);
+            $relativePath = Utils::relative_path_under($e['path'], $siteRoot);
             if ($relativePath !== null && $relativePath !== '') {
                 $out[$relativePath] = $e;
             }

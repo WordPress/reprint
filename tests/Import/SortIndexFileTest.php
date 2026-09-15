@@ -206,7 +206,7 @@ PHP;
         $path = $this->write_unsorted_index();
         $script = $this->temporary_directory . '/sort-without-exec.php';
         file_put_contents($script, '<?php' . "\n"
-            . 'require ' . var_export(dirname(__DIR__, 2) . '/packages/reprint-server/src/utils.php', true) . ';' . "\n"
+            . 'require ' . var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true) . ';' . "\n"
             . 'require ' . var_export(dirname(__DIR__, 2) . '/packages/reprint-client/src/lib/sort-index-file.php', true) . ';' . "\n"
             . '\\Reprint\\Importer\\sort_index_file($argv[1]);' . "\n");
 

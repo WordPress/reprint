@@ -1,9 +1,8 @@
 <?php
 
+use WordPress\Reprint\Server\Utils;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
-use function WordPress\Reprint\Server\path_is_descendant_of;
-use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 
 require_once __DIR__ . '/class-file-index-diff-processor.php';
 
@@ -302,7 +301,7 @@ final class FileSyncPatchPlanner
             $descendant_prefix =
                 $this->active_deletion_root["path"] . "/";
             if (
-                !path_is_same_as_or_descendant_of(
+                !Utils::path_is_same_as_or_descendant_of(
                     $index_path,
                     $this->active_deletion_root["path"]
                 )
@@ -321,7 +320,7 @@ final class FileSyncPatchPlanner
             // A NUL byte cannot occur in an index path. Use it when there is
             // no following patch-base path so the descendant test cannot match.
             $patch_head_entry_replaces_patch_base_subtree =
-                path_is_same_as_or_descendant_of(
+                Utils::path_is_same_as_or_descendant_of(
                     $this->index_diff->get_following_path_in_old_index()
                         ?? "\0",
                     $index_path
@@ -628,10 +627,10 @@ final class FileSyncPatchPlanner
         $following_patch_head_index_path =
             $following_patch_head_index_path ?? "\0";
 
-        return path_is_same_as_or_descendant_of(
+        return Utils::path_is_same_as_or_descendant_of(
             $preceding_patch_head_index_path,
             $index_path
-        ) || path_is_same_as_or_descendant_of(
+        ) || Utils::path_is_same_as_or_descendant_of(
             $following_patch_head_index_path,
             $index_path
         );
@@ -737,7 +736,7 @@ final class FileSyncPatchPlanner
         string $index_path
     ): bool {
         return $this->active_deletion_root !== null
-            && path_is_descendant_of(
+            && Utils::path_is_descendant_of(
                 $index_path,
                 $this->active_deletion_root["path"]
             );
@@ -756,7 +755,7 @@ final class FileSyncPatchPlanner
         foreach ($this->included_index_path_roots as $included_index_path_root) {
             if (
                 $included_index_path_root === ""
-                || path_is_same_as_or_descendant_of(
+                || Utils::path_is_same_as_or_descendant_of(
                     $index_path,
                     $included_index_path_root
                 )
@@ -771,11 +770,11 @@ final class FileSyncPatchPlanner
         foreach ($this->excluded_index_path_roots as $excluded_index_path_root) {
             if (
                 $excluded_index_path_root === ""
-                || path_is_same_as_or_descendant_of(
+                || Utils::path_is_same_as_or_descendant_of(
                     $index_path,
                     $excluded_index_path_root
                 )
-                || path_is_same_as_or_descendant_of(
+                || Utils::path_is_same_as_or_descendant_of(
                     $excluded_index_path_root,
                     $index_path
                 )

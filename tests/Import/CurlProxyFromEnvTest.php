@@ -99,7 +99,6 @@ class CurlProxyFromEnvTest extends TestCase
         $errno = curl_errno($ch);
         $error = curl_error($ch);
         $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
 
         $this->assertSame(0, $errno, "curl error {$errno}: {$error}");
         $this->assertSame($proxyUrl, $applied);
@@ -118,7 +117,6 @@ class CurlProxyFromEnvTest extends TestCase
         putenv('ALL_PROXY');
         $ch = curl_init('http://127.0.0.1:' . $this->proxyPort);
         $applied = apply_curl_proxy_from_environment($ch);
-        curl_close($ch);
         $this->assertNull($applied);
     }
 
@@ -127,7 +125,6 @@ class CurlProxyFromEnvTest extends TestCase
         putenv('ALL_PROXY=');
         $ch = curl_init('http://127.0.0.1:' . $this->proxyPort);
         $applied = apply_curl_proxy_from_environment($ch);
-        curl_close($ch);
         $this->assertNull($applied);
     }
 
@@ -153,7 +150,6 @@ class CurlProxyFromEnvTest extends TestCase
         $body = curl_exec($curl);
         $errno = curl_errno($curl);
         $code = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-        curl_close($curl);
 
         $this->assertSame(0, $errno);
         $this->assertSame(200, $code);

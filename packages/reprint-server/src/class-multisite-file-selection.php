@@ -73,18 +73,18 @@ class MultisiteFileSelection {
     {
         // Reject alternate spellings such as uploads/sites/7/../8/photo.jpg.
         // The containment checks must see the same path that the caller uses.
-        if (normalize_path($remote_absolute_path) !== $remote_absolute_path) {
+        if (Utils::normalize_path($remote_absolute_path) !== $remote_absolute_path) {
             return false;
         }
         $source = $this->source;
         // Reprint can contain secret.php. Exclude it before allowing the shared
         // plugin tree below, using its actual path rather than a directory name.
-        if (path_is_same_as_or_descendant_of($remote_absolute_path, $source['exporter_dir'])) {
+        if (Utils::path_is_same_as_or_descendant_of($remote_absolute_path, $source['exporter_dir'])) {
             return false;
         }
         // These core directories belong to the shared WordPress installation.
         foreach (['wp-admin', 'wp-includes'] as $directory) {
-            if (path_is_same_as_or_descendant_of($remote_absolute_path, $source['abspath'] . '/' . $directory)) {
+            if (Utils::path_is_same_as_or_descendant_of($remote_absolute_path, $source['abspath'] . '/' . $directory)) {
                 return true;
             }
         }
@@ -92,28 +92,28 @@ class MultisiteFileSelection {
         // contents. A plugin can store secrets here; this is not a rule for
         // safely exposing shared files to individual site administrators.
         foreach (['plugins', 'themes', 'mu-plugins', 'languages'] as $directory) {
-            if (path_is_same_as_or_descendant_of($remote_absolute_path, $source['content_dir'] . '/' . $directory)) {
+            if (Utils::path_is_same_as_or_descendant_of($remote_absolute_path, $source['content_dir'] . '/' . $directory)) {
                 return true;
             }
         }
         // Site 1 uses uploads/ itself, which also contains the other sites'
         // uploads/sites/ tree. Exclude that tree BEFORE allowing uploads/ below.
-        if ( (int) $source['site_id'] === 1 && path_is_same_as_or_descendant_of(
+        if ( (int) $source['site_id'] === 1 && Utils::path_is_same_as_or_descendant_of(
             $remote_absolute_path, $source['uploads_dir'] . '/sites'
         )) {
             return false;
         }
         // A numbered site's upload root is already separate. The helper checks
         // a slash boundary, so uploads/sites/7 cannot match uploads/sites/70.
-        if (path_is_same_as_or_descendant_of($remote_absolute_path, $source['uploads_dir'])) {
+        if (Utils::path_is_same_as_or_descendant_of($remote_absolute_path, $source['uploads_dir'])) {
             return true;
         }
         // Traversal must pass through wp-content, uploads and uploads/sites to
         // reach site 7. Allow those parents, but only as far up as abspath.
         // Their children still need their own check: allowing uploads/sites
         // does not allow uploads/sites/8 or the main site's uploads/photo.jpg.
-        if (path_is_same_as_or_descendant_of($source['uploads_dir'], $remote_absolute_path)
-            && path_is_same_as_or_descendant_of($remote_absolute_path, $source['abspath'])) {
+        if (Utils::path_is_same_as_or_descendant_of($source['uploads_dir'], $remote_absolute_path)
+            && Utils::path_is_same_as_or_descendant_of($remote_absolute_path, $source['abspath'])) {
             return true;
         }
 

@@ -1,14 +1,13 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
-
-use function WordPress\Reprint\Server\wp_join_unix_paths;
+use WordPress\Reprint\Server\Utils;
 
 /**
- * Drift tests for the copy of wp_join_unix_paths() in the exporter package.
+ * Drift tests for the copy of Utils::wp_join_unix_paths() in the exporter package.
  *
  * The original lives in wp-php-toolkit/filesystem. reprint-server cannot
- * require that package — see the header comment above the copy in utils.php —
+ * require that package — see the header comment above the copy in class-utils.php —
  * so the behaviour is pinned here instead. Change these expectations only
  * when the upstream function changes.
  */
@@ -50,7 +49,7 @@ final class JoinUnixPathsTest extends TestCase
      */
     public function testJoinsSegments(array $segments, string $expected): void
     {
-        $this->assertSame($expected, wp_join_unix_paths(...$segments));
+        $this->assertSame($expected, Utils::wp_join_unix_paths(...$segments));
     }
 
     /**
@@ -70,6 +69,6 @@ final class JoinUnixPathsTest extends TestCase
             $this->markTestSkipped('wp-php-toolkit/filesystem is not installed.');
         }
 
-        $this->assertSame($upstream(...$segments), wp_join_unix_paths(...$segments));
+        $this->assertSame($upstream(...$segments), Utils::wp_join_unix_paths(...$segments));
     }
 }

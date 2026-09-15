@@ -85,7 +85,7 @@ try {
         fail_php56_server_smoke('PHP 5.6 did not use the identity streaming fallback.');
     }
 
-    if (strlen(WordPress\Reprint\Server\generate_random_bytes(16)) !== 16) {
+    if (strlen(WordPress\Reprint\Server\Utils::generate_random_bytes(16)) !== 16) {
         fail_php56_server_smoke('The PHP 5.6 random-byte fallback returned the wrong length.');
     }
 } finally {

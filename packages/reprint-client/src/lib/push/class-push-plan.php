@@ -1,13 +1,12 @@
 <?php
 
 use WordPress\Reprint\Server\FileIndexProcessor;
+use WordPress\Reprint\Server\Utils;
 
 use function Reprint\Importer\decode_local_index_entry;
 use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Server\relative_path_under;
-use function WordPress\Reprint\Server\trim_right_slash;
 
 require_once __DIR__ . '/../index/class-file-sync-plan-runner.php';
 
@@ -332,7 +331,7 @@ class PushPlan
         string $local_index_file,
         string $document_root_local_relative_path
     ) {
-        $plan_directory = trim_right_slash($plan_directory);
+        $plan_directory = Utils::trim_right_slash($plan_directory);
         if (!is_dir($plan_directory)) {
             throw new LogicException("Cannot open a push plan without its directory: {$plan_directory}");
         }
@@ -361,7 +360,7 @@ class PushPlan
         if ($resolved_local_filesystem_root === false || !is_dir($resolved_local_filesystem_root) || is_link($filesystem_root)) {
             throw new InvalidArgumentException("PushPlan requires the filesystem root to be a real directory.");
         }
-        $this->filesystem_root = trim_right_slash($resolved_local_filesystem_root);
+        $this->filesystem_root = Utils::trim_right_slash($resolved_local_filesystem_root);
     }
 
     /**
