@@ -13,7 +13,7 @@ final class WindowsPathAccessTest extends TestCase
             $this->markTestSkipped('Unix filename preservation requires a Unix host.');
         }
         foreach (['/site/workspace\\group\\user/www', '/site/report.', '/site/report ', '/site/D:\\report'] as $path) {
-            $this->assertSame($path, \WordPress\Reprint\Server\source_io_path($path));
+            $this->assertSame($path, \WordPress\Reprint\Server\Utils::source_io_path($path));
         }
     }
 }

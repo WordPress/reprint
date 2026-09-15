@@ -1,11 +1,11 @@
 <?php
 
 use WordPress\Reprint\Server\FileIndexProcessor;
+use WordPress\Reprint\Server\Utils;
 
 use function Reprint\Importer\merge_local_index_mutations;
 use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\write_local_index_update;
-use function WordPress\Reprint\Server\relative_path_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI filesystem paths, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
@@ -756,7 +756,7 @@ class PullIndexJournal
         string $local_absolute_path,
         bool $path_is_file
     ): ?string {
-        $local_relative_path = relative_path_under(
+        $local_relative_path = Utils::relative_path_under(
             $local_absolute_path,
             $this->filesystem_root
         );

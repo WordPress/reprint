@@ -1,10 +1,7 @@
 <?php
 
+use WordPress\Reprint\Server\Utils;
 use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Server\native_path_format;
-use function WordPress\Reprint\Server\normalize_path;
-use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Server\realpath_with_missing_tail;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Merge failures carry CLI filesystem paths, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
@@ -185,19 +182,19 @@ class WpContentMerger
                 );
             }
             if (strpos($link_value, "/") !== 0) {
-                $resolved_target = normalize_path(
+                $resolved_target = Utils::normalize_path(
                     wp_join_unix_paths(dirname($source_entry), $link_value),
-                    native_path_format()
+                    Utils::native_path_format()
                 );
                 // The source tree moves; an external target does not.
                 if (
-                    !path_is_same_as_or_descendant_of(
+                    !Utils::path_is_same_as_or_descendant_of(
                         $resolved_target,
                         $this->source_wp_content
                     )
                 ) {
                     $link_value = self::compute_relative_path(
-                        realpath_with_missing_tail(dirname($destination_entry)),
+                        Utils::realpath_with_missing_tail(dirname($destination_entry)),
                         $resolved_target
                     );
                 }

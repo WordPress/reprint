@@ -1,9 +1,7 @@
 <?php
 
+use WordPress\Reprint\Server\Utils;
 use function Reprint\Importer\sort_index_file;
-use function WordPress\Reprint\Server\path_is_descendant_of;
-use function WordPress\Reprint\Server\path_remainder_under;
-use function WordPress\Reprint\Server\relative_path_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Filesystem paths are CLI values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
@@ -150,7 +148,7 @@ final class MappedRemoteIndexBuilder
         array $excluded_remote_absolute_path_prefixes
     ): bool {
         foreach ($excluded_remote_absolute_path_prefixes as $excluded_prefix) {
-            if (path_remainder_under($remote_absolute_path, $excluded_prefix) !== null) {
+            if (Utils::path_remainder_under($remote_absolute_path, $excluded_prefix) !== null) {
                 return true;
             }
         }
@@ -215,7 +213,7 @@ final class MappedRemoteIndexBuilder
         RemoteToLocalPathMapper $path_mapper
     ): void {
         $remote_absolute_path = $remote_entry["path"];
-        $local_relative_path = relative_path_under(
+        $local_relative_path = Utils::relative_path_under(
             $path_mapper->remote_path_to_local_path($remote_absolute_path),
             $filesystem_root
         );
@@ -301,7 +299,7 @@ final class MappedRemoteIndexBuilder
                 }
                 while ($active_mapped_path !== null) {
                     $mapped_path = $active_mapped_path["path"];
-                    if (path_is_descendant_of($local_path, $mapped_path)) {
+                    if (Utils::path_is_descendant_of($local_path, $mapped_path)) {
                         if (!$active_mapped_path["intermediate"]) {
                             throw new RuntimeException(
                                 "A remote path maps below another remote path: "

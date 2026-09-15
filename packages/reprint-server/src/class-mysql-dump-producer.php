@@ -2,7 +2,6 @@
 
 namespace WordPress\Reprint\Server;
 
-require_once __DIR__ . '/utils.php';
 require_once __DIR__ . "/class-database-rows-reader.php";
 
 /**
@@ -1305,7 +1304,7 @@ class MySQLDumpProducer
         }
 
         /** Base64 output is always ceil(n/3)*4 bytes. */
-        $estimated_base64_length = 4 * integer_divide($len + 2, 3);
+        $estimated_base64_length = 4 * Utils::integer_divide($len + 2, 3);
         // FROM_BASE64('<data>') adds 15 bytes. JSON adds the surrounding
         // CONVERT(... USING utf8mb4), for 38 wrapper bytes in total.
         $wrapper_bytes = strtoupper($data_type) === "JSON" ? 38 : 15;
@@ -1318,7 +1317,7 @@ class MySQLDumpProducer
         if ($byte_length === 0) {
             return strlen("NULLIF(1, 1 " . self::ZERO_BYTE_SPATIAL_VALUE_COMMENT . ")");
         }
-        return 15 + 4 * integer_divide($byte_length + 2, 3);
+        return 15 + 4 * Utils::integer_divide($byte_length + 2, 3);
     }
 
     /** Returns the source max_allowed_packet value, or null when it cannot be read. */
@@ -1931,7 +1930,7 @@ class MySQLDumpProducer
             $value_offset = $current['character_offset'];
             $value_length = max(
                 1,
-                integer_divide(
+                Utils::integer_divide(
                     $chunk_size,
                     $this->row_reader->get_maximum_character_bytes($column)
                 )

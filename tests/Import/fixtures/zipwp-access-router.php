@@ -11,10 +11,7 @@ if (empty($_COOKIE['zipwp_access'])) {
     return;
 }
 
-require_once __DIR__ . '/../../../packages/reprint-server/src/class-http-server.php';
-require_once __DIR__ . '/../../../packages/reprint-server/src/class-hmac-server.php';
-require_once __DIR__ . '/../../../packages/reprint-server/src/class-hmac-client.php';
-require_once __DIR__ . '/../../../packages/reprint-server/src/class-push-session.php';
+require_once __DIR__ . '/../../../vendor/autoload.php';
 
 $reprint_authentication = new \WordPress\Reprint\Server\HMACServer('zipwp-test-secret');
 if (\WordPress\Reprint\Server\HTTPServer::is_push_endpoint($_GET['endpoint'] ?? '')) {

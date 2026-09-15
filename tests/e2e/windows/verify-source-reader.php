@@ -1,8 +1,8 @@
 <?php
 /** Checks PHP source reads and explicit failures before the cross-host migration. */
+use WordPress\Reprint\Server\Utils;
 use WordPress\Reprint\Server\FileIndexProcessor;
 use WordPress\Reprint\Server\FileTreeProducer;
-use function WordPress\Reprint\Server\source_io_path;
 
 require dirname(__DIR__, 3) . '/packages/reprint-server/src/export.php';
 restore_error_handler();
@@ -22,12 +22,12 @@ foreach (['trailing', 'trailing.', 'trailing '] as $reprint_name) {
         throw new RuntimeException('The literal fixture is missing: ' . $reprint_name);
     }
 }
-if (file_get_contents(source_io_path($reprint_root . '/trailing')) !== 'ordinary sibling!') {
+if (file_get_contents(Utils::source_io_path($reprint_root . '/trailing')) !== 'ordinary sibling!') {
     throw new RuntimeException('Ordinary PHP source reads must work.');
 }
 foreach (['trailing.', 'trailing '] as $reprint_name) {
     try {
-        source_io_path($reprint_root . '/' . $reprint_name);
+        Utils::source_io_path($reprint_root . '/' . $reprint_name);
         throw new LogicException('An unreadable Windows name reached ordinary PHP I/O.');
     } catch (RuntimeException $reprint_error) {
         if (strpos($reprint_error->getMessage(), 'Cannot read the exact Windows filename') === false) {
@@ -137,10 +137,10 @@ unset($reprint_producer);
 // Ordinary UNC access fails beyond MAX_PATH on this PHP build. The PHP-supported
 // device spelling must remain inside I/O calls, never in index paths or cursors.
 $reprint_long_path = '\\\\LOCALHOST\\D$/Reprint reader UNC/' . str_repeat('a', 251) . '.txt';
-$reprint_long_stat = \WordPress\Reprint\Server\source_lstat($reprint_long_path);
+$reprint_long_stat = \WordPress\Reprint\Server\Utils::source_lstat($reprint_long_path);
 if ($reprint_long_stat === false || $reprint_long_stat['size'] !== 13
-    || \WordPress\Reprint\Server\source_realpath($reprint_long_path) !== $reprint_long_path
-    || file_get_contents(source_io_path($reprint_long_path)) !== 'long UNC file') {
+    || \WordPress\Reprint\Server\Utils::source_realpath($reprint_long_path) !== $reprint_long_path
+    || file_get_contents(Utils::source_io_path($reprint_long_path)) !== 'long UNC file') {
     throw new RuntimeException('PHP must read the long UNC file without changing its shared path.');
 }
 $reprint_producer = new FileTreeProducer(dirname($reprint_long_path), ['paths' => [$reprint_long_path]]);
@@ -152,13 +152,13 @@ unset($reprint_producer);
 // Ordinary allowed shares must still work under PHP's open_basedir policy.
 $reprint_short_share_path = '\\\\LOCALHOST\\D$/Reprint reader UNC/readable.txt';
 ini_set('open_basedir', __DIR__ . PATH_SEPARATOR . dirname($reprint_short_share_path));
-if (file_get_contents(source_io_path($reprint_short_share_path)) !== 'short UNC file') {
+if (file_get_contents(Utils::source_io_path($reprint_short_share_path)) !== 'short UNC file') {
     throw new RuntimeException('An allowed ordinary share stopped working under open_basedir.');
 }
 // PHP itself enforces open_basedir, including the long UNC I/O spelling.
 ini_set('open_basedir', __DIR__);
 foreach ([$reprint_path, $reprint_short_share_path, $reprint_long_path] as $reprint_denied_path) {
-    if (@file_get_contents(source_io_path($reprint_denied_path)) !== false) {
+    if (@file_get_contents(Utils::source_io_path($reprint_denied_path)) !== false) {
         throw new RuntimeException('Source file access bypassed open_basedir.');
     }
 }

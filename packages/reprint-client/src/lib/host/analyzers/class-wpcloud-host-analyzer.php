@@ -1,7 +1,7 @@
 <?php
 
+use WordPress\Reprint\Server\Utils;
 use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Server\trim_right_slash;
 
 /**
  * Host analyzer for WP Cloud (wpcom) sites.
@@ -118,7 +118,7 @@ class WpcloudHostAnalyzer implements HostAnalyzer
                 continue;
             }
             // WP Cloud's platform paths use Unix rules, even on a Windows client.
-            $dir = trim_right_slash(dirname($path), 'unix');
+            $dir = Utils::trim_right_slash(dirname($path), 'unix');
             if ($dir !== '/') {
                 $dirs[] = $dir;
             }

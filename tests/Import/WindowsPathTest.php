@@ -1,13 +1,7 @@
 <?php
 
+use WordPress\Reprint\Server\Utils;
 use PHPUnit\Framework\TestCase;
-use function WordPress\Reprint\Server\assert_valid_path;
-use function WordPress\Reprint\Server\normalize_path;
-use function WordPress\Reprint\Server\normalize_path_separators;
-use function WordPress\Reprint\Server\path_is_descendant_of;
-use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Server\path_remainder_under;
-use function WordPress\Reprint\Server\trim_right_slash;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/pull/class-remote-to-local-path-mapper.php';
 
@@ -17,10 +11,10 @@ class WindowsPathTest extends TestCase
     /** The default WordPress ABSPATH mixes native separators with a trailing slash. */
     public function test_accepts_windows_wordpress_directory(): void
     {
-        assert_valid_path('D:\\Sites\\example.test/', 'windows', 'directory entry');
-        $this->assertSame('D:/Sites/example.test', normalize_path('D:\\Sites\\example.test/', 'windows'));
-        $this->assertSame('D:/', normalize_path('d:\\site\\..\\..', 'windows'));
-        $this->assertSame('D:/', trim_right_slash('D:/', 'windows'));
+        Utils::assert_valid_path('D:\\Sites\\example.test/', 'windows', 'directory entry');
+        $this->assertSame('D:/Sites/example.test', Utils::normalize_path('D:\\Sites\\example.test/', 'windows'));
+        $this->assertSame('D:/', Utils::normalize_path('d:\\site\\..\\..', 'windows'));
+        $this->assertSame('D:/', Utils::trim_right_slash('D:/', 'windows'));
     }
 
     /**
@@ -32,10 +26,10 @@ class WindowsPathTest extends TestCase
      */
     public function test_maps_portable_windows_filename_bytes(string $remote_path, string $expected_path): void
     {
-        assert_valid_path($remote_path, 'windows');
+        Utils::assert_valid_path($remote_path, 'windows');
         $mapper = new RemoteToLocalPathMapper('/local', 'windows', []);
-        $this->assertSame($expected_path, normalize_path_separators($remote_path, 'windows'));
-        $this->assertSame($expected_path, normalize_path($remote_path, 'windows'));
+        $this->assertSame($expected_path, Utils::normalize_path_separators($remote_path, 'windows'));
+        $this->assertSame($expected_path, Utils::normalize_path($remote_path, 'windows'));
         $this->assertSame('/local/' . $expected_path, $mapper->remote_path_to_local_path($remote_path));
     }
 
@@ -62,20 +56,20 @@ class WindowsPathTest extends TestCase
     /** Both spellings must describe the same selected Windows subtree. */
     public function test_compares_windows_paths_at_component_boundaries(): void
     {
-        $path = normalize_path_separators('D:\\site\\upload.txt', 'windows');
-        $root = normalize_path_separators('d:/', 'windows');
-        $prefix = normalize_path_separators('d:\\\\site', 'windows');
-        $share_path = normalize_path_separators('\\\\SERVER\\SHARE/site/file.txt', 'windows');
-        $share_prefix = normalize_path_separators('\\\\server\\share\\\\site', 'windows');
-        $this->assertTrue(path_is_same_as_or_descendant_of($path, $prefix));
-        $this->assertTrue(path_is_same_as_or_descendant_of($prefix, $root));
-        $this->assertTrue(path_is_same_as_or_descendant_of($share_path, $share_prefix));
-        $this->assertFalse(path_is_same_as_or_descendant_of('D:/site-old', $prefix));
-        $this->assertFalse(path_is_same_as_or_descendant_of('E:/site', $root));
-        $this->assertFalse(path_is_same_as_or_descendant_of($prefix, '/'));
-        $this->assertTrue(path_is_descendant_of($prefix, $root));
-        $this->assertFalse(path_is_descendant_of($prefix, $prefix));
-        $this->assertSame('/upload.txt', path_remainder_under($path, $prefix));
+        $path = Utils::normalize_path_separators('D:\\site\\upload.txt', 'windows');
+        $root = Utils::normalize_path_separators('d:/', 'windows');
+        $prefix = Utils::normalize_path_separators('d:\\\\site', 'windows');
+        $share_path = Utils::normalize_path_separators('\\\\SERVER\\SHARE/site/file.txt', 'windows');
+        $share_prefix = Utils::normalize_path_separators('\\\\server\\share\\\\site', 'windows');
+        $this->assertTrue(Utils::path_is_same_as_or_descendant_of($path, $prefix));
+        $this->assertTrue(Utils::path_is_same_as_or_descendant_of($prefix, $root));
+        $this->assertTrue(Utils::path_is_same_as_or_descendant_of($share_path, $share_prefix));
+        $this->assertFalse(Utils::path_is_same_as_or_descendant_of('D:/site-old', $prefix));
+        $this->assertFalse(Utils::path_is_same_as_or_descendant_of('E:/site', $root));
+        $this->assertFalse(Utils::path_is_same_as_or_descendant_of($prefix, '/'));
+        $this->assertTrue(Utils::path_is_descendant_of($prefix, $root));
+        $this->assertFalse(Utils::path_is_descendant_of($prefix, $prefix));
+        $this->assertSame('/upload.txt', Utils::path_remainder_under($path, $prefix));
     }
 
     /** Drive names remain separate under the Linux destination root. */
@@ -92,18 +86,18 @@ class WindowsPathTest extends TestCase
     public function test_maps_unc_share_paths_without_losing_the_share_root(): void
     {
         $remote = '\\\\server\\media\\Sites\\photo.jpg';
-        assert_valid_path($remote, 'windows');
-        $this->assertSame('\\\\SERVER\\MEDIA/Sites/photo.jpg', normalize_path($remote, 'windows'));
-        $this->assertSame('\\\\SERVER\\MEDIA', normalize_path('\\\\server\\media\\site\\..\\..', 'windows'));
-        $remote = normalize_path_separators($remote, 'windows');
-        $this->assertTrue(path_is_same_as_or_descendant_of($remote, normalize_path_separators('\\\\server\\media\\', 'windows')));
-        $this->assertFalse(path_is_same_as_or_descendant_of($remote, normalize_path_separators('\\\\server\\media-old', 'windows')));
-        $this->assertSame('/Sites/photo.jpg', path_remainder_under($remote, normalize_path_separators('\\\\server\\media', 'windows')));
+        Utils::assert_valid_path($remote, 'windows');
+        $this->assertSame('\\\\SERVER\\MEDIA/Sites/photo.jpg', Utils::normalize_path($remote, 'windows'));
+        $this->assertSame('\\\\SERVER\\MEDIA', Utils::normalize_path('\\\\server\\media\\site\\..\\..', 'windows'));
+        $remote = Utils::normalize_path_separators($remote, 'windows');
+        $this->assertTrue(Utils::path_is_same_as_or_descendant_of($remote, Utils::normalize_path_separators('\\\\server\\media\\', 'windows')));
+        $this->assertFalse(Utils::path_is_same_as_or_descendant_of($remote, Utils::normalize_path_separators('\\\\server\\media-old', 'windows')));
+        $this->assertSame('/Sites/photo.jpg', Utils::path_remainder_under($remote, Utils::normalize_path_separators('\\\\server\\media', 'windows')));
         $mapper = new RemoteToLocalPathMapper('/local', 'windows', []);
         $this->assertSame('/local/UNC/SERVER/MEDIA/Sites/photo.jpg', $mapper->remote_path_to_local_path($remote));
         $this->assertSame('/local/C:/UNC/SERVER/MEDIA/Sites/photo.jpg', $mapper->remote_path_to_local_path('C:\\UNC\\SERVER\\MEDIA\\Sites\\photo.jpg'));
         $mapper = new RemoteToLocalPathMapper('/local', 'unix', []);
-        $this->assertSame('//server/media/name\\with\\backslashes', normalize_path_separators('//server/media/name\\with\\backslashes', 'unix'));
+        $this->assertSame('//server/media/name\\with\\backslashes', Utils::normalize_path_separators('//server/media/name\\with\\backslashes', 'unix'));
         $this->assertSame('/local/server/media/name\\with\\backslashes', $mapper->remote_path_to_local_path('//server/media/name\\with\\backslashes'));
     }
 
@@ -129,7 +123,7 @@ class WindowsPathTest extends TestCase
     public function test_rejects_unsupported_windows_path_forms(string $path): void
     {
         $this->expectException(InvalidArgumentException::class);
-        assert_valid_path($path, 'windows');
+        Utils::assert_valid_path($path, 'windows');
     }
 
     /** @return array[] Unsupported spellings, kept separate from portable filenames. */
@@ -159,9 +153,9 @@ class WindowsPathTest extends TestCase
      */
     public function test_preserves_unix_backslashes(string $path): void
     {
-        assert_valid_path($path, 'unix');
-        $this->assertSame($path, normalize_path_separators($path, 'unix'));
-        $this->assertSame($path, normalize_path($path, 'unix'));
+        Utils::assert_valid_path($path, 'unix');
+        $this->assertSame($path, Utils::normalize_path_separators($path, 'unix'));
+        $this->assertSame($path, Utils::normalize_path($path, 'unix'));
         $mapper = new RemoteToLocalPathMapper('/local', 'unix', ['/site']);
         $this->assertSame('/local' . $path, $mapper->remote_path_to_local_path($path));
     }
@@ -187,7 +181,7 @@ class WindowsPathTest extends TestCase
      */
     public function testResolvesLinkTargetsInTheirSourceFormat(string $source_path, string $target, string $expected, string $path_format): void
     {
-        $this->assertSame($expected, \WordPress\Reprint\Server\resolve_symlink_target_path($source_path, $target, $path_format));
+        $this->assertSame($expected, \WordPress\Reprint\Server\Utils::resolve_symlink_target_path($source_path, $target, $path_format));
     }
 
     /** @return array[] Source link, stored target, and the resolved source path. */
@@ -226,7 +220,7 @@ class WindowsPathTest extends TestCase
     {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('must not contain dot-segments');
-        assert_valid_path('D:\\site\\..\\outside', 'windows');
+        Utils::assert_valid_path('D:\\site\\..\\outside', 'windows');
     }
 
     /** A drive-relative path depends on the source process's working directory. */
@@ -234,7 +228,7 @@ class WindowsPathTest extends TestCase
     {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('must be an absolute path');
-        $this->assertSame('D:', trim_right_slash('D:', 'windows'));
-        assert_valid_path('D:site/file.txt', 'windows');
+        $this->assertSame('D:', Utils::trim_right_slash('D:', 'windows'));
+        Utils::assert_valid_path('D:site/file.txt', 'windows');
     }
 }

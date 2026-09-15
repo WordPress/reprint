@@ -14,26 +14,8 @@ use WordPress\Reprint\Server\PdoConstants;
 use WordPress\Reprint\Server\ResourceBudget;
 use WordPress\Reprint\Server\SqliteDriverPDO;
 use WordPress\Reprint\Server\WpdbDriverPDO;
+use WordPress\Reprint\Server\Utils;
 
-use function WordPress\Reprint\Server\native_path_format;
-use function WordPress\Reprint\Server\assert_valid_path;
-use function WordPress\Reprint\Server\build_pdo_dsn;
-use function WordPress\Reprint\Server\generate_random_bytes;
-use function WordPress\Reprint\Server\json_encode_or_throw;
-use function WordPress\Reprint\Server\is_absolute_path;
-use function WordPress\Reprint\Server\source_io_path;
-use function WordPress\Reprint\Server\source_lstat;
-use function WordPress\Reprint\Server\source_is_link;
-use function WordPress\Reprint\Server\source_realpath;
-use function WordPress\Reprint\Server\source_readlink;
-use function WordPress\Reprint\Server\normalize_path;
-use function WordPress\Reprint\Server\normalize_path_separators;
-use function WordPress\Reprint\Server\parse_size;
-use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Server\trim_right_slash;
-use function WordPress\Reprint\Server\wp_join_unix_paths;
-
-require_once __DIR__ . '/utils.php';
 require_once __DIR__ . '/class-resource-budget.php';
 require_once __DIR__ . '/class-gzip-output-stream.php';
 require_once __DIR__ . '/class-file-index-processor.php';
@@ -123,7 +105,7 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
      * Also, every chunk declares its Content-Length, so the client never needs
      * to search arbitrary body bytes for the boundary.
      */
-    $boundary = "boundary-" . bin2hex(generate_random_bytes(16));
+    $boundary = "boundary-" . bin2hex(Utils::generate_random_bytes(16));
     $can_send_headers = !headers_sent();
 
     if ($require_headers && !$can_send_headers) {
@@ -274,7 +256,7 @@ function create_db_connection(array $creds, array $options = [])
 
         try {
             $mysql = new PDO(
-                build_pdo_dsn($creds['db_host'], $creds['db_name']),
+                Utils::build_pdo_dsn($creds['db_host'], $creds['db_name']),
                 $creds["db_user"],
                 $creds["db_password"],
                 $merged_options
@@ -606,7 +588,7 @@ if (getenv('REPRINT_SERVER_TEST_MODE')) {
         if (isset($config['directory'])) {
             $dirs = is_array($config['directory']) ? $config['directory'] : [$config['directory']];
             foreach ($dirs as $d) {
-                $candidates[] = wp_join_unix_paths(
+                $candidates[] = Utils::wp_join_unix_paths(
                     $d,
                     'wp-content/plugins/reprint-server/test-hooks.php'
                 );
@@ -683,7 +665,7 @@ function normalize_path_list(array $paths): array
         }
         $real = realpath($path);
         $final = $real !== false ? $real : $path;
-        $final = trim_right_slash($final, native_path_format());
+        $final = Utils::trim_right_slash($final, Utils::native_path_format());
         if ($final === "") {
             continue;
         }
@@ -705,9 +687,9 @@ function detect_wp_roots(array $start_paths): array
         $current = $start;
         while ($current !== "" && !isset($seen[$current])) {
             $seen[$current] = true;
-            $wp_load_path = wp_join_unix_paths($current, "wp-load.php");
-            $wp_config_path = wp_join_unix_paths($current, "wp-config.php");
-            $wp_content_path = wp_join_unix_paths($current, "wp-content");
+            $wp_load_path = Utils::wp_join_unix_paths($current, "wp-load.php");
+            $wp_config_path = Utils::wp_join_unix_paths($current, "wp-config.php");
+            $wp_content_path = Utils::wp_join_unix_paths($current, "wp-content");
             $filesystem_probe_warning = false;
             $reprint_error_handler = null;
             // During preflight, Reprint's error handler turns a warning into HTTP 500.
@@ -1289,8 +1271,8 @@ function endpoint_db_index(
                 }
             }
 
-            $payload = json_encode_or_throw($tables);
-            $cursor_json = json_encode_or_throw([
+            $payload = Utils::json_encode_or_throw($tables);
+            $cursor_json = Utils::json_encode_or_throw([
                 "phase" => "tables",
                 "last_table" => $last_table,
             ]);
@@ -1395,11 +1377,11 @@ function resolve_directories(array $config): array
             );
         }
         $directory = PHP_OS === 'WINNT' ? $directory : trim($directory);
-        assert_valid_path($directory, native_path_format(), "directory entry");
+        Utils::assert_valid_path($directory, Utils::native_path_format(), "directory entry");
 
         clearstatcache(true, $directory);
-        $real_directory = @source_realpath($directory);
-        if ($real_directory === false || !is_dir(source_io_path($real_directory))) {
+        $real_directory = @Utils::source_realpath($directory);
+        if ($real_directory === false || !is_dir(Utils::source_io_path($real_directory))) {
             throw new InvalidArgumentException(
                 "directory entry is not an accessible directory: {$directory}\n" .
                     "Current working directory: " .
@@ -1410,7 +1392,7 @@ function resolve_directories(array $config): array
             );
         }
 
-        $directories[] = normalize_path_separators($real_directory, native_path_format());
+        $directories[] = Utils::normalize_path_separators($real_directory, Utils::native_path_format());
     }
 
     if (empty($directories)) {
@@ -1461,10 +1443,10 @@ function resolve_file_index_roots(array $config): array
             throw new InvalidArgumentException("directory entries must be non-empty strings");
         }
         $root_input = PHP_OS === 'WINNT' ? $root_input : trim($root_input);
-        assert_valid_path($root_input, native_path_format(), "directory entry");
-        $requested_path = normalize_path($root_input, native_path_format());
+        Utils::assert_valid_path($root_input, Utils::native_path_format(), "directory entry");
+        $requested_path = Utils::normalize_path($root_input, Utils::native_path_format());
         clearstatcache(true, $requested_path);
-        $stat = @source_lstat($requested_path);
+        $stat = @Utils::source_lstat($requested_path);
         if ($stat === false) {
             // The client sends `pulled_before` for selected paths an earlier pull
             // already saw. Absence there means the source deleted the path, so it
@@ -1487,8 +1469,8 @@ function resolve_file_index_roots(array $config): array
         }
 
         $mode = $stat["mode"] & STAT_TYPE_MASK;
-        $type = $mode === STAT_TYPE_LINK ? "symlink" : ( is_dir(source_io_path($requested_path)) ? "directory" : "file" );
-        $resolved_path = @source_realpath($requested_path);
+        $type = $mode === STAT_TYPE_LINK ? "symlink" : ( is_dir(Utils::source_io_path($requested_path)) ? "directory" : "file" );
+        $resolved_path = @Utils::source_realpath($requested_path);
         if ($type === "symlink" && $resolved_path === false) {
             $message = PHP_OS === 'WINNT'
                 ? "PHP cannot resolve the Windows link target: {$requested_path}. Recreate the link with a full drive-letter target before migration."
@@ -1511,7 +1493,7 @@ function resolve_file_index_roots(array $config): array
         }
         $roots[] = [
             "requested_path" => $requested_path,
-            "resolved_path" => normalize_path_separators($resolved_path, native_path_format()),
+            "resolved_path" => Utils::normalize_path_separators($resolved_path, Utils::native_path_format()),
             "type" => $type,
         ];
     }
@@ -1547,7 +1529,7 @@ function resolve_file_index_start_root(
     string $list_directory,
     bool $follow_symlinks
 ): array {
-    $requested_path = normalize_path($list_directory, native_path_format());
+    $requested_path = Utils::normalize_path($list_directory, Utils::native_path_format());
     foreach ($roots as $root) {
         if ($root["requested_path"] === $requested_path) {
             return $root;
@@ -1560,8 +1542,8 @@ function resolve_file_index_start_root(
         );
     }
 
-    $resolved_path = @source_realpath($requested_path);
-    if ($resolved_path === false || !is_dir(source_io_path($resolved_path))) {
+    $resolved_path = @Utils::source_realpath($requested_path);
+    if ($resolved_path === false || !is_dir(Utils::source_io_path($resolved_path))) {
         throw new InvalidArgumentException(
             "Followed symlink target directory does not exist or is not accessible: {$requested_path}"
         );
@@ -1569,7 +1551,7 @@ function resolve_file_index_start_root(
 
     return [
         "requested_path" => $requested_path,
-        "resolved_path" => normalize_path_separators($resolved_path, native_path_format()),
+        "resolved_path" => Utils::normalize_path_separators($resolved_path, Utils::native_path_format()),
         "type" => "directory",
     ];
 }
@@ -1579,7 +1561,7 @@ function file_index_parent_symlink(string $requested_path): ?array
 {
     $parents = [];
     $current = dirname($requested_path);
-    while (is_absolute_path($current, native_path_format())) {
+    while (Utils::is_absolute_path($current, Utils::native_path_format())) {
         $parents[] = $current;
         $parent = dirname($current);
         if ($parent === $current) {
@@ -1588,10 +1570,10 @@ function file_index_parent_symlink(string $requested_path): ?array
         $current = $parent;
     }
     foreach (array_reverse($parents) as $current) {
-        if (!@source_is_link($current)) {
+        if (!@Utils::source_is_link($current)) {
             continue;
         }
-        $target = @source_readlink($current);
+        $target = @Utils::source_readlink($current);
         return ["path" => $current, "target" => $target === false ? "(unreadable)" : $target];
     }
     return null;
@@ -1711,7 +1693,7 @@ function endpoint_preflight(array $config): array
                 "disk_total_bytes" => $disk_total !== false ? $disk_total : null,
             ];
 
-            $htaccess_path = wp_join_unix_paths($dir, ".htaccess");
+            $htaccess_path = Utils::wp_join_unix_paths($dir, ".htaccess");
             if (file_exists($htaccess_path)) {
                 $htaccess_readable = is_readable($htaccess_path);
                 $htaccess_size = @filesize($htaccess_path);
@@ -1743,9 +1725,9 @@ function endpoint_preflight(array $config): array
                 ];
             }
 
-            $plugins_dir = wp_join_unix_paths($dir, "wp-content/plugins");
-            $mu_plugins_dir = wp_join_unix_paths($dir, "wp-content/mu-plugins");
-            $themes_dir = wp_join_unix_paths($dir, "wp-content/themes");
+            $plugins_dir = Utils::wp_join_unix_paths($dir, "wp-content/plugins");
+            $mu_plugins_dir = Utils::wp_join_unix_paths($dir, "wp-content/mu-plugins");
+            $themes_dir = Utils::wp_join_unix_paths($dir, "wp-content/themes");
             $wp_paths[] = [
                 "root" => $dir,
                 "plugins_dir" => $plugins_dir,
@@ -1757,9 +1739,9 @@ function endpoint_preflight(array $config): array
 
     if (!empty($wp_scan_roots)) {
         foreach ($wp_scan_roots as $dir) {
-            $plugins_dir = wp_join_unix_paths($dir, "wp-content/plugins");
-            $mu_plugins_dir = wp_join_unix_paths($dir, "wp-content/mu-plugins");
-            $themes_dir = wp_join_unix_paths($dir, "wp-content/themes");
+            $plugins_dir = Utils::wp_join_unix_paths($dir, "wp-content/plugins");
+            $mu_plugins_dir = Utils::wp_join_unix_paths($dir, "wp-content/mu-plugins");
+            $themes_dir = Utils::wp_join_unix_paths($dir, "wp-content/themes");
             $wp_paths[] = [
                 "root" => $dir,
                 "plugins_dir" => $plugins_dir,
@@ -1780,9 +1762,9 @@ function endpoint_preflight(array $config): array
     $wp_paths = array_map(function ($root) {
         return [
             "root" => $root,
-            "plugins_dir" => wp_join_unix_paths($root, "wp-content/plugins"),
-            "mu_plugins_dir" => wp_join_unix_paths($root, "wp-content/mu-plugins"),
-            "themes_dir" => wp_join_unix_paths($root, "wp-content/themes"),
+            "plugins_dir" => Utils::wp_join_unix_paths($root, "wp-content/plugins"),
+            "mu_plugins_dir" => Utils::wp_join_unix_paths($root, "wp-content/mu-plugins"),
+            "themes_dir" => Utils::wp_join_unix_paths($root, "wp-content/themes"),
         ];
     }, $wp_paths);
 
@@ -1809,7 +1791,7 @@ function endpoint_preflight(array $config): array
         if ($memory_limit_raw === "-1") {
             $memory_limit_bytes = PHP_INT_MAX;
         } else {
-            $memory_limit_bytes = parse_size($memory_limit_raw);
+            $memory_limit_bytes = Utils::parse_size($memory_limit_raw);
         }
     }
     $memory_used = memory_get_usage(true);
@@ -1821,11 +1803,11 @@ function endpoint_preflight(array $config): array
     $upload_max_filesize_raw = ini_get("upload_max_filesize");
     $post_max_bytes =
         $post_max_size_raw !== false && $post_max_size_raw !== ""
-            ? parse_size($post_max_size_raw)
+            ? Utils::parse_size($post_max_size_raw)
             : null;
     $upload_max_bytes =
         $upload_max_filesize_raw !== false && $upload_max_filesize_raw !== ""
-            ? parse_size($upload_max_filesize_raw)
+            ? Utils::parse_size($upload_max_filesize_raw)
             : null;
     $max_request_bytes = null;
     if ($post_max_bytes !== null && $upload_max_bytes !== null) {
@@ -2072,7 +2054,7 @@ function endpoint_preflight(array $config): array
                         // the importer knows where the files actually live.
                         $wp_admin_path = null;
                         if (defined("ABSPATH")) {
-                            $wp_admin_candidate = wp_join_unix_paths(ABSPATH, "wp-admin");
+                            $wp_admin_candidate = Utils::wp_join_unix_paths(ABSPATH, "wp-admin");
                             $wp_admin_real = realpath($wp_admin_candidate);
                             if ($wp_admin_real !== false && is_dir($wp_admin_real)) {
                                 $wp_admin_path = $wp_admin_real;
@@ -2082,7 +2064,7 @@ function endpoint_preflight(array $config): array
                         $wp_includes_path = null;
                         if (defined("ABSPATH")) {
                             $wpinc = defined("WPINC") ? WPINC : "wp-includes";
-                            $wp_includes_candidate = wp_join_unix_paths(ABSPATH, $wpinc);
+                            $wp_includes_candidate = Utils::wp_join_unix_paths(ABSPATH, $wpinc);
                             $wp_includes_real = realpath($wp_includes_candidate);
                             if ($wp_includes_real !== false && is_dir($wp_includes_real)) {
                                 $wp_includes_path = $wp_includes_real;
@@ -2096,13 +2078,13 @@ function endpoint_preflight(array $config): array
                         // find the directory at the resolved location where
                         // files are actually downloaded.
                         $abspath_raw = defined("ABSPATH")
-                            ? trim_right_slash(ABSPATH, native_path_format())
+                            ? Utils::trim_right_slash(ABSPATH, Utils::native_path_format())
                             : null;
                         $abspath_resolved = null;
                         if ($abspath_raw !== null) {
                             $abspath_real = realpath($abspath_raw);
                             $abspath_resolved = $abspath_real !== false
-                                ? trim_right_slash($abspath_real, native_path_format())
+                                ? Utils::trim_right_slash($abspath_real, Utils::native_path_format())
                                 : $abspath_raw;
                         }
 
@@ -2395,21 +2377,21 @@ function endpoint_preflight(array $config): array
     // Scan each directory to list installed plugins, mu-plugins, and themes.
     $wp_runtime_paths = null;
     if ($db["wp"]["wp_load_loaded"]) {
-        $runtime_root = defined("ABSPATH") ? trim_right_slash(ABSPATH, native_path_format()) : null;
+        $runtime_root = defined("ABSPATH") ? Utils::trim_right_slash(ABSPATH, Utils::native_path_format()) : null;
         $content_dir = defined("WP_CONTENT_DIR")
-            ? trim_right_slash(WP_CONTENT_DIR, native_path_format())
+            ? Utils::trim_right_slash(WP_CONTENT_DIR, Utils::native_path_format())
             : null;
         $plugins_dir = defined("WP_PLUGIN_DIR")
-            ? trim_right_slash(WP_PLUGIN_DIR, native_path_format())
+            ? Utils::trim_right_slash(WP_PLUGIN_DIR, Utils::native_path_format())
             : null;
         $mu_plugins_dir = defined("WPMU_PLUGIN_DIR")
-            ? trim_right_slash(WPMU_PLUGIN_DIR, native_path_format())
+            ? Utils::trim_right_slash(WPMU_PLUGIN_DIR, Utils::native_path_format())
             : null;
         $themes_dir = null;
         if (function_exists("get_theme_root")) {
             $themes_dir = get_theme_root();
             if (is_string($themes_dir)) {
-                $themes_dir = trim_right_slash($themes_dir, native_path_format());
+                $themes_dir = Utils::trim_right_slash($themes_dir, Utils::native_path_format());
             } else {
                 $themes_dir = null;
             }
@@ -2417,13 +2399,13 @@ function endpoint_preflight(array $config): array
 
         if ($content_dir !== null) {
             if ($plugins_dir === null) {
-                $plugins_dir = wp_join_unix_paths($content_dir, "plugins");
+                $plugins_dir = Utils::wp_join_unix_paths($content_dir, "plugins");
             }
             if ($mu_plugins_dir === null) {
-                $mu_plugins_dir = wp_join_unix_paths($content_dir, "mu-plugins");
+                $mu_plugins_dir = Utils::wp_join_unix_paths($content_dir, "mu-plugins");
             }
             if ($themes_dir === null) {
-                $themes_dir = wp_join_unix_paths($content_dir, "themes");
+                $themes_dir = Utils::wp_join_unix_paths($content_dir, "themes");
             }
         }
 
@@ -2455,7 +2437,7 @@ function endpoint_preflight(array $config): array
                 if ($entry === "." || $entry === "..") {
                     continue;
                 }
-                $path = wp_join_unix_paths($plugins_dir, $entry);
+                $path = Utils::wp_join_unix_paths($plugins_dir, $entry);
                 $root_entry["plugins"][] = [
                     "name" => $entry,
                     "type" => is_dir($path) ? "dir" : "file",
@@ -2476,7 +2458,7 @@ function endpoint_preflight(array $config): array
                 if ($entry === "." || $entry === "..") {
                     continue;
                 }
-                $path = wp_join_unix_paths($mu_plugins_dir, $entry);
+                $path = Utils::wp_join_unix_paths($mu_plugins_dir, $entry);
                 $root_entry["mu_plugins"][] = [
                     "name" => $entry,
                     "type" => is_dir($path) ? "dir" : "file",
@@ -2497,7 +2479,7 @@ function endpoint_preflight(array $config): array
                 if ($entry === "." || $entry === "..") {
                     continue;
                 }
-                $path = wp_join_unix_paths($themes_dir, $entry);
+                $path = Utils::wp_join_unix_paths($themes_dir, $entry);
                 if (is_dir($path)) {
                     $root_entry["themes"][] = $entry;
                 }
@@ -2548,7 +2530,7 @@ function endpoint_preflight(array $config): array
         "error" => $preflight_error,
         "timestamp" => time(),
         "protocol_version" => EXPORT_PROTOCOL_VERSION,
-        "path_format" => native_path_format(),
+        "path_format" => Utils::native_path_format(),
         "capabilities" => [
             "base64_path_parameters" => true,
         ],
@@ -2793,7 +2775,7 @@ function stream_file_producer(
     $stream_failure = null;
     try {
         $initial_progress = $producer->get_progress();
-        $initial_progress_json = json_encode_or_throw($initial_progress);
+        $initial_progress_json = Utils::json_encode_or_throw($initial_progress);
         $initial_cursor = $producer->get_reentrancy_cursor();
         $last_cursor = $initial_cursor;
         $gz->write(
@@ -2826,7 +2808,7 @@ function stream_file_producer(
                 $metadata = [
                     "filesystem_root" => base64_encode($filesystem_root ?? ""),
                 ];
-                $metadata_json = json_encode_or_throw($metadata);
+                $metadata_json = Utils::json_encode_or_throw($metadata);
 
                 $gz->write(
                     "--{$boundary}\r\n" .
@@ -2845,7 +2827,7 @@ function stream_file_producer(
             if ($chunk === null) {
                 $now = microtime(true);
                 if ($iterations === 1 || $now - $last_progress_output >= 3.0) {
-                    $progress_json = json_encode_or_throw($progress);
+                    $progress_json = Utils::json_encode_or_throw($progress);
                     $cursor = $producer->get_reentrancy_cursor();
                     $last_cursor = $cursor;
 
@@ -2932,7 +2914,7 @@ function stream_file_producer(
                 if (isset($chunk["actual_ctime"])) {
                     $payload["actual_ctime"] = $chunk["actual_ctime"];
                 }
-                $json = json_encode_or_throw($payload);
+                $json = Utils::json_encode_or_throw($payload);
                 $gz->write(
                     "--{$boundary}\r\n" .
                     "Content-Type: application/json\r\n" .
@@ -3012,7 +2994,7 @@ function stream_file_producer(
         //        chunk as data. We should try and backfill the output up to the
         //        previous content-length value if possible.
         if ($abort_payload !== null) {
-            $json = json_encode_or_throw($abort_payload);
+            $json = Utils::json_encode_or_throw($abort_payload);
             $gz->write(
                 "--{$boundary}\r\n" .
                 "Content-Type: application/json\r\n" .
@@ -3187,7 +3169,7 @@ function endpoint_file_index(
             "filesystem_root" => base64_encode($filesystem_root),
             "list_dir" => base64_encode($list_directory),
         ];
-        $metadata_json = json_encode_or_throw($metadata);
+        $metadata_json = Utils::json_encode_or_throw($metadata);
         $gz->write(
             "--{$boundary}\r\n" .
             "Content-Type: application/json\r\n" .
@@ -3286,7 +3268,7 @@ function endpoint_file_index(
             $status = "partial";
         }
 
-        $cursor_json = json_encode_or_throw(
+        $cursor_json = Utils::json_encode_or_throw(
             $file_index->get_cursor(),
             JSON_UNESCAPED_SLASHES
         );
@@ -3359,12 +3341,12 @@ function emit_file_index_batch(
         _e2e_call_hook('test_hook_before_index_batch', $hook_args);
     }
 
-    $cursor_json = json_encode_or_throw(
+    $cursor_json = Utils::json_encode_or_throw(
         $file_index->get_cursor(),
         JSON_UNESCAPED_SLASHES
     );
     $cursor_base64 = base64_encode($cursor_json);
-    $json = json_encode_or_throw(
+    $json = Utils::json_encode_or_throw(
         encode_index_batch($batch_items),
         JSON_UNESCAPED_SLASHES
     );
@@ -3411,8 +3393,8 @@ function emit_file_index_error(
     if (!$path_is_base64) {
         $error["path"] = base64_encode($error["path"]);
     }
-    $json = json_encode_or_throw($error);
-    $cursor_json = json_encode_or_throw($cursor, JSON_UNESCAPED_SLASHES);
+    $json = Utils::json_encode_or_throw($error);
+    $cursor_json = Utils::json_encode_or_throw($cursor, JSON_UNESCAPED_SLASHES);
     $cursor_base64 = base64_encode($cursor_json);
     $gzip_stream->write(
         "--{$boundary}\r\n" .
