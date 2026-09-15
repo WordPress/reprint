@@ -61,7 +61,7 @@ class AcceptEncodingTest extends TestCase
     public function testAcceptEncodingExcludesBrotli(): void
     {
         $client = new \ImportClient(
-            'http://fake.url',
+            'https://fake.url',
             $this->tempDir . '/state',
             $this->tempDir . '/fs-root'
         );

@@ -56,7 +56,7 @@ class PullSymlinkTest extends TestCase
 
     public function testSymlinkIsCreated()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -78,7 +78,7 @@ class PullSymlinkTest extends TestCase
 
     public function testSymlinkTargetBesideVisitedRootRemainsQueued()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
         $indexPath = $this->tempDir . '/remote-index.jsonl';
         file_put_contents($indexPath, implode("\n", [
             json_encode([
@@ -109,7 +109,7 @@ class PullSymlinkTest extends TestCase
      */
     public function testRelativeSymlinkEscapingRootRejected()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -135,7 +135,7 @@ class PullSymlinkTest extends TestCase
      */
     public function testChainedSymlinksEscapingRootRejected()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -177,7 +177,7 @@ class PullSymlinkTest extends TestCase
      */
     public function testAbsoluteSymlinkOutsideRootRejected()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -202,7 +202,7 @@ class PullSymlinkTest extends TestCase
      */
     public function testRelativeSymlinkWithinRootCreated()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -228,7 +228,7 @@ class PullSymlinkTest extends TestCase
      */
     public function testAbsoluteSymlinkWithinRootCreated()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
         $root = realpath($this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
@@ -251,7 +251,7 @@ class PullSymlinkTest extends TestCase
 
     public function testSymlinkWithMissingDataSkipped()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -289,7 +289,7 @@ class PullSymlinkTest extends TestCase
 
     public function testSymlinkReplacesExistingFile()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         // Create a regular file
         $filePath = $this->tempDir . '/fs-root/test/link';

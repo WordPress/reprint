@@ -243,7 +243,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--state-dir=DIR', $output);
         $this->assertStringContainsString('--fs-root=DIR', $output);
         $this->assertStringContainsString('--secret=TOKEN', $output);
-        $this->assertStringContainsString('--force-http', $output);
+        $this->assertStringContainsString('--allow-unsafe-http', $output);
         $this->assertStringContainsString('--progress=MODE', $output);
         $this->assertStringContainsString('auto, tty, jsonl, or compact', $output);
         $this->assertStringContainsString('--verbose, -v', $output);
@@ -279,7 +279,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('complete diff from the beginning', $output);
         $this->assertStringNotContainsString('--runtime', $output);
         $this->assertStringNotContainsString('--secret', $output);
-        $this->assertStringNotContainsString('--force-http', $output);
+        $this->assertStringContainsString('--allow-unsafe-http', $output);
         $this->assertStringNotContainsString('--filter', $output);
         $this->assertStringNotContainsString('--remap', $output);
         $this->assertStringNotContainsString('--only', $output);
@@ -303,6 +303,17 @@ class CliHelpTest extends TestCase
         foreach (ImportClient::COMMANDS as $command) {
             $this->assertStringContainsString(
                 '--progress=MODE',
+                $this->runHelp($command),
+                $command
+            );
+        }
+    }
+
+    public function testAllowUnsafeHttpAppearsInEveryCommandHelp(): void
+    {
+        foreach (ImportClient::COMMANDS as $command) {
+            $this->assertStringContainsString(
+                '--allow-unsafe-http',
                 $this->runHelp($command),
                 $command
             );

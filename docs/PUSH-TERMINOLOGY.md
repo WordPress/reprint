@@ -424,7 +424,7 @@ The low-level, files-only command is `files-push`. Its `remote Reprint API URL` 
 exporter API URL, and its `filesystem root` is the resolved absolute directory supplied by
 `--fs-root`. It requires saved preflight data and treats its remote document
 root as a path beneath that filesystem root. Local relative paths beneath the document root become document-root-relative paths; other local paths do not
-become push or delete work. It also requires `--secret=TOKEN`; `--force-http`
+become push or delete work. It also requires `--secret=TOKEN`; `--allow-unsafe-http`
 is the explicit plain-HTTP opt-in.
 
 `files-push` uses the shared progress output mode. It never stores that mode in

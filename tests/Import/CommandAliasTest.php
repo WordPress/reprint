@@ -22,7 +22,7 @@ class CommandAliasTest extends TestCase
         $this->tempDir = sys_get_temp_dir() . '/import-alias-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
         $this->pullStateDirectory =
-            $this->stateDir . '/remotes/' . md5('http://fake.invalid') . '/pull';
+            $this->stateDir . '/remotes/' . md5('https://fake.invalid') . '/pull';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
         mkdir($this->pullStateDirectory, 0755, true);
@@ -65,7 +65,7 @@ class CommandAliasTest extends TestCase
      */
     public function testCommandAliasIsAccepted(string $alias, string $canonical_name): void
     {
-        $client = new \ImportClient('http://fake.invalid', $this->stateDir, $this->filesystem_root);
+        $client = new \ImportClient('https://fake.invalid', $this->stateDir, $this->filesystem_root);
 
         // Write a preflight so commands that require it don't bail early.
         file_put_contents(
@@ -118,7 +118,7 @@ class CommandAliasTest extends TestCase
             ]),
         );
 
-        $client = new \ImportClient('http://fake.invalid', $this->stateDir, $this->filesystem_root);
+        $client = new \ImportClient('https://fake.invalid', $this->stateDir, $this->filesystem_root);
         $reflection = new \ReflectionClass($client);
         $loadState = $reflection->getMethod('load_state');
         $loadState->setAccessible(true);

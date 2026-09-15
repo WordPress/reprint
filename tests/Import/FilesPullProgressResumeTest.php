@@ -89,7 +89,7 @@ class FilesPullProgressResumeTest extends TestCase {
             }
             $this->assertTrue($ready, (string) file_get_contents($root . '/server.log'));
             $url = 'http://' . $address . '/?chunk_size=16384';
-            $client = new StopDuringFileProgressClient($url, $root . '/state', $root . '/local');
+            $client = new StopDuringFileProgressClient($url, $root . '/state', $root . '/local', ['allow_http' => true]);
             $client->observation_file = $root . '/before-stop.json';
             \write_current_pull_state($client, [
                 'preflight' => ['data' => ['ok' => true, 'wp_detect' => ['roots' => [['path' => $source]]]], 'http_code' => 200],
@@ -128,7 +128,7 @@ class FilesPullProgressResumeTest extends TestCase {
             $this->assertTrue(pcntl_wifsignaled($child_status));
             $this->assertSame(SIGKILL, pcntl_wtermsig($child_status));
 
-            $resumed = new \ImportClient($url, $root . '/state', $root . '/local');
+            $resumed = new \ImportClient($url, $root . '/state', $root . '/local', ['allow_http' => true]);
             $reflection = new \ReflectionClass($resumed);
             $reflection->getProperty('state')->setValue($resumed, $reflection->getMethod('load_state')->invoke($resumed));
             $this->assertSame(0, $resumed->get_state()->fetch->offset, 'The first batch is still active.');

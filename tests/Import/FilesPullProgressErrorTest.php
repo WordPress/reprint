@@ -74,7 +74,7 @@ class FilesPullProgressErrorTest extends TestCase {
             }
             $this->assertTrue($ready, (string) file_get_contents($root . '/server.log'));
             $url = 'http://' . $address . '/?chunk_size=16384';
-            $client = new FileErrorProgressClient($url, $root . '/state', $root . '/local');
+            $client = new FileErrorProgressClient($url, $root . '/state', $root . '/local', ['allow_http' => true]);
             \write_current_pull_state($client, [
                 'preflight' => ['data' => ['ok' => true, 'wp_detect' => ['roots' => [['path' => $source]]]], 'http_code' => 200],
                 'active_resumable_command' => ['command_name' => 'files-pull', 'completion_state' => 'in_progress', 'current_stage' => 'fetch'],
@@ -123,7 +123,7 @@ class FilesPullProgressErrorTest extends TestCase {
             $reporter = $reflection->getProperty('progress_reporter')->getValue($client);
             $before_resume = $reporter->get_file_details();
             $this->assertSame($file_size, $before_resume['bytes']['done']);
-            $resumed = new \ImportClient($url, $root . '/state', $root . '/local');
+            $resumed = new \ImportClient($url, $root . '/state', $root . '/local', ['allow_http' => true]);
             $reflection->getProperty('state')->setValue($resumed, $reflection->getMethod('load_state')->invoke($resumed));
             $resumed_reporter = $reflection->getProperty('progress_reporter')->getValue($resumed);
             $resumed_reporter->load_file_list($list_file, $resumed->get_state()->fetch);

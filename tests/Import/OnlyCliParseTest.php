@@ -68,7 +68,7 @@ class OnlyCliParseTest extends TestCase
         foreach ($args as $a) {
             $cmd .= ' ' . escapeshellarg($a);
         }
-        return shell_exec($cmd . ' 2>&1') ?? '';
+        return shell_exec($cmd . ' --allow-unsafe-http 2>&1') ?? '';
     }
 
 
@@ -184,7 +184,8 @@ PHP, var_export($requestsLog, true)));
             new \ImportClient(
                 $remoteReprintApiUrl,
                 $this->tempDir . '/state',
-                $this->tempDir . '/fs'
+                $this->tempDir . '/fs',
+                ['allow_http' => true]
             ),
             array(
                 'preflight' => array(

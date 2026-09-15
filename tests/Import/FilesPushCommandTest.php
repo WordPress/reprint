@@ -50,7 +50,7 @@ final class FilesPushCommandTest extends TestCase
             $remoteReprintApiUrl,
             $this->stateDirectory,
             $this->localTree,
-            ['secret' => 'token', 'force_http' => false]
+            ['secret' => 'token', 'allow_http' => false]
         );
         $trimmedRemoteReprintApiUrl = rtrim($remoteReprintApiUrl, '?&');
         $expectedPushStateDirectory =
@@ -67,7 +67,7 @@ final class FilesPushCommandTest extends TestCase
             'https://example.test/?reprint-api=1&directory=other',
             $this->stateDirectory,
             $this->localTree,
-            ['secret' => 'token', 'force_http' => false]
+            ['secret' => 'token', 'allow_http' => false]
         );
         $otherFilesystemRoot = $this->root . '/other-filesystem-root';
         $otherStateDirectory = $this->root . '/other-state';
@@ -77,7 +77,7 @@ final class FilesPushCommandTest extends TestCase
             $remoteReprintApiUrl,
             $otherStateDirectory,
             $otherFilesystemRoot,
-            ['secret' => 'token', 'force_http' => false]
+            ['secret' => 'token', 'allow_http' => false]
         );
 
         $this->assertNotSame(
@@ -112,13 +112,13 @@ final class FilesPushCommandTest extends TestCase
 
         $olderCommand = $this->runCli([
             'files-pull',
-            'https://example.test/?reprint-api=1',
+            'http://example.test/?reprint-api=1',
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->localTree,
             '--force-http',
         ]);
         $this->assertSame(1, $olderCommand['exit'], $olderCommand['output']);
-        $this->assertStringContainsString('--force-http is accepted only by files-push.', $olderCommand['output']);
+        $this->assertStringContainsString('No preflight data found', $olderCommand['output']);
 
         $rewriteUrlWithForceHttpSource = $this->runCli([
             'db-apply',
@@ -156,7 +156,7 @@ final class FilesPushCommandTest extends TestCase
             'https://example.test/?reprint-api=1',
             $this->stateDirectory,
             $this->localTree,
-            'files-push'
+            ['signal_handling_command' => 'files-push']
         );
         $processLock = new \ReprintProcessLock($this->stateDirectory);
         try {
@@ -243,8 +243,8 @@ final class FilesPushCommandTest extends TestCase
             ['--secret=token']
         );
         $this->assertSame(1, $plainHttp['exit']);
-        $this->assertStringContainsString('must use HTTPS', $plainHttp['output']);
-        $this->assertStringContainsString('--force-http', $plainHttp['output']);
+        $this->assertStringContainsString('HTTP is insecure', $plainHttp['output']);
+        $this->assertStringContainsString('--allow-unsafe-http', $plainHttp['output']);
 
         $missingTree = $this->root . '/missing-tree';
         $missingTreeResult = $this->runCli([
@@ -353,7 +353,7 @@ final class FilesPushCommandTest extends TestCase
 
         $result = $this->runFilesPush(
             $remoteReprintApiUrl,
-            ['--secret=token', '--force-http', '--progress=jsonl']
+            ['--secret=token', '--allow-unsafe-http', '--progress=jsonl']
         );
         pcntl_waitpid($child, $status);
         fclose($listener);
@@ -408,7 +408,7 @@ final class FilesPushCommandTest extends TestCase
             $remoteReprintApiUrl,
             $this->stateDirectory,
             $this->localTree,
-            ['secret' => 'token', 'force_http' => false]
+            ['secret' => 'token', 'allow_http' => false]
         );
         mkdir($context['push_state_directory'], 0700, true);
         file_put_contents(
@@ -488,7 +488,7 @@ final class FilesPushCommandTest extends TestCase
             'https://example.test/?reprint-api=1',
             $this->stateDirectory,
             $this->localTree,
-            'files-diff'
+            ['signal_handling_command' => 'files-diff']
         );
         $progressProperty = new \ReflectionProperty(ImportClient::class, 'progress');
         $progressProperty->setValue($client, new \TerminalProgress(true, $progressStream));
@@ -560,7 +560,7 @@ final class FilesPushCommandTest extends TestCase
             'https://example.test/?reprint-api=1',
             $this->stateDirectory,
             $this->localTree,
-            'files-diff'
+            ['signal_handling_command' => 'files-diff']
         );
         $isTty = new \ReflectionProperty(ImportClient::class, 'is_tty');
         $progressOutputMode = new \ReflectionProperty(

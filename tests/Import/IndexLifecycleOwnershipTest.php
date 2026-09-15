@@ -73,7 +73,7 @@ final class IndexLifecycleOwnershipTest extends TestCase
             'files-diff' => ['files-diff', []],
             'files-push' => [
                 'files-push',
-                ['--secret=secret', '--force-http'],
+                ['--secret=secret', '--allow-unsafe-http'],
             ],
         ];
     }

@@ -86,7 +86,8 @@ class NewSiteUrlTest extends TestCase
         $client = new \ImportClient(
             'http://old-site.local/export?key=abc',
             $this->tempDir,
-            $this->tempDir . '/fs-root'
+            $this->tempDir . '/fs-root',
+            ['allow_http' => true]
         );
 
         $options = ['new_site_url' => 'https://new-site.example.com'];

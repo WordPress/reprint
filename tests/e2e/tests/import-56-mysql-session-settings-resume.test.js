@@ -73,6 +73,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             clientPath,
             'db-pull',
             importUrl(),
+            '--allow-unsafe-http',
             `--state-dir=${tempDir}`,
             `--fs-root=${fsRootDir(tempDir)}`,
             `--secret=${getSiteSecret(site)}`,

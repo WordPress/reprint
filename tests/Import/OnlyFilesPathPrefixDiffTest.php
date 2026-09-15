@@ -25,7 +25,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/only-diff-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $remoteReprintApiUrl = 'http://fake.url';
+        $remoteReprintApiUrl = 'https://fake.url';
         $this->pullStateDirectory =
             $this->stateDir
             . '/remotes/'
@@ -123,11 +123,11 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             "fs_root_nonempty_behavior" => "preserve-local",
         ];
         \write_current_pull_state(
-            new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root),
+            new \ImportClient('https://fake.url', $this->stateDir, $this->filesystem_root),
             $state
         );
 
-        $client = new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root);
+        $client = new \ImportClient('https://fake.url', $this->stateDir, $this->filesystem_root);
         $r = new \ReflectionClass($client);
         $r->getProperty('state')->setValue($client, $r->getMethod('load_state')->invoke($client));
         $r->getProperty('is_tty')->setValue($client, false);
