@@ -79,7 +79,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
     private function makeClient(): \ImportClient
     {
-        return new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root);
+        return new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root, ['allow_http' => true]);
     }
 
     private function readState(): array
@@ -126,6 +126,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             'http://fake.url',
             $this->stateDir,
             $this->filesystem_root,
+            ['allow_http' => true],
         );
         $reflection = new \ReflectionClass(\ImportClient::class);
 
@@ -1070,6 +1071,7 @@ PHP);
             $url,
             $this->stateDir,
             $this->filesystem_root,
+            ['allow_http' => true],
         );
         \write_current_pull_state($client, [
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],

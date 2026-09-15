@@ -42,7 +42,7 @@ from. The WordPress plugin ships the full package.
 
 ## Transport and authentication
 
-HTTPS is required. `--force-http` opts out explicitly, and its help text says
+HTTPS is required. `--allow-unsafe-http` opts out explicitly, and its help text says
 what it gives up: over plain HTTP an active attacker can read and modify
 transferred content; the flag only keeps the shared secret off the wire and
 limits replay.
@@ -474,7 +474,7 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 the resolved filesystem root named by `--fs-root`. It removes that local prefix when producing document-root-relative paths and excludes local paths
 outside the document root from push and delete work. It requires `--state-dir`,
 `--fs-root`, `--secret`, and saved preflight data; HTTPS is required unless the
-operator passes `--force-http`. It reads but never writes
+operator passes `--allow-unsafe-http`. It reads but never writes
 `<remote-state-directory>/pull/state.json`. It does not run preflight itself,
 show a plan, ask for confirmation, transfer a database, retry a failed request,
 or start a replacement sender after a `restart` outcome.
@@ -703,7 +703,7 @@ Files first, database second, each PR small and stacked in this order:
    path lists for the sender.
 6. **Push stream endpoint** — the store's HTTP surface plus a sender that
    sends one resumable multipart part per step; deletion work received;
-   `--force-http` with honest help text (the first
+   `--allow-unsafe-http` with honest help text (the first
    push networking this flag can gate). Decisions this slice locked in:
    sending streams through libcurl's pause mechanism, which PHP's curl
    extension supports from 8.1 — so `reprint push` requires PHP 8.1+ (pull

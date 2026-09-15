@@ -248,6 +248,7 @@ export function runImporter(url, outputDir, command, options = {}) {
             CLIENT_PATH,
             cmd,
             url,
+            '--allow-unsafe-http',
             `--state-dir=${outputDir}`,
             `--fs-root=${fsRootDir(outputDir)}`,
         ];

@@ -63,7 +63,7 @@ class RuntimeFilesTest extends TestCase
 
     private function makeClient(): \ImportClient
     {
-        return new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root);
+        return new \ImportClient('https://fake.url', $this->stateDir, $this->filesystem_root);
     }
 
     private function writeState(array $state): void

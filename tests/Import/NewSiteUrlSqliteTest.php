@@ -120,7 +120,8 @@ class NewSiteUrlSqliteTest extends TestCase
             new \ImportClient(
                 $remoteReprintApiUrl,
                 $this->tempDir,
-                $this->tempDir . '/fs-root'
+                $this->tempDir . '/fs-root',
+                ['allow_http' => true]
             ),
             $extra
         );
@@ -309,6 +310,7 @@ class NewSiteUrlSqliteTest extends TestCase
             $exportUrl,
             $this->tempDir,
             $this->tempDir . '/fs-root',
+            ['allow_http' => true],
         );
         $client->run([
             'command' => 'db-apply',

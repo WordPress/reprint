@@ -204,8 +204,16 @@ describe.each([
             join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
             'utf-8',
         ));
+        const runtimePaths = Object.fromEntries(
+            ['cwd', 'document_root', 'script_filename'].map(key => {
+                const value = state.preflight?.data?.runtime?.[key];
+                return [key, typeof value === 'string' && value.startsWith('base64:')
+                    ? Buffer.from(value.slice(7), 'base64').toString('utf-8')
+                    : value ?? null];
+            }),
+        );
         assert.equal(state.webhost, host,
-            `Expected webhost '${host}', got '${state.webhost}'`);
+            `Expected webhost '${host}', got '${state.webhost}'\nPreflight runtime paths: ${JSON.stringify(runtimePaths)}`);
     });
 
     it('files-pull applies the host-plugin flag', () => {
@@ -331,6 +339,7 @@ describe.each([
                 CLIENT_PATH,
                 'apply-runtime',
                 importUrl(),
+                '--allow-unsafe-http',
                 `--state-dir=${tempDir}`,
                 `--flat-document-root=${flatDir}`,
                 `--runtime=php-builtin`,

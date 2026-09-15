@@ -107,6 +107,7 @@ describe('Import: Playground CLI runtime', () => {
             CLIENT_PATH,
             'apply-runtime',
             importUrl(),
+            '--allow-unsafe-http',
             `--state-dir=${tempDir}`,
             `--fs-root=${fsRootDir(tempDir)}`,
             `--runtime=playground-cli`,

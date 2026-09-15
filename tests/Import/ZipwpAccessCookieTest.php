@@ -179,7 +179,7 @@ final class ZipwpAccessCookieTest extends TestCase {
 
     private function create_client(string $remote_reprint_api_url, string $secret = 'zipwp-test-secret'): \ImportClient
     {
-        $client = new \ImportClient($remote_reprint_api_url, $this->root . '/state', $this->root . '/local');
+        $client = new \ImportClient($remote_reprint_api_url, $this->root . '/state', $this->root . '/local', ['allow_http' => true]);
         ( new \ReflectionProperty($client, 'hmac_client') )->setValue($client, new \Site_Export_HMAC_Client($secret));
         return $client;
     }

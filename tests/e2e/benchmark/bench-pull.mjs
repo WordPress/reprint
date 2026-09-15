@@ -46,6 +46,15 @@ const PHP_BINARY = process.env.PHP_BINARY || 'php';
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 const PREFLIGHT_IMPORTER_PATH = process.env.BENCH_PREFLIGHT_IMPORTER_PATH || IMPORTER_PATH;
+const HTTP_ARGS_BY_IMPORTER = new Map(
+    [...new Set([IMPORTER_PATH, PREFLIGHT_IMPORTER_PATH])].map(importerPath => {
+        const help = execFileSync(PHP_BINARY, [importerPath, 'preflight', '--help'], {
+            encoding: 'utf-8',
+            timeout: 30_000,
+        });
+        return [importerPath, help.includes('--allow-unsafe-http') ? ['--allow-unsafe-http'] : []];
+    }),
+);
 const PLAYGROUND_PHP_BINARY = process.env.BENCH_PLAYGROUND_PHP_BINARY || join(PROJECT_ROOT, 'tests', 'e2e', 'ci', 'playground-php.sh');
 const PLAYGROUND_PHP_VERSION = process.env.PLAYGROUND_PHP_VERSION || '8.3';
 const REGISTRY = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'site-registry.json'), 'utf-8'));
@@ -144,6 +153,7 @@ function runStage(stage, stateDir, extraArgs = [], { phpBinary = PHP_BINARY, env
         importerPath,
         stage,
         url,
+        ...HTTP_ARGS_BY_IMPORTER.get(importerPath),
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
         `--secret=${getSiteSecret(SITE)}`,
@@ -456,6 +466,7 @@ register_shutdown_function(function () {
         IMPORTER_PATH,
         'files-pull',
         url,
+        ...HTTP_ARGS_BY_IMPORTER.get(IMPORTER_PATH),
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
         `--secret=${getSiteSecret(site)}`,
@@ -534,6 +545,7 @@ function runPreflightForSite(site, stateDir) {
         PREFLIGHT_IMPORTER_PATH,
         'preflight',
         url,
+        ...HTTP_ARGS_BY_IMPORTER.get(PREFLIGHT_IMPORTER_PATH),
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
         `--secret=${getSiteSecret(site)}`,
