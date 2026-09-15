@@ -331,6 +331,7 @@ describe.each([
                 CLIENT_PATH,
                 'apply-runtime',
                 importUrl(),
+                '--allow-unsafe-http',
                 `--state-dir=${tempDir}`,
                 `--flat-document-root=${flatDir}`,
                 `--runtime=php-builtin`,

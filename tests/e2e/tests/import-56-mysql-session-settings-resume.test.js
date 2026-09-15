@@ -98,6 +98,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             clientPath,
             'db-apply',
             importUrl(),
+            '--allow-unsafe-http',
             `--state-dir=${stateDir}`,
             `--fs-root=${fsRootDir(stateDir)}`,
             `--secret=${getSiteSecret(site)}`,
