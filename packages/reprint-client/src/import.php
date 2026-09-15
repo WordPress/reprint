@@ -12805,7 +12805,6 @@ class ImportClient
         try {
             $this->check_curl_error($ch);
         } catch (RuntimeException $e) {
-            @curl_close($ch);
             return [
                 "ok" => false,
                 "http_code" => 0,
@@ -12821,7 +12820,6 @@ class ImportClient
 
         $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
-        @curl_close($ch);
 
         if ($http_code !== 200) {
             $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url);
@@ -13199,27 +13197,23 @@ class ImportClient
         );
 
         try {
-            try {
-                $this->check_curl_error($ch);
-            } catch (RuntimeException $curl_error) {
-                $this->last_http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-                if ($endpoint !== null) {
-                    $this->handle_tuner_error($endpoint, [
-                        "http_code" => 0,
-                        "timeout" => $this->last_curl_timeout,
-                        "curl_errno" => $this->last_curl_errno,
-                    ]);
-                }
-                throw $curl_error;
+            $this->check_curl_error($ch);
+        } catch (RuntimeException $curl_error) {
+            $this->last_http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            if ($endpoint !== null) {
+                $this->handle_tuner_error($endpoint, [
+                    "http_code" => 0,
+                    "timeout" => $this->last_curl_timeout,
+                    "curl_errno" => $this->last_curl_errno,
+                ]);
             }
-
-            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
-            $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
-            $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
-        } finally {
-            @curl_close($ch);
+            throw $curl_error;
         }
+
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
+        $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
+        $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
 
         if (!isset($context->response_stats) || !is_array($context->response_stats)) {
             $context->response_stats = [];
