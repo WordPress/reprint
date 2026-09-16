@@ -219,6 +219,15 @@
     },
     "multisite-query-budget": {
       "port": 8148
+    },
+    "multisite-sqlite": {
+      "port": 8178
+    },
+    "multisite-sqlite-legacy": {
+      "port": 8179
+    },
+    "multisite-paths-mysql": {
+      "port": 8180
     }
   }
 }

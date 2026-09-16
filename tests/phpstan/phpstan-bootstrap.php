@@ -18,5 +18,11 @@ if (!function_exists('trailingslashit')) {
     }
 }
 
+if (!function_exists('wp_parse_url')) {
+    function wp_parse_url(string $url, int $component = -1) {
+        return parse_url($url, $component);
+    }
+}
+
 // Function declarations only; the WordPress integration is not executed here.
 require_once __DIR__ . '/../../reprint-server-wp/wordpress/multisite.php';

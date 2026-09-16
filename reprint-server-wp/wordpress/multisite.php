@@ -32,6 +32,7 @@ use WordPress\Reprint\Server\MultisiteDatabaseSelection;
  *     @type string $home_url Selected home URL.
  *     @type string $site_url Selected WordPress URL.
  *     @type string $content_url Shared content URL.
+ *     @type string $network_content_url Shared network content URL.
  * }
  */
 function get_multisite_export_context(): array {
@@ -88,6 +89,8 @@ function get_multisite_export_context(): array {
         }
     }
 
+    // Distinct hosts need no exclusions. Preflight separately collects paths
+    // for child sites below these bases; ordinary export requests do not.
     return [
         'site_id' => $site_id,
         'network_id' => $network_id,
@@ -100,5 +103,6 @@ function get_multisite_export_context(): array {
         'home_url' => get_option('home'),
         'site_url' => get_option('siteurl'),
         'content_url' => content_url(),
+        'network_content_url' => network_site_url('/wp-content'),
     ];
 }
