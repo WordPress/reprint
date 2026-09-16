@@ -113,6 +113,26 @@ $cases['file-case'] = @{
     content='namespace file'
     absent=@('D:/Reprint namespace cases/Mixed Case/HELLO.TXT')
 }
+$cases['file-case-not-followed'] = @{
+    source="$root\Mixed Case\HELLO.TXT"
+    destination=$destination
+    content='namespace file'
+    options=@('--no-follow-symlinks')
+    absent=@('D:/Reprint namespace cases/Mixed Case/HELLO.TXT')
+}
+$cases['file-case-share'] = @{
+    source='\\localhost\d$\Reprint namespace cases\Mixed Case\HELLO.TXT'
+    destination='UNC/LOCALHOST/D$/Reprint namespace cases/Mixed Case/hello.txt'
+    content='namespace file'
+    absent=@('UNC/LOCALHOST/D$/Reprint namespace cases/Mixed Case/HELLO.TXT')
+}
+$cases['combined-file-case'] = @{
+    source=@("$root\Mixed Case\hello.txt", "$root\Mixed Case\HELLO.TXT")
+    destination=$destination
+    content='namespace file'
+    absent=@('D:/Reprint namespace cases/Mixed Case/HELLO.TXT')
+    unique_basename='hello.txt'
+}
 [NamespaceFixtures]::Write("\\?\$root\Mixed Case\trailing", 'ordinary sibling!')
 $literalNames = @('NUL.txt', 'COM1.txt', 'COM¹.txt')
 # Same-size siblings expose metadata aliasing: size checks cannot detect it.

@@ -145,6 +145,9 @@ There are limits that a migration cannot hide:
   the source; Reprint reports the filesystem error rather than renaming them.
 * Windows normally resolves `HELLO.TXT` to `hello.txt`; Linux does not. Reprint preserves
   the actual filename case. Correct wrong-case references in site code or URLs.
+  Use the source spelling for `--exclude` and `--remap`; those rules compare
+  path text and do not correct filename case or resolve alternate names.
+  This limitation is tracked in [#816](https://github.com/WordPress/reprint/issues/816).
 * Physical devices and named pipes are not migration files and are rejected.
   A UNC path must name both a server and a share.
 * NTFS alternate data streams are not migrated. Only each file's main contents

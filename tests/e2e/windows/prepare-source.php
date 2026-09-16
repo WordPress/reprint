@@ -15,6 +15,12 @@ foreach (['C', 'D'] as $drive) {
     }
 }
 $path_cases = [
+    'wordpress-token' => [
+        'source' => ':wp-content:/uploads/migration/hello.txt',
+        'options' => ['--remap', ':wp-content:/uploads', ':fs-root:/media'],
+        'destination' => 'media/migration/hello.txt',
+        'content' => "Hello from Windows!\r\n",
+    ],
     'drive' => ['source' => 'C:\\Reprint path cases\\Mixed Case [v1] #100%', 'destination' => 'C:/Reprint path cases/Mixed Case [v1] #100%/hello.txt', 'content' => 'source drive C'],
     'duplicate-separators' => ['source' => 'D:\\\\Reprint path cases\\\\Mixed Case [v1] #100%', 'destination' => 'D:/Reprint path cases/Mixed Case [v1] #100%/hello.txt', 'content' => 'source drive D'],
     'forward' => ['source' => 'D:/Reprint path cases/Mixed Case [v1] #100%', 'destination' => 'D:/Reprint path cases/Mixed Case [v1] #100%/hello.txt', 'content' => 'source drive D'],
