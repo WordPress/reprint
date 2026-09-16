@@ -20,6 +20,7 @@ if ($reprint_authentication_error !== null) {
 }
 
 file_put_contents('parameters.json', json_encode($_POST));
+file_put_contents('request-target.txt', $_SERVER['REQUEST_URI']);
 file_put_contents('uploaded-file-list.json', file_get_contents($_FILES['file_list']['tmp_name']));
 \WordPress\Reprint\Server\HTTPServer::serve([
     'default_directory' => getcwd() . '/remote',

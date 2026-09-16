@@ -26,7 +26,7 @@ final class MultipartRequestParametersTest extends TestCase {
         $this->assertIsResource($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
         fclose($listener);
-        $this->url = 'http://' . $address . '/?reprint-api';
+        $this->url = 'http://' . $address . '/nested%2Fapi?%72eprint-api=1&site-export-api%5Bflag%5D=1&';
         $this->server_process = proc_open(
             [PHP_BINARY, '-S', $address, __DIR__ . '/fixtures/multipart-parameters-router.php'],
             [0 => ['pipe', 'r'], 1 => ['file', $this->root . '/server.log', 'a'], 2 => ['file', $this->root . '/server.log', 'a']],
@@ -128,6 +128,10 @@ final class MultipartRequestParametersTest extends TestCase {
             'zero' => '0',
         ];
         $this->assertSame($expected_parameters, json_decode(file_get_contents($this->root . '/parameters.json'), true));
+        $this->assertSame(
+            '/nested%2Fapi?%72eprint-api=1&site-export-api%5Bflag%5D=1&',
+            file_get_contents($this->root . '/request-target.txt')
+        );
         $this->assertSame($file_list_json, file_get_contents($this->root . '/uploaded-file-list.json'));
         $this->assertTrue($context->saw_completion);
         $this->assertSame(implode('', $contents), $received);

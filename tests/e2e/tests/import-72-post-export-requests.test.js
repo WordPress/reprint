@@ -63,7 +63,6 @@ describe('Export: POST body parameters with a query routing marker', () => {
     it('completes a file and database pull through the strict query firewall', async () => {
         writeFileSync(join(directory, 'requests.jsonl'), '');
         const output = join(directory, 'pull');
-        const importUrl = `${firewallUrl}&directory=${encodeURIComponent(getSiteDir(site))}`;
         const connection = await createMysqlConnection();
         await connection.query(`DROP DATABASE IF EXISTS ${importDb}`);
         await connection.query(`CREATE DATABASE ${importDb}`);
@@ -80,7 +79,7 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
     }
 }
 `);
-        const result = runImporter(importUrl, output, 'pull', {
+        const result = runImporter(firewallUrl, output, 'pull', {
             secret: getSiteSecret(site),
             autoResume: false,
             timeout: 120000,
@@ -95,7 +94,7 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
         });
         assert.equal(result.exitCode, 0, result.stderr + '\n' + result.stdout);
         assertPullPipelineComplete(JSON.parse(readFileSync(
-            join(pullStateDirectory(output, importUrl), 'state.json'), 'utf8',
+            join(pullStateDirectory(output, firewallUrl), 'state.json'), 'utf8',
         )));
         assert.equal(readFileSync(join(fsRootDir(output), getSiteDir(site), 'test-data', 'hello.txt'), 'utf8'), 'Hello World\n');
         const imported = await createMysqlConnection(importDb);
