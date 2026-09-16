@@ -8,11 +8,12 @@ $repository = dirname(__DIR__, 3);
 $directory = sys_get_temp_dir() . '/reprint-path-resolution-' . bin2hex(random_bytes(6));
 mkdir($directory);
 $router = $directory . '/router.php';
+file_put_contents($directory . '/source-directory.txt', 'D:/Reprint namespace cases');
 // The source process supplies this directory. The requesting process stays in
 // the checkout, so using the client's current directory would fail these cases.
 file_put_contents($router, '<?php require ' . var_export($repository . '/packages/reprint-server/src/class-http-server.php', true)
     . '; file_put_contents(__DIR__ . "/requests.jsonl", json_encode($_POST) . chr(10), FILE_APPEND)'
-    . '; chdir("D:/Reprint namespace cases"); \\WordPress\\Reprint\\Server\\HTTPServer::serve();');
+    . '; chdir(file_get_contents(__DIR__ . "/source-directory.txt")); \\WordPress\\Reprint\\Server\\HTTPServer::serve();');
 $listener = stream_socket_server('tcp://127.0.0.1:0');
 $address = stream_socket_get_name($listener, false);
 fclose($listener);
@@ -197,6 +198,87 @@ try {
             }
         }
     }
+    // Every case below starts another PHP process. Only state.json can carry
+    // resolutions from one process to the next; no in-memory cache can pass.
+    $cache_options = $client_cases['remaps and selections']['options'];
+    $more_options = $cache_options;
+    $more_options['include'][] = 'Mixed Case/missing/Added';
+    $invalid_options = $more_options;
+    $invalid_options['exclude'][] = 'C:Mixed Case';
+    $changed_target = $cache_options;
+    $changed_target['remap'][0][1] = ':fs-root:/different-target';
+    $changed_tokens = $preflight;
+    $changed_tokens['database']['wp']['paths_urls']['content_dir'] = 'D:/Reprint namespace cases/Other content';
+    $unix_preflight = ['path_format' => 'unix'];
+    $cache_cases = [
+        'first pull' => ['requests' => 1],
+        'another process' => ['requests' => 0],
+        'fresh preflight' => ['requests' => 0, 'timestamp' => 2],
+        'command reset' => ['requests' => 0, 'reset' => true],
+        'local target changed' => ['requests' => 0, 'options' => $changed_target],
+        'selection changed' => ['requests' => 1, 'options' => $more_options],
+        'changed selection reused' => ['requests' => 0, 'options' => $more_options],
+        'rejected replacement' => ['requests' => 1, 'options' => $invalid_options, 'error' => 'relative to another Windows drive'],
+        'previous batch after rejection' => ['requests' => 0, 'options' => $more_options],
+        'token value changed' => ['requests' => 1, 'options' => $more_options, 'preflight' => $changed_tokens],
+        'new token value reused' => ['requests' => 0, 'options' => $more_options, 'preflight' => $changed_tokens],
+        'Unix source ignores Windows results' => ['requests' => 0, 'options' => ['include' => 'D:Mixed Case'], 'preflight' => $unix_preflight, 'error' => 'must be an absolute path'],
+        'empty selection' => ['requests' => 0, 'options' => []],
+        'Windows results retained' => ['requests' => 0, 'options' => $more_options, 'preflight' => $changed_tokens],
+        'source working directory changed' => ['requests' => 0, 'options' => $more_options, 'preflight' => $changed_tokens, 'source_directory' => 'D:/Reprint link cases'],
+    ];
+    $state_file = $directory . '/cache-state/remotes/' . md5('http://' . $address . '/') . '/pull/state.json';
+    $previous_state = null;
+    foreach ($cache_cases as $name => $case) {
+        if (isset($case['source_directory'])) {
+            file_put_contents($directory . '/source-directory.txt', $case['source_directory']);
+        }
+        $options = $case['options'] ?? $cache_options;
+        $data = $case['preflight'] ?? $preflight;
+        $input = [
+            'url' => 'http://' . $address . '/',
+            'state_dir' => $directory . '/cache-state',
+            'files_dir' => $directory . '/cache-files',
+            'options' => $options,
+            'preflight' => $data,
+            'timestamp' => $case['timestamp'] ?? 1,
+            'reset' => $case['reset'] ?? false,
+        ];
+        file_put_contents($directory . '/client-input.json', json_encode($input, JSON_THROW_ON_ERROR));
+        file_put_contents($directory . '/requests.jsonl', '');
+        $worker = proc_open([PHP_BINARY, __DIR__ . '/path-cache-client.php', $directory . '/client-input.json'], [
+            0 => ['pipe', 'r'], 1 => ['file', $directory . '/client-result.json', 'w'], 2 => ['file', $directory . '/client-errors.log', 'w'],
+        ], $pipes);
+        fclose($pipes[0]);
+        if (proc_close($worker) !== 0) {
+            throw new RuntimeException($name . ': client failed: ' . file_get_contents($directory . '/client-errors.log'));
+        }
+        $result = json_decode(file_get_contents($directory . '/client-result.json'), true, 512, JSON_THROW_ON_ERROR);
+        $requests = file($directory . '/requests.jsonl', FILE_IGNORE_NEW_LINES);
+        if (count($requests) !== $case['requests']) {
+            throw new RuntimeException($name . ': expected ' . $case['requests'] . ' resolver requests after loading pull state; got ' . count($requests) . '.');
+        }
+        if (isset($case['error'])) {
+            if (strpos($result['error'] ?? '', $case['error']) === false || file_get_contents($state_file) !== $previous_state) {
+                throw new RuntimeException($name . ': the rejected batch must leave saved state unchanged.');
+            }
+        } else {
+            if ($result['error'] !== null) {
+                throw new RuntimeException($name . ': ' . $result['error']);
+            }
+            if ($options !== []) {
+                $content = $data['database']['wp']['paths_urls']['content_dir'];
+                $expected_include = $content === $drive_directory ? [$drive_directory] : [$drive_directory, $content . '/hello.txt'];
+                $target = str_replace('\\', '/', realpath($directory . '/cache-files')) . substr($options['remap'][0][1], strlen(':fs-root:'));
+                if ($result['include'] !== $expected_include || ($result['remap'][$drive_directory] ?? null) !== $target
+                    || $result['exclude'] !== [$content . '/missing/Child', $drive_directory . '/missing/Other']) {
+                    throw new RuntimeException($name . ': saved results changed the remap or selected paths: ' . json_encode($result));
+                }
+            }
+        }
+        $previous_state = file_get_contents($state_file);
+    }
+    echo 'PASS: ' . count($cache_cases) . " pull-state cache cases across separate client processes.\n";
     echo 'PASS: ' . count($cases) . ' Windows path cases, ' . count($batches) . ' endpoint batches, and ' . count($client_cases) . " client request-count cases.\n";
 } finally {
     proc_terminate($process);
