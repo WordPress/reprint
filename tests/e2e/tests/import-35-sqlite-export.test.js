@@ -315,6 +315,7 @@ describe.each([
         const origin = new URL(fixture.sites[7].url).origin;
         const expected = [];
         for (let index = 0; index < 2005; index++) expected.push(`/shop/child-${index}/`);
+        expected.push('/shop/final/');
         runWp(getSiteDir(site), ['eval', `
             global $wpdb;
             $domain = wp_parse_url(home_url(), PHP_URL_HOST) . ':' . wp_parse_url(home_url(), PHP_URL_PORT);
@@ -327,6 +328,13 @@ describe.each([
                     'archived' => $index === 0 ? 1 : 0,
                 ));
             }
+            // More than one whole scan window has no matching paths.
+            for ($index = 0; $index < 2005; ++$index) {
+                $wpdb->insert($wpdb->blogs, array('blog_id' => 20000 + $index,
+                    'site_id' => 1, 'domain' => 'other.example', 'path' => '/'));
+            }
+            $wpdb->insert($wpdb->blogs, array('blog_id' => 30000,
+                'site_id' => 1, 'domain' => $domain, 'path' => '/shop/final/'));
             foreach (array(
                 array($domain, '/shopper/child/'),
                 array('other.example', '/shop/child/'),
@@ -355,7 +363,7 @@ describe.each([
             $batch_sizes = array();
             // Observe actual wpdb results before the next query replaces them.
             add_filter('query', function ($query) use (&$batch_sizes, $wpdb) {
-                if (strpos($wpdb->last_query, 'SELECT blog_id, path FROM') === 0) {
+                if (strpos($wpdb->last_query, 'SELECT blog_id,') === 0) {
                     $batch_sizes[] = $wpdb->num_rows;
                 }
                 return $query;
@@ -364,7 +372,7 @@ describe.each([
             $batch_sizes[] = $wpdb->num_rows;
             echo json_encode($batch_sizes);
         `], fixture.sites[7].url));
-        assert.deepEqual(batches, [1000, 1000, 5], 'The adapter must never buffer the whole site list.');
+        assert.deepEqual(batches, [1000, 1000, 1000, 1000, 14], 'The adapter must never buffer the whole site list.');
     });
     it('keeps SQL wildcard characters literal and groups default-port spellings', () => {
         const paths = JSON.parse(runWp(getSiteDir(site), ['eval', `

@@ -2642,11 +2642,15 @@ function endpoint_preflight(array $config): array
  *
  * Selecting network.test/shop needs /shop/news/, but not /sibling/ or sites
  * on other domains. A root selection can need every path on that domain.
- * Read the indexed site directory once per preflight, not per SQL/file request.
+ * Build this list once per preflight, not per SQL/file request.
  * The wpdb adapter uses WordPress's active MySQL or SQLite connection. It
  * buffers query results, so read at most 1,000 rows per query. Continue after
  * the last blog_id; OFFSET would reread the earlier rows on every batch.
- * LIMIT bounds the returned rows, not the rows the database must scan.
+ * The first query filters by domain/path; domain-based networks usually return
+ * no rows. If it fills a batch, scan primary-key windows after that batch and
+ * mark non-matching paths NULL. Keeping those filters out of WHERE prevents
+ * both engines from sorting all remaining matches again for every batch.
+ * The first query can scan many rows; later queries scan at most 1,000.
  *
  * This list intentionally grows with matching sites. One million 20-byte paths
  * cost about 62 MiB as a PHP 8.4 list, before JSON encoding. No page list, URL
@@ -2697,25 +2701,35 @@ function reprint_get_multisite_nested_site_paths(array $source): array {
         }
         // No network ID filter: a site in another network can still have a
         // matching host/path. Archived sites must also keep their old links.
-        $query = $wpdb->prepare(
-            // phpcs:ignore WordPress.DB.PreparedSQL -- WordPress checks the table prefix; each path condition above is prepared, and domains use placeholders.
-            "SELECT blog_id, path FROM `{$source['base_prefix']}blogs` WHERE domain IN (" . implode(',', array_fill(0, count($selection['domains']), '%s')) . ") AND blog_id <> %d AND (" . implode(' OR ', $conditions) . ')',
+        $condition = $wpdb->prepare(
+            // phpcs:ignore WordPress.DB.PreparedSQL -- Each path condition above is prepared, and domains use placeholders.
+            "domain IN (" . implode(',', array_fill(0, count($selection['domains']), '%s')) . ") AND blog_id <> %d AND (" . implode(' OR ', $conditions) . ')',
             array_merge(array_keys($selection['domains']), [$source['site_id']])
         );
         $paths_by_origin[$origin] = [];
         $last_blog_id = 0;
         do {
+            if ($last_blog_id === 0) {
+                $query = "SELECT blog_id, path FROM `{$source['base_prefix']}blogs` WHERE {$condition}";
+            } else {
+                // Return even non-matches so the cursor crosses a window with
+                // no child sites. WHERE only bounds the primary-key scan.
+                $query = "SELECT blog_id, CASE WHEN {$condition} THEN path ELSE NULL END AS path FROM `{$source['base_prefix']}blogs`";
+            }
+            $query .= $last_blog_id === 0 ? ' AND' : ' WHERE';
             // wpdb removes its escaped-percent placeholders when it executes
             // this query, including LIKE '/shop/%'. Do not bypass its driver.
             $rows = $database->query($wpdb->prepare(
-                // phpcs:ignore WordPress.DB.PreparedSQL -- The filters above are prepared; the cursor is an integer placeholder.
-                $query . ' AND blog_id > %d ORDER BY blog_id LIMIT 1000',
+                // phpcs:ignore WordPress.DB.PreparedSQL -- The filters above are prepared; WordPress validates the prefix and the cursor is an integer placeholder.
+                $query . ' blog_id > %d ORDER BY blog_id LIMIT 1000',
                 $last_blog_id
             ));
             $row_count = 0;
             // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition -- Fetch at most one query batch.
             while ($row = $rows->fetch()) {
-                $paths_by_origin[$origin][] = $row['path'];
+                if ($row['path'] !== null) {
+                    $paths_by_origin[$origin][] = $row['path'];
+                }
                 $last_blog_id = (int) $row['blog_id'];
                 ++$row_count;
             }
