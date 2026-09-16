@@ -19,8 +19,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
-          extensions: mbstring, ffi
-          ini-values: ffi.enable=true
+          extensions: mbstring, :ffi
+          ini-values: ffi.enable=false
           coverage: none
       - name: Check native source reads
         shell: pwsh
@@ -28,6 +28,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           ./tests/e2e/windows/prepare-path-namespaces.ps1 "$env:GITHUB_WORKSPACE/namespace-cases.json"
+          php tests/e2e/windows/probe-php-paths.php "$env:GITHUB_WORKSPACE/namespace-cases.json"
           php tests/e2e/windows/verify-native-reader.php
           php -d ffi.enable=false tests/e2e/windows/verify-native-reader.php --without-ffi
   windows-to-linux:
@@ -46,8 +47,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
-          extensions: pdo_mysql, mysqli, curl, mbstring, zip, ffi
-          ini-values: ffi.enable=true
+          extensions: pdo_mysql, mysqli, curl, mbstring, zip, :ffi
+          ini-values: ffi.enable=false
           coverage: none
       - uses: Vampire/setup-wsl@v7
         with:
