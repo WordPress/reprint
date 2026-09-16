@@ -135,6 +135,11 @@ async function ensureSqliteSite(site, pluginVersion, multisite = false) {
                 convertToMultisite(siteDir, getSiteUrl(site));
             }
         },
+        afterPermissions: async (siteDir) => {
+            // HTTP runs as nginx; WP-CLI runs as the CI user. Both must write
+            // this fixture's SQLite database and create its journal files.
+            execSync(`sudo chmod -R a+rwX ${JSON.stringify(join(siteDir, 'wp-content', 'database'))}`);
+        },
     });
 }
 
