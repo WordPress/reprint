@@ -244,8 +244,8 @@ if (!function_exists(__NAMESPACE__ . '\\resolve_symlink_target_path')) {
  * A Windows source link may also start with //server/share. Normalize that
  * spelling with Windows rules before taking its parent directory. A single
  * leading target separator uses the source drive or share root. Drive-relative
- * CLI inputs such as D:photos need the source process's current directory and
- * must be resolved on the source instead of being passed as link paths here.
+ * CLI inputs such as D:photos need a current directory and are rejected.
+ * Select files with a full drive or share path, or a WordPress path token.
  *
  * @param string $symlink_path Absolute source link path.
  * @param string $target Target returned by the source's readlink().
@@ -718,8 +718,8 @@ if (!function_exists(__NAMESPACE__ . '\\normalize_path_separators')) {
  *
  * This does not make a relative path absolute. Link targets also need the
  * source link's directory; use resolve_symlink_target_path(). Windows CLI
- * inputs such as D:photos need the source process's current directory on D.
- * Namespace paths must be resolved by the source path-resolution endpoint.
+ * inputs such as D:photos need a current directory and are rejected.
+ * CLI selections also reject namespace prefixes; use a full drive or share path.
  * Dot segments remain intact so validation can reject them before removal.
  *
  * @param string $path Native or remote path, absolute or relative.
@@ -819,8 +819,8 @@ if (!function_exists(__NAMESPACE__ . '\\windows_share_root')) {
  * The caller must already know that the path uses Windows rules. Both
  * //server/share and \\server\share are accepted here. Do not use this parser
  * to identify a source OS: the first spelling is also an absolute Unix path.
- * Device namespaces and incomplete shares return null. Resolve namespace
- * inputs with the source path-resolution endpoint before using shared paths.
+ * Device namespaces and incomplete shares return null. CLI selections reject
+ * these forms; use a full drive path or a complete ordinary share path.
  *
  * @param string $path Native or remote filesystem path.
  * @return string|null Canonical `\\SERVER\SHARE` root, or null for other paths.

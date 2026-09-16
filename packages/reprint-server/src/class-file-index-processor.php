@@ -1013,6 +1013,14 @@ final class FileIndexProcessor {
             // add links from its own symlink target, so keep both entry sets.
             $entries = self::find_parent_symlinks(dirname($path_root));
         }
+        // A regular file uses the spelling already returned by realpath(), just
+        // like a traversed directory. Emitting both spellings would turn a
+        // Windows lookup of HELLO.TXT into two Linux files: HELLO.TXT and hello.txt.
+        // Parent links above keep their requested paths; the file appears once
+        // at the resolved path reached through those links.
+        if ($root["type"] === "file" && $root["resolved_path"] !== null) {
+            $path_root = $root["resolved_path"];
+        }
         $inspected_path = self::index_entries_for_path($path_root, $stat, $this->follow_symlinks);
         $resolved_target_was_indexed = $root["resolved_path"] !== null
             && $this->resolved_target_was_indexed($root);
@@ -1037,20 +1045,6 @@ final class FileIndexProcessor {
                 $target = self::index_entries_for_path($root["resolved_path"], $target_stat, false);
                 $entries = array_merge($entries, $target["entries"]);
             }
-        }
-        if (
-            $root["type"] === "file"
-            && $root["resolved_path"] !== null
-            && $root["resolved_path"] !== $root["requested_path"]
-            && !$resolved_target_was_indexed
-        ) {
-            // A regular root reached through no link normally has identical
-            // coordinates. Keep this branch for records supplied by callers
-            // which already normalized a resolved file root.
-            $entries = array_merge(
-                $entries,
-                self::index_entries_for_path($root["resolved_path"], $stat, false)["entries"]
-            );
         }
         $this->index_entries = $entries;
         $this->step_status = self::STATUS_INDEXED;

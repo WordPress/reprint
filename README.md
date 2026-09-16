@@ -81,6 +81,88 @@ php reprint.phar pull https://example.com --secret=TOKEN \
 
 **All options** — run `php reprint.phar pull --help` for the full list.
 
+### Windows source to Linux target
+
+A source site at `D:\Sites\example.test` can be pulled with the same command
+on Linux. Update both the source plugin and the client to include Windows path
+support. Drive-letter paths accept backslashes, forward slashes, mixed
+separators, and repeated separators. Network shares use `\\server\share\site`.
+
+The default layout under `--fs-root` keeps different drives and shares separate:
+
+| Source path | Path under `--fs-root` |
+| --- | --- |
+| `D:\Sites\example.test\index.php` | `D:/Sites/example.test/index.php` |
+| `c:/Sites\example.test/index.php` | `C:/Sites/example.test/index.php` |
+| `\\server\share\site\index.php` | `UNC/SERVER/SHARE/site/index.php` |
+
+Add `--flatten-to=/var/www/site` to place WordPress directly in that directory.
+Unix filename bytes, including literal backslashes, are unchanged. A Unix
+symlink target named `D:\photos` is a relative name, not a Windows drive path.
+Preflight reports `path_format: "unix"` or `path_format: "windows"`. The client
+saves that field and passes it to path conversion and validation. It never
+selects the format from a path prefix. Thus `//server/share/photos` is a Unix
+path in Unix mode and a network share in Windows mode. Servers without the
+field retain the earlier Unix-only contract; an invalid field is rejected.
+A relative link target also needs the source link's directory. With
+symlink following enabled, a copied `gallery -> D:\photos` link is rewritten
+when `--remap` moves that target. Selecting a link also retains intermediate
+links needed to reach its downloaded content.
+
+File selections use the same rules on Unix and Windows: supply a full absolute
+path or a WordPress token such as `:wp-content:/uploads`. Tokens expand from
+preflight data on the client; preparing selections makes no extra request.
+Relative selections such as `.\site`, `\site` and `D:site` are rejected, as are
+`.` and `..` components. Namespace prefixes such as `\\?\` and `\\.\` are also
+rejected as selection inputs. Use the ordinary drive-letter or UNC spelling
+for the same files. These restrictions apply to selections, not stored link
+targets, which are interpreted relative to the source link.
+
+All source reads use PHP's file functions. Reprint does not use FFI or run an
+external program to read Windows files. PHP's `open_basedir` restriction still
+applies. Long UNC paths use a PHP-supported namespace spelling at the file I/O
+call; that spelling does not enter the index or reach the Linux client. The
+Windows CI jobs run with the FFI extension absent.
+
+PHP cannot safely read every name that NTFS permits. For example, with two
+separate files named `report` and `report.`, PHP can return `report`'s metadata
+when asked for `report.`. Reprint rejects a file or directory component ending
+in a dot or space before calling PHP, including names found while walking a
+parent directory. Rename these entries on the source before migration. The
+pull fails again on resume; it does not skip the unreadable entry.
+
+Volume GUID and `GLOBALROOT` selections require a drive-letter or UNC spelling.
+Some Windows links can be followed by PHP but cannot be read by `readlink()`;
+these stop the pull rather than becoming empty links. Recreate such links with
+a backslash target. If PHP cannot resolve the link, use a full drive-letter
+target instead.
+
+There are limits that a migration cannot hide:
+
+* A Linux filesystem may reject a name that Windows accepts. The ext4 target in
+  CI allows 255 bytes per filename or directory component. For example, 126
+  copies of `é` followed by `.txt` occupy 256 UTF-8 bytes. Shorten such names on
+  the source; Reprint reports the filesystem error rather than renaming them.
+* Windows normally resolves `HELLO.TXT` to `hello.txt`; Linux does not. Reprint preserves
+  the actual filename case. Correct wrong-case references in site code or URLs.
+  Use the source spelling for `--exclude` and `--remap`; those rules compare
+  path text and do not correct filename case or resolve alternate names.
+  This limitation is tracked in [#816](https://github.com/WordPress/reprint/issues/816).
+* Physical devices and named pipes are not migration files and are rejected.
+  A UNC path must name both a server and a share.
+* NTFS alternate data streams are not migrated. Only each file's main contents
+  are copied; no stream sidecar files are created.
+
+These distinctions follow the [Windows path rules](https://learn.microsoft.com/en-us/dotnet/standard/io/file-path-formats)
+and [filesystem name limits](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation).
+The CI workflow runs the same full WordPress migration from a drive and a
+network share, with native Windows PHP/MySQL and a Linux client under WSL2.
+It checks hashes, empty directories, database table row counts, URL rewriting,
+and both raw and flattened runtimes. Separate path pulls cover punctuation,
+Unicode, long names, drive and share spellings, case-sensitive siblings, and
+explicit failures for relative selections, namespace inputs, unreadable names,
+and filesystem limits.
+
 ## Composer packages
 
 The server and client are published as separate Composer packages:
