@@ -2544,6 +2544,7 @@ function endpoint_preflight(array $config): array
         "path_format" => native_path_format(),
         "capabilities" => [
             "base64_path_parameters" => true,
+            "windows_path_resolution" => PHP_OS === 'WINNT' && empty($config['_multisite']),
         ],
         "wp_detect" => [
             "found" => !empty($wp_detect["roots"]),
@@ -3731,3 +3732,108 @@ function parse_http_config(): array
     $server = new HTTPServer();
     return $server->parse_http_config($_GET, $_POST, $_SERVER, $body);
 }
+
+/**
+ * Resolves one Windows source selection before the client builds its path rules.
+ *
+ * The input travels as base64 because JSON cannot represent arbitrary path bytes.
+ * This endpoint shares the existing authenticated export access; it never reads
+ * file contents. Windows, not the Linux client, supplies relative-path context.
+ *
+ * @param array $config {
+ *     @type string $source_path_b64 Base64-encoded source selection.
+ * }
+ * @return array {
+ *     @type bool   $ok       True after successful resolution.
+ *     @type string $path_b64 Base64-encoded absolute source path.
+ * }
+ */
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These failures become JSON API errors.
+// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the export endpoint registry's existing function names.
+function endpoint_resolve_windows_path(array $config): array {
+    if (PHP_OS !== 'WINNT') {
+        throw new InvalidArgumentException('Windows path resolution requires a Windows source.');
+    }
+    $encoded = $config['source_path_b64'] ?? null;
+    $path = is_string($encoded) ? base64_decode($encoded, true) : false;
+    if ($path === false || $path === '' || strpos($path, "\0") !== false) {
+        throw new InvalidArgumentException('source_path_b64 must encode a non-empty Windows path without NUL bytes.');
+    }
+    // Only this Windows endpoint interprets CLI input using the source process's
+    // directory. The client cannot supply that context from a Linux path string.
+    $path = str_replace('\\', '/', $path);
+    if (substr($path, 0, 4) === '//?/' || substr($path, 0, 4) === '//./') {
+        $tail = substr($path, 4);
+        if (preg_match('~^[a-zA-Z]:/~', $tail)) {
+            $path = $tail;
+        } elseif (strncasecmp($tail, 'UNC/', 4) === 0) {
+            $path = '//' . substr($tail, 4);
+        } elseif (preg_match('~^(Volume\{|GLOBALROOT/)~i', $tail)) {
+            throw new InvalidArgumentException('PHP cannot map this Windows volume namespace to a drive or share: ' . $path . '. Select the same files with a drive-letter or UNC path.');
+        } else {
+            throw new InvalidArgumentException('Windows device names cannot select migration files: ' . $path);
+        }
+        // Removing a namespace prefix is safe only for ordinary components.
+        // In particular, literal . and .. must not become traversal here.
+        assert_valid_path($path, 'windows', 'Windows namespace path');
+    }
+    if (substr($path, 0, 2) === '//') {
+        assert_valid_path($path, 'windows', 'Windows share path');
+    }
+    $directory = getcwd();
+    if ($directory === false) {
+        throw new RuntimeException('Cannot read the Windows source process current directory.');
+    }
+    $directory = normalize_path_separators($directory, 'windows');
+    if (preg_match('~^[a-zA-Z]:(?!/)~', $path)) {
+        // PHP realpath('D:site') does not supply D's working directory. Keep the
+        // process directory unchanged and require a full path for another drive.
+        if (strcasecmp(substr($path, 0, 2), substr($directory, 0, 2)) !== 0) {
+            throw new InvalidArgumentException('Cannot resolve a path relative to another Windows drive: ' . $path . '. Use a full drive-letter path.');
+        }
+        $path = $directory . '/' . substr($path, 2);
+    } elseif (substr($path, 0, 1) === '/' && substr($path, 0, 2) !== '//') {
+        $root = \WordPress\Reprint\Server\windows_share_root($directory) ?? substr($directory, 0, 2);
+        $path = $root . $path;
+    } elseif (!is_absolute_path($path, 'windows')) {
+        $path = $directory . '/' . $path;
+    }
+    // Validate names before dropping dot segments. A literal "folder./.."
+    // must not escape the read guard just because its last component is "..".
+    foreach (explode('/', str_replace('\\', '/', $path)) as $component) {
+        if ($component !== '.' && $component !== '..') {
+            source_io_path($component);
+        }
+    }
+    $path = normalize_path($path, 'windows');
+    assert_valid_path($path, 'windows', 'Windows source path');
+
+    // Resolve case one component at a time. A whole-path realpath() would replace
+    // a selected junction with its target before --no-follow-symlinks can see it.
+    // Stop resolving at a link; retain that link and every later component.
+    // Missing tails are valid for exclusions and paths deleted since a prior pull.
+    $root = \WordPress\Reprint\Server\windows_share_root($path) ?? substr($path, 0, 3);
+    $resolved = $root;
+    $keep_spelling = false;
+    foreach (explode('/', ltrim(substr($path, strlen($root)), '/')) as $component) {
+        if ($component === '') {
+            continue;
+        }
+        $candidate = rtrim($resolved, '/') . '/' . $component;
+        $keep_spelling = $keep_spelling || source_is_link($candidate);
+        $real = $keep_spelling ? false : source_realpath($candidate);
+        if ($real === false) {
+            $keep_spelling = true;
+            $resolved = $candidate;
+        } else {
+            $resolved = normalize_path_separators($real, 'windows');
+        }
+    }
+    $response = ['ok' => true, 'path_b64' => base64_encode($resolved)];
+    header('Content-Type: application/octet-stream');
+    // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- The response is JSON, not HTML.
+    echo json_encode_or_throw($response);
+    return $response;
+}
+
+// phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped

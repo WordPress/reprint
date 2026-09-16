@@ -10487,7 +10487,7 @@ class ImportClient
         $rules = [];
         $wp_content_target = null;
         foreach ($remap_raw as [$source_raw, $target_raw]) {
-            $source = $this->resolve_token_path($source_raw, $source_tokens, $this->get_state()->remote_path_format());
+            $source = $this->resolve_remote_token_path($source_raw, $source_tokens);
             $target = $this->resolve_token_path($target_raw, $target_tokens, native_path_format());
 
             if (!path_is_same_as_or_descendant_of($target, $filesystem_root)) {
@@ -10580,7 +10580,7 @@ class ImportClient
                 );
             }
 
-            $resolved = $this->resolve_token_path($src, $source_tokens, $this->get_state()->remote_path_format());
+            $resolved = $this->resolve_remote_token_path($src, $source_tokens);
             $prefixes[$resolved] = true;
 
             // Selecting content_dir also selects any plugins, mu-plugins, or
@@ -10811,6 +10811,61 @@ class ImportClient
      */
     private function resolve_token_path(string $raw, array $tokens, string $path_format): string
     {
+        $resolved = $this->substitute_path_tokens($raw, $tokens);
+        if ($resolved !== "") {
+            $resolved = trim_right_slash($resolved, $path_format);
+        }
+        assert_valid_path($resolved, $path_format, "path \"{$raw}\"");
+        return $resolved;
+    }
+
+    /**
+     * Resolves Windows source input on the remote host, never against the client cwd.
+     *
+     * Preflight's path_format supplies the source rules. The capability flag
+     * only says whether the source has this resolver. Send Windows inputs
+     * before changing separators: D:photos needs the source process's current
+     * directory on D, and namespace inputs need native Windows resolution.
+     * Returned paths are validated with the saved source format as well.
+     *
+     * @param string $raw Source selection from the CLI.
+     * @param array<string,string|null> $tokens Remote path token values.
+     */
+    private function resolve_remote_token_path(string $raw, array $tokens): string
+    {
+        $preflight = $this->get_state()->preflight_record();
+        if (
+            $this->get_state()->remote_path_format() !== 'windows'
+            || empty($preflight['data']['capabilities']['windows_path_resolution'])
+        ) {
+            return $this->resolve_token_path($raw, $tokens, $this->get_state()->remote_path_format());
+        }
+        $path = $this->substitute_path_tokens($raw, $tokens);
+        ['url' => $url, 'params' => $post_data] = $this->build_request('resolve_windows_path', null, [
+            'source_path_b64' => base64_encode($path),
+        ]);
+        $result = $this->fetch_json($url, $post_data);
+        $payload = $result['json'] ?? [];
+        if (empty($payload['ok']) || !is_string($payload['path_b64'] ?? null)) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The CLI reports API errors as text, not HTML.
+            throw new RuntimeException($payload['error'] ?? $result['error'] ?? 'The Windows source did not return a resolved path.');
+        }
+        $resolved = base64_decode($payload['path_b64'], true);
+        if ($resolved === false) {
+            throw new RuntimeException('The Windows source returned invalid base64 for the resolved path.');
+        }
+        assert_valid_path($resolved, $this->get_state()->remote_path_format(), 'Resolved Windows source path');
+        return trim_right_slash($resolved, $this->get_state()->remote_path_format());
+    }
+
+    /**
+     * Expands leading tokens without changing either platform's path syntax.
+     *
+     * @param string $raw Raw local or remote path.
+     * @param array<string,string|null> $tokens Available token values.
+     */
+    private function substitute_path_tokens(string $raw, array $tokens): string
+    {
         $resolved = $raw;
         foreach ($tokens as $name => $value) {
             $token = ":{$name}:";
@@ -10833,11 +10888,6 @@ class ImportClient
 
             $resolved = $value . substr($resolved, strlen($token));
         }
-
-        if ($resolved !== "") {
-            $resolved = trim_right_slash($resolved, $path_format);
-        }
-        assert_valid_path($resolved, $path_format, "path \"{$raw}\"");
 
         return $resolved;
     }
