@@ -75,6 +75,21 @@ class PullState
     public ?string $resolved_path_mappings_fingerprint = null;
     /** @var string|null Files-pull path-selection fingerprint; guards resume. */
     public ?string $files_pull_path_selection_fingerprint = null;
+    /**
+     * The last complete Windows source resolution, reused across pulls.
+     * Null means no batch has been saved yet.
+     *
+     * Inputs have their WordPress tokens expanded but keep their path syntax.
+     * Both lists use base64 so JSON preserves filename bytes. Their order pairs
+     * each input with its result. New preflight data alone does not discard this
+     * record; a different input list replaces it only after successful resolution.
+     *
+     * @var array|null {
+     *     @type string[] $source_paths_b64 Source inputs, in request order.
+     *     @type string[] $paths_b64        Resolved absolute paths, in the same order.
+     * }
+     */
+    public ?array $windows_source_path_cache = null;
     public FilesPullSummaryState $files_pull_summary;
     public DatabaseTableIndexState $db_index;
     public FileDiffProgressState $diff;
@@ -159,11 +174,13 @@ class PullState
         // State from clients predating CSS rewriting has neither CSS field.
         // An empty mapping keeps those downloads byte-for-byte copies. Starting
         // rewriting on resume could otherwise join raw and rewritten file bytes.
+        // Older clients have no path cache and resolve their next Windows batch.
         $data += [
             'files_pull_mode' => 'catch-up',
             'include_host_plugins' => false,
             'css_url_mapping' => [],
             'current_css_cursor' => null,
+            'windows_source_path_cache' => null,
         ];
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
@@ -186,6 +203,7 @@ class PullState
         $state->max_allowed_packet = $data['max_allowed_packet'];
         $state->resolved_path_mappings_fingerprint = $data['resolved_path_mappings_fingerprint'];
         $state->files_pull_path_selection_fingerprint = $data['files_pull_path_selection_fingerprint'];
+        $state->windows_source_path_cache = $data['windows_source_path_cache'];
         $state->files_pull_summary = FilesPullSummaryState::from_array($data['files_pull_summary']);
         $state->db_index = DatabaseTableIndexState::from_array($data['db_index']);
         $state->diff = FileDiffProgressState::from_array($data['diff']);
@@ -310,6 +328,7 @@ class PullState
             'max_allowed_packet' => $this->max_allowed_packet,
             'resolved_path_mappings_fingerprint' => $this->resolved_path_mappings_fingerprint,
             'files_pull_path_selection_fingerprint' => $this->files_pull_path_selection_fingerprint,
+            'windows_source_path_cache' => $this->windows_source_path_cache,
             'files_pull_summary' => $this->files_pull_summary->to_array(),
             'db_index' => $this->db_index->to_array(),
             'diff' => $this->diff->to_array(),

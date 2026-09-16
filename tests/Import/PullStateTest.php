@@ -95,6 +95,28 @@ class PullStateTest extends TestCase
         $this->assertFalse(\PullState::from_array($data)->include_host_plugins);
     }
 
+    /** Old clients have no saved resolutions; the next Windows pull resolves once. */
+    public function testOlderStateHasNoWindowsPathCache(): void
+    {
+        $data = json_decode(file_get_contents(__DIR__ . '/../fixtures/pull-state-before-css-rewriting.json'), true);
+        $this->assertArrayNotHasKey('windows_source_path_cache', $data);
+        $this->assertNull(\PullState::from_array($data)->windows_source_path_cache);
+    }
+
+    /** Both sides of the cached mapping must survive JSON without changing filename bytes. */
+    public function testWindowsPathCacheRoundTripsThroughJson(): void
+    {
+        $data = (new \PullState())->to_array();
+        $cache = [
+            'source_paths_b64' => [base64_encode("D:photo\xff"), base64_encode('D:/Sites/Mixed Case')],
+            'paths_b64' => [base64_encode("D:/Sites/photo\xff"), base64_encode('D:/Sites/Mixed Case')],
+        ];
+        $data['windows_source_path_cache'] = $cache;
+        $saved = json_decode(json_encode(\PullState::from_array($data)->to_array(), JSON_THROW_ON_ERROR), true);
+        $this->assertSame($cache, $saved['windows_source_path_cache']);
+        $this->assertSame($cache, \PullState::from_array($saved)->windows_source_path_cache);
+    }
+
     public function testStateDefaultsAnOlderMissingFilesPullModeToCatchUp(): void
     {
         $array = ( new \PullState() )->to_array();

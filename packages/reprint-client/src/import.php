@@ -10952,6 +10952,12 @@ class ImportClient
      * reject a partial response before applying any remap or selection. There is
      * no per-path retry. Local target paths are not part of this batch.
      *
+     * Reuse the last successful batch from pull state when the expanded inputs
+     * match. This deliberately keeps D:photos at its first resolved absolute
+     * path even if the source process later changes its working directory.
+     * Changed inputs or token values resolve again. Preflight timestamps and
+     * local destinations do not affect this source-only cache.
+     *
      * @param string[] $raw_sources Source selections and remap sources from the CLI.
      * @return array<string,string> Raw source argument => resolved source path.
      */
@@ -10976,18 +10982,24 @@ class ImportClient
         foreach ($raw_sources as $raw) {
             $encoded_paths[] = base64_encode($this->substitute_path_tokens($raw, $tokens));
         }
-        // One form field avoids PHP's max_input_vars truncating a long selection.
-        // Base64 inside JSON preserves path bytes which are not valid UTF-8.
-        ['url' => $url, 'params' => $post_data] = $this->build_request('resolve_windows_paths', null, [
-            'source_paths_b64' => json_encode($encoded_paths),
-        ]);
-        $result = $this->fetch_json($url, $post_data);
-        $payload = $result['json'] ?? [];
-        if (empty($payload['ok'])) {
-            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The CLI reports API errors as text, not HTML.
-            throw new RuntimeException($payload['error'] ?? $result['error'] ?? 'The Windows source did not resolve the requested paths.');
+        $cache = $this->get_state()->windows_source_path_cache;
+        $reuse_cache = $cache !== null && $cache['source_paths_b64'] === $encoded_paths;
+        if ($reuse_cache) {
+            $resolved_paths = $cache['paths_b64'];
+        } else {
+            // One form field avoids PHP's max_input_vars truncating a long selection.
+            // Base64 inside JSON preserves path bytes which are not valid UTF-8.
+            ['url' => $url, 'params' => $post_data] = $this->build_request('resolve_windows_paths', null, [
+                'source_paths_b64' => json_encode($encoded_paths),
+            ]);
+            $result = $this->fetch_json($url, $post_data);
+            $payload = $result['json'] ?? [];
+            if (empty($payload['ok'])) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The CLI reports API errors as text, not HTML.
+                throw new RuntimeException($payload['error'] ?? $result['error'] ?? 'The Windows source did not resolve the requested paths.');
+            }
+            $resolved_paths = $payload['paths_b64'] ?? null;
         }
-        $resolved_paths = $payload['paths_b64'] ?? null;
         if (!is_array($resolved_paths) || array_keys($resolved_paths) !== array_keys($raw_sources)) {
             throw new RuntimeException('The Windows source must return one resolved path per requested path, in request order.');
         }
@@ -10999,6 +11011,15 @@ class ImportClient
             }
             assert_valid_path($resolved, $path_format, 'Resolved Windows source path');
             $resolved_sources[$raw] = trim_right_slash($resolved, $path_format);
+        }
+        if (!$reuse_cache) {
+            // Publish only a fully validated batch. Failed requests leave the
+            // preceding batch available to a later pull with its original inputs.
+            $this->get_state()->windows_source_path_cache = [
+                'source_paths_b64' => $encoded_paths,
+                'paths_b64' => $resolved_paths,
+            ];
+            $this->save_state();
         }
         return $resolved_sources;
     }
@@ -13246,6 +13267,7 @@ class ImportClient
         $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
         $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
         $this->state->resolved_path_mappings_fingerprint = $previous_state->resolved_path_mappings_fingerprint;
+        $this->state->windows_source_path_cache = $previous_state->windows_source_path_cache;
         $this->state->css_url_mapping = $previous_state->css_url_mapping;
         $this->state->pull_pipeline = $previous_state->pull_pipeline;
     }
