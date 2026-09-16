@@ -21,6 +21,11 @@ use function WordPress\Reprint\Server\build_pdo_dsn;
 use function WordPress\Reprint\Server\generate_random_bytes;
 use function WordPress\Reprint\Server\json_encode_or_throw;
 use function WordPress\Reprint\Server\is_absolute_path;
+use function WordPress\Reprint\Server\source_io_path;
+use function WordPress\Reprint\Server\source_lstat;
+use function WordPress\Reprint\Server\source_is_link;
+use function WordPress\Reprint\Server\source_realpath;
+use function WordPress\Reprint\Server\source_readlink;
 use function WordPress\Reprint\Server\normalize_path;
 use function WordPress\Reprint\Server\normalize_path_separators;
 use function WordPress\Reprint\Server\parse_size;
@@ -1393,8 +1398,8 @@ function resolve_directories(array $config): array
         assert_valid_path($directory, native_path_format(), "directory entry");
 
         clearstatcache(true, $directory);
-        $real_directory = @realpath($directory);
-        if ($real_directory === false || !is_dir($real_directory)) {
+        $real_directory = @source_realpath($directory);
+        if ($real_directory === false || !is_dir(source_io_path($real_directory))) {
             throw new InvalidArgumentException(
                 "directory entry is not an accessible directory: {$directory}\n" .
                     "Current working directory: " .
@@ -1459,7 +1464,7 @@ function resolve_file_index_roots(array $config): array
         assert_valid_path($root_input, native_path_format(), "directory entry");
         $requested_path = normalize_path($root_input, native_path_format());
         clearstatcache(true, $requested_path);
-        $stat = @lstat($requested_path);
+        $stat = @source_lstat($requested_path);
         if ($stat === false) {
             // The client sends `pulled_before` for selected paths an earlier pull
             // already saw. Absence there means the source deleted the path, so it
@@ -1482,10 +1487,13 @@ function resolve_file_index_roots(array $config): array
         }
 
         $mode = $stat["mode"] & STAT_TYPE_MASK;
-        $type = $mode === STAT_TYPE_LINK ? "symlink" : ( is_dir($requested_path) ? "directory" : "file" );
-        $resolved_path = @realpath($requested_path);
+        $type = $mode === STAT_TYPE_LINK ? "symlink" : ( is_dir(source_io_path($requested_path)) ? "directory" : "file" );
+        $resolved_path = @source_realpath($requested_path);
         if ($type === "symlink" && $resolved_path === false) {
-            throw new InvalidArgumentException("Selected file-index root is a broken symlink: {$requested_path}");
+            $message = PHP_OS === 'WINNT'
+                ? "PHP cannot resolve the Windows link target: {$requested_path}. Recreate the link with a full drive-letter target before migration."
+                : "Selected file-index root is a broken symlink: {$requested_path}";
+            throw new InvalidArgumentException($message);
         }
         if ($resolved_path === false) {
             throw new InvalidArgumentException(
@@ -1552,8 +1560,8 @@ function resolve_file_index_start_root(
         );
     }
 
-    $resolved_path = @realpath($requested_path);
-    if ($resolved_path === false || !is_dir($resolved_path)) {
+    $resolved_path = @source_realpath($requested_path);
+    if ($resolved_path === false || !is_dir(source_io_path($resolved_path))) {
         throw new InvalidArgumentException(
             "Followed symlink target directory does not exist or is not accessible: {$requested_path}"
         );
@@ -1580,10 +1588,10 @@ function file_index_parent_symlink(string $requested_path): ?array
         $current = $parent;
     }
     foreach (array_reverse($parents) as $current) {
-        if (!@is_link($current)) {
+        if (!@source_is_link($current)) {
             continue;
         }
-        $target = @readlink($current);
+        $target = @source_readlink($current);
         return ["path" => $current, "target" => $target === false ? "(unreadable)" : $target];
     }
     return null;

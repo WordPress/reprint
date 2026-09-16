@@ -1,0 +1,31 @@
+name: Windows migration
+
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  php-reader:
+    name: Read Windows paths without FFI
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, :ffi
+          ini-values: ffi.enable=false
+          coverage: none
+      - name: Check PHP source reads
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          ./tests/e2e/windows/prepare-path-namespaces.ps1 "$env:GITHUB_WORKSPACE/namespace-cases.json"
+          php tests/e2e/windows/verify-source-reader.php

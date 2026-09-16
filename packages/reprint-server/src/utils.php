@@ -902,4 +902,137 @@ function wp_join_unix_paths(...$path_segments)
 }
 }
 
+if (!function_exists(__NAMESPACE__ . '\\source_io_path')) {
+/**
+ * Prepares a native source path for PHP file access without changing filenames.
+ *
+ * Call this before source file I/O, including lstat() and realpath(). For two
+ * files named report and report., Windows PHP can return report's metadata
+ * for report. even though it cannot open report. itself. A trailing space
+ * has the same problem. Reject the whole path before PHP can select a sibling.
+ * This also catches literal names returned by a directory listing, not just
+ * paths supplied by the user. Unix filenames pass through unchanged.
+ *
+ * PHP can read long UNC paths through the \\.\UNC\ spelling even when ordinary
+ * UNC metadata lookup fails. Keep ordinary paths on their usual PHP path,
+ * including its open_basedir checks. Use the prefix only at I/O; indexes and cursors
+ * retain the shared path. source_realpath() removes the I/O prefix on return.
+ * The source process's OS selects this behavior, never a remote path's prefix.
+ * No native extension or external command is used to bypass PHP file access.
+ */
+function source_io_path(string $path): string {
+    if (PHP_OS === 'WINNT' && preg_match('~[. ](?:[/\\\\]|$)~', $path)) {
+        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This is an API error, not HTML.
+        throw new \RuntimeException('Cannot read the exact Windows filename ' . $path . '. PHP cannot safely read a name ending in a dot or space. Rename it on the source before migration.');
+    }
+    if (PHP_OS === 'WINNT' && windows_share_root($path) !== null && @lstat($path) === false) {
+        return '\\\\.\\UNC\\' . ltrim(str_replace('/', '\\', $path), '\\');
+    }
+    return $path;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\source_is_link')) {
+/**
+ * Checks the source metadata, including Windows junctions that is_link() misses.
+ */
+function source_is_link(string $path): bool {
+    $stat = @source_lstat($path);
+    return $stat !== false && ( $stat['mode'] & 0170000 ) === 0120000;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\source_lstat')) {
+/**
+ * Reads source metadata and identifies Windows junctions through PHP readlink().
+ *
+ * Windows PHP lstat() reports symbolic links, but leaves the type bits at zero
+ * for junctions. is_link() therefore returns false and would let a no-follow
+ * pull traverse the target. Obtain the target before reporting a link type.
+ * An unrecognized reparse point that leads back to itself must fail rather
+ * than become a fabricated self-link or disappear as an unknown file type.
+ *
+ * Windows PHP exposes creation time as ctime. Keep that same convention in
+ * the index and post-read checks; changing clocks would invalidate existing
+ * change records. Same-size edits can escape these fields.
+ *
+ * @return array|false { PHP stat fields, or false on failure. Numeric keys 0-12
+ *     repeat these fields in the same order, as in lstat().
+ *     @type int $dev     Device number.
+ *     @type int $ino     File identifier.
+ *     @type int $mode    Type and permissions; junctions have link type bits.
+ *     @type int $nlink   Number of hard links.
+ *     @type int $uid     User ID.
+ *     @type int $gid     Group ID.
+ *     @type int $rdev    Device type, when applicable.
+ *     @type int $size    File size in bytes.
+ *     @type int $atime   Access time.
+ *     @type int $mtime   Modification time.
+ *     @type int $ctime   Change time on Unix; creation time on Windows.
+ *     @type int $blksize Filesystem block size, or -1 when unavailable.
+ *     @type int $blocks  Allocated blocks, or -1 when unavailable.
+ * }
+ */
+function source_lstat(string $path) {
+    $stat = lstat(source_io_path($path));
+    if (PHP_OS === 'WINNT' && $stat !== false && ( $stat['mode'] & 0170000 ) === 0) {
+        $target = source_readlink($path);
+        if (normalize_path_separators($target, 'windows') === normalize_path_separators($path, 'windows')) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This is an API error, not HTML.
+            throw new \RuntimeException('PHP cannot identify the Windows reparse point: ' . $path . '. Copy it to an ordinary file or directory before migration.');
+        }
+        $stat['mode'] |= 0120000;
+        $stat[2] = $stat['mode'];
+    }
+    return $stat;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\source_realpath')) {
+/**
+ * Resolves source paths through PHP and returns the shared index spelling.
+ *
+ * Windows PHP realpath() can fail on a link whose stored target starts at the
+ * drive root, even when readlink() returns its accessible absolute target.
+ * Resolve that target through PHP too. No file bytes are read through the
+ * original link; the index schedules the resolved path for the later fetch.
+ * A target that PHP still cannot resolve remains false, like ordinary realpath.
+ *
+ * Normalize the result using this source process's format. PHP on Windows
+ * returns backslashes; index comparisons must not compare those bytes against
+ * slash-delimited configured roots. Unix backslashes remain filename bytes.
+ *
+ * @return string|false Resolved source path, or false when PHP cannot resolve it.
+ */
+function source_realpath(string $path) {
+    $resolved = realpath(source_io_path($path));
+    if ($resolved === false && PHP_OS === 'WINNT' && source_is_link($path)) {
+        $target = source_readlink($path);
+        $resolved = realpath(source_io_path(resolve_symlink_target_path($path, $target, 'windows')));
+    }
+    if ($resolved !== false && PHP_OS === 'WINNT' && strncasecmp($resolved, '\\\\.\\UNC\\', 8) === 0) {
+        $resolved = '\\\\' . substr($resolved, 8);
+    }
+    return $resolved === false ? false : normalize_path_separators($resolved, native_path_format());
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\source_readlink')) {
+/**
+ * Reads a link through PHP, stopping if Windows cannot return its target.
+ *
+ * Windows PHP can follow a relative forward-slash target while readlink()
+ * fails with error 123. Returning an empty target would lose a readable link.
+ * Do not replace it with realpath(): that would hide intermediate links.
+ */
+function source_readlink(string $path) {
+    $target = readlink(source_io_path($path));
+    if ($target === false && PHP_OS === 'WINNT') {
+        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This is an API error, not HTML.
+        throw new \RuntimeException('PHP cannot read the Windows link target: ' . $path . '. Recreate the link with a backslash target before migration.');
+    }
+    return $target;
+}
+}
+
 }
