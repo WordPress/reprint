@@ -16,12 +16,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: true
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
-          extensions: mbstring, curl, :ffi
+          extensions: mbstring, curl, pdo_mysql, :ffi
           ini-values: ffi.enable=false
           coverage: none
+      - run: composer install --no-interaction --prefer-dist
       - name: Check PHP source reads
         shell: pwsh
         run: |

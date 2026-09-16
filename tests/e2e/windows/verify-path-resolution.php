@@ -11,6 +11,7 @@ $router = $directory . '/router.php';
 // The source process supplies this directory. The requesting process stays in
 // the checkout, so using the client's current directory would fail these cases.
 file_put_contents($router, '<?php require ' . var_export($repository . '/packages/reprint-server/src/class-http-server.php', true)
+    . '; file_put_contents(__DIR__ . "/requests.jsonl", json_encode($_POST) . chr(10), FILE_APPEND)'
     . '; chdir("D:/Reprint namespace cases"); \\WordPress\\Reprint\\Server\\HTTPServer::serve();');
 $listener = stream_socket_server('tcp://127.0.0.1:0');
 $address = stream_socket_get_name($listener, false);
@@ -88,11 +89,35 @@ try {
             }
         }
     }
+    require $repository . '/packages/reprint-client/src/import.php';
+    $client = new ImportClient('http://' . $address . '/', $directory . '/state', $directory . '/files');
+    $client->get_state()->set_preflight_record(['data' => [
+        'path_format' => 'windows',
+        'capabilities' => ['windows_path_resolution' => true],
+        'database' => ['wp' => ['paths_urls' => [
+            'content_dir' => 'D:/Reprint namespace cases/Mixed Case',
+        ]]],
+    ]]);
+    file_put_contents($directory . '/requests.jsonl', '');
+    $client->prepare_files_pull_options([
+        'remap' => [
+            ['D:Mixed Case', ':fs-root:/site'],
+            ['D:/Reprint link cases/junction', ':fs-root:/linked'],
+        ],
+        'include' => ['D:Mixed Case', ':wp-content:/hello.txt'],
+        'exclude' => [':wp-content:/missing/Child', 'Mixed Case/missing/Other'],
+    ], false);
+    $requests = file($directory . '/requests.jsonl', FILE_IGNORE_NEW_LINES);
+    if (count($requests) !== 1) {
+        throw new RuntimeException('Expected one request for all remap, include, and exclude paths; got ' . count($requests) . '.');
+    }
     echo 'PASS: ' . count($cases) . " Windows selections resolved or rejected over HTTP.\n";
 } finally {
     proc_terminate($process);
     proc_close($process);
-    unlink($router);
-    unlink($directory . '/server.log');
+    $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($directory, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+    foreach ($iterator as $entry) {
+        $entry->isDir() ? rmdir($entry->getPathname()) : unlink($entry->getPathname());
+    }
     rmdir($directory);
 }
