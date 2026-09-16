@@ -257,6 +257,11 @@ export function runImporter(url, outputDir, command, options = {}) {
         if (secret) {
             args.push(`--secret=${secret}`);
         }
+        // Whole-site copy tests compare every source file and row. Keep that
+        // behavior unless a test explicitly selects Reprint exclusion.
+        if (!extraArgs.includes('--include-reprint') && !extraArgs.includes('--exclude-reprint')) {
+            args.push('--include-reprint');
+        }
         if (extraArgs.length > 0) {
             args.push(...extraArgs);
         }
