@@ -100,7 +100,7 @@ final class MappedRemoteIndexBuilder
             }
         }
 
-        $remote_index_reader = new RemoteIndexReader($remote_index_file);
+        $remote_index_reader = new RemoteIndexReader($remote_index_file, $path_mapper->remote_path_format());
         $mapped_index_handle = fopen($mapped_remote_index_file, "wb");
         if (!is_resource($mapped_index_handle)) {
             throw new RuntimeException(

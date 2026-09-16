@@ -62,7 +62,7 @@ class ProgressScreenTest extends TestCase {
         $reflection->getProperty('remote_to_local_path_mapper')->setValue(
             $client,
             new \RemoteToLocalPathMapper(
-                (string) realpath($this->filesystem_root),
+                (string) realpath($this->filesystem_root), 'unix',
                 ['/']
             )
         );
@@ -281,7 +281,7 @@ class ProgressScreenTest extends TestCase {
         $reflection->getProperty('remote_to_local_path_mapper')->setValue(
             $client,
             new \RemoteToLocalPathMapper(
-                (string) realpath($this->filesystem_root),
+                (string) realpath($this->filesystem_root), 'unix',
                 ['/']
             )
         );

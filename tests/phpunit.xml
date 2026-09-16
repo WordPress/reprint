@@ -20,6 +20,7 @@
             <directory>UrlRewriting</directory>
         </testsuite>
         <testsuite name="Export Utility Tests">
+            <file>PathFormatTest.php</file>
             <file>BuildPdoDsnTest.php</file>
             <file>ExporterCompatibilityUtilitiesTest.php</file>
             <file>CreateDbConnectionTest.php</file>

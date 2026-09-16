@@ -1,6 +1,7 @@
 <?php
 
 use function WordPress\Filesystem\wp_join_unix_paths;
+use function WordPress\Reprint\Server\native_path_format;
 use function WordPress\Reprint\Server\normalize_path;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\realpath_with_missing_tail;
@@ -185,7 +186,8 @@ class WpContentMerger
             }
             if (strpos($link_value, "/") !== 0) {
                 $resolved_target = normalize_path(
-                    wp_join_unix_paths(dirname($source_entry), $link_value)
+                    wp_join_unix_paths(dirname($source_entry), $link_value),
+                    native_path_format()
                 );
                 // The source tree moves; an external target does not.
                 if (

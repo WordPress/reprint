@@ -813,6 +813,8 @@ final class FileIndexProcessor {
             return false;
         }
 
+        $canonical_directory = normalize_path_separators($canonical_directory, native_path_format());
+
         // When following links is disabled, every canonical directory must
         // remain inside a configured root. Reject one that crosses that
         // boundary, then continue with the remaining stack.
@@ -911,7 +913,7 @@ final class FileIndexProcessor {
             return "";
         }
         $canonical_storage_path = realpath($storage_path);
-        return $canonical_storage_path !== false ? $canonical_storage_path : $storage_path;
+        return normalize_path_separators($canonical_storage_path !== false ? $canonical_storage_path : $storage_path, native_path_format());
     }
 
     /**
@@ -1087,7 +1089,7 @@ final class FileIndexProcessor {
         $requested_path = $root["requested_path"];
         if (
             $requested_path === ""
-            || \WordPress\Reprint\Server\normalize_path($requested_path) !== $requested_path
+            || \WordPress\Reprint\Server\normalize_path($requested_path, native_path_format()) !== $requested_path
         ) {
             throw new InvalidArgumentException("File-index root requested_path must be normalized");
         }
@@ -1261,15 +1263,12 @@ final class FileIndexProcessor {
         $intermediates = [];
         $raw_target = @readlink($path);
         if ($raw_target !== false && $raw_target !== "") {
-            if ($raw_target[0] !== "/") {
-                $raw_target = wp_join_unix_paths(dirname($path), $raw_target);
-            }
             // Resolve only textual dot segments. realpath() would skip the
             // intermediate links that this walk must inspect.
-            $absolute_raw_target = \WordPress\Reprint\Server\normalize_path($raw_target);
+            $absolute_raw_target = resolve_symlink_target_path($path, $raw_target, native_path_format());
             if (
                 $absolute_raw_target !== ""
-                && $absolute_raw_target[0] === "/"
+                && is_absolute_path($absolute_raw_target, native_path_format())
                 && $absolute_raw_target !== $resolved_target
             ) {
                 $intermediates = self::find_parent_symlinks($absolute_raw_target);
@@ -1293,18 +1292,21 @@ final class FileIndexProcessor {
     private static function find_parent_symlinks(string $absolute_path): array
     {
         $entries = [];
-        $parts = explode("/", $absolute_path);
-        $current = "";
+        $parents = [];
+        $current = $absolute_path;
+        while (is_absolute_path($current, native_path_format())) {
+            $parents[] = $current;
+            $parent = dirname($current);
+            if ($parent === $current) {
+                break;
+            }
+            $current = $parent;
+        }
 
         // Keep the requested spelling while inspecting each parent. PHP follows
         // a parent link when checking the next component, so changing $current
         // to realpath() would turn later emitted links into resolved paths.
-        foreach ($parts as $part) {
-            if ($part === "") {
-                $current = "/";
-                continue;
-            }
-            $current = wp_join_unix_paths($current, $part);
+        foreach (array_reverse($parents) as $current) {
             if (!@is_link($current)) {
                 continue;
             }

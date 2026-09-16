@@ -68,7 +68,7 @@ class RemapSeamTest extends TestCase
 
     private function mapperWithRules(array $rules): \RemoteToLocalPathMapper
     {
-        return new \RemoteToLocalPathMapper($this->root, [], $rules);
+        return new \RemoteToLocalPathMapper($this->root, 'unix', [], $rules);
     }
 
     public function testRemoteAbsolutePathMapsToLocalAbsolutePath(): void
@@ -225,7 +225,7 @@ class RemapSeamTest extends TestCase
      */
     public function testTrimRightSlash(string $expected, string $path): void
     {
-        $this->assertSame($expected, trim_right_slash($path));
+        $this->assertSame($expected, trim_right_slash($path, \WordPress\Reprint\Server\native_path_format()));
     }
 
     public static function provideTrailingSlashPathCases(): array

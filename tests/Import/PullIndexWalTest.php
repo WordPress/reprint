@@ -50,7 +50,7 @@ final class PullIndexWalTest extends TestCase
             'file',
             (string) realpath($this->fileRoot . '/site/file.txt')
         );
-        $journal->apply_pending_records();
+        $journal->apply_pending_records('unix');
 
         $pullIndexWalPath = $this->pullStateDirectory . '/index.wal';
         $this->assertFileExists($pullIndexWalPath);
@@ -113,7 +113,7 @@ final class PullIndexWalTest extends TestCase
             file_get_contents($this->pullStateDirectory . '/index.wal')
         );
 
-        $journal->apply_pending_records();
+        $journal->apply_pending_records('unix');
         $this->assertSame([], $this->remoteIndexEntryPaths());
         $journal->remove_empty_wal();
     }
@@ -133,11 +133,11 @@ final class PullIndexWalTest extends TestCase
             'file',
             $localAbsolutePath
         );
-        $journal->apply_pending_records();
+        $journal->apply_pending_records('unix');
 
         unlink($localAbsolutePath);
         $journal->record_local_deletion($localAbsolutePath, 'file');
-        $journal->apply_pending_records();
+        $journal->apply_pending_records('unix');
 
         $this->assertSame(
             ['/site/local-only.txt'],
@@ -155,7 +155,7 @@ final class PullIndexWalTest extends TestCase
             5,
             'file'
         );
-        $journal->apply_pending_records();
+        $journal->apply_pending_records('unix');
 
         $this->assertSame(
             ['/site/nested/file.txt'],
@@ -209,7 +209,7 @@ final class PullIndexWalTest extends TestCase
             $completeRecord . '{"op":"+","remote_absolute_path_b64":"'
         );
 
-        $this->journal($this->client())->apply_pending_records();
+        $this->journal($this->client())->apply_pending_records('unix');
 
         $this->assertSame('/site/complete.txt', $this->firstRemoteIndexEntryPath());
         $this->assertSame(
