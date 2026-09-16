@@ -9,21 +9,26 @@ export async function ensureMultisite(name) {
     await ensureSite(name, {
         tablePrefix: 'network_', files: 'none',
         afterCreate: async (directory) => {
-            runWp(directory, ['core', 'multisite-convert', '--title=Source network', '--base=/', '--skip-config']);
-            const config = join(directory, 'wp-config.php');
-            const constants = `define('MULTISITE', true);
+            convertToMultisite(directory, getSiteUrl(name));
+        },
+    });
+    return JSON.parse(readFileSync(join(getSiteDir(name), '.multisite-layer.json'), 'utf8'));
+}
+
+/** Convert an installed MySQL or SQLite site to the same three-site fixture. */
+export function convertToMultisite(directory, url) {
+    runWp(directory, ['core', 'multisite-convert', '--title=Source network', '--base=/', '--skip-config']);
+    const config = join(directory, 'wp-config.php');
+    const constants = `define('MULTISITE', true);
 define('SUBDOMAIN_INSTALL', false);
-define('DOMAIN_CURRENT_SITE', '${new URL(getSiteUrl(name)).host}');
+define('DOMAIN_CURRENT_SITE', '${new URL(url).host}');
 define('PATH_CURRENT_SITE', '/');
 define('SITE_ID_CURRENT_SITE', 1);
 define('BLOG_ID_CURRENT_SITE', 1);
 `;
-            writeFileSync(config, readFileSync(config, 'utf8').replace('$table_prefix =', constants + '$table_prefix ='));
-            runWp(directory, ['plugin', 'activate', 'reprint-server', '--network']);
-            runWp(directory, ['eval-file', join(import.meta.dirname, '../fixtures/multisite-layer.php')]);
-        },
-    });
-    return JSON.parse(readFileSync(join(getSiteDir(name), '.multisite-layer.json'), 'utf8'));
+    writeFileSync(config, readFileSync(config, 'utf8').replace('$table_prefix =', constants + '$table_prefix ='));
+    runWp(directory, ['plugin', 'activate', 'reprint-server', '--network']);
+    runWp(directory, ['eval-file', join(import.meta.dirname, '../fixtures/multisite-layer.php')]);
 }
 
 export function runWp(directory, args, url = null) {
