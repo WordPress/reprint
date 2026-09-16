@@ -13,11 +13,12 @@ import { execSync } from 'node:child_process';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    apiRequest, createMysqlConnection,
+    apiRequest, createMysqlConnection, queryMysqlOnSqlite,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
+import { convertToMultisite, ensureMultisite, runWp } from '../lib/multisite-setup.js';
 
-async function ensureSqliteSite(site, pluginVersion) {
+async function ensureSqliteSite(site, pluginVersion, multisite = false) {
     await ensureSite(site, {
         db: 'none',
         files: 'sample',
@@ -130,6 +131,9 @@ async function ensureSqliteSite(site, pluginVersion) {
                 allowRoot,
                 { timeout: 30000, stdio: 'pipe' },
             );
+            if (multisite) {
+                convertToMultisite(siteDir, getSiteUrl(site));
+            }
         },
     });
 }
@@ -270,4 +274,123 @@ describe('Import: SQLite Export', () => {
             await importConn.end();
         }
     });
+    it('keeps ordinary imports on the existing URL rewriting path', () => {
+        runWp(getSiteDir(site), ['eval', `
+            global $wpdb;
+            $wpdb->update($wpdb->posts, array(
+                'post_content' => '<a href="https://source.test/page"></a><style>.hero{background:url(//source.test/photo.png)}</style>'
+            ), array('ID' => 1));
+        `]);
+        const directory = createTempDir('e2e-ordinary-sqlite-rewrite');
+        try {
+            const target = join(directory, 'target.sqlite');
+            const result = runImporter(importUrl(), directory, 'pull-db', {
+                secret: getSiteSecret(site), autoResume: false,
+                extraArgs: ['--target-engine=sqlite', `--target-sqlite-path=${target}`,
+                    '--rewrite-url', 'https://source.test', 'https://target.test'],
+            });
+            assert.equal(result.exitCode, 0, result.stdout + result.stderr);
+            const rows = queryMysqlOnSqlite(target, 'SELECT post_content FROM wp_posts WHERE ID=1');
+            assert.equal(rows[0].post_content, '<a href="https://target.test/page"></a><style>.hero{background:url(//target.test/photo.png)}</style>');
+        } finally { cleanupTempDir(directory); }
+    });
+
+});
+
+
+// Separate fixtures keep these conversions out of the single-site export tests.
+describe.each([
+    ['multisite-sqlite', '3.0.0'],
+    ['multisite-sqlite-legacy', '2.2.23'],
+    ['multisite-paths-mysql', 'mysql'],
+])('Multisite child paths: %s (%s)', (site, version) => {
+    let fixture;
+    beforeAll(async () => {
+        if (version !== 'mysql') await ensureSqliteSite(site, version, true);
+        else await ensureMultisite(site);
+        fixture = JSON.parse(readFileSync(join(getSiteDir(site), '.multisite-layer.json'), 'utf8'));
+    });
+
+    it('reads child paths across batches without including other domains or adjacent paths', async () => {
+        const origin = new URL(fixture.sites[7].url).origin;
+        const expected = [];
+        for (let index = 0; index < 2005; index++) expected.push(`/shop/child-${index}/`);
+        runWp(getSiteDir(site), ['eval', `
+            global $wpdb;
+            $domain = wp_parse_url(home_url(), PHP_URL_HOST) . ':' . wp_parse_url(home_url(), PHP_URL_PORT);
+            $wpdb->query("DELETE FROM {$wpdb->blogs} WHERE blog_id >= 10000");
+            for ($index = 0; $index < 2005; ++$index) {
+                // Sparse IDs catch pagination that advances by row count.
+                $wpdb->insert($wpdb->blogs, array(
+                    'blog_id' => 10000 + $index * 3, 'site_id' => 1,
+                    'domain' => $domain, 'path' => '/shop/child-' . $index . '/',
+                    'archived' => $index === 0 ? 1 : 0,
+                ));
+            }
+            foreach (array(
+                array($domain, '/shopper/child/'),
+                array('other.example', '/shop/child/'),
+                array($domain, '/shop/'),
+            ) as $row) {
+                $wpdb->insert($wpdb->blogs, array('site_id' => 1, 'domain' => $row[0], 'path' => $row[1]));
+            }
+        `], fixture.sites[7].url);
+        const response = await apiRequest(site, 'preflight', { multisite_mode: 'one-site-network-v1' }, {
+            url: `${fixture.sites[7].url}/?reprint-api`, method: 'GET',
+        });
+        assert.equal(response.status, 200, JSON.stringify(response.json).slice(0, 1000));
+        assert.equal(response.json.database.db_engine, version === 'mysql' ? 'mysql' : 'sqlite');
+        assert.deepEqual(response.json.database.wp.multisite.selection.nested_site_paths, { [origin]: expected });
+        const posted = await apiRequest(site, 'preflight', { multisite_mode: 'one-site-network-v1' }, {
+            url: `${fixture.sites[7].url}/?reprint-api`,
+        });
+        assert.equal(posted.status, 200, JSON.stringify(posted.json));
+        assert.deepEqual(posted.json.database.wp.multisite.selection.nested_site_paths, { [origin]: expected });
+        const batches = JSON.parse(runWp(getSiteDir(site), ['eval', `
+            global $wpdb;
+            $runtime = WordPress\\Reprint\\Server\\Plugin\\load_server_runtime();
+            require_once $runtime;
+            require_once WP_PLUGIN_DIR . '/reprint-server/wordpress/multisite.php';
+            $context = WordPress\\Reprint\\Server\\Plugin\\get_multisite_export_context();
+            $batch_sizes = array();
+            // Observe actual wpdb results before the next query replaces them.
+            add_filter('query', function ($query) use (&$batch_sizes, $wpdb) {
+                if (strpos($wpdb->last_query, 'SELECT blog_id, path FROM') === 0) {
+                    $batch_sizes[] = $wpdb->num_rows;
+                }
+                return $query;
+            });
+            reprint_get_multisite_nested_site_paths($context);
+            $batch_sizes[] = $wpdb->num_rows;
+            echo json_encode($batch_sizes);
+        `], fixture.sites[7].url));
+        assert.deepEqual(batches, [1000, 1000, 5], 'The adapter must never buffer the whole site list.');
+    });
+    it('keeps SQL wildcard characters literal and groups default-port spellings', () => {
+        const paths = JSON.parse(runWp(getSiteDir(site), ['eval', `
+            global $wpdb;
+            $runtime = WordPress\\Reprint\\Server\\Plugin\\load_server_runtime();
+            require_once $runtime;
+            require_once WP_PLUGIN_DIR . '/reprint-server/wordpress/multisite.php';
+            $context = WordPress\\Reprint\\Server\\Plugin\\get_multisite_export_context();
+            $wpdb->query("DELETE FROM {$wpdb->blogs} WHERE blog_id >= 40000");
+            foreach (array(
+                array('network.test', '/shop%20_sale/child/'),
+                array('network.test:443', '/admin/child/'),
+                array('network.test', '/shopX20_sale/not-a-child/'),
+                array('network.test', '/shop%20Xsale/not-a-child/'),
+                array('network.test', '/shop%20_sale/'),
+                array('network.test:8443', '/shop%20_sale/not-a-child/'),
+            ) as $index => $row) {
+                // Another network and an archived site still need protection.
+                $wpdb->insert($wpdb->blogs, array('blog_id' => 40000 + $index,
+                    'site_id' => 2, 'archived' => 1, 'domain' => $row[0], 'path' => $row[1]));
+            }
+            $context['home_url'] = 'https://network.test:443/shop%20_sale/';
+            $context['site_url'] = 'https://network.test/admin/';
+            echo json_encode(reprint_get_multisite_nested_site_paths($context));
+        `], fixture.sites[7].url));
+        assert.deepEqual(paths, { 'https://network.test': ['/shop%20_sale/child/', '/admin/child/'] });
+    });
+
 });

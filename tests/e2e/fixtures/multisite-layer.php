@@ -2,7 +2,10 @@
 /** A small real network for the E2E pair at each stack layer. */
 global $wpdb;
 $domain = wp_parse_url(home_url(), PHP_URL_HOST) . ':' . wp_parse_url(home_url(), PHP_URL_PORT);
-$wpdb->query("ALTER TABLE {$wpdb->blogs} AUTO_INCREMENT = 7");
+// Inserting then deleting ID 6 advances both MySQL and SQLite sequences.
+// The legacy SQLite translator does not support ALTER TABLE AUTO_INCREMENT.
+$wpdb->insert($wpdb->blogs, ['blog_id' => 6, 'domain' => $domain, 'path' => '/reserved-fixture/']);
+$wpdb->delete($wpdb->blogs, ['blog_id' => 6]);
 $shop = wpmu_create_blog($domain, '/shop/', 'Shop', 1, ['public' => 1]);
 $sibling = wpmu_create_blog($domain, '/sibling/', 'Sibling', 1, ['public' => 1]);
 $shared = wp_create_user('shared', 'multisite-password', 'shared@example.test');

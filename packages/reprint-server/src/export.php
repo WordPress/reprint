@@ -1588,6 +1588,13 @@ function file_index_parent_symlink(string $requested_path): ?array
  */
 function endpoint_preflight(array $config): array
 {
+    // The dispatcher has resolved GET, form and JSON parameters here.
+    // Collect only for preflight, and fail the request if this query fails:
+    // an incomplete child-path list could rewrite another site's links.
+    if (isset($config['_multisite'])) {
+        $config['_multisite']['nested_site_paths'] = reprint_get_multisite_nested_site_paths($config['_multisite']);
+    }
+
     // -- Resolve filesystem roots --
     // Determine which directories to scan: either from the client-provided
     // "directory" config, or by auto-detecting from cwd/DOCUMENT_ROOT/__DIR__.
@@ -2628,6 +2635,94 @@ function endpoint_preflight(array $config): array
         "status" => $response["ok"] ? "ok" : "error",
         "stats" => $response,
     ];
+}
+
+/**
+ * List only child-site paths that a selected home/site URL could rewrite.
+ *
+ * Selecting network.test/shop needs /shop/news/, but not /sibling/ or sites
+ * on other domains. A root selection can need every path on that domain.
+ * Read the indexed site directory once per preflight, not per SQL/file request.
+ * The wpdb adapter uses WordPress's active MySQL or SQLite connection. It
+ * buffers query results, so read at most 1,000 rows per query. Continue after
+ * the last blog_id; OFFSET would reread the earlier rows on every batch.
+ * LIMIT bounds the returned rows, not the rows the database must scan.
+ *
+ * This list intentionally grows with matching sites. One million 20-byte paths
+ * cost about 62 MiB as a PHP 8.4 list, before JSON encoding. No page list, URL
+ * object, regex or upload-site ID list is created for those sites.
+ *
+ * @param array $source {
+ *     Source context returned by get_multisite_export_context().
+ *
+ *     @type int    $site_id Selected site ID.
+ *     @type string $base_prefix Network table prefix.
+ *     @type string $home_url Selected home URL.
+ *     @type string $site_url Selected WordPress URL.
+ * }
+ * @return array<string, string[]> Source HTTP(S) origin => child-site paths.
+ */
+function reprint_get_multisite_nested_site_paths(array $source): array {
+    global $wpdb;
+
+    $origins = [];
+    foreach (array_unique([$source['home_url'], $source['site_url']]) as $url) {
+        $parts = wp_parse_url($url);
+        $domain = strtolower($parts['host']) . ( isset($parts['port']) ? ':' . $parts['port'] : '' );
+        $default_port = strtolower($parts['scheme']) === 'https' ? 443 : 80;
+        $authority = ( $parts['port'] ?? null ) === $default_port ? strtolower($parts['host']) : $domain;
+        $origin = strtolower($parts['scheme']) . '://' . $authority;
+        $path = rtrim($parts['path'] ?? '', '/') . '/';
+        // HTTP home plus HTTPS siteurl on one host still needs one path list.
+        $origins[$authority]['origin'] = $origin;
+        // A default port in home/siteurl need not appear in blogs.domain.
+        $origins[$authority]['domains'][$domain] = true;
+        $origins[$authority]['domains'][$authority] = true;
+        $origins[$authority]['paths'][] = $path;
+    }
+
+    $database = new WpdbDriverPDO($wpdb);
+    $paths_by_origin = [];
+    foreach ($origins as $authority => $selection) {
+        $origin = $selection['origin'];
+        $conditions = [];
+        foreach (array_unique($selection['paths']) as $path) {
+            // LIKE can use the path index. SQLite Integration 2.x makes
+            // esc_like() a no-op, so also compare the literal prefix:
+            // /shop%20_sale/ must not match /shopX20Xsale/.
+            $conditions[] = $wpdb->prepare(
+                '(path LIKE %s AND LEFT(path, CHAR_LENGTH(%s)) = %s AND path <> %s)',
+                $wpdb->esc_like($path) . '%', $path, $path, $path
+            );
+        }
+        // No network ID filter: a site in another network can still have a
+        // matching host/path. Archived sites must also keep their old links.
+        $query = $wpdb->prepare(
+            // phpcs:ignore WordPress.DB.PreparedSQL -- WordPress checks the table prefix; each path condition above is prepared, and domains use placeholders.
+            "SELECT blog_id, path FROM `{$source['base_prefix']}blogs` WHERE domain IN (" . implode(',', array_fill(0, count($selection['domains']), '%s')) . ") AND blog_id <> %d AND (" . implode(' OR ', $conditions) . ')',
+            array_merge(array_keys($selection['domains']), [$source['site_id']])
+        );
+        $paths_by_origin[$origin] = [];
+        $last_blog_id = 0;
+        do {
+            // wpdb removes its escaped-percent placeholders when it executes
+            // this query, including LIKE '/shop/%'. Do not bypass its driver.
+            $rows = $database->query($wpdb->prepare(
+                // phpcs:ignore WordPress.DB.PreparedSQL -- The filters above are prepared; the cursor is an integer placeholder.
+                $query . ' AND blog_id > %d ORDER BY blog_id LIMIT 1000',
+                $last_blog_id
+            ));
+            $row_count = 0;
+            // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition -- Fetch at most one query batch.
+            while ($row = $rows->fetch()) {
+                $paths_by_origin[$origin][] = $row['path'];
+                $last_blog_id = (int) $row['blog_id'];
+                ++$row_count;
+            }
+            unset($rows);
+        } while ($row_count === 1000);
+    }
+    return $paths_by_origin;
 }
 
 /**
