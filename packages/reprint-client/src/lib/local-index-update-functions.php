@@ -366,6 +366,11 @@ function write_file_index_processor_entry_to_local_index(
 			'File index path is outside the filesystem root.'
 		);
 	}
+	// Remote selections may include an empty root directory. The local index
+	// describes only descendants of its filesystem root, never an empty path.
+	if ( $local_relative_path === '' ) {
+		return;
+	}
 	$local_index_entry = [
 		'path'  => $local_relative_path,
 		'ctime' => $file_index_processor_entry['ctime'],

@@ -7,6 +7,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use function Reprint\Importer\merge_local_index_mutations;
+use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
@@ -27,6 +28,26 @@ final class LocalIndexUpdateFunctionsTest extends TestCase
     {
         $this->removeTree($this->root);
         parent::tearDown();
+    }
+
+    public function testLocalIndexOmitsTheFilesystemRootButKeepsItsEmptyChild(): void
+    {
+        $output = fopen('php://temp', 'w+');
+        try {
+            foreach ([$this->root, $this->root . '/empty'] as $path) {
+                write_file_index_processor_entry_to_local_index($output, [
+                    'path' => $path, 'type' => 'dir', 'empty' => true, 'ctime' => 1, 'size' => 0,
+                ], $this->root);
+            }
+            rewind($output);
+            $lines = explode("\n", trim(stream_get_contents($output)));
+            $this->assertCount(1, $lines);
+            $entry = json_decode($lines[0], true, 512, JSON_THROW_ON_ERROR);
+            $this->assertSame('empty', base64_decode($entry['path'], true));
+            $this->assertTrue($entry['empty']);
+        } finally {
+            fclose($output);
+        }
     }
 
     /**

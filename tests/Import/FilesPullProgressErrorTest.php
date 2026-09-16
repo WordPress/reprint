@@ -26,6 +26,34 @@ class FileErrorProgressClient extends \ImportClient {
 }
 
 class FilesPullProgressErrorTest extends TestCase {
+    /** @dataProvider sourceExceptionPhases */
+    public function testSourceExceptionStopsTheOperation(string $phase): void {
+        $root = sys_get_temp_dir() . '/source-exception-' . bin2hex(random_bytes(6));
+        mkdir($root);
+        try {
+            $client = new \ImportClient('http://source.invalid/', $root . '/state', $root . '/local');
+            $handler = ( new \ReflectionClass($client) )->getMethod('handle_error_chunk');
+            $failure = null;
+            try {
+                $handler->invoke($client, ['body' => json_encode([
+                    'error_type' => 'exception',
+                    'message' => 'PHP cannot read the Windows link target: D:/site/link.',
+                ])], $phase, new \Reprint\Importer\StreamingContext());
+            } catch (\RuntimeException $error) {
+                $failure = $error;
+            }
+            $this->assertNotNull($failure, 'A source exception must stop the operation, not become another partial request.');
+            $this->assertSame(\RuntimeException::class, get_class($failure));
+            $this->assertSame('Remote ' . $phase . ' failed: PHP cannot read the Windows link target: D:/site/link.', $failure->getMessage());
+        } finally {
+            $this->remove_directory($root);
+        }
+    }
+
+    public static function sourceExceptionPhases(): array {
+        return [['index'], ['files']];
+    }
+
     /** @dataProvider interruptedResponses */
     public function testNextFileHasItsOwnProgressAfterSourceFileDisappears(bool $interrupt_response): void {
         $root = sys_get_temp_dir() . '/file-progress-error-' . bin2hex(random_bytes(6));

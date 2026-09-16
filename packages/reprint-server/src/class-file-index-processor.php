@@ -379,9 +379,24 @@ final class FileIndexProcessor {
         // Finishing a directory is observable so callers may stop at this
         // exact cursor before the processor returns to its parent directory.
         if ($this->current_directory_position >= count($this->current_directory_names)) {
+            $this->step_status = self::STATUS_DIRECTORY_COMPLETE;
+            // Emit empty directories here, including a selected root which
+            // has no parent entry in this traversal. Root exclusions still
+            // apply even though there were no child names to check.
+            if (
+                $this->current_directory_names === []
+                && !self::path_has_default_skipped_component($this->current_directory)
+                && ( $this->storage_path === "" || !path_is_same_as_or_descendant_of($this->current_directory, $this->storage_path) )
+            ) {
+                clearstatcache(true, $this->current_directory);
+                $stat = @lstat($this->current_directory);
+                if ($stat !== false) {
+                    $this->index_entries = self::index_entries_for_path($this->current_directory, $stat, false)["entries"];
+                    $this->step_status = self::STATUS_INDEXED;
+                }
+            }
             array_pop($this->directory_stack);
             $this->forget_current_directory_names();
-            $this->step_status = self::STATUS_DIRECTORY_COMPLETE;
             return true;
         }
 
@@ -438,6 +453,12 @@ final class FileIndexProcessor {
         $inspected_path = self::index_entries_for_path($path, $stat, $this->follow_symlinks);
         $this->index_entries = $inspected_path["entries"];
         $type = $inspected_path["type"];
+        // The directory's own final step emits its empty entry, including when
+        // it is also a selected root. Keep uninspectable directory entries here
+        // so a later directory error does not make the path look absent.
+        if ($type === "dir" && !empty($this->index_entries[0]["empty"])) {
+            $this->index_entries = [];
+        }
         $this->step_status = self::STATUS_INDEXED;
 
         // Depth-first traversal enters a new directory before returning to the
