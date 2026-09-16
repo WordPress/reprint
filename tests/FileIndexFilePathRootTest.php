@@ -38,6 +38,23 @@ final class FileIndexFilePathRootTest extends TestCase
         $this->assertSame([$configPath], $paths);
     }
 
+    /** A selected file needs its parent link and one physical file, not two file entries. */
+    public function testEndpointIndexesAFileThroughAParentSymlinkAtItsResolvedPath(): void
+    {
+        $directory = (string) realpath($this->tempDir);
+        mkdir($directory . '/releases');
+        file_put_contents($directory . '/releases/config.php', '<?php // config');
+        symlink($directory . '/releases', $directory . '/current');
+        $selected = $directory . '/current/config.php';
+
+        $paths = $this->runFileIndex([$selected], $selected);
+
+        $this->assertSame([
+            $directory . '/current',
+            $directory . '/releases/config.php',
+        ], $paths);
+    }
+
     public function testEndpointIndexesAFileRootAlongsideADirectoryRoot(): void
     {
         $docroot = $this->tempDir . '/site';

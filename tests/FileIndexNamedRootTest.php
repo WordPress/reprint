@@ -97,6 +97,7 @@ final class FileIndexNamedRootTest extends TestCase
 
         $this->assertSame('link', $this->entryAt($entries, $current)['type']);
         $this->assertSame('file', $this->entryAt($entries, $releases . '/wp-config.php')['type']);
+        $this->assertNotContains($current . '/wp-config.php', array_column($entries, 'path'));
     }
 
     public function testSelectedAliasesKeepBothLinksAndIndexOnePhysicalTargetAcrossResume(): void

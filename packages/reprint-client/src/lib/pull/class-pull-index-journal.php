@@ -466,8 +466,10 @@ class PullIndexJournal
      *
      * @throws RuntimeException When the WAL or an index cannot be read,
      *                          replaced, or cleared.
+     *
+     * @param string $remote_path_format Source format saved with preflight: 'unix' or 'windows'.
      */
-    public function apply_pending_records(): void
+    public function apply_pending_records(string $remote_path_format): void
     {
         if ($this->pull_index_wal_handle) {
             $this->close();
@@ -486,7 +488,7 @@ class PullIndexJournal
             "INDEX MERGE START | merging pull index WAL into {$this->remote_index_path}",
         );
 
-        $remote_index_reader = new RemoteIndexReader($this->remote_index_path);
+        $remote_index_reader = new RemoteIndexReader($this->remote_index_path, $remote_path_format);
         $remote_index_reader->open();
         $pull_index_wal_file_handle = fopen($this->pull_index_wal_path, "r");
         $remote_index_replacement_file_handle = fopen($remote_index_replacement_file, "w");

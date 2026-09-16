@@ -26,6 +26,34 @@ class FileErrorProgressClient extends \ImportClient {
 }
 
 class FilesPullProgressErrorTest extends TestCase {
+    /** @dataProvider sourceExceptionPhases */
+    public function testSourceExceptionStopsTheOperation(string $phase): void {
+        $root = sys_get_temp_dir() . '/source-exception-' . bin2hex(random_bytes(6));
+        mkdir($root);
+        try {
+            $client = new \ImportClient('http://source.invalid/', $root . '/state', $root . '/local', ['allow_http' => true]);
+            $handler = ( new \ReflectionClass($client) )->getMethod('handle_error_chunk');
+            $failure = null;
+            try {
+                $handler->invoke($client, ['body' => json_encode([
+                    'error_type' => 'exception',
+                    'message' => 'PHP cannot read the Windows link target: D:/site/link.',
+                ])], $phase, new \Reprint\Importer\StreamingContext());
+            } catch (\RuntimeException $error) {
+                $failure = $error;
+            }
+            $this->assertNotNull($failure, 'A source exception must stop the operation, not become another partial request.');
+            $this->assertSame(\RuntimeException::class, get_class($failure));
+            $this->assertSame('Remote ' . $phase . ' failed: PHP cannot read the Windows link target: D:/site/link.', $failure->getMessage());
+        } finally {
+            $this->remove_directory($root);
+        }
+    }
+
+    public static function sourceExceptionPhases(): array {
+        return [['index'], ['files']];
+    }
+
     /** @dataProvider interruptedResponses */
     public function testNextFileHasItsOwnProgressAfterSourceFileDisappears(bool $interrupt_response): void {
         $root = sys_get_temp_dir() . '/file-progress-error-' . bin2hex(random_bytes(6));
@@ -73,11 +101,14 @@ class FilesPullProgressErrorTest extends TestCase {
                 usleep(10000);
             }
             $this->assertTrue($ready, (string) file_get_contents($root . '/server.log'));
-            $url = 'http://' . $address . '/?chunk_size=16384';
+            $url = 'http://' . $address . '/';
             $client = new FileErrorProgressClient($url, $root . '/state', $root . '/local', ['allow_http' => true]);
             \write_current_pull_state($client, [
                 'preflight' => ['data' => ['ok' => true, 'wp_detect' => ['roots' => [['path' => $source]]]], 'http_code' => 200],
                 'active_resumable_command' => ['command_name' => 'files-pull', 'completion_state' => 'in_progress', 'current_stage' => 'fetch'],
+            ]);
+            ( new \ReflectionMethod($client, 'initialize_tuner') )->invoke($client, [
+                'tuning_config' => ['file_chunk_start' => 16384, 'file_chunk_min' => 16384, 'file_chunk_max' => 16384],
             ]);
             $list_file = $client->pull_state_directory . '/fetch-list.jsonl';
             $list_handle = fopen($list_file, 'wb');

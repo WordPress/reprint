@@ -137,8 +137,8 @@ final class PushSession {
      *                                      must never receive, delete, or replace.
      */
     private function __construct(string $reprint_directory, string $docroot, string $push_session_id, array $excluded_paths) {
-        $this->reprint_directory = trim_right_slash($reprint_directory);
-        $this->docroot = trim_right_slash($docroot);
+        $this->reprint_directory = trim_right_slash($reprint_directory, native_path_format());
+        $this->docroot = trim_right_slash($docroot, native_path_format());
         $this->push_session_id = $push_session_id;
         if ($reprint_directory === $this->docroot) {
             throw new InvalidArgumentException('The reprint directory must not be the document root itself.');
@@ -2784,7 +2784,7 @@ final class PushSession {
         if ($real_path === false || !is_dir($real_path) || is_link($path)) {
             throw new InvalidArgumentException('The ' . $description . ' is not a real directory: ' . $path . '.');
         }
-        return trim_right_slash($real_path);
+        return trim_right_slash($real_path, native_path_format());
     }
 
     /**

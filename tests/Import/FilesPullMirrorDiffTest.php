@@ -78,7 +78,7 @@ final class FilesPullMirrorDiffTest extends TestCase
             'pull_index_journal'
         ) )->getValue($client);
         $journal->flush();
-        $journal->apply_pending_records();
+        $journal->apply_pending_records('unix');
         // A stopped mirror stage may have published its list but not saved fetch.
         $buildFetchList->invoke($client);
         $journal->flush();

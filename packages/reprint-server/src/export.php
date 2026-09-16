@@ -15,11 +15,19 @@ use WordPress\Reprint\Server\ResourceBudget;
 use WordPress\Reprint\Server\SqliteDriverPDO;
 use WordPress\Reprint\Server\WpdbDriverPDO;
 
+use function WordPress\Reprint\Server\native_path_format;
 use function WordPress\Reprint\Server\assert_valid_path;
 use function WordPress\Reprint\Server\build_pdo_dsn;
 use function WordPress\Reprint\Server\generate_random_bytes;
 use function WordPress\Reprint\Server\json_encode_or_throw;
+use function WordPress\Reprint\Server\is_absolute_path;
+use function WordPress\Reprint\Server\source_io_path;
+use function WordPress\Reprint\Server\source_lstat;
+use function WordPress\Reprint\Server\source_is_link;
+use function WordPress\Reprint\Server\source_realpath;
+use function WordPress\Reprint\Server\source_readlink;
 use function WordPress\Reprint\Server\normalize_path;
+use function WordPress\Reprint\Server\normalize_path_separators;
 use function WordPress\Reprint\Server\parse_size;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\trim_right_slash;
@@ -675,7 +683,7 @@ function normalize_path_list(array $paths): array
         }
         $real = realpath($path);
         $final = $real !== false ? $real : $path;
-        $final = trim_right_slash($final);
+        $final = trim_right_slash($final, native_path_format());
         if ($final === "") {
             continue;
         }
@@ -1386,12 +1394,12 @@ function resolve_directories(array $config): array
                 "directory entries must be non-empty strings"
             );
         }
-        $directory = trim($directory);
-        assert_valid_path($directory, "directory entry");
+        $directory = PHP_OS === 'WINNT' ? $directory : trim($directory);
+        assert_valid_path($directory, native_path_format(), "directory entry");
 
         clearstatcache(true, $directory);
-        $real_directory = @realpath($directory);
-        if ($real_directory === false || !is_dir($real_directory)) {
+        $real_directory = @source_realpath($directory);
+        if ($real_directory === false || !is_dir(source_io_path($real_directory))) {
             throw new InvalidArgumentException(
                 "directory entry is not an accessible directory: {$directory}\n" .
                     "Current working directory: " .
@@ -1402,7 +1410,7 @@ function resolve_directories(array $config): array
             );
         }
 
-        $directories[] = $real_directory;
+        $directories[] = normalize_path_separators($real_directory, native_path_format());
     }
 
     if (empty($directories)) {
@@ -1452,11 +1460,11 @@ function resolve_file_index_roots(array $config): array
         if (!is_string($root_input)) {
             throw new InvalidArgumentException("directory entries must be non-empty strings");
         }
-        $root_input = trim($root_input);
-        assert_valid_path($root_input, "directory entry");
-        $requested_path = normalize_path($root_input);
+        $root_input = PHP_OS === 'WINNT' ? $root_input : trim($root_input);
+        assert_valid_path($root_input, native_path_format(), "directory entry");
+        $requested_path = normalize_path($root_input, native_path_format());
         clearstatcache(true, $requested_path);
-        $stat = @lstat($requested_path);
+        $stat = @source_lstat($requested_path);
         if ($stat === false) {
             // The client sends `pulled_before` for selected paths an earlier pull
             // already saw. Absence there means the source deleted the path, so it
@@ -1479,10 +1487,13 @@ function resolve_file_index_roots(array $config): array
         }
 
         $mode = $stat["mode"] & STAT_TYPE_MASK;
-        $type = $mode === STAT_TYPE_LINK ? "symlink" : ( is_dir($requested_path) ? "directory" : "file" );
-        $resolved_path = @realpath($requested_path);
+        $type = $mode === STAT_TYPE_LINK ? "symlink" : ( is_dir(source_io_path($requested_path)) ? "directory" : "file" );
+        $resolved_path = @source_realpath($requested_path);
         if ($type === "symlink" && $resolved_path === false) {
-            throw new InvalidArgumentException("Selected file-index root is a broken symlink: {$requested_path}");
+            $message = PHP_OS === 'WINNT'
+                ? "PHP cannot resolve the Windows link target: {$requested_path}. Recreate the link with a full drive-letter target before migration."
+                : "Selected file-index root is a broken symlink: {$requested_path}";
+            throw new InvalidArgumentException($message);
         }
         if ($resolved_path === false) {
             throw new InvalidArgumentException(
@@ -1500,7 +1511,7 @@ function resolve_file_index_roots(array $config): array
         }
         $roots[] = [
             "requested_path" => $requested_path,
-            "resolved_path" => $resolved_path,
+            "resolved_path" => normalize_path_separators($resolved_path, native_path_format()),
             "type" => $type,
         ];
     }
@@ -1536,7 +1547,7 @@ function resolve_file_index_start_root(
     string $list_directory,
     bool $follow_symlinks
 ): array {
-    $requested_path = normalize_path($list_directory);
+    $requested_path = normalize_path($list_directory, native_path_format());
     foreach ($roots as $root) {
         if ($root["requested_path"] === $requested_path) {
             return $root;
@@ -1549,8 +1560,8 @@ function resolve_file_index_start_root(
         );
     }
 
-    $resolved_path = @realpath($requested_path);
-    if ($resolved_path === false || !is_dir($resolved_path)) {
+    $resolved_path = @source_realpath($requested_path);
+    if ($resolved_path === false || !is_dir(source_io_path($resolved_path))) {
         throw new InvalidArgumentException(
             "Followed symlink target directory does not exist or is not accessible: {$requested_path}"
         );
@@ -1558,7 +1569,7 @@ function resolve_file_index_start_root(
 
     return [
         "requested_path" => $requested_path,
-        "resolved_path" => $resolved_path,
+        "resolved_path" => normalize_path_separators($resolved_path, native_path_format()),
         "type" => "directory",
     ];
 }
@@ -1566,17 +1577,21 @@ function resolve_file_index_start_root(
 /** Returns the first symlink in a requested root's parent path. */
 function file_index_parent_symlink(string $requested_path): ?array
 {
-    $current = "/";
-    $parts = explode("/", trim(dirname($requested_path), "/"));
-    foreach ($parts as $part) {
-        if ($part === "") {
+    $parents = [];
+    $current = dirname($requested_path);
+    while (is_absolute_path($current, native_path_format())) {
+        $parents[] = $current;
+        $parent = dirname($current);
+        if ($parent === $current) {
+            break;
+        }
+        $current = $parent;
+    }
+    foreach (array_reverse($parents) as $current) {
+        if (!@source_is_link($current)) {
             continue;
         }
-        $current = wp_join_unix_paths($current, $part);
-        if (!@is_link($current)) {
-            continue;
-        }
-        $target = @readlink($current);
+        $target = @source_readlink($current);
         return ["path" => $current, "target" => $target === false ? "(unreadable)" : $target];
     }
     return null;
@@ -1588,6 +1603,13 @@ function file_index_parent_symlink(string $requested_path): ?array
  */
 function endpoint_preflight(array $config): array
 {
+    // The dispatcher has resolved GET, form and JSON parameters here.
+    // Collect only for preflight, and fail the request if this query fails:
+    // an incomplete child-path list could rewrite another site's links.
+    if (isset($config['_multisite'])) {
+        $config['_multisite']['nested_site_paths'] = reprint_get_multisite_nested_site_paths($config['_multisite']);
+    }
+
     // -- Resolve filesystem roots --
     // Determine which directories to scan: either from the client-provided
     // "directory" config, or by auto-detecting from cwd/DOCUMENT_ROOT/__DIR__.
@@ -2074,13 +2096,13 @@ function endpoint_preflight(array $config): array
                         // find the directory at the resolved location where
                         // files are actually downloaded.
                         $abspath_raw = defined("ABSPATH")
-                            ? trim_right_slash(ABSPATH)
+                            ? trim_right_slash(ABSPATH, native_path_format())
                             : null;
                         $abspath_resolved = null;
                         if ($abspath_raw !== null) {
                             $abspath_real = realpath($abspath_raw);
                             $abspath_resolved = $abspath_real !== false
-                                ? trim_right_slash($abspath_real)
+                                ? trim_right_slash($abspath_real, native_path_format())
                                 : $abspath_raw;
                         }
 
@@ -2373,21 +2395,21 @@ function endpoint_preflight(array $config): array
     // Scan each directory to list installed plugins, mu-plugins, and themes.
     $wp_runtime_paths = null;
     if ($db["wp"]["wp_load_loaded"]) {
-        $runtime_root = defined("ABSPATH") ? trim_right_slash(ABSPATH) : null;
+        $runtime_root = defined("ABSPATH") ? trim_right_slash(ABSPATH, native_path_format()) : null;
         $content_dir = defined("WP_CONTENT_DIR")
-            ? trim_right_slash(WP_CONTENT_DIR)
+            ? trim_right_slash(WP_CONTENT_DIR, native_path_format())
             : null;
         $plugins_dir = defined("WP_PLUGIN_DIR")
-            ? trim_right_slash(WP_PLUGIN_DIR)
+            ? trim_right_slash(WP_PLUGIN_DIR, native_path_format())
             : null;
         $mu_plugins_dir = defined("WPMU_PLUGIN_DIR")
-            ? trim_right_slash(WPMU_PLUGIN_DIR)
+            ? trim_right_slash(WPMU_PLUGIN_DIR, native_path_format())
             : null;
         $themes_dir = null;
         if (function_exists("get_theme_root")) {
             $themes_dir = get_theme_root();
             if (is_string($themes_dir)) {
-                $themes_dir = trim_right_slash($themes_dir);
+                $themes_dir = trim_right_slash($themes_dir, native_path_format());
             } else {
                 $themes_dir = null;
             }
@@ -2526,6 +2548,7 @@ function endpoint_preflight(array $config): array
         "error" => $preflight_error,
         "timestamp" => time(),
         "protocol_version" => EXPORT_PROTOCOL_VERSION,
+        "path_format" => native_path_format(),
         "capabilities" => [
             "base64_path_parameters" => true,
         ],
@@ -2628,6 +2651,108 @@ function endpoint_preflight(array $config): array
         "status" => $response["ok"] ? "ok" : "error",
         "stats" => $response,
     ];
+}
+
+/**
+ * List only child-site paths that a selected home/site URL could rewrite.
+ *
+ * Selecting network.test/shop needs /shop/news/, but not /sibling/ or sites
+ * on other domains. A root selection can need every path on that domain.
+ * Build this list once per preflight, not per SQL/file request.
+ * The wpdb adapter uses WordPress's active MySQL or SQLite connection. It
+ * buffers query results, so read at most 1,000 rows per query. Continue after
+ * the last blog_id; OFFSET would reread the earlier rows on every batch.
+ * The first query filters by domain/path; domain-based networks usually return
+ * no rows. If it fills a batch, scan primary-key windows after that batch and
+ * mark non-matching paths NULL. Keeping those filters out of WHERE prevents
+ * both engines from sorting all remaining matches again for every batch.
+ * The first query can scan many rows; later queries scan at most 1,000.
+ *
+ * This list intentionally grows with matching sites. One million 20-byte paths
+ * cost about 62 MiB as a PHP 8.4 list, before JSON encoding. No page list, URL
+ * object, regex or upload-site ID list is created for those sites.
+ *
+ * @param array $source {
+ *     Source context returned by get_multisite_export_context().
+ *
+ *     @type int    $site_id Selected site ID.
+ *     @type string $base_prefix Network table prefix.
+ *     @type string $home_url Selected home URL.
+ *     @type string $site_url Selected WordPress URL.
+ * }
+ * @return array<string, string[]> Source HTTP(S) origin => child-site paths.
+ */
+function reprint_get_multisite_nested_site_paths(array $source): array {
+    global $wpdb;
+
+    $origins = [];
+    foreach (array_unique([$source['home_url'], $source['site_url']]) as $url) {
+        $parts = wp_parse_url($url);
+        $domain = strtolower($parts['host']) . ( isset($parts['port']) ? ':' . $parts['port'] : '' );
+        $default_port = strtolower($parts['scheme']) === 'https' ? 443 : 80;
+        $authority = ( $parts['port'] ?? null ) === $default_port ? strtolower($parts['host']) : $domain;
+        $origin = strtolower($parts['scheme']) . '://' . $authority;
+        $path = rtrim($parts['path'] ?? '', '/') . '/';
+        // HTTP home plus HTTPS siteurl on one host still needs one path list.
+        $origins[$authority]['origin'] = $origin;
+        // A default port in home/siteurl need not appear in blogs.domain.
+        $origins[$authority]['domains'][$domain] = true;
+        $origins[$authority]['domains'][$authority] = true;
+        $origins[$authority]['paths'][] = $path;
+    }
+
+    $database = new WpdbDriverPDO($wpdb);
+    $paths_by_origin = [];
+    foreach ($origins as $authority => $selection) {
+        $origin = $selection['origin'];
+        $conditions = [];
+        foreach (array_unique($selection['paths']) as $path) {
+            // LIKE can use the path index. SQLite Integration 2.x makes
+            // esc_like() a no-op, so also compare the literal prefix:
+            // /shop%20_sale/ must not match /shopX20Xsale/.
+            $conditions[] = $wpdb->prepare(
+                '(path LIKE %s AND LEFT(path, CHAR_LENGTH(%s)) = %s AND path <> %s)',
+                $wpdb->esc_like($path) . '%', $path, $path, $path
+            );
+        }
+        // No network ID filter: a site in another network can still have a
+        // matching host/path. Archived sites must also keep their old links.
+        $condition = $wpdb->prepare(
+            // phpcs:ignore WordPress.DB.PreparedSQL -- Each path condition above is prepared, and domains use placeholders.
+            "domain IN (" . implode(',', array_fill(0, count($selection['domains']), '%s')) . ") AND blog_id <> %d AND (" . implode(' OR ', $conditions) . ')',
+            array_merge(array_keys($selection['domains']), [$source['site_id']])
+        );
+        $paths_by_origin[$origin] = [];
+        $last_blog_id = 0;
+        do {
+            if ($last_blog_id === 0) {
+                $query = "SELECT blog_id, path FROM `{$source['base_prefix']}blogs` WHERE {$condition}";
+            } else {
+                // Return even non-matches so the cursor crosses a window with
+                // no child sites. WHERE only bounds the primary-key scan.
+                $query = "SELECT blog_id, CASE WHEN {$condition} THEN path ELSE NULL END AS path FROM `{$source['base_prefix']}blogs`";
+            }
+            $query .= $last_blog_id === 0 ? ' AND' : ' WHERE';
+            // wpdb removes its escaped-percent placeholders when it executes
+            // this query, including LIKE '/shop/%'. Do not bypass its driver.
+            $rows = $database->query($wpdb->prepare(
+                // phpcs:ignore WordPress.DB.PreparedSQL -- The filters above are prepared; WordPress validates the prefix and the cursor is an integer placeholder.
+                $query . ' blog_id > %d ORDER BY blog_id LIMIT 1000',
+                $last_blog_id
+            ));
+            $row_count = 0;
+            // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition -- Fetch at most one query batch.
+            while ($row = $rows->fetch()) {
+                if ($row['path'] !== null) {
+                    $paths_by_origin[$origin][] = $row['path'];
+                }
+                $last_blog_id = (int) $row['blog_id'];
+                ++$row_count;
+            }
+            unset($rows);
+        } while ($row_count === 1000);
+    }
+    return $paths_by_origin;
 }
 
 /**

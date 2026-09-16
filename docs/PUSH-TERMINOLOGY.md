@@ -25,7 +25,13 @@ The domain path terms are:
 | Local relative path | Path relative to the filesystem root. | `$local_relative_path` |
 | Document-root-relative path | Path relative to the document root. | `$document_root_relative_path` |
 
-An **absolute path** begins at `/`. A **relative path** has no leading slash.
+A **path format** supplies the separator and root rules: `unix` or `windows`.
+It comes from the source host, never from the path text. An **absolute path**
+has a complete root in that format: `/` for Unix, a drive root such as `D:/`
+or a share root such as `\\SERVER\SHARE` for Windows. A **relative path** still
+needs a base directory or drive. For example, `D:photos` and `/photos` are not
+fully absolute Windows paths. Path format is separate from **path type**,
+which identifies a file, directory, or link.
 A **normalized path** has repeated separators and `.` or `..` segments removed
 lexically; it does not inspect the filesystem. A **resolved absolute path** is
 an absolute path whose existing symlinks `realpath()` resolved. An

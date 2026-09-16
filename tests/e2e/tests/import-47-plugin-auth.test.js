@@ -26,11 +26,11 @@ describe('Import: Reprint Server plugin authentication', () => {
     });
 
     it('rejects requests with no auth headers', async () => {
-        const url = new URL(getSiteUrl(site));
-        url.searchParams.set('endpoint', 'preflight');
-        url.searchParams.set('directory', getSiteDir(site));
-
-        const response = await fetch(url.toString());
+        const response = await fetch(getSiteUrl(site), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(site) }),
+        });
         assert.equal(response.status, 403,
             'Unauthenticated request must be rejected with 403');
 
@@ -40,13 +40,15 @@ describe('Import: Reprint Server plugin authentication', () => {
     });
 
     it('rejects requests signed with the wrong connection token', async () => {
-        const url = new URL(getSiteUrl(site));
-        url.searchParams.set('endpoint', 'preflight');
-        url.searchParams.set('directory', getSiteDir(site));
-
+        const requestBody = JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(site) });
         const clientWithWrongConnectionToken = createHmacClient('not-the-right-connection-token');
-        const response = await fetch(url.toString(), {
-            headers: clientWithWrongConnectionToken.getAuthHeaders(''),
+        const response = await fetch(getSiteUrl(site), {
+            method: 'POST',
+            headers: {
+                ...clientWithWrongConnectionToken.getAuthHeaders(requestBody),
+                'Content-Type': 'application/json',
+            },
+            body: requestBody,
         });
         assert.equal(response.status, 403,
             'Request signed with the wrong connection token must be rejected with 403');

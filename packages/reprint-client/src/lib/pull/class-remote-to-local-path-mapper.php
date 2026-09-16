@@ -1,7 +1,9 @@
 <?php
 
+use function WordPress\Reprint\Server\assert_valid_path_format;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Server\assert_valid_path;
+use function WordPress\Reprint\Server\normalize_path_separators;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\path_remainder_under;
 
@@ -18,6 +20,11 @@ use function WordPress\Reprint\Server\path_remainder_under;
  * symlink target outside that scope goes under the configured local followed
  * symlinks root instead.
  *
+ * Windows drive paths use forward slashes beneath the local root: D:\site\a.txt
+ * becomes /local/D:/site/a.txt. The drive stays in the path so D: and E: do not
+ * collide. A UNC path `\\SERVER\SHARE/file.txt` becomes
+ * /local/UNC/SERVER/SHARE/file.txt. Unix paths keep literal backslashes in names.
+ *
  * Copied targets and rewritten symlink destinations both use this mapping, so
  * a rewritten link points to the place where its target was copied.
  *
@@ -28,6 +35,9 @@ final class RemoteToLocalPathMapper
 {
     /** Local filesystem root beneath which pulled paths are written. */
     private string $filesystem_root;
+
+    /** Source path format from preflight; never inferred from an index path. */
+    private string $remote_path_format;
 
     /** @var list<string> Remote absolute path roots selected before following symlinks. */
     private array $original_remote_absolute_path_roots;
@@ -46,17 +56,21 @@ final class RemoteToLocalPathMapper
      * below the filesystem root.
      *
      * @param string               $filesystem_root                    Local filesystem root.
+     * @param string               $remote_path_format                 Source path format: 'unix' or 'windows'.
      * @param list<string>         $original_remote_absolute_path_roots Remote absolute path roots selected before following symlinks.
      * @param array<string,string> $resolved_path_mappings             Remote absolute prefix to local absolute prefix.
      * @param string|null          $local_followed_symlinks_root       Local root for followed targets outside the original scope.
      */
     public function __construct(
         string $filesystem_root,
+        string $remote_path_format,
         array $original_remote_absolute_path_roots,
         array $resolved_path_mappings = [],
         ?string $local_followed_symlinks_root = null
     ) {
         $this->filesystem_root = $filesystem_root;
+        assert_valid_path_format($remote_path_format);
+        $this->remote_path_format = $remote_path_format;
         $this->original_remote_absolute_path_roots = $original_remote_absolute_path_roots;
         $this->resolved_path_mappings = $resolved_path_mappings;
         $this->local_followed_symlinks_root = $local_followed_symlinks_root;
@@ -70,7 +84,8 @@ final class RemoteToLocalPathMapper
      */
     public function remote_path_to_local_path(string $remote_absolute_path): string
     {
-        assert_valid_path($remote_absolute_path, "remote absolute path");
+        assert_valid_path($remote_absolute_path, $this->remote_path_format, "remote absolute path");
+        $remote_absolute_path = normalize_path_separators($remote_absolute_path, $this->remote_path_format);
         $local_absolute_path = null;
         $longest_remote_prefix_length = -1;
         foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
@@ -93,6 +108,11 @@ final class RemoteToLocalPathMapper
             return $local_absolute_path;
         }
 
+        $local_relative_path = $remote_absolute_path;
+        if ($this->remote_path_format === 'windows' && substr($remote_absolute_path, 0, 2) === '\\\\') {
+            $local_relative_path = 'UNC/' . str_replace('\\', '/', substr($remote_absolute_path, 2));
+        }
+
         if (
             $this->local_followed_symlinks_root !== null
             && !path_is_same_as_or_descendant_of(
@@ -102,11 +122,17 @@ final class RemoteToLocalPathMapper
         ) {
             return wp_join_unix_paths(
                 $this->local_followed_symlinks_root,
-                $remote_absolute_path
+                $local_relative_path
             );
         }
 
-        return wp_join_unix_paths($this->filesystem_root, $remote_absolute_path);
+        return wp_join_unix_paths($this->filesystem_root, $local_relative_path);
+    }
+
+    /** Returns the source format required to validate entries before mapping them. */
+    public function remote_path_format(): string
+    {
+        return $this->remote_path_format;
     }
 
     /**

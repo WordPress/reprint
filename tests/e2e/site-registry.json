@@ -5,6 +5,9 @@
   "dbHost": "127.0.0.1",
   "wpVersion": "6.7",
   "sites": {
+    "post-requests": {
+      "port": 8153
+    },
     "basic": {
       "port": 8081
     },
@@ -216,6 +219,15 @@
     },
     "multisite-query-budget": {
       "port": 8148
+    },
+    "multisite-sqlite": {
+      "port": 8178
+    },
+    "multisite-sqlite-legacy": {
+      "port": 8179
+    },
+    "multisite-paths-mysql": {
+      "port": 8180
     }
   }
 }

@@ -88,7 +88,7 @@ class FilesPullProgressResumeTest extends TestCase {
                 usleep(10000);
             }
             $this->assertTrue($ready, (string) file_get_contents($root . '/server.log'));
-            $url = 'http://' . $address . '/?chunk_size=16384';
+            $url = 'http://' . $address . '/';
             $client = new StopDuringFileProgressClient($url, $root . '/state', $root . '/local', ['allow_http' => true]);
             $client->observation_file = $root . '/before-stop.json';
             \write_current_pull_state($client, [
@@ -175,6 +175,9 @@ class FilesPullProgressResumeTest extends TestCase {
 
     private function download_list(\ImportClient $client, string $list_file): void {
         $reflection = new \ReflectionClass($client);
+        $reflection->getMethod('initialize_tuner')->invoke($client, [
+            'tuning_config' => ['file_chunk_start' => 16384, 'file_chunk_min' => 16384, 'file_chunk_max' => 16384],
+        ]);
         $download = $reflection->getMethod('fetch_files_from_list');
         for ($request = 0; $request < 10; ++$request) {
             if ($download->invoke($client, $list_file)) {

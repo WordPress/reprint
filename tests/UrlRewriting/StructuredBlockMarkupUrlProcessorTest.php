@@ -8,11 +8,75 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.php';
 
 class StructuredBlockMarkupUrlProcessorTest extends TestCase {
+    /** Full HTTP URLs need no base; shorthand and relative forms still use it. */
+    public function testAbsoluteUrlShortcutKeepsBaseResolutionAndValidation(): void
+    {
+        foreach ([
+            ['https://source.example/photo.jpg', 'https://source.example/photo.jpg', true],
+            ['HTTPS://source.example/photo.jpg', 'https://source.example/photo.jpg', true],
+            [' https://source.example/photo.jpg ', 'https://source.example/photo.jpg', true],
+            ['https:photo.jpg', 'https://source.example/shop/photo.jpg', true],
+            ['//source.example/photo.jpg', 'https://source.example/photo.jpg', false],
+            ['photo.jpg', 'https://source.example/shop/photo.jpg', false],
+            ['../photo.jpg', 'https://source.example/photo.jpg', false],
+            ['https:', 'https://source.example/shop/', false],
+            ['https://invalid host/photo.jpg', false, false],
+        ] as [$rawUrl, $absoluteUrl, $isAbsolute]) {
+            foreach ([
+                '<a href="' . $rawUrl . '"></a>',
+                '<style>a{background:url("' . $rawUrl . '")}</style>',
+                '<!-- wp:image ' . json_encode(['url' => $rawUrl]) . ' /-->',
+            ] as $markup) {
+                $processor = new StructuredBlockMarkupUrlProcessor($markup, 'https://source.example/shop/', true);
+                $this->assertSame($absoluteUrl !== false, $processor->next_url(), $markup);
+                if ($absoluteUrl !== false) {
+                    $this->assertSame($absoluteUrl, $processor->get_parsed_url()->toString(), $markup);
+                    $this->assertSame($isAbsolute, $processor->is_url_absolute(), $markup);
+                    $this->assertFalse($processor->next_url(), $markup);
+                }
+            }
+        }
+    }
+
     public function testNextUrlInCurrentTokenReturnsFalseWithoutAStructuredUrl(): void
     {
         $processor = new StructuredBlockMarkupUrlProcessor('Text without structured URLs');
 
         $this->assertFalse($processor->next_url_in_current_token());
+    }
+
+    /** A block setting must not inherit relative-URL handling from the preceding field. */
+    public function testRelativeUrlRuleChangesWithEachField(): void
+    {
+        $markup = '<!-- wp:image {"label":"/label","url":"/photo.jpg","className":"/class"} /-->'
+            . '<style>a{background:url(image.jpg)}</style>'
+            . '<a href="/about"></a>';
+        $fields = [
+            ['/label', false, false],
+            ['/photo.jpg', true, 'https://source.example/photo.jpg'],
+            ['/class', false, false],
+            ['image.jpg', true, 'https://source.example/shop/image.jpg'],
+            ['/about', true, 'https://source.example/about'],
+        ];
+
+        foreach (['https://source.example/shop/', null] as $baseUrl) {
+            $processor = new StructuredBlockMarkupUrlProcessor($markup, $baseUrl, true);
+            $fieldIndex = 0;
+            while ($processor->next_token()) {
+                while ($processor->next_raw_url_in_current_token()) {
+                    [$rawUrl, $acceptsRelativeUrls, $absoluteUrl] = $fields[$fieldIndex++];
+                    $this->assertSame($rawUrl, $processor->get_raw_url());
+                    $this->assertSame($acceptsRelativeUrls ? $baseUrl : null, $processor->get_url_base());
+                    $parsedUrl = $processor->get_parsed_url();
+                    $this->assertSame(
+                        $baseUrl === null ? false : $absoluteUrl,
+                        $parsedUrl === false ? false : $parsedUrl->toString()
+                    );
+                }
+            }
+            $this->assertSame(count($fields), $fieldIndex);
+            $this->assertNull($processor->get_url_base());
+        }
     }
 
     #[DataProvider('structuredUrlDiscoveryProvider')]

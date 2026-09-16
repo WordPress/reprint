@@ -14,18 +14,36 @@ not a CI failure threshold.
 | --- | --- |
 | `html` | HTML links with distinct URLs. |
 | `style-elements` | CSS URLs inside STYLE elements. |
+| `style-large-value` | 8,192 STYLE elements in one value, exposing repeated whole-value copies. |
 | `blocks-literal-urls` | Plain URLs inside nested Divi attributes. |
-| `blocks-nested-html` | HTML in `module.content.value`, with distinct URLs. This exercised the raw-JSON fast path removed in #795. |
+| `blocks-nested-html` | HTML in `module.content.value`, with distinct URLs. Ordinary imports keep the raw-JSON fast path; selected-site imports parse the nested strings. |
 | `blocks-repeated-urls` | The same HTML shape with one repeated URL and distinct surrounding text. |
 | `blocks-escaped-quotes` | Nested HTML with JSON `\u0022` quotes. This already needed parsing before #795. |
 | `blocks-encoded-shortcodes` | A nested WPBakery shortcode whose base64 body hides HTML links. |
 | `blocks-no-source-urls` | Distinct block values that need no URL changes. |
 | `serialized-options` | PHP-serialized options, including string-length updates. |
 
+Each corpus runs twice. `url-rewrite-*` uses ordinary import settings.
+`url-rewrite-selected-site-*` selects a multisite migration with no child paths,
+so the report shows the extra format parsing separately. Both modes receive the
+same inputs and must produce the same target content.
+
+Until selected-site rewriting lands on trunk, the trunk side of those extra rows
+uses its ordinary rewrite path as a reference. It does not claim that trunk can
+keep child-site links remote. The URL correctness tests cover those links.
+
+The three `selected-site-child-paths-*` cases also supply a child site at
+`/news/`. Their content points to `/article/...`, so each parsed URL must pass
+the child-path lookup before it can move. Trunk ignores the child-path argument;
+these particular outputs remain comparable because no input points to `/news/`.
+The URL tests separately check matched child links, relative links and dot segments.
+These cases measure lookup misses, not the cost of loading a large site directory.
+
 ## Reading the numbers
 
-Each case contains 128 distinct values with 32 entries each. One PHP process
-runs five samples; the report uses the median. Each sample starts a new rewriter
+Most cases contain 128 distinct values with 32 entries each. `style-large-value`
+uses one value with 8,192 distinct URLs. One PHP process runs five samples; the
+report uses the median. Each sample starts a new rewriter
 and reuses it across the values, as SQL apply does. This includes building the
 URL mapping. PHP startup, fixture creation and output validation are not timed.
 
@@ -48,6 +66,7 @@ From the repository root, with dependencies installed:
 ```sh
 node tests/e2e/benchmark/bench-url-rewrite.mjs /absolute/path/to/reprint.phar > urls.json
 php tests/e2e/benchmark/bench-url-rewrite.php /absolute/path/to/checkout blocks-nested-html
+php tests/e2e/benchmark/bench-url-rewrite.php /absolute/path/to/checkout selected-site-blocks-nested-html
 ```
 
 To compare two builds, run the same harness against each PHAR. Do not copy the

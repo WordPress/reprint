@@ -344,7 +344,7 @@ class DiagnoseHttpErrorTest extends TestCase
                 }
                 $request .= $piece;
             }
-            if (strpos($request, 'GET /?reprint-api=1') !== 0) {
+            if (strpos($request, 'POST /?reprint-api=1') !== 0) {
                 exit(3);
             }
             $body = '<!doctype html><title>Unsupported Media Type</title>';
@@ -366,7 +366,7 @@ class DiagnoseHttpErrorTest extends TestCase
         );
         $reflection = new \ReflectionClass(\ImportClient::class);
         $method = $reflection->getMethod('fetch_json');
-        $result = $method->invoke($client, 'http://' . $address . '/?reprint-api=1&endpoint=preflight');
+        $result = $method->invoke($client, 'http://' . $address . '/?reprint-api=1', ['endpoint' => 'preflight']);
         pcntl_waitpid($child, $status);
         fclose($listener);
 
@@ -407,7 +407,7 @@ class DiagnoseHttpErrorTest extends TestCase
                 }
                 $request .= $piece;
             }
-            if (strpos($request, 'GET /?reprint-api=1') !== 0) {
+            if (strpos($request, 'POST /?reprint-api=1') !== 0) {
                 exit(3);
             }
             $body = '<!DOCTYPE html><html><head>' .
@@ -431,7 +431,7 @@ class DiagnoseHttpErrorTest extends TestCase
         );
         $reflection = new \ReflectionClass(\ImportClient::class);
         $method = $reflection->getMethod('fetch_json');
-        $result = $method->invoke($client, 'http://' . $address . '/?reprint-api=1&endpoint=preflight');
+        $result = $method->invoke($client, 'http://' . $address . '/?reprint-api=1', ['endpoint' => 'preflight']);
         pcntl_waitpid($child, $status);
         fclose($listener);
 

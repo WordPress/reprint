@@ -12,8 +12,9 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { basename, dirname, join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import {
-    runImporter, createTempDir, cleanupTempDir,
+    apiRequest, runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, createMysqlConnection, pullStateDirectory, fsRootDir,
 } from '../lib/test-helpers.js';
@@ -127,6 +128,7 @@ describe.each([
     let runtimeDir;
 
     beforeAll(async () => {
+        const sourceWorkingDirectory = `/nas/content/live/${site}`;
         await ensureSite(site, {
             db: 'standard',
             files: 'sample',
@@ -140,7 +142,6 @@ describe.each([
                 if (host === 'wpengine') {
                     // Give the source request WP Engine's working-directory layout.
                     // Preflight reads the real cwd; no saved host state is injected.
-                    const sourceWorkingDirectory = `/nas/content/live/${site}`;
                     execFileSync('sudo', ['mkdir', '-p', sourceWorkingDirectory]);
                     const configPath = join(siteDir, 'wp-config.php');
                     writeFileSync(configPath, readFileSync(configPath, 'utf-8').replace(
@@ -181,6 +182,25 @@ describe.each([
                 await conn.end();
             },
         });
+
+        if (host === 'wpengine') {
+            // The fixture changes wp-config.php after WordPress installation.
+            // Check the HTTP source's working directory before testing client
+            // host detection. Do not accept a cached, pre-change response as
+            // the configured fixture, or retry a failed host-detection assertion.
+            const deadline = Date.now() + 30000;
+            let response;
+            do {
+                response = await apiRequest(site, 'preflight', {}, {
+                    url: importUrl(), signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+                });
+                assert.equal(response.status, 200, response.text?.slice(0, 500));
+                if (response.json?.runtime?.cwd === sourceWorkingDirectory) break;
+                await sleep(100);
+            } while (Date.now() < deadline);
+            assert.equal(response.json?.runtime?.cwd, sourceWorkingDirectory,
+                'The HTTP source must use the fixture working directory before host detection is tested.');
+        }
 
         tempDir = createTempDir('e2e-siteground-plugins');
         runtimeDir = join(tempDir, 'runtime');

@@ -63,6 +63,21 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
         $this->assertSame(5 * 1024 * 1024, $property->getValue($sync));
     }
 
+    public function testFileEndingAtAnExactChunkBoundaryCompletesWithoutAnEmptyReadError()
+    {
+        $content = str_repeat('A', 16384);
+        $directory = $this->createTestDirectory('exact-chunks', ['file.bin' => $content]);
+        $producer = new FileTreeProducer($directory, [
+            'chunk_size' => 8192,
+            'paths' => [$directory . '/file.bin'],
+        ]);
+        $chunks = $this->processAllChunks($producer);
+        $this->assertSame(['file', 'file'], array_column($chunks, 'type'));
+        $this->assertSame([0, 8192], array_column($chunks, 'offset'));
+        $this->assertSame($content, implode('', array_column($chunks, 'data')));
+        $this->assertTrue($chunks[1]['is_last_chunk']);
+    }
+
     public function testSyncMultipleFiles()
     {
         $dir = $this->createTestDirectory('multiple-files', [

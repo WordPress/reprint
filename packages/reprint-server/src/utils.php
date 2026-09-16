@@ -229,14 +229,71 @@ function json_encode_or_throw($value, int $flags = 0): string
 }
 }
 
+if (!function_exists(__NAMESPACE__ . '\\resolve_symlink_target_path')) {
+/**
+ * Resolves a link target with the supplied source path format and base directory.
+ *
+ * D:\photos is a relative Unix name and an absolute Windows drive path. The
+ * caller supplies 'unix' or 'windows'; neither the target nor the source link's
+ * prefix selects those rules. For example:
+ *
+ *     Source link       Target       Format    Absolute target
+ *     /site/gallery     D:\photos    unix      /site/D:\photos
+ *     E:/site/gallery   D:\photos    windows   D:/photos
+ *
+ * A Windows source link may also start with //server/share. Normalize that
+ * spelling with Windows rules before taking its parent directory. A single
+ * leading target separator uses the source drive or share root. Drive-relative
+ * CLI inputs such as D:photos need a current directory and are rejected.
+ * Select files with a full drive or share path, or a WordPress path token.
+ *
+ * @param string $symlink_path Absolute source link path.
+ * @param string $target Target returned by the source's readlink().
+ * @param string $path_format Source path format: 'unix' or 'windows'.
+ * @return string Absolute source target with dot segments resolved lexically.
+ */
+function resolve_symlink_target_path(string $symlink_path, string $target, string $path_format): string
+{
+    assert_valid_path($symlink_path, $path_format, 'Source symlink path');
+    $symlink_path = normalize_path_separators($symlink_path, $path_format);
+    $target = normalize_path_separators($target, $path_format);
+    if ($path_format === 'windows' && str_starts_with($target, '/')) {
+        $root = windows_share_root($symlink_path) ?? substr($symlink_path, 0, 3);
+        return normalize_path(wp_join_unix_paths($root, substr($target, 1)), $path_format);
+    }
+    return normalize_path(
+        is_absolute_path($target, $path_format) ? $target : wp_join_unix_paths(dirname($symlink_path), $target),
+        $path_format
+    );
+}
+}
+
 if (!function_exists(__NAMESPACE__ . '\\normalize_path')) {
 /**
  * Resolve ".." and "." segments in a path without touching the filesystem.
  *
- * Unlike realpath(), this works on paths that don't exist yet.
+ * Unlike realpath(), this works on paths that don't exist yet. Windows drive
+ * paths use forward slashes and retain their drive or share root, even on a
+ * Unix client. Parent segments cannot climb above a share root. The format
+ * comes from the source, not the path text. Unix mode keeps backslashes as
+ * filename bytes. This lexical helper does not supply a current directory;
+ * callers must resolve relative inputs against their base first.
+ *
+ * @param string $path Path after any required base-directory resolution.
+ * @param string $path_format Path format: 'unix' or 'windows'.
+ * @return string Path with dot segments removed.
  */
-function normalize_path(string $path): string
+function normalize_path(string $path, string $path_format): string
 {
+    $path = normalize_path_separators($path, $path_format);
+    $share_root = $path_format === 'windows' ? windows_share_root($path) : null;
+    $root = $share_root !== null ? $share_root . '/' : "/";
+    if ($share_root !== null) {
+        $path = ltrim(substr($path, strlen($share_root)), '/');
+    } elseif ($path_format === 'windows' && preg_match('~^[A-Z]:/~', $path)) {
+        $root = substr($path, 0, 3);
+        $path = substr($path, 3);
+    }
     $parts = explode("/", $path);
     $resolved = [];
     foreach ($parts as $part) {
@@ -249,7 +306,9 @@ function normalize_path(string $path): string
             $resolved[] = $part;
         }
     }
-    return "/" . implode("/", $resolved);
+    return $share_root !== null && $resolved === []
+        ? $share_root
+        : $root . implode("/", $resolved);
 }
 }
 
@@ -258,21 +317,28 @@ if (!function_exists(__NAMESPACE__ . '\\trim_right_slash')) {
  * Removes trailing slashes without changing the filesystem root into an empty path.
  *
  * Unlike rtrim($path, '/'), this returns `/` for both the filesystem root and
- * an empty input. It only changes the lexical spelling; it does not validate
- * the path or resolve dot segments and symlinks.
+ * an empty input. Windows drive paths use forward slashes and keep `D:/`
+ * intact. It only changes the lexical spelling; it does not validate the path
+ * or resolve dot segments and symlinks.
  *
  * Examples:
  *
- *     trim_right_slash('/srv/site///'); // '/srv/site'
- *     trim_right_slash('/');            // '/'
- *     trim_right_slash('');             // '/'
+ *     trim_right_slash('/srv/site///', 'unix'); // '/srv/site'
+ *     trim_right_slash('/', 'unix');            // '/'
+ *     trim_right_slash('', 'unix');             // '/'
  *
  * @param string $path Path whose trailing slashes to remove.
+ * @param string $path_format Path format: 'unix' or 'windows'.
  * @return string A path without trailing slashes, or `/` for the filesystem root.
  */
-function trim_right_slash(string $path): string
+function trim_right_slash(string $path, string $path_format): string
 {
-    return rtrim($path, '/') ?: '/';
+    $path = normalize_path_separators($path, $path_format);
+    $trimmed = rtrim($path, '/');
+    if ($path_format === 'windows' && preg_match('~^[A-Z]:/+$~', $path)) {
+        return $trimmed . '/';
+    }
+    return $trimmed ?: '/';
 }
 }
 
@@ -305,7 +371,7 @@ function realpath_with_missing_tail(string $absolute_path): string
         throw new InvalidArgumentException('Path must be absolute: ' . $absolute_path);
     }
 
-    $normalized_path = normalize_path($absolute_path);
+    $normalized_path = normalize_path($absolute_path, 'unix');
     $missing_components = [];
     $existing_ancestor = $normalized_path;
     $canonical_existing_ancestor = realpath($existing_ancestor);
@@ -327,11 +393,12 @@ function realpath_with_missing_tail(string $absolute_path): string
     }
 
     if ($missing_components === []) {
-        return normalize_path($canonical_existing_ancestor);
+        return normalize_path($canonical_existing_ancestor, 'unix');
     }
 
     return normalize_path(
-        $canonical_existing_ancestor . '/' . implode('/', $missing_components)
+        $canonical_existing_ancestor . '/' . implode('/', $missing_components),
+        'unix'
     );
 }
 }
@@ -426,12 +493,14 @@ function assert_valid_relative_path(string $path, string $label): void
 if (!function_exists(__NAMESPACE__ . '\\path_is_same_as_or_descendant_of')) {
 /**
  * Indicates whether a candidate path is the same as or a descendant of an
- * ancestor.
+ * ancestor. Both inputs must already use slash-delimited path components.
+ * Convert Windows inputs with their explicit format before comparing them.
+ * This comparison preserves backslashes, case, and all other name bytes.
  *
  * Either argument may be a list. The result is true when any candidate-and-
- * ancestor pair matches. The filesystem root matches every absolute path and
- * cannot use the normal ancestor-plus-slash prefix because that would produce
- * `//`.
+ * ancestor pair matches. `/` matches Unix absolute paths; a drive root such as
+ * `D:/` matches only that drive. Roots cannot use the normal ancestor-plus-slash
+ * prefix because that would add a second slash.
  *
  * Examples:
  *
@@ -467,8 +536,8 @@ function path_is_same_as_or_descendant_of($path, $ancestor): bool
     if (!is_string($path) || !is_string($ancestor)) {
         throw new InvalidArgumentException('Path containment expects strings or lists of strings.');
     }
-    if ($ancestor === "/") {
-        return str_starts_with($path, "/");
+    if (substr($ancestor, -1) === "/") {
+        return str_starts_with($path, $ancestor);
     }
     return $path === $ancestor || str_starts_with($path, $ancestor . "/");
 }
@@ -476,7 +545,8 @@ function path_is_same_as_or_descendant_of($path, $ancestor): bool
 
 if (!function_exists(__NAMESPACE__ . '\\path_is_descendant_of')) {
 /**
- * Indicates whether a candidate path is a descendant of an ancestor.
+ * Indicates whether a slash-delimited path is a descendant of an ancestor.
+ * Inputs follow the same no-conversion contract as path_is_same_as_or_descendant_of().
  *
  * Either argument may be a list. The result is true when any candidate-and-
  * ancestor pair has a component-boundary match below the ancestor. Unlike
@@ -523,7 +593,8 @@ function path_is_descendant_of($path, $ancestor): bool
 
 if (!function_exists(__NAMESPACE__ . '\\path_remainder_under')) {
 /**
- * Returns the remainder of $path underneath $prefix.
+ * Returns the remainder of slash-delimited $path underneath $prefix.
+ * Neither argument is converted; callers normalize with the known format first.
  *
  * An exact match returns an empty string. A descendant returns the remainder
  * beginning with "/". A path outside $prefix returns null.
@@ -586,23 +657,29 @@ function relative_path_under(string $path, string $root): ?string
 if (!function_exists(__NAMESPACE__ . '\\assert_valid_path')) {
 /**
  * Validates that a path is a non-empty absolute string without NUL bytes
- * or dot-segments (. or ..).
+ * or dot-segments (. or ..). Windows drive and UNC paths may use either
+ * separator below their root; drive-relative paths such as `D:site` are rejected.
  *
  * Useful anywhere untrusted or remote paths need to be checked before
  * use — both the exporter (directory config) and the importer (remote
  * paths from the server) share this validation.
  *
+ * The caller must supply the source format. D:\photos passes in Windows
+ * mode and fails in Unix mode because that Unix name has no absolute root.
+ * Validation cannot determine the format or the base of a relative path.
+ *
  * @param string $path  The path to validate.
+ * @param string $path_format Path format: 'unix' or 'windows'.
  * @param string $label Human-readable label for error messages (e.g. "directory", "remote path").
  * @throws InvalidArgumentException When the path fails any check.
  */
-function assert_valid_path(string $path, string $label = "path"): void
+function assert_valid_path(string $path, string $path_format, string $label = "path"): void
 {
-    $path = trim($path);
+    $path = normalize_path_separators($path, $path_format);
     if ($path === "") {
         throw new InvalidArgumentException("{$label} must be a non-empty string");
     }
-    if ($path[0] !== "/") {
+    if (!is_absolute_path($path, $path_format)) {
         throw new InvalidArgumentException("{$label} must be an absolute path: {$path}");
     }
     if (strpos($path, "\0") !== false) {
@@ -615,6 +692,150 @@ function assert_valid_path(string $path, string $label = "path"): void
             );
         }
     }
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\normalize_path_separators')) {
+/**
+ * Converts separators using an explicit path format, without resolving the path.
+ *
+ * The same bytes can have different meanings. The format must come from the
+ * source preflight for remote paths, or from the local OS for local paths.
+ * Never select the format from the path prefix. For example:
+ *
+ *     Input                              Format    Output
+ *     D:\photos                          unix      D:\photos
+ *     D:\photos                          windows   D:/photos
+ *     //server/share/photos              unix      //server/share/photos
+ *     //server/share/photos              windows   \\SERVER\SHARE/photos
+ *     /site/workspace\group\user/www      unix      /site/workspace\group\user/www
+ *
+ * Unix mode returns every byte unchanged, including Windows-looking relative
+ * names. Windows mode accepts both separators, including in relative targets.
+ * It gives drive letters and share roots a stable spelling for indexes and
+ * path rules. It preserves filename case, trailing dots and spaces. A share
+ * keeps a \\SERVER\SHARE root; separators below it become forward slashes.
+ *
+ * This does not make a relative path absolute. Link targets also need the
+ * source link's directory; use resolve_symlink_target_path(). Windows CLI
+ * inputs such as D:photos need a current directory and are rejected.
+ * CLI selections also reject namespace prefixes; use a full drive or share path.
+ * Dot segments remain intact so validation can reject them before removal.
+ *
+ * @param string $path Native or remote path, absolute or relative.
+ * @param string $path_format Path format: 'unix' or 'windows'. No inferred default.
+ * @return string Path with separators interpreted only under the supplied format.
+ */
+function normalize_path_separators(string $path, string $path_format): string
+{
+    assert_valid_path_format($path_format);
+    if ($path_format === 'unix') {
+        return $path;
+    }
+    $path = str_replace('\\', '/', $path);
+    $share_root = windows_share_root($path);
+    if ($share_root !== null) {
+        $tail = preg_replace('~/+~', '/', substr($path, strlen($share_root)));
+        return $share_root . ( $tail === '/' ? '' : $tail );
+    }
+    if (preg_match('~^[a-zA-Z]:/~', $path)) {
+        $path = strtoupper($path[0]) . substr($path, 1);
+    }
+    return preg_replace('~/+~', '/', $path);
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\is_absolute_path')) {
+/**
+ * Checks for a complete root under the supplied path format.
+ *
+ * D:\photos is absolute only in Windows mode. /photos is absolute only in
+ * Unix mode; on Windows it still needs a drive. A Windows share may use
+ * either separator. This checks spelling, not existence or link targets.
+ *
+ * @param string $path Native or remote filesystem path.
+ * @param string $path_format Path format: 'unix' or 'windows'.
+ * @return bool Whether the path is independent of a base directory or drive.
+ */
+function is_absolute_path(string $path, string $path_format): bool
+{
+    $path = normalize_path_separators($path, $path_format);
+    if ($path_format === 'unix') {
+        return str_starts_with($path, '/');
+    }
+    return preg_match('~^[A-Z]:/~', $path) === 1 || windows_share_root($path) !== null;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\preflight_path_format')) {
+/**
+ * Reads the source format without guessing from a path or a capability flag.
+ *
+ * Servers without the field use the earlier Unix-only path contract. A present
+ * invalid value must fail rather than acquire that compatibility default.
+ *
+ * @param array $preflight_data { Source preflight data.
+ *     @type string $path_format Optional 'unix' or 'windows'; absent on older servers.
+ * }
+ * @return string Validated source path format.
+ */
+function preflight_path_format(array $preflight_data): string
+{
+    $path_format = array_key_exists('path_format', $preflight_data) ? $preflight_data['path_format'] : 'unix';
+    assert_valid_path_format($path_format);
+    return $path_format;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\assert_valid_path_format')) {
+/**
+ * Rejects a missing or unknown format instead of guessing from a path string.
+ *
+ * @param mixed $path_format Format supplied by a caller or preflight response.
+ * @throws InvalidArgumentException When the value is not 'unix' or 'windows'.
+ */
+function assert_valid_path_format($path_format): void
+{
+    if (!in_array($path_format, ['unix', 'windows'], true)) {
+        throw new InvalidArgumentException('Path format must be "unix" or "windows"; received ' . json_encode($path_format) . '.');
+    }
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\native_path_format')) {
+/**
+ * Returns the path format of this PHP process, never the remote host's format.
+ */
+function native_path_format(): string
+{
+    return PHP_OS === 'WINNT' ? 'windows' : 'unix';
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\windows_share_root')) {
+/**
+ * Returns the server and share of an explicitly Windows UNC path.
+ *
+ * The caller must already know that the path uses Windows rules. Both
+ * //server/share and \\server\share are accepted here. Do not use this parser
+ * to identify a source OS: the first spelling is also an absolute Unix path.
+ * Device namespaces and incomplete shares return null. CLI selections reject
+ * these forms; use a full drive path or a complete ordinary share path.
+ *
+ * @param string $path Native or remote filesystem path.
+ * @return string|null Canonical `\\SERVER\SHARE` root, or null for other paths.
+ */
+function windows_share_root(string $path): ?string
+{
+    $path = str_replace('/', '\\', $path);
+    if (
+        preg_match('~^\\\\\\\\([^\\\\/]+)[\\\\/]([^\\\\/]+)~', $path, $parts) !== 1
+        || in_array($parts[1], ['.', '..', '?'], true)
+        || in_array($parts[2], ['.', '..'], true)
+    ) {
+        return null;
+    }
+    return '\\\\' . strtoupper($parts[1]) . '\\' . strtoupper($parts[2]);
 }
 }
 
@@ -678,6 +899,139 @@ function wp_join_unix_paths(...$path_segments)
     }
 
     return $result;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\source_io_path')) {
+/**
+ * Prepares a native source path for PHP file access without changing filenames.
+ *
+ * Call this before source file I/O, including lstat() and realpath(). For two
+ * files named report and report., Windows PHP can return report's metadata
+ * for report. even though it cannot open report. itself. A trailing space
+ * has the same problem. Reject the whole path before PHP can select a sibling.
+ * This also catches literal names returned by a directory listing, not just
+ * paths supplied by the user. Unix filenames pass through unchanged.
+ *
+ * PHP can read long UNC paths through the \\.\UNC\ spelling even when ordinary
+ * UNC metadata lookup fails. Keep ordinary paths on their usual PHP path,
+ * including its open_basedir checks. Use the prefix only at I/O; indexes and cursors
+ * retain the shared path. source_realpath() removes the I/O prefix on return.
+ * The source process's OS selects this behavior, never a remote path's prefix.
+ * No native extension or external command is used to bypass PHP file access.
+ */
+function source_io_path(string $path): string {
+    if (PHP_OS === 'WINNT' && preg_match('~[. ](?:[/\\\\]|$)~', $path)) {
+        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This is an API error, not HTML.
+        throw new \RuntimeException('Cannot read the exact Windows filename ' . $path . '. PHP cannot safely read a name ending in a dot or space. Rename it on the source before migration.');
+    }
+    if (PHP_OS === 'WINNT' && windows_share_root($path) !== null && @lstat($path) === false) {
+        return '\\\\.\\UNC\\' . ltrim(str_replace('/', '\\', $path), '\\');
+    }
+    return $path;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\source_is_link')) {
+/**
+ * Checks the source metadata, including Windows junctions that is_link() misses.
+ */
+function source_is_link(string $path): bool {
+    $stat = @source_lstat($path);
+    return $stat !== false && ( $stat['mode'] & 0170000 ) === 0120000;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\source_lstat')) {
+/**
+ * Reads source metadata and identifies Windows junctions through PHP readlink().
+ *
+ * Windows PHP lstat() reports symbolic links, but leaves the type bits at zero
+ * for junctions. is_link() therefore returns false and would let a no-follow
+ * pull traverse the target. Obtain the target before reporting a link type.
+ * An unrecognized reparse point that leads back to itself must fail rather
+ * than become a fabricated self-link or disappear as an unknown file type.
+ *
+ * Windows PHP exposes creation time as ctime. Keep that same convention in
+ * the index and post-read checks; changing clocks would invalidate existing
+ * change records. Same-size edits can escape these fields.
+ *
+ * @return array|false { PHP stat fields, or false on failure. Numeric keys 0-12
+ *     repeat these fields in the same order, as in lstat().
+ *     @type int $dev     Device number.
+ *     @type int $ino     File identifier.
+ *     @type int $mode    Type and permissions; junctions have link type bits.
+ *     @type int $nlink   Number of hard links.
+ *     @type int $uid     User ID.
+ *     @type int $gid     Group ID.
+ *     @type int $rdev    Device type, when applicable.
+ *     @type int $size    File size in bytes.
+ *     @type int $atime   Access time.
+ *     @type int $mtime   Modification time.
+ *     @type int $ctime   Change time on Unix; creation time on Windows.
+ *     @type int $blksize Filesystem block size, or -1 when unavailable.
+ *     @type int $blocks  Allocated blocks, or -1 when unavailable.
+ * }
+ */
+function source_lstat(string $path) {
+    $stat = lstat(source_io_path($path));
+    if (PHP_OS === 'WINNT' && $stat !== false && ( $stat['mode'] & 0170000 ) === 0) {
+        $target = source_readlink($path);
+        if (normalize_path_separators($target, 'windows') === normalize_path_separators($path, 'windows')) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This is an API error, not HTML.
+            throw new \RuntimeException('PHP cannot identify the Windows reparse point: ' . $path . '. Copy it to an ordinary file or directory before migration.');
+        }
+        $stat['mode'] |= 0120000;
+        $stat[2] = $stat['mode'];
+    }
+    return $stat;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\source_realpath')) {
+/**
+ * Resolves source paths through PHP and returns the shared index spelling.
+ *
+ * Windows PHP realpath() can fail on a link whose stored target starts at the
+ * drive root, even when readlink() returns its accessible absolute target.
+ * Resolve that target through PHP too. No file bytes are read through the
+ * original link; the index schedules the resolved path for the later fetch.
+ * A target that PHP still cannot resolve remains false, like ordinary realpath.
+ *
+ * Normalize the result using this source process's format. PHP on Windows
+ * returns backslashes; index comparisons must not compare those bytes against
+ * slash-delimited configured roots. Unix backslashes remain filename bytes.
+ *
+ * @return string|false Resolved source path, or false when PHP cannot resolve it.
+ */
+function source_realpath(string $path) {
+    $resolved = realpath(source_io_path($path));
+    if ($resolved === false && PHP_OS === 'WINNT' && source_is_link($path)) {
+        $target = source_readlink($path);
+        $resolved = realpath(source_io_path(resolve_symlink_target_path($path, $target, 'windows')));
+    }
+    if ($resolved !== false && PHP_OS === 'WINNT' && strncasecmp($resolved, '\\\\.\\UNC\\', 8) === 0) {
+        $resolved = '\\\\' . substr($resolved, 8);
+    }
+    return $resolved === false ? false : normalize_path_separators($resolved, native_path_format());
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\source_readlink')) {
+/**
+ * Reads a link through PHP, stopping if Windows cannot return its target.
+ *
+ * Windows PHP can follow a relative forward-slash target while readlink()
+ * fails with error 123. Returning an empty target would lose a readable link.
+ * Do not replace it with realpath(): that would hide intermediate links.
+ */
+function source_readlink(string $path) {
+    $target = readlink(source_io_path($path));
+    if ($target === false && PHP_OS === 'WINNT') {
+        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This is an API error, not HTML.
+        throw new \RuntimeException('PHP cannot read the Windows link target: ' . $path . '. Recreate the link with a backslash target before migration.');
+    }
+    return $target;
 }
 }
 

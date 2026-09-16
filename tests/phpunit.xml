@@ -20,11 +20,13 @@
             <directory>UrlRewriting</directory>
         </testsuite>
         <testsuite name="Export Utility Tests">
+            <file>PathFormatTest.php</file>
             <file>BuildPdoDsnTest.php</file>
             <file>ExporterCompatibilityUtilitiesTest.php</file>
             <file>CreateDbConnectionTest.php</file>
             <file>PushCommitTest.php</file>
             <file>ExportHttpServerTest.php</file>
+            <file>WindowsPathAccessTest.php</file>
             <file>ExportResolveDirectoriesTest.php</file>
             <file>FileIndexDedupTest.php</file>
             <file>FileIndexSkipDefaultsTest.php</file>
