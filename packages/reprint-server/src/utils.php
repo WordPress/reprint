@@ -952,6 +952,10 @@ if (!function_exists(__NAMESPACE__ . '\\source_lstat')) {
  * An unrecognized reparse point that leads back to itself must fail rather
  * than become a fabricated self-link or disappear as an unknown file type.
  *
+ * Windows PHP exposes creation time as ctime. Keep that same convention in
+ * the index and post-read checks; changing clocks would invalidate existing
+ * change records. Same-size edits can escape these fields.
+ *
  * @return array|false { PHP stat fields, or false on failure. Numeric keys 0-12
  *     repeat these fields in the same order, as in lstat().
  *     @type int $dev     Device number.
@@ -964,7 +968,7 @@ if (!function_exists(__NAMESPACE__ . '\\source_lstat')) {
  *     @type int $size    File size in bytes.
  *     @type int $atime   Access time.
  *     @type int $mtime   Modification time.
- *     @type int $ctime   Change time reported by PHP on this platform.
+ *     @type int $ctime   Change time on Unix; creation time on Windows.
  *     @type int $blksize Filesystem block size, or -1 when unavailable.
  *     @type int $blocks  Allocated blocks, or -1 when unavailable.
  * }
