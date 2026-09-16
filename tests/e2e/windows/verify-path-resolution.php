@@ -91,6 +91,9 @@ try {
     }
     require $repository . '/packages/reprint-client/src/import.php';
     $client = new ImportClient('http://' . $address . '/', $directory . '/state', $directory . '/files');
+    // This source-resolution test needs the slash-delimited destination format
+    // used by the remap check. Windows realpath() returns backslashes.
+    $client->filesystem_root = str_replace('\\', '/', $client->filesystem_root);
     $client->get_state()->set_preflight_record(['data' => [
         'path_format' => 'windows',
         'capabilities' => ['windows_path_resolution' => true],
