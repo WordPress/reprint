@@ -220,12 +220,13 @@ describe('Pull a selected site into a fresh single site', () => {
             // startup allocations. Check peak growth to catch a temporary list
             // even if a later filter discards it before the response is built.
             const collectionMemory = JSON.parse(runWp(getSiteDir(site), ['eval', `
-                WordPress\\Reprint\\Server\\Plugin\\load_server_runtime();
+                $runtime = WordPress\\Reprint\\Server\\Plugin\\load_server_runtime();
+                require_once $runtime;
                 require_once WP_PLUGIN_DIR . '/reprint-server/wordpress/multisite.php';
                 $context = WordPress\\Reprint\\Server\\Plugin\\get_multisite_export_context();
                 $before = memory_get_usage();
                 $peak_before = memory_get_peak_usage();
-                $paths = WordPress\\Reprint\\Server\\Plugin\\get_multisite_nested_site_paths($context);
+                $paths = reprint_get_multisite_nested_site_paths($context);
                 echo json_encode(array('live_growth' => memory_get_usage() - $before,
                     'peak_growth' => memory_get_peak_usage() - $peak_before,
                     'paths' => array_sum(array_map('count', $paths))));
@@ -312,17 +313,18 @@ describe('Pull a selected site into a fresh single site', () => {
     it('keeps child-path collection out of ordinary export context and never collects upload site IDs', () => {
         const observations = JSON.parse(runWp(getSiteDir(site), ['eval', `
             global $wpdb;
-            WordPress\\Reprint\\Server\\Plugin\\load_server_runtime();
+            $runtime = WordPress\\Reprint\\Server\\Plugin\\load_server_runtime();
+            require_once $runtime;
             require_once WP_PLUGIN_DIR . '/reprint-server/wordpress/multisite.php';
             define('SAVEQUERIES', true);
             $wpdb->queries = array();
             $context = WordPress\\Reprint\\Server\\Plugin\\get_multisite_export_context();
             $count = 0;
             foreach ($wpdb->queries as $query) {
-                if (strpos($query[0], 'SELECT domain, path FROM') === 0) { ++$count; }
+                if (strpos($query[0], 'SELECT blog_id, path FROM') === 0) { ++$count; }
             }
             $context['site_url'] = str_replace('http:', 'https:', $context['site_url']);
-            $paths = WordPress\\Reprint\\Server\\Plugin\\get_multisite_nested_site_paths($context);
+            $paths = reprint_get_multisite_nested_site_paths($context);
             echo json_encode(array($count, isset($context['sibling_urls']), array_key_exists('sibling_site_ids', $context), array_key_exists('nested_site_paths', $context), count($paths)));
         `], fixture.sites[7].url));
         assert.deepEqual(observations, [0, false, false, false, 1]);
