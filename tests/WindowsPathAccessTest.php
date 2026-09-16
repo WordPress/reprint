@@ -4,22 +4,17 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 use WordPress\Reprint\Server\HTTPServer;
-use WordPress\Reprint\Server\WindowsFilesystem;
 
 final class WindowsPathAccessTest extends TestCase
 {
-    public function testNativeReaderIsUnavailableOnOtherOperatingSystems(): void
+    public function testUnixSourceAccessPreservesWindowsLookingNames(): void
     {
         if (PHP_OS === 'WINNT') {
-            $this->markTestSkipped('Native Windows checks run in the Windows migration job.');
+            $this->markTestSkipped('Unix filename preservation requires a Unix host.');
         }
-        require_once __DIR__ . '/../packages/reprint-server/src/class-windows-filesystem.php';
-        $this->assertFalse(WindowsFilesystem::available());
-        $this->assertNotContains('reprint-windows', stream_get_wrappers());
-        $this->assertSame(__FILE__, \WordPress\Reprint\Server\source_io_path(__FILE__));
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('Exact Windows paths require');
-        WindowsFilesystem::resolve_input('D:/example');
+        foreach (['/site/workspace\\group\\user/www', '/site/report.', '/site/report ', '/site/D:\\report'] as $path) {
+            $this->assertSame($path, \WordPress\Reprint\Server\source_io_path($path));
+        }
     }
 
     public function testRestrictedMultisiteCannotResolveAnOutsidePath(): void

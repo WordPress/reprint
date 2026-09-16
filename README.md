@@ -109,22 +109,28 @@ symlink following enabled, a copied `gallery -> D:\photos` link is rewritten
 when `--remap` moves that target. Selecting a link also retains intermediate
 links needed to reach its downloaded content.
 
-The source also accepts file paths with `\\?\` or `\\.\` prefixes, including
-UNC paths, volume GUIDs and `GLOBALROOT\Device\HarddiskVolumeN` paths. Volume
-aliases resolve to their drive path before the client selects files. Relative
-selections such as `.\site`, `\site` and `D:site` use the Windows source process's
-current directory and drive, never the Linux client's. Prefer a full path when
-the source process's working directory is not known.
+The source accepts drive and UNC file paths with `\\?\` or `\\.\` prefixes
+when their components are safe for PHP file access. Relative selections such
+as `.\site`, `\site` and `D:site` use the Windows source process's current
+directory, never the Linux client's. A drive-relative selection must use the
+source process's current drive. Use a full path for another drive.
 
-These namespace and relative selections, and exact filename reads, require
-**64-bit PHP 7.4+ with FFI and mbstring enabled** on the source. Reprint uses
-read-only Windows file handles for indexing and file
-chunks. This preserves trailing dots and spaces, reserved filenames such as
-`NUL.txt`, and long UNC names that PHP's ordinary file functions may change or
-fail to read. FFI is optional for ordinary paths. The native reader is disabled
-when `open_basedir` is set; Reprint does not bypass that host restriction. If
-native reads are unavailable, a literal trailing-name entry stops the pull
-instead of silently copying another file or omitting it.
+All source reads use PHP's file functions. Reprint does not use FFI or run an
+external program to read Windows files. PHP's `open_basedir` restriction still
+applies. The Windows CI jobs run with the FFI extension absent.
+
+PHP cannot safely read every name that NTFS permits. For example, with two
+separate files named `report` and `report.`, PHP can return `report`'s metadata
+when asked for `report.`. Reprint rejects a file or directory component ending
+in a dot or space before calling PHP, including names found while walking a
+parent directory. Rename these entries on the source before migration. The
+pull fails again on resume; it does not skip the unreadable entry.
+
+Volume GUID and `GLOBALROOT` selections require a drive-letter or UNC spelling.
+Some Windows links can be followed by PHP but cannot be read by `readlink()`;
+these stop the pull rather than becoming empty links. Recreate such links with
+a backslash target. If PHP cannot resolve the link, use a full drive-letter
+target instead.
 
 There are limits that a migration cannot hide:
 
@@ -145,8 +151,8 @@ The CI workflow runs the same full WordPress migration from a drive and a
 network share, with native Windows PHP/MySQL and a Linux client under WSL2.
 It checks hashes, empty directories, database table row counts, URL rewriting,
 and both raw and flattened runtimes. Separate path pulls cover punctuation,
-Unicode, long names, namespace aliases, relative paths, literal trailing names,
-case-sensitive siblings, and clear failures at filesystem limits.
+Unicode, long names, drive and share aliases, relative paths, case-sensitive
+siblings, and explicit failures for unreadable names and filesystem limits.
 
 ## Composer packages
 

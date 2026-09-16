@@ -14,7 +14,6 @@ use WordPress\Reprint\Server\PdoConstants;
 use WordPress\Reprint\Server\ResourceBudget;
 use WordPress\Reprint\Server\SqliteDriverPDO;
 use WordPress\Reprint\Server\WpdbDriverPDO;
-use WordPress\Reprint\Server\WindowsFilesystem;
 
 use function WordPress\Reprint\Server\native_path_format;
 use function WordPress\Reprint\Server\assert_valid_path;
@@ -23,7 +22,6 @@ use function WordPress\Reprint\Server\generate_random_bytes;
 use function WordPress\Reprint\Server\json_encode_or_throw;
 use function WordPress\Reprint\Server\is_absolute_path;
 use function WordPress\Reprint\Server\source_io_path;
-use function WordPress\Reprint\Server\source_realpath;
 use function WordPress\Reprint\Server\source_readlink;
 use function WordPress\Reprint\Server\normalize_path;
 use function WordPress\Reprint\Server\normalize_path_separators;
@@ -1397,7 +1395,7 @@ function resolve_directories(array $config): array
         assert_valid_path($directory, native_path_format(), "directory entry");
 
         clearstatcache(true, $directory);
-        $real_directory = @source_realpath($directory);
+        $real_directory = @realpath(source_io_path($directory));
         if ($real_directory === false || !is_dir(source_io_path($real_directory))) {
             throw new InvalidArgumentException(
                 "directory entry is not an accessible directory: {$directory}\n" .
@@ -1487,9 +1485,12 @@ function resolve_file_index_roots(array $config): array
 
         $mode = $stat["mode"] & STAT_TYPE_MASK;
         $type = $mode === STAT_TYPE_LINK ? "symlink" : ( is_dir(source_io_path($requested_path)) ? "directory" : "file" );
-        $resolved_path = @source_realpath($requested_path);
+        $resolved_path = @realpath(source_io_path($requested_path));
         if ($type === "symlink" && $resolved_path === false) {
-            throw new InvalidArgumentException("Selected file-index root is a broken symlink: {$requested_path}");
+            $message = PHP_OS === 'WINNT'
+                ? "PHP cannot resolve the Windows link target: {$requested_path}. Recreate the link with a full drive-letter target before migration."
+                : "Selected file-index root is a broken symlink: {$requested_path}";
+            throw new InvalidArgumentException($message);
         }
         if ($resolved_path === false) {
             throw new InvalidArgumentException(
@@ -1556,7 +1557,7 @@ function resolve_file_index_start_root(
         );
     }
 
-    $resolved_path = @source_realpath($requested_path);
+    $resolved_path = @realpath(source_io_path($requested_path));
     if ($resolved_path === false || !is_dir(source_io_path($resolved_path))) {
         throw new InvalidArgumentException(
             "Followed symlink target directory does not exist or is not accessible: {$requested_path}"
@@ -3755,14 +3756,75 @@ function endpoint_resolve_windows_path(array $config): array {
     if ($path === false || $path === '' || strpos($path, "\0") !== false) {
         throw new InvalidArgumentException('source_path_b64 must encode a non-empty Windows path without NUL bytes.');
     }
-    require_once __DIR__ . '/class-windows-filesystem.php';
-    if (WindowsFilesystem::available()) {
-        $resolved = WindowsFilesystem::resolve_input($path);
-    } else {
-        assert_valid_path($path, native_path_format(), 'Windows source path');
-        source_io_path($path);
-        $real = realpath($path);
-        $resolved = normalize_path_separators($real === false ? $path : $real, native_path_format());
+    // Only this Windows endpoint interprets CLI input using the source process's
+    // directory. The client cannot supply that context from a Linux path string.
+    $path = str_replace('\\', '/', $path);
+    if (substr($path, 0, 4) === '//?/' || substr($path, 0, 4) === '//./') {
+        $tail = substr($path, 4);
+        if (preg_match('~^[a-zA-Z]:/~', $tail)) {
+            $path = $tail;
+        } elseif (strncasecmp($tail, 'UNC/', 4) === 0) {
+            $path = '//' . substr($tail, 4);
+        } elseif (preg_match('~^(Volume\{|GLOBALROOT/)~i', $tail)) {
+            throw new InvalidArgumentException('PHP cannot map this Windows volume namespace to a drive or share: ' . $path . '. Select the same files with a drive-letter or UNC path.');
+        } else {
+            throw new InvalidArgumentException('Windows device names cannot select migration files: ' . $path);
+        }
+        // Removing a namespace prefix is safe only for ordinary components.
+        // In particular, literal . and .. must not become traversal here.
+        assert_valid_path($path, 'windows', 'Windows namespace path');
+    }
+    if (substr($path, 0, 2) === '//') {
+        assert_valid_path($path, 'windows', 'Windows share path');
+    }
+    $directory = getcwd();
+    if ($directory === false) {
+        throw new RuntimeException('Cannot read the Windows source process current directory.');
+    }
+    $directory = normalize_path_separators($directory, 'windows');
+    if (preg_match('~^[a-zA-Z]:(?!/)~', $path)) {
+        // PHP realpath('D:site') does not supply D's working directory. Keep the
+        // process directory unchanged and require a full path for another drive.
+        if (strcasecmp(substr($path, 0, 2), substr($directory, 0, 2)) !== 0) {
+            throw new InvalidArgumentException('Cannot resolve a path relative to another Windows drive: ' . $path . '. Use a full drive-letter path.');
+        }
+        $path = $directory . '/' . substr($path, 2);
+    } elseif (substr($path, 0, 1) === '/' && substr($path, 0, 2) !== '//') {
+        $root = \WordPress\Reprint\Server\windows_share_root($directory) ?? substr($directory, 0, 2);
+        $path = $root . $path;
+    } elseif (!is_absolute_path($path, 'windows')) {
+        $path = $directory . '/' . $path;
+    }
+    // Validate names before dropping dot segments. A literal "folder./.."
+    // must not escape the read guard just because its last component is "..".
+    foreach (explode('/', str_replace('\\', '/', $path)) as $component) {
+        if ($component !== '.' && $component !== '..') {
+            source_io_path($component);
+        }
+    }
+    $path = normalize_path($path, 'windows');
+    assert_valid_path($path, 'windows', 'Windows source path');
+
+    // Resolve case one component at a time. A whole-path realpath() would replace
+    // a selected junction with its target before --no-follow-symlinks can see it.
+    // Stop resolving at a link; retain that link and every later component.
+    // Missing tails are valid for exclusions and paths deleted since a prior pull.
+    $root = \WordPress\Reprint\Server\windows_share_root($path) ?? substr($path, 0, 3);
+    $resolved = $root;
+    $keep_spelling = false;
+    foreach (explode('/', ltrim(substr($path, strlen($root)), '/')) as $component) {
+        if ($component === '') {
+            continue;
+        }
+        $candidate = rtrim($resolved, '/') . '/' . $component;
+        $keep_spelling = $keep_spelling || is_link($candidate);
+        $real = $keep_spelling ? false : realpath($candidate);
+        if ($real === false) {
+            $keep_spelling = true;
+            $resolved = $candidate;
+        } else {
+            $resolved = normalize_path_separators($real, 'windows');
+        }
     }
     $response = ['ok' => true, 'path_b64' => base64_encode($resolved)];
     header('Content-Type: application/octet-stream');

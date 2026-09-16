@@ -441,7 +441,15 @@ final class FileIndexProcessor {
         // cursor is already settled, so continuation moves to the next name
         // unless a UNC API limit makes disappearance impossible to infer.
         clearstatcache(true, $path);
-        $stat = @lstat(source_io_path($path));
+        try {
+            $stat = @lstat(source_io_path($path));
+        } catch (RuntimeException $error) {
+            // A literal Windows name must fail again after resume, not disappear
+            // behind the cursor just because its read guard stopped this step.
+            $this->directory_stack[$frame_index]["after"] = $previous_entry_name;
+            --$this->current_directory_position;
+            throw $error;
+        }
         if ($stat === false) {
             if (windows_share_root($path) !== null) {
                 // PHP may list a long UNC filename but fail to inspect it. Do
@@ -481,7 +489,7 @@ final class FileIndexProcessor {
         // on the stack, and traversing an ancestor would expose paths outside
         // the requested tree before entering that root again.
         if ($type === "dir") {
-            $canonical_directory = source_realpath($path);
+            $canonical_directory = realpath(source_io_path($path));
             if (
                 $canonical_directory === false
                 || !\WordPress\Reprint\Server\path_is_same_as_or_descendant_of($this->configured_directories, $canonical_directory)
@@ -816,7 +824,7 @@ final class FileIndexProcessor {
         // A directory may disappear while it waits on the stack. Remove that
         // frame so a later call continues with its parent or the next root.
         clearstatcache(true, $this->current_directory);
-        $canonical_directory = source_realpath($this->current_directory);
+        $canonical_directory = realpath(source_io_path($this->current_directory));
         if ($canonical_directory === false || !is_dir(source_io_path($canonical_directory))) {
             array_pop($this->directory_stack);
             $this->directory_error = [
@@ -927,7 +935,7 @@ final class FileIndexProcessor {
         if ($storage_path === "") {
             return "";
         }
-        $canonical_storage_path = source_realpath($storage_path);
+        $canonical_storage_path = realpath(source_io_path($storage_path));
         return normalize_path_separators($canonical_storage_path !== false ? $canonical_storage_path : $storage_path, native_path_format());
     }
 
@@ -1264,7 +1272,7 @@ final class FileIndexProcessor {
         // directories can add more traversal work. Broken, self-referential,
         // and file links remain ordinary link entries without a target.
         clearstatcache(true, $path);
-        $resolved_target = @source_realpath($path);
+        $resolved_target = @realpath(source_io_path($path));
         if (
             $resolved_target === false
             || $resolved_target === $path

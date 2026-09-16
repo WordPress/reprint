@@ -719,7 +719,7 @@ if (!function_exists(__NAMESPACE__ . '\\normalize_path_separators')) {
  * This does not make a relative path absolute. Link targets also need the
  * source link's directory; use resolve_symlink_target_path(). Windows CLI
  * inputs such as D:photos need the source process's current directory on D.
- * Namespace paths must be resolved by WindowsFilesystem::resolve_input().
+ * Namespace paths must be resolved by the source path-resolution endpoint.
  * Dot segments remain intact so validation can reject them before removal.
  *
  * @param string $path Native or remote path, absolute or relative.
@@ -820,7 +820,7 @@ if (!function_exists(__NAMESPACE__ . '\\windows_share_root')) {
  * //server/share and \\server\share are accepted here. Do not use this parser
  * to identify a source OS: the first spelling is also an absolute Unix path.
  * Device namespaces and incomplete shares return null. Resolve namespace
- * inputs with WindowsFilesystem::resolve_input() before using shared paths.
+ * inputs with the source path-resolution endpoint before using shared paths.
  *
  * @param string $path Native or remote filesystem path.
  * @return string|null Canonical `\\SERVER\SHARE` root, or null for other paths.
@@ -904,64 +904,41 @@ function wp_join_unix_paths(...$path_segments)
 
 if (!function_exists(__NAMESPACE__ . '\\source_io_path')) {
 /**
- * Returns a read-only filesystem URI for exact Windows names, or the ordinary path.
+ * Rejects Windows names that PHP cannot read without changing their meaning.
  *
- * Use only at PHP file-I/O calls. Indexes, cursors and the wire retain the actual
- * path. Without native reads, fail on names PHP would normalize rather than
- * silently exporting a sibling or skipping the entry.
+ * Call this before source file I/O, including lstat() and realpath(). For two
+ * files named report and report., Windows PHP can return report's metadata
+ * for report. even though it cannot open report. itself. A trailing space
+ * has the same problem. Reject the whole path before PHP can select a sibling.
+ * This also catches literal names returned by a directory listing, not just
+ * paths supplied by the user. Unix filenames pass through unchanged.
+ *
+ * No native extension or external command is used to bypass PHP file access.
  */
 function source_io_path(string $path): string {
-    if (PHP_OS !== 'WINNT') {
-        return $path;
-    }
-    if (!class_exists(WindowsFilesystem::class, false)) {
-        require_once __DIR__ . '/class-windows-filesystem.php';
-    }
-    if (WindowsFilesystem::available()) {
-        return 'reprint-windows://' . base64_encode($path);
-    }
-    if (preg_match('~[. ](?:[/\\\\]|$)~', $path)) {
+    if (PHP_OS === 'WINNT' && preg_match('~[. ](?:[/\\\\]|$)~', $path)) {
         // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This is an API error, not HTML.
-        throw new \RuntimeException('Cannot read the exact Windows filename ' . $path . '. Use 64-bit PHP 7.4+ with FFI and mbstring enabled and open_basedir unset.');
+        throw new \RuntimeException('Cannot read the exact Windows filename ' . $path . '. PHP cannot safely read a name ending in a dot or space. Rename it on the source before migration.');
     }
     return $path;
 }
 }
 
-if (!function_exists(__NAMESPACE__ . '\\source_realpath')) {
-/**
- * Resolves source filesystem links without normalizing literal Windows filenames.
- */
-function source_realpath(string $path) {
-    if (PHP_OS === 'WINNT') {
-        if (!class_exists(WindowsFilesystem::class, false)) {
-            require_once __DIR__ . '/class-windows-filesystem.php';
-        }
-        if (WindowsFilesystem::available()) {
-            return WindowsFilesystem::realpath($path);
-        }
-        source_io_path($path);
-    }
-    return realpath($path);
-}
-}
-
-
 if (!function_exists(__NAMESPACE__ . '\\source_readlink')) {
 /**
- * Reads a source link target without normalizing a literal Windows link name.
+ * Reads a link through PHP, stopping if Windows cannot return its target.
+ *
+ * Windows PHP can follow a relative forward-slash target while readlink()
+ * fails with error 123. Returning an empty target would lose a readable link.
+ * Do not replace it with realpath(): that would hide intermediate links.
  */
 function source_readlink(string $path) {
-    if (PHP_OS === 'WINNT') {
-        if (!class_exists(WindowsFilesystem::class, false)) {
-            require_once __DIR__ . '/class-windows-filesystem.php';
-        }
-        if (WindowsFilesystem::available()) {
-            return WindowsFilesystem::readlink($path);
-        }
-        source_io_path($path);
+    $target = readlink(source_io_path($path));
+    if ($target === false && PHP_OS === 'WINNT') {
+        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This is an API error, not HTML.
+        throw new \RuntimeException('PHP cannot read the Windows link target: ' . $path . '. Recreate the link with a backslash target before migration.');
     }
-    return readlink($path);
+    return $target;
 }
 }
 

@@ -1,5 +1,5 @@
 # Use Windows APIs to create literal filenames that ordinary path cleanup changes.
-# The PHP source must read these real files; the fixture does not fake the exporter.
+# The PHP source must copy readable names and reject unreadable names, never a sibling.
 param([string]$ManifestPath)
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -64,6 +64,11 @@ public static class NamespaceFixtures {
 $root = 'D:\Reprint namespace cases'
 New-Item -ItemType Directory -Force "$root\Mixed Case" | Out-Null
 [NamespaceFixtures]::Write("\\?\$root\Mixed Case\hello.txt", 'namespace file')
+# Keep unreadable names separate so ordinary namespace selections still prove a
+# complete successful pull. Parent traversal of this tree must fail explicitly.
+$literalRoot = 'D:\Reprint literal cases'
+New-Item -ItemType Directory -Force "$literalRoot\Mixed Case" | Out-Null
+$literalError = 'Cannot read the exact Windows filename'
 $destination = 'D:/Reprint namespace cases/Mixed Case/hello.txt'
 $cases = [ordered]@{}
 $spellings = [ordered]@{
@@ -85,6 +90,9 @@ foreach ($entry in $spellings.GetEnumerator()) {
     if ($entry.Key -in @('device-share', 'literal-share', 'forward-share')) { $local = 'UNC/LOCALHOST/D$/Reprint namespace cases/Mixed Case/hello.txt' }
     if ($entry.Key -eq 'ip-share') { $local = 'UNC/127.0.0.1/D$/Reprint namespace cases/Mixed Case/hello.txt' }
     $cases[$entry.Key] = @{source=$entry.Value; destination=$local; content='namespace file'}
+    if ($entry.Key -in @('volume-guid', 'global-root')) {
+        $cases[$entry.Key]['error'] = 'PHP cannot map this Windows volume namespace'
+    }
 }
 # The native server is started from this same checkout. Relative input must be
 # resolved there, never against the Linux client's working directory.
@@ -93,15 +101,21 @@ New-Item -ItemType Directory -Force '.\relative source' | Out-Null
 foreach ($entry in @{ 'directory-relative'='.\relative source'; 'drive-relative'='D:relative source' }.GetEnumerator()) {
     $cases[$entry.Key] = @{source=$entry.Value; destination="$pwd/relative source/hello.txt".Replace('\', '/'); content='relative file'}
 }
-# The ordinary sibling has the same size as both literal trailing-name files.
 [NamespaceFixtures]::Write("\\?\$root\Mixed Case\trailing", 'ordinary sibling!')
-$literalNames = @('trailing.', 'trailing ', 'NUL.txt', 'COM1.txt', 'COM¹.txt')
+$literalNames = @('NUL.txt', 'COM1.txt', 'COM¹.txt')
+# Same-size siblings expose metadata aliasing: size checks cannot detect it.
+[NamespaceFixtures]::Write("\\?\$literalRoot\Mixed Case\trailing", 'ordinary sibling!')
+foreach ($name in @('trailing.', 'trailing ')) {
+    [NamespaceFixtures]::Write("\\?\$literalRoot\Mixed Case\$name", "literal $name")
+    $cases['trailing-name-' + $cases.Count] = @{source="\\?\$literalRoot\Mixed Case\$name"; error=$literalError}
+}
+$cases['trailing-name-parent'] = @{source="$literalRoot\Mixed Case"; error=$literalError}
 foreach ($name in $literalNames) {
     [NamespaceFixtures]::Write("\\?\$root\Mixed Case\$name", "literal $name")
     $cases['literal-name-' + $cases.Count] = @{source="\\?\$root\Mixed Case\$name"; destination="D:/Reprint namespace cases/Mixed Case/$name"; content="literal $name"}
 }
-# Selecting the parent must preserve every literal child too. Checking hello.txt
-# alone misses a traversal that reads the ordinary sibling for a trailing name.
+# Selecting the parent must preserve each readable reserved name too; checking
+# hello.txt alone would miss a traversal that silently omitted those entries.
 foreach ($key in $spellings.Keys) {
     $directory = $cases[$key].destination.Substring(0, $cases[$key].destination.Length - 'hello.txt'.Length)
     $files = @(
@@ -131,25 +145,18 @@ $cases['case-sensitive-directory'] = @{
         @{destination='D:/Reprint namespace cases/case-sensitive/ITEM.txt'; content='uppercase file'}
     )
 }
-New-Item -ItemType Directory -Force "$root\folder" | Out-Null
-[NamespaceFixtures]::Write("\\?\$root\folder\hello.txt", 'ordinary folder')
+New-Item -ItemType Directory -Force "$literalRoot\folder" | Out-Null
+[NamespaceFixtures]::Write("\\?\$literalRoot\folder\hello.txt", 'ordinary folder')
 foreach ($name in @('folder.', 'folder ')) {
-    [NamespaceFixtures]::Directory("\\?\$root\$name")
-    [NamespaceFixtures]::Write("\\?\$root\$name\hello.txt", "literal $name")
-    $cases['literal-directory-' + $cases.Count] = @{source="\\?\$root\$name"; destination="D:/Reprint namespace cases/$name/hello.txt"; content="literal $name"}
+    [NamespaceFixtures]::Directory("\\?\$literalRoot\$name")
+    [NamespaceFixtures]::Write("\\?\$literalRoot\$name\hello.txt", "literal $name")
+    $cases['literal-directory-' + $cases.Count] = @{source="\\?\$literalRoot\$name"; error=$literalError}
 }
-# A normal parent selection must preserve literal directory names found below it.
-$cases['literal-directory-parent'] = @{
-    source=$root
-    files=@(
-        @{destination='D:/Reprint namespace cases/folder/hello.txt'; content='ordinary folder'},
-        @{destination='D:/Reprint namespace cases/folder./hello.txt'; content='literal folder.'},
-        @{destination='D:/Reprint namespace cases/folder /hello.txt'; content='literal folder '}
-    ) + $cases['literal-drive'].files + $cases['case-sensitive-directory'].files
-}
+# Listing an ordinary parent must not silently skip unreadable children.
+$cases['literal-directory-parent'] = @{source=$literalRoot; error=$literalError}
 # Equivalent local-volume inputs must not create separate Linux trees.
-$cases['combined-volume-aliases'] = @{
-    source=@($spellings['literal-drive'], $spellings['device-drive'], $spellings['volume-guid'], $spellings['global-root'], $spellings['folder-case'])
+$cases['combined-drive-aliases'] = @{
+    source=@($spellings['literal-drive'], $spellings['device-drive'], $spellings['folder-case'])
     destination=$destination
     content='namespace file'
     files=$cases['literal-drive'].files
@@ -157,15 +164,11 @@ $cases['combined-volume-aliases'] = @{
 }
 
 # An ordinary non-empty sibling must not hide an empty literal directory.
-New-Item -ItemType Directory -Force "$root\empty" | Out-Null
-[NamespaceFixtures]::Write("\\?\$root\empty\hello.txt", 'non-empty sibling')
+New-Item -ItemType Directory -Force "$literalRoot\empty" | Out-Null
+[NamespaceFixtures]::Write("\\?\$literalRoot\empty\hello.txt", 'non-empty sibling')
 foreach ($name in @('empty.', 'empty ')) {
-    [NamespaceFixtures]::Directory("\\?\$root\$name")
-    $cases['literal-empty-' + $cases.Count] = @{
-        source="\\?\$root\$name"
-        files=@()
-        directories=@("D:/Reprint namespace cases/$name")
-    }
+    [NamespaceFixtures]::Directory("\\?\$literalRoot\$name")
+    $cases['literal-empty-' + $cases.Count] = @{source="\\?\$literalRoot\$name"; error=$literalError}
 }
 
 # Keep link targets outside this selection so --no-follow-symlinks can prove
@@ -205,6 +208,12 @@ foreach ($spelling in @('backslash', 'forward-slash', 'root-relative', 'absolute
             links=@($local)
             options=@('--remap', $sourceTarget, ':fs-root:/moved-target')
         }
+        if ($spelling -eq 'forward-slash') {
+            $cases[$name]['error'] = 'PHP cannot read the Windows link target'
+        }
+        if ($spelling -eq 'root-relative') {
+            $cases[$name]['error'] = 'PHP cannot resolve the Windows link target'
+        }
     }
 }
 [NamespaceFixtures]::Link("$linkRoot\cycle-a", './cycle-b', $false)
@@ -223,7 +232,6 @@ $cases['parent-junction-not-followed'] = @{
 }
 
 New-Item -ItemType Directory -Force 'D:\Reprint chunk boundaries' | Out-Null
-[NamespaceFixtures]::Write('\\?\D:\Reprint chunk boundaries\literal', 'short sibling')
-[NamespaceFixtures]::Write('\\?\D:\Reprint chunk boundaries\literal.', ('A' * 16384))
+[NamespaceFixtures]::Write('\\?\D:\Reprint chunk boundaries\readable', ('A' * 16384))
 
 $cases | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ManifestPath -Encoding utf8NoBOM

@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  native-reader:
-    name: Read exact Windows filenames
+  php-reader:
+    name: Read Windows paths without FFI
     runs-on: windows-2025
     timeout-minutes: 10
     steps:
@@ -22,17 +22,15 @@ jobs:
           extensions: mbstring, :ffi
           ini-values: ffi.enable=false
           coverage: none
-      - name: Check native source reads
+      - name: Check PHP source reads
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           ./tests/e2e/windows/prepare-path-namespaces.ps1 "$env:GITHUB_WORKSPACE/namespace-cases.json"
-          php tests/e2e/windows/probe-php-paths.php "$env:GITHUB_WORKSPACE/namespace-cases.json"
-          php tests/e2e/windows/verify-native-reader.php
-          php -d ffi.enable=false tests/e2e/windows/verify-native-reader.php --without-ffi
+          php tests/e2e/windows/verify-source-reader.php
   windows-to-linux:
-    needs: native-reader
+    needs: php-reader
     name: Pull Windows WordPress into Linux (${{ matrix.source }})
     strategy:
       fail-fast: false
