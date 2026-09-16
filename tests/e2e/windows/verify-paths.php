@@ -3,16 +3,6 @@
 $manifest = json_decode(file_get_contents($argv[1]), true, 512, JSON_THROW_ON_ERROR);
 $source = json_decode(file_get_contents('/root/migration/source.json'), true, 512, JSON_THROW_ON_ERROR);
 
-// The real plugin must reject path lookups before reaching native filesystem calls.
-$request = curl_init($source['home'] . '/?reprint-api&endpoint=resolve_windows_path&source_path_b64=' . rawurlencode(base64_encode('D:/')));
-curl_setopt_array($request, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
-curl_exec($request);
-$status = curl_getinfo($request, CURLINFO_RESPONSE_CODE);
-curl_close($request);
-if ($status !== 403) {
-    throw new RuntimeException('Unauthenticated Windows path lookup must return HTTP 403; got ' . $status);
-}
-
 $failures = [];
 // Use a fresh pull for each spelling; a shared state could hide a skipped selection.
 foreach ($manifest['path_cases'] as $name => $case) {

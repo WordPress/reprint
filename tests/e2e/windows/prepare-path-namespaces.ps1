@@ -72,6 +72,7 @@ $literalError = 'Cannot read the exact Windows filename'
 $destination = 'D:/Reprint namespace cases/Mixed Case/hello.txt'
 $cases = [ordered]@{}
 $spellings = [ordered]@{
+    'ordinary-drive' = "$root\Mixed Case"
     'literal-drive' = "\\?\$root\Mixed Case"
     'device-drive' = "\\.\$root\Mixed Case"
     'device-share' = '\\.\UNC\localhost\D$\Reprint namespace cases\Mixed Case'
@@ -90,16 +91,27 @@ foreach ($entry in $spellings.GetEnumerator()) {
     if ($entry.Key -in @('device-share', 'literal-share', 'forward-share')) { $local = 'UNC/LOCALHOST/D$/Reprint namespace cases/Mixed Case/hello.txt' }
     if ($entry.Key -eq 'ip-share') { $local = 'UNC/127.0.0.1/D$/Reprint namespace cases/Mixed Case/hello.txt' }
     $cases[$entry.Key] = @{source=$entry.Value; destination=$local; content='namespace file'}
-    if ($entry.Key -in @('volume-guid', 'global-root')) {
-        $cases[$entry.Key]['error'] = 'PHP cannot map this Windows volume namespace'
+    # Selections follow the same absolute-path contract as Unix. Namespace
+    # inputs and paths which need a working directory are rejected locally.
+    if ($entry.Key -in @('literal-drive', 'device-drive', 'device-share', 'literal-share', 'volume-guid', 'global-root', 'root-relative')) {
+        $cases[$entry.Key]['error'] = 'must be an absolute path'
+    }
+    if ($entry.Key -in @('parent-components', 'current-components')) {
+        $cases[$entry.Key]['error'] = 'must not contain dot-segments'
     }
 }
-# The native server is started from this same checkout. Relative input must be
-# resolved there, never against the Linux client's working directory.
+# Even an existing relative path is rejected. Neither process supplies an
+# implicit base directory for a CLI selection.
 New-Item -ItemType Directory -Force '.\relative source' | Out-Null
 [System.IO.File]::WriteAllText("$pwd\relative source\hello.txt", 'relative file')
 foreach ($entry in @{ 'directory-relative'='.\relative source'; 'drive-relative'='D:relative source' }.GetEnumerator()) {
-    $cases[$entry.Key] = @{source=$entry.Value; destination="$pwd/relative source/hello.txt".Replace('\', '/'); content='relative file'}
+    $cases[$entry.Key] = @{source=$entry.Value; error='must be an absolute path'}
+}
+$cases['file-case'] = @{
+    source="$root\Mixed Case\HELLO.TXT"
+    destination=$destination
+    content='namespace file'
+    absent=@('D:/Reprint namespace cases/Mixed Case/HELLO.TXT')
 }
 [NamespaceFixtures]::Write("\\?\$root\Mixed Case\trailing", 'ordinary sibling!')
 $literalNames = @('NUL.txt', 'COM1.txt', 'COM¹.txt')
@@ -107,12 +119,12 @@ $literalNames = @('NUL.txt', 'COM1.txt', 'COM¹.txt')
 [NamespaceFixtures]::Write("\\?\$literalRoot\Mixed Case\trailing", 'ordinary sibling!')
 foreach ($name in @('trailing.', 'trailing ')) {
     [NamespaceFixtures]::Write("\\?\$literalRoot\Mixed Case\$name", "literal $name")
-    $cases['trailing-name-' + $cases.Count] = @{source="\\?\$literalRoot\Mixed Case\$name"; error=$literalError}
+    $cases['trailing-name-' + $cases.Count] = @{source="$literalRoot\Mixed Case\$name"; error=$literalError}
 }
 $cases['trailing-name-parent'] = @{source="$literalRoot\Mixed Case"; error=$literalError}
 foreach ($name in $literalNames) {
     [NamespaceFixtures]::Write("\\?\$root\Mixed Case\$name", "literal $name")
-    $cases['literal-name-' + $cases.Count] = @{source="\\?\$root\Mixed Case\$name"; destination="D:/Reprint namespace cases/Mixed Case/$name"; content="literal $name"}
+    $cases['literal-name-' + $cases.Count] = @{source="$root\Mixed Case\$name"; destination="D:/Reprint namespace cases/Mixed Case/$name"; content="literal $name"}
 }
 # Selecting the parent must preserve each readable reserved name too; checking
 # hello.txt alone would miss a traversal that silently omitted those entries.
@@ -130,7 +142,7 @@ foreach ($key in $spellings.Keys) {
 # PHP's ordinary drive spelling can read an existing literal NUL.txt file.
 # An actual device has no file suffix; the physical-device test covers rejection.
 $cases['reserved-file'] = @{source="$root\Mixed Case\NUL.txt"; destination='D:/Reprint namespace cases/Mixed Case/NUL.txt'; content='literal NUL.txt'}
-$cases['physical-device'] = @{source='\\.\PhysicalDrive0'; error='Windows device names cannot select migration files'}
+$cases['physical-device'] = @{source='\\.\PhysicalDrive0'; error='must be an absolute path'}
 
 # Both spellings exist. A source that lowercases names would silently lose a file.
 New-Item -ItemType Directory -Force "$root\case-sensitive" | Out-Null
@@ -145,21 +157,38 @@ $cases['case-sensitive-directory'] = @{
         @{destination='D:/Reprint namespace cases/case-sensitive/ITEM.txt'; content='uppercase file'}
     )
 }
+# Case-sensitive Windows directories must keep distinct files separate in
+# both exclusions and remaps, just like Unix directories.
+$cases['case-sensitive-exclude'] = @{
+    source="$root\case-sensitive"
+    options=@('--exclude', "$root\case-sensitive\item.txt")
+    files=@(@{destination='D:/Reprint namespace cases/case-sensitive/ITEM.txt'; content='uppercase file'})
+    absent=@('D:/Reprint namespace cases/case-sensitive/item.txt')
+}
+$cases['case-sensitive-remap'] = @{
+    source="$root\case-sensitive"
+    options=@('--remap', "$root\case-sensitive\item.txt", ':fs-root:/moved-item.txt')
+    files=@(
+        @{destination='moved-item.txt'; content='lowercase file'},
+        @{destination='D:/Reprint namespace cases/case-sensitive/ITEM.txt'; content='uppercase file'}
+    )
+    absent=@('D:/Reprint namespace cases/case-sensitive/item.txt')
+}
 New-Item -ItemType Directory -Force "$literalRoot\folder" | Out-Null
 [NamespaceFixtures]::Write("\\?\$literalRoot\folder\hello.txt", 'ordinary folder')
 foreach ($name in @('folder.', 'folder ')) {
     [NamespaceFixtures]::Directory("\\?\$literalRoot\$name")
     [NamespaceFixtures]::Write("\\?\$literalRoot\$name\hello.txt", "literal $name")
-    $cases['literal-directory-' + $cases.Count] = @{source="\\?\$literalRoot\$name"; error=$literalError}
+    $cases['literal-directory-' + $cases.Count] = @{source="$literalRoot\$name"; error=$literalError}
 }
 # Listing an ordinary parent must not silently skip unreadable children.
 $cases['literal-directory-parent'] = @{source=$literalRoot; error=$literalError}
-# Equivalent local-volume inputs must not create separate Linux trees.
+# Equivalent ordinary drive spellings must not create separate Linux trees.
 $cases['combined-drive-aliases'] = @{
-    source=@($spellings['literal-drive'], $spellings['device-drive'], $spellings['folder-case'])
+    source=@($spellings['ordinary-drive'], $spellings['ordinary-drive'].Replace('\', '/'), $spellings['ordinary-drive'].Replace('D:', 'd:'))
     destination=$destination
     content='namespace file'
-    files=$cases['literal-drive'].files
+    files=$cases['ordinary-drive'].files
     unique_basename='hello.txt'
 }
 
@@ -168,7 +197,7 @@ New-Item -ItemType Directory -Force "$literalRoot\empty" | Out-Null
 [NamespaceFixtures]::Write("\\?\$literalRoot\empty\hello.txt", 'non-empty sibling')
 foreach ($name in @('empty.', 'empty ')) {
     [NamespaceFixtures]::Directory("\\?\$literalRoot\$name")
-    $cases['literal-empty-' + $cases.Count] = @{source="\\?\$literalRoot\$name"; error=$literalError}
+    $cases['literal-empty-' + $cases.Count] = @{source="$literalRoot\$name"; error=$literalError}
 }
 
 # Keep link targets outside this selection so --no-follow-symlinks can prove
@@ -178,7 +207,7 @@ New-Item -ItemType Directory -Force $linkRoot | Out-Null
 New-Item -ItemType Junction -Path "$linkRoot\junction" -Target "$root\Mixed Case" | Out-Null
 New-Item -ItemType SymbolicLink -Path "$linkRoot\file-link" -Target "$root\Mixed Case\hello.txt" | Out-Null
 $cases['junction-followed'] = @{
-    source="\\?\$linkRoot\junction"
+    source="$linkRoot\junction"
     destination='D:/Reprint link cases/junction/hello.txt'
     content='namespace file'
     links=@('D:/Reprint link cases/junction')
@@ -220,14 +249,14 @@ $cases['unreadable-link-parent'] = @{source='D:\Reprint unreadable links'; error
 [NamespaceFixtures]::Link("$linkRoot\cycle-a", './cycle-b', $false)
 [NamespaceFixtures]::Link("$linkRoot\cycle-b", './cycle-a', $false)
 $cases['junction-not-followed'] = @{
-    source="\\?\$linkRoot\junction"
+    source="$linkRoot\junction"
     files=@()
     options=@('--no-follow-symlinks')
     links=@('D:/Reprint link cases/junction')
     absent=@('D:/Reprint namespace cases')
 }
 $cases['parent-junction-not-followed'] = @{
-    source="\\?\$linkRoot\junction\hello.txt"
+    source="$linkRoot\junction\hello.txt"
     options=@('--no-follow-symlinks')
     error='use --follow-symlinks'
 }

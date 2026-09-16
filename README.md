@@ -109,11 +109,14 @@ symlink following enabled, a copied `gallery -> D:\photos` link is rewritten
 when `--remap` moves that target. Selecting a link also retains intermediate
 links needed to reach its downloaded content.
 
-The source accepts drive and UNC file paths with `\\?\` or `\\.\` prefixes
-when their components are safe for PHP file access. Relative selections such
-as `.\site`, `\site` and `D:site` use the Windows source process's current
-directory, never the Linux client's. A drive-relative selection must use the
-source process's current drive. Use a full path for another drive.
+File selections use the same rules on Unix and Windows: supply a full absolute
+path or a WordPress token such as `:wp-content:/uploads`. Tokens expand from
+preflight data on the client; preparing selections makes no extra request.
+Relative selections such as `.\site`, `\site` and `D:site` are rejected, as are
+`.` and `..` components. Namespace prefixes such as `\\?\` and `\\.\` are also
+rejected as selection inputs. Use the ordinary drive-letter or UNC spelling
+for the same files. These restrictions apply to selections, not stored link
+targets, which are interpreted relative to the source link.
 
 All source reads use PHP's file functions. Reprint does not use FFI or run an
 external program to read Windows files. PHP's `open_basedir` restriction still
@@ -153,8 +156,9 @@ The CI workflow runs the same full WordPress migration from a drive and a
 network share, with native Windows PHP/MySQL and a Linux client under WSL2.
 It checks hashes, empty directories, database table row counts, URL rewriting,
 and both raw and flattened runtimes. Separate path pulls cover punctuation,
-Unicode, long names, drive and share aliases, relative paths, case-sensitive
-siblings, and explicit failures for unreadable names and filesystem limits.
+Unicode, long names, drive and share spellings, case-sensitive siblings, and
+explicit failures for relative selections, namespace inputs, unreadable names,
+and filesystem limits.
 
 ## Composer packages
 
