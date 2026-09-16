@@ -214,10 +214,11 @@ final class RuntimeFilesRootPathTest extends TestCase
         $router = $this->root . '/runtime-files-root-router.php';
         file_put_contents($router, sprintf(<<<'PHP'
 <?php
+// Query fields select the fixture response; client-generated export fields arrive in POST.
 $request = array(
-    'endpoint' => $_GET['endpoint'] ?? null,
-    'directory' => isset($_GET['directory'])
-        ? (array) $_GET['directory']
+    'endpoint' => $_POST['endpoint'] ?? null,
+    'directory' => isset($_POST['directory'])
+        ? (array) $_POST['directory']
         : null,
     'files' => isset($_FILES['file_list'])
         ? json_decode(file_get_contents($_FILES['file_list']['tmp_name']), true)

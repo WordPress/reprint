@@ -24,6 +24,7 @@
  * Rules: https://github.com/zcomtenten/cwaf/tree/f9a3f105768d72bb3ea1585fdc963176d1f41f73
  */
 import http from 'node:http';
+import { readRequestEndpoint } from './request-endpoint.js';
 import { appendFileSync } from 'node:fs';
 
 const [backendUrlString, responseLogPath] = process.argv.slice(2);
@@ -82,7 +83,7 @@ function sendInspectedResponse(response, details) {
     response.end(details.body);
 }
 
-const server = http.createServer((request, response) => {
+const server = http.createServer(async (request, response) => {
     let clearResponseBody = null;
     if (request.url === '/__outbound-firewall-clear-php-response') {
         clearResponseBody = 'fopen';
@@ -101,7 +102,7 @@ const server = http.createServer((request, response) => {
     }
 
     const requestUrl = new URL(request.url, `http://${request.headers.host}`);
-    const endpoint = requestUrl.searchParams.get('endpoint') || '';
+    const endpoint = await readRequestEndpoint(request) || '';
     const inspectResponse = endpoint === 'file_fetch' || endpoint === 'sql_chunk';
     const upstreamRequest = http.request({
         protocol: backendUrl.protocol,

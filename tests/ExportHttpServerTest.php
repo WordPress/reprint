@@ -42,10 +42,11 @@ final class ExportHttpServerTest extends TestCase
     {
         $server = new \WordPress\Reprint\Server\HTTPServer();
         $config = $server->parse_http_config(
-            ['endpoint' => 'file_index'],
+            [],
             [],
             ['CONTENT_TYPE' => 'application/json; charset=utf-8'],
             json_encode([
+                'endpoint' => 'file_index',
                 'paths' => ['a', 'b'],
                 'max_execution_time' => '7',
                 'memory_threshold' => '0.7',
@@ -60,10 +61,24 @@ final class ExportHttpServerTest extends TestCase
         $this->assertTrue($config['create_table_query']);
     }
 
+    public function testJsonBodyParametersOverrideQueryParameters(): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        $config = $server->parse_http_config(
+            ['endpoint' => 'preflight', 'directory' => '/query'],
+            [],
+            ['CONTENT_TYPE' => 'application/json'],
+            '{"endpoint":"db_index","directory":"/body"}'
+        );
+
+        $this->assertSame('db_index', $config['endpoint']);
+        $this->assertSame('/body', $config['directory']);
+    }
+
     public function testParsesBase64EncodedPathParameters(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer();
-        $config = $server->parse_http_config([
+        $config = $server->parse_http_config([], [
             'endpoint' => 'file_index',
             'directory' => [
                 base64_encode('/srv/site'),
@@ -87,7 +102,7 @@ final class ExportHttpServerTest extends TestCase
             'directory entry 1 must be an absolute path or a base64-encoded absolute path; observed "not base64".'
         );
 
-        $server->parse_http_config([
+        $server->parse_http_config([], [
             'endpoint' => 'file_index',
             'directory' => [base64_encode('/srv/site'), 'not base64'],
         ]);
@@ -96,7 +111,7 @@ final class ExportHttpServerTest extends TestCase
     public function testKeepsLegacyRawPathParameterForProtocolNegotiation(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer();
-        $config = $server->parse_http_config([
+        $config = $server->parse_http_config([], [
             'endpoint' => 'preflight',
             'directory' => ['/tmp', '/srv/site'],
         ]);
@@ -330,13 +345,42 @@ final class ExportHttpServerTest extends TestCase
         ]);
 
         $server->handle_request([
-            'get' => ['endpoint' => 'preflight'],
-            'post' => [],
-            'server' => ['REQUEST_METHOD' => 'GET'],
+            'get' => [],
+            'post' => ['endpoint' => 'preflight'],
+            'server' => ['REQUEST_METHOD' => 'POST'],
             'body' => '',
         ]);
 
         $this->assertSame([['endpoint' => 'preflight']], $calls);
+    }
+
+    public function testMultipartParametersDoNotReadTheUploadBody(): void
+    {
+        $calls = [];
+        $server = new \WordPress\Reprint\Server\HTTPServer([
+            'budget_factory' => static function (): stdClass {
+                return new stdClass();
+            },
+            'body_reader' => static function (): string {
+                throw new RuntimeException('Parameter parsing must leave the multipart upload to PHP.');
+            },
+            'handlers' => [
+                'file_fetch' => static function (array $config) use (&$calls): void {
+                    $calls[] = $config;
+                },
+            ],
+        ]);
+
+        $server->handle_request([
+            'get' => [],
+            'post' => ['endpoint' => 'file_fetch', 'directory' => '/site'],
+            'server' => [
+                'REQUEST_METHOD' => 'POST',
+                'CONTENT_TYPE' => 'multipart/form-data; boundary=file-list',
+            ],
+        ]);
+
+        $this->assertSame([['endpoint' => 'file_fetch', 'directory' => '/site']], $calls);
     }
 
     public function testPushEndpointsNeverReadAJsonRequestBody(): void
