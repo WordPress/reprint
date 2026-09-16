@@ -6,6 +6,7 @@ require_once __DIR__ . '/utils.php';
 
 use InvalidArgumentException;
 use LogicException;
+use RuntimeException;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Traversal failures become API or CLI values, never HTML output.
 
@@ -364,6 +365,8 @@ final class FileIndexProcessor {
         // each step bounded and makes its cursor boundary unambiguous.
         if (!empty($this->pending_named_roots)) {
             $this->index_next_named_root();
+            // An unreadable Windows link must remain pending when inspection throws.
+            array_shift($this->pending_named_roots);
             return true;
         }
 
@@ -389,7 +392,7 @@ final class FileIndexProcessor {
                 && ( $this->storage_path === "" || !path_is_same_as_or_descendant_of($this->current_directory, $this->storage_path) )
             ) {
                 clearstatcache(true, $this->current_directory);
-                $stat = @lstat($this->current_directory);
+                $stat = @source_lstat($this->current_directory);
                 if ($stat !== false) {
                     $this->index_entries = self::index_entries_for_path($this->current_directory, $stat, false)["entries"];
                     $this->step_status = self::STATUS_INDEXED;
@@ -401,13 +404,15 @@ final class FileIndexProcessor {
         }
 
         // Select exactly one name for this step. Move the cursor first so every
-        // later outcome, including omission or disappearance, settles the name.
+        // omission or disappearance settles the name. An uninspectable UNC
+        // entry below rolls this cursor back instead of claiming disappearance.
         $frame_index = count($this->directory_stack) - 1;
         $entry_name = $this->current_directory_names[$this->current_directory_position];
         ++$this->current_directory_position;
         // Set "after" before any skip or stat call. The cursor must move past
         // a cache path or a path that disappears between scandir() and lstat(),
         // or every resumed request would inspect that same name again.
+        $previous_entry_name = $this->directory_stack[$frame_index]["after"];
         $this->directory_stack[$frame_index]["after"] = $entry_name;
         $path = wp_join_unix_paths($this->current_directory, $entry_name);
 
@@ -435,22 +440,40 @@ final class FileIndexProcessor {
         }
 
         // A name returned by scandir() may disappear before inspection. Its
-        // cursor is already settled, so continuation moves to the next name.
+        // cursor is already settled, so continuation moves to the next name
+        // unless a UNC API limit makes disappearance impossible to infer.
         clearstatcache(true, $path);
-        $stat = @lstat($path);
-        if ($stat === false) {
-            $this->step_status = self::STATUS_PATH_UNAVAILABLE;
-            return true;
-        }
-        if (
-            self::stat_is_file($stat)
-            && self::file_name_is_default_skipped($path)
-        ) {
-            $this->step_status = self::STATUS_SKIPPED;
-            return true;
-        }
+        try {
+            $stat = @source_lstat($path);
+            if ($stat === false) {
+                if (windows_share_root($path) !== null) {
+                    // PHP may list a long UNC filename but fail to inspect it. Do
+                    // not treat that API limit as a deletion. Keep the cursor before
+                    // this entry so another attempt cannot silently skip the file.
+                    throw new RuntimeException(
+                        "Cannot inspect Windows share path: {$path}. PHP returned no file metadata. " .
+                        "Check source access; for long UNC paths, configure the source with a drive-letter path."
+                    );
+                }
+                $this->step_status = self::STATUS_PATH_UNAVAILABLE;
+                return true;
+            }
+            if (
+                self::stat_is_file($stat)
+                && self::file_name_is_default_skipped($path)
+            ) {
+                $this->step_status = self::STATUS_SKIPPED;
+                return true;
+            }
 
-        $inspected_path = self::index_entries_for_path($path, $stat, $this->follow_symlinks);
+            $inspected_path = self::index_entries_for_path($path, $stat, $this->follow_symlinks);
+        } catch (RuntimeException $error) {
+            // Names and link targets that PHP cannot inspect must fail again
+            // after resume, not disappear behind this entry's error cursor.
+            $this->directory_stack[$frame_index]["after"] = $previous_entry_name;
+            --$this->current_directory_position;
+            throw $error;
+        }
         $this->index_entries = $inspected_path["entries"];
         $type = $inspected_path["type"];
         // The directory's own final step emits its empty entry, including when
@@ -466,7 +489,7 @@ final class FileIndexProcessor {
         // on the stack, and traversing an ancestor would expose paths outside
         // the requested tree before entering that root again.
         if ($type === "dir") {
-            $canonical_directory = realpath($path);
+            $canonical_directory = source_realpath($path);
             if (
                 $canonical_directory === false
                 || !\WordPress\Reprint\Server\path_is_same_as_or_descendant_of($this->configured_directories, $canonical_directory)
@@ -801,8 +824,8 @@ final class FileIndexProcessor {
         // A directory may disappear while it waits on the stack. Remove that
         // frame so a later call continues with its parent or the next root.
         clearstatcache(true, $this->current_directory);
-        $canonical_directory = realpath($this->current_directory);
-        if ($canonical_directory === false || !is_dir($canonical_directory)) {
+        $canonical_directory = source_realpath($this->current_directory);
+        if ($canonical_directory === false || !is_dir(source_io_path($canonical_directory))) {
             array_pop($this->directory_stack);
             $this->directory_error = [
                 "error_type" => "dir_open",
@@ -845,7 +868,7 @@ final class FileIndexProcessor {
         // a site 7 pull, uploads/sites still lists sibling names; the selection
         // skips their subtrees, not this parent-directory listing.
         clearstatcache(true, $canonical_directory);
-        $directory_names = @scandir($canonical_directory, SCANDIR_SORT_ASCENDING);
+        $directory_names = @scandir(source_io_path($canonical_directory), SCANDIR_SORT_ASCENDING);
         if ($directory_names === false) {
             array_pop($this->directory_stack);
             $this->directory_error = [
@@ -912,7 +935,7 @@ final class FileIndexProcessor {
         if ($storage_path === "") {
             return "";
         }
-        $canonical_storage_path = realpath($storage_path);
+        $canonical_storage_path = source_realpath($storage_path);
         return normalize_path_separators($canonical_storage_path !== false ? $canonical_storage_path : $storage_path, native_path_format());
     }
 
@@ -943,8 +966,9 @@ final class FileIndexProcessor {
      */
     private function index_next_named_root(): void
     {
-        // Settle the cursor first so a skipped or vanished path is not retried.
-        $requested_path = array_shift($this->pending_named_roots);
+        // The caller settles skipped, vanished, or indexed roots after return.
+        // A thrown read error keeps this named root pending for resume.
+        $requested_path = $this->pending_named_roots[0];
         $root = $this->find_root($requested_path);
         if ($root === null) {
             throw new InvalidArgumentException("Index cursor names a root absent from this request: {$requested_path}");
@@ -970,7 +994,7 @@ final class FileIndexProcessor {
         }
 
         clearstatcache(true, $path_root);
-        $stat = @lstat($path_root);
+        $stat = @source_lstat($path_root);
         if ($stat === false) {
             $this->step_status = self::STATUS_PATH_UNAVAILABLE;
             return;
@@ -1004,11 +1028,11 @@ final class FileIndexProcessor {
             $this->follow_symlinks
             && $root["type"] === "symlink"
             && $root["resolved_path"] !== null
-            && !is_dir($root["resolved_path"])
+            && !is_dir(source_io_path($root["resolved_path"]))
             && !$resolved_target_was_indexed
         ) {
             clearstatcache(true, $root["resolved_path"]);
-            $target_stat = @lstat($root["resolved_path"]);
+            $target_stat = @source_lstat($root["resolved_path"]);
             if (is_array($target_stat)) {
                 $target = self::index_entries_for_path($root["resolved_path"], $target_stat, false);
                 $entries = array_merge($entries, $target["entries"]);
@@ -1130,7 +1154,7 @@ final class FileIndexProcessor {
         foreach ($roots as $root) {
             if (
                 $root["type"] === "directory"
-                || ( $follow_symlinks && $root["type"] === "symlink" && $root["resolved_path"] !== null && is_dir($root["resolved_path"]) )
+                || ( $follow_symlinks && $root["type"] === "symlink" && $root["resolved_path"] !== null && is_dir(source_io_path($root["resolved_path"])) )
             ) {
                 if (!in_array($root["resolved_path"], $directories, true)) {
                     $directories[] = $root["resolved_path"];
@@ -1186,7 +1210,7 @@ final class FileIndexProcessor {
         if ($type === "dir") {
             // Actual empty directory, not a directory with all its children
             // excluded from the synchronization
-            $directory_handle = @opendir($path);
+            $directory_handle = @opendir(source_io_path($path));
             if ($directory_handle !== false) {
                 $item["empty"] = true;
                 while (true) {
@@ -1247,13 +1271,15 @@ final class FileIndexProcessor {
     {
         // Only links ending at a directory need a canonical target because only
         // directories can add more traversal work. Broken, self-referential,
-        // and file links remain ordinary link entries without a target.
+        // and file links normally remain ordinary link entries without a target.
+        // Windows lookups can throw when PHP cannot read the stored target;
+        // treating that failure as a broken link could omit readable content.
         clearstatcache(true, $path);
-        $resolved_target = @realpath($path);
+        $resolved_target = @source_realpath($path);
         if (
             $resolved_target === false
             || $resolved_target === $path
-            || !is_dir($resolved_target)
+            || !is_dir(source_io_path($resolved_target))
         ) {
             return ["target" => null, "intermediates" => []];
         }
@@ -1261,7 +1287,7 @@ final class FileIndexProcessor {
         // realpath() jumps directly to the final directory. Walk the unresolved
         // target as well so links along that path are included in the index.
         $intermediates = [];
-        $raw_target = @readlink($path);
+        $raw_target = @source_readlink($path);
         if ($raw_target !== false && $raw_target !== "") {
             // Resolve only textual dot segments. realpath() would skip the
             // intermediate links that this walk must inspect.
@@ -1307,15 +1333,15 @@ final class FileIndexProcessor {
         // a parent link when checking the next component, so changing $current
         // to realpath() would turn later emitted links into resolved paths.
         foreach (array_reverse($parents) as $current) {
-            if (!@is_link($current)) {
+            if (!@source_is_link($current)) {
                 continue;
             }
 
             // Preserve the link spelling returned by readlink(); pull needs it
             // to reconstruct the same link rather than only its final directory.
-            $target = @readlink($current);
+            $target = @source_readlink($current);
             if ($target !== false && $target !== "") {
-                $stat = @lstat($current);
+                $stat = @source_lstat($current);
                 $entries[] = [
                     "path" => $current,
                     "ctime" => (int) ( is_array($stat) && isset($stat["ctime"]) ? $stat["ctime"] : 0 ),
