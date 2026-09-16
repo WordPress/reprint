@@ -5,7 +5,6 @@ use WordPress\Reprint\Server\FileTreeProducer;
 use function WordPress\Reprint\Server\source_io_path;
 
 require dirname(__DIR__, 3) . '/packages/reprint-server/src/export.php';
-require dirname(__DIR__, 3) . '/packages/reprint-server/src/class-file-tree-producer.php';
 restore_error_handler();
 restore_exception_handler();
 
