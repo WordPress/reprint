@@ -14007,7 +14007,7 @@ if (
             'placeholder' => 'DIR',
             'help' => 'Local directory read from or written to for site files',
             'help_section' => 'required',
-            'commands' => ['apply-runtime'],
+            'commands' => ['apply-runtime', 'doctor'],
             'aliases' => ['docroot'],
         ],
 
@@ -14848,6 +14848,20 @@ if (
     // commands expose focused workflows useful for scripting and hosting
     // platform integrations; pull composes the relevant pull-side commands.
     $command_info = [
+        "doctor" => [
+            "level" => "high",
+            "short" => "Load WordPress, deactivating plugins that cause fatal errors",
+            "usage" => "reprint doctor --fs-root=WORDPRESS_ROOT",
+            "description" =>
+                "Requires wp-load.php in a separate PHP process. If a fatal error points\n" .
+                "to one active regular plugin, deactivates it and tries again. Plugin\n" .
+                "files and data are kept; deactivation hooks are not run. Stops on\n" .
+                "other failures. Does not deactivate plugins on multisite.\n\n" .
+                "Uses the same PHP binary as Reprint. Checks startup only, not pages\n" .
+                "or the web server. No remote URL, connection token, or state directory\n" .
+                "is needed. Prints a JSON result with disabled_plugins and their errors.\n" .
+                "Exits 0 when wp-load.php loads, or 1 when it cannot complete.\n",
+        ],
         "pull" => [
             "level" => "high",
             "short" => "Clone a remote site (preflight + files + database + apply)",
@@ -15338,6 +15352,29 @@ if (
     if (in_array("--help", array_slice($argv, 2)) || in_array("-h", array_slice($argv, 2))) {
         _cli_render_command_help($command, $option_defs, $command_info);
         exit(0);
+    }
+
+    if ($command === 'doctor') {
+        [, $reprint_doctor_wordpress_root] = _cli_parse_options(
+            $argv,
+            $argument_count,
+            2,
+            array_filter($option_defs, static fn($definition) => $definition['name'] === 'fs-root')
+        );
+        if (!$reprint_doctor_wordpress_root) {
+            fwrite(STDERR, "Error: doctor requires --fs-root=WORDPRESS_ROOT containing wp-load.php.\n");
+            exit(1);
+        }
+        require_once __DIR__ . '/lib/doctor/functions.php';
+        try {
+            $reprint_doctor_result = \Reprint\Importer\run_doctor(
+                realpath($reprint_doctor_wordpress_root) ?: $reprint_doctor_wordpress_root
+            );
+        } catch (\Throwable $error) {
+            $reprint_doctor_result = ['status' => 'failed', 'message' => $error->getMessage()];
+        }
+        echo json_encode($reprint_doctor_result, JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
+        exit($reprint_doctor_result['status'] === 'complete' ? 0 : 1);
     }
 
     // Most commands name the remote Reprint API URL whose state they use.

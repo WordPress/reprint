@@ -24,6 +24,27 @@ class CliHelpTest extends TestCase
         }
     }
 
+    public function testDoctorHelpDescribesAutomaticDeactivationAndLocalStartupCheck(): void
+    {
+        $output = $this->runHelp('doctor');
+
+        $this->assertStringContainsString('Usage: reprint doctor --fs-root=WORDPRESS_ROOT', $output);
+        $this->assertStringContainsString('deactivates it and tries again', $output);
+        $this->assertStringContainsString('Checks startup only', $output);
+        $this->assertStringContainsString('Does not deactivate plugins on multisite', $output);
+        $this->assertStringNotContainsString('--secret', $output);
+        $this->assertStringNotContainsString('--state-dir', $output);
+    }
+
+    public function testDoctorRequiresAWordPressRootInsteadOfARemoteUrl(): void
+    {
+        $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+        $output = shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($entry) . ' doctor 2>&1') ?? '';
+
+        $this->assertStringContainsString('doctor requires --fs-root=WORDPRESS_ROOT', $output);
+        $this->assertStringNotContainsString('<remote-reprint-api-url> is required', $output);
+    }
+
     public function testConflictingHostPluginFlagsAreRejectedInEitherOrder(): void
     {
         $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';

@@ -887,6 +887,25 @@ load the `.so`: `tests/e2e/ci/verify-wp-mysql-parser.php` asserts that
 a native-backed parser before benchmarking Playground `db-pull` and `db-apply`.
 That path requires Node.js with JSPI support; CI uses Node 24.
 
+#### Check WordPress startup
+
+Once the destination has its files, database, and working `wp-config.php`, run:
+
+```sh
+reprint doctor --fs-root=/path/to/wordpress
+```
+
+Doctor requires `wp-load.php` in a fresh PHP process. If a fatal error's file
+belongs to one active regular plugin, it deactivates that plugin and tries
+again. It keeps the plugin's files and data and skips its deactivation hooks.
+Other failures stop the command. Multisite plugins are not deactivated.
+
+The JSON result lists the disabled plugins and their errors. Exit code 0 means
+`wp-load.php` loaded; exit code 1 means the check could not complete. Doctor
+uses the same PHP binary as Reprint. It does not check page rendering or the
+web server, and disabling a plugin may remove features from the site.
+No remote URL, connection token, or state directory is required.
+
 #### Shoehorning the site onto your platform
 
 You've got a copy of the remote files in the `--fs-root` directory and
