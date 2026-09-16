@@ -19,8 +19,10 @@ foreach ($manifest['path_cases'] as $name => $case) {
     try {
         $root = '/root/path-tests/' . $name;
         $log_path = '/root/migration/path-' . $name . '.log';
+        // Each path fixture is tiny. Bound a stuck PHP/Windows file call so CI
+        // prints the failing selection instead of losing logs at the job timeout.
         $command = [
-            PHP_BINARY, 'packages/reprint-client/src/import.php', 'pull-files', $source['home'] . '/?reprint-api',
+            'timeout', '--kill-after=5s', '90s', PHP_BINARY, 'packages/reprint-client/src/import.php', 'pull-files', $source['home'] . '/?reprint-api',
             '--secret=windows-migration-secret', '--state-dir=' . $root . '/state', '--fs-root=' . $root . '/files',
             '--progress=jsonl',
         ];
@@ -32,10 +34,15 @@ foreach ($manifest['path_cases'] as $name => $case) {
         }
         // A repeated failure must not resume past an uninspected or unwritten file.
         for ($attempt = 1; $attempt <= (isset($case['error']) ? 2 : 1); ++$attempt) {
+            printf("RUN: %s attempt %d.\n", $name, $attempt);
             $process = proc_open($command, [0 => ['pipe', 'r'], 1 => ['file', $log_path, 'w'], 2 => ['file', $log_path, 'a']], $pipes);
             fclose($pipes[0]);
             $exit_code = proc_close($process);
             $log = file_get_contents($log_path);
+            if ($exit_code === 124 || $exit_code === 137) {
+                fwrite(STDERR, 'Path pull timed out for ' . $name . "; stop before later requests hide the cause:\n" . $log);
+                exit(1);
+            }
             if (isset($case['error'])) {
                 if ($exit_code === 0 || strpos($log, $case['error']) === false) {
                     throw new RuntimeException('Expected a clear failure for ' . $name . ', got exit ' . $exit_code . ":\n" . $log);
