@@ -591,6 +591,16 @@ an oversized value is being appended in separate UPDATE statements; those cases
 require aborting and starting the database import again. After `db-apply`
 finishes, it removes its internal cursor table from the imported database.
 
+For example, Online Backup for WordPress uses a MyISAM table whose
+`AUTO_INCREMENT` column is second in a composite primary key. If the target
+reports `enforce_storage_engine=InnoDB`, direct MySQL output and `db-apply`
+add a non-unique index starting with that column so InnoDB can create the
+table. Existing rows, IDs, and keys are kept. Future IDs use one table-wide
+sequence instead of separate sequences for each group; plugins that rely on
+per-group numbering may need changes. Reprint reports this change in terminal
+output, JSONL warning records, and `audit.log`. It does not change the source
+database or the downloaded SQL file, and leaves compatible schemas unchanged.
+
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
 environment variable). The host string also supports `host:port` and
