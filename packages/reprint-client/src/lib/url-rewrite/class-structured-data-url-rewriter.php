@@ -854,7 +854,8 @@ class StructuredDataUrlRewriter
                                 } elseif ( is_string( $value ) ) {
                                     // Keep whole-URL detection for top-level strings. Only
                                     // declared URL fields get a base for relative URLs.
-                                    $rewritten = $this->rewrite_url_field( $value, $p->get_block_attribute_url_base( $name ) );
+                                    $field_base_url = $p->block_attribute_accepts_relative_urls( $name ) ? $base_url : null;
+                                    $rewritten = $this->rewrite_url_field( $value, $field_base_url );
                                     if ( $rewritten !== false ) {
                                         $value = $rewritten['raw_url'];
                                     }

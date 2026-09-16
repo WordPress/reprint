@@ -45,13 +45,12 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	private $base_url_string;
 	private $base_url_object;
 	/**
-	 * Base allowed by the current field, or null when only absolute URLs count.
-	 * `/photo.jpg` in an HTML href uses the site base; the same string in an
-	 * unknown block setting does not. Retain that context until URL parsing.
-	 *
-	 * @var string|null
+	 * Whether the current field accepts relative URLs, such as `/photo.jpg`
+	 * in an HTML href. Unknown block settings accept only absolute URLs.
+	 * Keep this decision until the cache lookup and URL parsing are done;
+	 * accepted relative URLs use the existing base_url_string.
 	 */
-	private $current_url_base;
+	private bool $current_field_accepts_relative_urls = false;
 	private $css_url_processor;
 	private $css_url_processor_updated;
 
@@ -123,7 +122,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 			// This prefix check selects the base argument; WPURL validates the URL.
 			$this->parsed_url = WPURL::parse(
 				$this->raw_url,
-				$this->has_absolute_http_url_prefix( $this->raw_url ) ? null : $this->current_url_base
+				$this->has_absolute_http_url_prefix( $this->raw_url ) ? null : $this->get_url_base()
 			);
 		}
 		return $this->parsed_url;
@@ -131,7 +130,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 
 	/** Include the field's relative-URL context in cache keys, even before parsing. */
 	public function get_url_base(): ?string {
-		return $this->current_url_base;
+		return $this->current_field_accepts_relative_urls ? $this->base_url_string : null;
 	}
 
 	/** Flush the current token, then discard its URL and CSS parser state. */
@@ -140,12 +139,12 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		// moving on. Keep the CSS parser alive until that flush has finished.
 		$has_token = parent::next_token();
 
-		$this->raw_url                    = null;
-		$this->parsed_url                 = null;
-		$this->current_url_base           = null;
-		$this->inspecting_html_attributes = null;
-		$this->css_url_processor          = null;
-		$this->in_style_element           = false;
+		$this->raw_url                            = null;
+		$this->parsed_url                         = null;
+		$this->current_field_accepts_relative_urls = false;
+		$this->inspecting_html_attributes         = null;
+		$this->css_url_processor                  = null;
+		$this->in_style_element                   = false;
 		// get_updated_html() cleared the update flag before we dropped its parser.
 		return $has_token;
 	}
@@ -180,7 +179,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	public function next_raw_url_in_current_token() {
 		$this->raw_url = null;
 		$this->parsed_url = null;
-		$this->current_url_base = $this->base_url_string;
+		$this->current_field_accepts_relative_urls = true;
 		switch ( parent::get_token_type() ) {
 			case '#tag':
 				if ( $this->in_style_element ) {
@@ -400,7 +399,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 				continue;
 			}
 
-			$this->current_url_base = $this->get_block_attribute_url_base( $this->get_block_attribute_key() );
+			$this->current_field_accepts_relative_urls = $this->block_attribute_accepts_relative_urls( $this->get_block_attribute_key() );
 
 			$this->raw_url    = $url_maybe;
 			return true;
@@ -410,19 +409,19 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	}
 
 	/**
-	 * Return the site base only for a declared top-level block URL field.
+	 * Check whether a top-level block field accepts relative URLs.
 	 *
 	 * In wp:navigation-link, url="/about-us" names a page relative to the site.
-	 * In an unknown field, "/about-us" could also be a class name. That field
-	 * gets no base, so only absolute URLs can be parsed.
+	 * In an unknown field, "/about-us" could also be a class name. Return false
+	 * for that field so callers parse it without the existing site base.
 	 *
 	 * Callers pass only top-level string fields. A nested key named "url"
 	 * does not inherit the block's URL rule.
 	 *
 	 * @param string|int $attribute_name Top-level key in the decoded block JSON.
-	 * @return string|null Site base, or null when only absolute URLs count.
+	 * @return bool Whether the field may use the existing site base.
 	 */
-	public function get_block_attribute_url_base( $attribute_name ): ?string {
+	public function block_attribute_accepts_relative_urls( $attribute_name ): bool {
 		$is_relative_url_block_attribute = (
 			isset( self::BLOCK_ATTRIBUTES_TO_ACCEPT_RELATIVE_URLS_FROM[ $this->get_block_name() ] ) &&
 			in_array( $attribute_name, self::BLOCK_ATTRIBUTES_TO_ACCEPT_RELATIVE_URLS_FROM[ $this->get_block_name() ], true )
@@ -456,7 +455,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 			)
 		);
 
-		return $is_relative_url_block_attribute ? $this->base_url_string : null;
+		return (bool) $is_relative_url_block_attribute;
 	}
 
 	/**

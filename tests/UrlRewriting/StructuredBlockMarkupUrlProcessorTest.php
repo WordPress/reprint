@@ -44,6 +44,40 @@ class StructuredBlockMarkupUrlProcessorTest extends TestCase {
         $this->assertFalse($processor->next_url_in_current_token());
     }
 
+    /** A block setting must not inherit relative-URL handling from the preceding field. */
+    public function testRelativeUrlRuleChangesWithEachField(): void
+    {
+        $markup = '<!-- wp:image {"label":"/label","url":"/photo.jpg","className":"/class"} /-->'
+            . '<style>a{background:url(image.jpg)}</style>'
+            . '<a href="/about"></a>';
+        $fields = [
+            ['/label', false, false],
+            ['/photo.jpg', true, 'https://source.example/photo.jpg'],
+            ['/class', false, false],
+            ['image.jpg', true, 'https://source.example/shop/image.jpg'],
+            ['/about', true, 'https://source.example/about'],
+        ];
+
+        foreach (['https://source.example/shop/', null] as $baseUrl) {
+            $processor = new StructuredBlockMarkupUrlProcessor($markup, $baseUrl, true);
+            $fieldIndex = 0;
+            while ($processor->next_token()) {
+                while ($processor->next_raw_url_in_current_token()) {
+                    [$rawUrl, $acceptsRelativeUrls, $absoluteUrl] = $fields[$fieldIndex++];
+                    $this->assertSame($rawUrl, $processor->get_raw_url());
+                    $this->assertSame($acceptsRelativeUrls ? $baseUrl : null, $processor->get_url_base());
+                    $parsedUrl = $processor->get_parsed_url();
+                    $this->assertSame(
+                        $baseUrl === null ? false : $absoluteUrl,
+                        $parsedUrl === false ? false : $parsedUrl->toString()
+                    );
+                }
+            }
+            $this->assertSame(count($fields), $fieldIndex);
+            $this->assertNull($processor->get_url_base());
+        }
+    }
+
     #[DataProvider('structuredUrlDiscoveryProvider')]
     public function testFindsStructuredUrl(
         string $expectedRawUrl,
