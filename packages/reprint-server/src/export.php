@@ -1603,6 +1603,13 @@ function file_index_parent_symlink(string $requested_path): ?array
  */
 function endpoint_preflight(array $config): array
 {
+    // The dispatcher has resolved GET, form and JSON parameters here.
+    // Collect only for preflight, and fail the request if this query fails:
+    // an incomplete child-path list could rewrite another site's links.
+    if (isset($config['_multisite'])) {
+        $config['_multisite']['nested_site_paths'] = reprint_get_multisite_nested_site_paths($config['_multisite']);
+    }
+
     // -- Resolve filesystem roots --
     // Determine which directories to scan: either from the client-provided
     // "directory" config, or by auto-detecting from cwd/DOCUMENT_ROOT/__DIR__.
@@ -2544,7 +2551,6 @@ function endpoint_preflight(array $config): array
         "path_format" => native_path_format(),
         "capabilities" => [
             "base64_path_parameters" => true,
-            "windows_path_resolution" => PHP_OS === 'WINNT' && empty($config['_multisite']),
         ],
         "wp_detect" => [
             "found" => !empty($wp_detect["roots"]),
@@ -2645,6 +2651,108 @@ function endpoint_preflight(array $config): array
         "status" => $response["ok"] ? "ok" : "error",
         "stats" => $response,
     ];
+}
+
+/**
+ * List only child-site paths that a selected home/site URL could rewrite.
+ *
+ * Selecting network.test/shop needs /shop/news/, but not /sibling/ or sites
+ * on other domains. A root selection can need every path on that domain.
+ * Build this list once per preflight, not per SQL/file request.
+ * The wpdb adapter uses WordPress's active MySQL or SQLite connection. It
+ * buffers query results, so read at most 1,000 rows per query. Continue after
+ * the last blog_id; OFFSET would reread the earlier rows on every batch.
+ * The first query filters by domain/path; domain-based networks usually return
+ * no rows. If it fills a batch, scan primary-key windows after that batch and
+ * mark non-matching paths NULL. Keeping those filters out of WHERE prevents
+ * both engines from sorting all remaining matches again for every batch.
+ * The first query can scan many rows; later queries scan at most 1,000.
+ *
+ * This list intentionally grows with matching sites. One million 20-byte paths
+ * cost about 62 MiB as a PHP 8.4 list, before JSON encoding. No page list, URL
+ * object, regex or upload-site ID list is created for those sites.
+ *
+ * @param array $source {
+ *     Source context returned by get_multisite_export_context().
+ *
+ *     @type int    $site_id Selected site ID.
+ *     @type string $base_prefix Network table prefix.
+ *     @type string $home_url Selected home URL.
+ *     @type string $site_url Selected WordPress URL.
+ * }
+ * @return array<string, string[]> Source HTTP(S) origin => child-site paths.
+ */
+function reprint_get_multisite_nested_site_paths(array $source): array {
+    global $wpdb;
+
+    $origins = [];
+    foreach (array_unique([$source['home_url'], $source['site_url']]) as $url) {
+        $parts = wp_parse_url($url);
+        $domain = strtolower($parts['host']) . ( isset($parts['port']) ? ':' . $parts['port'] : '' );
+        $default_port = strtolower($parts['scheme']) === 'https' ? 443 : 80;
+        $authority = ( $parts['port'] ?? null ) === $default_port ? strtolower($parts['host']) : $domain;
+        $origin = strtolower($parts['scheme']) . '://' . $authority;
+        $path = rtrim($parts['path'] ?? '', '/') . '/';
+        // HTTP home plus HTTPS siteurl on one host still needs one path list.
+        $origins[$authority]['origin'] = $origin;
+        // A default port in home/siteurl need not appear in blogs.domain.
+        $origins[$authority]['domains'][$domain] = true;
+        $origins[$authority]['domains'][$authority] = true;
+        $origins[$authority]['paths'][] = $path;
+    }
+
+    $database = new WpdbDriverPDO($wpdb);
+    $paths_by_origin = [];
+    foreach ($origins as $authority => $selection) {
+        $origin = $selection['origin'];
+        $conditions = [];
+        foreach (array_unique($selection['paths']) as $path) {
+            // LIKE can use the path index. SQLite Integration 2.x makes
+            // esc_like() a no-op, so also compare the literal prefix:
+            // /shop%20_sale/ must not match /shopX20Xsale/.
+            $conditions[] = $wpdb->prepare(
+                '(path LIKE %s AND LEFT(path, CHAR_LENGTH(%s)) = %s AND path <> %s)',
+                $wpdb->esc_like($path) . '%', $path, $path, $path
+            );
+        }
+        // No network ID filter: a site in another network can still have a
+        // matching host/path. Archived sites must also keep their old links.
+        $condition = $wpdb->prepare(
+            // phpcs:ignore WordPress.DB.PreparedSQL -- Each path condition above is prepared, and domains use placeholders.
+            "domain IN (" . implode(',', array_fill(0, count($selection['domains']), '%s')) . ") AND blog_id <> %d AND (" . implode(' OR ', $conditions) . ')',
+            array_merge(array_keys($selection['domains']), [$source['site_id']])
+        );
+        $paths_by_origin[$origin] = [];
+        $last_blog_id = 0;
+        do {
+            if ($last_blog_id === 0) {
+                $query = "SELECT blog_id, path FROM `{$source['base_prefix']}blogs` WHERE {$condition}";
+            } else {
+                // Return even non-matches so the cursor crosses a window with
+                // no child sites. WHERE only bounds the primary-key scan.
+                $query = "SELECT blog_id, CASE WHEN {$condition} THEN path ELSE NULL END AS path FROM `{$source['base_prefix']}blogs`";
+            }
+            $query .= $last_blog_id === 0 ? ' AND' : ' WHERE';
+            // wpdb removes its escaped-percent placeholders when it executes
+            // this query, including LIKE '/shop/%'. Do not bypass its driver.
+            $rows = $database->query($wpdb->prepare(
+                // phpcs:ignore WordPress.DB.PreparedSQL -- The filters above are prepared; WordPress validates the prefix and the cursor is an integer placeholder.
+                $query . ' blog_id > %d ORDER BY blog_id LIMIT 1000',
+                $last_blog_id
+            ));
+            $row_count = 0;
+            // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition -- Fetch at most one query batch.
+            while ($row = $rows->fetch()) {
+                if ($row['path'] !== null) {
+                    $paths_by_origin[$origin][] = $row['path'];
+                }
+                $last_blog_id = (int) $row['blog_id'];
+                ++$row_count;
+            }
+            unset($rows);
+        } while ($row_count === 1000);
+    }
+    return $paths_by_origin;
 }
 
 /**
@@ -3732,108 +3840,3 @@ function parse_http_config(): array
     $server = new HTTPServer();
     return $server->parse_http_config($_GET, $_POST, $_SERVER, $body);
 }
-
-/**
- * Resolves one Windows source selection before the client builds its path rules.
- *
- * The input travels as base64 because JSON cannot represent arbitrary path bytes.
- * This endpoint shares the existing authenticated export access; it never reads
- * file contents. Windows, not the Linux client, supplies relative-path context.
- *
- * @param array $config {
- *     @type string $source_path_b64 Base64-encoded source selection.
- * }
- * @return array {
- *     @type bool   $ok       True after successful resolution.
- *     @type string $path_b64 Base64-encoded absolute source path.
- * }
- */
-// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These failures become JSON API errors.
-// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Matches the export endpoint registry's existing function names.
-function endpoint_resolve_windows_path(array $config): array {
-    if (PHP_OS !== 'WINNT') {
-        throw new InvalidArgumentException('Windows path resolution requires a Windows source.');
-    }
-    $encoded = $config['source_path_b64'] ?? null;
-    $path = is_string($encoded) ? base64_decode($encoded, true) : false;
-    if ($path === false || $path === '' || strpos($path, "\0") !== false) {
-        throw new InvalidArgumentException('source_path_b64 must encode a non-empty Windows path without NUL bytes.');
-    }
-    // Only this Windows endpoint interprets CLI input using the source process's
-    // directory. The client cannot supply that context from a Linux path string.
-    $path = str_replace('\\', '/', $path);
-    if (substr($path, 0, 4) === '//?/' || substr($path, 0, 4) === '//./') {
-        $tail = substr($path, 4);
-        if (preg_match('~^[a-zA-Z]:/~', $tail)) {
-            $path = $tail;
-        } elseif (strncasecmp($tail, 'UNC/', 4) === 0) {
-            $path = '//' . substr($tail, 4);
-        } elseif (preg_match('~^(Volume\{|GLOBALROOT/)~i', $tail)) {
-            throw new InvalidArgumentException('PHP cannot map this Windows volume namespace to a drive or share: ' . $path . '. Select the same files with a drive-letter or UNC path.');
-        } else {
-            throw new InvalidArgumentException('Windows device names cannot select migration files: ' . $path);
-        }
-        // Removing a namespace prefix is safe only for ordinary components.
-        // In particular, literal . and .. must not become traversal here.
-        assert_valid_path($path, 'windows', 'Windows namespace path');
-    }
-    if (substr($path, 0, 2) === '//') {
-        assert_valid_path($path, 'windows', 'Windows share path');
-    }
-    $directory = getcwd();
-    if ($directory === false) {
-        throw new RuntimeException('Cannot read the Windows source process current directory.');
-    }
-    $directory = normalize_path_separators($directory, 'windows');
-    if (preg_match('~^[a-zA-Z]:(?!/)~', $path)) {
-        // PHP realpath('D:site') does not supply D's working directory. Keep the
-        // process directory unchanged and require a full path for another drive.
-        if (strcasecmp(substr($path, 0, 2), substr($directory, 0, 2)) !== 0) {
-            throw new InvalidArgumentException('Cannot resolve a path relative to another Windows drive: ' . $path . '. Use a full drive-letter path.');
-        }
-        $path = $directory . '/' . substr($path, 2);
-    } elseif (substr($path, 0, 1) === '/' && substr($path, 0, 2) !== '//') {
-        $root = \WordPress\Reprint\Server\windows_share_root($directory) ?? substr($directory, 0, 2);
-        $path = $root . $path;
-    } elseif (!is_absolute_path($path, 'windows')) {
-        $path = $directory . '/' . $path;
-    }
-    // Validate names before dropping dot segments. A literal "folder./.."
-    // must not escape the read guard just because its last component is "..".
-    foreach (explode('/', str_replace('\\', '/', $path)) as $component) {
-        if ($component !== '.' && $component !== '..') {
-            source_io_path($component);
-        }
-    }
-    $path = normalize_path($path, 'windows');
-    assert_valid_path($path, 'windows', 'Windows source path');
-
-    // Resolve case one component at a time. A whole-path realpath() would replace
-    // a selected junction with its target before --no-follow-symlinks can see it.
-    // Stop resolving at a link; retain that link and every later component.
-    // Missing tails are valid for exclusions and paths deleted since a prior pull.
-    $root = \WordPress\Reprint\Server\windows_share_root($path) ?? substr($path, 0, 3);
-    $resolved = $root;
-    $keep_spelling = false;
-    foreach (explode('/', ltrim(substr($path, strlen($root)), '/')) as $component) {
-        if ($component === '') {
-            continue;
-        }
-        $candidate = rtrim($resolved, '/') . '/' . $component;
-        $keep_spelling = $keep_spelling || source_is_link($candidate);
-        $real = $keep_spelling ? false : source_realpath($candidate);
-        if ($real === false) {
-            $keep_spelling = true;
-            $resolved = $candidate;
-        } else {
-            $resolved = normalize_path_separators($real, 'windows');
-        }
-    }
-    $response = ['ok' => true, 'path_b64' => base64_encode($resolved)];
-    header('Content-Type: application/octet-stream');
-    // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- The response is JSON, not HTML.
-    echo json_encode_or_throw($response);
-    return $response;
-}
-
-// phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
