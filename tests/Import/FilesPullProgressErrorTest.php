@@ -73,11 +73,14 @@ class FilesPullProgressErrorTest extends TestCase {
                 usleep(10000);
             }
             $this->assertTrue($ready, (string) file_get_contents($root . '/server.log'));
-            $url = 'http://' . $address . '/?chunk_size=16384';
+            $url = 'http://' . $address . '/';
             $client = new FileErrorProgressClient($url, $root . '/state', $root . '/local');
             \write_current_pull_state($client, [
                 'preflight' => ['data' => ['ok' => true, 'wp_detect' => ['roots' => [['path' => $source]]]], 'http_code' => 200],
                 'active_resumable_command' => ['command_name' => 'files-pull', 'completion_state' => 'in_progress', 'current_stage' => 'fetch'],
+            ]);
+            ( new \ReflectionMethod($client, 'initialize_tuner') )->invoke($client, [
+                'tuning_config' => ['file_chunk_start' => 16384, 'file_chunk_min' => 16384, 'file_chunk_max' => 16384],
             ]);
             $list_file = $client->pull_state_directory . '/fetch-list.jsonl';
             $list_handle = fopen($list_file, 'wb');
