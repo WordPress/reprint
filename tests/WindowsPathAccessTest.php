@@ -25,9 +25,9 @@ final class WindowsPathAccessTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('This endpoint does not support a selected multisite site.');
         $server->normalize_config([
-            'endpoint' => 'resolve_windows_path',
+            'endpoint' => 'resolve_windows_paths',
             'multisite_mode' => 'one-site-network-v1',
-            'source_path_b64' => base64_encode('D:/outside'),
+            'source_paths_b64' => json_encode([base64_encode('D:/outside')]),
         ]);
     }
 
@@ -67,7 +67,7 @@ final class WindowsPathAccessTest extends TestCase
             }
             $this->assertTrue($ready, file_get_contents($directory . '/server.log'));
             foreach ([null, 'wrong-token', 'path-test-token'] as $token) {
-                $request = curl_init('http://' . $address . '/?reprint-api&endpoint=resolve_windows_path&source_path_b64=' . rawurlencode(base64_encode('D:/')));
+                $request = curl_init('http://' . $address . '/?reprint-api&endpoint=resolve_windows_paths&source_paths_b64=' . rawurlencode(json_encode([base64_encode('D:/')])));
                 curl_setopt_array($request, [
                     CURLOPT_RETURNTRANSFER => true,
                     CURLOPT_TIMEOUT => 10,

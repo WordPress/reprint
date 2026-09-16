@@ -685,10 +685,6 @@ class ImportClient
     public function prepare_files_pull_options(array $options, bool $assert_remap = true): void
     {
         $remap_raw = $options["remap"] ?? [];
-        if (!empty($remap_raw)) {
-            $this->resolved_path_mappings = $this->resolve_remap($remap_raw);
-        }
-
         $include_raw = $options["include"] ?? $options["only"] ?? [];
         if (is_string($include_raw)) {
             $include_raw = [$include_raw];
@@ -704,15 +700,31 @@ class ImportClient
             $include_raw[] = ":wp-uploads:";
         }
 
+        foreach (["include" => $include_raw, "exclude" => $excluded_raw] as $option_name => $paths) {
+            if (in_array("", $paths, true)) {
+                throw new InvalidArgumentException("--{$option_name} source cannot be empty");
+            }
+        }
+
+        // Resolve every source option together. Splitting remaps, includes, and
+        // exclusions here would turn one pull into several resolver requests.
+        // Local remap targets never go to the source host.
+        $resolved_sources = $this->resolve_remote_token_paths(array_merge(
+            array_column($remap_raw, 0), $include_raw, $excluded_raw
+        ));
+        if (!empty($remap_raw)) {
+            $this->resolved_path_mappings = $this->resolve_remap($remap_raw, $resolved_sources);
+        }
+
         $this->pull_only_files_with_path_prefixes = [];
         $this->pull_excluded_files_with_path_prefixes = [];
         if (!empty($include_raw)) {
             $this->pull_only_files_with_path_prefixes =
-                $this->resolve_remote_paths($include_raw, "include");
+                $this->resolve_remote_paths($include_raw, $resolved_sources);
         }
         if (!empty($excluded_raw)) {
             $this->pull_excluded_files_with_path_prefixes =
-                $this->resolve_remote_paths($excluded_raw, "exclude");
+                $this->resolve_remote_paths($excluded_raw, $resolved_sources);
         }
         $this->excluded_plugins = $this->get_excluded_plugins();
 
@@ -10589,15 +10601,16 @@ class ImportClient
     /**
      * Build the remap rules from raw SOURCE TARGET arguments and preflight data.
      *
-     * Each argument is a template string of `:token:` substitutions and/or a raw absolute path.
-     * Source arguments resolve against the remote site's WordPress path tokens.
+     * Arguments are `:token:` templates or paths in their source or target format.
+     * Source arguments use the paths already resolved together for this pull.
      * Target arguments resolve under --fs-root and must stay within it.
      * Each rule is a full source path => full local target path (both absolute).
      *
      * @param array<int,array{0:string,1:string}> $remap_raw Raw SOURCE/TARGET mappings.
+     * @param array<string,string> $resolved_sources Raw source argument => resolved path.
      * @return array<string,string> Source path => target path (both absolute).
      */
-    private function resolve_remap(array $remap_raw): array
+    private function resolve_remap(array $remap_raw, array $resolved_sources): array
     {
         $filesystem_root = $this->filesystem_root;
 
@@ -10607,7 +10620,7 @@ class ImportClient
         $rules = [];
         $wp_content_target = null;
         foreach ($remap_raw as [$source_raw, $target_raw]) {
-            $source = $this->resolve_remote_token_path($source_raw, $source_tokens);
+            $source = $resolved_sources[$source_raw];
             $target = $this->resolve_token_path($target_raw, $target_tokens, native_path_format());
 
             if (!path_is_same_as_or_descendant_of($target, $filesystem_root)) {
@@ -10670,37 +10683,23 @@ class ImportClient
     }
 
     /**
-     * Resolves :token:-based path locators into absolute paths on the remote site.
+     * Expands selected wp-content paths and removes covered prefixes.
      *
-     * For example, when `:wp-plugins:` maps to `/htdocs/wp-content/plugins`:
-     *
-     *     $prefixes = $this->resolve_remote_paths(
-     *         [':wp-plugins:', ':wp-plugins:/woocommerce', '/var/custom/data'],
-     *         'only'
-     *     );
-     *
-     *     // Returns ['/htdocs/wp-content/plugins', '/var/custom/data'].
+     * Source paths have already been resolved in the same batch as remaps and
+     * exclusions. For example, selecting wp-content and wp-content/plugins
+     * returns just wp-content, plus any WordPress content directories outside it.
      *
      * @param array<int,string> $raw_sources Raw SOURCE values from the CLI.
-     * @param string            $option_name CLI option name used in errors.
+     * @param array<string,string> $resolved_sources Raw source argument => resolved path.
      * @return array<int,string> Absolute remote path prefixes (deduped).
      */
-    private function resolve_remote_paths(
-        array $raw_sources,
-        string $option_name
-    ): array
+    private function resolve_remote_paths(array $raw_sources, array $resolved_sources): array
     {
         $source_tokens = $this->remote_path_tokens();
 
         $prefixes = [];
         foreach ($raw_sources as $src) {
-            if ($src === "") {
-                throw new InvalidArgumentException(
-                    "--{$option_name} source cannot be empty"
-                );
-            }
-
-            $resolved = $this->resolve_remote_token_path($src, $source_tokens);
+            $resolved = $resolved_sources[$src];
             $prefixes[$resolved] = true;
 
             // Selecting content_dir also selects any plugins, mu-plugins, or
@@ -10940,42 +10939,68 @@ class ImportClient
     }
 
     /**
-     * Resolves Windows source input on the remote host, never against the client cwd.
+     * Resolves all source options in at most one request, before building rules.
      *
      * Preflight's path_format supplies the source rules. The capability flag
      * only says whether the source has this resolver. Send Windows inputs
      * before changing separators: D:photos needs the source process's current
      * directory on D, and namespace inputs need native Windows resolution.
      * Returned paths are validated with the saved source format as well.
+     * Unix and older sources keep local token expansion and validation.
      *
-     * @param string $raw Source selection from the CLI.
-     * @param array<string,string|null> $tokens Remote path token values.
+     * Duplicate arguments share one result. Results are positional on the wire;
+     * reject a partial response before applying any remap or selection. There is
+     * no per-path retry. Local target paths are not part of this batch.
+     *
+     * @param string[] $raw_sources Source selections and remap sources from the CLI.
+     * @return array<string,string> Raw source argument => resolved source path.
      */
-    private function resolve_remote_token_path(string $raw, array $tokens): string
+    private function resolve_remote_token_paths(array $raw_sources): array
     {
-        $preflight = $this->get_state()->preflight_record();
-        if (
-            $this->get_state()->remote_path_format() !== 'windows'
-            || empty($preflight['data']['capabilities']['windows_path_resolution'])
-        ) {
-            return $this->resolve_token_path($raw, $tokens, $this->get_state()->remote_path_format());
+        $raw_sources = array_values(array_unique($raw_sources));
+        if ($raw_sources === []) {
+            return [];
         }
-        $path = $this->substitute_path_tokens($raw, $tokens);
-        ['url' => $url, 'params' => $post_data] = $this->build_request('resolve_windows_path', null, [
-            'source_path_b64' => base64_encode($path),
+        $tokens = $this->remote_path_tokens();
+        $path_format = $this->get_state()->remote_path_format();
+        $preflight = $this->get_state()->preflight_record();
+        $resolved_sources = [];
+        if ($path_format !== 'windows' || empty($preflight['data']['capabilities']['windows_path_resolution'])) {
+            foreach ($raw_sources as $raw) {
+                $resolved_sources[$raw] = $this->resolve_token_path($raw, $tokens, $path_format);
+            }
+            return $resolved_sources;
+        }
+
+        $encoded_paths = [];
+        foreach ($raw_sources as $raw) {
+            $encoded_paths[] = base64_encode($this->substitute_path_tokens($raw, $tokens));
+        }
+        // One form field avoids PHP's max_input_vars truncating a long selection.
+        // Base64 inside JSON preserves path bytes which are not valid UTF-8.
+        ['url' => $url, 'params' => $post_data] = $this->build_request('resolve_windows_paths', null, [
+            'source_paths_b64' => json_encode($encoded_paths),
         ]);
         $result = $this->fetch_json($url, $post_data);
         $payload = $result['json'] ?? [];
-        if (empty($payload['ok']) || !is_string($payload['path_b64'] ?? null)) {
+        if (empty($payload['ok'])) {
             // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The CLI reports API errors as text, not HTML.
-            throw new RuntimeException($payload['error'] ?? $result['error'] ?? 'The Windows source did not return a resolved path.');
+            throw new RuntimeException($payload['error'] ?? $result['error'] ?? 'The Windows source did not resolve the requested paths.');
         }
-        $resolved = base64_decode($payload['path_b64'], true);
-        if ($resolved === false) {
-            throw new RuntimeException('The Windows source returned invalid base64 for the resolved path.');
+        $resolved_paths = $payload['paths_b64'] ?? null;
+        if (!is_array($resolved_paths) || array_keys($resolved_paths) !== array_keys($raw_sources)) {
+            throw new RuntimeException('The Windows source must return one resolved path per requested path, in request order.');
         }
-        assert_valid_path($resolved, $this->get_state()->remote_path_format(), 'Resolved Windows source path');
-        return trim_right_slash($resolved, $this->get_state()->remote_path_format());
+        foreach ($raw_sources as $index => $raw) {
+            $encoded = $resolved_paths[$index];
+            $resolved = is_string($encoded) ? base64_decode($encoded, true) : false;
+            if ($resolved === false) {
+                throw new RuntimeException('The Windows source returned invalid base64 for a resolved path.');
+            }
+            assert_valid_path($resolved, $path_format, 'Resolved Windows source path');
+            $resolved_sources[$raw] = trim_right_slash($resolved, $path_format);
+        }
+        return $resolved_sources;
     }
 
     /**

@@ -94,7 +94,7 @@ class RemapResolveTest extends TestCase
     {
         $client = $this->client([]);
         $client->get_state()->set_preflight_record(['data' => ['path_format' => 'windows']]);
-        $mappings = $this->call($client, 'resolve_remap', [[['d:\\site', ':fs-root:/workspace\\group\\user/www']]]);
+        $mappings = $this->resolve($client, ['d:\\site', ':fs-root:/workspace\\group\\user/www']);
         $this->assertSame(
             ['D:/site' => $this->root . '/workspace\\group\\user/www'],
             $mappings
@@ -130,9 +130,11 @@ class RemapResolveTest extends TestCase
         $this->assertSame($this->root, $client->filesystem_root);
     }
 
+    /** Resolve options through the same combined source batch as files-pull. */
     private function resolve($c, array ...$mappings): array
     {
-        return $this->call($c, 'resolve_remap', array($mappings));
+        $c->prepare_files_pull_options(['remap' => $mappings], false);
+        return (new \ReflectionClass($c))->getProperty('resolved_path_mappings')->getValue($c);
     }
 
     private function assertRemapConsistent($c): void
