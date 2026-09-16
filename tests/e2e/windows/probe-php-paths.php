@@ -5,7 +5,7 @@ if (PHP_OS !== 'WINNT' || extension_loaded('FFI')) {
 }
 $root = 'D:\\Reprint namespace cases\\Mixed Case\\';
 foreach (['trailing', 'trailing.', 'trailing ', 'NUL.txt', 'COM1.txt', 'COM¹.txt'] as $name) {
-    foreach ([$root . $name, '\\\\?\\' . $root . $name, 'file://' . '\\\\?\\' . $root . $name] as $path) {
+    foreach ([$root . $name, '\\\\?\\' . $root . $name, '\\\\.\\' . $root . $name, str_replace('\\', '/', '\\\\?\\' . $root . $name), str_replace('\\', '/', '\\\\.\\' . $root . $name)] as $path) {
         error_clear_last();
         $contents = @file_get_contents($path);
         echo json_encode(['path' => $path, 'contents' => $contents, 'error' => error_get_last()['message'] ?? null,
