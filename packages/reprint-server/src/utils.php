@@ -904,7 +904,7 @@ function wp_join_unix_paths(...$path_segments)
 
 if (!function_exists(__NAMESPACE__ . '\\source_io_path')) {
 /**
- * Rejects Windows names that PHP cannot read without changing their meaning.
+ * Prepares a native source path for PHP file access without changing filenames.
  *
  * Call this before source file I/O, including lstat() and realpath(). For two
  * files named report and report., Windows PHP can return report's metadata
@@ -913,12 +913,20 @@ if (!function_exists(__NAMESPACE__ . '\\source_io_path')) {
  * This also catches literal names returned by a directory listing, not just
  * paths supplied by the user. Unix filenames pass through unchanged.
  *
+ * PHP can read long UNC paths through the \\.\UNC\ spelling even when ordinary
+ * UNC metadata lookup fails. Keep ordinary paths on their usual PHP path,
+ * including its open_basedir checks. Use the prefix only at I/O; indexes and cursors
+ * retain the shared path. source_realpath() removes the I/O prefix on return.
+ * The source process's OS selects this behavior, never a remote path's prefix.
  * No native extension or external command is used to bypass PHP file access.
  */
 function source_io_path(string $path): string {
     if (PHP_OS === 'WINNT' && preg_match('~[. ](?:[/\\\\]|$)~', $path)) {
         // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This is an API error, not HTML.
         throw new \RuntimeException('Cannot read the exact Windows filename ' . $path . '. PHP cannot safely read a name ending in a dot or space. Rename it on the source before migration.');
+    }
+    if (PHP_OS === 'WINNT' && windows_share_root($path) !== null && @lstat($path) === false) {
+        return '\\\\.\\UNC\\' . ltrim(str_replace('/', '\\', $path), '\\');
     }
     return $path;
 }
@@ -944,7 +952,22 @@ if (!function_exists(__NAMESPACE__ . '\\source_lstat')) {
  * An unrecognized reparse point that leads back to itself must fail rather
  * than become a fabricated self-link or disappear as an unknown file type.
  *
- * @return array|false PHP stat fields, with link type bits for Windows junctions.
+ * @return array|false { PHP stat fields, or false on failure. Numeric keys 0-12
+ *     repeat these fields in the same order, as in lstat().
+ *     @type int $dev     Device number.
+ *     @type int $ino     File identifier.
+ *     @type int $mode    Type and permissions; junctions have link type bits.
+ *     @type int $nlink   Number of hard links.
+ *     @type int $uid     User ID.
+ *     @type int $gid     Group ID.
+ *     @type int $rdev    Device type, when applicable.
+ *     @type int $size    File size in bytes.
+ *     @type int $atime   Access time.
+ *     @type int $mtime   Modification time.
+ *     @type int $ctime   Change time reported by PHP on this platform.
+ *     @type int $blksize Filesystem block size, or -1 when unavailable.
+ *     @type int $blocks  Allocated blocks, or -1 when unavailable.
+ * }
  */
 function source_lstat(string $path) {
     $stat = lstat(source_io_path($path));
@@ -982,6 +1005,9 @@ function source_realpath(string $path) {
     if ($resolved === false && PHP_OS === 'WINNT' && source_is_link($path)) {
         $target = source_readlink($path);
         $resolved = realpath(source_io_path(resolve_symlink_target_path($path, $target, 'windows')));
+    }
+    if ($resolved !== false && PHP_OS === 'WINNT' && strncasecmp($resolved, '\\\\.\\UNC\\', 8) === 0) {
+        $resolved = '\\\\' . substr($resolved, 8);
     }
     return $resolved === false ? false : normalize_path_separators($resolved, native_path_format());
 }

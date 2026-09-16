@@ -140,20 +140,32 @@ if (!$reprint_chunk['is_last_chunk'] || $reprint_producer->next_chunk()) {
 }
 unset($reprint_producer);
 
-// Record PHP's namespace behavior for a share path beyond MAX_PATH.
-$reprint_long_tail = 'localhost\\D$\\Reprint reader UNC\\' . str_repeat('a', 251) . '.txt';
-foreach (['\\\\' . $reprint_long_tail, '\\\\.\\UNC\\' . $reprint_long_tail, '\\\\?\\UNC\\' . $reprint_long_tail] as $reprint_long_path) {
-    echo json_encode([
-        'long_path' => $reprint_long_path,
-        'contents' => @file_get_contents($reprint_long_path),
-        'stat' => @lstat($reprint_long_path),
-        'realpath' => @realpath($reprint_long_path),
-    ]) . "\n";
+// Ordinary UNC access fails beyond MAX_PATH on this PHP build. The PHP-supported
+// device spelling must remain inside I/O calls, never in index paths or cursors.
+$reprint_long_path = '\\\\LOCALHOST\\D$/Reprint reader UNC/' . str_repeat('a', 251) . '.txt';
+$reprint_long_stat = \WordPress\Reprint\Server\source_lstat($reprint_long_path);
+if ($reprint_long_stat === false || $reprint_long_stat['size'] !== 13
+    || \WordPress\Reprint\Server\source_realpath($reprint_long_path) !== $reprint_long_path
+    || file_get_contents(source_io_path($reprint_long_path)) !== 'long UNC file') {
+    throw new RuntimeException('PHP must read the long UNC file without changing its shared path.');
 }
+$reprint_producer = new FileTreeProducer(dirname($reprint_long_path), ['paths' => [$reprint_long_path]]);
+if (!$reprint_producer->next_chunk() || $reprint_producer->get_current_chunk()['data'] !== 'long UNC file') {
+    throw new RuntimeException('The real file producer could not read the long UNC file through PHP.');
+}
+unset($reprint_producer);
 
-// PHP itself enforces open_basedir; there is no second filesystem API.
-ini_set('open_basedir', __DIR__);
-if (@file_get_contents(source_io_path($reprint_path)) !== false) {
-    throw new RuntimeException('Source file access bypassed open_basedir.');
+// Ordinary allowed shares must still work under PHP's open_basedir policy.
+$reprint_short_share_path = '\\\\LOCALHOST\\D$/Reprint reader UNC/readable.txt';
+ini_set('open_basedir', __DIR__ . PATH_SEPARATOR . dirname($reprint_short_share_path));
+if (file_get_contents(source_io_path($reprint_short_share_path)) !== 'short UNC file') {
+    throw new RuntimeException('An allowed ordinary share stopped working under open_basedir.');
 }
-echo "PASS: PHP reads, seek, resume, unreadable names, error cursors, and open_basedir without FFI.\n";
+// PHP itself enforces open_basedir, including the long UNC I/O spelling.
+ini_set('open_basedir', __DIR__);
+foreach ([$reprint_path, $reprint_short_share_path, $reprint_long_path] as $reprint_denied_path) {
+    if (@file_get_contents(source_io_path($reprint_denied_path)) !== false) {
+        throw new RuntimeException('Source file access bypassed open_basedir.');
+    }
+}
+echo "PASS: PHP reads, seek, resume, unreadable names, error cursors, long UNC paths, and open_basedir without FFI.\n";

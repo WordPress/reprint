@@ -117,7 +117,9 @@ source process's current drive. Use a full path for another drive.
 
 All source reads use PHP's file functions. Reprint does not use FFI or run an
 external program to read Windows files. PHP's `open_basedir` restriction still
-applies. The Windows CI jobs run with the FFI extension absent.
+applies. Long UNC paths use a PHP-supported namespace spelling at the file I/O
+call; that spelling does not enter the index or reach the Linux client. The
+Windows CI jobs run with the FFI extension absent.
 
 PHP cannot safely read every name that NTFS permits. For example, with two
 separate files named `report` and `report.`, PHP can return `report`'s metadata
@@ -127,8 +129,6 @@ parent directory. Rename these entries on the source before migration. The
 pull fails again on resume; it does not skip the unreadable entry.
 
 Volume GUID and `GLOBALROOT` selections require a drive-letter or UNC spelling.
-For long share paths that PHP cannot inspect, select the same source through a
-drive-letter path.
 Some Windows links can be followed by PHP but cannot be read by `readlink()`;
 these stop the pull rather than becoming empty links. Recreate such links with
 a backslash target. If PHP cannot resolve the link, use a full drive-letter

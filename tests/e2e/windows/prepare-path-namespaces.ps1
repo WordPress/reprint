@@ -237,6 +237,7 @@ New-Item -ItemType Directory -Force 'D:\Reprint chunk boundaries' | Out-Null
 
 # Keep this read probe independent from the full WordPress fixture.
 New-Item -ItemType Directory -Force 'D:\Reprint reader UNC' | Out-Null
+[NamespaceFixtures]::Write('\\?\D:\Reprint reader UNC\readable.txt', 'short UNC file')
 [NamespaceFixtures]::Write(('\\?\D:\Reprint reader UNC\' + ('a' * 251) + '.txt'), 'long UNC file')
 
 $cases | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ManifestPath -Encoding utf8NoBOM

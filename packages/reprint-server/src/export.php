@@ -3821,7 +3821,7 @@ function endpoint_resolve_windows_path(array $config): array {
         }
         $candidate = rtrim($resolved, '/') . '/' . $component;
         $keep_spelling = $keep_spelling || source_is_link($candidate);
-        $real = $keep_spelling ? false : realpath($candidate);
+        $real = $keep_spelling ? false : source_realpath($candidate);
         if ($real === false) {
             $keep_spelling = true;
             $resolved = $candidate;
