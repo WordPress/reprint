@@ -14,6 +14,7 @@ class StructuredBlockMarkupUrlProcessorTest extends TestCase {
         foreach ([
             ['https://source.example/photo.jpg', 'https://source.example/photo.jpg', true],
             ['HTTPS://source.example/photo.jpg', 'https://source.example/photo.jpg', true],
+            [' https://source.example/photo.jpg ', 'https://source.example/photo.jpg', true],
             ['https:photo.jpg', 'https://source.example/shop/photo.jpg', true],
             ['//source.example/photo.jpg', 'https://source.example/photo.jpg', false],
             ['photo.jpg', 'https://source.example/shop/photo.jpg', false],

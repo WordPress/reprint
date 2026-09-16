@@ -173,8 +173,8 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	 * Read the next decoded URL field without parsing the URL itself.
 	 *
 	 * HTML, CSS, and block parsers still identify and decode the field. The
-	 * rewriter checks its bounded cache next, then calls get_parsed_url() on a
-	 * miss. Call next_url_in_current_token() when invalid URLs must be skipped.
+	 * rewriter checks its bounded cache next, then parses the URL on a miss.
+	 * Call next_url_in_current_token() when invalid URLs must be skipped.
 	 */
 	public function next_raw_url_in_current_token() {
 		$this->raw_url = null;
@@ -364,7 +364,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		return false;
 	}
 
-	/** Parse top-level block URL fields, resolving relative URLs only for known fields. */
+	/** Read top-level block URL fields, allowing relative URLs only for known fields. */
 	private function next_url_block_attribute() {
 		// This reader accepts "url" in {"url":"https://example.com/a"}.
 		// Divi often uses {"module":{"content":{"value":"https://example.com/a"}}}.
@@ -375,7 +375,7 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		// imports skip this iterator: StructuredDataUrlRewriter walks
 		// get_block_attributes() once and returns changes through set_block_attributes()
 		// before the next token.
-		// Check only before the iterator starts; later calls continue from its path.
+		// Skip this scan while the iterator has a current attribute path.
 		if ( false === $this->get_block_attribute_path() ) {
 			$has_top_level_string = false;
 			foreach ( $this->get_block_attributes() ?: array() as $value ) {
@@ -541,10 +541,11 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 		if ( ! $this->get_parsed_url() ) {
 			return false;
 		}
-		// A full HTTP(S) URL has already passed the parser without a base.
-		// Skip a second parse for that case. Other HTTP(S) forms still need
-		// the check: "https:photo.jpg" parses without a base, but "https:"
-		// only parses with one.
+		// A full HTTP(S) prefix already passed parsing without a base.
+		// The decoded field can also contain " https://example.com/photo.jpg ":
+		// the prefix check misses its space, but the parser accepts it alone.
+		// "photo.jpg" needs a base and must stay relative. Check the field text,
+		// not get_parsed_url(), which has already resolved it to a complete URL.
 		return $this->has_absolute_http_url_prefix( $this->get_raw_url() )
 			|| WPURL::can_parse( $this->get_raw_url() );
 	}

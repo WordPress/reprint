@@ -168,8 +168,13 @@ class StructuredDataUrlRewriter
             // rule. A base path describes a directory even without a trailing slash.
             $this->base_url = $this->base_url !== '' ? rtrim($this->base_url, '/') . '/' : '';
 
-            // A sibling or media rule must win over its containing site URL, just
-            // as it does in the cautious plain-text rewriter. Keep the base above.
+            // Longer source paths win, as in the cautious plain-text rewriter:
+            // https://network.test/uploads/sites/7 -> https://target.test/uploads
+            // https://network.test/news -> https://network.test/news (keep the child site)
+            // https://network.test -> https://target.test
+            // The media rule removes /sites/7; the broad site rule would retain it.
+            // Keep the original first source as the base above: "photo.jpg" must
+            // resolve against the site, not whichever media rule sorts first.
             uksort($url_mapping, static function (string $first, string $second): int {
                 return strlen($second) <=> strlen($first);
             });
@@ -181,7 +186,7 @@ class StructuredDataUrlRewriter
         $this->parsed_mapping = [];
         foreach ($url_mapping as $from_url_string => $to_url_string) {
             $this->source_bases_contain_html_syntax = $this->source_bases_contain_html_syntax
-                || strpbrk($from_url_string, '<>') !== false;
+                || strcspn($from_url_string, '<>') !== strlen($from_url_string);
             $this->parsed_mapping[] = [
                 'from_url' => WPURL::parse($from_url_string),
                 'to_url'   => WPURL::parse($to_url_string),
@@ -950,11 +955,38 @@ class StructuredDataUrlRewriter
         if ($processor->get_tag() !== 'SCRIPT' || $processor->is_tag_closer()) {
             return;
         }
-        $type = $processor->get_attribute('type');
-        if (!is_string($type) || preg_match(
-            '/\Aapplication\/(?:[a-z0-9!#$&^_.+-]+\+)?json\z/',
-            strtolower(trim(explode(';', $type, 2)[0]))
-        ) !== 1) {
+        $media_type = $processor->get_attribute('type');
+        if (!is_string($media_type)) {
+            return;
+        }
+        // Read the MIME type and subtype using the standard's HTTP whitespace
+        // and token bytes. PHP's default trim() also strips invalid bytes such
+        // as vertical tabs. Parameters cannot change the JSON classification:
+        // application/ld+json; profile="a;b" has the same body format as
+        // application/ld+json. Do not copy or parse the unused parameter tail.
+        // https://mimesniff.spec.whatwg.org/#parse-a-mime-type
+        $http_whitespace = " \t\r\n";
+        $http_token_bytes = "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        $type_start = strspn($media_type, $http_whitespace);
+        $type_length = strspn($media_type, $http_token_bytes, $type_start);
+        $slash = $type_start + $type_length;
+        if ($type_length === 0 || ( $media_type[$slash] ?? '' ) !== '/') {
+            return;
+        }
+        $subtype_start = $slash + 1;
+        $subtype_length = strspn($media_type, $http_token_bytes, $subtype_start);
+        $end = $subtype_start + $subtype_length;
+        $end += strspn($media_type, $http_whitespace, $end);
+        if ($subtype_length === 0 || !in_array($media_type[$end] ?? '', ['', ';'], true)) {
+            return;
+        }
+        $type = strtolower(substr($media_type, $type_start, $type_length));
+        $subtype = strtolower(substr($media_type, $subtype_start, $subtype_length));
+        // JSON includes text/json and any valid subtype ending in +json,
+        // such as model/gltf+json, but not application/jsonp.
+        // https://mimesniff.spec.whatwg.org/#json-mime-type
+        if (!( ( $type === 'application' || $type === 'text' ) && $subtype === 'json' )
+            && substr($subtype, -5) !== '+json') {
             return;
         }
         $body = $processor->get_modifiable_text();

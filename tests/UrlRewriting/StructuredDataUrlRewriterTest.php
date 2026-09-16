@@ -1024,6 +1024,58 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://new-site.com/from-css.jpg', $rewritten_code);
     }
 
+    /** MIME parameters do not change the body format; malformed type names must not enable JSON parsing. */
+    #[DataProvider('jsonScriptMediaTypeProvider')]
+    public function testScriptMediaTypeControlsJsonDecoding(string $type, bool $is_json): void
+    {
+        $body = '{"url":"https:\u002F\u002Fold-site.com\u002Fphoto.jpg"}';
+        foreach ([null, []] as $selection) {
+            // A block comment selects the block processor; plain HTML uses the fast path.
+            foreach (['', '<!-- wp:paragraph /-->'] as $prefix) {
+                $rewriter = new StructuredDataUrlRewriter(['https://old-site.com' => 'https://new-site.com'], $selection);
+                $input = $prefix . '<script type="' . htmlspecialchars($type, ENT_QUOTES) . '">' . $body . '</script>';
+                $output = $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
+                if (!$is_json) {
+                    $this->assertSame($input, $output);
+                    continue;
+                }
+                $processor = new WP_HTML_Tag_Processor($output);
+                $this->assertTrue($processor->next_tag('SCRIPT'));
+                $this->assertSame(
+                    ['url' => 'https://new-site.com/photo.jpg'],
+                    json_decode($processor->get_modifiable_text(), true)
+                );
+            }
+        }
+    }
+
+    /** @return array<string, array{0:string, 1:bool}> */
+    public static function jsonScriptMediaTypeProvider(): array
+    {
+        return [
+            'JSON' => ['application/json', true],
+            'JSON-LD' => ['application/ld+json', true],
+            'HTTP whitespace and mixed case' => [" \tAPPLICATION/LD+JSON\r\n ; charset=utf-8", true],
+            'quoted parameter with a semicolon' => ['application/json; profile="a;b"', true],
+            'unfinished parameter does not change the type' => ['application/json; profile="unfinished', true],
+            'legacy text JSON' => ['text/json', true],
+            'JSON suffix on another type' => ['model/gltf+json', true],
+            'HTTP token punctuation' => ["application/vnd.test%'*`|~+json", true],
+            'empty suffix prefix is still a token' => ['application/+json', true],
+            'JSONP' => ['application/jsonp', false],
+            'unrecognized bare JSON subtype' => ['model/json', false],
+            'JavaScript' => ['text/javascript', false],
+            'missing type' => ['/json', false],
+            'missing subtype' => ['application/', false],
+            'space before slash' => ['application /json', false],
+            'space after slash' => ['application/ json', false],
+            'subtype after whitespace' => ['application/json extra', false],
+            'vertical tab is not HTTP whitespace' => ["\vapplication/json", false],
+            'form feed is not HTTP whitespace' => ["application/json\f", false],
+            'non-ASCII subtype' => ['application/é+json', false],
+        ];
+    }
+
     #[DataProvider('nonJsonScriptTypeProvider')]
     public function testDoesNotParseJsonLookingScriptBodiesWithoutAJsonMediaType(
         string $opening_tag
