@@ -521,6 +521,10 @@ class FileTreeProducer
             $changed = true;
             $error_type = "file_missing";
         } else {
+            // feof() can stay false until another read, even after an exact
+            // final chunk. Use the fresh size instead of emitting an empty-read
+            // error on the next step. This also works for native Windows streams.
+            $is_last = $is_last || $stat["size"] === $this->streaming_file_offset;
             $now_ctime = $stat["ctime"];
             if ($now_ctime !== $file["ctime"]) {
                 $changed = true;

@@ -8351,7 +8351,15 @@ class ImportClient
                             : null,
                 ];
             } elseif ($chunk_type === "error") {
-                $this->handle_error_chunk($chunk, "index", $context);
+                try {
+                    $this->handle_error_chunk($chunk, "index", $context);
+                } catch (RuntimeException $e) {
+                    // The exporter flushes completed batches before a fatal
+                    // error. Keep those entries when a later command resumes.
+                    $this->get_state()->index->cursor = $cursor;
+                    $this->save_state();
+                    throw $e;
+                }
             }
         };
 
@@ -8360,7 +8368,6 @@ class ImportClient
         try {
             $this->fetch_streaming($url, $cursor, $context, $post_data, "file_index");
         } catch (TransientInterruptionException $e) {
-            fclose($next_remote_index_file_handle);
             $this->get_state()->index->cursor = $cursor;
             $this->get_state()->active_resumable_command->completion_state = "partial";
             $this->assert_can_retry_after_interrupted_response(
@@ -8370,6 +8377,8 @@ class ImportClient
                 $e,
             );
             return false;
+        } finally {
+            fclose($next_remote_index_file_handle);
         }
         $this->get_state()->consecutive_interrupted_responses = 0;
         $wall_time = microtime(true) - $request_start;
@@ -8378,7 +8387,6 @@ class ImportClient
             $wall_time,
             $context->response_stats ?? [],
         );
-        fclose($next_remote_index_file_handle);
 
         $this->get_state()->index->cursor = $next_remote_index_is_complete ? null : $cursor;
         $this->save_state();
@@ -11685,6 +11693,13 @@ class ImportClient
             ],
             true,
         );
+        if (in_array($phase, ["index", "files"], true) && $error_type === "exception") {
+            // A source exception cannot become another partial fetch forever.
+            // For example, Windows PHP may be unable to read a stored link target.
+            // Stop at the saved cursor so the user can correct the source first.
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Remote error rendered as CLI text, not HTML.
+            throw new RuntimeException("Remote {$phase} failed: {$message}");
+        }
     }
 
     /**
