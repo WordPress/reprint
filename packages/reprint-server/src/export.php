@@ -22,6 +22,7 @@ use function WordPress\Reprint\Server\generate_random_bytes;
 use function WordPress\Reprint\Server\json_encode_or_throw;
 use function WordPress\Reprint\Server\is_absolute_path;
 use function WordPress\Reprint\Server\source_io_path;
+use function WordPress\Reprint\Server\source_realpath;
 use function WordPress\Reprint\Server\source_readlink;
 use function WordPress\Reprint\Server\normalize_path;
 use function WordPress\Reprint\Server\normalize_path_separators;
@@ -1395,7 +1396,7 @@ function resolve_directories(array $config): array
         assert_valid_path($directory, native_path_format(), "directory entry");
 
         clearstatcache(true, $directory);
-        $real_directory = @realpath(source_io_path($directory));
+        $real_directory = @source_realpath($directory);
         if ($real_directory === false || !is_dir(source_io_path($real_directory))) {
             throw new InvalidArgumentException(
                 "directory entry is not an accessible directory: {$directory}\n" .
@@ -1485,7 +1486,7 @@ function resolve_file_index_roots(array $config): array
 
         $mode = $stat["mode"] & STAT_TYPE_MASK;
         $type = $mode === STAT_TYPE_LINK ? "symlink" : ( is_dir(source_io_path($requested_path)) ? "directory" : "file" );
-        $resolved_path = @realpath(source_io_path($requested_path));
+        $resolved_path = @source_realpath($requested_path);
         if ($type === "symlink" && $resolved_path === false) {
             $message = PHP_OS === 'WINNT'
                 ? "PHP cannot resolve the Windows link target: {$requested_path}. Recreate the link with a full drive-letter target before migration."
@@ -1557,7 +1558,7 @@ function resolve_file_index_start_root(
         );
     }
 
-    $resolved_path = @realpath(source_io_path($requested_path));
+    $resolved_path = @source_realpath($requested_path);
     if ($resolved_path === false || !is_dir(source_io_path($resolved_path))) {
         throw new InvalidArgumentException(
             "Followed symlink target directory does not exist or is not accessible: {$requested_path}"

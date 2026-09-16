@@ -211,11 +211,12 @@ foreach ($spelling in @('backslash', 'forward-slash', 'root-relative', 'absolute
         if ($spelling -eq 'forward-slash') {
             $cases[$name]['error'] = 'PHP cannot read the Windows link target'
         }
-        if ($spelling -eq 'root-relative') {
-            $cases[$name]['error'] = 'PHP cannot resolve the Windows link target'
-        }
     }
 }
+# An unreadable target discovered under a parent must fail again on resume.
+New-Item -ItemType Directory -Force 'D:\Reprint unreadable links' | Out-Null
+[NamespaceFixtures]::Link('D:\Reprint unreadable links\directory', '../Reprint namespace cases/Mixed Case', $true)
+$cases['unreadable-link-parent'] = @{source='D:\Reprint unreadable links'; error='PHP cannot read the Windows link target'}
 [NamespaceFixtures]::Link("$linkRoot\cycle-a", './cycle-b', $false)
 [NamespaceFixtures]::Link("$linkRoot\cycle-b", './cycle-a', $false)
 $cases['junction-not-followed'] = @{

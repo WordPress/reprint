@@ -924,6 +924,32 @@ function source_io_path(string $path): string {
 }
 }
 
+if (!function_exists(__NAMESPACE__ . '\\source_realpath')) {
+/**
+ * Resolves source paths through PHP and returns the shared index spelling.
+ *
+ * Windows PHP realpath() can fail on a link whose stored target starts at the
+ * drive root, even when readlink() returns its accessible absolute target.
+ * Resolve that target through PHP too. No file bytes are read through the
+ * original link; the index schedules the resolved path for the later fetch.
+ * A target that PHP still cannot resolve remains false, like ordinary realpath.
+ *
+ * Normalize the result using this source process's format. PHP on Windows
+ * returns backslashes; index comparisons must not compare those bytes against
+ * slash-delimited configured roots. Unix backslashes remain filename bytes.
+ *
+ * @return string|false Resolved source path, or false when PHP cannot resolve it.
+ */
+function source_realpath(string $path) {
+    $resolved = realpath(source_io_path($path));
+    if ($resolved === false && PHP_OS === 'WINNT' && is_link($path)) {
+        $target = source_readlink($path);
+        $resolved = realpath(source_io_path(resolve_symlink_target_path($path, $target, 'windows')));
+    }
+    return $resolved === false ? false : normalize_path_separators($resolved, native_path_format());
+}
+}
+
 if (!function_exists(__NAMESPACE__ . '\\source_readlink')) {
 /**
  * Reads a link through PHP, stopping if Windows cannot return its target.

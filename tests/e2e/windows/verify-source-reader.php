@@ -35,34 +35,71 @@ foreach (['trailing.', 'trailing '] as $reprint_name) {
         }
     }
 }
-// Start with a valid parent selection, then encounter the unreadable child in
-// the real directory listing. Saving that error cursor must not skip the child.
-$reprint_roots = resolve_file_index_roots(['directory' => [$reprint_root]]);
+// PHP realpath() returns backslashes. Index comparisons still use the shared
+// Windows spelling, so a parent plus an explicit child must not walk it twice.
+$reprint_roots = resolve_file_index_roots(['directory' => [
+    'D:/Reprint namespace cases', 'D:/Reprint namespace cases/Mixed Case',
+]]);
 $reprint_processor = FileIndexProcessor::start($reprint_roots, $reprint_roots[0], false, '');
-$reprint_first_error = null;
-for ($reprint_attempt = 0; $reprint_attempt < 2; ++$reprint_attempt) {
-    try {
-        $reprint_steps = 0;
-        while ($reprint_processor->next_index_step()) {
-            if (++$reprint_steps > 100) {
-                throw new LogicException('The index did not reach the unreadable child.');
-            }
+$reprint_paths = [];
+while ($reprint_processor->next_index_step()) {
+    foreach ($reprint_processor->get_index_entries() as $reprint_entry) {
+        if (in_array($reprint_entry['path'], $reprint_paths, true)) {
+            throw new RuntimeException('Overlapping Windows roots repeated a path: ' . $reprint_entry['path']);
         }
-        throw new LogicException('Indexing skipped an unreadable child.');
-    } catch (RuntimeException $reprint_error) {
-        if (strpos($reprint_error->getMessage(), 'Cannot read the exact Windows filename') === false) {
-            throw $reprint_error;
-        }
+        $reprint_paths[] = $reprint_entry['path'];
     }
-    if ($reprint_first_error !== null && $reprint_first_error !== $reprint_error->getMessage()) {
-        throw new RuntimeException('Resume skipped the first unreadable child.');
-    }
-    $reprint_first_error = $reprint_error->getMessage();
-    $reprint_cursor = json_encode($reprint_processor->get_cursor());
-    $reprint_processor->close();
-    $reprint_processor = FileIndexProcessor::resume($reprint_roots, $reprint_cursor, false, '');
 }
 $reprint_processor->close();
+if (!in_array('D:/Reprint namespace cases/Mixed Case/hello.txt', $reprint_paths, true)) {
+    throw new RuntimeException('Overlapping Windows roots omitted the selected child.');
+}
+$reprint_roots = resolve_file_index_roots(['directory' => ['D:/Reprint link cases/junction'], 'follow_symlinks' => true]);
+$reprint_processor = FileIndexProcessor::start($reprint_roots, $reprint_roots[0], true, '');
+while ($reprint_processor->next_index_step()) {
+    foreach ($reprint_processor->get_index_entries() as $reprint_entry) {
+        if (isset($reprint_entry['target']) && $reprint_entry['target'] !== 'D:/Reprint namespace cases/Mixed Case') {
+            throw new RuntimeException('A Windows index target retained native separators: ' . $reprint_entry['target']);
+        }
+    }
+}
+$reprint_processor->close();
+
+// Read failures can occur in a directory entry or a selected named link.
+// Their cursors must retain the same entry, without skipping it on resume.
+foreach ([
+    'D:/Reprint literal cases/Mixed Case' => 'Cannot read the exact Windows filename',
+    'D:/Reprint unreadable links' => 'PHP cannot read the Windows link target',
+    'D:/Reprint link cases/target-forward-slash-directory' => 'PHP cannot read the Windows link target',
+] as $reprint_selection => $reprint_expected_error) {
+    $reprint_roots = resolve_file_index_roots(['directory' => [$reprint_selection], 'follow_symlinks' => true]);
+    $reprint_processor = FileIndexProcessor::start($reprint_roots, $reprint_roots[0], true, '');
+    $reprint_first_error = null;
+    for ($reprint_attempt = 0; $reprint_attempt < 2; ++$reprint_attempt) {
+        try {
+            $reprint_steps = 0;
+            while ($reprint_processor->next_index_step()) {
+                if (++$reprint_steps > 100) {
+                    throw new LogicException('The index did not reach the unreadable child.');
+                }
+            }
+            throw new LogicException('Indexing skipped an unreadable child.');
+        } catch (RuntimeException $reprint_error) {
+            if (strpos($reprint_error->getMessage(), $reprint_expected_error) === false) {
+                throw $reprint_error;
+            }
+        }
+        if ($reprint_first_error !== null && $reprint_first_error !== $reprint_error->getMessage()) {
+            throw new RuntimeException('Resume skipped the first unreadable child.');
+        }
+        $reprint_first_error = $reprint_error->getMessage();
+        $reprint_cursor = json_encode($reprint_processor->get_cursor());
+        $reprint_processor->close();
+        $reprint_processor = FileIndexProcessor::resume($reprint_roots, $reprint_cursor, true, '');
+    }
+    $reprint_processor->close();
+
+}
 
 // Resume the real PHP reader after one chunk, without a native stream wrapper.
 $reprint_path = 'D:/Reprint chunk boundaries/readable';

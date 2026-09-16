@@ -365,6 +365,8 @@ final class FileIndexProcessor {
         // each step bounded and makes its cursor boundary unambiguous.
         if (!empty($this->pending_named_roots)) {
             $this->index_next_named_root();
+            // An unreadable Windows link must remain pending when inspection throws.
+            array_shift($this->pending_named_roots);
             return true;
         }
 
@@ -443,37 +445,35 @@ final class FileIndexProcessor {
         clearstatcache(true, $path);
         try {
             $stat = @lstat(source_io_path($path));
+            if ($stat === false) {
+                if (windows_share_root($path) !== null) {
+                    // PHP may list a long UNC filename but fail to inspect it. Do
+                    // not treat that API limit as a deletion. Keep the cursor before
+                    // this entry so another attempt cannot silently skip the file.
+                    throw new RuntimeException(
+                        "Cannot inspect Windows share path: {$path}. PHP returned no file metadata. " .
+                        "Check source access; for long UNC paths, configure the source with a drive-letter path."
+                    );
+                }
+                $this->step_status = self::STATUS_PATH_UNAVAILABLE;
+                return true;
+            }
+            if (
+                self::stat_is_file($stat)
+                && self::file_name_is_default_skipped($path)
+            ) {
+                $this->step_status = self::STATUS_SKIPPED;
+                return true;
+            }
+
+            $inspected_path = self::index_entries_for_path($path, $stat, $this->follow_symlinks);
         } catch (RuntimeException $error) {
-            // A literal Windows name must fail again after resume, not disappear
-            // behind the cursor just because its read guard stopped this step.
+            // Names and link targets that PHP cannot inspect must fail again
+            // after resume, not disappear behind this entry's error cursor.
             $this->directory_stack[$frame_index]["after"] = $previous_entry_name;
             --$this->current_directory_position;
             throw $error;
         }
-        if ($stat === false) {
-            if (windows_share_root($path) !== null) {
-                // PHP may list a long UNC filename but fail to inspect it. Do
-                // not treat that API limit as a deletion. Keep the cursor before
-                // this entry so another attempt cannot silently skip the file.
-                $this->directory_stack[$frame_index]["after"] = $previous_entry_name;
-                --$this->current_directory_position;
-                throw new RuntimeException(
-                    "Cannot inspect Windows share path: {$path}. PHP returned no file metadata. " .
-                    "Check source access; for long UNC paths, configure the source with a drive-letter path."
-                );
-            }
-            $this->step_status = self::STATUS_PATH_UNAVAILABLE;
-            return true;
-        }
-        if (
-            self::stat_is_file($stat)
-            && self::file_name_is_default_skipped($path)
-        ) {
-            $this->step_status = self::STATUS_SKIPPED;
-            return true;
-        }
-
-        $inspected_path = self::index_entries_for_path($path, $stat, $this->follow_symlinks);
         $this->index_entries = $inspected_path["entries"];
         $type = $inspected_path["type"];
         // The directory's own final step emits its empty entry, including when
@@ -489,7 +489,7 @@ final class FileIndexProcessor {
         // on the stack, and traversing an ancestor would expose paths outside
         // the requested tree before entering that root again.
         if ($type === "dir") {
-            $canonical_directory = realpath(source_io_path($path));
+            $canonical_directory = source_realpath($path);
             if (
                 $canonical_directory === false
                 || !\WordPress\Reprint\Server\path_is_same_as_or_descendant_of($this->configured_directories, $canonical_directory)
@@ -824,7 +824,7 @@ final class FileIndexProcessor {
         // A directory may disappear while it waits on the stack. Remove that
         // frame so a later call continues with its parent or the next root.
         clearstatcache(true, $this->current_directory);
-        $canonical_directory = realpath(source_io_path($this->current_directory));
+        $canonical_directory = source_realpath($this->current_directory);
         if ($canonical_directory === false || !is_dir(source_io_path($canonical_directory))) {
             array_pop($this->directory_stack);
             $this->directory_error = [
@@ -935,7 +935,7 @@ final class FileIndexProcessor {
         if ($storage_path === "") {
             return "";
         }
-        $canonical_storage_path = realpath(source_io_path($storage_path));
+        $canonical_storage_path = source_realpath($storage_path);
         return normalize_path_separators($canonical_storage_path !== false ? $canonical_storage_path : $storage_path, native_path_format());
     }
 
@@ -966,8 +966,9 @@ final class FileIndexProcessor {
      */
     private function index_next_named_root(): void
     {
-        // Settle the cursor first so a skipped or vanished path is not retried.
-        $requested_path = array_shift($this->pending_named_roots);
+        // The caller settles skipped, vanished, or indexed roots after return.
+        // A thrown read error keeps this named root pending for resume.
+        $requested_path = $this->pending_named_roots[0];
         $root = $this->find_root($requested_path);
         if ($root === null) {
             throw new InvalidArgumentException("Index cursor names a root absent from this request: {$requested_path}");
@@ -1270,9 +1271,11 @@ final class FileIndexProcessor {
     {
         // Only links ending at a directory need a canonical target because only
         // directories can add more traversal work. Broken, self-referential,
-        // and file links remain ordinary link entries without a target.
+        // and file links normally remain ordinary link entries without a target.
+        // Windows lookups can throw when PHP cannot read the stored target;
+        // treating that failure as a broken link could omit readable content.
         clearstatcache(true, $path);
-        $resolved_target = @realpath(source_io_path($path));
+        $resolved_target = @source_realpath($path);
         if (
             $resolved_target === false
             || $resolved_target === $path
