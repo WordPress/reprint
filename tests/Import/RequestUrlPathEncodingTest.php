@@ -62,11 +62,11 @@ final class RequestUrlPathEncodingTest extends TestCase
         );
     }
 
-    public function testPathParametersInApiUrlMoveToPostBody(): void
+    /** @dataProvider remote_api_urls */
+    public function testSuppliedUrlIsUnchangedAndDoesNotSupplyBodyParameters(string $remote_api_url): void
     {
         $client = new \ImportClient(
-            'https://example.com/?reprint-api&directory%5B%5D=%2Fsrv%2Fsite'
-                . '&directory%5B%5D=%2Fsrv%2Fshared&unrelated=value',
+            $remote_api_url,
             $this->root . '/state',
             $this->root . '/files'
         );
@@ -75,32 +75,52 @@ final class RequestUrlPathEncodingTest extends TestCase
         ]);
         $build_request = (new \ReflectionClass($client))->getMethod('build_request');
 
-        $request = $build_request->invoke($client, 'file_index', null);
-        $post_params = $request['params'];
-        parse_str((string) parse_url($request['url'], PHP_URL_QUERY), $url_query);
-        $this->assertArrayNotHasKey('directory', $url_query);
-        $this->assertArrayNotHasKey('list_dir', $url_query);
-        $this->assertArrayNotHasKey('pulled_before', $url_query);
+        $request = $build_request->invoke($client, 'file_index', null, [
+            'directory' => ['/srv/body-directory'],
+        ]);
 
-        $this->assertSame(
-            [base64_encode('/srv/site'), base64_encode('/srv/shared')],
-            $post_params['directory']
-        );
-        $this->assertSame(['reprint-api' => ''], $url_query);
-        $this->assertSame('file_index', $post_params['endpoint']);
-        $this->assertSame('value', $post_params['unrelated']);
+        $this->assertSame($remote_api_url, $request['url']);
+        $this->assertSame([
+            'endpoint' => 'file_index',
+            'directory' => [base64_encode('/srv/body-directory')],
+        ], $request['params']);
+    }
+
+    public static function remote_api_urls(): array
+    {
+        return [
+            'plain endpoint' => ['https://example.com/export.php'],
+            'empty query' => ['https://example.com/export.php?'],
+            'routing marker' => ['https://example.com/?reprint-api'],
+            'legacy marker' => ['https://example.com/?site-export-api=1'],
+            'trailing separator' => ['https://example.com/?reprint-api&'],
+            'encoded marker' => ['https://example.com/?%72eprint%2Dapi'],
+            'array marker' => ['https://example.com/?reprint-api%5B%5D=1'],
+            'leading encoded space' => ['https://example.com/?%20reprint-api=1'],
+            'encoded null' => ['https://example.com/?reprint-api%00suffix=1'],
+            'both markers' => ['https://example.com/?site-export-api&reprint-api'],
+            'duplicate keys' => ['https://example.com/?reprint-api&route=one&route=two'],
+            'empty value' => ['https://example.com/?reprint-api&route='],
+            'semicolon' => ['https://example.com/?reprint-api=1;route=export'],
+            'encoded delimiters' => ['https://example.com/a%2fb%3fc?route=a%26b%3Dc%23d&reprint-api'],
+            'nested options' => ['https://example.com/?reprint-api&directory%5B%5D=%2Fsrv%2Furl-directory&endpoint=preflight'],
+            'fragment' => ['https://example.com/?reprint-api#fragment?with=query&'],
+            'IPv6 address' => ['http://[::1]:8080/export.php?route=export&reprint-api'],
+            'Unicode path' => ['https://example.com/łódź/?reprint-api'],
+        ];
     }
 
     public function testFallsBackToRawPathsWithoutServerCapability(): void
     {
         $client = new \ImportClient(
-            'https://example.com/?reprint-api&directory=%2Fsrv%2Fsite',
+            'https://example.com/?reprint-api',
             $this->root . '/state',
             $this->root . '/files'
         );
         $build_request = (new \ReflectionClass($client))->getMethod('build_request');
 
         $request = $build_request->invoke($client, 'file_index', null, [
+            'directory' => '/srv/site',
             'list_dir' => '/srv/site',
         ]);
         $post_params = $request['params'];
@@ -116,7 +136,7 @@ final class RequestUrlPathEncodingTest extends TestCase
     public function testPreflightKeepsRawPathsAfterCapabilityWasRecorded(): void
     {
         $client = new \ImportClient(
-            'https://example.com/?reprint-api&directory=%2Fsrv%2Fsite',
+            'https://example.com/?reprint-api',
             $this->root . '/state',
             $this->root . '/files'
         );
@@ -125,7 +145,7 @@ final class RequestUrlPathEncodingTest extends TestCase
         ]);
         $build_request = (new \ReflectionClass($client))->getMethod('build_request');
 
-        $request = $build_request->invoke($client, 'preflight', null);
+        $request = $build_request->invoke($client, 'preflight', null, ['directory' => '/srv/site']);
         $post_params = $request['params'];
         parse_str((string) parse_url($request['url'], PHP_URL_QUERY), $url_query);
         $this->assertArrayNotHasKey('directory', $url_query);
@@ -155,8 +175,8 @@ final class RequestUrlPathEncodingTest extends TestCase
             $client, 'sql_chunk', $cursor, $params
         );
 
-        $this->assertSame('https://example.com/?site-export-api', $request['url']);
-        $this->assertSame(['endpoint' => 'sql_chunk', 'route' => 'export'] + $params + ['cursor' => $cursor], $request['params']);
+        $this->assertSame('https://example.com/?site-export-api&route=export', $request['url']);
+        $this->assertSame(['endpoint' => 'sql_chunk'] + $params + ['cursor' => $cursor], $request['params']);
     }
 
     private function remove_tree(string $path): void

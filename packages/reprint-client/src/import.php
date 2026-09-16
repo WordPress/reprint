@@ -535,7 +535,7 @@ class ImportClient
             }
         }
 
-        $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
+        $this->remote_reprint_api_url = $remote_reprint_api_url;
         // Some WAFs reject automated requests without User-Agent or Referer.
         // Accept-Language supplies the browser-language context managed hosts
         // ask users to configure when diagnosing request-header blocks. These
@@ -11702,12 +11702,12 @@ class ImportClient
     }
 
     /**
-     * Keep only the API marker in the URL; send export parameters in the body.
+     * Use the supplied URL unchanged; send client-generated parameters in the body.
      *
      * @param array $params Endpoint-specific pull options, including tuning,
      *                      path selections, table selections, and row filters.
      * @return array {
-     *     @type string $url    API URL with only its routing marker.
+     *     @type string $url    API URL exactly as supplied by the caller.
      *     @type array  $params Endpoint and options to send in the POST body.
      * }
      */
@@ -11716,22 +11716,6 @@ class ImportClient
         ?string $cursor,
         array $params = []
     ): array {
-        $url = explode('#', $this->remote_reprint_api_url, 2)[0];
-        $query_start = strpos($url, '?');
-        if ($query_start !== false) {
-            $query = substr($url, $query_start + 1);
-            parse_str($query, $url_params);
-            unset($url_params['reprint-api'], $url_params['site-export-api']);
-            $params = array_merge($url_params, $params);
-            $query_parts = array_filter(explode('&', $query), static function ($part) {
-                $key = urldecode(explode('=', $part, 2)[0]);
-                return in_array($key, ['reprint-api', 'site-export-api'], true);
-            });
-            $url = substr($url, 0, $query_start);
-            if ($query_parts) {
-                $url .= '?' . implode('&', $query_parts);
-            }
-        }
         // Keep endpoint before multipart file data so hosts can route the
         // request without first reading a potentially large file list.
         unset($params['endpoint']);
@@ -11759,7 +11743,7 @@ class ImportClient
             // Include the cursor in the body when hosts strip custom headers.
             $params["cursor"] = $cursor;
         }
-        return ['url' => $url, 'params' => $params];
+        return ['url' => $this->remote_reprint_api_url, 'params' => $params];
     }
 
     /**

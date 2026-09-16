@@ -68,7 +68,7 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         );
         const [readyMessage] = await once(firewallProcess, 'message');
         firewallOrigin = `http://127.0.0.1:${readyMessage.port}`;
-        importUrl = `${firewallOrigin}/?reprint-api&directory=${encodeURIComponent(getSiteDir(site))}`;
+        importUrl = `${firewallOrigin}/?reprint-api`;
 
         const connection = await createMysqlConnection();
         await connection.query(`DROP DATABASE IF EXISTS \`${importDb}\``);

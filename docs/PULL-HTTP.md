@@ -1,7 +1,9 @@
 # Export parameter rollout
 
 Keep the API routing marker (`?reprint-api` or the legacy `?site-export-api`)
-in the URL. Every export parameter, including `endpoint`, belongs in the POST
+in the URL. The client passes the supplied API URL to cURL unchanged, including
+any custom routing query parameters. It does not copy parameters out of that URL.
+Every client-generated export parameter, including `endpoint`, goes in the POST
 body. For example, POST to `/?reprint-api` with:
 
 ```json
@@ -44,7 +46,9 @@ continuation.
 Multipart array fields use bracketed names built directly from their keys.
 They do not depend on PHP's `arg_separator.output` setting.
 
-The strict query-firewall fixture permits only the routing marker in the URL.
+The strict query-firewall test supplies an API URL with only its routing marker.
+The client does not remove caller-supplied query parameters to satisfy a WAF.
+The fixture permits only the routing marker in the URL.
 It rejects `endpoint` and every other query parameter even on POST requests.
 Request bodies and response streams pass through unchanged. This models the
 reported query rejection; it does not promise that all firewalls accept all
