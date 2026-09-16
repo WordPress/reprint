@@ -288,7 +288,7 @@ final class FilesPullDiffCheckpointTest extends TestCase
             'pull_index_journal'
         ) )->getValue($resumedClient);
         $this->assertInstanceOf(\PullIndexJournal::class, $pullIndexJournal);
-        $pullIndexJournal->apply_pending_records();
+        $pullIndexJournal->apply_pending_records('unix');
 
         $actualRemoteIndexPaths = $this->readBase64Paths(
             $this->pullStateDirectory . '/remote-index.jsonl',

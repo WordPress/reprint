@@ -105,14 +105,14 @@ final class PushEndpoints {
         }
         $excluded_paths = normalize_excluded_paths($excluded_paths);
 
-        assert_valid_path($reprint_directory, 'Push endpoint reprint_directory');
-        assert_valid_path($docroot, 'Push endpoint docroot');
+        assert_valid_path($reprint_directory, native_path_format(), 'Push endpoint reprint_directory');
+        assert_valid_path($docroot, native_path_format(), 'Push endpoint docroot');
         $canonical_reprint_directory = realpath_with_missing_tail(
             $reprint_directory
         );
         $canonical_docroot = realpath($docroot);
         if ($canonical_docroot === false) {
-            $canonical_docroot = normalize_path($docroot);
+            $canonical_docroot = normalize_path($docroot, native_path_format());
         }
         if (path_is_same_as_or_descendant_of($canonical_reprint_directory, $canonical_docroot)) {
             throw new InvalidArgumentException(

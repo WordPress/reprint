@@ -200,6 +200,49 @@ class PullStateTest extends TestCase
         $this->assertSame('wp_', $state->get('preflight.database.wp.table_prefix'));
     }
 
+    /** A resumed pull must use the same source rules as its first process. */
+    public function testSourceFormatSurvivesSavingAndLoadingPreflight(): void
+    {
+        foreach (['unix', 'windows'] as $path_format) {
+            $state = new \PullState();
+            $state->set_preflight_record(['data' => ['path_format' => $path_format]]);
+            $saved = json_decode(json_encode($state->to_array(), JSON_THROW_ON_ERROR), true);
+            $this->assertSame($path_format, \PullState::from_array($saved)->remote_path_format());
+        }
+    }
+
+    /** A missing field follows the old contract, even when other values look Windows-like. */
+    public function testLegacyPreflightUsesUnixRulesWithoutInspectingPathsOrCapabilities(): void
+    {
+        $state = new \PullState();
+        $state->set_preflight_record(['data' => [
+            'capabilities' => ['windows_path_resolution' => true],
+            'wp_detect' => ['roots' => [['path' => 'D:\\site']]],
+        ]]);
+        $this->assertSame('unix', $state->remote_path_format());
+    }
+
+    /**
+     * A present invalid field must not acquire the legacy default.
+     *
+     * @dataProvider invalidPathFormats
+     * @param mixed $path_format Invalid response field.
+     */
+    public function testInvalidSourceFormatIsRejected($path_format): void
+    {
+        $state = new \PullState();
+        $state->set_preflight_record(['data' => ['path_format' => $path_format]]);
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Path format must be "unix" or "windows"');
+        $state->remote_path_format();
+    }
+
+    /** @return array[] Invalid source format fields. */
+    public static function invalidPathFormats(): array
+    {
+        return [[null], [''], ['Windows'], ['linux'], [false], [[]]];
+    }
+
     public function testGetRejectsUnregisteredConfigPaths(): void
     {
         $state = new \PullState();

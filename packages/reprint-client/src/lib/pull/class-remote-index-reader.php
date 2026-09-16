@@ -1,5 +1,6 @@
 <?php
 
+use function WordPress\Reprint\Server\assert_valid_path_format;
 use function WordPress\Reprint\Server\assert_valid_path;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Index failures are CLI filesystem paths and values, never HTML output.
@@ -35,11 +36,15 @@ use function WordPress\Reprint\Server\assert_valid_path;
  * that relative-path format has an optional `empty` field and remains owned by
  * PushPlan and the local-index merge helpers.
  *
+ * The source format comes from saved preflight, not from an entry's prefix
+ * or this reader's OS. Validation uses that format without changing path
+ * bytes: changing them here could break the index's existing sort order.
+ *
  * ## Lifecycle and resume
  *
  * Store the byte offset only after the returned entry has been processed:
  *
- *     $reader = new RemoteIndexReader($remote_index_path);
+ *     $reader = new RemoteIndexReader($remote_index_path, $remote_path_format);
  *     try {
  *         $reader->open();
  *         $reader->seek_to_byte_offset($processed_byte_offset);
@@ -55,7 +60,7 @@ use function WordPress\Reprint\Server\assert_valid_path;
  * If the process stops inside apply_remote_index_entry(), the stored offset
  * still precedes that entry. A new reader therefore selects it again:
  *
- *     $reader = new RemoteIndexReader($remote_index_path);
+ *     $reader = new RemoteIndexReader($remote_index_path, $remote_path_format);
  *     try {
  *         $reader->open();
  *         $reader->seek_to_byte_offset(load_processed_byte_offset());
@@ -67,7 +72,7 @@ use function WordPress\Reprint\Server\assert_valid_path;
  * A missing file behaves like an empty index, as it does during the first
  * pull:
  *
- *     $reader = new RemoteIndexReader($missing_remote_index_path);
+ *     $reader = new RemoteIndexReader($missing_remote_index_path, $remote_path_format);
  *     try {
  *         $reader->open();
  *         $entry = $reader->next_entry(); // null.
@@ -80,7 +85,7 @@ use function WordPress\Reprint\Server\assert_valid_path;
  * next_entry() throws, so a caller which accepts rejected records can continue
  * with the following line:
  *
- *     $reader = new RemoteIndexReader($remote_index_path);
+ *     $reader = new RemoteIndexReader($remote_index_path, $remote_path_format);
  *     try {
  *         $reader->open();
  *         try {
@@ -100,6 +105,9 @@ class RemoteIndexReader
     /** @var string Remote index file read by this object. */
     private string $remote_index_path;
 
+    /** Source path format saved with the preflight for this index. */
+    private string $remote_path_format;
+
     /** @var resource|null Open remote index handle, or null for a missing index. */
     private $remote_index_file_handle = null;
 
@@ -107,10 +115,13 @@ class RemoteIndexReader
      * Configures the remote index path without opening it.
      *
      * @param string $remote_index_path Path to one remote JSONL index.
+     * @param string $remote_path_format Source path format: 'unix' or 'windows'.
      */
-    public function __construct(string $remote_index_path)
+    public function __construct(string $remote_index_path, string $remote_path_format)
     {
         $this->remote_index_path = $remote_index_path;
+        assert_valid_path_format($remote_path_format);
+        $this->remote_path_format = $remote_path_format;
     }
 
     /**
@@ -167,7 +178,7 @@ class RemoteIndexReader
             if (trim($remote_index_json_line) === "") {
                 continue;
             }
-            return self::decode_index_line($remote_index_json_line);
+            return self::decode_index_line($remote_index_json_line, $this->remote_path_format);
         }
         return null;
     }
@@ -237,6 +248,7 @@ class RemoteIndexReader
      * `file`, preserving the historical remote-index parsing contract.
      *
      * @param string $line One JSONL line from a remote index file.
+     * @param string $remote_path_format Source path format: 'unix' or 'windows'.
      * @return array {
      *     Decoded index entry.
      *
@@ -250,7 +262,7 @@ class RemoteIndexReader
      * @throws InvalidArgumentException When the decoded path is not a valid
      *                                  remote absolute path.
      */
-    public static function decode_index_line(string $line): array
+    public static function decode_index_line(string $line, string $remote_path_format): array
     {
         $line = trim($line);
         $data = json_decode($line, true);
@@ -265,7 +277,7 @@ class RemoteIndexReader
         if ($path === "" || $path === false) {
             throw new RuntimeException("Invalid index path (base64 decode failed)");
         }
-        assert_valid_path($path, "index path");
+        assert_valid_path($path, $remote_path_format, "index path");
         $entry = [
             "path" => $path,
             "ctime" => (int) ( $data["ctime"] ?? 0 ),

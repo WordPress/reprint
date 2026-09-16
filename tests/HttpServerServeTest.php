@@ -40,6 +40,7 @@ final class HttpServerServeTest extends TestCase
 
         $output = $this->runScript($script);
 
+        $this->assertStringContainsString('"path_format":"' . ( PHP_OS === 'WINNT' ? 'windows' : 'unix' ) . '"', $output);
         $this->assertStringContainsString('OK', $output);
         $this->assertStringNotContainsString('FAIL', $output);
     }

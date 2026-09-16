@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+use function WordPress\Reprint\Server\preflight_path_format;
+
 use Reprint\Importer\State\AdaptiveTuningState;
 use Reprint\Importer\State\DatabaseApplyCommandState;
 use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
@@ -225,6 +227,20 @@ class PullState
     public function set_preflight_record(?array $entry): void
     {
         $this->preflight = $entry;
+    }
+
+    /**
+     * Returns the source path format saved with preflight.
+     *
+     * Servers without this field use the existing Unix-only path contract.
+     * A present value must be valid. Never infer it from a drive prefix or a
+     * capability flag: those cannot describe the meaning of all source paths.
+     *
+     * @return string Source path format: 'unix' or 'windows'.
+     */
+    public function remote_path_format(): string
+    {
+        return preflight_path_format($this->preflight['data'] ?? []);
     }
 
     /**

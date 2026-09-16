@@ -15,11 +15,14 @@ use WordPress\Reprint\Server\ResourceBudget;
 use WordPress\Reprint\Server\SqliteDriverPDO;
 use WordPress\Reprint\Server\WpdbDriverPDO;
 
+use function WordPress\Reprint\Server\native_path_format;
 use function WordPress\Reprint\Server\assert_valid_path;
 use function WordPress\Reprint\Server\build_pdo_dsn;
 use function WordPress\Reprint\Server\generate_random_bytes;
 use function WordPress\Reprint\Server\json_encode_or_throw;
+use function WordPress\Reprint\Server\is_absolute_path;
 use function WordPress\Reprint\Server\normalize_path;
+use function WordPress\Reprint\Server\normalize_path_separators;
 use function WordPress\Reprint\Server\parse_size;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Server\trim_right_slash;
@@ -675,7 +678,7 @@ function normalize_path_list(array $paths): array
         }
         $real = realpath($path);
         $final = $real !== false ? $real : $path;
-        $final = trim_right_slash($final);
+        $final = trim_right_slash($final, native_path_format());
         if ($final === "") {
             continue;
         }
@@ -1386,8 +1389,8 @@ function resolve_directories(array $config): array
                 "directory entries must be non-empty strings"
             );
         }
-        $directory = trim($directory);
-        assert_valid_path($directory, "directory entry");
+        $directory = PHP_OS === 'WINNT' ? $directory : trim($directory);
+        assert_valid_path($directory, native_path_format(), "directory entry");
 
         clearstatcache(true, $directory);
         $real_directory = @realpath($directory);
@@ -1402,7 +1405,7 @@ function resolve_directories(array $config): array
             );
         }
 
-        $directories[] = $real_directory;
+        $directories[] = normalize_path_separators($real_directory, native_path_format());
     }
 
     if (empty($directories)) {
@@ -1452,9 +1455,9 @@ function resolve_file_index_roots(array $config): array
         if (!is_string($root_input)) {
             throw new InvalidArgumentException("directory entries must be non-empty strings");
         }
-        $root_input = trim($root_input);
-        assert_valid_path($root_input, "directory entry");
-        $requested_path = normalize_path($root_input);
+        $root_input = PHP_OS === 'WINNT' ? $root_input : trim($root_input);
+        assert_valid_path($root_input, native_path_format(), "directory entry");
+        $requested_path = normalize_path($root_input, native_path_format());
         clearstatcache(true, $requested_path);
         $stat = @lstat($requested_path);
         if ($stat === false) {
@@ -1500,7 +1503,7 @@ function resolve_file_index_roots(array $config): array
         }
         $roots[] = [
             "requested_path" => $requested_path,
-            "resolved_path" => $resolved_path,
+            "resolved_path" => normalize_path_separators($resolved_path, native_path_format()),
             "type" => $type,
         ];
     }
@@ -1536,7 +1539,7 @@ function resolve_file_index_start_root(
     string $list_directory,
     bool $follow_symlinks
 ): array {
-    $requested_path = normalize_path($list_directory);
+    $requested_path = normalize_path($list_directory, native_path_format());
     foreach ($roots as $root) {
         if ($root["requested_path"] === $requested_path) {
             return $root;
@@ -1558,7 +1561,7 @@ function resolve_file_index_start_root(
 
     return [
         "requested_path" => $requested_path,
-        "resolved_path" => $resolved_path,
+        "resolved_path" => normalize_path_separators($resolved_path, native_path_format()),
         "type" => "directory",
     ];
 }
@@ -1566,13 +1569,17 @@ function resolve_file_index_start_root(
 /** Returns the first symlink in a requested root's parent path. */
 function file_index_parent_symlink(string $requested_path): ?array
 {
-    $current = "/";
-    $parts = explode("/", trim(dirname($requested_path), "/"));
-    foreach ($parts as $part) {
-        if ($part === "") {
-            continue;
+    $parents = [];
+    $current = dirname($requested_path);
+    while (is_absolute_path($current, native_path_format())) {
+        $parents[] = $current;
+        $parent = dirname($current);
+        if ($parent === $current) {
+            break;
         }
-        $current = wp_join_unix_paths($current, $part);
+        $current = $parent;
+    }
+    foreach (array_reverse($parents) as $current) {
         if (!@is_link($current)) {
             continue;
         }
@@ -2081,13 +2088,13 @@ function endpoint_preflight(array $config): array
                         // find the directory at the resolved location where
                         // files are actually downloaded.
                         $abspath_raw = defined("ABSPATH")
-                            ? trim_right_slash(ABSPATH)
+                            ? trim_right_slash(ABSPATH, native_path_format())
                             : null;
                         $abspath_resolved = null;
                         if ($abspath_raw !== null) {
                             $abspath_real = realpath($abspath_raw);
                             $abspath_resolved = $abspath_real !== false
-                                ? trim_right_slash($abspath_real)
+                                ? trim_right_slash($abspath_real, native_path_format())
                                 : $abspath_raw;
                         }
 
@@ -2380,21 +2387,21 @@ function endpoint_preflight(array $config): array
     // Scan each directory to list installed plugins, mu-plugins, and themes.
     $wp_runtime_paths = null;
     if ($db["wp"]["wp_load_loaded"]) {
-        $runtime_root = defined("ABSPATH") ? trim_right_slash(ABSPATH) : null;
+        $runtime_root = defined("ABSPATH") ? trim_right_slash(ABSPATH, native_path_format()) : null;
         $content_dir = defined("WP_CONTENT_DIR")
-            ? trim_right_slash(WP_CONTENT_DIR)
+            ? trim_right_slash(WP_CONTENT_DIR, native_path_format())
             : null;
         $plugins_dir = defined("WP_PLUGIN_DIR")
-            ? trim_right_slash(WP_PLUGIN_DIR)
+            ? trim_right_slash(WP_PLUGIN_DIR, native_path_format())
             : null;
         $mu_plugins_dir = defined("WPMU_PLUGIN_DIR")
-            ? trim_right_slash(WPMU_PLUGIN_DIR)
+            ? trim_right_slash(WPMU_PLUGIN_DIR, native_path_format())
             : null;
         $themes_dir = null;
         if (function_exists("get_theme_root")) {
             $themes_dir = get_theme_root();
             if (is_string($themes_dir)) {
-                $themes_dir = trim_right_slash($themes_dir);
+                $themes_dir = trim_right_slash($themes_dir, native_path_format());
             } else {
                 $themes_dir = null;
             }
@@ -2533,6 +2540,7 @@ function endpoint_preflight(array $config): array
         "error" => $preflight_error,
         "timestamp" => time(),
         "protocol_version" => EXPORT_PROTOCOL_VERSION,
+        "path_format" => native_path_format(),
         "capabilities" => [
             "base64_path_parameters" => true,
         ],

@@ -42,7 +42,7 @@ final class RemoteIndexReaderTest extends TestCase
                 . "\n"
         );
 
-        $reader = new \RemoteIndexReader($remoteIndexPath);
+        $reader = new \RemoteIndexReader($remoteIndexPath, 'unix');
         $reader->open();
 
         $this->assertSame(
@@ -69,7 +69,7 @@ final class RemoteIndexReaderTest extends TestCase
 
     public function testMissingFileIsAnEmptyReaderAtByteOffsetZero(): void
     {
-        $reader = new \RemoteIndexReader($this->root . '/missing.jsonl');
+        $reader = new \RemoteIndexReader($this->root . '/missing.jsonl', 'unix');
         $reader->open();
 
         $this->assertNull($reader->next_entry());
@@ -89,14 +89,14 @@ final class RemoteIndexReaderTest extends TestCase
                 . $this->indexLine('/site/third.txt', 30, 7, 'file') . "\n"
         );
 
-        $firstReader = new \RemoteIndexReader($remoteIndexPath);
+        $firstReader = new \RemoteIndexReader($remoteIndexPath, 'unix');
         $firstReader->open();
         $firstEntry = $firstReader->next_entry();
         $secondEntry = $firstReader->next_entry();
         $byteOffset = $firstReader->byte_offset();
         $firstReader->close();
 
-        $resumedReader = new \RemoteIndexReader($remoteIndexPath);
+        $resumedReader = new \RemoteIndexReader($remoteIndexPath, 'unix');
         $resumedReader->open();
         $resumedReader->seek_to_byte_offset($byteOffset);
         $thirdEntry = $resumedReader->next_entry();
@@ -123,7 +123,7 @@ final class RemoteIndexReaderTest extends TestCase
                 . "\n"
         );
 
-        $reader = new \RemoteIndexReader($remoteIndexPath);
+        $reader = new \RemoteIndexReader($remoteIndexPath, 'unix');
         $reader->open();
         try {
             $reader->next_entry();
@@ -144,7 +144,23 @@ final class RemoteIndexReaderTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('Invalid index line format');
 
-        \RemoteIndexReader::decode_index_line("\n");
+        \RemoteIndexReader::decode_index_line("\n", 'unix');
+    }
+
+    /** Readers validate with source rules but preserve the bytes that set index order. */
+    public function testIndexValidationUsesSourceFormatWithoutChangingSortBytes(): void
+    {
+        foreach (['unix', 'windows'] as $path_format) {
+            $path = '//server/share/photos';
+            $entry = \RemoteIndexReader::decode_index_line($this->indexLine($path, 1, 2, 'file'), $path_format);
+            $this->assertSame($path, $entry['path']);
+        }
+        $path = 'D:\\photos';
+        $line = $this->indexLine($path, 1, 2, 'file');
+        $this->assertSame($path, \RemoteIndexReader::decode_index_line($line, 'windows')['path']);
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('must be an absolute path');
+        \RemoteIndexReader::decode_index_line($line, 'unix');
     }
 
     private function indexLine(

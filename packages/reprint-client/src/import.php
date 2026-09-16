@@ -49,10 +49,14 @@ use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function Reprint\Importer\write_local_index_entry;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
+use function WordPress\Reprint\Server\native_path_format;
 use function WordPress\Reprint\Server\assert_valid_path;
 use function WordPress\Reprint\Server\normalize_path;
+use function WordPress\Reprint\Server\normalize_path_separators;
+use function WordPress\Reprint\Server\is_absolute_path;
 use function WordPress\Reprint\Server\parse_size;
 use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
+use function WordPress\Reprint\Server\resolve_symlink_target_path;
 use function WordPress\Reprint\Server\path_is_descendant_of;
 use function WordPress\Reprint\Server\path_remainder_under;
 use function WordPress\Reprint\Server\realpath_with_missing_tail;
@@ -548,14 +552,14 @@ class ImportClient
         if ($referer !== null) {
             $this->request_context_headers['Referer'] = $referer;
         }
-        $this->state_dir = trim_right_slash($state_dir);
-        $this->filesystem_root = trim_right_slash($filesystem_root);
+        $this->state_dir = trim_right_slash($state_dir, native_path_format());
+        $this->filesystem_root = trim_right_slash($filesystem_root, native_path_format());
         $remote_state_directory = $selected_remote_state_directory === null
             ? self::remote_state_directory_path(
                 $this->remote_reprint_api_url,
                 $this->state_dir
             )
-            : trim_right_slash($selected_remote_state_directory);
+            : trim_right_slash($selected_remote_state_directory, native_path_format());
         $this->pull_state_directory = wp_join_unix_paths($remote_state_directory, "pull");
         $this->local_index_file = wp_join_unix_paths($remote_state_directory, "local_index.jsonl");
         $this->pull_state_file = wp_join_unix_paths($this->pull_state_directory, "state.json");
@@ -2297,7 +2301,7 @@ class ImportClient
         }
         return [
             'remote_reprint_api_url' => rtrim($remote_reprint_api_url, '?&'),
-            'filesystem_root' => trim_right_slash($resolved_local_filesystem_root),
+            'filesystem_root' => trim_right_slash($resolved_local_filesystem_root, native_path_format()),
             'push_state_directory' => $push_state_directory,
         ];
     }
@@ -2344,7 +2348,7 @@ class ImportClient
                 'The filesystem root does not exist or is not a directory: ' . $filesystem_root . '.'
             );
         }
-        $resolved_local_filesystem_root = trim_right_slash($resolved_local_filesystem_root);
+        $resolved_local_filesystem_root = trim_right_slash($resolved_local_filesystem_root, native_path_format());
         // Resolve an absolute physical path even when its final components do not exist.
         $remote_state_directory = self::remote_state_directory_path(
             $remote_reprint_api_url,
@@ -2377,7 +2381,7 @@ class ImportClient
         string $state_dir
     ): string {
         return wp_join_unix_paths(
-            trim_right_slash($state_dir),
+            trim_right_slash($state_dir, native_path_format()),
             'remotes',
             md5(rtrim($remote_reprint_api_url, '?&'))
         );
@@ -2618,7 +2622,7 @@ class ImportClient
         // Save the cleared cursor first. If applying the WAL stops partway, the
         // next run starts with the cleared cursor and applies the WAL again.
         $this->save_state();
-        $this->pull_index_journal->apply_pending_records();
+        $this->pull_index_journal->apply_pending_records($this->get_state()->remote_path_format());
         $this->pull_index_journal->remove_empty_wal();
     }
 
@@ -2973,7 +2977,7 @@ class ImportClient
         foreach ($files as $f) {
             $parent = dirname($f);
             if ($parent !== "" && $parent !== ".") {
-                $by_dir[trim_right_slash($parent)][] = $f;
+                $by_dir[trim_right_slash($parent, $this->get_state()->remote_path_format())][] = $f;
             }
         }
 
@@ -3540,7 +3544,7 @@ class ImportClient
             $has_progress
             && $active_resumable_command->current_stage === "diff";
         if (!$resuming_diff) {
-            $this->pull_index_journal->apply_pending_records();
+            $this->pull_index_journal->apply_pending_records($this->get_state()->remote_path_format());
         }
         $this->assert_files_pull_path_selection_unchanged_while_resuming($has_progress);
         $this->assert_local_followed_symlinks_root_unchanged();
@@ -3802,7 +3806,7 @@ class ImportClient
             // Save the fetch stage before applying the WAL. From this stage,
             // startup applies any pending WAL before it resumes the fetch list.
             $this->save_state();
-            $this->pull_index_journal->apply_pending_records();
+            $this->pull_index_journal->apply_pending_records($this->get_state()->remote_path_format());
             $this->remove_local_plan_directory(
                 wp_join_unix_paths($this->pull_state_directory, "mirror-plan")
             );
@@ -3863,7 +3867,7 @@ class ImportClient
         if ($this->follow_symlinks) {
             $this->recreate_intermediate_symlinks();
         }
-        $this->pull_index_journal->apply_pending_records();
+        $this->pull_index_journal->apply_pending_records($this->get_state()->remote_path_format());
 
         $this->ensure_local_index_exists();
         $this->get_state()->active_resumable_command->completion_state = "complete";
@@ -4869,7 +4873,7 @@ class ImportClient
         // the map, so the counts we derive are always deduplicated.
         $size_by_path = [];
 
-        $next_remote_index_reader = new RemoteIndexReader($next_remote_index_file);
+        $next_remote_index_reader = new RemoteIndexReader($next_remote_index_file, $this->get_state()->remote_path_format());
         try {
             $next_remote_index_reader->open();
         } catch (RuntimeException $exception) {
@@ -5168,7 +5172,7 @@ class ImportClient
 
         if (!empty($flat_document_root)) {
             // --flat-document-root: used directly as the web root.
-            $raw_local_document_root = trim_right_slash($flat_document_root);
+            $raw_local_document_root = trim_right_slash($flat_document_root, native_path_format());
         } else {
             // --fs-root: the raw download directory. The remote site's
             // document_root tells us where the web root lived on the
@@ -5599,7 +5603,7 @@ class ImportClient
             realpath($this->pull_state_directory)
             ?: $this->pull_state_directory;
         $manifest->constants["REPRINT_PULL_STATE_FILE"] = wp_join_unix_paths(
-            trim_right_slash($pull_state_directory),
+            trim_right_slash($pull_state_directory, native_path_format()),
             "state.json"
         );
         $manifest->routes[] = [
@@ -5671,9 +5675,9 @@ class ImportClient
             );
         }
         // Keep a lexical absolute path because --from may not exist yet.
-        $from = trim_right_slash($from);
+        $from = trim_right_slash($from, native_path_format());
         if (strpos($from, "/") !== 0) {
-            $from = normalize_path(wp_join_unix_paths(getcwd(), $from));
+            $from = normalize_path(wp_join_unix_paths(getcwd(), $from), native_path_format());
         }
         // A WordPress root passed by mistake would move wp-admin, wp-includes
         // and wp-config.php into the pulled wp-content.
@@ -5829,7 +5833,7 @@ class ImportClient
             );
         }
 
-        $flatten_to = trim_right_slash($flatten_to);
+        $flatten_to = trim_right_slash($flatten_to, native_path_format());
         $force = $options["force"] ?? false;
 
         // Ensure the filesystem root exists
@@ -6197,7 +6201,7 @@ class ImportClient
         if (!is_string($value) || trim($value) === "") {
             return null;
         }
-        return trim_right_slash($value);
+        return trim_right_slash($value, $this->get_state()->remote_path_format());
     }
 
     /**
@@ -8183,7 +8187,7 @@ class ImportClient
                 fclose($context->file_handle);
                 $context->file_handle = null;
             }
-            $this->pull_index_journal->apply_pending_records();
+            $this->pull_index_journal->apply_pending_records($this->get_state()->remote_path_format());
             $this->get_state()->active_resumable_command->completion_state = "partial";
             $this->assert_can_retry_after_interrupted_response(
                 "file_fetch",
@@ -8203,7 +8207,7 @@ class ImportClient
         );
         $this->get_state()->fetch->cursor = $cursor;
         $this->progress_reporter->checkpoint_file_progress($this->get_state()->fetch);
-        $this->pull_index_journal->apply_pending_records();
+        $this->pull_index_journal->apply_pending_records($this->get_state()->remote_path_format());
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
             if (!fflush($context->file_handle)) {
@@ -8383,6 +8387,7 @@ class ImportClient
                     }
                     assert_valid_path(
                         $path,
+                        $this->get_state()->remote_path_format(),
                         "index batch path",
                     );
                     foreach ($this->excluded_plugins as $excluded_plugin) {
@@ -8524,11 +8529,14 @@ class ImportClient
         }
 
         $file_diff_progress_state = $this->get_state()->diff;
+        $remote_path_format = $this->get_state()->remote_path_format();
         $index_diff = FileIndexDiffProcessor::resume(
             $this->remote_index_file,
             $this->next_remote_index_file,
             $file_diff_progress_state->index_diff_cursor,
-            [RemoteIndexReader::class, "decode_index_line"]
+            static function (string $line) use ($remote_path_format): array {
+                return RemoteIndexReader::decode_index_line($line, $remote_path_format);
+            }
         );
         $fetch_list_file_handle = null;
         try {
@@ -10287,10 +10295,10 @@ class ImportClient
     ): void {
         if (str_starts_with($target, "/")) {
             // Absolute target: must be under root
-            $resolved = normalize_path($target);
+            $resolved = normalize_path($target, native_path_format());
         } else {
             // Relative target: resolve against the symlink's parent directory
-            $resolved = normalize_path(wp_join_unix_paths($symlink_parent_dir, $target));
+            $resolved = normalize_path(wp_join_unix_paths($symlink_parent_dir, $target), native_path_format());
         }
 
         if (!path_is_same_as_or_descendant_of($resolved, $root)) {
@@ -10342,9 +10350,7 @@ class ImportClient
     ): string {
         // Resolve to a remote absolute path (relative targets are based on
         // the source symlink's remote directory).
-        $remote_absolute_target = str_starts_with($target, "/")
-            ? normalize_path($target)
-            : normalize_path(wp_join_unix_paths(dirname($remote_absolute_path), $target));
+        $remote_absolute_target = resolve_symlink_target_path($remote_absolute_path, $target, $this->get_state()->remote_path_format());
 
         // Only rewrite a target whose subtree was actually followed and indexed;
         // everything else keeps its original (portable) spelling.
@@ -10380,14 +10386,15 @@ class ImportClient
     private function next_remote_index_contains_remote_absolute_path_prefix(
         string $remote_absolute_path
     ): bool {
-        $remote_absolute_path = normalize_path($remote_absolute_path);
+        $remote_absolute_path = normalize_path($remote_absolute_path, $this->get_state()->remote_path_format());
 
         if (isset($this->next_remote_index_prefix_cache[$remote_absolute_path])) {
             return $this->next_remote_index_prefix_cache[$remote_absolute_path];
         }
 
         $next_remote_index_reader = new RemoteIndexReader(
-            $this->next_remote_index_file
+            $this->next_remote_index_file,
+            $this->get_state()->remote_path_format()
         );
         try {
             $next_remote_index_reader->open();
@@ -10567,7 +10574,7 @@ class ImportClient
     private function resolve_local_followed_symlinks_root(string $raw): string
     {
         $filesystem_root = $this->filesystem_root;
-        $directory = $this->resolve_token_path($raw, ["fs-root" => $filesystem_root]);
+        $directory = $this->resolve_token_path($raw, ["fs-root" => $filesystem_root], native_path_format());
 
         if (!path_is_same_as_or_descendant_of($directory, $filesystem_root)) {
             throw new InvalidArgumentException(
@@ -10600,8 +10607,8 @@ class ImportClient
         $rules = [];
         $wp_content_target = null;
         foreach ($remap_raw as [$source_raw, $target_raw]) {
-            $source = $this->resolve_token_path($source_raw, $source_tokens);
-            $target = $this->resolve_token_path($target_raw, $target_tokens);
+            $source = $this->resolve_token_path($source_raw, $source_tokens, $this->get_state()->remote_path_format());
+            $target = $this->resolve_token_path($target_raw, $target_tokens, native_path_format());
 
             if (!path_is_same_as_or_descendant_of($target, $filesystem_root)) {
                 throw new InvalidArgumentException(
@@ -10693,7 +10700,7 @@ class ImportClient
                 );
             }
 
-            $resolved = $this->resolve_token_path($src, $source_tokens);
+            $resolved = $this->resolve_token_path($src, $source_tokens, $this->get_state()->remote_path_format());
             $prefixes[$resolved] = true;
 
             // Selecting content_dir also selects any plugins, mu-plugins, or
@@ -10919,9 +10926,10 @@ class ImportClient
      * unavailable in preflight is a distinct, clear error.
      *
      * @param string $raw The raw argument.
+     * @param string $path_format Source format for remote inputs, native format for local inputs.
      * @param array<string,string|null> $tokens Token name => value (null = unavailable).
      */
-    private function resolve_token_path(string $raw, array $tokens): string
+    private function resolve_token_path(string $raw, array $tokens, string $path_format): string
     {
         $resolved = $raw;
         foreach ($tokens as $name => $value) {
@@ -10947,9 +10955,9 @@ class ImportClient
         }
 
         if ($resolved !== "") {
-            $resolved = trim_right_slash($resolved);
+            $resolved = trim_right_slash($resolved, $path_format);
         }
-        assert_valid_path($resolved, "path \"{$raw}\"");
+        assert_valid_path($resolved, $path_format, "path \"{$raw}\"");
 
         return $resolved;
     }
@@ -10960,6 +10968,7 @@ class ImportClient
         if ($this->remote_to_local_path_mapper === null) {
             $this->remote_to_local_path_mapper = new RemoteToLocalPathMapper(
                 $this->filesystem_root,
+                $this->get_state()->remote_path_format(),
                 $this->get_export_directories(),
                 $this->resolved_path_mappings,
                 $this->local_followed_symlinks_root
@@ -11953,7 +11962,7 @@ class ImportClient
         ];
 
         if ($this->extra_directory !== null && $this->extra_directory !== "") {
-            $extra_paths["extra_directory"] = trim_right_slash($this->extra_directory);
+            $extra_paths["extra_directory"] = trim_right_slash($this->extra_directory, $this->get_state()->remote_path_format());
         }
 
         // Ensure every --remap source is enumerated — including plugins or
@@ -11971,8 +11980,11 @@ class ImportClient
         $ini_all = $state->get('preflight.runtime.ini_get_all');
         foreach (["auto_prepend_file", "auto_append_file"] as $ini_key) {
             $ini_path = $ini_all[$ini_key] ?? "";
-            if (is_string($ini_path) && $ini_path !== "" && $ini_path[0] === "/") {
-                $ini_dir = trim_right_slash(dirname($ini_path));
+            if (is_string($ini_path) && is_absolute_path($ini_path, $state->remote_path_format())) {
+                // dirname() runs on the client. Convert source separators first
+                // so D:\scripts\env.php yields D:/scripts on a Unix client.
+                $ini_path = normalize_path_separators($ini_path, $state->remote_path_format());
+                $ini_dir = trim_right_slash(dirname($ini_path) . '/', $state->remote_path_format());
                 if ($ini_dir !== "/") {
                     $extra_paths[$ini_key] = $ini_dir;
                 }
@@ -12198,7 +12210,7 @@ class ImportClient
         }
         // Runtime-file requests also come from the source's preflight response,
         // so matching a request does not replace path validation.
-        assert_valid_path($path, $label);
+        assert_valid_path($path, $this->get_state()->remote_path_format(), $label);
     }
 
     /**
@@ -13579,7 +13591,7 @@ class ImportClient
             && !$applying_diff_records_would_rewrite_an_open_index
         ) {
             try {
-                $this->pull_index_journal->apply_pending_records();
+                $this->pull_index_journal->apply_pending_records($this->get_state()->remote_path_format());
             } catch (Exception $e) {
                 $this->audit_log(
                     "Failed to apply the pull index WAL on shutdown: " .
