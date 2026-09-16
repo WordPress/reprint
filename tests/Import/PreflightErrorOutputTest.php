@@ -127,6 +127,7 @@ final class PreflightErrorOutputTest extends TestCase {
     {
         $preflight_body = json_encode([
             'ok' => true,
+            'reprint_plugin' => null,
             'protocol_version' => PULL_PROTOCOL_VERSION,
             'filesystem' => ['ok' => true],
             'database' => ['connected' => true],
@@ -214,6 +215,7 @@ final class PreflightErrorOutputTest extends TestCase {
     {
         $payload = [
             'ok' => true,
+            'reprint_plugin' => null,
             'protocol_version' => PULL_PROTOCOL_VERSION + 1,
             'filesystem' => ['ok' => true],
             'database' => ['connected' => true],

@@ -100,7 +100,7 @@ class ReprintExclusionHttpTest extends TestCase
 
     public static function exclusion_modes(): array
     {
-        return [['--exclude-reprint', true], ['--include-reprint', false], ['', false]];
+        return [['--exclude-reprint', true], ['--include-reprint', false], ['', true]];
     }
 
     /** @dataProvider exclusion_modes */

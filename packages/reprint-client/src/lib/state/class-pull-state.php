@@ -69,7 +69,7 @@ class PullState
     /** Keep host platform plugins through file download and db-apply. */
     public bool $include_host_plugins = true;
     /** Omit the source Reprint plugin and its connection state from pulls. */
-    public bool $exclude_reprint = false;
+    public bool $exclude_reprint = true;
     /** @var string|null User-Agent that worked during preflight. */
     public ?string $user_agent = null;
     public ?int $max_allowed_packet = null;

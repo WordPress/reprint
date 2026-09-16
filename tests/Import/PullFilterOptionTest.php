@@ -74,6 +74,7 @@ class PullFilterFakeClient extends \ImportClient
             "http_code" => 200,
             "data" => [
                 "ok" => true,
+                "reprint_plugin" => null,
                 "database" => [
                     "wp" => [
                         "wp_version" => "6.8",
@@ -315,7 +316,7 @@ class PullFilterOptionTest extends TestCase
                 "started_by_command" => "pull",
                 "last_completed_stage" => "preflight",
             ],
-            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true, "reprint_plugin" => null]],
         ]);
 
         $client = $this->makeClient();
@@ -346,7 +347,7 @@ class PullFilterOptionTest extends TestCase
                 "started_by_command" => "pull",
                 "last_completed_stage" => "preflight",
             ],
-            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true, "reprint_plugin" => null]],
         ]);
 
         $client = $this->makeClient();
@@ -376,7 +377,7 @@ class PullFilterOptionTest extends TestCase
                 "started_by_command" => "pull-db",
                 "last_completed_stage" => null,
             ],
-            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true, "reprint_plugin" => null]],
         ]);
         file_put_contents($this->stateDir . '/db.sql', "SELECT 1;\n");
 
@@ -561,7 +562,7 @@ class PullFilterOptionTest extends TestCase
                 "stage_sequence" => ["preflight", "files-pull"],
                 "last_completed_stage" => "preflight",
             ],
-            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true, "reprint_plugin" => null]],
         ]);
 
         $client = $this->makeClient();
@@ -584,7 +585,7 @@ class PullFilterOptionTest extends TestCase
                 "completion_state" => "complete",
                 "current_stage" => null,
             ],
-            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true, "reprint_plugin" => null]],
         ]);
 
         $client = $this->makeClient();
@@ -612,7 +613,7 @@ class PullFilterOptionTest extends TestCase
                 "stage_sequence" => ["preflight", "files-pull"],
                 "last_completed_stage" => "preflight",
             ],
-            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true, "reprint_plugin" => null]],
         ]);
 
         $client = $this->makeClient();
@@ -703,7 +704,7 @@ class PullFilterOptionTest extends TestCase
                 "stage_sequence" => ["preflight", "files-pull"],
                 "last_completed_stage" => "preflight",
             ],
-            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true, "reprint_plugin" => null]],
         ]);
 
         $client = $this->makeClient();
@@ -739,7 +740,7 @@ class PullFilterOptionTest extends TestCase
                 "stage_sequence" => ["preflight", "db-pull", "db-apply"],
                 "last_completed_stage" => "preflight",
             ],
-            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true, "reprint_plugin" => null]],
         ]);
 
         $client = $this->makeClient();
@@ -767,7 +768,7 @@ class PullFilterOptionTest extends TestCase
                 "completion_state" => "complete",
                 "current_stage" => null,
             ],
-            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true, "reprint_plugin" => null]],
         ]);
 
         $client = $this->makeClient();

@@ -160,6 +160,7 @@ PHP, var_export($requestsLog, true)));
     {
         $data = array(
             'ok' => true,
+            'reprint_plugin' => null,
             'capabilities' => array(
                 'base64_path_parameters' => true,
             ),

@@ -378,6 +378,7 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->writeState($exportUrl, [
             'preflight' => [
                 'data' => [
+                    'reprint_plugin' => null,
                     'database' => ['wp' => ['table_prefix' => 'wp_']],
                 ],
             ],

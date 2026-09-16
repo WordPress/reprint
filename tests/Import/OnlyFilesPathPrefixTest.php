@@ -73,7 +73,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     private function client(array $preflightData): \ImportClient
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
-        $c->get_state()->set_preflight_record(array('data' => $preflightData));
+        $c->get_state()->set_preflight_record(array('data' => array('reprint_plugin' => null) + $preflightData));
         $this->set($c, 'audit_log_file', $this->tempDir . '/audit.log');
         return $c;
     }
@@ -126,6 +126,7 @@ class OnlyFilesPathPrefixTest extends TestCase
             ),
             'preflight' => array(
                 'data' => array(
+                    'reprint_plugin' => null,
                     'database' => array(
                         'wp' => array(
                             'paths_urls' => array(

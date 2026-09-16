@@ -87,9 +87,9 @@ class ReprintExclusionTest extends TestCase
         $this->assertFalse(\PullState::from_array($data)->exclude_reprint);
     }
 
-    public function testNewStateIncludesReprintByDefault(): void
+    public function testNewStateExcludesReprintByDefault(): void
     {
-        $this->assertFalse((new \PullState())->exclude_reprint);
+        $this->assertTrue((new \PullState())->exclude_reprint);
     }
 
     public function testCannotChangeSelectionBetweenPipelineStages(): void
