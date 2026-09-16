@@ -5,6 +5,7 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupProcessor;
 const REPRINT_URL_REWRITE_BENCHMARK_CASES = [
     'html',
     'style-elements',
+    'style-large-value',
     'blocks-literal-urls',
     'blocks-nested-html',
     'blocks-repeated-urls',
@@ -12,6 +13,14 @@ const REPRINT_URL_REWRITE_BENCHMARK_CASES = [
     'blocks-encoded-shortcodes',
     'blocks-no-source-urls',
     'serialized-options',
+];
+
+// These corpora use declared URL fields. A child-path lookup can distinguish
+// /article/... from /news/...; opaque strings deliberately cannot do that.
+const REPRINT_URL_REWRITE_CHILD_PATH_BENCHMARK_CASES = [
+    'style-elements',
+    'blocks-nested-html',
+    'blocks-repeated-urls',
 ];
 
 /**
@@ -29,7 +38,10 @@ function reprint_url_rewrite_benchmark_fixture(string $scenario, int $row): arra
     $expected = strpos($scenario, 'blocks-') === 0 ? [] : '';
     $source_values = [];
     $target_values = [];
-    for ($block = 0; $block < 32; ++$block) {
+    // One large value exposes repeated whole-HTML copies which small rows hide.
+    // It also crosses the HTML parser's 1,000-edit batch limit several times.
+    $entry_count = $scenario === 'style-large-value' ? 8192 : 32;
+    for ($block = 0; $block < $entry_count; ++$block) {
         $id = $row * 32 + $block;
         $url_id = $scenario === 'blocks-repeated-urls' ? 0 : $id;
         $source = 'https://source.example/article/' . $url_id;
@@ -43,6 +55,7 @@ function reprint_url_rewrite_benchmark_fixture(string $scenario, int $row): arra
                 $expected .= $target_html;
                 continue 2;
             case 'style-elements':
+            case 'style-large-value':
                 $input .= '<style>.article-' . $id . '{background:url("' . $source . '")}</style>';
                 $expected .= '<style>.article-' . $id . '{background:url("' . $target . '")}</style>';
                 continue 2;

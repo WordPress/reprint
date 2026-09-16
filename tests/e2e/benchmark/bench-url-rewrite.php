@@ -7,7 +7,11 @@
 
 require __DIR__ . '/url-rewrite-fixtures.php';
 if (( $argv[1] ?? '' ) === '--list') {
-    echo json_encode(REPRINT_URL_REWRITE_BENCHMARK_CASES) . "\n";
+    echo json_encode(array_merge(
+        REPRINT_URL_REWRITE_BENCHMARK_CASES,
+        array_map(static function ($scenario) { return 'selected-site-' . $scenario; }, REPRINT_URL_REWRITE_BENCHMARK_CASES),
+        array_map(static function ($scenario) { return 'selected-site-child-paths-' . $scenario; }, REPRINT_URL_REWRITE_CHILD_PATH_BENCHMARK_CASES)
+    )) . "\n";
     exit;
 }
 reprint_benchmark_url_rewrite($argv[1] ?? '', $argv[2] ?? '');
@@ -23,13 +27,20 @@ function reprint_benchmark_url_rewrite(string $build_path, string $scenario): vo
     require $root . '/vendor/autoload.php';
     require $root . '/packages/reprint-client/src/lib/url-rewrite/load.php';
 
+    $selected_site = strpos($scenario, 'selected-site-') === 0;
+    $with_child_paths = strpos($scenario, 'selected-site-child-paths-') === 0;
+    $prefix = $with_child_paths ? 'selected-site-child-paths-' : 'selected-site-';
+    $corpus = $selected_site ? substr($scenario, strlen($prefix)) : $scenario;
+    $child_paths = $with_child_paths ? ['https://source.example' => ['/news/']] : [];
+
     // Fixed-size corpus; generation, loading PHP and output checks are not timed.
     // Each sample uses fresh caches, then reuses one rewriter across distinct rows,
     // as SQL apply does. Repeating one value would mostly benchmark cache hits.
     $fixtures = [];
     $input_bytes = 0;
-    for ($row = 0; $row < 128; ++$row) {
-        $fixture = reprint_url_rewrite_benchmark_fixture($scenario, $row);
+    $row_count = $corpus === 'style-large-value' ? 1 : 128;
+    for ($row = 0; $row < $row_count; ++$row) {
+        $fixture = reprint_url_rewrite_benchmark_fixture($corpus, $row);
         $input_bytes += strlen($fixture['input']);
         $fixtures[] = $fixture;
     }
@@ -37,9 +48,15 @@ function reprint_benchmark_url_rewrite(string $build_path, string $scenario): vo
     for ($sample = 0; $sample < 5; ++$sample) {
         $outputs = [];
         $start = hrtime(true);
-        $rewriter = new StructuredDataUrlRewriter(['https://source.example' => 'https://destination.example']);
+        $mapping = ['https://source.example' => 'https://destination.example'];
+        // An array selects the multisite parser path, even when empty. Trunk
+        // predates that argument and PHP ignores it there: its ordinary rewrite
+        // is the reference time for the same input and expected output.
+        $rewriter = $selected_site
+            ? new StructuredDataUrlRewriter($mapping, $child_paths)
+            : new StructuredDataUrlRewriter($mapping);
         foreach ($fixtures as $fixture) {
-            $outputs[] = $scenario === 'serialized-options'
+            $outputs[] = $corpus === 'serialized-options'
                 ? $rewriter->rewrite($fixture['input'])
                 : $rewriter->rewrite_known_block_markup_value($fixture['input']);
         }
