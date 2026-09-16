@@ -112,9 +112,14 @@ The generated URL map has at most 20 entries. One million other-domain records
 do not enlarge preflight. One million matching 20-byte child paths need about
 62 MiB for the PHP list and 86 MiB for the lookup set on PHP 8.4. Building the
 set temporarily holds both. JSON handling also needs space; this is an accepted
-memory cost, not a fixed bound independent of network size. The source reads
-rows through MySQLi without a buffered result or a PHP object per row. It does
-this only at preflight, not for every SQL/file request.
+memory cost, not a fixed bound independent of network size. The source uses
+the wpdb adapter with at most 1,000 buffered rows per query. The first query
+uses domain/path filters; it can scan and sort many rows. Further batches scan
+primary-key windows, including non-matches, rather than repeatedly sorting the
+remaining matches. This runs only at preflight, not for every SQL/file request.
+
+Child-path lookup works on MySQL and SQLite. Selected-site SQL export still
+requires the direct MySQL connection and saved-user lock described below.
 
 The large-network tests cover both directory cases, then run a real SQL import
 with a million child paths. They also check that progress JSON stays small and
@@ -219,8 +224,10 @@ was not moved.
 
 This first version rejects legacy blogs.dir uploads, custom upload or content
 directories, shared custom user tables at the source, and symlinks in selected
-paths. It does not copy cache or database drop-ins. It does not support a SQLite
-target, merging into an existing database, or pushing into a multisite network.
+paths. It does not copy cache or database drop-ins. SQLite source networks need
+separate saved-user locking support before selected-site SQL export can work.
+SQLite targets, merging into an existing database, and pushing into a multisite
+network are also unsupported.
 
 The source is not a transactionally frozen snapshot. Pause writes for the final
 migration if a point-in-time copy is required. The pull does not delete the
