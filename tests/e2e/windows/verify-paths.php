@@ -34,6 +34,7 @@ foreach ($manifest['path_cases'] as $name => $case) {
         }
         // A repeated failure must not resume past an uninspected or unwritten file.
         for ($attempt = 1; $attempt <= (isset($case['error']) ? 2 : 1); ++$attempt) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- CLI case names, not HTML.
             printf("RUN: %s attempt %d.\n", $name, $attempt);
             $process = proc_open($command, [0 => ['pipe', 'r'], 1 => ['file', $log_path, 'w'], 2 => ['file', $log_path, 'a']], $pipes);
             fclose($pipes[0]);

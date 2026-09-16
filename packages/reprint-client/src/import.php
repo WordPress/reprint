@@ -11737,9 +11737,12 @@ class ImportClient
             ],
             true,
         );
-        if ($phase === "index" && $error_type === "exception") {
+        if (in_array($phase, ["index", "files"], true) && $error_type === "exception") {
+            // A source exception cannot become another partial fetch forever.
+            // For example, Windows PHP may be unable to read a stored link target.
+            // Stop at the saved cursor so the user can correct the source first.
             // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Remote error rendered as CLI text, not HTML.
-            throw new RuntimeException("Remote index failed: {$message}");
+            throw new RuntimeException("Remote {$phase} failed: {$message}");
         }
     }
 

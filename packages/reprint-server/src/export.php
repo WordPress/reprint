@@ -22,6 +22,8 @@ use function WordPress\Reprint\Server\generate_random_bytes;
 use function WordPress\Reprint\Server\json_encode_or_throw;
 use function WordPress\Reprint\Server\is_absolute_path;
 use function WordPress\Reprint\Server\source_io_path;
+use function WordPress\Reprint\Server\source_lstat;
+use function WordPress\Reprint\Server\source_is_link;
 use function WordPress\Reprint\Server\source_realpath;
 use function WordPress\Reprint\Server\source_readlink;
 use function WordPress\Reprint\Server\normalize_path;
@@ -1462,7 +1464,7 @@ function resolve_file_index_roots(array $config): array
         assert_valid_path($root_input, native_path_format(), "directory entry");
         $requested_path = normalize_path($root_input, native_path_format());
         clearstatcache(true, $requested_path);
-        $stat = @lstat(source_io_path($requested_path));
+        $stat = @source_lstat($requested_path);
         if ($stat === false) {
             // The client sends `pulled_before` for selected paths an earlier pull
             // already saw. Absence there means the source deleted the path, so it
@@ -1586,7 +1588,7 @@ function file_index_parent_symlink(string $requested_path): ?array
         $current = $parent;
     }
     foreach (array_reverse($parents) as $current) {
-        if (!@is_link(source_io_path($current))) {
+        if (!@source_is_link($current)) {
             continue;
         }
         $target = @source_readlink($current);
@@ -3818,7 +3820,7 @@ function endpoint_resolve_windows_path(array $config): array {
             continue;
         }
         $candidate = rtrim($resolved, '/') . '/' . $component;
-        $keep_spelling = $keep_spelling || is_link($candidate);
+        $keep_spelling = $keep_spelling || source_is_link($candidate);
         $real = $keep_spelling ? false : realpath($candidate);
         if ($real === false) {
             $keep_spelling = true;

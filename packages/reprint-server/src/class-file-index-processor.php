@@ -392,7 +392,7 @@ final class FileIndexProcessor {
                 && ( $this->storage_path === "" || !path_is_same_as_or_descendant_of($this->current_directory, $this->storage_path) )
             ) {
                 clearstatcache(true, $this->current_directory);
-                $stat = @lstat(source_io_path($this->current_directory));
+                $stat = @source_lstat($this->current_directory);
                 if ($stat !== false) {
                     $this->index_entries = self::index_entries_for_path($this->current_directory, $stat, false)["entries"];
                     $this->step_status = self::STATUS_INDEXED;
@@ -444,7 +444,7 @@ final class FileIndexProcessor {
         // unless a UNC API limit makes disappearance impossible to infer.
         clearstatcache(true, $path);
         try {
-            $stat = @lstat(source_io_path($path));
+            $stat = @source_lstat($path);
             if ($stat === false) {
                 if (windows_share_root($path) !== null) {
                     // PHP may list a long UNC filename but fail to inspect it. Do
@@ -994,7 +994,7 @@ final class FileIndexProcessor {
         }
 
         clearstatcache(true, $path_root);
-        $stat = @lstat(source_io_path($path_root));
+        $stat = @source_lstat($path_root);
         if ($stat === false) {
             $this->step_status = self::STATUS_PATH_UNAVAILABLE;
             return;
@@ -1032,7 +1032,7 @@ final class FileIndexProcessor {
             && !$resolved_target_was_indexed
         ) {
             clearstatcache(true, $root["resolved_path"]);
-            $target_stat = @lstat(source_io_path($root["resolved_path"]));
+            $target_stat = @source_lstat($root["resolved_path"]);
             if (is_array($target_stat)) {
                 $target = self::index_entries_for_path($root["resolved_path"], $target_stat, false);
                 $entries = array_merge($entries, $target["entries"]);
@@ -1333,7 +1333,7 @@ final class FileIndexProcessor {
         // a parent link when checking the next component, so changing $current
         // to realpath() would turn later emitted links into resolved paths.
         foreach (array_reverse($parents) as $current) {
-            if (!@is_link(source_io_path($current))) {
+            if (!@source_is_link($current)) {
                 continue;
             }
 
@@ -1341,7 +1341,7 @@ final class FileIndexProcessor {
             // to reconstruct the same link rather than only its final directory.
             $target = @source_readlink($current);
             if ($target !== false && $target !== "") {
-                $stat = @lstat(source_io_path($current));
+                $stat = @source_lstat($current);
                 $entries[] = [
                     "path" => $current,
                     "ctime" => (int) ( is_array($stat) && isset($stat["ctime"]) ? $stat["ctime"] : 0 ),

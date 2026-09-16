@@ -405,14 +405,14 @@ class FileTreeProducer
         }
 
         clearstatcache(true, $path);
-        if (is_absolute_path($path, native_path_format()) && (file_exists(source_io_path($path)) || is_link(source_io_path($path)))) {
+        if (is_absolute_path($path, native_path_format()) && (file_exists(source_io_path($path)) || source_is_link($path))) {
             return $path;
         }
 
         foreach ($this->directories as $dir) {
             $candidate = wp_join_unix_paths($dir, $path);
             clearstatcache(true, $candidate);
-            if (file_exists(source_io_path($candidate)) || is_link(source_io_path($candidate))) {
+            if (file_exists(source_io_path($candidate)) || source_is_link($candidate)) {
                 return $candidate;
             }
         }
@@ -431,7 +431,7 @@ class FileTreeProducer
                 $this->multisite_selection->assert_path_allowed($file["path"]);
             }
             clearstatcache(true, $file["path"]);
-            $pre_stat = @lstat(source_io_path($file["path"]));
+            $pre_stat = @source_lstat($file["path"]);
             if ($pre_stat === false || (($pre_stat["mode"] & 0170000) !== 0100000)) {
                 $this->streaming_file_handle = null;
                 $this->current_file_meta = null;
@@ -687,7 +687,7 @@ class FileTreeProducer
     private function lstat_path(string $path): ?array
     {
         clearstatcache(true, $path);
-        $stat = @lstat(source_io_path($path));
+        $stat = @source_lstat($path);
         if ($stat === false) {
             return null;
         }

@@ -127,6 +127,8 @@ parent directory. Rename these entries on the source before migration. The
 pull fails again on resume; it does not skip the unreadable entry.
 
 Volume GUID and `GLOBALROOT` selections require a drive-letter or UNC spelling.
+For long share paths that PHP cannot inspect, select the same source through a
+drive-letter path.
 Some Windows links can be followed by PHP but cannot be read by `readlink()`;
 these stop the pull rather than becoming empty links. Recreate such links with
 a backslash target. If PHP cannot resolve the link, use a full drive-letter

@@ -924,6 +924,43 @@ function source_io_path(string $path): string {
 }
 }
 
+if (!function_exists(__NAMESPACE__ . '\\source_is_link')) {
+/**
+ * Checks the source metadata, including Windows junctions that is_link() misses.
+ */
+function source_is_link(string $path): bool {
+    $stat = @source_lstat($path);
+    return $stat !== false && ( $stat['mode'] & 0170000 ) === 0120000;
+}
+}
+
+if (!function_exists(__NAMESPACE__ . '\\source_lstat')) {
+/**
+ * Reads source metadata and identifies Windows junctions through PHP readlink().
+ *
+ * Windows PHP lstat() reports symbolic links, but leaves the type bits at zero
+ * for junctions. is_link() therefore returns false and would let a no-follow
+ * pull traverse the target. Obtain the target before reporting a link type.
+ * An unrecognized reparse point that leads back to itself must fail rather
+ * than become a fabricated self-link or disappear as an unknown file type.
+ *
+ * @return array|false PHP stat fields, with link type bits for Windows junctions.
+ */
+function source_lstat(string $path) {
+    $stat = lstat(source_io_path($path));
+    if (PHP_OS === 'WINNT' && $stat !== false && ( $stat['mode'] & 0170000 ) === 0) {
+        $target = source_readlink($path);
+        if (normalize_path_separators($target, 'windows') === normalize_path_separators($path, 'windows')) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This is an API error, not HTML.
+            throw new \RuntimeException('PHP cannot identify the Windows reparse point: ' . $path . '. Copy it to an ordinary file or directory before migration.');
+        }
+        $stat['mode'] |= 0120000;
+        $stat[2] = $stat['mode'];
+    }
+    return $stat;
+}
+}
+
 if (!function_exists(__NAMESPACE__ . '\\source_realpath')) {
 /**
  * Resolves source paths through PHP and returns the shared index spelling.
@@ -942,7 +979,7 @@ if (!function_exists(__NAMESPACE__ . '\\source_realpath')) {
  */
 function source_realpath(string $path) {
     $resolved = realpath(source_io_path($path));
-    if ($resolved === false && PHP_OS === 'WINNT' && is_link($path)) {
+    if ($resolved === false && PHP_OS === 'WINNT' && source_is_link($path)) {
         $target = source_readlink($path);
         $resolved = realpath(source_io_path(resolve_symlink_target_path($path, $target, 'windows')));
     }

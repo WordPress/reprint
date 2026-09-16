@@ -235,4 +235,8 @@ $cases['parent-junction-not-followed'] = @{
 New-Item -ItemType Directory -Force 'D:\Reprint chunk boundaries' | Out-Null
 [NamespaceFixtures]::Write('\\?\D:\Reprint chunk boundaries\readable', ('A' * 16384))
 
+# Keep this read probe independent from the full WordPress fixture.
+New-Item -ItemType Directory -Force 'D:\Reprint reader UNC' | Out-Null
+[NamespaceFixtures]::Write(('\\?\D:\Reprint reader UNC\' + ('a' * 251) + '.txt'), 'long UNC file')
+
 $cases | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ManifestPath -Encoding utf8NoBOM

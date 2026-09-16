@@ -54,16 +54,31 @@ $reprint_processor->close();
 if (!in_array('D:/Reprint namespace cases/Mixed Case/hello.txt', $reprint_paths, true)) {
     throw new RuntimeException('Overlapping Windows roots omitted the selected child.');
 }
+ob_start();
+$reprint_response = endpoint_resolve_windows_path(['source_path_b64' => base64_encode('\\\\?\\D:\\Reprint link cases\\junction')]);
+ob_end_clean();
+if (base64_decode($reprint_response['path_b64']) !== 'D:/Reprint link cases/junction') {
+    throw new RuntimeException('Windows input resolution followed the selected junction.');
+}
 $reprint_roots = resolve_file_index_roots(['directory' => ['D:/Reprint link cases/junction'], 'follow_symlinks' => true]);
+if ($reprint_roots[0]['type'] !== 'symlink') {
+    throw new RuntimeException('PHP junction metadata must become a link, not a directory.');
+}
+$reprint_saw_junction = false;
 $reprint_processor = FileIndexProcessor::start($reprint_roots, $reprint_roots[0], true, '');
 while ($reprint_processor->next_index_step()) {
     foreach ($reprint_processor->get_index_entries() as $reprint_entry) {
+        $reprint_saw_junction = $reprint_saw_junction || $reprint_entry['path'] === 'D:/Reprint link cases/junction';
         if (isset($reprint_entry['target']) && $reprint_entry['target'] !== 'D:/Reprint namespace cases/Mixed Case') {
             throw new RuntimeException('A Windows index target retained native separators: ' . $reprint_entry['target']);
         }
     }
 }
 $reprint_processor->close();
+
+if (!$reprint_saw_junction) {
+    throw new RuntimeException('The index omitted the selected junction.');
+}
 
 // Read failures can occur in a directory entry or a selected named link.
 // Their cursors must retain the same entry, without skipping it on resume.
@@ -124,6 +139,17 @@ if (!$reprint_chunk['is_last_chunk'] || $reprint_producer->next_chunk()) {
     throw new RuntimeException('An exact final chunk must complete without an extra read error.');
 }
 unset($reprint_producer);
+
+// Record PHP's namespace behavior for a share path beyond MAX_PATH.
+$reprint_long_tail = 'localhost\\D$\\Reprint reader UNC\\' . str_repeat('a', 251) . '.txt';
+foreach (['\\\\' . $reprint_long_tail, '\\\\.\\UNC\\' . $reprint_long_tail, '\\\\?\\UNC\\' . $reprint_long_tail] as $reprint_long_path) {
+    echo json_encode([
+        'long_path' => $reprint_long_path,
+        'contents' => @file_get_contents($reprint_long_path),
+        'stat' => @lstat($reprint_long_path),
+        'realpath' => @realpath($reprint_long_path),
+    ]) . "\n";
+}
 
 // PHP itself enforces open_basedir; there is no second filesystem API.
 ini_set('open_basedir', __DIR__);
