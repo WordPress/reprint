@@ -887,6 +887,53 @@ load the `.so`: `tests/e2e/ci/verify-wp-mysql-parser.php` asserts that
 a native-backed parser before benchmarking Playground `db-pull` and `db-apply`.
 That path requires Node.js with JSPI support; CI uses Node 24.
 
+#### Post-migration tasks
+
+Once the destination has its files, database, and working `wp-config.php`, run
+both tasks with:
+
+```sh
+reprint post-process --fs-root=/path/to/wordpress --state-dir=/path/to/migration-state
+```
+
+Run only selected tasks with `--tasks`:
+
+```sh
+reprint post-process --fs-root=/path/to/wordpress --tasks=disable-failing-plugins
+reprint post-process --fs-root=/path/to/wordpress --state-dir=/path/to/migration-state \
+  --tasks=disable-hosting-plugins
+```
+
+Omitting `--tasks`, or passing `--tasks=all`, runs both. A comma-separated list
+selects only those tasks. Hosting cleanup always runs first, regardless of the
+list's order. Processing stops at the first failure.
+
+`disable-hosting-plugins` removes known source-host plugin, MU-plugin, and
+drop-in files using the same rules as `apply-runtime`. It reads the saved
+preflight from `--state-dir`; it does not contact the source, load WordPress,
+change `active_plugins`, or generate runtime files. Like runtime cleanup, it
+records removed paths for later pushes without changing the saved pull selection.
+Generic cache drop-ins are removed only when the saved source-host data calls
+for that. Finish an interrupted files-push, or finish or abort an interrupted
+files-pull, before running this task.
+
+Use the ready-to-run WordPress root containing `wp-load.php` as `--fs-root`,
+not the raw download directory. Hosting cleanup uses the standard `wp-content`
+layout under that root. If the state directory contains several remotes, pass
+the original source URL to select one:
+
+```sh
+reprint post-process https://source.example/?reprint-api \
+  --fs-root=/path/to/wordpress --state-dir=/path/to/migration-state
+```
+
+`disable-failing-plugins` performs the startup recovery described below. It
+does not need migration state when run alone. JSON output has `status` and a
+`results` list with each attempted task's name, status, and removed paths or
+disabled plugins. Earlier results remain in the report if a later task fails.
+Exit code 0 means all selected tasks completed; exit code 1 means processing
+stopped. Neither task checks page rendering or the web server.
+
 #### Recover WordPress startup
 
 Once the destination has its files, database, and working `wp-config.php`, run:

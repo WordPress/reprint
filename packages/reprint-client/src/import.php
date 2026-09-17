@@ -521,9 +521,9 @@ class ImportClient
             } elseif ($signal_handling_command === 'db-rewrite-urls') {
                 pcntl_signal(SIGINT, [$this, 'handle_database_url_rewrite_shutdown']);
                 pcntl_signal(SIGTERM, [$this, 'handle_database_url_rewrite_shutdown']);
-            } elseif ($signal_handling_command !== 'files-diff') {
-                // files-diff must not save the pull command's state from a
-                // shutdown handler; default signal behavior ends the report.
+            } elseif (!in_array($signal_handling_command, ['files-diff', 'post-process'], true)) {
+                // files-diff and post-process must not save the pull command's
+                // state from a shutdown handler; default signal behavior ends them.
                 pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
                 pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
             }
@@ -2366,7 +2366,7 @@ class ImportClient
     }
 
     /** Returns `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`. */
-    private static function remote_state_directory_path(
+    public static function remote_state_directory_path(
         string $remote_reprint_api_url,
         string $state_dir
     ): string {
@@ -5216,17 +5216,7 @@ class ImportClient
             $abs_output_dir = realpath($abs_output_dir);
         }
 
-        $excluded_plugins = ( $options['include_host_plugins'] ?? false ) ? [] : excluded_plugins($preflight_data);
-        $excluded_local_paths = array_column($excluded_plugins, 'local_path');
-        if ($excluded_local_paths !== []) {
-            $push_state_directory = wp_join_unix_paths(dirname($this->pull_state_directory), 'push');
-            if (is_file(wp_join_unix_paths($push_state_directory, 'sender.json'))) {
-                throw new RuntimeException('Finish the interrupted files-push before applying local runtime cleanup.');
-            }
-            if (is_file($this->pull_index_wal_path)) {
-                throw new RuntimeException('Finish or abort the interrupted files-pull before applying local runtime cleanup.');
-            }
-        }
+        $excluded_local_paths = ( $options['include_host_plugins'] ?? false ) ? [] : $this->host_plugin_paths_to_remove();
 
         // Step 1: Build the runtime manifest from preflight data.
         $manifest = runtime_manifest_for($preflight_data);
@@ -5369,26 +5359,7 @@ class ImportClient
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
         }
 
-        // A previous import or pre-existing local tree may already contain an
-        // excluded plugin. File download filtering cannot remove that copy.
-        // Save exclusions before the first removal: a stopped setup must not
-        // turn its completed removals into source-host deletions on the next push.
-        // A later opt-out does not restore files removed by an earlier setup.
-        $this->get_state()->apply->remote_paths_removed_from_local_site = array_values(array_unique(array_merge(
-            $this->get_state()->apply->remote_paths_removed_from_local_site,
-            $excluded_local_paths
-        )));
-        $this->save_state();
-        foreach ($excluded_local_paths as $rel_path) {
-            $full_path = wp_join_unix_paths($local_document_root, $rel_path);
-            if (!file_exists($full_path) && !is_link($full_path)) {
-                continue;
-            }
-            if (is_dir($full_path) && !is_link($full_path)) {
-                self::rmdir_recursive($full_path);
-            } else {
-                unlink($full_path);
-            }
+        foreach ($this->remove_host_plugin_paths($excluded_local_paths, $local_document_root) as $rel_path) {
             $summary[] = "Removed source-host path: {$rel_path}";
             $this->audit_log("APPLY-RUNTIME | removed {$rel_path} (source-host)");
         }
@@ -5430,6 +5401,80 @@ class ImportClient
             $human_summary .= "{$line}\n";
         }
         $this->progress->show_lifecycle_line($human_summary);
+    }
+
+    /**
+     * Remove source-host files using saved preflight, without loading WordPress.
+     * The caller holds the state directory's ReprintProcessLock for this task.
+     *
+     * @param string $local_document_root Local site root with the standard wp-content layout.
+     * @return string[] Paths removed, relative to the local site root.
+     */
+    public function run_disable_hosting_plugins(string $local_document_root): array
+    {
+        $this->state = $this->load_state();
+        $removed_paths = $this->remove_host_plugin_paths($this->host_plugin_paths_to_remove(), $local_document_root);
+        foreach ($removed_paths as $path) {
+            $this->audit_log("POST-PROCESS | removed {$path} (source-host)");
+        }
+        return $removed_paths;
+    }
+
+    /** @return string[] Source-host paths which may be removed from the local site. */
+    private function host_plugin_paths_to_remove(): array
+    {
+        $this->require_preflight();
+        $paths = array_column(excluded_plugins($this->get_state()->preflight_record()['data']), 'local_path');
+        if ($paths !== []) {
+            $push_state_directory = wp_join_unix_paths(dirname($this->pull_state_directory), 'push');
+            if (is_file(wp_join_unix_paths($push_state_directory, 'sender.json'))) {
+                throw new RuntimeException('Finish the interrupted files-push before applying local runtime cleanup.');
+            }
+            if (is_file($this->pull_index_wal_path)) {
+                throw new RuntimeException('Finish or abort the interrupted files-pull before applying local runtime cleanup.');
+            }
+        }
+        return $paths;
+    }
+
+    /**
+     * Record push exclusions before removing local copies of source-host files.
+     *
+     * @param string[] $excluded_local_paths Paths relative to the local site root.
+     * @param string   $local_document_root  Local site root with the standard wp-content layout.
+     * @return string[] Paths removed, relative to the local site root.
+     */
+    private function remove_host_plugin_paths(array $excluded_local_paths, string $local_document_root): array
+    {
+        // A previous import or pre-existing local tree may already contain an
+        // excluded plugin. File download filtering cannot remove that copy.
+        // Save exclusions before the first removal: a stopped setup must not
+        // turn its completed removals into source-host deletions on the next push.
+        // A later opt-out does not restore files removed by an earlier setup.
+        $this->get_state()->apply->remote_paths_removed_from_local_site = array_values(array_unique(array_merge(
+            $this->get_state()->apply->remote_paths_removed_from_local_site,
+            $excluded_local_paths
+        )));
+        $this->save_state();
+        $removed_paths = [];
+        foreach ($excluded_local_paths as $rel_path) {
+            $full_path = wp_join_unix_paths($local_document_root, $rel_path);
+            if (!file_exists($full_path) && !is_link($full_path)) {
+                continue;
+            }
+            if (is_dir($full_path) && !is_link($full_path)) {
+                self::rmdir_recursive($full_path);
+            } else {
+                unlink($full_path);
+            }
+            clearstatcache(true, $full_path);
+            if (file_exists($full_path) || is_link($full_path)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, not HTML.
+                throw new RuntimeException("Could not remove source-host path: {$full_path}.");
+            }
+            $removed_paths[] = $rel_path;
+        }
+        return $removed_paths;
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.
@@ -14007,8 +14052,17 @@ if (
             'placeholder' => 'DIR',
             'help' => 'Local directory read from or written to for site files',
             'help_section' => 'required',
-            'commands' => ['apply-runtime', 'recover'],
+            'commands' => ['apply-runtime', 'recover', 'post-process'],
             'aliases' => ['docroot'],
+        ],
+
+        [
+            'name' => 'tasks',
+            'type' => 'value',
+            'target' => 'tasks',
+            'placeholder' => 'TASKS',
+            'help' => 'Comma-separated task names, or all (default: all)',
+            'commands' => ['post-process'],
         ],
 
         // ── Global options ───────────────────────────────────────
@@ -14848,6 +14902,29 @@ if (
     // commands expose focused workflows useful for scripting and hosting
     // platform integrations; pull composes the relevant pull-side commands.
     $command_info = [
+        "post-process" => [
+            "level" => "high",
+            "short" => "Run selected post-migration tasks on the local site",
+            "usage" => "reprint post-process [<remote-reprint-api-url>] --fs-root=WORDPRESS_ROOT [--state-dir=DIR] [--tasks=TASKS]",
+            "description" =>
+                "Runs all tasks by default. --tasks selects only the named tasks.\n" .
+                "Tasks always run in this order, stopping at the first failure:\n\n" .
+                "  disable-hosting-plugins: Remove known source-host plugin, MU-plugin,\n" .
+                "    and drop-in files using the same rules as apply-runtime. Requires\n" .
+                "    --state-dir with successful saved preflight. Does not load WordPress\n" .
+                "    or edit active_plugins. Uses wp-content under --fs-root.\n" .
+                "  disable-failing-plugins: Require wp-load.php in fresh PHP processes.\n" .
+                "    Deactivate an active regular plugin when its file causes a fatal,\n" .
+                "    then try again. Keeps files and data; skips deactivation hooks.\n" .
+                "    Stops on other failures. Does not deactivate multisite plugins.\n\n" .
+                "--fs-root is the ready-to-run WordPress root containing wp-load.php,\n" .
+                "not the raw download directory. The positional URL selects saved state\n" .
+                "when --state-dir contains multiple remotes. No source API requests\n" .
+                "are made. Failing-plugin recovery alone needs no migration state.\n\n" .
+                "Prints JSON with per-task results. Exit 0 means all selected tasks\n" .
+                "completed; exit 1 means processing stopped. Uses Reprint's PHP binary.\n" .
+                "Does not check page rendering or the web server.\n",
+        ],
         "recover" => [
             "level" => "high",
             "short" => "Load WordPress, deactivating plugins that cause fatal errors",
@@ -15352,6 +15429,26 @@ if (
     if (in_array("--help", array_slice($argv, 2)) || in_array("-h", array_slice($argv, 2))) {
         _cli_render_command_help($command, $option_defs, $command_info);
         exit(0);
+    }
+
+    if ($command === 'post-process') {
+        $reprint_post_process_source = $argv[2] ?? '';
+        $reprint_post_process_has_source = $reprint_post_process_source !== '' && strpos($reprint_post_process_source, '-') !== 0;
+        [$reprint_post_process_state, $reprint_post_process_root, $reprint_post_process_options] = _cli_parse_options(
+            $argv,
+            $argument_count,
+            $reprint_post_process_has_source ? 3 : 2,
+            array_filter($option_defs, static fn($definition) => in_array($definition['name'], ['fs-root', 'state-dir', 'tasks'], true))
+        );
+        require_once __DIR__ . '/lib/post-process/functions.php';
+        $reprint_post_process_result = \Reprint\Importer\run_post_process(
+            $reprint_post_process_root ? ( realpath($reprint_post_process_root) ?: $reprint_post_process_root ) : '',
+            $reprint_post_process_options['tasks'] ?? 'all',
+            $reprint_post_process_state,
+            $reprint_post_process_has_source ? $reprint_post_process_source : null
+        );
+        echo json_encode($reprint_post_process_result, JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
+        exit($reprint_post_process_result['status'] === 'complete' ? 0 : 1);
     }
 
     if ($command === 'recover') {

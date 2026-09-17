@@ -45,6 +45,34 @@ class CliHelpTest extends TestCase
         $this->assertStringNotContainsString('<remote-reprint-api-url> is required', $output);
     }
 
+    public function testPostProcessHelpListsTheTasksAndTheirStateRequirements(): void
+    {
+        require_once __DIR__ . '/../../packages/reprint-client/src/lib/post-process/functions.php';
+        $output = $this->runHelp('post-process');
+
+        foreach (\Reprint\Importer\POST_PROCESS_TASKS as $task) {
+            $this->assertStringContainsString($task . ':', $output);
+        }
+        $this->assertStringContainsString('Runs all tasks by default', $output);
+        $this->assertStringContainsString('--tasks=TASKS', $output);
+        $this->assertStringContainsString('--state-dir with successful saved preflight', $output);
+        $this->assertStringContainsString('only the named tasks', $output);
+        $this->assertStringNotContainsString('--check-url', $output);
+        $this->assertStringNotContainsString('--secret', $output);
+        $this->assertStringNotContainsString('--include-host-plugins', $output);
+    }
+
+    public function testPostProcessRequiresAWordPressRootBeforeAnyTaskRuns(): void
+    {
+        $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+        $output = shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($entry) . ' post-process 2>/dev/null') ?? '';
+        $result = json_decode($output, true);
+
+        $this->assertSame('failed', $result['status']);
+        $this->assertSame([], $result['results']);
+        $this->assertStringContainsString('--fs-root=WORDPRESS_ROOT containing wp-load.php', $result['message']);
+    }
+
     public function testConflictingHostPluginFlagsAreRejectedInEitherOrder(): void
     {
         $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';

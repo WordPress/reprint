@@ -589,6 +589,34 @@ class ProductionDropInRemovalTest extends TestCase
         ];
     }
 
+    public function testHostingTaskReportsFailureWhenAPluginDirectoryCannotBeRemoved(): void
+    {
+        require_once __DIR__ . '/../../packages/reprint-client/src/lib/post-process/functions.php';
+        $this->writeState([]);
+        file_put_contents($this->fsRoot . '/wp-load.php', '<?php');
+        $locked_directory = $this->fsRoot . '/wp-content/plugins/hostinger';
+        mkdir($locked_directory, 0755, true);
+        file_put_contents($locked_directory . '/plugin.php', '<?php');
+        chmod($locked_directory, 0555);
+        if (is_writable($locked_directory)) {
+            chmod($locked_directory, 0755);
+            $this->markTestSkipped('This test requires directory write permissions to prevent unlink.');
+        }
+
+        try {
+            $result = \Reprint\Importer\run_post_process($this->fsRoot, 'disable-hosting-plugins', $this->stateDir);
+            $this->assertSame('failed', $result['status']);
+            $this->assertSame('failed', $result['results'][0]['status']);
+            $this->assertStringContainsString('Could not remove source-host path: ' . $locked_directory, $result['message']);
+            $this->assertFileExists($locked_directory . '/plugin.php');
+            $reopened = $this->makeClient();
+            $this->loadClientState($reopened);
+            $this->assertContains('wp-content/plugins/hostinger', $reopened->get_state()->apply->remote_paths_removed_from_local_site);
+        } finally {
+            chmod($locked_directory, 0755);
+        }
+    }
+
     // ---- Portable SiteGround plugins stay on disk ----
 
     private function writeSitegroundState(array $overrides = []): void
