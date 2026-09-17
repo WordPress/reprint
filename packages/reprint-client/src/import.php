@@ -14007,7 +14007,7 @@ if (
             'placeholder' => 'DIR',
             'help' => 'Local directory read from or written to for site files',
             'help_section' => 'required',
-            'commands' => ['apply-runtime', 'doctor'],
+            'commands' => ['apply-runtime', 'recover'],
             'aliases' => ['docroot'],
         ],
 
@@ -14848,10 +14848,10 @@ if (
     // commands expose focused workflows useful for scripting and hosting
     // platform integrations; pull composes the relevant pull-side commands.
     $command_info = [
-        "doctor" => [
+        "recover" => [
             "level" => "high",
             "short" => "Load WordPress, deactivating plugins that cause fatal errors",
-            "usage" => "reprint doctor --fs-root=WORDPRESS_ROOT",
+            "usage" => "reprint recover --fs-root=WORDPRESS_ROOT",
             "description" =>
                 "Requires wp-load.php in a separate PHP process. If a fatal error points\n" .
                 "to one active regular plugin, deactivates it and tries again. Plugin\n" .
@@ -15354,27 +15354,27 @@ if (
         exit(0);
     }
 
-    if ($command === 'doctor') {
-        [, $reprint_doctor_wordpress_root] = _cli_parse_options(
+    if ($command === 'recover') {
+        [, $reprint_recover_wordpress_root] = _cli_parse_options(
             $argv,
             $argument_count,
             2,
             array_filter($option_defs, static fn($definition) => $definition['name'] === 'fs-root')
         );
-        if (!$reprint_doctor_wordpress_root) {
-            fwrite(STDERR, "Error: doctor requires --fs-root=WORDPRESS_ROOT containing wp-load.php.\n");
+        if (!$reprint_recover_wordpress_root) {
+            fwrite(STDERR, "Error: recover requires --fs-root=WORDPRESS_ROOT containing wp-load.php.\n");
             exit(1);
         }
-        require_once __DIR__ . '/lib/doctor/functions.php';
+        require_once __DIR__ . '/lib/recover/functions.php';
         try {
-            $reprint_doctor_result = \Reprint\Importer\run_doctor(
-                realpath($reprint_doctor_wordpress_root) ?: $reprint_doctor_wordpress_root
+            $reprint_recover_result = \Reprint\Importer\run_recover(
+                realpath($reprint_recover_wordpress_root) ?: $reprint_recover_wordpress_root
             );
         } catch (\Throwable $error) {
-            $reprint_doctor_result = ['status' => 'failed', 'message' => $error->getMessage()];
+            $reprint_recover_result = ['status' => 'failed', 'message' => $error->getMessage()];
         }
-        echo json_encode($reprint_doctor_result, JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
-        exit($reprint_doctor_result['status'] === 'complete' ? 0 : 1);
+        echo json_encode($reprint_recover_result, JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
+        exit($reprint_recover_result['status'] === 'complete' ? 0 : 1);
     }
 
     // Most commands name the remote Reprint API URL whose state they use.

@@ -23,12 +23,12 @@ use RuntimeException;
  *     }
  * }
  */
-function run_doctor( string $wordpress_root ): array {
+function run_recover( string $wordpress_root ): array {
 	if ( ! is_file( $wordpress_root . '/wp-load.php' ) ) {
 		// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error, not HTML.
 		throw new RuntimeException( 'No wp-load.php found in ' . $wordpress_root . '.' );
 	}
-	$result_file = tempnam( sys_get_temp_dir(), 'reprint-doctor-' );
+	$result_file = tempnam( sys_get_temp_dir(), 'reprint-recover-' );
 	if ( false === $result_file ) {
 		throw new RuntimeException( 'Could not create the WordPress load result file.' );
 	}
