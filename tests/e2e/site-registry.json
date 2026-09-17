@@ -234,6 +234,9 @@
     },
     "multisite-paths-mysql": {
       "port": 8180
+    },
+    "multisite-plugin-tables": {
+      "port": 8181
     }
   }
 }
