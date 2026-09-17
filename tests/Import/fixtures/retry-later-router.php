@@ -11,6 +11,7 @@ if ($reprint_endpoint === 'preflight') {
     header('Content-Type: application/json');
     echo json_encode([
         'ok' => true,
+        'reprint_plugin' => null,
         'protocol_version' => 3,
         'capabilities' => ['base64_path_parameters' => true],
         'runtime' => ['document_root' => getcwd() . '/remote', 'ini_get_all' => []],

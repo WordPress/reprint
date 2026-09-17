@@ -1571,6 +1571,7 @@ final class FilesPullLocalIndexTest extends TestCase
             'http_code' => 200,
             'data' => [
                 'ok' => true,
+                'reprint_plugin' => null,
                 'capabilities' => [
                     'base64_path_parameters' => true,
                 ],
@@ -1707,6 +1708,7 @@ if ($endpoint === 'preflight') {
     header('Content-Type: application/json');
     echo json_encode(array(
         'ok' => true,
+        'reprint_plugin' => null,
         'capabilities' => array(
             'base64_path_parameters' => true,
         ),

@@ -182,7 +182,7 @@ final class UnixSymlinkPathTest extends TestCase {
         if (!is_dir($state_directory)) {
             $client = new \ImportClient($this->url, $state_directory, $this->root . '/files');
             \write_current_pull_state($client, [
-                'preflight' => ['data' => ['ok' => true, 'path_format' => 'unix', 'wp_detect' => ['roots' => [['path' => $this->source]]]], 'http_code' => 200],
+                'preflight' => ['data' => ['ok' => true, 'reprint_plugin' => null, 'path_format' => 'unix', 'wp_detect' => ['roots' => [['path' => $this->source]]]], 'http_code' => 200],
             ]);
         }
         $command = array_merge([PHP_BINARY, dirname(__DIR__, 2) . '/packages/reprint-client/src/import.php',

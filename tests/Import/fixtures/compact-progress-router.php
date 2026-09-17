@@ -7,6 +7,7 @@ if (!is_file('response.json') && ( $_POST['endpoint'] ?? '' ) === 'preflight') {
     // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- JSON fixture, not HTML.
     echo json_encode([
         'ok' => true,
+        'reprint_plugin' => null,
         'protocol_version' => 3,
         'filesystem' => ['ok' => true],
         'database' => ['connected' => true],

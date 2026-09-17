@@ -99,6 +99,7 @@ class CssFileDownloadTest extends TestCase {
         \write_current_pull_state($client, [
             'preflight' => ['http_code' => 200, 'data' => [
                 'ok' => true,
+                'reprint_plugin' => null,
                 'runtime' => ['document_root' => $this->source],
                 'wp_detect' => ['roots' => [['path' => $this->source]]],
             ]],

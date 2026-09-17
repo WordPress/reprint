@@ -237,7 +237,7 @@ final class PullIndexWalTest extends TestCase
         );
         \write_current_pull_state($this->client(), [
             'preflight' => [
-                'data' => ['ok' => true],
+                'data' => ['ok' => true, 'reprint_plugin' => null],
                 'http_code' => 200,
             ],
         ]);

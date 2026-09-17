@@ -364,16 +364,17 @@ caches, operating-system metadata, and editor scratch files. `--include`,
 
 **Reprint plugin and connection state**
 
-For example, `pull --exclude-reprint` skips the source Reprint plugin directory,
-leaves its connection token out of `db.sql`, and removes its entry from the
-imported `active_plugins` list. Other plugins and their settings stay.
+For example, `pull` with a new state directory skips the source Reprint plugin
+directory, leaves its connection token out of `db.sql`, and removes its entry
+from the imported `active_plugins` list. Other plugins and their settings stay.
 
-New pulls include Reprint unless you pass `--exclude-reprint`. The same flag
-works with `pull-files`, `pull-db`, `files-pull`, and `db-pull`:
+New pulls exclude Reprint unless you pass `--include-reprint`. The explicit
+`--exclude-reprint` flag also works with `pull-files`, `pull-db`, `files-pull`,
+and `db-pull`:
 
 ```bash
 php reprint.phar pull "$URL" --secret="$SECRET" \
-    --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --exclude-reprint
+    --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 ```
 
 The source reports its installed plugin path, including renamed directories
@@ -389,7 +390,9 @@ It stops if decoding and re-encoding the untouched list does not reproduce both
 the serialized PHP bytes and the bytes stored in the source column.
 
 The choice is saved in the state directory. Later pulls keep it without
-repeating the flag. `--include-reprint` selects inclusion again; the two flags cannot be combined. Finish an unfinished pull
+repeating the flag. `--include-reprint` selects inclusion again; the two flags
+cannot be combined. Only new state defaults to exclusion; existing state keeps
+its saved choice. Finish an unfinished pull
 or use `--abort` before changing its choice. State written before this option
 existed keeps the previous inclusion behavior.
 
