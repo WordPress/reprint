@@ -56,7 +56,7 @@ class ReprintExclusionHttpTest extends TestCase
         $configuration = '<?php $table_prefix = "custom_";' . "\n";
         foreach ([
             'DB_HOST' => getenv('DB_HOST'), 'DB_USER' => getenv('DB_USER'),
-            'DB_PASSWORD' => getenv('DB_PASS'), 'DB_NAME' => $this->source_database,
+            'DB_PASSWORD' => getenv('DB_PASS'), 'DB_NAME' => $this->source_database, 'DB_CHARSET' => 'utf8mb4',
             'ABSPATH' => $this->root . '/source/', 'WP_PLUGIN_DIR' => $this->root . '/installed-plugins',
             'WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR' => $this->root . '/plugin/',
         ] as $name => $value) {
@@ -185,6 +185,63 @@ class ReprintExclusionHttpTest extends TestCase
         $this->assertSame($source_options, $source->query('SELECT * FROM custom_options ORDER BY option_id')->fetchAll(PDO::FETCH_ASSOC));
     }
 
+    public static function activation_charsets(): array
+    {
+        return [
+            'utf8 site, latin1 column' => ['utf8mb4', 'latin1', 'café/index.php'],
+            'latin1 site, utf8 column' => ['latin1', 'utf8mb4', "caf\xe9/index.php"],
+            'utf8 site and column' => ['utf8mb4', 'utf8mb4', '🌍/index.php'],
+            'latin1 site and column' => ['latin1', 'latin1', "caf\xe9/index.php"],
+        ];
+    }
+
+    /** @dataProvider activation_charsets */
+    public function testActivationUsesWordPressCharsetAndPreservesStoredBytes(string $site_charset, string $column_charset, string $other_plugin): void
+    {
+        $this->database->exec("ALTER TABLE custom_options MODIFY option_value longtext CHARACTER SET {$column_charset}");
+        $this->database->exec("SET NAMES {$site_charset}");
+        file_put_contents($this->root . '/configuration.php',
+            '$wpdb = (object) ["charset" => ' . var_export($site_charset, true) . '];', FILE_APPEND);
+        // WordPress serializes before MySQL converts the value to the column
+        // charset. PHP string lengths therefore describe the site charset.
+        $plugins = ['renamed/index.php', $other_plugin, 'last/index.php'];
+        $this->database->prepare("UPDATE custom_options SET option_value = ? WHERE option_name = 'active_plugins'")->execute([serialize($plugins)]);
+        $before = $this->database->query('SELECT option_id, option_name, CAST(option_value AS BINARY), autoload FROM custom_options ORDER BY option_id')->fetchAll(PDO::FETCH_NUM);
+        $this->run_client('preflight');
+        $this->run_client('db-pull', ['--exclude-reprint']);
+        $target = new PDO('mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->target_database,
+            getenv('DB_USER'), getenv('DB_PASS'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $target->exec(file_get_contents($this->root . '/state/db.sql'));
+        $target->exec("SET NAMES {$site_charset}");
+        $expected = serialize([$other_plugin, 'last/index.php']);
+        $this->assertSame($expected, $target->query("SELECT option_value FROM custom_options WHERE option_name = 'active_plugins'")->fetchColumn());
+        $expected_stored = $this->database->prepare("SELECT CAST(CONVERT(? USING {$column_charset}) AS BINARY)");
+        $expected_stored->execute([$expected]);
+        $this->assertSame($expected_stored->fetchColumn(), $target->query("SELECT CAST(option_value AS BINARY) FROM custom_options WHERE option_name = 'active_plugins'")->fetchColumn());
+        $this->assertSame($before, $this->database->query('SELECT option_id, option_name, CAST(option_value AS BINARY), autoload FROM custom_options ORDER BY option_id')->fetchAll(PDO::FETCH_NUM));
+    }
+
+    public function testRejectsLossyCharsetRoundTrip(): void
+    {
+        $this->database->exec('ALTER TABLE custom_options MODIFY option_value longtext CHARACTER SET latin1');
+        $this->database->exec('SET NAMES latin1');
+        $this->database->prepare("UPDATE custom_options SET option_value = ? WHERE option_name = 'active_plugins'")
+            ->execute([serialize(['renamed/index.php', "caf\xe9/index.php"])]);
+        // A changed site charset can replace é with ? without changing the
+        // serialized byte lengths. A PHP-only round trip cannot detect it.
+        file_put_contents($this->root . '/configuration.php', '$wpdb = (object) ["charset" => "ascii"];', FILE_APPEND);
+        $this->assert_export_rejected('cannot round-trip through the WordPress database charset');
+    }
+
+    public function testRejectsTamperedSerializationThatDoesNotReencodeExactly(): void
+    {
+        $serialized = str_replace('i:0;', 'i:00;', serialize(['renamed/index.php', 'other/index.php']));
+        $this->assertIsArray(unserialize($serialized));
+        $this->assertNotSame($serialized, serialize(unserialize($serialized)));
+        $this->database->prepare("UPDATE custom_options SET option_value = ? WHERE option_name = 'active_plugins'")->execute([$serialized]);
+        $this->assert_export_rejected('does not re-encode to the same serialized bytes');
+    }
+
     public function testNetworkActivationIsFilteredInTheExportedSql(): void
     {
         foreach ([
@@ -197,8 +254,10 @@ class ReprintExclusionHttpTest extends TestCase
         ] as $table => $columns) {
             $this->database->exec("CREATE TABLE {$table} {$columns}");
         }
+        $this->database->exec('ALTER TABLE custom_sitemeta MODIFY meta_value longtext CHARACTER SET latin1');
+        $this->database->exec('SET NAMES utf8mb4');
         $insert = $this->database->prepare('INSERT INTO custom_sitemeta (site_id, meta_key, meta_value) VALUES (?, ?, ?)');
-        $insert->execute([7, 'active_sitewide_plugins', serialize(['renamed/index.php' => 12, 'other/index.php' => 34])]);
+        $insert->execute([7, 'active_sitewide_plugins', serialize(['renamed/index.php' => 12, 'café/index.php' => 34])]);
         $insert->execute([8, 'active_sitewide_plugins', serialize(['renamed/index.php' => 56])]);
         $before = $this->database->query('SELECT * FROM custom_sitemeta ORDER BY meta_id')->fetchAll(PDO::FETCH_ASSOC);
         file_put_contents($this->root . '/configuration.php',
@@ -229,8 +288,23 @@ class ReprintExclusionHttpTest extends TestCase
             getenv('DB_USER'), getenv('DB_PASS'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
         $target->exec($sql);
         $plugins = $target->query("SELECT meta_value FROM custom_sitemeta WHERE meta_key = 'active_sitewide_plugins'")->fetchColumn();
-        $this->assertSame(['other/index.php' => 34], unserialize($plugins));
+        $this->assertSame(['café/index.php' => 34], unserialize($plugins));
         $this->assertSame($before, $this->database->query('SELECT * FROM custom_sitemeta ORDER BY meta_id')->fetchAll(PDO::FETCH_ASSOC));
+    }
+
+    private function assert_export_rejected(string $message): void
+    {
+        $before = $this->database->query("SELECT CAST(option_value AS BINARY) FROM custom_options WHERE option_name = 'active_plugins'")->fetchColumn();
+        $request = curl_init($this->url);
+        curl_setopt_array($request, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => http_build_query([
+            'endpoint' => 'sql_chunk', 'exclude_reprint' => true,
+        ]), CURLOPT_RETURNTRANSFER => true, CURLOPT_ENCODING => '']);
+        $response = curl_exec($request);
+        $this->assertSame(500, curl_getinfo($request, CURLINFO_HTTP_CODE), (string) $response);
+        curl_close($request);
+        $this->assertStringContainsString('The source active_plugins ' . $message, (string) $response);
+        $this->assertStringNotContainsString('INSERT INTO', (string) $response);
+        $this->assertSame($before, $this->database->query("SELECT CAST(option_value AS BINARY) FROM custom_options WHERE option_name = 'active_plugins'")->fetchColumn());
     }
 
     private function run_client(string $command, array $arguments = []): void

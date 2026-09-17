@@ -384,6 +384,9 @@ and symlink aliases. Exclusion skips those paths and these exact option rows:
 source plugin's exact basename from site and selected-network activation lists.
 The resulting dump can be imported without Reprint or any cleanup step. The
 source option values are not changed and the plugin's uninstall code is not run.
+The exporter edits activation lists in PHP using WordPress's database charset.
+It stops if decoding and re-encoding the untouched list does not reproduce both
+the serialized PHP bytes and the bytes stored in the source column.
 
 The choice is saved in the state directory. Later pulls keep it without
 repeating the flag. `--include-reprint` selects inclusion again; the two flags cannot be combined. Finish an unfinished pull

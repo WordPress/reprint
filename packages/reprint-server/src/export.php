@@ -151,6 +151,7 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
  * @return array {
  *     Database connection details resolved from the server environment.
  *
+ *     @type string      $db_engine      MySQL or SQLite.
  *     @type string      $db_host        Database host.
  *     @type string      $db_name        Database name.
  *     @type string      $db_user        Database user.
@@ -159,6 +160,7 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
  *     @type string|null $table_prefix   WordPress table prefix, if known.
  * }
  * @phpstan-return array{
+ *     db_engine: "mysql"|"sqlite",
  *     db_host: string,
  *     db_name: string,
  *     db_user: string,
@@ -884,16 +886,34 @@ function endpoint_sql_chunk(
             if ($network !== null) {
                 $activation_options[] = [$network['base_prefix'] . 'sitemeta', 'meta_key', 'meta_value', 'active_sitewide_plugins', $network['network_id']];
             }
+            // WordPress serializes before MySQL converts to the column charset.
+            // Read in WordPress's charset so PHP sees the original byte lengths.
+            // Without an explicit charset, try the stored bytes and require the
+            // same exact round trip below rather than guessing an encoding.
+            $wordpress_charset = !empty($GLOBALS['wpdb']->charset) ? $GLOBALS['wpdb']->charset
+                : ( defined('DB_CHARSET') && DB_CHARSET !== '' ? DB_CHARSET : 'binary' );
+            $quoted_wordpress_charset = '`' . str_replace('`', '``', $wordpress_charset) . '`';
             foreach ($activation_options as [$table, $name_column, $value_column, $option_name, $network_id]) {
                 $quoted_table = '`' . str_replace('`', '``', $table) . '`';
                 $where = "`{$name_column}` = '" . $option_name . "'";
                 if ($network_id !== null) {
                     $where .= ' AND site_id = ' . (int) $network_id;
                 }
-                $serialized = $mysql->query("SELECT CAST(`{$value_column}` AS BINARY) FROM {$quoted_table} WHERE {$where} LIMIT 1")->fetchColumn();
-                if ($serialized === false) {
+                $serialized_expression = "`{$value_column}`";
+                $charset_expression = "'binary'";
+                if ($creds['db_engine'] === 'mysql') {
+                    $serialized_expression = "CONVERT(`{$value_column}` USING {$quoted_wordpress_charset})";
+                    $charset_expression = "CHARSET(`{$value_column}`)";
+                }
+                $activation = $mysql->query(
+                    "SELECT CAST(`{$value_column}` AS BINARY) AS stored_value, " .
+                    "CAST({$serialized_expression} AS BINARY) AS serialized_value, {$charset_expression} AS storage_charset " .
+                    "FROM {$quoted_table} WHERE {$where} LIMIT 1"
+                )->fetch(PDO::FETCH_ASSOC);
+                if ($activation === false) {
                     continue;
                 }
+                $serialized = $activation['serialized_value'];
                 // These are source WordPress options, not request data. PHP 5.6
                 // does not accept the allowed_classes argument.
                 $plugins = PHP_VERSION_ID < 70000 ? @unserialize($serialized)
@@ -901,6 +921,23 @@ function endpoint_sql_chunk(
                 if (!is_array($plugins)) {
                     // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports a fixed option name in an API error, not HTML.
                     throw new RuntimeException('The source ' . $option_name . ' is not a serialized plugin array.');
+                }
+                if (serialize($plugins) !== $serialized) {
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports a fixed option name in an API error, not HTML.
+                    throw new RuntimeException('The source ' . $option_name . ' does not re-encode to the same serialized bytes. Refusing to edit it.');
+                }
+                $storage_expression_format = "FROM_BASE64('%s')";
+                if ($creds['db_engine'] === 'mysql') {
+                    $quoted_storage_charset = '`' . str_replace('`', '``', $activation['storage_charset']) . '`';
+                    $storage_expression_format = "CONVERT(CONVERT(FROM_BASE64('%s') USING {$quoted_wordpress_charset}) USING {$quoted_storage_charset})";
+                    // A lossy charset conversion can leave valid serialization.
+                    // Check the untouched value against the actual stored bytes.
+                    $round_trip_expression = sprintf($storage_expression_format, base64_encode($serialized));
+                    $round_trip = $mysql->query("SELECT CAST({$round_trip_expression} AS BINARY)")->fetchColumn();
+                    if ($round_trip !== $activation['stored_value']) {
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports a fixed option name in an API error, not HTML.
+                        throw new RuntimeException('The source ' . $option_name . ' cannot round-trip through the WordPress database charset without changing stored bytes. Refusing to edit it.');
+                    }
                 }
                 if ($option_name === 'active_plugins') {
                     $plugins = array_values(array_filter($plugins, static function ($basename) use ($plugin_basename) {
@@ -911,9 +948,9 @@ function endpoint_sql_chunk(
                 }
                 // Change only the exported value. The normal row query retains
                 // its primary key, autoload value, and any additional columns.
-                $replacement = base64_encode(serialize($plugins));
+                $replacement = sprintf($storage_expression_format, base64_encode(serialize($plugins)));
                 $producer_options['column_read_expressions'][$table][$value_column] =
-                    "CASE WHEN {$where} THEN FROM_BASE64('{$replacement}') ELSE `{$value_column}` END";
+                    "CASE WHEN {$where} THEN {$replacement} ELSE `{$value_column}` END";
             }
         }
     }
