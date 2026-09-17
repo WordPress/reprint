@@ -1,25 +1,14 @@
 <?php
 /**
- * Shared utility methods used by both the server and the client.
+ * Static helpers shared by the server and client packages.
  *
- * These helpers live on a class rather than as loose functions so that
- * Composer's classmap autoloads them on first use. Consumers call
- * `Utils::name()` after requiring `vendor/autoload.php`; nothing needs to
- * require this file by path. Generic names like parse_size() or
- * normalize_path() would clash sooner or later as global functions, and more
- * than one plugin on a WordPress.com site loads this package.
+ * Composer's classmap autoloads this class; nothing requires it by path. Keep
+ * it free of I/O, hooks, and mutable global state.
  *
- * Keep this file limited to the class declaration: do not add I/O, hooks, or
- * mutable global state here.
- *
- * Two plugins on the same site can each ship a copy of this package — wpcomsh
- * and Jetpack both do on WordPress.com — so whichever copy autoloads this class
- * first supplies every method for both. Jetpack's autoloader picks the newest
- * version across plugins; a plain Composer autoloader picks the copy registered
- * first. Add new methods with that in mind: a copy that loads first but lacks a
- * newer method makes the first call to it a fatal. The pre-v0.10.0 copy
- * (reprint-exporter v0.1.47) declares functions in WordPress\Reprint\Exporter,
- * a namespace nothing here uses, so it cannot win this class name.
+ * Several plugins on one site may each ship a copy of this package, and only
+ * the copy that autoloads first supplies this class. A method added here does
+ * not reach a site where an older copy wins, so callers in other packages
+ * cannot assume it exists.
  */
 
 namespace WordPress\Reprint\Server;
