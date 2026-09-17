@@ -151,6 +151,7 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
  * @return array {
  *     Database connection details resolved from the server environment.
  *
+ *     @type string      $db_engine      MySQL or SQLite.
  *     @type string      $db_host        Database host.
  *     @type string      $db_name        Database name.
  *     @type string      $db_user        Database user.
@@ -159,6 +160,7 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
  *     @type string|null $table_prefix   WordPress table prefix, if known.
  * }
  * @phpstan-return array{
+ *     db_engine: "mysql"|"sqlite",
  *     db_host: string,
  *     db_name: string,
  *     db_user: string,
@@ -856,6 +858,102 @@ function endpoint_sql_chunk(
     }
 
     $exclude_rows = sql_exclude_rows_from_config($config, $creds["table_prefix"] ?? null);
+    $exclude_reprint = filter_var($config['exclude_reprint'] ?? false, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+    if ($exclude_reprint === null) {
+        throw new InvalidArgumentException('exclude_reprint must be a boolean; received ' . json_encode($config['exclude_reprint']) . '.');
+    }
+    if ($exclude_reprint) {
+        $network = $config['_multisite'] ?? null;
+        $site_prefix = $network === null ? $creds['table_prefix']
+            : $network['base_prefix'] . ( $network['site_id'] === 1 ? '' : $network['site_id'] . '_' );
+        if ($site_prefix === null || $site_prefix === '') {
+            throw new InvalidArgumentException('exclude_reprint requires the source WordPress table prefix.');
+        }
+        foreach ([
+            'reprint_server_connection_token',
+            'reprint_server_push_authorized_token_fingerprint',
+            'site_export_secret',
+            'site_export_push_authorized_token_fingerprint',
+        ] as $option_name) {
+            $exclude_rows[] = ['table' => $site_prefix . 'options', 'column' => 'option_name', 'value' => $option_name];
+        }
+        if (defined('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR') && function_exists('plugin_basename')) {
+            $plugin_directory = constant('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR');
+            $plugin_basename = plugin_basename(rtrim($plugin_directory, '/\\') . '/index.php');
+            $activation_options = [
+                [$site_prefix . 'options', 'option_name', 'option_value', 'active_plugins', null],
+            ];
+            if ($network !== null) {
+                $activation_options[] = [$network['base_prefix'] . 'sitemeta', 'meta_key', 'meta_value', 'active_sitewide_plugins', $network['network_id']];
+            }
+            // WordPress serializes before MySQL converts to the column charset.
+            // Read in WordPress's charset so PHP sees the original byte lengths.
+            // Without an explicit charset, try the stored bytes and require the
+            // same exact round trip below rather than guessing an encoding.
+            $wordpress_charset = !empty($GLOBALS['wpdb']->charset) ? $GLOBALS['wpdb']->charset
+                : ( defined('DB_CHARSET') && DB_CHARSET !== '' ? DB_CHARSET : 'binary' );
+            $quoted_wordpress_charset = '`' . str_replace('`', '``', $wordpress_charset) . '`';
+            foreach ($activation_options as [$table, $name_column, $value_column, $option_name, $network_id]) {
+                $quoted_table = '`' . str_replace('`', '``', $table) . '`';
+                $where = "`{$name_column}` = '" . $option_name . "'";
+                if ($network_id !== null) {
+                    $where .= ' AND site_id = ' . (int) $network_id;
+                }
+                $serialized_expression = "`{$value_column}`";
+                $charset_expression = "'binary'";
+                if ($creds['db_engine'] === 'mysql') {
+                    $serialized_expression = "CONVERT(`{$value_column}` USING {$quoted_wordpress_charset})";
+                    $charset_expression = "CHARSET(`{$value_column}`)";
+                }
+                $activation = $mysql->query(
+                    "SELECT CAST(`{$value_column}` AS BINARY) AS stored_value, " .
+                    "CAST({$serialized_expression} AS BINARY) AS serialized_value, {$charset_expression} AS storage_charset " .
+                    "FROM {$quoted_table} WHERE {$where} LIMIT 1"
+                )->fetch(PDO::FETCH_ASSOC);
+                if ($activation === false) {
+                    continue;
+                }
+                $serialized = $activation['serialized_value'];
+                // These are source WordPress options, not request data. PHP 5.6
+                // does not accept the allowed_classes argument.
+                $plugins = PHP_VERSION_ID < 70000 ? @unserialize($serialized)
+                    : @unserialize($serialized, ['allowed_classes' => false]);
+                if (!is_array($plugins)) {
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports a fixed option name in an API error, not HTML.
+                    throw new RuntimeException('The source ' . $option_name . ' is not a serialized plugin array.');
+                }
+                if (serialize($plugins) !== $serialized) {
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports a fixed option name in an API error, not HTML.
+                    throw new RuntimeException('The source ' . $option_name . ' does not re-encode to the same serialized bytes. Refusing to edit it.');
+                }
+                $storage_expression_format = "FROM_BASE64('%s')";
+                if ($creds['db_engine'] === 'mysql') {
+                    $quoted_storage_charset = '`' . str_replace('`', '``', $activation['storage_charset']) . '`';
+                    $storage_expression_format = "CONVERT(CONVERT(FROM_BASE64('%s') USING {$quoted_wordpress_charset}) USING {$quoted_storage_charset})";
+                    // A lossy charset conversion can leave valid serialization.
+                    // Check the untouched value against the actual stored bytes.
+                    $round_trip_expression = sprintf($storage_expression_format, base64_encode($serialized));
+                    $round_trip = $mysql->query("SELECT CAST({$round_trip_expression} AS BINARY)")->fetchColumn();
+                    if ($round_trip !== $activation['stored_value']) {
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports a fixed option name in an API error, not HTML.
+                        throw new RuntimeException('The source ' . $option_name . ' cannot round-trip through the WordPress database charset without changing stored bytes. Refusing to edit it.');
+                    }
+                }
+                if ($option_name === 'active_plugins') {
+                    $plugins = array_values(array_filter($plugins, static function ($basename) use ($plugin_basename) {
+                        return $basename !== $plugin_basename;
+                    }));
+                } else {
+                    unset($plugins[$plugin_basename]);
+                }
+                // Change only the exported value. The normal row query retains
+                // its primary key, autoload value, and any additional columns.
+                $replacement = sprintf($storage_expression_format, base64_encode(serialize($plugins)));
+                $producer_options['column_read_expressions'][$table][$value_column] =
+                    "CASE WHEN {$where} THEN {$replacement} ELSE `{$value_column}` END";
+            }
+        }
+    }
     if ($exclude_rows) {
         $producer_options["exclude_rows"] = $exclude_rows;
     }
@@ -2538,6 +2636,34 @@ function endpoint_preflight(array $config): array
         }
     }
 
+    // Report the installed alias and the physical plugin directory. A renamed
+    // or symlinked installation must not leak secret.php through either path.
+    $reprint_plugin = null;
+    if (defined('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR') && function_exists('plugin_basename')) {
+        $plugin_directory = trim_right_slash(constant('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR'), native_path_format());
+        $plugin_basename = plugin_basename($plugin_directory . '/index.php');
+        $plugin_paths = [$plugin_directory];
+        $physical_plugin_directory = realpath($plugin_directory);
+        if ($physical_plugin_directory !== false) {
+            $plugin_paths[] = $physical_plugin_directory;
+        }
+        if (defined('WP_PLUGIN_DIR') && dirname($plugin_basename) !== '.') {
+            $installed_plugin_directory = WP_PLUGIN_DIR . '/' . dirname($plugin_basename);
+            if ($physical_plugin_directory !== false && realpath($installed_plugin_directory) === $physical_plugin_directory) {
+                $plugin_paths[] = $installed_plugin_directory;
+                // WP_PLUGIN_DIR may itself be a symlink. Keep the installed
+                // plugin basename when resolving its parent, not its final link.
+                $physical_plugins_directory = realpath(WP_PLUGIN_DIR);
+                if ($physical_plugins_directory !== false) {
+                    $plugin_paths[] = $physical_plugins_directory . '/' . dirname($plugin_basename);
+                }
+            }
+        }
+        $reprint_plugin = [
+            'paths_b64' => array_map('base64_encode', array_values(array_unique($plugin_paths))),
+        ];
+    }
+
     // -- Assemble and return the preflight response --
     $ok =
         $preflight_error === null &&
@@ -2549,6 +2675,7 @@ function endpoint_preflight(array $config): array
         "timestamp" => time(),
         "protocol_version" => EXPORT_PROTOCOL_VERSION,
         "path_format" => native_path_format(),
+        "reprint_plugin" => $reprint_plugin,
         "capabilities" => [
             "base64_path_parameters" => true,
         ],
