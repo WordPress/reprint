@@ -9,7 +9,8 @@ import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
+import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
@@ -79,7 +80,9 @@ async function ensureSqliteSite(site, pluginVersion, multisite = false) {
                 "define('DB_USER', 'unused');",
                 "define('DB_PASSWORD', 'unused');",
                 "define('DB_CHARSET', 'utf8mb4');",
-                "define('DB_COLLATE', '');",
+                // The multisite matrix also imports into MariaDB, which does
+                // not support MySQL 8's default utf8mb4_0900_ai_ci collation.
+                `define('DB_COLLATE', '${multisite ? 'utf8mb4_unicode_ci' : ''}');`,
                 "define('AUTH_KEY',         'e2e-test-key-1');",
                 "define('SECURE_AUTH_KEY',  'e2e-test-key-2');",
                 "define('LOGGED_IN_KEY',    'e2e-test-key-3');",
@@ -314,7 +317,171 @@ describe.each([
         if (version !== 'mysql') await ensureSqliteSite(site, version, true);
         else await ensureMultisite(site);
         fixture = JSON.parse(readFileSync(join(getSiteDir(site), '.multisite-layer.json'), 'utf8'));
+
     });
+
+    it.each(['sqlite', 'mysql'])('migrates site 7 to a %s single-site target', async (engine) => {
+        const directory = createTempDir(`e2e-${site}-to-${engine}`);
+        const documentRoot = join(directory, 'site');
+        const targetUrl = 'http://127.0.0.1:9697';
+        const databaseName = 'e2e_selected_sqlite_target';
+        const sqlitePath = join(directory, 'target.sqlite');
+        let server;
+        let serverLog = '';
+        const connection = await createMysqlConnection();
+        try {
+            runWp(getSiteDir(site), ['eval', "wp_update_post(['ID'=>100, 'post_content'=>'Only site 7']);"], fixture.sites[7].url);
+            if (engine === 'mysql') {
+                await connection.query(`DROP DATABASE IF EXISTS ${databaseName}`);
+                await connection.query(`CREATE DATABASE ${databaseName}`);
+            }
+            const targetArgs = engine === 'sqlite'
+                ? ['--target-engine=sqlite', `--target-sqlite-path=${sqlitePath}`, `--target-db=${databaseName}`]
+                : ['--target-engine=mysql', '--target-host=127.0.0.1', '--target-user=e2e_admin', '--target-pass=e2e_password', `--target-db=${databaseName}`];
+            const result = runImporter(`${fixture.sites[7].url}/?reprint-api`, directory, 'pull', {
+                secret: getSiteSecret(site), skipPreflight: true, autoResume: false,
+                timeout: 240000, wallTimeout: 300000,
+                extraArgs: [...targetArgs, `--new-site-url=${targetUrl}`, '--site-admin=shared',
+                    '--runtime=php-builtin', '--start-runtime=none', `--flatten-to=${documentRoot}`],
+            });
+            assert.equal(result.exitCode, 0, result.stdout + result.stderr);
+            writeFileSync(join(documentRoot, 'sqlite-check.php'), `<?php
+                require __DIR__ . '/wp-load.php';
+                $upload = wp_upload_bits('new-target.txt', null, 'New target upload');
+                echo json_encode([
+                    'multisite' => is_multisite(), 'prefix' => $wpdb->prefix,
+                    'users_table' => $wpdb->users, 'tables' => $wpdb->get_col('SHOW TABLES'),
+                    'users' => $wpdb->get_col("SELECT user_login FROM {$wpdb->users} ORDER BY user_login"),
+                    'administrator' => user_can(get_user_by('login', 'shared'), 'manage_options'),
+                    'content' => get_post(100)->post_content, 'media' => wp_get_attachment_url(200),
+                    'new_upload' => $upload, 'sqlite' => isset($GLOBALS['@pdo']),
+                ]);
+            `);
+            server = spawn(process.env.E2E_WP_CLI_PHP_BINARY || 'php', [
+                '-S', '127.0.0.1:9697', '-t', documentRoot, join(directory, 'runtime/runtime.php'),
+            ], { stdio: ['ignore', 'pipe', 'pipe'] });
+            server.stdout.on('data', data => { serverLog = (serverLog + data).slice(-16000); });
+            server.stderr.on('data', data => { serverLog = (serverLog + data).slice(-16000); });
+            let response;
+            for (let attempt = 0; attempt < 100; ++attempt) {
+                try { response = await fetch(`${targetUrl}/sqlite-check.php`); break; }
+                catch { await sleep(100); }
+            }
+            assert.ok(response, serverLog);
+            const body = await response.text();
+            assert.equal(response.status, 200, body + serverLog);
+            const target = JSON.parse(body);
+            const prefix = version === 'mysql' ? 'network_' : 'wp_';
+            assert.equal(target.multisite, false);
+            assert.equal(target.sqlite, engine === 'sqlite');
+            assert.equal(target.prefix, `${prefix}7_`);
+            assert.equal(target.users_table, `${prefix}users`);
+            assert.ok(!target.tables.includes(`${prefix}8_posts`));
+            assert.ok(!target.users.includes('sibling-member'));
+            assert.ok(target.users.includes('shop-member'));
+            assert.equal(target.administrator, true);
+            assert.equal(target.content, 'Only site 7');
+            assert.equal(target.new_upload.error, false);
+            assert.ok(target.media.startsWith(`${targetUrl}/wp-content/uploads/sites/7/`));
+            assert.equal(await (await fetch(target.media)).text(), 'Media on site 7');
+            assert.equal(await (await fetch(target.new_upload.url)).text(), 'New target upload');
+        } finally {
+            if (server && server.exitCode === null) {
+                const stopped = new Promise(resolve => server.once('exit', resolve));
+                server.kill();
+                await stopped;
+            }
+            if (engine === 'mysql') await connection.query(`DROP DATABASE IF EXISTS ${databaseName}`);
+            await connection.end();
+            cleanupTempDir(directory);
+        }
+    }, 300000);
+
+    it('resumes source user collection across HTTP requests and rejects a replaced set', async () => {
+        const url = `${fixture.sites[7].url}/?reprint-api`;
+        const params = { multisite_mode: 'one-site-network-v1' };
+        const first = await apiRequest(site, 'sql_chunk', params, { url });
+        const cursor = first.chunks?.find(chunk => chunk.type === 'sql' && chunk.body.includes('INSERT INTO'))?.headers['x-cursor'];
+        assert.ok(cursor, JSON.stringify(first.json || first.chunks));
+        const resumed = await apiRequest(site, 'sql_chunk', { ...params, cursor }, { url });
+        assert.equal(resumed.chunks?.find(chunk => chunk.type === 'completion')?.headers['x-status'], 'complete', JSON.stringify(resumed.json || resumed.chunks));
+        await apiRequest(site, 'sql_chunk', params, { url });
+        const stale = await apiRequest(site, 'sql_chunk', { ...params, cursor }, { url });
+        assert.ok(!stale.chunks?.some(chunk => chunk.type === 'sql'));
+        assert.ok(JSON.stringify(stale.json || stale.chunks).includes('replaced or are missing'));
+    });
+
+    it('rejects an existing SQLite target without changing its tables or rows', () => {
+        const directory = createTempDir('e2e-multisite-sqlite-occupied');
+        const path = join(directory, 'target.sqlite');
+        try {
+            queryMysqlOnSqlite(path, 'CREATE TABLE keep_this (value text)');
+            queryMysqlOnSqlite(path, "INSERT INTO keep_this VALUES ('Existing local data')");
+            const result = runImporter(`${fixture.sites[7].url}/?reprint-api`, directory, 'pull-db', {
+                secret: getSiteSecret(site), skipPreflight: true, autoResume: false,
+                extraArgs: ['--target-engine=sqlite', `--target-sqlite-path=${path}`,
+                    '--target-db=sqlite_database', '--new-site-url=http://target.test', '--site-admin=shared'],
+            });
+            assert.equal(result.exitCode, 1, result.stdout + result.stderr);
+            assert.ok((result.stdout + result.stderr).includes('empty target database; found table keep_this'));
+            assert.deepEqual(queryMysqlOnSqlite(path, 'SHOW TABLES').map(Object.values).flat(), ['keep_this']);
+            assert.deepEqual(queryMysqlOnSqlite(path, 'SELECT value FROM keep_this'), [{ value: 'Existing local data' }]);
+        } finally { cleanupTempDir(directory); }
+    });
+
+    for (const stage of ['database-initialize', 'sql', 'database-cleanup']) {
+        for (const when of ['before', 'after']) {
+            it(`resumes SQLite apply after process death ${when} saving ${stage}`, async () => {
+                const directory = createTempDir('e2e-multisite-sqlite-resume');
+                const path = join(directory, 'target.sqlite');
+                const marker = join(directory, 'paused');
+                const url = `${fixture.sites[7].url}/?reprint-api`;
+                let child;
+                let finished;
+                let output = '';
+                try {
+                    const dump = runImporter(url, directory, 'db-pull', { secret: getSiteSecret(site), autoResume: false });
+                    assert.equal(dump.exitCode, 0, dump.stdout + dump.stderr);
+                    const clientPath = process.env.CLIENT_PATH || join(import.meta.dirname, '../../../packages/reprint-client/bin/reprint-client');
+                    child = spawn(process.env.E2E_WP_CLI_PHP_BINARY || 'php', [
+                        join(import.meta.dirname, '../fixtures/pause-multisite-apply.php'),
+                        clientPath, url, directory, 'sqlite_database', stage, when, marker, 'http://target.test', path,
+                    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+                    finished = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
+                    child.stdout.on('data', data => { output = (output + data).slice(-16000); });
+                    child.stderr.on('data', data => { output = (output + data).slice(-16000); });
+                    for (let attempt = 0; attempt < 300 && !existsSync(marker) && child.exitCode === null; ++attempt) await sleep(100);
+                    assert.ok(existsSync(marker), output);
+                    child.kill('SIGKILL');
+                    assert.equal((await finished).signal, 'SIGKILL');
+                    const args = ['--target-engine=sqlite', `--target-sqlite-path=${path}`,
+                        '--target-db=sqlite_database', '--new-site-url=http://target.test', '--site-admin=shared'];
+                    if (stage === 'sql') {
+                        const otherPath = join(directory, 'other.sqlite');
+                        queryMysqlOnSqlite(otherPath, 'CREATE TABLE keep_this (value text)');
+                        const changed = runImporter(url, directory, 'db-apply', {
+                            secret: getSiteSecret(site), autoResume: false,
+                            extraArgs: args.map(arg => arg === `--target-sqlite-path=${path}` ? `--target-sqlite-path=${otherPath}` : arg),
+                        });
+                        assert.equal(changed.exitCode, 1, changed.stdout + changed.stderr);
+                        assert.ok((changed.stdout + changed.stderr).includes('Cannot change --target-sqlite-path'));
+                        assert.deepEqual(queryMysqlOnSqlite(otherPath, 'SHOW TABLES').map(Object.values).flat(), ['keep_this']);
+                    }
+                    const resumed = runImporter(url, directory, 'db-apply', {
+                        secret: getSiteSecret(site), autoResume: false, extraArgs: args,
+                    });
+                    assert.equal(resumed.exitCode, 0, resumed.stdout + resumed.stderr);
+                    const prefix = version === 'mysql' ? 'network_' : 'wp_';
+                    assert.deepEqual(queryMysqlOnSqlite(path, `SELECT blog_id FROM ${prefix}blogs`), [{ blog_id: 7 }]);
+                    assert.deepEqual(queryMysqlOnSqlite(path, `SELECT post_content FROM ${prefix}7_posts WHERE ID=100`), [{ post_content: 'Only site 7' }]);
+                    assert.ok(!queryMysqlOnSqlite(path, `SELECT user_login FROM ${prefix}users`).some(row => row.user_login === 'sibling-member'));
+                } finally {
+                    if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await finished; }
+                    cleanupTempDir(directory);
+                }
+            }, 120000);
+        }
+    }
 
     it('reads child paths across batches without including other domains or adjacent paths', async () => {
         const origin = new URL(fixture.sites[7].url).origin;

@@ -175,18 +175,22 @@ class MultisiteTarget {
         // WPLANG row. An existing empty string is an explicit English choice.
         $database->execute("INSERT INTO `{$site_prefix}options` (option_name, option_value, autoload)
             SELECT 'WPLANG', meta_value, 'yes' FROM `{$base_prefix}sitemeta`
-            WHERE site_id = ? AND meta_key = 'WPLANG' LIMIT 1
-            ON DUPLICATE KEY UPDATE option_name = VALUES(option_name)", [$source['network_id']]);
+            WHERE site_id = ? AND meta_key = 'WPLANG'
+            AND NOT EXISTS (SELECT 1 FROM `{$site_prefix}options` WHERE option_name = 'WPLANG') LIMIT 1", [$source['network_id']]);
         // The Reprint plugin and its credentials never enter the selected file
         // tree. Merge network activation keys and ordinary activation values into
         // the single-site list, excluding Reprint from both. Keep source network
         // rows available so cleanup can be replayed after process death.
         $active_plugins = [];
+        $site_plugins_exist = false;
         foreach ([
             ["{$base_prefix}sitemeta", 'meta_value', "site_id = ? AND meta_key = 'active_sitewide_plugins'", [$source['network_id']], true],
             ["{$site_prefix}options", 'option_value', "option_name = 'active_plugins'", [], false],
         ] as [$table, $column, $where, $params, $network]) {
             $row = $database->query("SELECT `{$column}` FROM `{$table}` WHERE {$where}", $params)->fetch(\PDO::FETCH_NUM);
+            if (!$network) {
+                $site_plugins_exist = $row !== false;
+            }
             $plugins = $row ? @unserialize($row[0], ['allowed_classes' => false]) : [];
             if (!is_array($plugins)) {
                 throw new InvalidArgumentException('The imported plugin activation list is not a serialized array: ' . $table . '.');
@@ -205,7 +209,11 @@ class MultisiteTarget {
         $active_plugins = array_values(array_unique($active_plugins));
         // Replace the list atomically: deleting it first loses site-only plugins
         // if the process stops before the insert and cleanup runs again.
-        $database->execute("INSERT INTO `{$site_prefix}options` (option_name, option_value, autoload) VALUES ('active_plugins', ?, 'yes') ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)", [serialize($active_plugins)]);
+        if ($site_plugins_exist) {
+            $database->execute("UPDATE `{$site_prefix}options` SET option_value = ? WHERE option_name = 'active_plugins'", [serialize($active_plugins)]);
+        } else {
+            $database->execute("INSERT INTO `{$site_prefix}options` (option_name, option_value, autoload) VALUES ('active_plugins', ?, 'yes')", [serialize($active_plugins)]);
+        }
         if ($database->inTransaction()) {
             $database->commit();
         }
@@ -215,20 +223,20 @@ class MultisiteTarget {
      * Build a standalone target configuration with new login salts.
      *
      * @param array $target {
-     *     MySQL target connection.
+     *     Target connection. SQLite is loaded by the existing runtime manifest.
      *
      *     @type string $db Database name.
-     *     @type string $user Database user.
-     *     @type string $pass Database password.
-     *     @type string $host Database host.
-     *     @type int $port Database port.
+     *     @type string $user MySQL database user; absent for SQLite.
+     *     @type string $pass MySQL database password; absent for SQLite.
+     *     @type string $host MySQL database host; absent for SQLite.
+     *     @type int $port MySQL database port; absent for SQLite.
      * }
      */
     public function get_wp_config(array $target): string
     {
         $constants = [
-            'DB_NAME' => $target['db'], 'DB_USER' => $target['user'], 'DB_PASSWORD' => $target['pass'],
-            'DB_HOST' => $target['host'] . ( $target['port'] === 3306 ? '' : ':' . $target['port'] ),
+            'DB_NAME' => $target['db'], 'DB_USER' => $target['user'] ?? '', 'DB_PASSWORD' => $target['pass'] ?? '',
+            'DB_HOST' => ( $target['host'] ?? 'localhost' ) . ( ( $target['port'] ?? 3306 ) === 3306 ? '' : ':' . $target['port'] ),
             'DB_CHARSET' => 'utf8mb4', 'DB_COLLATE' => '',
             // User tables use the source network prefix; keep their names while
             // ordinary tables and capability keys use the selected site's prefix.
