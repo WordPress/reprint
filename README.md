@@ -362,6 +362,44 @@ paths, plus version-control metadata, `node_modules`, IDE and package-manager
 caches, operating-system metadata, and editor scratch files. `--include`,
 `--exclude`, `--filter`, and `--remap` cannot override these omissions.
 
+**Reprint plugin and connection state**
+
+For example, `pull --exclude-reprint` skips the source Reprint plugin directory,
+leaves its connection token out of `db.sql`, and removes its entry from the
+imported `active_plugins` list. Other plugins and their settings stay.
+
+New pulls include Reprint unless you pass `--exclude-reprint`. The same flag
+works with `pull-files`, `pull-db`, `files-pull`, and `db-pull`:
+
+```bash
+php reprint.phar pull "$URL" --secret="$SECRET" \
+    --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --exclude-reprint
+```
+
+The source reports its installed plugin path, including renamed directories
+and symlink aliases. Exclusion skips those paths and these exact option rows:
+`reprint_server_connection_token`,
+`reprint_server_push_authorized_token_fingerprint`, `site_export_secret`, and
+`site_export_push_authorized_token_fingerprint`. SQL export also removes the
+source plugin's exact basename from site and selected-network activation lists.
+The resulting dump can be imported without Reprint or any cleanup step. The
+source option values are not changed and the plugin's uninstall code is not run.
+
+The choice is saved in the state directory. Later pulls keep it without
+repeating the flag. `--include-reprint` selects inclusion again; the two flags cannot be combined. Finish an unfinished pull
+or use `--abort` before changing its choice. State written before this option
+existed keeps the previous inclusion behavior.
+
+Exclusion needs a source server that reports the plugin path. An older server
+produces an update message rather than guessing a directory name. Update the
+source and rerun preflight, or use `--include-reprint`. Existing multisite
+export restrictions still apply with either flag.
+
+This is a pull exclusion, not a local uninstall. It does not remove plugin
+files already present at the destination or rewrite an existing SQL dump. If
+you change the choice after downloading the database, start a fresh database
+pull before applying it. `db-apply` imports the dump as downloaded.
+
 **Host platform plugins**
 
 New pulls keep host platform plugins, MU plugins, and host cache drop-ins.

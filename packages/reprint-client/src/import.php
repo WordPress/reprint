@@ -714,6 +714,10 @@ class ImportClient
             $this->pull_excluded_files_with_path_prefixes =
                 $this->resolve_remote_paths($excluded_raw, "exclude");
         }
+        $this->pull_excluded_files_with_path_prefixes = array_values(array_unique(array_merge(
+            $this->pull_excluded_files_with_path_prefixes,
+            $this->get_excluded_reprint_paths()
+        )));
         $this->excluded_plugins = $this->get_excluded_plugins();
 
         if ($assert_remap) {
@@ -1024,6 +1028,12 @@ class ImportClient
                 "include_host_plugins must be a boolean; received " . gettype($options["include_host_plugins"]) . "."
             );
         }
+        if (array_key_exists("exclude_reprint", $options) && !is_bool($options["exclude_reprint"])) {
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports a CLI/library option type, not HTML.
+                "exclude_reprint must be a boolean; received " . gettype($options["exclude_reprint"]) . "."
+            );
+        }
 
         // High-level pulls persist resume state before they enter the stage
         // runner. Reject invalid options first so a typo does not leave behind
@@ -1081,6 +1091,24 @@ class ImportClient
                 );
             }
             $this->get_state()->include_host_plugins = $options["include_host_plugins"];
+            $this->save_state();
+        }
+
+        // SQL row filtering and file selection must keep the same choice across
+        // process boundaries, including the gap between two pipeline stages.
+        if (isset($options['exclude_reprint']) && $options['exclude_reprint'] !== $this->get_state()->exclude_reprint) {
+            $checkpoint = $this->get_state()->active_resumable_command;
+            $pipeline = $this->get_state()->pull_pipeline;
+            if (!$abort && (
+                ( $checkpoint->command_name !== null && $checkpoint->completion_state !== 'complete' )
+                || ( $pipeline->started_by_command !== null && $pipeline->stage_sequence !== []
+                    && $pipeline->last_completed_stage !== end($pipeline->stage_sequence) )
+            )) {
+                throw new RuntimeException(
+                    'Cannot change --exclude-reprint/--include-reprint while a pull is in progress. Finish the current pull or use --abort first.'
+                );
+            }
+            $this->get_state()->exclude_reprint = $options['exclude_reprint'];
             $this->save_state();
         }
 
@@ -3372,6 +3400,12 @@ class ImportClient
                     "value_base64" => base64_encode("_edit_lock"),
                 ],
             ];
+            if ($this->get_state()->exclude_reprint) {
+                // Check source support before downloading any SQL. The exporter
+                // omits credential rows and rewrites activation values in db.sql.
+                $this->get_excluded_reprint_paths();
+                $params['exclude_reprint'] = true;
+            }
 
             // Tell the server about the target max_allowed_packet so it can
             // cap SQL statements to a size the target can actually apply.
@@ -7684,6 +7718,42 @@ class ImportClient
             return [];
         }
         return excluded_plugins($this->get_state()->preflight_record()["data"] ?? []);
+    }
+
+    /**
+     * Read the source plugin's actual paths when Reprint exclusion is selected.
+     *
+     * @return string[] Remote absolute paths, or an empty list when Reprint is included or not installed.
+     */
+    private function get_excluded_reprint_paths(): array
+    {
+        if (!$this->get_state()->exclude_reprint) {
+            return [];
+        }
+        $preflight = $this->get_state()->preflight_record()['data'] ?? [];
+        if (!array_key_exists('reprint_plugin', $preflight)) {
+            throw new RuntimeException(
+                'The source did not report its Reprint plugin path. Update the source Reprint Server and rerun preflight, or use --include-reprint.'
+            );
+        }
+        $plugin = $preflight['reprint_plugin'];
+        if ($plugin === null) {
+            return [];
+        }
+        if (!is_array($plugin) || !is_array($plugin['paths_b64'] ?? null) || empty($plugin['paths_b64'])) {
+            throw new RuntimeException('The source reprint_plugin must contain a non-empty paths_b64 array.');
+        }
+        $paths = [];
+        foreach ($plugin['paths_b64'] as $path_b64) {
+            $path = is_string($path_b64) ? base64_decode($path_b64, true) : false;
+            $path = $path === false ? null : $this->clean_preflight_path($path);
+            if ($path === null || $path === '/' || strpos($path, "\0") !== false
+                || !is_absolute_path($path, $this->get_state()->remote_path_format())) {
+                throw new RuntimeException('The source reprint_plugin.paths_b64 must contain base64 absolute plugin directories, not a filesystem root.');
+            }
+            $paths[] = $path;
+        }
+        return array_values(array_unique($paths));
     }
 
     /**
@@ -13167,6 +13237,7 @@ class ImportClient
         $this->state->user_agent = $previous_state->user_agent;
         $this->state->follow_symlinks = $previous_state->follow_symlinks;
         $this->state->include_host_plugins = $previous_state->include_host_plugins;
+        $this->state->exclude_reprint = $previous_state->exclude_reprint;
         $this->state->apply->remote_paths_removed_from_local_site = $previous_state->apply->remote_paths_removed_from_local_site;
         $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
         $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
@@ -13915,6 +13986,23 @@ if (
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'db-apply', 'apply-runtime'],
         ],
         [
+            'name' => 'exclude-reprint',
+            'type' => 'flag',
+            'target' => 'exclude_reprint',
+            'help' => 'Omit the source Reprint plugin, credentials, and activation entries (saved in state; requires an updated source server)',
+            'help_section' => 'global',
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'db-pull'],
+        ],
+        [
+            'name' => 'include-reprint',
+            'type' => 'flag',
+            'target' => 'exclude_reprint',
+            'flag_value' => false,
+            'help' => 'Keep the source Reprint plugin and connection state (default for new state; saved in state)',
+            'help_section' => 'global',
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'db-pull'],
+        ],
+        [
             'name' => 'no-follow-symlinks',
             'type' => 'flag',
             'target' => 'follow_symlinks',
@@ -14344,6 +14432,11 @@ if (
 
                         case 'flag':
                             if ($arg === "--{$cli_name}" || (isset($def['short']) && $arg === "-{$def['short']}")) {
+                                if ($def['target'] === 'exclude_reprint' && array_key_exists('exclude_reprint', $options)
+                                    && $options['exclude_reprint'] !== ( $def['flag_value'] ?? true )) {
+                                    fwrite(STDERR, "--exclude-reprint and --include-reprint cannot be combined.\n");
+                                    exit(1);
+                                }
                                 if (
                                     $def['target'] === 'include_host_plugins'
                                     && array_key_exists('include_host_plugins', $options)
