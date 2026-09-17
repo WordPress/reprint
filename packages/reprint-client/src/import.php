@@ -17,6 +17,7 @@ use Reprint\Importer\Database\DatabaseConnection;
 use Reprint\Importer\Database\MysqliDatabaseConnection;
 use Reprint\Importer\Database\PdoDatabaseConnection;
 use Reprint\Importer\DatabaseUrlRewriteProcessor;
+use Reprint\Importer\MyIsamAutoIncrementStatementRewriter;
 use Reprint\Importer\NullableSpatialColumnStatementRewriter;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\ProgressReporter;
@@ -7467,6 +7468,7 @@ class ImportClient
             $connection
         );
         if ($target_engine === 'mysql') {
+            $myisam_auto_increment_rewriter = new MyIsamAutoIncrementStatementRewriter($connection);
             $query_stream = new \WP_MySQL_FastQueryStream();
             $query_stream->append_sql($sql);
             $query_stream->mark_input_complete();
@@ -7477,6 +7479,21 @@ class ImportClient
                     $spatial_srid_guard->assert_statement_supported($query);
                 }
                 $query = $nullable_spatial_column_rewriter->rewrite($query) ?? $query;
+                $rewritten = $myisam_auto_increment_rewriter->rewrite($query);
+                if ($rewritten !== null) {
+                    $query = $rewritten['sql'];
+                    $this->audit_log($rewritten['message'], false);
+                    $this->output_progress([
+                        'type' => 'warning',
+                        'phase' => 'sql',
+                        'reason' => 'auto_increment_index_added',
+                        'table' => $rewritten['table'],
+                        'column' => $rewritten['column'],
+                        'message' => $rewritten['message'],
+                    ], true);
+                    $this->progress->clear_progress_line();
+                    $this->progress->print_line($rewritten['message'] . "\n");
+                }
                 if ($stmt_rewriter !== null) {
                     $query = $stmt_rewriter->rewrite($query);
                 }
