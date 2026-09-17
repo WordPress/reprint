@@ -115,6 +115,24 @@ class PhpBuiltinRuntimeRoutingTest extends TestCase
         );
     }
 
+    public function testStartsTheCliServerWithJitDisabled(): void
+    {
+        $runtime = file_get_contents($this->outputDir . '/runtime.php');
+        $startScript = file_get_contents($this->outputDir . '/start.sh');
+
+        $this->assertStringNotContainsString('opcache.jit', $runtime);
+        $this->assertStringContainsString('exec php', $startScript);
+        $this->assertStringContainsString('-d opcache.jit=disable', $startScript);
+    }
+
+    public function testBindsLocalhostToTheIpv4Loopback(): void
+    {
+        $startScript = file_get_contents($this->outputDir . '/start.sh');
+
+        $this->assertStringContainsString('-S 127.0.0.1:8881', $startScript);
+        $this->assertStringContainsString('http://localhost:8881', $startScript);
+    }
+
     public function testDocumentRootPhpFilesTakePrecedenceOverCoreFallback(): void
     {
         $output = $this->runRuntime('/wp-content/plugins/example/site.php');

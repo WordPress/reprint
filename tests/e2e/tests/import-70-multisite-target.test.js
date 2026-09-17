@@ -120,9 +120,7 @@ describe('Pull a selected site into a fresh single site', () => {
         assert.ok(inspection.new_url.startsWith(`${targetUrl}/wp-content/uploads/sites/7/`));
 
         let serverLog = '';
-        server = spawn(process.env.E2E_WP_CLI_PHP_BINARY || 'php', [
-            '-S', '127.0.0.1:9247', '-t', documentRoot, join(directory, 'runtime/runtime.php'),
-        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+        server = spawn('bash', [join(directory, 'runtime/start.sh')], { stdio: ['ignore', 'pipe', 'pipe'] });
         server.stdout.on('data', data => { serverLog += data; });
         server.stderr.on('data', data => { serverLog += data; });
         // Keep the first request failure and exit reason; later connection

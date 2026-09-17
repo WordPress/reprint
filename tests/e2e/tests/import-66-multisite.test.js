@@ -205,7 +205,7 @@ define('BLOG_ID_CURRENT_SITE', 1);
             assert.ok(inspection.attachment.startsWith(inspection.upload_url + '/'));
 
             let serverLog = '';
-            target.server = spawn(php, ['-S', `127.0.0.1:${target.port}`, '-t', target.documentRoot, join(directory, 'runtime/runtime.php')], { stdio: ['ignore', 'pipe', 'pipe'] });
+            target.server = spawn('bash', [join(directory, 'runtime/start.sh')], { stdio: ['ignore', 'pipe', 'pipe'] });
             target.server.stdout.on('data', data => { serverLog += data; });
             target.server.stderr.on('data', data => { serverLog += data; });
             // A refused connection after the server accepted a request hides

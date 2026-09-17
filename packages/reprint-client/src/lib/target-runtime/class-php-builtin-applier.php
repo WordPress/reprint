@@ -246,13 +246,24 @@ class PhpBuiltinApplier implements RuntimeApplier
         $lines[] = '';
 
         $php_args = [];
-        $php_args[] = 'php';
+        // Replace the shell with PHP so signals sent to start.sh reach the
+        // server process instead of leaving it running in the background.
+        $php_args[] = 'exec php';
 
         foreach ($manifest->php_ini as $key => $value) {
             $php_args[] = "-d {$key}={$value}";
         }
 
-        $php_args[] = '-S ' . $host . ':' . $port;
+        // PHP 8.4's function JIT can crash while compiling ordinary WordPress
+        // code such as rest_sanitize_value_from_schema(). php -S uses the CLI
+        // SAPI, so disable JIT for this generated development server. OPcache
+        // remains enabled.
+        $php_args[] = '-d opcache.jit=disable';
+
+        // php -S may bind localhost only to ::1 while the browser resolves it
+        // to 127.0.0.1. Bind the exact localhost case to the IPv4 loopback.
+        $listen_host = $host === 'localhost' ? '127.0.0.1' : $host;
+        $php_args[] = '-S ' . $listen_host . ':' . $port;
         $php_args[] = '-t ' . escapeshellarg($filesystem_root);
         $php_args[] = escapeshellarg($runtime_path);
 

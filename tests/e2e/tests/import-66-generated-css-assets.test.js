@@ -90,7 +90,7 @@ add_action('wp_enqueue_scripts', function () {
         assert.equal(result.exitCode, 0, `Pull failed:\n${result.stdout}\n${result.stderr}`);
         serverLog = join(temporaryDirectory, 'target-server.log');
         const log = openSync(serverLog, 'a');
-        server = spawn('php', ['-S', `127.0.0.1:${port}`, '-t', flatDirectory, join(runtimeDirectory, 'runtime.php')], {
+        server = spawn('bash', [join(runtimeDirectory, 'start.sh')], {
             stdio: ['ignore', log, log],
         });
         closeSync(log);
