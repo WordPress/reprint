@@ -5,6 +5,7 @@ namespace ImportTests;
 use PDO;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Database\MysqliDatabaseConnection;
+use Reprint\Importer\MyIsamAutoIncrementStatementRewriter;
 use WordPress\Reprint\Server\MySQLDumpProducer;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
@@ -267,6 +268,31 @@ class MysqlAutoIncrementImportTest extends TestCase
         $this->importSql($row[1] . ';');
         $this->assertSame($row[1], $this->target->query('SHOW CREATE TABLE `odd``table`')->fetch(PDO::FETCH_NUM)[1]);
         $this->assertSame(1, substr_count($this->readOutput(), 'Warning: The target forces InnoDB.'));
+    }
+
+    public function testStatementRewriterReturnsSqlAndWarningWithoutExecutingOrPrinting(): void
+    {
+        $rewriter = new MyIsamAutoIncrementStatementRewriter($this->target);
+        $sql = file_get_contents(__DIR__ . '/fixtures/wponlinebackup-items.sql');
+        $rewritten = $rewriter->rewrite($sql);
+        if (!$this->supports_enforced_engine) {
+            $this->assertNull($rewritten);
+            return;
+        }
+
+        $this->assertSame(
+            substr_replace($sql, ', KEY (`item_id`)', strrpos($sql, ')'), 0),
+            $rewritten['sql']
+        );
+        $this->assertSame('wp_wponlinebackup_items', $rewritten['table']);
+        $this->assertSame('item_id', $rewritten['column']);
+        $this->assertStringContainsString('table-wide sequence instead of per-group sequences', $rewritten['message']);
+        $this->assertFalse($this->target->query("SHOW TABLES LIKE 'wp_wponlinebackup_items'")->fetchColumn());
+        $this->assertSame('', $this->readOutput());
+        $this->assertNull($rewriter->rewrite($rewritten['sql']));
+        $this->assertNull($rewriter->rewrite('SELECT 1;'));
+        $this->target->exec('SET SESSION enforce_storage_engine=NULL');
+        $this->assertNull($rewriter->rewrite($sql));
     }
 
     private function importSql(string $sql): void
