@@ -5,7 +5,7 @@ namespace WordPress\Reprint\Server;
 require_once __DIR__ . '/utils.php';
 
 /**
- * Selects the WordPress tables and shared rows to export for one network site.
+ * Selects site tables and shared WordPress rows to export for one network site.
  *
  * For site 7 with base prefix `network_`, keep core tables such as
  * `network_7_posts`. Use `network_7_reprint_users` to store user IDs found in
@@ -86,7 +86,7 @@ class MultisiteDatabaseSelection {
      */
     public function get_identity(): string
     {
-        return 'core-v5:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
+        return 'site-tables-v1:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
     }
 
     /**
@@ -302,7 +302,7 @@ class MultisiteDatabaseSelection {
     }
 
     /**
-     * Whether this table has a defined core selection rule.
+     * Whether this table has a defined selection rule.
      *
      * '1=0' keeps a known table's schema without rows. '0=1' marks a table
      * without a rule for this selection, so the reader skips the whole table.
@@ -321,8 +321,8 @@ class MultisiteDatabaseSelection {
      */
     public function get_row_condition(string $table): string
     {
-        // These exact core tables contain only the selected site's records.
-        // A prefix match alone cannot establish what a plugin table contains.
+        // Apply exact core rules first, especially the options and shared-user
+        // filters. The numbered plugin-table prefix rule comes after them.
         $site_tables = [
             'posts', 'postmeta', 'comments', 'commentmeta', 'terms',
             'termmeta', 'term_taxonomy', 'term_relationships', 'links',
@@ -402,6 +402,17 @@ class MultisiteDatabaseSelection {
             // Pending registrations and registration history describe the
             // network, not this site's content. Retain empty core tables only.
             return '1=0';
+        }
+        // Plugins using $wpdb->prefix store site 7's data in network_7_*.
+        // Keep these names: the standalone target adopts that same prefix.
+        // Include the final underscore so site 70 cannot match site 7.
+        // This is a storage convention for network-authorized exports, not a
+        // guarantee that arbitrary plugin data is safe for site-only admins.
+        // Site 1 has no numbered prefix: network_orders could contain main-site
+        // or network-wide orders, so it still needs an explicit migration rule.
+        if ($this->site_id !== 1 && strpos($table, $this->site_prefix) === 0
+            && !self::is_internal_table($table)) {
+            return '1=1';
         }
         return '0=1';
     }

@@ -55,8 +55,9 @@ bootstrap includes are not used in that configuration.
 
 ## What moves
 
-Core site tables; members and users referenced by posts, comments, or links;
-core profile fields and the selected site's roles; selected network settings;
+Core site tables and plugin tables under a numbered site's prefix; members
+and users referenced by posts, comments, or links; core profile fields and
+the selected site's roles; selected network settings;
 shared core, plugin, theme, language, and mu-plugin code; selected media.
 Users keep their IDs and password hashes, but sessions and application
 passwords do not move. LOGIN uses the target database's normal login matching,
@@ -211,16 +212,41 @@ require a fresh export. This is not a frozen source snapshot.
 The table-walk cursor changed. Exports started with the earlier discovery-source
 cursor cannot resume; start a fresh database export after updating the source plugin.
 
+## Plugin tables
+
+For a numbered site, plugin tables such as `network_7_wc_orders` move in full,
+without renaming. Tables under `network_8_` or `network_70_` stay behind and do
+not block site 7's export. Existing core filters still apply to shared users,
+usermeta and the selected site's options. Reprint's saved user tables stay out.
+Rows use the existing batched, resumable SQL reader, including oversized values.
+
+This uses the plugin convention of building site-local table names from
+`$wpdb->prefix`. A prefix does not prove that a plugin stores only that site's
+private data. The current flow requires the network token; this rule must not
+be treated as permission to expose arbitrary plugin data to site-only admins.
+
+Unnumbered plugin tables such as `network_orders` still stop the pull, even
+when selecting site 1: they may contain main-site or shared network data.
+They need explicit migration rules, as do shared plugin settings.
+
+The plugin-table E2E test installs WooCommerce with custom order tables and
+post-table synchronization disabled. It reads an imported order and creates
+a new one after booting the single-site target. This does not establish full
+WooCommerce compatibility: customer usermeta, shared extensions, external
+services, and plugin-specific site IDs still need separate migration rules.
+Users referenced only by plugin tables are not added to the exported user set.
+
+Exports started before numbered plugin tables were included cannot resume
+under the new rules. Start a fresh export after updating the source plugin.
+
 ## What needs separate work
 
-Plugin-defined tables and shared plugin settings need explicit migration rules.
-Unknown tables stop the pull. Unknown network settings and non-core user
-metadata are not copied; plugins that depend on those values need separate
-configuration at the target. Plugins that require multisite APIs cannot run
-unchanged on a single site. Shared plugin directories are copied in full;
-review plugins that store private data beside their code before migrating.
-Cross-site content references cannot work locally when the referenced site
-was not moved.
+Unknown network settings and non-core user metadata are not copied; plugins
+that depend on those values need separate configuration at the target.
+Plugins that require multisite APIs cannot run unchanged on a single site.
+Shared plugin directories are copied in full; review plugins that store
+private data beside their code before migrating. Cross-site content references
+cannot work locally when the referenced site was not moved.
 
 This first version rejects legacy blogs.dir uploads, custom upload or content
 directories, shared custom user tables at the source, and symlinks in selected
