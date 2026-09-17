@@ -4,6 +4,8 @@ use Throwable as FixtureThrowable;
 
 $fixture_calls = 0;
 $fixture_map_calls = 0;
+$fixture_static_calls = 0;
+$fixture_method_calls = 0;
 
 function fixture_nullable_value()
 {
@@ -28,21 +30,35 @@ final class Php72SyntaxFixture extends Php56ParentFixture
 
     private $optional;
 
+    public static function nullableStatic()
+    {
+        ++$GLOBALS['fixture_static_calls'];
+        return null;
+    }
+
+    public function nullableMethod()
+    {
+        ++$GLOBALS['fixture_method_calls'];
+        return null;
+    }
+
     /** Kept on the generated method. */
     public function render($value, array $options = [])
     {
         $host = isset($options['host']) ? $options['host'] : self::DEFAULT_HOST;
         $optional = isset($this->optional) ? $this->optional : 'property-default';
         list($address, $port) = $options['address'];
-        $__reprint_php56_destructure_37_786 = $options['metadata'];
+        $__reprint_php56_destructure_51_1095 = $options['metadata'];
         // Kept with the generated assignment.
-        $name = $__reprint_php56_destructure_37_786['name'];
-        $enabled = $__reprint_php56_destructure_37_786['enabled'];
-        $secret = ($__reprint_php56_coalesce_42_955 = fixture_nullable_value()) !== null ? $__reprint_php56_coalesce_42_955 : 'secret-default';
-        $user = ($__reprint_php56_coalesce_43_1017 = fixture_map()) !== null && isset($__reprint_php56_coalesce_43_1017['user']) ? $__reprint_php56_coalesce_43_1017['user'] : 'map-default';
-        $nested = ($__reprint_php56_coalesce_44_1075 = isset($options['nested']) ? $options['nested'] : null) !== null ? $__reprint_php56_coalesce_44_1075 : 'nested-default';
+        $name = $__reprint_php56_destructure_51_1095['name'];
+        $enabled = $__reprint_php56_destructure_51_1095['enabled'];
+        $secret = ($__reprint_php56_coalesce_56_1264 = fixture_nullable_value()) !== null ? $__reprint_php56_coalesce_56_1264 : 'secret-default';
+        $user = ($__reprint_php56_coalesce_57_1326 = fixture_map()) !== null && isset($__reprint_php56_coalesce_57_1326['user']) ? $__reprint_php56_coalesce_57_1326['user'] : 'map-default';
+        $nested = ($__reprint_php56_coalesce_58_1384 = isset($options['nested']) ? $options['nested'] : null) !== null ? $__reprint_php56_coalesce_58_1384 : 'nested-default';
+        $static = ($__reprint_php56_coalesce_59_1452 = self::nullableStatic()) !== null ? $__reprint_php56_coalesce_59_1452 : 'static-default';
+        $method = ($__reprint_php56_coalesce_60_1514 = $this->nullableMethod()) !== null ? $__reprint_php56_coalesce_60_1514 : 'method-default';
 
-        return implode('|', [$value, $host, $optional, $address, $port, $name, $enabled, $secret, $user, $nested]);
+        return implode('|', [$value, $host, $optional, $address, $port, $name, $enabled, $secret, $user, $nested, $static, $method]);
     }
 
     public function preservedHints(
@@ -64,4 +80,6 @@ echo json_encode([
     ]),
     $fixture_calls,
     $fixture_map_calls,
+    $fixture_static_calls,
+    $fixture_method_calls,
 ]);
