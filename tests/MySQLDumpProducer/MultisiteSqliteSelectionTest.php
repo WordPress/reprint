@@ -145,7 +145,8 @@ final class MultisiteSqliteSelectionTest extends TestCase {
 
     public function test_process_death_releases_lock_and_preserves_saved_users(): void
     {
-        $script = 'require ' . var_export(__DIR__ . '/../../packages/reprint-server/src/class-multisite-database-selection.php', true) . ';'
+        $script = 'require ' . var_export(__DIR__ . '/../../vendor/autoload.php', true) . ';'
+            . 'require ' . var_export(__DIR__ . '/../../packages/reprint-server/src/class-multisite-database-selection.php', true) . ';'
             . 'require ' . var_export(__DIR__ . '/../../packages/reprint-server/src/class-sqlite-driver-pdo.php', true) . ';'
             . 'require ' . var_export(__DIR__ . '/../../packages/reprint-server/src/class-pdo-constants.php', true) . ';'
             . 'require ' . var_export(__DIR__ . '/../../lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php', true) . ';'
