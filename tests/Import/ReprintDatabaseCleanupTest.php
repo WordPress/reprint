@@ -157,6 +157,6 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
     /** The local cleanup uses the real connection, without replacing its queries. */
     private function cleanup(ImportClient $client): void
     {
-        \Reprint\Importer\cleanup_reprint_database(new PdoDatabaseConnection($this->pdo), 'mysql', 'renamed/index.php', $client->get_state()->preflight_record()['data']['database']['wp']);
+        \Reprint\Importer\remove_reprint_plugin_data_from_the_imported_database(new PdoDatabaseConnection($this->pdo), 'mysql', 'renamed/index.php', $client->get_state()->preflight_record()['data']['database']['wp']);
     }
 }

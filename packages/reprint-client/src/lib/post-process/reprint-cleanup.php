@@ -24,7 +24,7 @@ use Reprint\Importer\Database\DatabaseConnection;
  *                               contains base_prefix, site_id and network_id.
  * }
  */
-function cleanup_reprint_database(DatabaseConnection $database, string $engine, string $plugin_basename, array $wordpress_database): void
+function remove_reprint_plugin_data_from_the_imported_database(DatabaseConnection $database, string $engine, string $plugin_basename, array $wordpress_database): void
 {
     $network = $wordpress_database['multisite']['selection'] ?? null;
     $site_prefix = $network === null ? ( $wordpress_database['table_prefix'] ?? null )

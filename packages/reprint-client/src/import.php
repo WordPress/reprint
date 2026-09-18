@@ -5454,7 +5454,7 @@ class ImportClient
         require_once __DIR__ . '/lib/post-process/reprint-cleanup.php';
         [$database] = $this->create_target_database_connection($target, false);
         try {
-            \Reprint\Importer\cleanup_reprint_database($database, $target['engine'], $plugin_basename, $preflight['database']['wp']);
+            \Reprint\Importer\remove_reprint_plugin_data_from_the_imported_database($database, $target['engine'], $plugin_basename, $preflight['database']['wp']);
         } finally {
             if ($database->inTransaction()) {
                 $database->rollBack();
