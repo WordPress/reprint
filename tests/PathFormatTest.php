@@ -1,10 +1,7 @@
 <?php
 
+use WordPress\Reprint\Server\Utils;
 use PHPUnit\Framework\TestCase;
-use function WordPress\Reprint\Server\assert_valid_path;
-use function WordPress\Reprint\Server\is_absolute_path;
-use function WordPress\Reprint\Server\normalize_path_separators;
-use function WordPress\Reprint\Server\resolve_symlink_target_path;
 
 /** The supplied path format, not a prefix guess, controls path interpretation. */
 final class PathFormatTest extends TestCase {
@@ -23,10 +20,10 @@ final class PathFormatTest extends TestCase {
         bool $unix_absolute,
         bool $windows_absolute
     ): void {
-        $this->assertSame($path, normalize_path_separators($path, 'unix'));
-        $this->assertSame($windows_path, normalize_path_separators($path, 'windows'));
-        $this->assertSame($unix_absolute, is_absolute_path($path, 'unix'));
-        $this->assertSame($windows_absolute, is_absolute_path($path, 'windows'));
+        $this->assertSame($path, Utils::normalize_path_separators($path, 'unix'));
+        $this->assertSame($windows_path, Utils::normalize_path_separators($path, 'windows'));
+        $this->assertSame($unix_absolute, Utils::is_absolute_path($path, 'unix'));
+        $this->assertSame($windows_absolute, Utils::is_absolute_path($path, 'windows'));
     }
 
     /** @return array[] Input, Windows spelling, and absolute flags for both formats. */
@@ -48,7 +45,7 @@ final class PathFormatTest extends TestCase {
     public function testWindowsLinkSourceDoesNotNeedBackslashRootToIdentifyItsFormat(): void {
         $this->assertSame(
             '\\\\SERVER\\SHARE/photos',
-            resolve_symlink_target_path('//server/share/site/link', '..\\photos', 'windows')
+            Utils::resolve_symlink_target_path('//server/share/site/link', '..\\photos', 'windows')
         );
     }
 
@@ -56,34 +53,34 @@ final class PathFormatTest extends TestCase {
     public function testUnixLinkSourceMustBeAbsoluteUnderUnixRules(): void {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('must be an absolute path');
-        resolve_symlink_target_path('D:\\site\\link', 'photos', 'unix');
+        Utils::resolve_symlink_target_path('D:\\site\\link', 'photos', 'unix');
     }
 
     /** A Windows root-relative link source cannot supply the missing drive. */
     public function testWindowsLinkSourceMustSupplyItsDriveOrShare(): void {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('must be an absolute path');
-        resolve_symlink_target_path('/site/link', 'photos', 'windows');
+        Utils::resolve_symlink_target_path('/site/link', 'photos', 'windows');
     }
 
     /** Unix validation must not accept a drive prefix as proof of an absolute path. */
     public function testUnixValidationRejectsWindowsLookingRelativeName(): void {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('must be an absolute path');
-        assert_valid_path('D:\\photos', 'unix', 'source path');
+        Utils::assert_valid_path('D:\\photos', 'unix', 'source path');
     }
 
     /** Validation must check the actual bytes, including a final NUL byte. */
     public function testValidationDoesNotTrimAwayInvalidPathBytes(): void {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('must not contain NUL bytes');
-        assert_valid_path("/site/photos\0", 'unix');
+        Utils::assert_valid_path("/site/photos\0", 'unix');
     }
 
     /** Unknown formats must fail instead of silently selecting either set of rules. */
     public function testUnknownFormatIsRejected(): void {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('amiga');
-        normalize_path_separators('/site/photos', 'amiga');
+        Utils::normalize_path_separators('/site/photos', 'amiga');
     }
 }

@@ -1,6 +1,6 @@
 <?php
 
-use function WordPress\Reprint\Server\relative_path_under;
+use WordPress\Reprint\Server\Utils;
 
 require_once __DIR__ . '/class-file-sync-patch-planner.php';
 
@@ -318,7 +318,7 @@ final class FileSyncPlanRunner {
 
         $operation = $this->patch_planner->get_operation();
         if ($operation !== null && $operation["action"] !== "copy") {
-            $target_relative_path = relative_path_under(
+            $target_relative_path = Utils::relative_path_under(
                 $operation["path"],
                 $this->cursor["deletion_path_prefix"]
             );

@@ -640,8 +640,6 @@ class CurlTimeoutRecoveryTest extends TestCase
             } catch (TransientInterruptionException $e) {
                 $this->assertStringContainsString("({$errorNumber})", $e->getMessage());
             }
-
-            curl_close($curl);
         } finally {
             proc_close($server);
         }
@@ -712,8 +710,6 @@ PHP);
             } catch (TransientInterruptionException $e) {
                 $this->assertStringContainsString('(61)', $e->getMessage());
             }
-
-            curl_close($curl);
         } finally {
             proc_close($server);
         }
@@ -750,8 +746,6 @@ PHP);
                 'An unreachable host must not be treated as a resumable interruption',
             );
         }
-
-        curl_close($curl);
     }
 
     /**

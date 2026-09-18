@@ -9,6 +9,7 @@ if (array_diff(array_keys($_GET), ['reprint-api', 'site-export-api'])) {
     return;
 }
 
+require_once __DIR__ . '/../../../vendor/autoload.php';
 require_once __DIR__ . '/../../../packages/reprint-server/src/class-http-server.php';
 require_once __DIR__ . '/../../../packages/reprint-server/src/class-hmac-server.php';
 

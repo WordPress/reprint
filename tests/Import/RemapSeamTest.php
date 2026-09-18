@@ -3,13 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use function WordPress\Reprint\Server\assert_valid_relative_path;
-use function WordPress\Reprint\Server\path_is_descendant_of;
-use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Server\path_remainder_under;
-use function WordPress\Reprint\Server\realpath_with_missing_tail;
-use function WordPress\Reprint\Server\relative_path_under;
-use function WordPress\Reprint\Server\trim_right_slash;
+use WordPress\Reprint\Server\Utils;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
@@ -171,7 +165,7 @@ class RemapSeamTest extends TestCase
      */
     public function testPathRemainderUnder(?string $expected, string $path, string $prefix): void
     {
-        $this->assertSame($expected, path_remainder_under($path, $prefix));
+        $this->assertSame($expected, Utils::path_remainder_under($path, $prefix));
     }
 
     public static function providePathRemainderCases(): array
@@ -190,7 +184,7 @@ class RemapSeamTest extends TestCase
     public function testAssertValidRelativePathAllowsDocumentRootDescendants(): void
     {
         foreach (array('index.php', 'wp-content/plugins/example.php', 'leading space/file') as $path) {
-            assert_valid_relative_path($path, 'Document-root-relative path');
+            Utils::assert_valid_relative_path($path, 'Document-root-relative path');
         }
 
         $this->addToAssertionCount(1);
@@ -204,7 +198,7 @@ class RemapSeamTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage($message);
 
-        assert_valid_relative_path($path, 'Document-root-relative path');
+        Utils::assert_valid_relative_path($path, 'Document-root-relative path');
     }
 
     public static function provideInvalidRelativePathCases(): array
@@ -225,7 +219,7 @@ class RemapSeamTest extends TestCase
      */
     public function testTrimRightSlash(string $expected, string $path): void
     {
-        $this->assertSame($expected, trim_right_slash($path, \WordPress\Reprint\Server\native_path_format()));
+        $this->assertSame($expected, Utils::trim_right_slash($path, \WordPress\Reprint\Server\Utils::native_path_format()));
     }
 
     public static function provideTrailingSlashPathCases(): array
@@ -243,7 +237,7 @@ class RemapSeamTest extends TestCase
      */
     public function testRelativePathUnder(?string $expected, string $path, string $root): void
     {
-        $this->assertSame($expected, relative_path_under($path, $root));
+        $this->assertSame($expected, Utils::relative_path_under($path, $root));
     }
 
     public static function provideRelativePathCases(): array
@@ -268,7 +262,7 @@ class RemapSeamTest extends TestCase
      */
     public function testPathIsSameAsOrDescendantOf(bool $expected, string $path, string $ancestor): void
     {
-        $this->assertSame($expected, path_is_same_as_or_descendant_of($path, $ancestor));
+        $this->assertSame($expected, Utils::path_is_same_as_or_descendant_of($path, $ancestor));
     }
 
     public static function providePathSameAsOrDescendantOfCases(): array
@@ -285,13 +279,13 @@ class RemapSeamTest extends TestCase
 
     public function testPathIsSameAsOrDescendantOfMatchesAnyPathAndAncestor(): void
     {
-        $this->assertTrue(path_is_same_as_or_descendant_of('/a/b', ['/elsewhere', '/a']));
-        $this->assertTrue(path_is_same_as_or_descendant_of(['/elsewhere', '/a/b'], '/a'));
-        $this->assertTrue(path_is_same_as_or_descendant_of(
+        $this->assertTrue(Utils::path_is_same_as_or_descendant_of('/a/b', ['/elsewhere', '/a']));
+        $this->assertTrue(Utils::path_is_same_as_or_descendant_of(['/elsewhere', '/a/b'], '/a'));
+        $this->assertTrue(Utils::path_is_same_as_or_descendant_of(
             ['/elsewhere', '/a/b'],
             ['/not-this-one', '/a']
         ));
-        $this->assertFalse(path_is_same_as_or_descendant_of(
+        $this->assertFalse(Utils::path_is_same_as_or_descendant_of(
             ['/elsewhere', '/other'],
             ['/not-this-one', '/a']
         ));
@@ -302,7 +296,7 @@ class RemapSeamTest extends TestCase
      */
     public function testPathIsDescendantOf(bool $expected, string $path, string $ancestor): void
     {
-        $this->assertSame($expected, path_is_descendant_of($path, $ancestor));
+        $this->assertSame($expected, Utils::path_is_descendant_of($path, $ancestor));
     }
 
     public static function providePathDescendantOfCases(): array
@@ -320,13 +314,13 @@ class RemapSeamTest extends TestCase
 
     public function testPathIsDescendantOfMatchesAnyPathAndAncestor(): void
     {
-        $this->assertTrue(path_is_descendant_of('/a/b', ['/elsewhere', '/a']));
-        $this->assertTrue(path_is_descendant_of(['/elsewhere', '/a/b'], '/a'));
-        $this->assertTrue(path_is_descendant_of(
+        $this->assertTrue(Utils::path_is_descendant_of('/a/b', ['/elsewhere', '/a']));
+        $this->assertTrue(Utils::path_is_descendant_of(['/elsewhere', '/a/b'], '/a'));
+        $this->assertTrue(Utils::path_is_descendant_of(
             ['/elsewhere', '/a/b'],
             ['/not-this-one', '/a']
         ));
-        $this->assertFalse(path_is_descendant_of(
+        $this->assertFalse(Utils::path_is_descendant_of(
             ['/elsewhere', '/a'],
             ['/not-this-one', '/a']
         ));
@@ -341,30 +335,30 @@ class RemapSeamTest extends TestCase
 
         $this->assertSame(
             $canonical_existing_directory,
-            realpath_with_missing_tail($existing_directory)
+            Utils::realpath_with_missing_tail($existing_directory)
         );
         $this->assertSame(
             $canonical_existing_directory . '/missing',
-            realpath_with_missing_tail($existing_directory . '/missing')
+            Utils::realpath_with_missing_tail($existing_directory . '/missing')
         );
         $this->assertSame(
             $canonical_existing_directory . '/missing/child',
-            realpath_with_missing_tail($existing_directory . '/missing/child')
+            Utils::realpath_with_missing_tail($existing_directory . '/missing/child')
         );
-        $this->assertSame('/', realpath_with_missing_tail('/'));
+        $this->assertSame('/', Utils::realpath_with_missing_tail('/'));
 
         $symlink = $this->tempDir . '/existing-link';
         symlink($existing_directory, $symlink);
         $this->assertSame(
             $canonical_existing_directory . '/missing-through-link',
-            realpath_with_missing_tail($symlink . '/missing-through-link')
+            Utils::realpath_with_missing_tail($symlink . '/missing-through-link')
         );
 
         $broken_symlink = $this->tempDir . '/broken-link';
         symlink($this->tempDir . '/missing-target', $broken_symlink);
         $this->assertSame(
             $broken_symlink . '/child',
-            realpath_with_missing_tail($broken_symlink . '/child')
+            Utils::realpath_with_missing_tail($broken_symlink . '/child')
         );
     }
 

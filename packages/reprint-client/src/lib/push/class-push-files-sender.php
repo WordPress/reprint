@@ -1,10 +1,7 @@
 <?php
 
+use WordPress\Reprint\Server\Utils;
 use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Server\native_path_format;
-use function WordPress\Reprint\Server\relative_path_under;
-use function WordPress\Reprint\Server\normalize_excluded_paths;
-use function WordPress\Reprint\Server\trim_right_slash;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Sender failures are CLI/API values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
@@ -378,7 +375,7 @@ final class PushFilesSender
         if (!is_array($excluded_paths)) {
             throw new InvalidArgumentException('excluded_paths must be an array.');
         }
-        $this->excluded_paths = normalize_excluded_paths($excluded_paths);
+        $this->excluded_paths = Utils::normalize_excluded_paths($excluded_paths);
         $request_sizer_options = $options['request_sizer_options'] ?? [];
         if (!is_array($request_sizer_options)) {
             throw new InvalidArgumentException('request_sizer_options must be an array.');
@@ -400,10 +397,10 @@ final class PushFilesSender
         if ($resolved_local_filesystem_root === false) {
             throw new InvalidArgumentException('PushFilesSender requires a real filesystem root directory.');
         }
-        $this->filesystem_root = trim_right_slash($resolved_local_filesystem_root, native_path_format());
+        $this->filesystem_root = Utils::trim_right_slash($resolved_local_filesystem_root, Utils::native_path_format());
         $this->document_root_local_relative_path = trim($document_root, '/');
         $this->process_lock = $process_lock;
-        $this->push_state_directory = trim_right_slash($push_state_directory, native_path_format());
+        $this->push_state_directory = Utils::trim_right_slash($push_state_directory, Utils::native_path_format());
         $this->plan_directory = wp_join_unix_paths($this->push_state_directory, 'plan');
         $remote_state_directory = dirname($this->push_state_directory);
         $this->local_index_file = wp_join_unix_paths($remote_state_directory, 'local_index.jsonl');
@@ -1569,7 +1566,7 @@ final class PushFilesSender
         if ($local_relative_path === false) {
             throw new RuntimeException('Failed to decode a path in the local paths-to-push file.');
         }
-        $document_root_relative_path = relative_path_under(
+        $document_root_relative_path = Utils::relative_path_under(
             $local_relative_path,
             $this->state['document_root_local_relative_path']
         );

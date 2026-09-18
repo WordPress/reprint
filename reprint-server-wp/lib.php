@@ -14,8 +14,7 @@ use InvalidArgumentException;
 use WordPress\Reprint\Server\HMACServer;
 use WordPress\Reprint\Server\HTTPServer;
 use WordPress\Reprint\Server\PushConfigurationException;
-
-use function WordPress\Reprint\Server\relative_path_under;
+use WordPress\Reprint\Server\Utils;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -624,12 +623,12 @@ function handle_api_request(array $options = []): void {
                     . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
                 );
                 $logical_plugin_directory_to_verify = $logical_plugin_directory;
-                $logical_plugin_relative_path = relative_path_under(
+                $logical_plugin_relative_path = Utils::relative_path_under(
                     $logical_plugin_directory,
                     $lexical_docroot
                 );
                 if ($logical_plugin_relative_path === null) {
-                    $logical_plugin_relative_path = relative_path_under(
+                    $logical_plugin_relative_path = Utils::relative_path_under(
                         $logical_plugin_directory,
                         $docroot
                     );
@@ -645,7 +644,7 @@ function handle_api_request(array $options = []): void {
                             str_replace('\\', '/', $canonical_wordpress_plugin_directory)
                             . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
                         );
-                        $logical_plugin_relative_path = relative_path_under(
+                        $logical_plugin_relative_path = Utils::relative_path_under(
                             $logical_plugin_directory_from_canonical_parent,
                             $docroot
                         );
@@ -673,7 +672,7 @@ function handle_api_request(array $options = []): void {
                     $logical_plugin_path_added = true;
                 }
             }
-            $plugin_relative_path = relative_path_under(
+            $plugin_relative_path = Utils::relative_path_under(
                 $plugin_directory,
                 $docroot
             );

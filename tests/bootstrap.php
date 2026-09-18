@@ -29,8 +29,8 @@ require_once __DIR__ . '/../packages/reprint-server/src/class-file-tree-producer
 require_once __DIR__ . '/../packages/reprint-server/src/class-file-index-processor.php';
 
 // Local path-package installs can be stale until composer reinstall.
-if (!function_exists('WordPress\\Reprint\\Server\\build_pdo_dsn')) {
-    require_once __DIR__ . '/../packages/reprint-server/src/utils.php';
+if (!class_exists('WordPress\\Reprint\\Server\\Utils', false)) {
+    require_once __DIR__ . '/../packages/reprint-server/src/class-utils.php';
 }
 
 if (!class_exists('Site_Export_HMAC_Client', false)) {

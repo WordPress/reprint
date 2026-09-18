@@ -2,8 +2,6 @@
 
 namespace WordPress\Reprint\Server;
 
-require_once __DIR__ . '/utils.php';
-
 /**
  * Selects site tables and shared WordPress rows to export for one network site.
  *
@@ -175,7 +173,7 @@ class MultisiteDatabaseSelection {
             // Starting again replaces one site's set, including abandoned work.
             // Do not delete it at completion: the last HTTP response may be lost
             // and the importer may still need to replay an earlier cursor.
-            $this->generation = bin2hex(generate_random_bytes(16));
+            $this->generation = bin2hex(Utils::generate_random_bytes(16));
             $table_comment = " COMMENT='reprint-users-v1:{$this->generation}'";
             if ($db instanceof SqliteDriverPDO) {
                 // Invalidate old cursors BEFORE replacing their rows. If this

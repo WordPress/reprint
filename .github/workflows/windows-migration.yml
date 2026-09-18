@@ -22,6 +22,8 @@ jobs:
           extensions: mbstring, :ffi
           ini-values: ffi.enable=false
           coverage: none
+      - name: Install server autoloader
+        run: composer install --working-dir=packages/reprint-server --no-dev --no-interaction --prefer-dist
       - name: Check PHP source reads
         shell: pwsh
         run: |

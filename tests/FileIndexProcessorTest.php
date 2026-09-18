@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 use WordPress\Reprint\Server\FileIndexProcessor;
-use function WordPress\Reprint\Server\relative_path_under;
+use WordPress\Reprint\Server\Utils;
 
 require_once dirname(__DIR__) . '/packages/reprint-server/src/class-file-index-processor.php';
 
@@ -594,7 +594,7 @@ final class FileIndexProcessorTest extends TestCase {
             ? 'symlink'
             : ( is_dir($path) ? 'directory' : 'file' );
         return [
-            'requested_path' => \WordPress\Reprint\Server\normalize_path($path, \WordPress\Reprint\Server\native_path_format()),
+            'requested_path' => \WordPress\Reprint\Server\Utils::normalize_path($path, \WordPress\Reprint\Server\Utils::native_path_format()),
             'resolved_path' => $resolvedPath,
             'type' => $type,
         ];
@@ -663,7 +663,7 @@ final class FileIndexProcessorTest extends TestCase {
         $root = (string) realpath($docroot);
         $paths = [];
         foreach ($entries as $entry) {
-            $relativePath = relative_path_under($entry['path'], $root);
+            $relativePath = Utils::relative_path_under($entry['path'], $root);
             if ($relativePath !== null && $relativePath !== '') {
                 $paths[] = $relativePath;
             }

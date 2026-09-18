@@ -37,6 +37,7 @@ use Reprint\Importer\TransientInterruptionException;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 
 use WordPress\Reprint\Server\FileIndexProcessor;
+use WordPress\Reprint\Server\Utils;
 
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
@@ -51,19 +52,6 @@ use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function Reprint\Importer\write_local_index_entry;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
-use function WordPress\Reprint\Server\native_path_format;
-use function WordPress\Reprint\Server\assert_valid_path;
-use function WordPress\Reprint\Server\normalize_path;
-use function WordPress\Reprint\Server\normalize_path_separators;
-use function WordPress\Reprint\Server\is_absolute_path;
-use function WordPress\Reprint\Server\parse_size;
-use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Server\resolve_symlink_target_path;
-use function WordPress\Reprint\Server\path_is_descendant_of;
-use function WordPress\Reprint\Server\path_remainder_under;
-use function WordPress\Reprint\Server\realpath_with_missing_tail;
-use function WordPress\Reprint\Server\relative_path_under;
-use function WordPress\Reprint\Server\trim_right_slash;
 use function Reprint\Importer\merge_local_index_mutations;
 use function Reprint\Importer\write_local_index_update;
 
@@ -79,7 +67,6 @@ foreach ([
 ] as $autoloader) {
     if (file_exists($autoloader)) {
         require_once $autoloader;
-        require_once dirname($autoloader) . '/wp-php-toolkit/reprint-server/src/utils.php';
         break;
     }
 }
@@ -555,14 +542,14 @@ class ImportClient
         if ($referer !== null) {
             $this->request_context_headers['Referer'] = $referer;
         }
-        $this->state_dir = trim_right_slash($state_dir, native_path_format());
-        $this->filesystem_root = trim_right_slash($filesystem_root, native_path_format());
+        $this->state_dir = Utils::trim_right_slash($state_dir, Utils::native_path_format());
+        $this->filesystem_root = Utils::trim_right_slash($filesystem_root, Utils::native_path_format());
         $remote_state_directory = $selected_remote_state_directory === null
             ? self::remote_state_directory_path(
                 $this->remote_reprint_api_url,
                 $this->state_dir
             )
-            : trim_right_slash($selected_remote_state_directory, native_path_format());
+            : Utils::trim_right_slash($selected_remote_state_directory, Utils::native_path_format());
         $this->pull_state_directory = wp_join_unix_paths($remote_state_directory, "pull");
         $this->local_index_file = wp_join_unix_paths($remote_state_directory, "local_index.jsonl");
         $this->pull_state_file = wp_join_unix_paths($this->pull_state_directory, "state.json");
@@ -1112,7 +1099,7 @@ class ImportClient
             $this->files_pull_mode =
                 $requested_files_pull_mode ?? $saved_files_pull_mode;
 
-            $absolute_state_directory = realpath_with_missing_tail(
+            $absolute_state_directory = Utils::realpath_with_missing_tail(
                 $this->state_dir[0] === "/"
                     ? $this->state_dir
                     : wp_join_unix_paths(getcwd() ?: "/", $this->state_dir)
@@ -1120,7 +1107,7 @@ class ImportClient
             if (
                 !$abort
                 && $this->files_pull_mode === "mirror"
-                && relative_path_under(
+                && Utils::relative_path_under(
                     $absolute_state_directory,
                     $this->filesystem_root
                 ) !== null
@@ -1808,7 +1795,7 @@ class ImportClient
         $memory_limit_value = trim( (string) ini_get('memory_limit') );
         $memory_limit_bytes = $memory_limit_value === '' || $memory_limit_value === '-1'
             ? -1
-            : parse_size($memory_limit_value);
+            : Utils::parse_size($memory_limit_value);
         $sender_options = [
             'filesystem_root' => $context['filesystem_root'],
             'document_root' => $document_root,
@@ -2304,7 +2291,7 @@ class ImportClient
         }
         return [
             'remote_reprint_api_url' => rtrim($remote_reprint_api_url, '?&'),
-            'filesystem_root' => trim_right_slash($resolved_local_filesystem_root, native_path_format()),
+            'filesystem_root' => Utils::trim_right_slash($resolved_local_filesystem_root, Utils::native_path_format()),
             'push_state_directory' => $push_state_directory,
         ];
     }
@@ -2351,7 +2338,7 @@ class ImportClient
                 'The filesystem root does not exist or is not a directory: ' . $filesystem_root . '.'
             );
         }
-        $resolved_local_filesystem_root = trim_right_slash($resolved_local_filesystem_root, native_path_format());
+        $resolved_local_filesystem_root = Utils::trim_right_slash($resolved_local_filesystem_root, Utils::native_path_format());
         // Resolve an absolute physical path even when its final components do not exist.
         $remote_state_directory = self::remote_state_directory_path(
             $remote_reprint_api_url,
@@ -2365,10 +2352,10 @@ class ImportClient
             }
             $push_state_directory = wp_join_unix_paths($working_directory, $push_state_directory);
         }
-        $push_state_directory = realpath_with_missing_tail(
+        $push_state_directory = Utils::realpath_with_missing_tail(
             $push_state_directory
         );
-        if (path_is_same_as_or_descendant_of($push_state_directory, $resolved_local_filesystem_root)) {
+        if (Utils::path_is_same_as_or_descendant_of($push_state_directory, $resolved_local_filesystem_root)) {
             throw new InvalidArgumentException(
                 'The local push state directory ' . $push_state_directory
                 . ' must be outside the filesystem root ' . $resolved_local_filesystem_root . '.'
@@ -2384,7 +2371,7 @@ class ImportClient
         string $state_dir
     ): string {
         return wp_join_unix_paths(
-            trim_right_slash($state_dir, native_path_format()),
+            Utils::trim_right_slash($state_dir, Utils::native_path_format()),
             'remotes',
             md5(rtrim($remote_reprint_api_url, '?&'))
         );
@@ -2845,7 +2832,7 @@ class ImportClient
             if (
                 $content_dir !== null &&
                 $uploads_basedir !== null &&
-                !path_is_same_as_or_descendant_of($uploads_basedir, $content_dir)
+                !Utils::path_is_same_as_or_descendant_of($uploads_basedir, $content_dir)
             ) {
                 $this->audit_log(
                     "NON-STANDARD LAYOUT | uploads at {$uploads_basedir} " .
@@ -2980,7 +2967,7 @@ class ImportClient
         foreach ($files as $f) {
             $parent = dirname($f);
             if ($parent !== "" && $parent !== ".") {
-                $by_dir[trim_right_slash($parent, $this->get_state()->remote_path_format())][] = $f;
+                $by_dir[Utils::trim_right_slash($parent, $this->get_state()->remote_path_format())][] = $f;
             }
         }
 
@@ -3914,7 +3901,7 @@ class ImportClient
         $memory_limit_value = trim( (string) ini_get('memory_limit') );
         $memory_limit_bytes = $memory_limit_value === '' || $memory_limit_value === '-1'
             ? -1
-            : parse_size($memory_limit_value);
+            : Utils::parse_size($memory_limit_value);
 
         return $memory_limit_bytes === -1
             || memory_get_usage(true) < $memory_limit_bytes * 0.8;
@@ -4171,7 +4158,7 @@ class ImportClient
     ): bool {
         $candidate_paths = [$local_relative_path];
         foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
-            $remainder = path_remainder_under(
+            $remainder = Utils::path_remainder_under(
                 $local_absolute_path,
                 $local_prefix
             );
@@ -4374,7 +4361,7 @@ class ImportClient
             }
             // Skip if this directory is a subdirectory of an already-visited path,
             // since those files were already included in the parent's index.
-            if (path_is_same_as_or_descendant_of($dir, array_keys($visited))) {
+            if (Utils::path_is_same_as_or_descendant_of($dir, array_keys($visited))) {
                 $this->audit_log(
                     "FOLLOW SYMLINK SKIP | {$dir} already covered by a visited parent",
                     true,
@@ -4521,7 +4508,7 @@ class ImportClient
             }
 
             // Check containment: skip if already under a visited root
-            if (path_is_same_as_or_descendant_of($symlink_target, array_keys($visited))) {
+            if (Utils::path_is_same_as_or_descendant_of($symlink_target, array_keys($visited))) {
                 continue;
             }
 
@@ -5190,7 +5177,7 @@ class ImportClient
 
         if (!empty($flat_document_root)) {
             // --flat-document-root: used directly as the web root.
-            $raw_local_document_root = trim_right_slash($flat_document_root, native_path_format());
+            $raw_local_document_root = Utils::trim_right_slash($flat_document_root, Utils::native_path_format());
         } else {
             // --fs-root: the raw download directory. The remote site's
             // document_root tells us where the web root lived on the
@@ -5638,7 +5625,7 @@ class ImportClient
             realpath($this->pull_state_directory)
             ?: $this->pull_state_directory;
         $manifest->constants["REPRINT_PULL_STATE_FILE"] = wp_join_unix_paths(
-            trim_right_slash($pull_state_directory, native_path_format()),
+            Utils::trim_right_slash($pull_state_directory, Utils::native_path_format()),
             "state.json"
         );
         $manifest->routes[] = [
@@ -5710,9 +5697,9 @@ class ImportClient
             );
         }
         // Keep a lexical absolute path because --from may not exist yet.
-        $from = trim_right_slash($from, native_path_format());
+        $from = Utils::trim_right_slash($from, Utils::native_path_format());
         if (strpos($from, "/") !== 0) {
-            $from = normalize_path(wp_join_unix_paths(getcwd(), $from), native_path_format());
+            $from = Utils::normalize_path(wp_join_unix_paths(getcwd(), $from), Utils::native_path_format());
         }
         // A WordPress root passed by mistake would move wp-admin, wp-includes
         // and wp-config.php into the pulled wp-content.
@@ -5822,11 +5809,11 @@ class ImportClient
         string $source_wp_content,
         string $destination
     ): void {
-        $resolved_source = realpath_with_missing_tail($source_wp_content);
-        $resolved_destination = realpath_with_missing_tail($destination);
+        $resolved_source = Utils::realpath_with_missing_tail($source_wp_content);
+        $resolved_destination = Utils::realpath_with_missing_tail($destination);
         if (
-            !path_is_same_as_or_descendant_of($resolved_source, $resolved_destination)
-            && !path_is_same_as_or_descendant_of($resolved_destination, $resolved_source)
+            !Utils::path_is_same_as_or_descendant_of($resolved_source, $resolved_destination)
+            && !Utils::path_is_same_as_or_descendant_of($resolved_destination, $resolved_source)
         ) {
             return;
         }
@@ -5865,7 +5852,7 @@ class ImportClient
             );
         }
 
-        $flatten_to = trim_right_slash($flatten_to, native_path_format());
+        $flatten_to = Utils::trim_right_slash($flatten_to, Utils::native_path_format());
         $force = $options["force"] ?? false;
 
         // Ensure the filesystem root exists
@@ -5941,16 +5928,16 @@ class ImportClient
         $wp_includes_detached = $wp_includes_path !== null
             && $wp_includes_path !== wp_join_unix_paths($abspath, "wp-includes");
         $content_detached = $content_dir !== null
-            && !path_is_descendant_of($content_dir, $abspath);
+            && !Utils::path_is_descendant_of($content_dir, $abspath);
         $plugins_detached = $plugins_dir !== null
             && $content_dir !== null
-            && !path_is_descendant_of($plugins_dir, $content_dir);
+            && !Utils::path_is_descendant_of($plugins_dir, $content_dir);
         $mu_plugins_detached = $mu_plugins_dir !== null
             && $content_dir !== null
-            && !path_is_descendant_of($mu_plugins_dir, $content_dir);
+            && !Utils::path_is_descendant_of($mu_plugins_dir, $content_dir);
         $uploads_detached = $uploads_basedir !== null
             && $content_dir !== null
-            && !path_is_descendant_of($uploads_basedir, $content_dir);
+            && !Utils::path_is_descendant_of($uploads_basedir, $content_dir);
 
         // If any sub-component is detached from content_dir, we need to
         // "explode" wp-content into a real directory with individual symlinks
@@ -6231,7 +6218,7 @@ class ImportClient
         if (!is_string($value) || trim($value) === "") {
             return null;
         }
-        return trim_right_slash($value, $this->get_state()->remote_path_format());
+        return Utils::trim_right_slash($value, $this->get_state()->remote_path_format());
     }
 
     /**
@@ -7958,7 +7945,7 @@ class ImportClient
         $retained_plugins = [];
         while ($processor->next_value()) {
             $basename = $processor->get_value();
-            $is_match = path_is_descendant_of($basename, $plugin_dirs);
+            $is_match = Utils::path_is_descendant_of($basename, $plugin_dirs);
             if ($is_match) {
                 $deactivated_plugins[] = $basename;
             } else {
@@ -8559,7 +8546,7 @@ class ImportClient
                             "Invalid index batch item: path base64 decode failed",
                         );
                     }
-                    assert_valid_path(
+                    Utils::assert_valid_path(
                         $path,
                         $this->get_state()->remote_path_format(),
                         "index batch path",
@@ -8568,7 +8555,7 @@ class ImportClient
                         $excluded_source_path = $excluded_plugin['source_path'];
                         if (
                             $excluded_source_path !== null
-                            && path_is_same_as_or_descendant_of($path, $excluded_source_path)
+                            && Utils::path_is_same_as_or_descendant_of($path, $excluded_source_path)
                         ) {
                             continue 2;
                         }
@@ -9333,7 +9320,7 @@ class ImportClient
         // Stopping the rest early would leave a deleted target tree half removed,
         // its emptied directories still on disk.
         $stop_at_export_directory = $export_directories !== []
-            && path_is_same_as_or_descendant_of($missing_remote_path, $export_directories);
+            && Utils::path_is_same_as_or_descendant_of($missing_remote_path, $export_directories);
         // Find the shallowest parent absent from both neighboring entries.
         for ($component_index = 0; $component_index < $remote_parent_component_count; ++$component_index) {
             $remote_parent_components[] = $missing_remote_path_components[$component_index];
@@ -9342,16 +9329,16 @@ class ImportClient
             // index never covered it, so its absence does not confirm deletion.
             if (
                 $stop_at_export_directory
-                && !path_is_same_as_or_descendant_of($path_prefix, $export_directories)
+                && !Utils::path_is_same_as_or_descendant_of($path_prefix, $export_directories)
             ) {
                 continue;
             }
             if (
-                !path_is_same_as_or_descendant_of(
+                !Utils::path_is_same_as_or_descendant_of(
                     $nearest_existing_path_before,
                     $path_prefix,
                 )
-                && !path_is_same_as_or_descendant_of(
+                && !Utils::path_is_same_as_or_descendant_of(
                     $nearest_existing_path_after,
                     $path_prefix,
                 )
@@ -10467,15 +10454,15 @@ class ImportClient
         string $target,
         string $root
     ): void {
-        if (str_starts_with($target, "/")) {
+        if (Utils::str_starts_with($target, "/")) {
             // Absolute target: must be under root
-            $resolved = normalize_path($target, native_path_format());
+            $resolved = Utils::normalize_path($target, Utils::native_path_format());
         } else {
             // Relative target: resolve against the symlink's parent directory
-            $resolved = normalize_path(wp_join_unix_paths($symlink_parent_dir, $target), native_path_format());
+            $resolved = Utils::normalize_path(wp_join_unix_paths($symlink_parent_dir, $target), Utils::native_path_format());
         }
 
-        if (!path_is_same_as_or_descendant_of($resolved, $root)) {
+        if (!Utils::path_is_same_as_or_descendant_of($resolved, $root)) {
             throw new RuntimeException(
                 "Security: symlink target escapes filesystem root: {$target} " .
                 "(resolves to {$resolved}, root is {$root})"
@@ -10524,7 +10511,7 @@ class ImportClient
     ): string {
         // Resolve to a remote absolute path (relative targets are based on
         // the source symlink's remote directory).
-        $remote_absolute_target = resolve_symlink_target_path($remote_absolute_path, $target, $this->get_state()->remote_path_format());
+        $remote_absolute_target = Utils::resolve_symlink_target_path($remote_absolute_path, $target, $this->get_state()->remote_path_format());
 
         // Only rewrite a target whose subtree was actually followed and indexed;
         // everything else keeps its original (portable) spelling.
@@ -10560,7 +10547,7 @@ class ImportClient
     private function next_remote_index_contains_remote_absolute_path_prefix(
         string $remote_absolute_path
     ): bool {
-        $remote_absolute_path = normalize_path($remote_absolute_path, $this->get_state()->remote_path_format());
+        $remote_absolute_path = Utils::normalize_path($remote_absolute_path, $this->get_state()->remote_path_format());
 
         if (isset($this->next_remote_index_prefix_cache[$remote_absolute_path])) {
             return $this->next_remote_index_prefix_cache[$remote_absolute_path];
@@ -10588,7 +10575,7 @@ class ImportClient
                 break;
             }
             $next_remote_index_entry_path = $next_remote_index_entry["path"];
-            if (path_is_same_as_or_descendant_of($next_remote_index_entry_path, $remote_absolute_path)) {
+            if (Utils::path_is_same_as_or_descendant_of($next_remote_index_entry_path, $remote_absolute_path)) {
                 $path_prefix_found = true;
                 break;
             }
@@ -10748,9 +10735,9 @@ class ImportClient
     private function resolve_local_followed_symlinks_root(string $raw): string
     {
         $filesystem_root = $this->filesystem_root;
-        $directory = $this->resolve_token_path($raw, ["fs-root" => $filesystem_root], native_path_format());
+        $directory = $this->resolve_token_path($raw, ["fs-root" => $filesystem_root], Utils::native_path_format());
 
-        if (!path_is_same_as_or_descendant_of($directory, $filesystem_root)) {
+        if (!Utils::path_is_same_as_or_descendant_of($directory, $filesystem_root)) {
             throw new InvalidArgumentException(
                 "--follow-symlinks local followed symlinks root \"{$directory}\" resolves outside --fs-root ({$filesystem_root}); " .
                     "it must stay within the destination root",
@@ -10782,9 +10769,9 @@ class ImportClient
         $wp_content_target = null;
         foreach ($remap_raw as [$source_raw, $target_raw]) {
             $source = $this->resolve_token_path($source_raw, $source_tokens, $this->get_state()->remote_path_format());
-            $target = $this->resolve_token_path($target_raw, $target_tokens, native_path_format());
+            $target = $this->resolve_token_path($target_raw, $target_tokens, Utils::native_path_format());
 
-            if (!path_is_same_as_or_descendant_of($target, $filesystem_root)) {
+            if (!Utils::path_is_same_as_or_descendant_of($target, $filesystem_root)) {
                 throw new InvalidArgumentException(
                     "--remap target \"{$target}\" resolves outside --fs-root ({$filesystem_root}); " .
                         "targets must stay within the destination root",
@@ -10835,7 +10822,7 @@ class ImportClient
         $directories = [];
         foreach (["wp-plugins" => "plugins", "wp-mu-plugins" => "mu-plugins", "wp-uploads" => "uploads"] as $token => $name) {
             $source = $source_tokens[$token];
-            if ($source !== null && !path_is_same_as_or_descendant_of($source, $content)) {
+            if ($source !== null && !Utils::path_is_same_as_or_descendant_of($source, $content)) {
                 $directories[$name] = $source;
             }
         }
@@ -10894,7 +10881,7 @@ class ImportClient
             $covered = false;
 
             foreach ($sources as $other) {
-                if (path_is_descendant_of($path, $other)) {
+                if (Utils::path_is_descendant_of($path, $other)) {
                     $covered = true;
                     break;
                 }
@@ -10959,7 +10946,7 @@ class ImportClient
                 // entry, so an exact match would never track a selected directory
                 // and its later deletion would be rejected instead of synced.
                 foreach (array_keys($remaining) as $selected_root) {
-                    if (path_is_same_as_or_descendant_of($path, $selected_root)) {
+                    if (Utils::path_is_same_as_or_descendant_of($path, $selected_root)) {
                         unset($remaining[$selected_root]);
                     }
                 }
@@ -11012,7 +10999,7 @@ class ImportClient
             $selected = empty($included_path_prefixes);
 
             foreach ($included_path_prefixes as $included_path_prefix) {
-                $remainder = path_remainder_under(
+                $remainder = Utils::path_remainder_under(
                     $path,
                     $included_path_prefix
                 );
@@ -11036,7 +11023,7 @@ class ImportClient
 
         foreach ($excluded_path_prefixes as $excluded_path_prefix) {
             if (
-                path_remainder_under($path, $excluded_path_prefix)
+                Utils::path_remainder_under($path, $excluded_path_prefix)
                 !== null
             ) {
                 return false;
@@ -11129,9 +11116,9 @@ class ImportClient
         }
 
         if ($resolved !== "") {
-            $resolved = trim_right_slash($resolved, $path_format);
+            $resolved = Utils::trim_right_slash($resolved, $path_format);
         }
-        assert_valid_path($resolved, $path_format, "path \"{$raw}\"");
+        Utils::assert_valid_path($resolved, $path_format, "path \"{$raw}\"");
 
         return $resolved;
     }
@@ -11534,7 +11521,7 @@ class ImportClient
     private function path_traverses_symlink(string $path): bool
     {
         $root = $this->filesystem_root;
-        $relative = relative_path_under($path, $root);
+        $relative = Utils::relative_path_under($path, $root);
         if ($relative === null || $relative === "") {
             return false;
         }
@@ -11567,8 +11554,8 @@ class ImportClient
         $real_filesystem_root = $this->filesystem_root;
 
         // Resolve the nearest existing ancestor while retaining any missing tail.
-        $resolved_directory = realpath_with_missing_tail($dir);
-        if (!path_is_same_as_or_descendant_of($resolved_directory, $real_filesystem_root)) {
+        $resolved_directory = Utils::realpath_with_missing_tail($dir);
+        if (!Utils::path_is_same_as_or_descendant_of($resolved_directory, $real_filesystem_root)) {
             // In preserve-local mode, a path that resolves outside the
             // filesystem root is expected when a directory like wp-content/plugins
             // is symlinked to a shared hosting location.  Skip gracefully
@@ -11592,7 +11579,7 @@ class ImportClient
             return;
         }
 
-        $relative = relative_path_under($dir, $real_filesystem_root);
+        $relative = Utils::relative_path_under($dir, $real_filesystem_root);
         if ($relative === null) {
             throw new RuntimeException(
                 "Security: Refusing to create directory outside filesystem root: {$dir}",
@@ -11667,7 +11654,7 @@ class ImportClient
             }
 
             $resolved = realpath($current);
-            if ($resolved === false || !path_is_same_as_or_descendant_of($resolved, $real_filesystem_root)) {
+            if ($resolved === false || !Utils::path_is_same_as_or_descendant_of($resolved, $real_filesystem_root)) {
                 throw new RuntimeException(
                     "Security: Refusing to create directory outside filesystem root: {$current}",
                 );
@@ -12139,7 +12126,7 @@ class ImportClient
         ];
 
         if ($this->extra_directory !== null && $this->extra_directory !== "") {
-            $extra_paths["extra_directory"] = trim_right_slash($this->extra_directory, $this->get_state()->remote_path_format());
+            $extra_paths["extra_directory"] = Utils::trim_right_slash($this->extra_directory, $this->get_state()->remote_path_format());
         }
 
         // Ensure every --remap source is enumerated — including plugins or
@@ -12157,11 +12144,11 @@ class ImportClient
         $ini_all = $state->get('preflight.runtime.ini_get_all');
         foreach (["auto_prepend_file", "auto_append_file"] as $ini_key) {
             $ini_path = $ini_all[$ini_key] ?? "";
-            if (is_string($ini_path) && is_absolute_path($ini_path, $state->remote_path_format())) {
+            if (is_string($ini_path) && Utils::is_absolute_path($ini_path, $state->remote_path_format())) {
                 // dirname() runs on the client. Convert source separators first
                 // so D:\scripts\env.php yields D:/scripts on a Unix client.
-                $ini_path = normalize_path_separators($ini_path, $state->remote_path_format());
-                $ini_dir = trim_right_slash(dirname($ini_path) . '/', $state->remote_path_format());
+                $ini_path = Utils::normalize_path_separators($ini_path, $state->remote_path_format());
+                $ini_dir = Utils::trim_right_slash(dirname($ini_path) . '/', $state->remote_path_format());
                 if ($ini_dir !== "/") {
                     $extra_paths[$ini_key] = $ini_dir;
                 }
@@ -12173,7 +12160,7 @@ class ImportClient
                 continue;
             }
             // Check if this path is already covered by an existing dir.
-            if (!path_is_same_as_or_descendant_of($path, $dirs)) {
+            if (!Utils::path_is_same_as_or_descendant_of($path, $dirs)) {
                 $dirs[] = $path;
                 $this->audit_log(
                     "DIRECTORY AUTO-DETECT | adding {$label} outside roots: " .
@@ -12387,7 +12374,7 @@ class ImportClient
         }
         // Runtime-file requests also come from the source's preflight response,
         // so matching a request does not replace path validation.
-        assert_valid_path($path, $this->get_state()->remote_path_format(), $label);
+        Utils::assert_valid_path($path, $this->get_state()->remote_path_format(), $label);
     }
 
     /**
@@ -12572,7 +12559,7 @@ class ImportClient
         $looks_like_html = !is_array($decoded) && $body !== '' && (
             stripos($body, '<html') !== false ||
             stripos($body, '<!doctype') !== false ||
-            str_starts_with($body, '<')
+            Utils::str_starts_with($body, '<')
         );
         $looks_like_wordfence_block_page = $looks_like_html &&
             stripos($body, 'Your access to this site has been limited') !== false &&
@@ -12622,7 +12609,7 @@ class ImportClient
             // The server tells us exactly what went wrong. Map each known
             // HMAC error to a targeted message.
 
-            if (str_contains($server_msg, 'HMAC signature verification failed')) {
+            if (Utils::str_contains($server_msg, 'HMAC signature verification failed')) {
                 return [
                     'code' => 'AUTH_SECRET_MISMATCH',
                     'message' =>
@@ -12631,7 +12618,7 @@ class ImportClient
                 ];
             }
 
-            if (str_contains($server_msg, 'timestamp expired')) {
+            if (Utils::str_contains($server_msg, 'timestamp expired')) {
                 return [
                     'code' => 'AUTH_CLOCK_SKEW',
                     'message' =>
@@ -12641,7 +12628,7 @@ class ImportClient
                 ];
             }
 
-            if (str_contains($server_msg, 'Content hash mismatch')) {
+            if (Utils::str_contains($server_msg, 'Content hash mismatch')) {
                 return [
                     'code' => 'AUTH_CONTENT_TAMPERED',
                     'message' =>
@@ -12651,7 +12638,7 @@ class ImportClient
                 ];
             }
 
-            if (str_contains($server_msg, 'Missing X-Auth-')) {
+            if (Utils::str_contains($server_msg, 'Missing X-Auth-')) {
                 return [
                     'code' => 'AUTH_HEADERS_STRIPPED',
                     'message' =>
@@ -12818,7 +12805,6 @@ class ImportClient
         try {
             $this->check_curl_error($ch);
         } catch (RuntimeException $e) {
-            @curl_close($ch);
             return [
                 "ok" => false,
                 "http_code" => 0,
@@ -12834,7 +12820,6 @@ class ImportClient
 
         $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
-        @curl_close($ch);
 
         if ($http_code !== 200) {
             $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url);
@@ -13212,27 +13197,23 @@ class ImportClient
         );
 
         try {
-            try {
-                $this->check_curl_error($ch);
-            } catch (RuntimeException $curl_error) {
-                $this->last_http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-                if ($endpoint !== null) {
-                    $this->handle_tuner_error($endpoint, [
-                        "http_code" => 0,
-                        "timeout" => $this->last_curl_timeout,
-                        "curl_errno" => $this->last_curl_errno,
-                    ]);
-                }
-                throw $curl_error;
+            $this->check_curl_error($ch);
+        } catch (RuntimeException $curl_error) {
+            $this->last_http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            if ($endpoint !== null) {
+                $this->handle_tuner_error($endpoint, [
+                    "http_code" => 0,
+                    "timeout" => $this->last_curl_timeout,
+                    "curl_errno" => $this->last_curl_errno,
+                ]);
             }
-
-            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
-            $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
-            $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
-        } finally {
-            @curl_close($ch);
+            throw $curl_error;
         }
+
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
+        $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
+        $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
 
         if (!isset($context->response_stats) || !is_array($context->response_stats)) {
             $context->response_stats = [];
@@ -13569,7 +13550,7 @@ class ImportClient
         if (!is_string($value) || $value === "") {
             return $value;
         }
-        if (!str_starts_with($value, self::STATE_PATH_ENCODING_PREFIX)) {
+        if (!Utils::str_starts_with($value, self::STATE_PATH_ENCODING_PREFIX)) {
             throw new UnexpectedValueException(
                 "Pull state path is missing the base64: encoding prefix."
             );
@@ -14598,7 +14579,7 @@ if (
         switch ($cast) {
             case 'int':   return (int) $raw;
             case 'float': return (float) $raw;
-            case 'size':  return parse_size($raw);
+            case 'size':  return Utils::parse_size($raw);
             default:      return $raw;
         }
     }
@@ -14748,7 +14729,7 @@ if (
     function _cli_render_install_server(): void
     {
         $version = get_importer_version();
-        $is_dev = str_contains($version, '-trunk') || $version === 'v0.0.0';
+        $is_dev = Utils::str_contains($version, '-trunk') || $version === 'v0.0.0';
         $is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
         $bold  = $is_tty ? "\033[1m" : "";
         $dim   = $is_tty ? "\033[2m" : "";

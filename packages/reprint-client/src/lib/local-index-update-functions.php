@@ -2,8 +2,7 @@
 
 namespace Reprint\Importer;
 
-use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Server\relative_path_under;
+use WordPress\Reprint\Server\Utils;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exceptions contain CLI filesystem paths, never HTML output.
 
@@ -154,7 +153,7 @@ function merge_local_index_mutations(
 			 */
 			while (
 				$local_index_entries->valid()
-				&& path_is_same_as_or_descendant_of(
+				&& Utils::path_is_same_as_or_descendant_of(
 					$local_index_entries->current()['path'],
 					$local_index_update_path
 				)
@@ -357,7 +356,7 @@ function write_file_index_processor_entry_to_local_index(
 			. '.'
 		);
 	}
-	$local_relative_path = relative_path_under(
+	$local_relative_path = Utils::relative_path_under(
 		$file_index_processor_entry['path'],
 		$filesystem_root
 	);
