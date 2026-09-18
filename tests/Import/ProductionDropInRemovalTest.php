@@ -589,6 +589,32 @@ class ProductionDropInRemovalTest extends TestCase
         ];
     }
 
+    /** Verify cleanup removes links themselves, not the directories they point to. */
+    public function testHostCleanupPreservesSymlinkTargetsAndReportsOnlyRemovedPaths(): void
+    {
+        $this->writeState([]);
+        $plugins_directory = $this->fsRoot . '/wp-content/plugins';
+        $linked_directory = $this->tempDir . '/shared-plugin-files';
+        mkdir($plugins_directory . '/spinupwp', 0755, true);
+        mkdir($linked_directory);
+        file_put_contents($linked_directory . '/keep.php', '<?php');
+        symlink($linked_directory, $plugins_directory . '/hostinger');
+        symlink($linked_directory, $plugins_directory . '/spinupwp/shared');
+        symlink($this->tempDir . '/missing-target', $plugins_directory . '/hostinger-easy-onboarding');
+        $paths = ['wp-content/plugins/hostinger', 'wp-content/plugins/spinupwp', 'wp-content/plugins/hostinger-easy-onboarding'];
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $removed = $this->callPrivate($client, 'remove_host_plugin_paths', [array_merge($paths, ['wp-content/plugins/already-absent']), $this->fsRoot]);
+
+        $this->assertSame($paths, $removed);
+        $this->assertFileExists($linked_directory . '/keep.php');
+        foreach ($paths as $path) {
+            $this->assertFalse(is_link($this->fsRoot . '/' . $path));
+            $this->assertFileDoesNotExist($this->fsRoot . '/' . $path);
+        }
+    }
+
     public function testHostingTaskReportsFailureWhenAPluginDirectoryCannotBeRemoved(): void
     {
         require_once __DIR__ . '/../../packages/reprint-client/src/lib/post-process/functions.php';

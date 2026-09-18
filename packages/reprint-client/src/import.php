@@ -43,8 +43,10 @@ use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
 use function Reprint\Importer\apply_zipwp_access_cookie;
 use function Reprint\Importer\register_sqlite_function;
+use function Reprint\Importer\remove_host_plugin_paths;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
+use function Reprint\Importer\rmdir_recursive;
 use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\unsupported_media_type_error_detail;
 use function Reprint\Importer\wordpress_admin_referer;
@@ -92,6 +94,7 @@ require_once __DIR__ . '/lib/url-rewrite/load.php';
 // Load host analyzers (produce a runtime manifest from preflight data)
 require_once __DIR__ . '/lib/host/load.php';
 require_once __DIR__ . '/lib/class-multisite-target.php';
+require_once __DIR__ . '/lib/post-process/host-plugin-cleanup.php';
 
 // Load target runtime appliers (consume a runtime manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
@@ -2921,7 +2924,7 @@ class ImportClient
 
         // Always wipe and recreate so the directory reflects current state.
         if (is_dir($runtime_dir)) {
-            self::rmdir_recursive($runtime_dir);
+            rmdir_recursive($runtime_dir);
             $this->audit_log("RUNTIME FILES | deleted {$runtime_dir}");
         }
 
@@ -3069,33 +3072,6 @@ class ImportClient
 
         return $downloaded;
     }
-
-    /**
-     * Recursively remove a directory and all its contents.
-     */
-    private static function rmdir_recursive(string $dir): void
-    {
-        if (!is_dir($dir)) {
-            return;
-        }
-        $entries = scandir($dir);
-        if ($entries === false) {
-            return;
-        }
-        foreach ($entries as $entry) {
-            if ($entry === "." || $entry === "..") {
-                continue;
-            }
-            $path = wp_join_unix_paths($dir, $entry);
-            if (is_dir($path) && !is_link($path)) {
-                self::rmdir_recursive($path);
-            } else {
-                @unlink($path);
-            }
-        }
-        @rmdir($dir);
-    }
-
 
     /**
      * Assert that a preflight has already been run and stored in state.
@@ -5456,25 +5432,7 @@ class ImportClient
             $excluded_local_paths
         )));
         $this->save_state();
-        $removed_paths = [];
-        foreach ($excluded_local_paths as $rel_path) {
-            $full_path = wp_join_unix_paths($local_document_root, $rel_path);
-            if (!file_exists($full_path) && !is_link($full_path)) {
-                continue;
-            }
-            if (is_dir($full_path) && !is_link($full_path)) {
-                self::rmdir_recursive($full_path);
-            } else {
-                unlink($full_path);
-            }
-            clearstatcache(true, $full_path);
-            if (file_exists($full_path) || is_link($full_path)) {
-                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, not HTML.
-                throw new RuntimeException("Could not remove source-host path: {$full_path}.");
-            }
-            $removed_paths[] = $rel_path;
-        }
-        return $removed_paths;
+        return remove_host_plugin_paths($excluded_local_paths, $local_document_root);
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.
