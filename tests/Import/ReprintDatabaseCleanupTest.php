@@ -113,6 +113,12 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
         $insert->execute([7, serialize(['renamed/index.php' => 12, 'network-only/index.php' => 34])]);
         $other_network = serialize(['renamed/index.php' => 56]);
         $insert->execute([8, $other_network]);
+        $insert_token = $this->pdo->prepare('INSERT INTO custom_sitemeta (site_id, meta_key, meta_value) VALUES (?, ?, ?)');
+        foreach ([7, 8] as $network_id) {
+            foreach (['reprint_server_connection_token', 'site_export_secret'] as $option_name) {
+                $insert_token->execute([$network_id, $option_name, 'network-token-' . $network_id]);
+            }
+        }
         $selection = [
             'site_id' => 2, 'network_id' => 7, 'base_prefix' => 'custom_',
             'home_url' => 'https://source.test/shop', 'site_url' => 'https://source.test/shop',
@@ -130,6 +136,8 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
             $this->assertSame(['network-only/index.php' => 34], unserialize($this->pdo->query('SELECT meta_value FROM custom_sitemeta WHERE site_id = 7')->fetchColumn()));
         }
         $this->assertSame($other_network, $this->pdo->query('SELECT meta_value FROM custom_sitemeta WHERE site_id = 8')->fetchColumn());
+        $this->assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM custom_sitemeta WHERE site_id = 7 AND meta_key <> 'active_sitewide_plugins'")->fetchColumn());
+        $this->assertSame(['network-token-8', 'network-token-8'], $this->pdo->query("SELECT meta_value FROM custom_sitemeta WHERE site_id = 8 AND meta_key <> 'active_sitewide_plugins'")->fetchAll(PDO::FETCH_COLUMN));
         $this->assertSame('source-secret', $this->pdo->query("SELECT option_value FROM custom_options WHERE option_name = 'reprint_server_connection_token'")->fetchColumn());
         $this->assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM custom_2_options WHERE option_name = 'reprint_server_connection_token'")->fetchColumn());
     }

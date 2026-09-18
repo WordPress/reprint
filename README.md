@@ -907,9 +907,10 @@ reprint post-process --fs-root=/path/to/wordpress --state-dir=/path/to/migration
 ```
 
 Omitting `--tasks`, or passing `--tasks=all`, runs all three. A comma-separated
-list selects only those tasks. Hosting cleanup runs first, startup recovery
-runs second, and Reprint removal runs last, regardless of the list's order.
-Processing stops at the first failure.
+list selects only those tasks. Hosting cleanup runs first, Reprint removal
+runs second, and startup recovery runs last, regardless of the list's order.
+Processing stops at the first failure. A theme or must-use plugin fatal during
+startup therefore cannot prevent Reprint's earlier removal.
 
 `disable-hosting-plugins` removes known source-host plugin, MU-plugin, and
 drop-in files using the same rules as `apply-runtime`. It reads the saved

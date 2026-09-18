@@ -94,10 +94,19 @@ function cleanup_reprint_database(DatabaseConnection $database, string $engine, 
                 array_merge([base64_encode($replacement)], $params));
         }
     }
-    $options_table = '`' . str_replace('`', '``', $site_prefix . 'options') . '`';
-    $database->execute("DELETE FROM {$options_table} WHERE option_name IN (?, ?, ?, ?)", [
+    $connection_options = [
         'reprint_server_connection_token', 'reprint_server_push_authorized_token_fingerprint',
         'site_export_secret', 'site_export_push_authorized_token_fingerprint',
-    ]);
+    ];
+    $placeholders = implode(', ', array_fill(0, count($connection_options), '?'));
+    $options_table = '`' . str_replace('`', '``', $site_prefix . 'options') . '`';
+    $database->execute("DELETE FROM {$options_table} WHERE option_name IN ({$placeholders})", $connection_options);
+    if ($network !== null) {
+        // Reprint uses site options on multisite, which WordPress stores in
+        // sitemeta. Only the selected network's copied credentials belong here.
+        $network_table = '`' . str_replace('`', '``', $network['base_prefix'] . 'sitemeta') . '`';
+        $database->execute("DELETE FROM {$network_table} WHERE site_id = ? AND meta_key IN ({$placeholders})",
+            array_merge([$network['network_id']], $connection_options));
+    }
     $database->commit();
 }

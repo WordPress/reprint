@@ -13432,6 +13432,13 @@ class ImportClient
         $state["db_index"]["file"] = $this->encode_state_path_value(
             $state["db_index"]["file"] ?? null,
         );
+        // Host-plugin paths were plain UTF-8 strings. Renamed Reprint plugins
+        // can have other filename bytes; tag those without changing old records.
+        foreach ($state['apply']['remote_paths_removed_from_local_site'] ?? [] as $index => $path) {
+            if (preg_match('//u', $path) !== 1) {
+                $state['apply']['remote_paths_removed_from_local_site'][$index] = ['path_b64' => base64_encode($path)];
+            }
+        }
 
         if (
             isset($state["preflight"]) &&
@@ -13461,6 +13468,15 @@ class ImportClient
         $state["db_index"]["file"] = $this->decode_state_path_value(
             $state["db_index"]["file"] ?? null,
         );
+        foreach ($state['apply']['remote_paths_removed_from_local_site'] ?? [] as $index => $path) {
+            if (is_array($path)) {
+                $decoded = is_string($path['path_b64'] ?? null) ? base64_decode($path['path_b64'], true) : false;
+                if ($decoded === false) {
+                    throw new UnexpectedValueException('A saved runtime cleanup path contains invalid base64.');
+                }
+                $state['apply']['remote_paths_removed_from_local_site'][$index] = $decoded;
+            }
+        }
 
         if (
             isset($state["preflight"]) &&
@@ -14947,15 +14963,15 @@ if (
                 "    and drop-in files using the same rules as apply-runtime. Requires\n" .
                 "    --state-dir with successful saved preflight. Does not load WordPress\n" .
                 "    or edit active_plugins. Uses wp-content under --fs-root.\n" .
-                "  disable-failing-plugins: Require wp-load.php in fresh PHP processes.\n" .
-                "    Deactivate an active regular plugin when its file causes a fatal,\n" .
-                "    then try again. Keeps files and data; skips deactivation hooks.\n" .
-                "    Stops on other failures. Does not deactivate multisite plugins.\n" .
                 "  remove-reprint: Remove the migrated Reprint plugin files, activation\n" .
                 "    entries, and current and legacy connection options. Requires saved\n" .
                 "    preflight from an updated source and target database settings saved\n" .
                 "    by db-apply or apply-runtime. Does not load WordPress or edit dumps.\n" .
-                "    Uses wp-content/plugins under --fs-root. Runs last.\n\n" .
+                "    Uses wp-content/plugins under --fs-root.\n" .
+                "  disable-failing-plugins: Require wp-load.php in fresh PHP processes.\n" .
+                "    Deactivate an active regular plugin when its file causes a fatal,\n" .
+                "    then try again. Keeps files and data; skips deactivation hooks.\n" .
+                "    Stops on other failures. Does not deactivate multisite plugins.\n\n" .
                 "--fs-root is the ready-to-run WordPress root containing wp-load.php,\n" .
                 "not the raw download directory. The positional URL selects saved state\n" .
                 "when --state-dir contains multiple remotes. No source API requests\n" .

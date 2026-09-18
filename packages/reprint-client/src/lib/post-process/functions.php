@@ -9,7 +9,7 @@ use Throwable;
 
 require_once __DIR__ . '/../recover/functions.php';
 
-const POST_PROCESS_TASKS = array( 'disable-hosting-plugins', 'disable-failing-plugins', 'remove-reprint' );
+const POST_PROCESS_TASKS = array( 'disable-hosting-plugins', 'remove-reprint', 'disable-failing-plugins' );
 
 /**
  * Run selected local tasks, stopping at the first failure. Hosting runs first.
@@ -21,7 +21,7 @@ const POST_PROCESS_TASKS = array( 'disable-hosting-plugins', 'disable-failing-pl
  * @return array {
  *     @type string $status  Complete or failed.
  *     @type array  $results Task results in execution order. Each has task and status;
- *                           hosting cleanup has removed_paths, startup recovery has
+ *                           file cleanup has removed_paths, startup recovery has
  *                           the run_recover() fields. Failed tasks include message.
  *     @type string $message Reason processing stopped, present on failure.
  * }
@@ -74,14 +74,6 @@ function run_post_process( string $wordpress_root, string $tasks = 'all', ?strin
 			);
 			$current_task = null;
 		}
-		if ( in_array( 'disable-failing-plugins', $selected_tasks, true ) ) {
-			$current_task = 'disable-failing-plugins';
-			$result       = run_recover( $wordpress_root );
-			$results[]    = array_merge( array( 'task' => $current_task ), $result );
-			if ( 'failed' === $result['status'] ) {
-				return array( 'status' => 'failed', 'results' => $results, 'message' => $result['message'] );
-			}
-		}
 		if ( in_array( 'remove-reprint', $selected_tasks, true ) ) {
 			$current_task = 'remove-reprint';
 			$results[]    = array(
@@ -89,6 +81,14 @@ function run_post_process( string $wordpress_root, string $tasks = 'all', ?strin
 				'status'        => 'complete',
 				'removed_paths' => $client->run_remove_reprint( $wordpress_root ),
 			);
+		}
+		if ( in_array( 'disable-failing-plugins', $selected_tasks, true ) ) {
+			$current_task = 'disable-failing-plugins';
+			$result       = run_recover( $wordpress_root );
+			$results[]    = array_merge( array( 'task' => $current_task ), $result );
+			if ( 'failed' === $result['status'] ) {
+				return array( 'status' => 'failed', 'results' => $results, 'message' => $result['message'] );
+			}
 		}
 		return array( 'status' => 'complete', 'results' => $results );
 	} catch ( Throwable $error ) {

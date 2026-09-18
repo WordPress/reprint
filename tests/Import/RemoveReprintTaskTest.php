@@ -228,6 +228,30 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
         }
     }
 
+    /** Unix plugin directory names need not be UTF-8, but cleanup state is JSON. */
+    public function testKeepsNonUtf8PluginPathsInSavedPushExclusions(): void
+    {
+        $directory_name = "renam\xe9";
+        $relative_path = 'wp-content/plugins/' . $directory_name;
+        rename($this->directory . '/site/wp-content/plugins/renamed', $this->directory . '/site/' . $relative_path);
+        $record = $this->client->get_state()->preflight_record();
+        $record['data']['reprint_plugin']['basename_b64'] = base64_encode($directory_name . '/index.php');
+        $record['data']['database']['wp']['wpdb_charset'] = 'latin1';
+        $this->client->get_state()->set_preflight_record($record);
+        $this->client->save_state();
+        $this->pdo->exec('SET NAMES latin1');
+        $this->pdo->prepare("UPDATE custom_options SET option_value = ? WHERE option_name = 'active_plugins'")
+            ->execute([serialize([$directory_name . '/index.php', 'other/index.php'])]);
+        $this->pdo->exec('SET NAMES utf8mb4');
+        $result = $this->run_task();
+        $this->assertSame('complete', $result['status'], json_encode($result));
+        $this->assertDirectoryDoesNotExist($this->directory . '/site/' . $relative_path);
+        $state = ( new ReflectionMethod($this->client, 'load_state') )->invoke($this->client);
+        $this->assertContains($relative_path, $state->apply->remote_paths_removed_from_local_site);
+        $result = $this->run_task();
+        $this->assertSame('complete', $result['status'], json_encode($result));
+    }
+
     /**
      * @return array {
      *     @type string $status  Complete or failed.
