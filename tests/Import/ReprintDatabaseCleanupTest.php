@@ -2,8 +2,8 @@
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 require_once __DIR__ . '/../MySQLDumpProducer/MySQLDumpProducerTestBase.php';
-require_once __DIR__ . '/../../packages/reprint-client/src/lib/post-process/reprint-cleanup.php';
 
+use Reprint\Importer\PostProcess;
 use Reprint\Importer\Database\PdoDatabaseConnection;
 use Reprint\Importer\MultisiteTarget;
 use WordPress\Reprint\Server\Utils;
@@ -158,6 +158,6 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
     /** The local cleanup uses the real connection, without replacing its queries. */
     private function cleanup(ImportClient $client): void
     {
-        \Reprint\Importer\remove_reprint_plugin_data_from_the_imported_database(new PdoDatabaseConnection($this->pdo), 'mysql', 'renamed/index.php', $client->get_state()->preflight_record()['data']['database']['wp']);
+        PostProcess::remove_reprint_plugin_data_from_the_imported_database(new PdoDatabaseConnection($this->pdo), 'mysql', 'renamed/index.php', $client->get_state()->preflight_record()['data']['database']['wp']);
     }
 }

@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\PostProcess;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
@@ -617,7 +618,6 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testHostingTaskReportsFailureWhenAPluginDirectoryCannotBeRemoved(): void
     {
-        require_once __DIR__ . '/../../packages/reprint-client/src/lib/post-process/functions.php';
         $this->writeState([]);
         file_put_contents($this->fsRoot . '/wp-load.php', '<?php');
         $locked_directory = $this->fsRoot . '/wp-content/plugins/hostinger';
@@ -630,7 +630,7 @@ class ProductionDropInRemovalTest extends TestCase
         }
 
         try {
-            $result = \Reprint\Importer\run_post_process($this->fsRoot, 'disable-hosting-plugins', $this->stateDir);
+            $result = PostProcess::run($this->fsRoot, 'disable-hosting-plugins', $this->stateDir);
             $this->assertSame('failed', $result['status']);
             $this->assertSame('failed', $result['results'][0]['status']);
             $this->assertStringContainsString('Could not remove source-host path: ' . $locked_directory, $result['message']);

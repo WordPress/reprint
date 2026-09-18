@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use ImportClient;
+use Reprint\Importer\PostProcess;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
@@ -47,10 +48,9 @@ class CliHelpTest extends TestCase
 
     public function testPostProcessHelpListsTheTasksAndTheirStateRequirements(): void
     {
-        require_once __DIR__ . '/../../packages/reprint-client/src/lib/post-process/functions.php';
         $output = $this->runHelp('post-process');
 
-        foreach (\Reprint\Importer\POST_PROCESS_TASKS as $task) {
+        foreach (PostProcess::TASKS as $task) {
             $this->assertStringContainsString($task . ':', $output);
         }
         $this->assertStringContainsString('Runs all tasks by default', $output);

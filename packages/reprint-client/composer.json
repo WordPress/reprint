@@ -13,6 +13,11 @@
         "wp-php-toolkit/html": "^0.10.1",
         "wp-php-toolkit/reprint-server": "*@dev"
     },
+    "autoload": {
+        "classmap": [
+            "src/lib/post-process/class-post-process.php"
+        ]
+    },
     "bin": [
         "bin/reprint-client",
         "bin/reprint-importer"

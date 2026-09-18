@@ -300,7 +300,13 @@ Inside a class, omit the class name when context already supplies it: use
   every request, including unrelated Jetpack requests. Keep loading the class
   free of side effects, and keep the server package dependent only on PHP; use
   `Utils::wp_join_unix_paths()` rather than importing the filesystem package.
-  Migration state and task decisions stay in callers. See
+  Client-specific workflows belong in client classes, not the shared server
+  `Utils`. Register only class-only files or directories in the client classmap;
+  do not scan `import.php`, which declares `ImportClient` but also runs CLI setup.
+  Scripts which run work at file scope, such as the recovery child loading
+  `wp-load.php`, stay explicit entry points, not autoloaded classes.
+  Test loading in a fresh PHP process: the test bootstrap or another test may
+  already have loaded the class and hidden a missing autoload entry. See
   [PR #804](https://github.com/WordPress/reprint/pull/804) for the rationale.
 - The root Composer install uses Composer's default path-repository strategy,
   which symlinks the local server and client packages when the platform

@@ -3,10 +3,10 @@
 use PHPUnit\Framework\TestCase;
 
 /**
- * Guards the loading contract of the shared utility class.
+ * Guards lazy loading of shared utilities and client post-migration tasks.
  *
  * WordPress\Reprint\Server\Utils resolves through Composer's classmap. Nothing
- * may require a utility file by path, and the server package must not add an
+ * may require a utility file by path, and neither package may add an
  * autoload.files entry, because Composer executes every such entry on each
  * consumer request.
  */
@@ -22,19 +22,21 @@ final class UtilsLoadingTest extends TestCase
 
     public function testComposerDoesNotEagerLoadAnyFile(): void
     {
-        $composer_path = __DIR__ . '/../packages/reprint-server/composer.json';
-        $composer_json = file_get_contents($composer_path);
-        $this->assertNotFalse($composer_json, 'reprint-server composer.json must be readable.');
+        foreach (['reprint-server', 'reprint-client'] as $package) {
+            $composer_path = __DIR__ . '/../packages/' . $package . '/composer.json';
+            $composer_json = file_get_contents($composer_path);
+            $this->assertNotFalse($composer_json, $package . ' composer.json must be readable.');
 
-        $composer = json_decode($composer_json, true);
-        $this->assertIsArray($composer, 'reprint-server composer.json must contain valid JSON.');
+            $composer = json_decode($composer_json, true);
+            $this->assertIsArray($composer, $package . ' composer.json must contain valid JSON.');
 
-        $this->assertSame(
-            [],
-            $composer['autoload']['files'] ?? [],
-            'Composer executes every autoload.files entry on each consumer request. '
-            . 'Utility consumers must call the autoloaded Utils class instead.'
-        );
+            $this->assertSame(
+                [],
+                $composer['autoload']['files'] ?? [],
+                'Composer executes every autoload.files entry on each consumer request. '
+                . 'Consumers must call autoloaded classes instead.'
+            );
+        }
     }
 
     /** The test bootstrap loads Utils, so check lazy loading in a fresh process. */
@@ -75,6 +77,47 @@ final class UtilsLoadingTest extends TestCase
                 rmdir($directory);
             }
         }
+    }
+
+    /** Class lookup must not run CLI setup or the recovery child's WordPress load. */
+    public function testPostProcessAutoloadDoesNotStartTheClientOrWordPress(): void
+    {
+        $code = <<<'PHP'
+        $loader = require $argv[1];
+        $files_before = get_included_files();
+        $functions_before = get_defined_functions()['user'];
+        $constants_before = get_defined_constants(true)['user'] ?? [];
+        $class = 'Reprint\\Importer\\PostProcess';
+        $already_loaded = class_exists($class, false);
+        $autoloaded = class_exists($class);
+        echo json_encode([
+            'already_loaded' => $already_loaded,
+            'autoloaded' => $autoloaded,
+            'new_files' => array_values(array_map('basename', array_diff(get_included_files(), $files_before))),
+            'new_functions' => array_values(array_diff(get_defined_functions()['user'], $functions_before)),
+            'new_constants' => array_keys(array_diff_key(get_defined_constants(true)['user'] ?? [], $constants_before)),
+            'client_registered' => isset($loader->getClassMap()['ImportClient']),
+            'client_loaded' => class_exists('ImportClient', false),
+        ]);
+        PHP;
+        $process = proc_open(
+            [PHP_BINARY, '-r', $code, __DIR__ . '/../vendor/autoload.php'],
+            [1 => ['pipe', 'w'], 2 => ['redirect', 1]],
+            $pipes
+        );
+        $this->assertIsResource($process);
+        $output = stream_get_contents($pipes[1]);
+        fclose($pipes[1]);
+        $this->assertSame(0, proc_close($process), $output);
+        $this->assertSame([
+            'already_loaded' => false,
+            'autoloaded' => true,
+            'new_files' => ['class-post-process.php'],
+            'new_functions' => [],
+            'new_constants' => [],
+            'client_registered' => false,
+            'client_loaded' => false,
+        ], json_decode($output, true));
     }
 
     public function testNoFileRequiresTheRemovedUtilityFile(): void

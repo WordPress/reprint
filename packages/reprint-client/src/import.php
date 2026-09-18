@@ -19,6 +19,7 @@ use Reprint\Importer\Database\PdoDatabaseConnection;
 use Reprint\Importer\DatabaseUrlRewriteProcessor;
 use Reprint\Importer\MyIsamAutoIncrementStatementRewriter;
 use Reprint\Importer\NullableSpatialColumnStatementRewriter;
+use Reprint\Importer\PostProcess;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\ProgressReporter;
 use Reprint\Importer\Pull\PullFailureReportedException;
@@ -5448,10 +5449,9 @@ class ImportClient
             }
         }
         $relative_paths = array_values(array_unique($relative_paths));
-        require_once __DIR__ . '/lib/post-process/reprint-cleanup.php';
         [$database] = $this->create_target_database_connection($target, false);
         try {
-            \Reprint\Importer\remove_reprint_plugin_data_from_the_imported_database($database, $target['engine'], $plugin_basename, $preflight['database']['wp']);
+            PostProcess::remove_reprint_plugin_data_from_the_imported_database($database, $target['engine'], $plugin_basename, $preflight['database']['wp']);
         } finally {
             if ($database->inTransaction()) {
                 $database->rollBack();
@@ -15492,8 +15492,7 @@ if (
             $reprint_post_process_has_source ? 3 : 2,
             array_filter($option_defs, static fn($definition) => in_array($definition['name'], ['fs-root', 'state-dir', 'tasks'], true))
         );
-        require_once __DIR__ . '/lib/post-process/functions.php';
-        $reprint_post_process_result = \Reprint\Importer\run_post_process(
+        $reprint_post_process_result = PostProcess::run(
             $reprint_post_process_root ? ( realpath($reprint_post_process_root) ?: $reprint_post_process_root ) : '',
             $reprint_post_process_options['tasks'] ?? 'all',
             $reprint_post_process_state,
@@ -15514,9 +15513,8 @@ if (
             fwrite(STDERR, "Error: recover requires --fs-root=WORDPRESS_ROOT containing wp-load.php.\n");
             exit(1);
         }
-        require_once __DIR__ . '/lib/recover/functions.php';
         try {
-            $reprint_recover_result = \Reprint\Importer\run_recover(
+            $reprint_recover_result = PostProcess::recover(
                 realpath($reprint_recover_wordpress_root) ?: $reprint_recover_wordpress_root
             );
         } catch (\Throwable $error) {
