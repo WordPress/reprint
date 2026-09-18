@@ -2,8 +2,8 @@
 /**
  * Static helpers shared by the server and client packages.
  *
- * Composer's classmap autoloads this class; nothing requires it by path. Keep
- * it free of I/O, hooks, and mutable global state.
+ * Composer's classmap autoloads this class; nothing requires it by path. Loading
+ * it must not perform I/O, register hooks, or change mutable global state.
  *
  * Several plugins on one site may each ship a copy of this package, and only
  * the copy that autoloads first supplies this class. A method added here does
@@ -783,6 +783,67 @@ final class Utils
             return null;
         }
         return '\\\\' . strtoupper($parts[1]) . '\\' . strtoupper($parts[2]);
+    }
+
+    /**
+     * Remove local source-host files after the caller saves their push exclusions.
+     *
+     * @param string[] $excluded_local_paths Paths relative to the local site root.
+     * @param string   $local_document_root  Local site root with the standard wp-content layout.
+     * @return string[] Paths removed, relative to the local site root. Absent paths are omitted.
+     */
+    public static function remove_host_plugin_paths(array $excluded_local_paths, string $local_document_root): array
+    {
+        $removed_paths = [];
+        foreach ($excluded_local_paths as $relative_path) {
+            $full_path = self::wp_join_unix_paths($local_document_root, $relative_path);
+            if (!file_exists($full_path) && !is_link($full_path)) {
+                continue;
+            }
+            if (is_dir($full_path) && !is_link($full_path)) {
+                self::rmdir_recursive($full_path);
+            } else {
+                unlink($full_path);
+            }
+            clearstatcache(true, $full_path);
+            if (file_exists($full_path) || is_link($full_path)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, not HTML.
+                throw new RuntimeException("Could not remove source-host path: {$full_path}.");
+            }
+            $removed_paths[] = $relative_path;
+        }
+        return $removed_paths;
+    }
+
+    /**
+     * Recursively remove a directory and all its contents.
+     *
+     * Child symlinks are unlinked, not followed. Removal errors are left to callers
+     * to check; runtime-file refresh tolerates them, host-plugin cleanup does not.
+     *
+     * @param string $directory Directory to remove.
+     */
+    public static function rmdir_recursive(string $directory): void
+    {
+        if (!is_dir($directory)) {
+            return;
+        }
+        $entries = scandir($directory);
+        if (false === $entries) {
+            return;
+        }
+        foreach ($entries as $entry) {
+            if ('.' === $entry || '..' === $entry) {
+                continue;
+            }
+            $path = self::wp_join_unix_paths($directory, $entry);
+            if (is_dir($path) && !is_link($path)) {
+                self::rmdir_recursive($path);
+            } else {
+                @unlink($path);
+            }
+        }
+        @rmdir($directory);
     }
 
     // ---------------------------------------------------------------------------

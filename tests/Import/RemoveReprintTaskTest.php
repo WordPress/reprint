@@ -6,6 +6,7 @@ use ImportClient;
 use MySQLDumpProducerTestBase;
 use PDO;
 use ReflectionMethod;
+use WordPress\Reprint\Server\Utils;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 require_once __DIR__ . '/../MySQLDumpProducer/MySQLDumpProducerTestBase.php';
@@ -55,7 +56,7 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
     protected function tearDown(): void
     {
         chmod($this->directory . '/site/wp-content/plugins', 0777);
-        \Reprint\Importer\rmdir_recursive($this->directory);
+        Utils::rmdir_recursive($this->directory);
         parent::tearDown();
     }
 

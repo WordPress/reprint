@@ -37,6 +37,46 @@ final class UtilsLoadingTest extends TestCase
         );
     }
 
+    /** The test bootstrap loads Utils, so check lazy loading in a fresh process. */
+    public function testCleanupHelpersAutoloadWithoutLoadingTheClient(): void
+    {
+        $directory = sys_get_temp_dir() . '/reprint-utils-' . bin2hex(random_bytes(6));
+        mkdir($directory . '/plugin', 0700, true);
+        file_put_contents($directory . '/plugin/index.php', '<?php');
+        $code = <<<'PHP'
+        use WordPress\Reprint\Server\Utils;
+        require $argv[1];
+        $already_loaded = class_exists(Utils::class, false);
+        $removed = Utils::remove_host_plugin_paths(['plugin', 'absent'], $argv[2]);
+        Utils::rmdir_recursive($argv[2]);
+        echo json_encode([$already_loaded, $removed]);
+        PHP;
+
+        try {
+            $process = proc_open(
+                [PHP_BINARY, '-r', $code, __DIR__ . '/../vendor/autoload.php', $directory],
+                [1 => ['pipe', 'w'], 2 => ['redirect', 1]],
+                $pipes
+            );
+            $this->assertIsResource($process);
+            $output = stream_get_contents($pipes[1]);
+            fclose($pipes[1]);
+            $this->assertSame(0, proc_close($process), $output);
+            $this->assertSame([false, ['plugin']], json_decode($output, true));
+            $this->assertDirectoryDoesNotExist($directory);
+        } finally {
+            if (is_file($directory . '/plugin/index.php')) {
+                unlink($directory . '/plugin/index.php');
+            }
+            if (is_dir($directory . '/plugin')) {
+                rmdir($directory . '/plugin');
+            }
+            if (is_dir($directory)) {
+                rmdir($directory);
+            }
+        }
+    }
+
     public function testNoFileRequiresTheRemovedUtilityFile(): void
     {
         $root = dirname(__DIR__);

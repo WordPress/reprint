@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../packages/reprint-client/src/lib/post-process/repr
 
 use Reprint\Importer\Database\PdoDatabaseConnection;
 use Reprint\Importer\MultisiteTarget;
+use WordPress\Reprint\Server\Utils;
 
 /** Exercise activation edits against a real target database. */
 class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
@@ -27,7 +28,7 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
         if ($this->pdo->inTransaction()) {
             $this->pdo->rollBack();
         }
-        \Reprint\Importer\rmdir_recursive($this->directory);
+        Utils::rmdir_recursive($this->directory);
         parent::tearDown();
     }
 

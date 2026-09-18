@@ -43,10 +43,8 @@ use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
 use function Reprint\Importer\apply_zipwp_access_cookie;
 use function Reprint\Importer\register_sqlite_function;
-use function Reprint\Importer\remove_host_plugin_paths;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
-use function Reprint\Importer\rmdir_recursive;
 use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\unsupported_media_type_error_detail;
 use function Reprint\Importer\wordpress_admin_referer;
@@ -104,7 +102,6 @@ require_once __DIR__ . '/lib/sort-index-file.php';
 require_once __DIR__ . '/lib/local-index-update-functions.php';
 require_once __DIR__ . '/lib/index/class-file-index-diff-processor.php';
 require_once __DIR__ . '/lib/class-reprint-process-lock.php';
-require_once __DIR__ . '/lib/post-process/host-plugin-cleanup.php';
 
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
@@ -2924,7 +2921,7 @@ class ImportClient
 
         // Always wipe and recreate so the directory reflects current state.
         if (is_dir($runtime_dir)) {
-            rmdir_recursive($runtime_dir);
+            Utils::rmdir_recursive($runtime_dir);
             $this->audit_log("RUNTIME FILES | deleted {$runtime_dir}");
         }
 
@@ -5508,7 +5505,7 @@ class ImportClient
             $excluded_local_paths
         )));
         $this->save_state();
-        return remove_host_plugin_paths($excluded_local_paths, $local_document_root);
+        return Utils::remove_host_plugin_paths($excluded_local_paths, $local_document_root);
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.

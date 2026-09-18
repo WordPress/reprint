@@ -294,6 +294,14 @@ Inside a class, omit the class name when context already supplies it: use
 
 ## Repo mechanics that will bite you
 
+- Shared stateless helpers belong in `WordPress\Reprint\Server\Utils`, loaded
+  through Composer's classmap. Do not add utility `require_once` calls or
+  `autoload.files` entries: those make consumers manage loading or run code on
+  every request, including unrelated Jetpack requests. Keep loading the class
+  free of side effects, and keep the server package dependent only on PHP; use
+  `Utils::wp_join_unix_paths()` rather than importing the filesystem package.
+  Migration state and task decisions stay in callers. See
+  [PR #804](https://github.com/WordPress/reprint/pull/804) for the rationale.
 - The root Composer install uses Composer's default path-repository strategy,
   which symlinks the local server and client packages when the platform
   supports it. Tests then run the files under `packages/` without a copied
