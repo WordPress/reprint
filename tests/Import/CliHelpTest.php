@@ -301,11 +301,10 @@ class CliHelpTest extends TestCase
     public function testProgressOutputModeAppearsInEveryCommandHelp(): void
     {
         foreach (ImportClient::COMMANDS as $command) {
-            $this->assertStringContainsString(
-                '--progress=MODE',
-                $this->runHelp($command),
-                $command
-            );
+            $help = $this->runHelp($command);
+            $this->assertStringContainsString('--progress=MODE', $help, $command);
+            $this->assertStringContainsString('final command report', $help, $command);
+            $this->assertStringNotContainsString('--report', $help, $command);
         }
     }
 }

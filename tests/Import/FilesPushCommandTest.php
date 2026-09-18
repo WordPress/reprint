@@ -205,7 +205,7 @@ final class FilesPushCommandTest extends TestCase
         $missingSecret = $this->runFilesPush('https://example.test/?reprint-api=1', []);
         $this->assertSame(1, $missingSecret['exit']);
         $this->assertStringContainsString('files-push requires --secret=TOKEN.', $missingSecret['output']);
-        $missingSecretError = $this->lastJsonLine($missingSecret['stderr']);
+        $missingSecretError = $this->lastWorkflowResult($missingSecret['stderr']);
         $this->assertArrayHasKey('error', $missingSecretError);
         $this->assertArrayNotHasKey('command', $missingSecretError);
         $this->assertArrayNotHasKey('phase', $missingSecretError);
@@ -255,7 +255,7 @@ final class FilesPushCommandTest extends TestCase
             '--secret=token',
         ]);
         $this->assertSame(1, $missingTreeResult['exit']);
-        $missingTreeError = $this->lastJsonLine($missingTreeResult['stderr']);
+        $missingTreeError = $this->lastWorkflowResult($missingTreeResult['stderr']);
         $this->assertSame(
             'The filesystem root does not exist or is not a directory: ' . $missingTree . '.',
             $missingTreeError['error'] ?? null
@@ -272,7 +272,7 @@ final class FilesPushCommandTest extends TestCase
             '--secret=token',
         ]);
         $this->assertSame(1, $symlinkResult['exit']);
-        $symlinkError = $this->lastJsonLine($symlinkResult['stderr']);
+        $symlinkError = $this->lastWorkflowResult($symlinkResult['stderr']);
         $this->assertSame(
             'The filesystem root must not be a symlink: ' . $symlinkedTree . '.',
             $symlinkError['error'] ?? null
@@ -287,7 +287,7 @@ final class FilesPushCommandTest extends TestCase
             '--secret=token',
         ]);
         $this->assertSame(1, $nestedStateResult['exit']);
-        $nestedStateError = $this->lastJsonLine($nestedStateResult['stderr']);
+        $nestedStateError = $this->lastWorkflowResult($nestedStateResult['stderr']);
         $this->assertStringContainsString('must be outside the filesystem root', $nestedStateError['error'] ?? '');
         $this->assertStringContainsString( (string) realpath($this->localTree), $nestedStateError['error'] ?? '' );
 
@@ -391,7 +391,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertStringNotContainsString($secret, $result['output']);
         $this->assertStringNotContainsString($secret, $this->readTree($this->stateDirectory));
         $this->assertStringContainsString('--secret=***', $this->readTree($this->stateDirectory));
-        $finalLine = $this->lastJsonLine($result['stdout']);
+        $finalLine = $this->lastWorkflowResult($result['stdout']);
         $this->assertSame('files-push', $finalLine['command'] ?? null);
         $this->assertSame('failed', $finalLine['status'] ?? null);
         $this->assertSame(1, $result['exit']);
@@ -432,7 +432,7 @@ final class FilesPushCommandTest extends TestCase
         $result = $this->runFilesPush($remoteReprintApiUrl, ['--secret=token']);
 
         $this->assertSame(1, $result['exit'], $result['output']);
-        $finalLine = $this->lastJsonLine($result['stdout']);
+        $finalLine = $this->lastWorkflowResult($result['stdout']);
         $this->assertSame('files-push', $finalLine['command'] ?? null);
         $this->assertSame('error', $finalLine['status'] ?? null);
         $this->assertSame('starting_plan', $finalLine['phase'] ?? null);
@@ -659,15 +659,15 @@ final class FilesPushCommandTest extends TestCase
     }
 
     /** @return array<string,mixed> */
-    private function lastJsonLine(string $output): array
+    private function lastWorkflowResult(string $output): array
     {
         foreach (array_reverse(preg_split('/\R/', trim($output)) ?: []) as $line) {
             $decoded = json_decode($line, true);
-            if (is_array($decoded)) {
+            if (is_array($decoded) && ( $decoded['type'] ?? null ) !== 'reprint_report') {
                 return $decoded;
             }
         }
-        $this->fail('No JSON line was found in output: ' . $output);
+        $this->fail('No workflow result was found in output: ' . $output);
     }
 
     private function assertNoSenderState(string $stateDirectory): void

@@ -76,7 +76,11 @@ final class FilesDiffCommandTest extends TestCase
             'local_paths_to_push' => 0,
             'local_paths_to_delete' => 0,
         ];
-        $this->assertSame($this->encodeJsonLine($expectedRecord), $result['stdout']);
+        $this->assertSame($this->encodeJsonLine($expectedRecord) . $this->encodeJsonLine([
+            'type' => 'reprint_report', 'schema_version' => 1, 'command' => 'files-diff',
+            'status' => 'complete', 'exit_code' => 0, 'failed_stage' => null,
+            'error' => null, 'error_code' => null,
+        ]), $result['stdout']);
         $this->assertSame('', $result['stderr']);
     }
 
@@ -236,7 +240,11 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertSame(
             implode('', array_map(
                 fn(array $record): string => $this->encodeJsonLine($record),
-                array_merge($records, [$finalRecord])
+                array_merge($records, [$finalRecord, [
+                    'type' => 'reprint_report', 'schema_version' => 1, 'command' => 'files-diff',
+                    'status' => 'complete', 'exit_code' => 0, 'failed_stage' => null,
+                    'error' => null, 'error_code' => null,
+                ]])
             )),
             $result['stdout']
         );
@@ -311,7 +319,10 @@ final class FilesDiffCommandTest extends TestCase
         ]);
 
         $this->assertSame(1, $result['exit'], $result['output']);
-        $this->assertSame('', $result['stdout']);
+        $this->assertSame(1, substr_count($result['stdout'], "\n"));
+        $report = json_decode($result['stdout'], true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('reprint_report', $report['type']);
+        $this->assertSame(1, $report['exit_code']);
         $this->assertCanonicalSingleJsonLine($result['stderr']);
         $errorRecord = json_decode($result['stderr'], true, 512, JSON_THROW_ON_ERROR);
         $this->assertIsArray($errorRecord);
@@ -352,7 +363,10 @@ final class FilesDiffCommandTest extends TestCase
         $result = $this->runFilesDiff($this->remoteReprintApiUrl . '&site=other');
 
         $this->assertSame(1, $result['exit'], $result['output']);
-        $this->assertSame('', $result['stdout']);
+        $this->assertSame(1, substr_count($result['stdout'], "\n"));
+        $report = json_decode($result['stdout'], true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('reprint_report', $report['type']);
+        $this->assertSame(1, $report['exit_code']);
         $this->assertCanonicalSingleJsonLine($result['stderr']);
         $errorRecord = json_decode($result['stderr'], true, 512, JSON_THROW_ON_ERROR);
         $this->assertIsArray($errorRecord);
@@ -403,8 +417,11 @@ final class FilesDiffCommandTest extends TestCase
         ]);
 
         $this->assertSame(0, $result['exit'], $result['output']);
-        $this->assertCanonicalSingleJsonLine($result['stdout']);
-        $metadata = json_decode($result['stdout'], true, 512, JSON_THROW_ON_ERROR);
+        $lines = explode("\n", trim($result['stdout']));
+        $this->assertCount(2, $lines);
+        $this->assertCanonicalSingleJsonLine($lines[0] . "\n");
+        $metadata = json_decode($lines[0], true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('reprint_report', json_decode($lines[1], true)['type']);
         $this->assertFalse($metadata['hasCompletedOnce']);
         $this->assertSame('', $result['stderr']);
     }
@@ -640,7 +657,9 @@ final class FilesDiffCommandTest extends TestCase
         $records = [];
         foreach (preg_split('/\R/', trim($output)) ?: [] as $line) {
             $decoded = json_decode($line, true);
-            if (is_array($decoded) && ( $decoded['command'] ?? null ) === 'files-diff') {
+            if (is_array($decoded) && ( $decoded['command'] ?? null ) === 'files-diff'
+                && ( $decoded['type'] ?? null ) !== 'reprint_report'
+            ) {
                 $records[] = $decoded;
             }
         }

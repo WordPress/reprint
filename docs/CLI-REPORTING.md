@@ -1,0 +1,86 @@
+# CLI reporting
+
+JSONL and compact CLI output end with a final command result, so callers do not
+need to infer the outcome from progress messages. No separate flag is needed:
+
+```sh
+php reprint.phar pull "$URL" --state-dir="$STATE_DIR" \
+    --fs-root="$FS_ROOT" --secret="$SECRET" --progress=compact
+```
+
+The CLI appends one JSON line after a command returns or throws a handled
+exception in `--progress=jsonl` or `--progress=compact` mode. The default `auto`
+mode also appends it when the progress stream is not a terminal. `--progress=tty`
+and `auto` on a terminal do not append a report.
+
+Existing progress and command data stay in place. Stage updates say which
+command and stage are running; the final report says how the invocation ended.
+It does not repeat individual preflight checks. Captured `preflight` output
+contains its data record followed by the final report. Downloading runtime
+files can also emit progress before those records. Callers must read the
+records separately, not decode all of stdout as one JSON document or assume a
+fixed line count. The same applies to other commands that print JSON data,
+such as `pull-metadata` and `files-stats`; their data keeps its existing formatting.
+
+The report goes to stdout, except when stdout carries SQL; then it goes to
+stderr with the other progress records. `progress.json` remains the source for
+live progress. A caller does not need its last update to read the final error.
+
+```json
+{
+  "type": "reprint_report",
+  "schema_version": 1,
+  "command": "pull-files",
+  "status": "error",
+  "exit_code": 1,
+  "failed_stage": "preflight",
+  "error": "The remote server returned HTTP 401: Invalid signature",
+  "error_code": "AUTH_FAILED"
+}
+```
+
+`--progress=compact` prints short progress followed by the final report. It does
+not create an additional progress log; `progress.json` snapshots and `audit.log`
+are unchanged. With SQL on stdout, `auto` checks stderr to choose between JSONL
+and terminal progress.
+
+`command` is the outer command the caller invoked. Preflight inside `pull`,
+`pull-files`, or `pull-db` does not produce a separate final report.
+
+`status` is `complete`, `partial`, `error`, or `aborted`. Files-push also retains
+its `interrupted`, `restart`, and `failed` outcomes and its `reason` and `detail`.
+`exit_code` is the actual exit code; reporting does not choose retry timing or
+change command outcomes. Exit 2 is unfinished work, not success. A successful
+`--abort` reports `aborted`, not `complete`.
+
+`failed_stage`, `error`, and `error_code` are null when unavailable. Failed
+commands which have no specific error code still provide their error message.
+HTTP and cURL details, including `http_code`, `curl_errno`, and
+`consecutive_failures_without_progress`, are included when the command reports
+them. Callers must not depend on every failure having those fields.
+
+`preflight-assert` keeps its existing `checks` in its command result, with
+`label`, `pass`, and `detail` for each check. These are not copied into the final
+report, and no per-check codes are added.
+
+## Reading a ticket
+
+Split the captured output into lines. Decode each whole line as JSON, ignore
+non-JSON lines, and select records with `type: "reprint_report"` and a supported
+`schema_version`. Do not match JSON prefixes or assume field order.
+
+Each report describes one invocation. A ticket containing separately invoked
+preflight and download commands can contain several reports. The adapter must
+associate those reports with its steps and produce the overall migration
+result. Selecting the last success without checking which command ran can
+mistake a preflight success for a completed migration.
+
+There is no report if PHP cannot load the program, argument parsing exits
+before command setup, the process is killed, or its output pipe breaks. An
+OOM or an uncatchable signal cannot reliably print a final line. Missing or
+truncated reports mean the final result is unavailable; use the host job's
+status, never an earlier success or the last progress tick.
+
+The report is emitted at the CLI boundary. Library users calling
+`ImportClient::run()` directly still receive the command's regular output and
+can read its exit code or catch its exception.

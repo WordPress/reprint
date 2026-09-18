@@ -451,6 +451,9 @@ class ImportClient
     /** Monotonic seconds at the last compact update or stage change. */
     private float $last_compact_progress_time = 0;
 
+    /** @var array<string,mixed> Final outcome and error details for the current invocation, independent of progress throttling. */
+    public array $command_report_details = [];
+
     /** @var TerminalProgress Renders progress and lifecycle output to the terminal. */
     private TerminalProgress $progress;
 
@@ -1328,7 +1331,7 @@ class ImportClient
         }
 
         // preflight fetches a new report; preflight-assert reads the saved one.
-        // Both exit directly, including when the saved report contains an error.
+        // Both return their exit code to the CLI so it can append a command report.
         if ($command === "preflight") {
             $this->run_preflight();
             $this->run_preflight_report();
@@ -1971,6 +1974,11 @@ class ImportClient
             'steps' => $this->pipeline_steps,
         ], $result);
         $this->progress_reporter->write_file(true);
+
+        $this->command_report_details = array_intersect_key($result, array_flip(['status', 'reason', 'detail']));
+        if (in_array($status, ['failed', 'error'], true)) {
+            $this->command_report_details['error'] = $message;
+        }
 
         // Emit the final JSON line after any preceding progress records.
         if ($this->uses_terminal_progress() && !$this->verbose_mode) {
@@ -3120,7 +3128,7 @@ class ImportClient
     /**
      * Command: preflight
      *
-     * Prints the full preflight response as pretty-printed JSON to stdout.
+     * Prints the full preflight response as one JSON line to stdout.
      * The preflight itself already ran in run_preflight() — this just
      * outputs the stored result.
      */
@@ -3128,8 +3136,7 @@ class ImportClient
     {
         $entry = $this->get_state()->preflight_record();
         if ($entry === null) {
-            echo "No preflight data available.\n";
-            exit(1);
+            throw new RuntimeException("No preflight data available.");
         }
         $error = $this->get_preflight_error();
         $this->last_error_code = $error['code'] ?? null;
@@ -3137,17 +3144,18 @@ class ImportClient
         $entry["error"] = $error['message'] ?? null;
         $entry["error_code"] = $this->last_error_code;
         $entry["message"] = $error === null ? "Preflight passed." : "Error: " . $error['message'];
+        $this->command_report_details = $error === null ? [] : array_intersect_key($entry, array_flip(['error', 'error_code', 'http_code']));
         // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
         echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
         $this->write_progress_file($entry["error"]);
-        exit($error === null ? 0 : 1);
+        $this->exit_code = $error === null ? 0 : 1;
     }
 
     /**
      * Command: preflight-assert
      *
      * Inspects the preflight response (already fetched by run_preflight())
-     * and exits with code 0 if migration looks feasible, code 1 if not.
+     * and sets exit code 0 if migration looks feasible, code 1 if not.
      * Prints a human-readable pass/fail summary in terminal mode or one
      * structured result in JSONL mode.
      */
@@ -3288,7 +3296,7 @@ class ImportClient
         ], true);
 
         $this->write_progress_file($error['message'] ?? null);
-        exit($all_pass ? 0 : 1);
+        $this->exit_code = $all_pass ? 0 : 1;
     }
 
     /**
@@ -13839,6 +13847,12 @@ class ImportClient
         $this->progress_reporter->update($context, $data);
         $this->progress_reporter->write_file();
 
+        if (( $data['status'] ?? null ) === 'error') {
+            $this->command_report_details = array_intersect_key($data, array_flip([
+                'error', 'error_code', 'failed_stage', 'http_code', 'curl_errno',
+                'consecutive_failures_without_progress',
+            ]));
+        }
         // The non-verbose terminal presentation uses show_progress_line() instead.
         if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             return;
@@ -13919,6 +13933,64 @@ class ImportClient
 // ============================================================================
 // CLI Entry Point
 // ============================================================================
+
+/**
+ * Append the invocation result in JSONL and compact output, never for an inner stage.
+ *
+ * A missing client means construction or lock acquisition failed. Reports do
+ * not rely on shutdown callbacks: a killed process cannot promise a result.
+ *
+ * @param string            $command   Invoked command.
+ * @param int               $exit_code Actual process exit code.
+ * @param array             $options { Parsed CLI options.
+ *     @type string $progress   Progress output mode; auto detects the progress stream.
+ *     @type bool   $abort      Whether this invocation clears saved work.
+ *     @type string $sql_output SQL destination; stdout reserves that stream for SQL.
+ * }
+ * @param ImportClient|null $client    Command client, when construction succeeded.
+ * @param Throwable|null    $exception Unhandled command failure, when present.
+ */
+function reprint_write_command_report(
+    string $command,
+    int $exit_code,
+    array $options,
+    ?ImportClient $client,
+    ?Throwable $exception = null
+): void {
+    $stream = !in_array($command, ['files-push', 'files-diff'], true)
+        && ( $options['sql_output'] ?? ( $client === null ? null : $client->get_state()->sql_output ) ) === 'stdout'
+        ? STDERR : STDOUT;
+    $progress_output_mode = $options['progress'] ?? 'auto';
+    if ($progress_output_mode === 'tty'
+        || ( $progress_output_mode === 'auto' && function_exists('posix_isatty') && posix_isatty($stream) )
+    ) {
+        return;
+    }
+    $details = $client === null ? [] : $client->command_report_details;
+    $status = $details['status'] ?? ( $exit_code === 0 ? 'complete' : ( $exit_code === 2 ? 'partial' : 'error' ) );
+    if ($exit_code === 0 && !empty($options['abort'])) {
+        $status = 'aborted';
+    }
+    $error = null;
+    $error_code = null;
+    if ($exit_code !== 0 && $exit_code !== 2) {
+        $error = $exception === null ? ( $details['error'] ?? null ) : $exception->getMessage();
+        $error_code = $details['error_code'] ?? ( $client === null ? null : $client->last_error_code );
+    }
+    $report = [
+        'type' => 'reprint_report',
+        'schema_version' => 1,
+        'command' => $command,
+        'status' => $status,
+        'exit_code' => $exit_code,
+        'failed_stage' => $details['failed_stage'] ?? null,
+        'error' => $error,
+        'error_code' => $error_code,
+    ] + $details;
+    // Error messages may contain arbitrary source bytes. Keep the record valid
+    // JSON; path fields in structured details use the protocol's base64 form.
+    fwrite($stream, json_encode($report, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES) . "\n");
+}
 
 // Returns the importer version string. Inside the phar, reads the baked-in
 // VERSION file. In development, falls back to `git describe`.
@@ -14033,7 +14105,7 @@ if (
             'type' => 'value',
             'target' => 'progress',
             'placeholder' => 'MODE',
-            'help' => 'Progress output: auto, tty, jsonl, or compact (default: auto). Compact keeps stage changes, 30-second counter updates, results, warnings, and errors.',
+            'help' => 'Progress output: auto, tty, jsonl, or compact (default: auto). Compact keeps stage changes, 30-second counter updates, results, warnings, and errors. JSONL and compact append a final command report.',
             'help_section' => 'global',
             'commands' => ImportClient::COMMANDS,
             'valid_values' => ImportClient::PROGRESS_OUTPUT_MODES,
@@ -15056,6 +15128,7 @@ if (
                 "  tty    Force the single interactive progress bar\n" .
                 "  jsonl  Force one JSON object per line\n" .
                 "  compact  Print stage changes, 30-second counter updates, results, warnings, and errors\n" .
+                "JSONL and compact output end with one final command report.\n" .
                 "Explicit tty, jsonl, and compact modes cannot be combined with --verbose.\n" .
                 "\n" .
                 "Exit outcomes:\n" .
@@ -15523,6 +15596,7 @@ if (
         // channel to surface as ndjson events. Stash the exit code on
         // a global so the embedder can read it.
         $GLOBALS['REPRINT_PULL_EXIT_CODE'] = (int) $client->exit_code;
+        reprint_write_command_report($command, (int) $client->exit_code, $options, $client);
         if (!defined('EXIT_AFTER_PULL') || EXIT_AFTER_PULL) {
             exit($client->exit_code);
         }
@@ -15553,6 +15627,7 @@ if (
         }
         $reprint_exit_code = $e instanceof RetryLaterException ? 3 : 1;
         $GLOBALS['REPRINT_PULL_EXIT_CODE'] = $reprint_exit_code;
+        reprint_write_command_report($command, (int) $GLOBALS['REPRINT_PULL_EXIT_CODE'], $options, $client ?? null, $e);
         if (!defined('EXIT_AFTER_PULL') || EXIT_AFTER_PULL) {
             exit( (int) $reprint_exit_code );
         }
