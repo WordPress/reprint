@@ -5,6 +5,12 @@
   "dbHost": "127.0.0.1",
   "wpVersion": "6.7",
   "sites": {
+    "database-push-source": {
+      "port": 8182
+    },
+    "database-push-target": {
+      "port": 8183
+    },
     "post-requests": {
       "port": 8153
     },

@@ -118,7 +118,7 @@ final class FilesPushCommandTest extends TestCase
             '--force-http',
         ]);
         $this->assertSame(1, $olderCommand['exit'], $olderCommand['output']);
-        $this->assertStringContainsString('--force-http is accepted only by files-push.', $olderCommand['output']);
+        $this->assertStringContainsString('--force-http is accepted only by files-push and db-push.', $olderCommand['output']);
 
         $rewriteUrlWithForceHttpSource = $this->runCli([
             'db-apply',
@@ -130,7 +130,7 @@ final class FilesPushCommandTest extends TestCase
             'https://example.test',
         ]);
         $this->assertStringNotContainsString(
-            '--force-http is accepted only by files-push.',
+            '--force-http is accepted only by files-push and db-push.',
             $rewriteUrlWithForceHttpSource['output']
         );
     }
