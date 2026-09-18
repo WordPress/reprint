@@ -4,6 +4,7 @@ use WordPress\Reprint\Server\Utils;
 use WordPress\Reprint\Server\FileIndexProcessor;
 use WordPress\Reprint\Server\FileTreeProducer;
 
+require dirname(__DIR__, 3) . '/packages/reprint-server/vendor/autoload.php';
 require dirname(__DIR__, 3) . '/packages/reprint-server/src/export.php';
 restore_error_handler();
 restore_exception_handler();
