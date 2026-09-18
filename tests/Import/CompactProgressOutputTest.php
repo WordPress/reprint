@@ -117,7 +117,7 @@ final class CompactProgressOutputTest extends TestCase {
 
     public function testStageChangesAndWarningsBypassTheCounterThrottle(): void
     {
-        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files');
+        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
         $command = $client->get_state()->active_resumable_command;
         $command->command_name = 'db-pull';
         $command->completion_state = 'in_progress';
@@ -159,7 +159,7 @@ final class CompactProgressOutputTest extends TestCase {
 
     public function testPushProgressPrintsEachStageOnceWithoutItsCounters(): void
     {
-        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files');
+        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
         $stream = fopen('php://memory', 'w+b');
         ( new \ReflectionProperty($client, 'progress_fd') )->setValue($client, $stream);
         ( new \ReflectionProperty($client, 'progress_output_mode') )->setValue($client, 'compact');
@@ -184,7 +184,7 @@ final class CompactProgressOutputTest extends TestCase {
     /** @dataProvider counterEvents */
     public function testCompactSamplesChangedCountersWithoutPerFileOrTableDetails(string $command_name, string $phase, string $type): void
     {
-        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files');
+        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
         $command = $client->get_state()->active_resumable_command;
         $command->command_name = $command_name;
         $command->completion_state = 'in_progress';
@@ -261,7 +261,7 @@ final class CompactProgressOutputTest extends TestCase {
 
     public function testStageChangesRestartTheCompactInterval(): void
     {
-        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files');
+        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
         $stream = fopen('php://memory', 'w+b');
         ( new \ReflectionProperty($client, 'progress_fd') )->setValue($client, $stream);
         ( new \ReflectionProperty($client, 'progress_output_mode') )->setValue($client, 'compact');
@@ -317,7 +317,7 @@ final class CompactProgressOutputTest extends TestCase {
         $process = proc_open(
             array_merge([
                 PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
-                $command, $this->remote_url, '--secret=preflight-test-secret',
+                $command, $this->remote_url, '--secret=preflight-test-secret', '--allow-unsafe-http',
                 '--state-dir=' . $this->root . '/state', '--fs-root=' . $this->root . '/files',
                 '--progress=jsonl',
             ], $options),

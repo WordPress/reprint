@@ -2982,6 +2982,7 @@ final class PushEndpointsTest extends TestCase {
                 __DIR__ . '/../packages/reprint-client/bin/reprint-client',
                 'files-diff',
                 $this->remote_reprint_api_url,
+                '--allow-unsafe-http',
                 '--state-dir=' . $state_directory,
                 '--fs-root=' . $local_docroot,
                 '--progress=jsonl',
@@ -3028,7 +3029,7 @@ final class PushEndpointsTest extends TestCase {
             mkdir(dirname($remote_document_root . '/' . $document_root_relative_path), 0700, true);
             file_put_contents($remote_document_root . '/' . $document_root_relative_path, $contents);
         }
-        $client = new ImportClient($this->remote_reprint_api_url, $state_directory, $filesystem_root);
+        $client = new ImportClient($this->remote_reprint_api_url, $state_directory, $filesystem_root, ['allow_http' => true]);
         write_current_pull_state($client, [
             'preflight' => [
                 'http_code' => 200,
@@ -3047,6 +3048,7 @@ final class PushEndpointsTest extends TestCase {
             __DIR__ . '/../packages/reprint-client/bin/reprint-client',
             'files-pull',
             $this->remote_reprint_api_url,
+            '--allow-unsafe-http',
             '--state-dir=' . $state_directory,
             '--fs-root=' . $filesystem_root,
             '--secret=' . self::SECRET,
@@ -3064,6 +3066,7 @@ final class PushEndpointsTest extends TestCase {
                 __DIR__ . '/../packages/reprint-client/bin/reprint-client',
                 'apply-runtime',
                 $this->remote_reprint_api_url,
+                '--allow-unsafe-http',
                 '--state-dir=' . $state_directory,
                 '--fs-root=' . $filesystem_root,
                 '--runtime=php-builtin',

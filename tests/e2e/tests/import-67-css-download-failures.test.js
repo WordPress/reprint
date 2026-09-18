@@ -148,6 +148,7 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
         assert.equal(preflight.exitCode, 0, preflight.stdout + preflight.stderr);
         writeHookState(site, { action: 'pause', fired: false, release: false });
         child = spawn(phpBinary, [clientPath, 'files-pull', importUrl,
+            '--allow-unsafe-http',
             `--state-dir=${temporaryDirectory}`, `--fs-root=${fsRootDir(temporaryDirectory)}`,
             `--secret=${getSiteSecret(site)}`, ...downloadArguments(),
         ], { stdio: ['ignore', 'pipe', 'pipe'] });

@@ -1034,7 +1034,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->targetUrl,
             $this->stateDirectory,
             $this->rawFileRoot,
-            'files-pull'
+            ['signal_handling_command' => 'files-pull', 'allow_http' => true]
         );
         $client->throw_before_fetch_stage_save = true;
         $processLock = new \ReprintProcessLock($this->stateDirectory);
@@ -1110,7 +1110,7 @@ final class FilesPullLocalIndexTest extends TestCase
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->rawFileRoot,
             '--secret=secret',
-            '--force-http',
+            '--allow-unsafe-http',
         ]);
         $this->assertSame(1, $blockedPush['exit'], $blockedPush['output']);
         $this->assertStringContainsString(
@@ -1501,6 +1501,7 @@ final class FilesPullLocalIndexTest extends TestCase
      */
     private function startCliProcess(array $arguments): array
     {
+        $arguments[] = '--allow-unsafe-http';
         $process = proc_open(
             array_merge([PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client'], $arguments),
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
