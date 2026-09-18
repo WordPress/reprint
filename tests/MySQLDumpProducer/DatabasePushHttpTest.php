@@ -186,6 +186,45 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         }
     }
 
+    public function testEnumIndexZeroRemainsDistinctFromZeroAndEmptyLabels(): void {
+        $this->pdo->exec("CREATE TABLE wp_enums (id int PRIMARY KEY, value ENUM('0','', 'allowed') NULL) ENGINE=InnoDB");
+        $this->pdo->exec("INSERT IGNORE INTO wp_enums VALUES (1, 'invalid'), (2, '0'), (3, ''), (4, 'allowed'), (5, NULL)");
+        $expected = $this->pdo->query('SELECT id, value, value+0 AS member FROM wp_enums ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+        $client = $this->client();
+        $processor = $this->processor($client);
+        try {
+            while ($processor->next_step()) {
+            }
+            $status = $processor->get_status();
+            $result = $client->send_push_request('POST', 'push_db_commit', ['push_session_id' => $status['push_session_id'], 'review' => $status['review'], 'writers_stopped' => 'yes'], ['accepted']);
+            self::assertSame('complete', $result['status'], json_encode($result));
+            self::assertSame($expected, $this->receiver->query('SELECT id, value, value+0 AS member FROM wp_enums ORDER BY id')->fetchAll(PDO::FETCH_ASSOC));
+        } finally {
+            $processor->close();
+            $client->close();
+        }
+    }
+
+    public function testEnumIndexZeroDoesNotPermitTruncatingAnotherColumn(): void {
+        $this->pdo->exec("CREATE TABLE wp_enums (id int PRIMARY KEY, value ENUM('allowed') NOT NULL, url varchar(20)) ENGINE=InnoDB");
+        $this->pdo->exec("INSERT IGNORE INTO wp_enums VALUES (1, 'invalid', 'https://local.test/x')");
+        $client = $this->client();
+        $processor = $this->processor($client);
+        try {
+            while ($processor->next_step()) {
+            }
+            self::fail('URL rewriting must not silently truncate another column when restoring ENUM index zero.');
+        } catch (RuntimeException $exception) {
+            self::assertStringContainsString('ENUM index zero', $exception->getMessage());
+            self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+            $incoming = $this->receiver->query("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME LIKE '__reprint%_t0'")->fetchColumn();
+            self::assertSame(0, (int) $this->receiver->query('SELECT COUNT(*) FROM `' . $incoming . '`')->fetchColumn());
+        } finally {
+            $processor->close();
+            $client->close();
+        }
+    }
+
     /** @param list<string> $arguments Real CLI arguments. @return array<string,mixed> */
     private function runCli(array $arguments): array {
         $process = proc_open($arguments, [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']], $pipes);

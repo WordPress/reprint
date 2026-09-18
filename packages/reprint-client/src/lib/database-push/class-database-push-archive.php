@@ -94,6 +94,15 @@ class DatabasePushArchive {
             $values = [];
             $rewritten_bytes = 0;
             foreach ($row as $column => $value) {
+                if (preg_match('/^enum\(/i', $this->columns[$column]['Type'])) {
+                    [$value, $enum_index] = json_decode($value, true, 512, JSON_THROW_ON_ERROR);
+                    if ($enum_index === 0) {
+                        // A permissively stored invalid ENUM is index zero,
+                        // not the empty label or a label containing "0".
+                        $values[$column] = 0;
+                        continue;
+                    }
+                }
                 $rewritten = $value;
                 if ($value !== null && !preg_match('/^(tinyblob|blob|mediumblob|longblob|binary|varbinary|bit)\b/i', $this->columns[$column]['Type'])) {
                     $rewritten = $this->rewriter->rewrite_value( (string) $value, $this->current_table, $column);
@@ -143,6 +152,12 @@ class DatabasePushArchive {
                 // these bytes unchanged through IF and native parameter binding.
                 $value = preg_match('/^bit\(/i', $this->columns[$column]['Type'])
                     ? 'CAST(' . $identifier . ' AS BINARY)' : $identifier;
+                if (preg_match('/^enum\(/i', $this->columns[$column]['Type'])) {
+                    // Carry the index as well as the label to distinguish
+                    // index zero from a declared empty-string member. MySQL
+                    // emits +0 as a JSON float; CAST gives both engines integers.
+                    $value = 'JSON_ARRAY(' . $identifier . ',CAST(' . $identifier . ' AS UNSIGNED))';
+                }
                 $select[] = 'IF(' . $size . '>' . self::MAX_ROW_BYTES . ',NULL,' . $value . ') AS ' . $identifier;
             }
             $select[] = $size . ' AS __reprint_row_bytes';

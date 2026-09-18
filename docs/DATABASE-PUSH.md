@@ -132,7 +132,10 @@ Use a new state directory for the next deployment.
 The client takes one consistent InnoDB read snapshot and writes a private
 archive. It rewrites each complete value locally, including serialized PHP
 lengths and structured WordPress content, before base64 encoding it. Binary
-columns are copied unchanged. Rewriting a primary key is rejected. Source
+columns are copied unchanged. ENUM index zero is distinct from a declared empty
+label or the label `0`. Restoring that legacy value accepts only the server
+warnings naming its columns; other warnings roll the row back. Rewriting a
+primary key is rejected. Source
 rows are never updated. Keep source **DDL** unchanged during preparation.
 If preparation is interrupted, a new run starts a fresh snapshot; an open
 MySQL transaction cannot survive process death. A sealed archive is reused
@@ -167,6 +170,17 @@ commit response, stale review tokens, failed unique-value imports, discard,
 cleanup, client-side serialization rewriting, row-size rejection, exact
 binary/decimal/BIT/NULL values, and zero auto-increment IDs. They do not
 simulate database-server power loss or claim automatic writer draining.
+
+The WordPress E2E suite shares pull datasets for SQL edge values, structured
+URL rewriting, binary/composite keys, legacy ENUM values, 200 × 80 KiB payloads,
+and a 50,050-row version of the pull batch-boundary fixture. It compares every
+site schema and every complete row against pull/apply, checks source and live
+tables before commit, and verifies home-page rendering and admin authentication
+after commit and cleanup. Builder markup is checked against explicit expected
+values and rendered through WordPress. The pull suite’s two known unsupported
+encoded-URL cases remain limitations of the shared rewriter. A separate 13 MiB
+row check verifies
+safe rejection at the current row limit.
 
 Selective changes remain separate future work in
 [issue #827](https://github.com/WordPress/reprint/issues/827).
