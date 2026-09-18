@@ -362,7 +362,7 @@
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-client",
-                "reference": "795144bf7d8f8880da905076ce8b9fbf93e9674b"
+                "reference": "ad20e466bc2ea77ee5eff93f5a02d810a64ee23a"
             },
             "require": {
                 "ext-pdo": "*",
@@ -379,11 +379,6 @@
                 "bin/reprint-importer"
             ],
             "type": "library",
-            "autoload": {
-                "classmap": [
-                    "src/lib/post-process/class-post-process.php"
-                ]
-            },
             "license": [
                 "GPL-2.0-or-later"
             ],

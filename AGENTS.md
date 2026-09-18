@@ -295,19 +295,21 @@ Inside a class, omit the class name when context already supplies it: use
 ## Repo mechanics that will bite you
 
 - Shared stateless helpers belong in `WordPress\Reprint\Server\Utils`, loaded
-  through Composer's classmap. Do not add utility `require_once` calls or
+  through Composer's classmap. Do not add shared utility `require_once` calls or
   `autoload.files` entries: those make consumers manage loading or run code on
   every request, including unrelated Jetpack requests. Keep loading the class
   free of side effects, and keep the server package dependent only on PHP; use
   `Utils::wp_join_unix_paths()` rather than importing the filesystem package.
   Client-specific workflows belong in client classes, not the shared server
-  `Utils`. Register only class-only files or directories in the client classmap;
-  do not scan `import.php`, which declares `ImportClient` but also runs CLI setup.
+  `Utils`. Load client classes explicitly from `import.php`, alongside the other
+  client includes, rather than adding Composer autoload entries for them.
+  Do not autoload `import.php`: it declares `ImportClient` but also runs CLI setup.
   Scripts which run work at file scope, such as the recovery child loading
   `wp-load.php`, stay explicit entry points, not autoloaded classes.
   Test loading in a fresh PHP process: the test bootstrap or another test may
-  already have loaded the class and hidden a missing autoload entry. See
-  [PR #804](https://github.com/WordPress/reprint/pull/804) for the rationale.
+  already have loaded the class and hidden a missing include or autoload entry.
+  [PR #804](https://github.com/WordPress/reprint/pull/804) explains the shared
+  server utility rule; it does not require client classes to use Composer.
 - The root Composer install uses Composer's default path-repository strategy,
   which symlinks the local server and client packages when the platform
   supports it. Tests then run the files under `packages/` without a copied

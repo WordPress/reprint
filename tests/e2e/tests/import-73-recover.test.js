@@ -141,7 +141,7 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         assert.equal(result.report.status, 'complete');
         const registeredTasks = JSON.parse(execFileSync('php', ['-r',
             'require $argv[1]; echo json_encode(\\Reprint\\Importer\\PostProcess::TASKS);',
-            join(import.meta.dirname, '../../../vendor/autoload.php')], { encoding: 'utf8' }));
+            join(import.meta.dirname, '../../../packages/reprint-client/src/lib/post-process/class-post-process.php')], { encoding: 'utf8' }));
         assert.deepEqual(result.report.results.map(item => item.task), options.length
             ? ['disable-hosting-plugins', 'disable-failing-plugins']
             : registeredTasks);

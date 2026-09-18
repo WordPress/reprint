@@ -97,6 +97,8 @@ require_once __DIR__ . '/lib/class-multisite-target.php';
 // Load target runtime appliers (consume a runtime manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
 
+require_once __DIR__ . '/lib/post-process/class-post-process.php';
+
 require_once __DIR__ . '/lib/merge/load.php';
 
 require_once __DIR__ . '/lib/sort-index-file.php';

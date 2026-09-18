@@ -3,7 +3,7 @@
 use PHPUnit\Framework\TestCase;
 
 /**
- * Guards lazy loading of shared utilities and client post-migration tasks.
+ * Guards lazy loading of shared utilities and explicit loading of client tasks.
  *
  * WordPress\Reprint\Server\Utils resolves through Composer's classmap. Nothing
  * may require a utility file by path, and neither package may add an
@@ -34,7 +34,7 @@ final class UtilsLoadingTest extends TestCase
                 [],
                 $composer['autoload']['files'] ?? [],
                 'Composer executes every autoload.files entry on each consumer request. '
-                . 'Consumers must call autoloaded classes instead.'
+                . 'Shared utilities must autoload; client classes must load through the client entry point.'
             );
         }
     }
@@ -79,8 +79,8 @@ final class UtilsLoadingTest extends TestCase
         }
     }
 
-    /** Class lookup must not run CLI setup or the recovery child's WordPress load. */
-    public function testPostProcessAutoloadDoesNotStartTheClientOrWordPress(): void
+    /** Explicit class loading must not run CLI setup or the recovery child's WordPress load. */
+    public function testPostProcessLoadsExplicitlyWithoutStartingTheClientOrWordPress(): void
     {
         $code = <<<'PHP'
         $loader = require $argv[1];
@@ -90,9 +90,11 @@ final class UtilsLoadingTest extends TestCase
         $class = 'Reprint\\Importer\\PostProcess';
         $already_loaded = class_exists($class, false);
         $autoloaded = class_exists($class);
+        require_once $argv[2];
         echo json_encode([
             'already_loaded' => $already_loaded,
             'autoloaded' => $autoloaded,
+            'explicitly_loaded' => class_exists($class, false),
             'new_files' => array_values(array_map('basename', array_diff(get_included_files(), $files_before))),
             'new_functions' => array_values(array_diff(get_defined_functions()['user'], $functions_before)),
             'new_constants' => array_keys(array_diff_key(get_defined_constants(true)['user'] ?? [], $constants_before)),
@@ -101,7 +103,7 @@ final class UtilsLoadingTest extends TestCase
         ]);
         PHP;
         $process = proc_open(
-            [PHP_BINARY, '-r', $code, __DIR__ . '/../vendor/autoload.php'],
+            [PHP_BINARY, '-r', $code, __DIR__ . '/../vendor/autoload.php', __DIR__ . '/../packages/reprint-client/src/lib/post-process/class-post-process.php'],
             [1 => ['pipe', 'w'], 2 => ['redirect', 1]],
             $pipes
         );
@@ -111,7 +113,8 @@ final class UtilsLoadingTest extends TestCase
         $this->assertSame(0, proc_close($process), $output);
         $this->assertSame([
             'already_loaded' => false,
-            'autoloaded' => true,
+            'autoloaded' => false,
+            'explicitly_loaded' => true,
             'new_files' => ['class-post-process.php'],
             'new_functions' => [],
             'new_constants' => [],
