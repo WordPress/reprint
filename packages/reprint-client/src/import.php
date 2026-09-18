@@ -94,7 +94,6 @@ require_once __DIR__ . '/lib/url-rewrite/load.php';
 // Load host analyzers (produce a runtime manifest from preflight data)
 require_once __DIR__ . '/lib/host/load.php';
 require_once __DIR__ . '/lib/class-multisite-target.php';
-require_once __DIR__ . '/lib/post-process/host-plugin-cleanup.php';
 
 // Load target runtime appliers (consume a runtime manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
@@ -105,6 +104,7 @@ require_once __DIR__ . '/lib/sort-index-file.php';
 require_once __DIR__ . '/lib/local-index-update-functions.php';
 require_once __DIR__ . '/lib/index/class-file-index-diff-processor.php';
 require_once __DIR__ . '/lib/class-reprint-process-lock.php';
+require_once __DIR__ . '/lib/post-process/host-plugin-cleanup.php';
 
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
