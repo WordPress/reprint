@@ -68,6 +68,8 @@ class PullState
     public string $filter = 'none';
     /** Keep host platform plugins through file download and db-apply. */
     public bool $include_host_plugins = true;
+    /** Skip Reprint files and remove its connection state after database import. */
+    public bool $exclude_reprint = false;
     /** @var string|null User-Agent that worked during preflight. */
     public ?string $user_agent = null;
     public ?int $max_allowed_packet = null;
@@ -162,6 +164,8 @@ class PullState
         $data += [
             'files_pull_mode' => 'catch-up',
             'include_host_plugins' => false,
+            // Older pulls included Reprint; keep their selection on resume.
+            'exclude_reprint' => false,
             'css_url_mapping' => [],
             'current_css_cursor' => null,
         ];
@@ -182,6 +186,7 @@ class PullState
         $state->fs_root_nonempty_behavior = $data['fs_root_nonempty_behavior'];
         $state->filter = $data['filter'];
         $state->include_host_plugins = $data['include_host_plugins'];
+        $state->exclude_reprint = $data['exclude_reprint'];
         $state->user_agent = $data['user_agent'];
         $state->max_allowed_packet = $data['max_allowed_packet'];
         $state->resolved_path_mappings_fingerprint = $data['resolved_path_mappings_fingerprint'];
@@ -306,6 +311,7 @@ class PullState
             'fs_root_nonempty_behavior' => $this->fs_root_nonempty_behavior,
             'filter' => $this->filter,
             'include_host_plugins' => $this->include_host_plugins,
+            'exclude_reprint' => $this->exclude_reprint,
             'user_agent' => $this->user_agent,
             'max_allowed_packet' => $this->max_allowed_packet,
             'resolved_path_mappings_fingerprint' => $this->resolved_path_mappings_fingerprint,

@@ -2538,6 +2538,35 @@ function endpoint_preflight(array $config): array
         }
     }
 
+    // Report the installed alias and the physical plugin directory. A renamed
+    // or symlinked installation must not leak secret.php through either path.
+    $reprint_plugin = null;
+    if (defined('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR') && function_exists('plugin_basename')) {
+        $plugin_directory = trim_right_slash(constant('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR'), native_path_format());
+        $plugin_basename = plugin_basename($plugin_directory . '/index.php');
+        $plugin_paths = [$plugin_directory];
+        $physical_plugin_directory = realpath($plugin_directory);
+        if ($physical_plugin_directory !== false) {
+            $plugin_paths[] = $physical_plugin_directory;
+        }
+        if (defined('WP_PLUGIN_DIR') && dirname($plugin_basename) !== '.') {
+            $installed_plugin_directory = WP_PLUGIN_DIR . '/' . dirname($plugin_basename);
+            if ($physical_plugin_directory !== false && realpath($installed_plugin_directory) === $physical_plugin_directory) {
+                $plugin_paths[] = $installed_plugin_directory;
+                // WP_PLUGIN_DIR may itself be a symlink. Keep the installed
+                // plugin basename when resolving its parent, not its final link.
+                $physical_plugins_directory = realpath(WP_PLUGIN_DIR);
+                if ($physical_plugins_directory !== false) {
+                    $plugin_paths[] = $physical_plugins_directory . '/' . dirname($plugin_basename);
+                }
+            }
+        }
+        $reprint_plugin = [
+            'basename_b64' => base64_encode($plugin_basename),
+            'paths_b64' => array_map('base64_encode', array_values(array_unique($plugin_paths))),
+        ];
+    }
+
     // -- Assemble and return the preflight response --
     $ok =
         $preflight_error === null &&
@@ -2549,6 +2578,7 @@ function endpoint_preflight(array $config): array
         "timestamp" => time(),
         "protocol_version" => EXPORT_PROTOCOL_VERSION,
         "path_format" => native_path_format(),
+        "reprint_plugin" => $reprint_plugin,
         "capabilities" => [
             "base64_path_parameters" => true,
         ],
