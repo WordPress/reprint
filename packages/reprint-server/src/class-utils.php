@@ -786,13 +786,13 @@ final class Utils
     }
 
     /**
-     * Remove local source-host files after the caller saves their push exclusions.
+     * Remove selected local files and directories after the caller saves their push exclusions.
      *
      * @param string[] $excluded_local_paths Paths relative to the local site root.
      * @param string   $local_document_root  Local site root with the standard wp-content layout.
      * @return string[] Paths removed, relative to the local site root. Absent paths are omitted.
      */
-    public static function remove_host_plugin_paths(array $excluded_local_paths, string $local_document_root): array
+    public static function remove_local_files_and_directories(array $excluded_local_paths, string $local_document_root): array
     {
         $removed_paths = [];
         foreach ($excluded_local_paths as $relative_path) {
@@ -801,7 +801,7 @@ final class Utils
                 continue;
             }
             if (is_dir($full_path) && !is_link($full_path)) {
-                self::rmdir_recursive($full_path);
+                self::remove_directory_and_its_contents($full_path);
             } else {
                 unlink($full_path);
             }
@@ -823,7 +823,7 @@ final class Utils
      *
      * @param string $directory Directory to remove.
      */
-    public static function rmdir_recursive(string $directory): void
+    public static function remove_directory_and_its_contents(string $directory): void
     {
         if (!is_dir($directory)) {
             return;
@@ -838,7 +838,7 @@ final class Utils
             }
             $path = self::wp_join_unix_paths($directory, $entry);
             if (is_dir($path) && !is_link($path)) {
-                self::rmdir_recursive($path);
+                self::remove_directory_and_its_contents($path);
             } else {
                 @unlink($path);
             }

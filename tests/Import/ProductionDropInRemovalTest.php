@@ -591,7 +591,7 @@ class ProductionDropInRemovalTest extends TestCase
     }
 
     /** Verify cleanup removes links themselves, not the directories they point to. */
-    public function testHostCleanupPreservesSymlinkTargetsAndReportsOnlyRemovedPaths(): void
+    public function testHostPluginFileRemovalPreservesSymlinkTargetsAndReportsOnlyRemovedPaths(): void
     {
         $this->writeState([]);
         $plugins_directory = $this->fsRoot . '/wp-content/plugins';
@@ -606,7 +606,7 @@ class ProductionDropInRemovalTest extends TestCase
 
         $client = $this->makeClient();
         $this->loadClientState($client);
-        $removed = $this->callPrivate($client, 'remove_host_plugin_paths', [array_merge($paths, ['wp-content/plugins/already-absent']), $this->fsRoot]);
+        $removed = $this->callPrivate($client, 'record_push_exclusions_and_remove_local_paths', [array_merge($paths, ['wp-content/plugins/already-absent']), $this->fsRoot]);
 
         $this->assertSame($paths, $removed);
         $this->assertFileExists($linked_directory . '/keep.php');
@@ -630,7 +630,7 @@ class ProductionDropInRemovalTest extends TestCase
         }
 
         try {
-            $result = PostProcess::run($this->fsRoot, 'disable-hosting-plugins', $this->stateDir);
+            $result = PostProcess::run_selected_tasks($this->fsRoot, 'disable-hosting-plugins', $this->stateDir);
             $this->assertSame('failed', $result['status']);
             $this->assertSame('failed', $result['results'][0]['status']);
             $this->assertStringContainsString('Could not remove source-host path: ' . $locked_directory, $result['message']);

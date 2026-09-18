@@ -56,14 +56,14 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
     protected function tearDown(): void
     {
         chmod($this->directory . '/site/wp-content/plugins', 0777);
-        Utils::rmdir_recursive($this->directory);
+        Utils::remove_directory_and_its_contents($this->directory);
         parent::tearDown();
     }
 
     /** An offline source and an unusable wp-load.php must not block cleanup. */
     public function testRemovesOnlyReprintAndRepeatsWithoutLoadingWordPressOrContactingSource(): void
     {
-        $result = $this->run_task();
+        $result = $this->run_remove_reprint_task();
         $this->assertSame('complete', $result['status'], json_encode($result));
         $this->assertSame(['remove-reprint'], array_column($result['results'], 'task'));
         $this->assertSame(['wp-content/plugins/renamed'], $result['results'][0]['removed_paths']);
@@ -73,7 +73,7 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
         $state_file = ImportClient::remote_state_directory_path('https://source.invalid', $this->directory . '/state') . '/pull/state.json';
         $state = json_decode(file_get_contents($state_file), true);
         $this->assertSame(['wp-content/mu-plugins/previous-host.php', 'wp-content/plugins/renamed'], $state['apply']['remote_paths_removed_from_local_site']);
-        $result = $this->run_task();
+        $result = $this->run_remove_reprint_task();
         $this->assertSame('complete', $result['status'], json_encode($result));
         $this->assertSame([], $result['results'][0]['removed_paths']);
     }
@@ -85,7 +85,7 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
         unset($record['data']['reprint_plugin']);
         $this->client->get_state()->set_preflight_record($record);
         $this->client->save_state();
-        $result = $this->run_task();
+        $result = $this->run_remove_reprint_task();
         $this->assertSame('failed', $result['status']);
         $this->assertStringContainsString('rerun preflight', $result['message']);
         $this->assertFileExists($this->directory . '/site/wp-content/plugins/renamed/secret.php');
@@ -97,7 +97,7 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
         $this->client->get_state()->active_resumable_command->command_name = 'db-apply';
         $this->client->get_state()->active_resumable_command->completion_state = 'in_progress';
         $this->client->save_state();
-        $result = $this->run_task();
+        $result = $this->run_remove_reprint_task();
         $this->assertSame('failed', $result['status']);
         $this->assertStringContainsString('Finish', $result['message']);
         $this->assertFileExists($this->directory . '/site/wp-content/plugins/renamed/secret.php');
@@ -109,7 +109,7 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
     {
         $this->client->get_state()->apply->target_engine = null;
         $this->client->save_state();
-        $result = $this->run_task();
+        $result = $this->run_remove_reprint_task();
         $this->assertSame('failed', $result['status']);
         $this->assertStringContainsString('target database settings', $result['message']);
         $this->assertFileExists($this->directory . '/site/wp-content/plugins/renamed/secret.php');
@@ -122,7 +122,7 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
         $record['data']['reprint_plugin'] = null;
         $this->client->get_state()->set_preflight_record($record);
         $this->client->save_state();
-        $result = $this->run_task();
+        $result = $this->run_remove_reprint_task();
         $this->assertSame('complete', $result['status'], json_encode($result));
         $this->assertSame([], $result['results'][0]['removed_paths']);
         $this->assertFileExists($this->directory . '/site/wp-content/plugins/renamed/secret.php');
@@ -136,7 +136,7 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
             $record['data']['reprint_plugin']['basename_b64'] = base64_encode($basename);
             $this->client->get_state()->set_preflight_record($record);
             $this->client->save_state();
-            $result = $this->run_task();
+            $result = $this->run_remove_reprint_task();
             $this->assertSame('failed', $result['status'], $basename);
             $this->assertStringContainsString('relative Reprint plugin basename', $result['message']);
             $this->assertFileExists($this->directory . '/site/wp-content/plugins/renamed/secret.php');
@@ -153,13 +153,13 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
             $this->client->get_state()->apply->target_user = $user;
             $this->client->get_state()->apply->target_pass = 'test';
             $this->client->save_state();
-            $result = $this->run_task();
+            $result = $this->run_remove_reprint_task();
             $this->assertSame('failed', $result['status']);
             $this->assertStringContainsString('DELETE command denied', $result['message']);
             $this->assertFileExists($this->directory . '/site/wp-content/plugins/renamed/secret.php');
             $this->assertSame('source-token', $this->pdo->query("SELECT option_value FROM custom_options WHERE option_name = 'reprint_server_connection_token'")->fetchColumn());
             $this->pdo->exec("GRANT DELETE ON `{$this->dbName}`.* TO '{$user}'@'%'");
-            $result = $this->run_task();
+            $result = $this->run_remove_reprint_task();
             $this->assertSame('complete', $result['status'], json_encode($result));
             $this->assertDirectoryDoesNotExist($this->directory . '/site/wp-content/plugins/renamed');
         } finally {
@@ -174,11 +174,11 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
         if (is_writable($this->directory . '/site/wp-content/plugins')) {
             $this->markTestSkipped('Run as an unprivileged user to exercise directory removal failure.');
         }
-        $result = $this->run_task();
+        $result = $this->run_remove_reprint_task();
         $this->assertSame('failed', $result['status']);
         $this->assertStringContainsString('Could not remove', $result['message']);
         chmod($this->directory . '/site/wp-content/plugins', 0777);
-        $result = $this->run_task();
+        $result = $this->run_remove_reprint_task();
         $this->assertSame('complete', $result['status'], json_encode($result));
         $this->assertDirectoryDoesNotExist($this->directory . '/site/wp-content/plugins/renamed');
     }
@@ -190,7 +190,7 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
         $target = $this->directory . '/site/reprint-package';
         rename($plugin, $target);
         symlink($target, $plugin);
-        $result = $this->run_task();
+        $result = $this->run_remove_reprint_task();
         $this->assertSame('complete', $result['status'], json_encode($result));
         $this->assertSame(['reprint-package', 'wp-content/plugins/renamed'], $result['results'][0]['removed_paths']);
         $this->assertDirectoryDoesNotExist($target);
@@ -199,7 +199,7 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
         mkdir($this->directory . '/shared');
         file_put_contents($this->directory . '/shared/secret.php', 'shared-token');
         symlink($this->directory . '/shared', $plugin);
-        $result = $this->run_task();
+        $result = $this->run_remove_reprint_task();
         $this->assertSame('complete', $result['status'], json_encode($result));
         $this->assertSame('shared-token', file_get_contents($this->directory . '/shared/secret.php'));
         $this->assertFalse(is_link($plugin));
@@ -220,7 +220,7 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
             'reprint_server_connection_token', 'source-token',
         ]);
         try {
-            $result = $this->run_task();
+            $result = $this->run_remove_reprint_task();
             $this->assertSame('complete', $result['status'], json_encode($result));
             $this->assertSame(serialize(['another/index.php']), $database->query("SELECT option_value FROM custom_options WHERE option_name = 'active_plugins'")->fetchColumn());
             $this->assertSame(0, (int) $database->query("SELECT COUNT(*) FROM custom_options WHERE option_name = 'reprint_server_connection_token'")->fetchColumn());
@@ -244,12 +244,12 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
         $this->pdo->prepare("UPDATE custom_options SET option_value = ? WHERE option_name = 'active_plugins'")
             ->execute([serialize([$directory_name . '/index.php', 'other/index.php'])]);
         $this->pdo->exec('SET NAMES utf8mb4');
-        $result = $this->run_task();
+        $result = $this->run_remove_reprint_task();
         $this->assertSame('complete', $result['status'], json_encode($result));
         $this->assertDirectoryDoesNotExist($this->directory . '/site/' . $relative_path);
         $state = ( new ReflectionMethod($this->client, 'load_state') )->invoke($this->client);
         $this->assertContains($relative_path, $state->apply->remote_paths_removed_from_local_site);
-        $result = $this->run_task();
+        $result = $this->run_remove_reprint_task();
         $this->assertSame('complete', $result['status'], json_encode($result));
     }
 
@@ -260,7 +260,7 @@ class RemoveReprintTaskTest extends MySQLDumpProducerTestBase {
      *     @type string $message Failure detail, present only on failure.
      * }
      */
-    private function run_task(): array
+    private function run_remove_reprint_task(): array
     {
         $command = [PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client', 'post-process',
             '--tasks=remove-reprint', '--fs-root=' . $this->directory . '/site', '--state-dir=' . $this->directory . '/state'];

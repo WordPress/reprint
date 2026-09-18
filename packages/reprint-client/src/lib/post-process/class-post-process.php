@@ -24,11 +24,12 @@ final class PostProcess {
      *     @type string $status  Complete or failed.
      *     @type array  $results Task results in execution order. Each has task and status;
      *                           file cleanup has removed_paths, startup recovery has
-     *                           the recover() fields. Failed tasks include message.
+     *                           the disable_plugins_that_prevent_wordpress_from_loading() fields.
+     *                           Failed tasks include message.
      *     @type string $message Reason processing stopped, present on failure.
      * }
      */
-    public static function run( string $wordpress_root, string $tasks = 'all', ?string $state_directory = null, ?string $remote_reprint_api_url = null ): array {
+    public static function run_selected_tasks( string $wordpress_root, string $tasks = 'all', ?string $state_directory = null, ?string $remote_reprint_api_url = null ): array {
         $results      = array();
         $process_lock = null;
         $current_task = null;
@@ -72,7 +73,7 @@ final class PostProcess {
                 $results[]    = array(
                     'task'          => $current_task,
                     'status'        => 'complete',
-                    'removed_paths' => $client->run_disable_hosting_plugins( $wordpress_root ),
+                    'removed_paths' => $client->remove_source_host_plugin_files( $wordpress_root ),
                 );
                 $current_task = null;
             }
@@ -81,12 +82,12 @@ final class PostProcess {
                 $results[]    = array(
                     'task'          => $current_task,
                     'status'        => 'complete',
-                    'removed_paths' => $client->run_remove_reprint( $wordpress_root ),
+                    'removed_paths' => $client->remove_imported_reprint_plugin_files_and_data( $wordpress_root ),
                 );
             }
             if ( in_array( 'disable-failing-plugins', $selected_tasks, true ) ) {
                 $current_task = 'disable-failing-plugins';
-                $result       = self::recover( $wordpress_root );
+                $result       = self::disable_plugins_that_prevent_wordpress_from_loading( $wordpress_root );
                 $results[]    = array_merge( array( 'task' => $current_task ), $result );
                 if ( 'failed' === $result['status'] ) {
                     return array( 'status' => 'failed', 'results' => $results, 'message' => $result['message'] );
@@ -124,7 +125,7 @@ final class PostProcess {
      *     }
      * }
      */
-    public static function recover( string $wordpress_root ): array {
+    public static function disable_plugins_that_prevent_wordpress_from_loading( string $wordpress_root ): array {
         if ( ! is_file( $wordpress_root . '/wp-load.php' ) ) {
             // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error, not HTML.
             throw new RuntimeException( 'No wp-load.php found in ' . $wordpress_root . '.' );

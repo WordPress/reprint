@@ -40,7 +40,7 @@ final class UtilsLoadingTest extends TestCase
     }
 
     /** The test bootstrap loads Utils, so check lazy loading in a fresh process. */
-    public function testCleanupHelpersAutoloadWithoutLoadingTheClient(): void
+    public function testFileRemovalHelpersAutoloadWithoutLoadingTheClient(): void
     {
         $directory = sys_get_temp_dir() . '/reprint-utils-' . bin2hex(random_bytes(6));
         mkdir($directory . '/plugin', 0700, true);
@@ -49,8 +49,8 @@ final class UtilsLoadingTest extends TestCase
         use WordPress\Reprint\Server\Utils;
         require $argv[1];
         $already_loaded = class_exists(Utils::class, false);
-        $removed = Utils::remove_host_plugin_paths(['plugin', 'absent'], $argv[2]);
-        Utils::rmdir_recursive($argv[2]);
+        $removed = Utils::remove_local_files_and_directories(['plugin', 'absent'], $argv[2]);
+        Utils::remove_directory_and_its_contents($argv[2]);
         echo json_encode([$already_loaded, $removed]);
         PHP;
 

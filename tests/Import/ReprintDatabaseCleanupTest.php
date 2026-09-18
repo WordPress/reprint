@@ -28,12 +28,12 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
         if ($this->pdo->inTransaction()) {
             $this->pdo->rollBack();
         }
-        Utils::rmdir_recursive($this->directory);
+        Utils::remove_directory_and_its_contents($this->directory);
         parent::tearDown();
     }
 
     /** WordPress's serialized byte counts need not describe the column charset. */
-    public static function charsets(): array
+    public static function wordpress_and_column_charset_combinations(): array
     {
         return [
             ['utf8mb4', 'latin1', 'café/index.php'],
@@ -43,7 +43,7 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
         ];
     }
 
-    /** @dataProvider charsets */
+    /** @dataProvider wordpress_and_column_charset_combinations */
     public function testPreservesOtherPluginBytesAndRowFields(string $site_charset, string $column_charset, string $other_plugin): void
     {
         $this->pdo->exec("ALTER TABLE custom_options MODIFY option_value longtext CHARACTER SET {$column_charset}");
@@ -56,9 +56,9 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
         $expected_bytes = $statement->fetchColumn();
         // The importer uses UTF-8 regardless of the source WordPress charset.
         $this->pdo->exec('SET NAMES utf8mb4');
-        $client = $this->client($site_charset);
-        $this->cleanup($client);
-        $this->cleanup($client);
+        $client = $this->create_client_with_saved_preflight($site_charset);
+        $this->remove_imported_reprint_plugin_data($client);
+        $this->remove_imported_reprint_plugin_data($client);
         $this->assertSame($expected_bytes, $this->pdo->query("SELECT CAST(option_value AS BINARY) FROM custom_options WHERE option_name = 'active_plugins'")->fetchColumn());
         $this->assertSame(['option_id' => 17, 'autoload' => 'no'], $this->pdo->query("SELECT option_id, autoload FROM custom_options WHERE option_name = 'active_plugins'")->fetch(PDO::FETCH_ASSOC));
         $this->assertSame(['active_plugins', 'another_plugin_token'], $this->pdo->query('SELECT option_name FROM custom_options ORDER BY option_name')->fetchAll(PDO::FETCH_COLUMN));
@@ -73,7 +73,7 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
             ->execute([serialize(['renamed/index.php', "caf\xe9/index.php"])]);
         $before = $this->pdo->query('SELECT CAST(option_value AS BINARY) FROM custom_options ORDER BY option_id')->fetchAll(PDO::FETCH_COLUMN);
         try {
-            $this->cleanup($this->client('ascii'));
+            $this->remove_imported_reprint_plugin_data($this->create_client_with_saved_preflight('ascii'));
             $this->fail('Lossy charset conversion must stop cleanup.');
         } catch (RuntimeException $error) {
             $this->assertStringContainsString('cannot round-trip', $error->getMessage());
@@ -88,7 +88,7 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
         foreach (['a:2:{broken', str_replace('i:0;', 'i:00;', serialize(['renamed/index.php']))] as $serialized) {
             $this->pdo->prepare("REPLACE INTO custom_options (option_name, option_value) VALUES ('active_plugins', ?)")->execute([$serialized]);
             try {
-                $this->cleanup($this->client('utf8mb4'));
+                $this->remove_imported_reprint_plugin_data($this->create_client_with_saved_preflight('utf8mb4'));
                 $this->fail('Tampered serialization must stop cleanup.');
             } catch (RuntimeException $error) {
                 $this->assertStringContainsString('does not round-trip as a serialized plugin array', $error->getMessage());
@@ -100,7 +100,7 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
     }
 
     /** Replaying network adoption must not reactivate the renamed Reprint plugin. */
-    public function testSelectedSiteAndNetworkStayCleanAfterAdoptionRepeats(): void
+    public function testNetworkAdoptionDoesNotRestoreReprintActivationOrConnectionTokens(): void
     {
         $this->pdo->exec('CREATE TABLE custom_2_options LIKE custom_options');
         $this->pdo->exec("INSERT INTO custom_2_options SELECT * FROM custom_options");
@@ -126,12 +126,12 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
             'content_url' => 'https://source.test/wp-content', 'network_content_url' => 'https://source.test/wp-content',
             'uploads_url' => 'https://source.test/wp-content/uploads/sites/2',
         ];
-        $client = $this->client('utf8mb4');
+        $client = $this->create_client_with_saved_preflight('utf8mb4');
         $preflight = $client->get_state()->preflight_record();
         $preflight['data']['database']['wp']['multisite']['selection'] = $selection;
         $client->get_state()->set_preflight_record($preflight);
         for ($attempt = 0; $attempt < 2; ++$attempt) {
-            $this->cleanup($client);
+            $this->remove_imported_reprint_plugin_data($client);
             ( new MultisiteTarget($selection, 'https://target.test') )->configure_database(new PdoDatabaseConnection($this->pdo), 'admin');
             $this->assertSame(['network-only/index.php', 'site-only/index.php'], unserialize($this->pdo->query("SELECT option_value FROM custom_2_options WHERE option_name = 'active_plugins'")->fetchColumn()));
             $this->assertSame(['network-only/index.php' => 34], unserialize($this->pdo->query('SELECT meta_value FROM custom_sitemeta WHERE site_id = 7')->fetchColumn()));
@@ -144,7 +144,7 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
     }
 
     /** Supply the same installation facts that preflight saves for an import. */
-    private function client(string $charset): ImportClient
+    private function create_client_with_saved_preflight(string $charset): ImportClient
     {
         $client = new ImportClient('https://source.test', $this->directory . '/state', $this->directory . '/files');
         $client->get_state()->set_preflight_record(['http_code' => 200, 'data' => [
@@ -156,7 +156,7 @@ class ReprintDatabaseCleanupTest extends MySQLDumpProducerTestBase {
     }
 
     /** The local cleanup uses the real connection, without replacing its queries. */
-    private function cleanup(ImportClient $client): void
+    private function remove_imported_reprint_plugin_data(ImportClient $client): void
     {
         PostProcess::remove_reprint_plugin_data_from_the_imported_database(new PdoDatabaseConnection($this->pdo), 'mysql', 'renamed/index.php', $client->get_state()->preflight_record()['data']['database']['wp']);
     }

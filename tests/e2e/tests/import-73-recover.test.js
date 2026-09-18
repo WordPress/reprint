@@ -24,16 +24,16 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
 
     beforeEach(() => {
         stateDirectory = mkdtempSync(join(tmpdir(), 'post-process-'));
-        plugin('recover-healthy/main.php', "add_action('wp_loaded', function () { update_option('recover_loaded', 'yes'); });");
-        runWp(['option', 'update', 'recover_loaded', 'no']);
-        activate(['recover-healthy/main.php']);
+        writePluginFile('recover-healthy/main.php', "add_action('wp_loaded', function () { update_option('recover_loaded', 'yes'); });");
+        runWordPressCliCommand(['option', 'update', 'recover_loaded', 'no']);
+        setActivePlugins(['recover-healthy/main.php']);
     });
 
     afterEach(() => {
         rmSync(join(mustUseDirectory, 'recover-fatal.php'), { force: true });
         rmSync(join(mustUseDirectory, 'hostinger-mu-plugin.php'), { force: true });
         rmSync(join(siteDirectory, 'wp-content/object-cache.php'), { force: true });
-        activate([]);
+        setActivePlugins([]);
         for (const name of ['recover-healthy', 'recover-first', 'recover-second', 'recover-first-extra', 'recover-single.php', 'hostinger', 'renamed-reprint']) {
             rmSync(join(pluginsDirectory, name), { recursive: true, force: true });
         }
@@ -41,51 +41,51 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
     });
 
     it('loads a healthy site without changing its active plugins', () => {
-        const result = recover();
+        const result = runRecoverCommand();
         assert.equal(result.exitCode, 0, result.stderr);
         assert.equal(result.report.status, 'complete');
         assert.deepEqual(result.report.disabled_plugins, []);
-        assert.deepEqual(activePlugins(), ['recover-healthy/main.php']);
-        assert.equal(runWp(['option', 'get', 'recover_loaded']).trim(), 'yes');
+        assert.deepEqual(readActivePlugins(), ['recover-healthy/main.php']);
+        assert.equal(runWordPressCliCommand(['option', 'get', 'recover_loaded']).trim(), 'yes');
     });
 
     it('deactivates successive runtime and parse failures, then loads WordPress', () => {
-        plugin('recover-first/main.php', 'recover_missing_function();');
-        plugin('recover-second/main.php', 'this is not valid PHP;');
-        activate(['recover-first/main.php', 'recover-second/main.php', 'recover-healthy/main.php']);
+        writePluginFile('recover-first/main.php', 'recover_missing_function();');
+        writePluginFile('recover-second/main.php', 'this is not valid PHP;');
+        setActivePlugins(['recover-first/main.php', 'recover-second/main.php', 'recover-healthy/main.php']);
 
-        const result = recover();
+        const result = runRecoverCommand();
         assert.equal(result.exitCode, 0, result.stderr);
         assert.equal(result.report.status, 'complete');
         assert.deepEqual(result.report.disabled_plugins.map(item => item.plugin), ['recover-first/main.php', 'recover-second/main.php']);
         assert.match(result.report.disabled_plugins[0].error.message, /recover_missing_function/);
         assert.equal(result.report.disabled_plugins[0].error.line, 3);
-        assert.deepEqual(activePlugins(), ['recover-healthy/main.php']);
-        assert.equal(runWp(['option', 'get', 'recover_loaded']).trim(), 'yes');
+        assert.deepEqual(readActivePlugins(), ['recover-healthy/main.php']);
+        assert.equal(runWordPressCliCommand(['option', 'get', 'recover_loaded']).trim(), 'yes');
         assert.ok(existsSync(join(pluginsDirectory, 'recover-first/main.php')), 'Deactivation must preserve plugin files');
-        assert.deepEqual(recover().report.disabled_plugins, []);
+        assert.deepEqual(runRecoverCommand().report.disabled_plugins, []);
     });
 
     it('matches nested plugin files without matching a neighboring directory', () => {
-        plugin('recover-first/main.php', '');
-        plugin('recover-first-extra/main.php', "require __DIR__ . '/nested/fatal.php';");
-        plugin('recover-first-extra/nested/fatal.php', 'recover_missing_function();');
-        activate(['recover-first/main.php', 'recover-first-extra/main.php', 'recover-healthy/main.php']);
+        writePluginFile('recover-first/main.php', '');
+        writePluginFile('recover-first-extra/main.php', "require __DIR__ . '/nested/fatal.php';");
+        writePluginFile('recover-first-extra/nested/fatal.php', 'recover_missing_function();');
+        setActivePlugins(['recover-first/main.php', 'recover-first-extra/main.php', 'recover-healthy/main.php']);
 
-        const result = recover();
+        const result = runRecoverCommand();
         assert.equal(result.exitCode, 0, result.stderr);
         assert.deepEqual(result.report.disabled_plugins.map(item => item.plugin), ['recover-first-extra/main.php']);
-        assert.deepEqual(activePlugins(), ['recover-first/main.php', 'recover-healthy/main.php']);
+        assert.deepEqual(readActivePlugins(), ['recover-first/main.php', 'recover-healthy/main.php']);
     });
 
     it('deactivates a single-file plugin without running its deactivation hook', () => {
-        plugin('recover-single.php', "register_deactivation_hook(__FILE__, function () { update_option('recover_deactivation_hook', 'ran'); }); recover_missing_function();");
-        activate(['recover-single.php', 'recover-healthy/main.php']);
+        writePluginFile('recover-single.php', "register_deactivation_hook(__FILE__, function () { update_option('recover_deactivation_hook', 'ran'); }); recover_missing_function();");
+        setActivePlugins(['recover-single.php', 'recover-healthy/main.php']);
 
-        const result = recover();
+        const result = runRecoverCommand();
         assert.equal(result.exitCode, 0, result.stderr);
         assert.deepEqual(result.report.disabled_plugins.map(item => item.plugin), ['recover-single.php']);
-        assert.deepEqual(activePlugins(), ['recover-healthy/main.php']);
+        assert.deepEqual(readActivePlugins(), ['recover-healthy/main.php']);
         const hook = spawnSync('php', ['/tmp/wp-cli.phar', '--allow-root', `--path=${siteDirectory}`, '--skip-plugins', 'option', 'get', 'recover_deactivation_hook'], { encoding: 'utf8' });
         assert.notEqual(hook.status, 0, 'The deactivation hook must not run');
     });
@@ -94,49 +94,49 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         mkdirSync(mustUseDirectory, { recursive: true });
         writeFileSync(join(mustUseDirectory, 'recover-fatal.php'), '<?php recover_missing_function();');
 
-        const result = recover();
+        const result = runRecoverCommand();
         assert.equal(result.exitCode, 1);
         assert.equal(result.report.status, 'failed');
         assert.deepEqual(result.report.disabled_plugins, []);
         assert.match(result.report.error.message, /recover_missing_function/);
         rmSync(join(mustUseDirectory, 'recover-fatal.php'));
-        assert.deepEqual(activePlugins(), ['recover-healthy/main.php']);
+        assert.deepEqual(readActivePlugins(), ['recover-healthy/main.php']);
     });
 
     it('does not treat exit before wp-load returns as a successful load', () => {
-        plugin('recover-first/main.php', 'exit(0);');
-        activate(['recover-first/main.php', 'recover-healthy/main.php']);
+        writePluginFile('recover-first/main.php', 'exit(0);');
+        setActivePlugins(['recover-first/main.php', 'recover-healthy/main.php']);
 
-        const result = recover();
+        const result = runRecoverCommand();
         assert.equal(result.exitCode, 1);
         assert.equal(result.report.status, 'failed');
         assert.deepEqual(result.report.disabled_plugins, []);
-        assert.deepEqual(activePlugins(), ['recover-first/main.php', 'recover-healthy/main.php']);
+        assert.deepEqual(readActivePlugins(), ['recover-first/main.php', 'recover-healthy/main.php']);
     });
 
     it('stops when WordPress refuses to save the plugin deactivation', () => {
-        plugin('recover-first/main.php', "add_filter('pre_update_option_active_plugins', function ($value, $old) { return $old; }, 10, 2); recover_missing_function();");
-        activate(['recover-first/main.php', 'recover-healthy/main.php']);
+        writePluginFile('recover-first/main.php', "add_filter('pre_update_option_active_plugins', function ($value, $old) { return $old; }, 10, 2); recover_missing_function();");
+        setActivePlugins(['recover-first/main.php', 'recover-healthy/main.php']);
 
-        const result = recover();
+        const result = runRecoverCommand();
         assert.equal(result.exitCode, 1);
         assert.equal(result.report.status, 'failed');
         assert.deepEqual(result.report.disabled_plugins, []);
         assert.match(result.report.message, /deactivat/i);
-        assert.deepEqual(activePlugins(), ['recover-first/main.php', 'recover-healthy/main.php']);
+        assert.deepEqual(readActivePlugins(), ['recover-first/main.php', 'recover-healthy/main.php']);
     });
 
     it.each([
         { options: [] },
         { options: ['--tasks=disable-failing-plugins,disable-hosting-plugins'] },
     ])('runs hosting cleanup before fatal-plugin recovery with options $options', ({ options }) => {
-        const stateFile = savePreflight();
-        plugin('recover-first/main.php', 'recover_missing_function();');
-        activate(['recover-first/main.php', 'recover-healthy/main.php']);
+        const stateFile = savePreflightFixture();
+        writePluginFile('recover-first/main.php', 'recover_missing_function();');
+        setActivePlugins(['recover-first/main.php', 'recover-healthy/main.php']);
         mkdirSync(mustUseDirectory, { recursive: true });
         writeFileSync(join(mustUseDirectory, 'hostinger-mu-plugin.php'), '<?php recover_missing_host_function();');
 
-        const result = postProcess([`--state-dir=${stateDirectory}`, ...options]);
+        const result = runPostProcessCommand([`--state-dir=${stateDirectory}`, ...options]);
         assert.equal(result.exitCode, 0, result.stderr);
         assert.equal(result.report.status, 'complete');
         const registeredTasks = JSON.parse(execFileSync('php', ['-r',
@@ -148,40 +148,40 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         assert.deepEqual(result.report.results[0].removed_paths, ['wp-content/mu-plugins/hostinger-mu-plugin.php']);
         assert.deepEqual(result.report.results.find(item => item.task === 'disable-failing-plugins').disabled_plugins.map(item => item.plugin), ['recover-first/main.php']);
         assert.equal(existsSync(join(mustUseDirectory, 'hostinger-mu-plugin.php')), false);
-        assert.deepEqual(activePlugins(), ['recover-healthy/main.php']);
+        assert.deepEqual(readActivePlugins(), ['recover-healthy/main.php']);
         const state = JSON.parse(readFileSync(stateFile, 'utf8'));
         assert.equal(state.include_host_plugins, true, 'Post-processing must not change the saved pull selection');
         assert.ok(state.apply.remote_paths_removed_from_local_site.includes('wp-content/mu-plugins/hostinger-mu-plugin.php'));
         assert.ok(state.apply.remote_paths_removed_from_local_site.includes('wp-content/mu-plugins/previous-host.php'));
 
-        const repeated = postProcess([`--state-dir=${stateDirectory}`, '--tasks=all']);
+        const repeated = runPostProcessCommand([`--state-dir=${stateDirectory}`, '--tasks=all']);
         assert.equal(repeated.exitCode, 0, repeated.stderr);
         assert.deepEqual(repeated.report.results[0].removed_paths, []);
         assert.deepEqual(repeated.report.results.find(item => item.task === 'disable-failing-plugins').disabled_plugins, []);
     });
 
     it('runs only failing-plugin recovery without requiring migration state', () => {
-        plugin('hostinger/main.php', '');
-        plugin('recover-first/main.php', 'recover_missing_function();');
-        activate(['hostinger/main.php', 'recover-first/main.php', 'recover-healthy/main.php']);
+        writePluginFile('hostinger/main.php', '');
+        writePluginFile('recover-first/main.php', 'recover_missing_function();');
+        setActivePlugins(['hostinger/main.php', 'recover-first/main.php', 'recover-healthy/main.php']);
 
-        const result = postProcess(['--tasks=disable-failing-plugins']);
+        const result = runPostProcessCommand(['--tasks=disable-failing-plugins']);
         assert.equal(result.exitCode, 0, result.stderr);
         assert.deepEqual(result.report.results.map(item => item.task), ['disable-failing-plugins']);
-        assert.deepEqual(activePlugins(), ['hostinger/main.php', 'recover-healthy/main.php']);
+        assert.deepEqual(readActivePlugins(), ['hostinger/main.php', 'recover-healthy/main.php']);
         assert.ok(existsSync(join(pluginsDirectory, 'hostinger/main.php')));
     });
 
     it.each([false, true])('removes renamed Reprint before startup, with unrecoverable MU-plugin fatal: %s', async (fatalAfterPreflight) => {
         cpSync(join(pluginsDirectory, 'reprint-server'), join(pluginsDirectory, 'renamed-reprint'), { recursive: true });
-        activate(['renamed-reprint/index.php', 'recover-healthy/main.php']);
+        setActivePlugins(['renamed-reprint/index.php', 'recover-healthy/main.php']);
         for (const name of ['reprint_server_connection_token', 'reprint_server_push_authorized_token_fingerprint', 'site_export_secret', 'site_export_push_authorized_token_fingerprint']) {
-            runWp(['option', 'update', name, 'copied-source-credential']);
+            runWordPressCliCommand(['option', 'update', name, 'copied-source-credential']);
         }
         const response = await apiRequest('recover', 'preflight');
         assert.equal(response.status, 200, response.text);
         assert.equal(Buffer.from(response.json.reprint_plugin.basename_b64, 'base64').toString(), 'renamed-reprint/index.php');
-        const target = JSON.parse(runWp(['eval', "echo json_encode(['host' => DB_HOST, 'user' => DB_USER, 'pass' => DB_PASSWORD, 'db' => DB_NAME]);"]));
+        const target = JSON.parse(runWordPressCliCommand(['eval', "echo json_encode(['host' => DB_HOST, 'user' => DB_USER, 'pass' => DB_PASSWORD, 'db' => DB_NAME]);"]));
         execFileSync('php', ['-r', `
             require $argv[1];
             $client = new ImportClient($argv[2], $argv[3], $argv[4]);
@@ -202,7 +202,7 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
             mkdirSync(mustUseDirectory, { recursive: true });
             writeFileSync(join(mustUseDirectory, 'recover-fatal.php'), '<?php recover_missing_function();');
         }
-        const result = postProcess([`--state-dir=${stateDirectory}`]);
+        const result = runPostProcessCommand([`--state-dir=${stateDirectory}`]);
         assert.equal(result.exitCode, fatalAfterPreflight ? 1 : 0, result.stderr);
         assert.equal(existsSync(join(pluginsDirectory, 'renamed-reprint/secret.php')), false, 'A startup fatal must not prevent removal of the copied connection token');
         assert.deepEqual(result.report.results.map(item => item.task), ['disable-hosting-plugins', 'remove-reprint', 'disable-failing-plugins']);
@@ -213,67 +213,67 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
             assert.match(result.report.results[2].error.message, /recover_missing_function/);
             rmSync(join(mustUseDirectory, 'recover-fatal.php'));
         }
-        assert.deepEqual(activePlugins(), ['recover-healthy/main.php']);
-        const remainingOptions = JSON.parse(runWp(['option', 'list', '--search=*', '--field=option_name', '--format=json']));
+        assert.deepEqual(readActivePlugins(), ['recover-healthy/main.php']);
+        const remainingOptions = JSON.parse(runWordPressCliCommand(['option', 'list', '--search=*', '--field=option_name', '--format=json']));
         for (const name of ['reprint_server_connection_token', 'reprint_server_push_authorized_token_fingerprint', 'site_export_secret', 'site_export_push_authorized_token_fingerprint']) {
             assert.equal(remainingOptions.includes(name), false, name);
         }
-        assert.equal(recover().exitCode, 0);
-        assert.deepEqual(postProcess([`--state-dir=${stateDirectory}`, '--tasks=remove-reprint']).report.results[0].removed_paths, []);
+        assert.equal(runRecoverCommand().exitCode, 0);
+        assert.deepEqual(runPostProcessCommand([`--state-dir=${stateDirectory}`, '--tasks=remove-reprint']).report.results[0].removed_paths, []);
     });
 
     it('runs only hosting cleanup without loading or deactivating an ordinary failing plugin', () => {
-        savePreflight();
-        plugin('hostinger/main.php', '');
-        plugin('recover-first/main.php', 'recover_missing_function();');
-        activate(['hostinger/main.php', 'recover-first/main.php', 'recover-healthy/main.php']);
+        savePreflightFixture();
+        writePluginFile('hostinger/main.php', '');
+        writePluginFile('recover-first/main.php', 'recover_missing_function();');
+        setActivePlugins(['hostinger/main.php', 'recover-first/main.php', 'recover-healthy/main.php']);
 
-        const result = postProcess([`--state-dir=${stateDirectory}`, '--tasks=disable-hosting-plugins']);
+        const result = runPostProcessCommand([`--state-dir=${stateDirectory}`, '--tasks=disable-hosting-plugins']);
         assert.equal(result.exitCode, 0, result.stderr);
         assert.deepEqual(result.report.results.map(item => item.task), ['disable-hosting-plugins']);
         assert.deepEqual(result.report.results[0].removed_paths, ['wp-content/plugins/hostinger']);
         assert.equal(existsSync(join(pluginsDirectory, 'hostinger')), false);
-        assert.deepEqual(activePlugins(), ['hostinger/main.php', 'recover-first/main.php', 'recover-healthy/main.php']);
-        assert.equal(runWp(['option', 'get', 'recover_loaded']).trim(), 'no');
+        assert.deepEqual(readActivePlugins(), ['hostinger/main.php', 'recover-first/main.php', 'recover-healthy/main.php']);
+        assert.equal(runWordPressCliCommand(['option', 'get', 'recover_loaded']).trim(), 'no');
     });
 
     it('uses saved source-host data before removing a generic cache drop-in', () => {
-        savePreflight(sourceUrl, '/var/www/source');
+        savePreflightFixture(sourceUrl, '/var/www/source');
         const dropin = join(siteDirectory, 'wp-content/object-cache.php');
         writeFileSync(dropin, '<?php // A portable cache drop-in.');
-        let result = postProcess([`--state-dir=${stateDirectory}`, '--tasks=disable-hosting-plugins']);
+        let result = runPostProcessCommand([`--state-dir=${stateDirectory}`, '--tasks=disable-hosting-plugins']);
         assert.equal(result.exitCode, 0, result.stderr);
         assert.ok(existsSync(dropin));
 
-        savePreflight(sourceUrl, '/nas/content/live/source');
-        result = postProcess([`--state-dir=${stateDirectory}`, '--tasks=disable-hosting-plugins']);
+        savePreflightFixture(sourceUrl, '/nas/content/live/source');
+        result = runPostProcessCommand([`--state-dir=${stateDirectory}`, '--tasks=disable-hosting-plugins']);
         assert.equal(result.exitCode, 0, result.stderr);
         assert.deepEqual(result.report.results[0].removed_paths, ['wp-content/object-cache.php']);
         assert.equal(existsSync(dropin), false);
     });
 
     it('requires an explicit source when migration state contains multiple remotes', () => {
-        savePreflight();
-        savePreflight('https://other-source.example/?reprint-api');
-        plugin('hostinger/main.php', '');
+        savePreflightFixture();
+        savePreflightFixture('https://other-source.example/?reprint-api');
+        writePluginFile('hostinger/main.php', '');
 
-        const ambiguous = postProcess([`--state-dir=${stateDirectory}`]);
+        const ambiguous = runPostProcessCommand([`--state-dir=${stateDirectory}`]);
         assert.equal(ambiguous.exitCode, 1);
         assert.match(ambiguous.report.message, /more than one saved remote/);
         assert.ok(existsSync(join(pluginsDirectory, 'hostinger/main.php')));
 
-        const selected = postProcess([sourceUrl, `--state-dir=${stateDirectory}`]);
+        const selected = runPostProcessCommand([sourceUrl, `--state-dir=${stateDirectory}`]);
         assert.equal(selected.exitCode, 0, selected.stderr);
         assert.equal(existsSync(join(pluginsDirectory, 'hostinger')), false);
     });
 
     it('retains completed task results when WordPress cannot be recovered', () => {
-        savePreflight();
-        plugin('hostinger/main.php', '');
+        savePreflightFixture();
+        writePluginFile('hostinger/main.php', '');
         mkdirSync(mustUseDirectory, { recursive: true });
         writeFileSync(join(mustUseDirectory, 'recover-fatal.php'), '<?php recover_missing_function();');
 
-        const result = postProcess([`--state-dir=${stateDirectory}`]);
+        const result = runPostProcessCommand([`--state-dir=${stateDirectory}`]);
         assert.equal(result.exitCode, 1);
         assert.equal(result.report.status, 'failed');
         assert.deepEqual(result.report.results.map(item => item.status), ['complete', 'complete', 'failed']);
@@ -283,60 +283,60 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
     });
 
     it.each([null, { error: 'The saved source preflight was rejected.' }])('refuses hosting cleanup with missing or rejected preflight: %j', (preflight) => {
-        const stateFile = savePreflight();
+        const stateFile = savePreflightFixture();
         const state = JSON.parse(readFileSync(stateFile, 'utf8'));
         state.preflight = preflight === null ? null : { ...state.preflight, ...preflight };
         writeFileSync(stateFile, JSON.stringify(state));
-        plugin('hostinger/main.php', '');
+        writePluginFile('hostinger/main.php', '');
 
-        const result = postProcess([`--state-dir=${stateDirectory}`]);
+        const result = runPostProcessCommand([`--state-dir=${stateDirectory}`]);
         assert.equal(result.exitCode, 1);
         assert.equal(result.report.status, 'failed');
         assert.deepEqual(result.report.results.map(item => item.task), ['disable-hosting-plugins']);
         assert.match(result.report.message, preflight === null ? /No preflight data/ : /preflight was rejected/);
         assert.ok(existsSync(join(pluginsDirectory, 'hostinger/main.php')));
-        assert.equal(runWp(['option', 'get', 'recover_loaded']).trim(), 'no');
+        assert.equal(runWordPressCliCommand(['option', 'get', 'recover_loaded']).trim(), 'no');
     });
 
     it('rejects missing state and invalid task lists before changing the site', () => {
-        savePreflight();
-        plugin('hostinger/main.php', '');
-        plugin('recover-first/main.php', 'recover_missing_function();');
-        activate(['recover-first/main.php', 'recover-healthy/main.php']);
+        savePreflightFixture();
+        writePluginFile('hostinger/main.php', '');
+        writePluginFile('recover-first/main.php', 'recover_missing_function();');
+        setActivePlugins(['recover-first/main.php', 'recover-healthy/main.php']);
 
         for (const arguments_ of [[], [`--state-dir=${stateDirectory}/missing`], [`--state-dir=${stateDirectory}`, '--tasks=disable-hosting-plugins,unknown'], [`--state-dir=${stateDirectory}`, '--tasks='], [`--state-dir=${stateDirectory}`, '--tasks=all,disable-failing-plugins']]) {
-            const result = postProcess(arguments_);
+            const result = runPostProcessCommand(arguments_);
             assert.equal(result.exitCode, 1);
             assert.equal(result.report.status, 'failed');
             assert.ok(existsSync(join(pluginsDirectory, 'hostinger/main.php')));
-            assert.deepEqual(activePlugins(), ['recover-first/main.php', 'recover-healthy/main.php']);
+            assert.deepEqual(readActivePlugins(), ['recover-first/main.php', 'recover-healthy/main.php']);
         }
         assert.equal(existsSync(join(stateDirectory, 'missing')), false);
     });
 
     it.each(['pull/index.wal', 'push/sender.json'])('refuses hosting cleanup while %s exists', (pendingFile) => {
-        const stateFile = savePreflight();
+        const stateFile = savePreflightFixture();
         const pendingPath = join(stateFile, '../..', pendingFile);
         mkdirSync(join(pendingPath, '..'), { recursive: true });
         writeFileSync(pendingPath, '');
-        plugin('hostinger/main.php', '');
+        writePluginFile('hostinger/main.php', '');
 
-        const result = postProcess([`--state-dir=${stateDirectory}`]);
+        const result = runPostProcessCommand([`--state-dir=${stateDirectory}`]);
         assert.equal(result.exitCode, 1);
         assert.match(result.report.message, /Finish.*interrupted files-(pull|push)/);
         assert.deepEqual(result.report.results.map(item => item.task), ['disable-hosting-plugins']);
         assert.ok(existsSync(join(pluginsDirectory, 'hostinger/main.php')));
-        assert.equal(runWp(['option', 'get', 'recover_loaded']).trim(), 'no');
+        assert.equal(runWordPressCliCommand(['option', 'get', 'recover_loaded']).trim(), 'no');
     });
 
-    function postProcess(arguments_) {
+    function runPostProcessCommand(arguments_) {
         const result = spawnSync('php', [entry, 'post-process', ...arguments_, `--fs-root=${siteDirectory}`], { encoding: 'utf8', timeout: 15000 });
         assert.equal(result.error, undefined, String(result.error));
         assert.ok(result.stdout.trim().startsWith('{'), `Post-process must return a JSON report.\n${result.stdout}\n${result.stderr}`);
         return { exitCode: result.status, report: JSON.parse(result.stdout), stderr: result.stderr };
     }
 
-    function savePreflight(url = sourceUrl, documentRoot = '/nas/content/live/source') {
+    function savePreflightFixture(url = sourceUrl, documentRoot = '/nas/content/live/source') {
         execFileSync('php', ['-r', `
             require $argv[1];
             $client = new ImportClient($argv[2], $argv[3], $argv[4]);
@@ -354,28 +354,28 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         return join(stateDirectory, 'remotes', createHash('md5').update(url).digest('hex'), 'pull/state.json');
     }
 
-    function recover() {
+    function runRecoverCommand() {
         const result = spawnSync('php', [entry, 'recover', `--fs-root=${siteDirectory}`], { encoding: 'utf8', timeout: 15000 });
         assert.equal(result.error, undefined, String(result.error));
         assert.ok(result.stdout.trim().startsWith('{'), `Recover must return a JSON report.\n${result.stdout}\n${result.stderr}`);
         return { exitCode: result.status, report: JSON.parse(result.stdout), stderr: result.stderr };
     }
 
-    function plugin(basename, code) {
+    function writePluginFile(basename, code) {
         const filename = join(pluginsDirectory, basename);
         mkdirSync(join(filename, '..'), { recursive: true });
         writeFileSync(filename, `<?php\n/* Plugin Name: Recover fixture */\n${code}\n`);
     }
 
-    function activate(plugins) {
-        runWp(['option', 'update', 'active_plugins', JSON.stringify(plugins), '--format=json']);
+    function setActivePlugins(plugins) {
+        runWordPressCliCommand(['option', 'update', 'active_plugins', JSON.stringify(plugins), '--format=json']);
     }
 
-    function activePlugins() {
-        return JSON.parse(runWp(['option', 'get', 'active_plugins', '--format=json']));
+    function readActivePlugins() {
+        return JSON.parse(runWordPressCliCommand(['option', 'get', 'active_plugins', '--format=json']));
     }
 
-    function runWp(arguments_) {
+    function runWordPressCliCommand(arguments_) {
         return execFileSync('php', ['/tmp/wp-cli.phar', '--allow-root', `--path=${siteDirectory}`, '--skip-plugins', '--skip-themes', ...arguments_], { encoding: 'utf8' });
     }
 });
