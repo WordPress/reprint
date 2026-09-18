@@ -16,6 +16,9 @@ class PdoDatabaseConnection implements DatabaseConnection {
     private ?PDO $query_database;
     private ?PDO $prepared_database;
 
+    /** @var resource|null Lock shared by imports into the same SQLite file. */
+    private $sqlite_import_lock;
+
     /** @var array<string,\PDOStatement> */
     private array $prepared_statements = [];
 
@@ -30,6 +33,31 @@ class PdoDatabaseConnection implements DatabaseConnection {
     {
         $this->query_database = $query_database;
         $this->prepared_database = $prepared_database ?? $query_database;
+    }
+
+    /**
+     * Hold an import lock across SQLite commits, including the empty-target check.
+     * A state-directory lock alone does not stop two separate pulls from using
+     * the same database. SQLite's emulated GET_LOCK does not acquire a lock.
+     */
+    public function lock_sqlite_database(): void
+    {
+        $file = $this->get_prepared_database()->query('PRAGMA database_list')->fetch(PDO::FETCH_ASSOC)['file'];
+        if ($file === '') {
+            throw new RuntimeException('Resumable SQLite import requires a database file; :memory: cannot retain its import cursor.');
+        }
+        $path = $file . '.reprint-import.lock';
+        $handle = fopen($path, 'c');
+        if ($handle === false) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, not HTML.
+            throw new RuntimeException('Cannot open the SQLite import lock: ' . $path);
+        }
+        if (!flock($handle, LOCK_EX | LOCK_NB)) {
+            fclose($handle);
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, not HTML.
+            throw new RuntimeException('Another Reprint import is using the SQLite database: ' . $file);
+        }
+        $this->sqlite_import_lock = $handle;
     }
 
     public function query(string $sql, array $params = []): DatabaseResult
@@ -127,6 +155,12 @@ class PdoDatabaseConnection implements DatabaseConnection {
         $this->prepared_statement_order = [];
         $this->query_database = null;
         $this->prepared_database = null;
+        if ($this->sqlite_import_lock !== null) {
+            // Leave the file in place so waiting processes use the same inode.
+            flock($this->sqlite_import_lock, LOCK_UN);
+            fclose($this->sqlite_import_lock);
+            $this->sqlite_import_lock = null;
+        }
     }
 
     private function get_query_database(): PDO

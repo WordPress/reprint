@@ -26,7 +26,8 @@ $reprint_client = new ReprintMultisiteApplyPause($argv[2], $argv[3], $argv[3] . 
 $reprint_client->run([
     'command' => 'db-apply',
     'include_host_plugins' => false,
-    'target_engine' => 'mysql', 'target_host' => '127.0.0.1',
+    'target_engine' => isset($argv[9]) ? 'sqlite' : 'mysql',
+    'target_sqlite_path' => $argv[9] ?? null, 'target_host' => '127.0.0.1',
     'target_user' => 'e2e_admin', 'target_pass' => 'e2e_password', 'target_db' => $argv[4],
     'new_site_url' => $argv[8], 'site_admin' => 'shared',
 ]);

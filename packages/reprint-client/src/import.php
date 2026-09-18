@@ -5330,8 +5330,8 @@ class ImportClient
         }
 
         if ($multisite_target !== null) {
-            if ($target['engine'] !== 'mysql' || $wordpress_index_php === '') {
-                throw new InvalidArgumentException('The selected multisite runtime requires its imported WordPress files and a MySQL target.');
+            if ($wordpress_index_php === '') {
+                throw new InvalidArgumentException('The selected multisite runtime requires its imported WordPress files.');
             }
             // flat-docroot links core files to the raw download. Without an
             // explicit ABSPATH, wp-load.php looks beside that link's target,
@@ -6935,7 +6935,12 @@ class ImportClient
             }
             $database = new PdoDatabaseConnection($pdo, $sqlite_pdo);
             if ($import_command !== null) {
-                $this->create_database_import_position_table($database);
+                $database->lock_sqlite_database();
+                // Selected-site imports check for an empty target before adding
+                // their progress table. Ordinary imports may replace tables.
+                if (!is_array($this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null)) {
+                    $this->create_database_import_position_table($database);
+                }
             }
 
             return [
@@ -7007,7 +7012,9 @@ class ImportClient
         $database = new MysqliDatabaseConnection($mysqli);
         if ($import_command !== null) {
             $this->lock_database_import_target($database, $target_db, $import_command);
-            $this->create_database_import_position_table($database);
+            if (!is_array($this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null)) {
+                $this->create_database_import_position_table($database);
+            }
         }
 
         return [
@@ -7109,9 +7116,6 @@ class ImportClient
         $selection = $this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null;
         $site_admin = $options['site_admin'] ?? ( $has_unfinished_apply ? $apply_state->site_admin : null );
         if (is_array($selection)) {
-            if ($target['engine'] !== 'mysql') {
-                throw new InvalidArgumentException('A selected multisite pull currently requires a MySQL target.');
-            }
             if (!is_string($site_admin) || $site_admin === '') {
                 throw new InvalidArgumentException('A multisite pull requires --site-admin=LOGIN naming an imported user; received ' . json_encode($site_admin) . '.');
             }
@@ -7122,10 +7126,12 @@ class ImportClient
             }
             if ($is_resume) {
                 // The saved empty-database check applies only to this target.
-                foreach (['engine', 'host', 'port', 'db'] as $field) {
+                $target_fields = $target['engine'] === 'sqlite'
+                    ? ['engine', 'db', 'sqlite_path'] : ['engine', 'host', 'port', 'db'];
+                foreach ($target_fields as $field) {
                     if ($target[$field] !== $apply_state->{'target_' . $field}) {
                         // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option values, not HTML.
-                        throw new InvalidArgumentException('Cannot change --target-' . $field . ' while resuming a selected multisite apply; requested ' . $target[$field] . '.');
+                        throw new InvalidArgumentException('Cannot change --target-' . str_replace('_', '-', $field) . ' while resuming a selected multisite apply; requested ' . $target[$field] . '.');
                     }
                 }
                 if ($url_mapping !== $apply_state->rewrite_url) {
@@ -7263,7 +7269,7 @@ class ImportClient
         [$connection, $connection_label] = $this->create_target_database_connection(
             $target,
             true,
-            $multisite_target === null ? 'db-apply' : null,
+            'db-apply',
         );
         $spatial_srid_guard = $target_engine === 'mysql'
             ? new SpatialSridGuard(
@@ -7291,7 +7297,6 @@ class ImportClient
         $statements_executed = 0;
         try {
             if ($multisite_target !== null) {
-                $this->lock_database_import_target($connection, $target['db'], 'db-apply');
                 if (!$is_resume) {
                     $multisite_target->assert_empty_database($connection);
                     // Save the empty-target check before CREATE TABLE. A process
@@ -7806,6 +7811,13 @@ class ImportClient
             $executed_query = $stmt_rewriter->rewrite($query);
         }
 
+        // Discovery-only exporter groups contain DO 0 so their cursors can be
+        // committed without changing target rows. SQLite's translator rejects
+        // DO; SELECT evaluates the same expression and exec discards its result.
+        $lexer = new \WP_MySQL_Lexer($executed_query);
+        if ($lexer->next_token() && $lexer->get_token()->id === \WP_MySQL_Lexer::DO_SYMBOL) {
+            $executed_query = substr_replace($executed_query, 'SELECT', $lexer->get_token()->start, 2);
+        }
         $connection->exec($executed_query);
     }
 

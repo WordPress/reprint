@@ -20,12 +20,26 @@ Preflight sends the selected site's URL bases and a separate list of child-site
 paths below those bases on the same host. It does not list other domains or
 pages. The URL map does not grow with network size.
 
-Run the pull with an empty MySQL target database, --new-site-url, and
+Run the pull with an empty MySQL or SQLite target database, --new-site-url, and
 --site-admin=LOGIN. LOGIN must name a user included in the selected site's
 export. This explicitly adds the administrator role to that user at the target;
 it keeps their existing roles and direct capabilities. Other imported users
 keep their selected-site roles. Source superadmins are not copied merely
 because they administer the source network.
+
+For example, migrate the shop to a SQLite file:
+
+```sh
+php reprint.phar pull 'https://network.example/shop/?reprint-api' \
+  --secret=NETWORK_TOKEN --state-dir=./state --fs-root=./files \
+  --target-engine=sqlite --target-sqlite-path=/srv/shop/database.sqlite \
+  --target-db=shop --new-site-url=https://shop.example --site-admin=alice
+```
+
+The source can use MySQL or SQLite Database Integration 2.x/3.x. Reprint uses
+the source's active driver. The target uses the bundled SQLite driver.
+SQLite-to-MySQL imports still require a target that supports the source's
+collations; MySQL 8's `utf8mb4_0900_ai_ci` is not supported by older MariaDB.
 
 Direct `db-pull --sql-output=mysql` is rejected for multisite. Use `pull-db`,
 or download with `db-pull` and apply with `db-apply`, so the target checks and
@@ -119,8 +133,7 @@ uses domain/path filters; it can scan and sort many rows. Further batches scan
 primary-key windows, including non-matches, rather than repeatedly sorting the
 remaining matches. This runs only at preflight, not for every SQL/file request.
 
-Child-path lookup works on MySQL and SQLite. Selected-site SQL export still
-requires the direct MySQL connection and saved-user lock described below.
+Child-path lookup and selected-site SQL export work on MySQL and SQLite.
 
 The large-network tests cover both directory cases, then run a real SQL import
 with a million child paths. They also check that progress JSON stays small and
@@ -169,11 +182,25 @@ Exporting site 7 creates `network_7_reprint_users` on the source. Site 8 uses
 never enter the SQL dump or database index. Core WordPress tables and indexes
 are not changed.
 
-The source needs `pdo_mysql`, a direct connection using its WordPress database
+A MySQL source needs `pdo_mysql`, a direct connection using its WordPress database
 credentials, and SELECT, CREATE, DROP, INSERT, and UPDATE privileges. The shared
 wpdb fallback is not used for selected-site exports: its reads and writes may
 use different connections or share a plugin's transaction. Saved IDs must
 commit before their export cursor is sent.
+
+A SQLite source uses its active translator and native connection, with no open
+transaction. Saved IDs commit before the cursor is sent. Each site holds a
+separate file lock beside the database, for example
+`.ht.sqlite.network_7_reprint_users.lock`. SQLite targets hold
+`database.sqlite.reprint-import.lock` across the empty check and SQL commits.
+The SQLite source lock file also stores the fixed-size export token because
+older SQLite drivers discard table comments. A fresh export replaces this token
+before it replaces the saved rows; no cursor with the new token is sent until
+the table is ready. Both require a writable database directory and working
+filesystem locks.
+The locks release on close or process death. Leave the lock files in place;
+removing one while another process uses it would allow two separate locks.
+In-memory databases cannot resume across requests and are rejected.
 
 Content tables finish first. Each batch of posts, comments or links saves its
 user IDs and source row IDs before sending SQL. A partial export still visits
@@ -250,10 +277,8 @@ cannot work locally when the referenced site was not moved.
 
 This first version rejects legacy blogs.dir uploads, custom upload or content
 directories, shared custom user tables at the source, and symlinks in selected
-paths. It does not copy cache or database drop-ins. SQLite source networks need
-separate saved-user locking support before selected-site SQL export can work.
-SQLite targets, merging into an existing database, and pushing into a multisite
-network are also unsupported.
+paths. It does not copy cache or database drop-ins. Merging into an existing
+database and pushing into a multisite network remain unsupported.
 
 The source is not a transactionally frozen snapshot. Pause writes for the final
 migration if a point-in-time copy is required. The pull does not delete the
