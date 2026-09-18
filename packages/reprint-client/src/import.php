@@ -174,6 +174,7 @@ class ImportClient
         "files-index",
         "files-stats",
         "db-pull",
+        "db-push",
         "db-index",
         "db-apply",
         "db-rewrite-urls",
@@ -521,9 +522,9 @@ class ImportClient
             } elseif ($signal_handling_command === 'db-rewrite-urls') {
                 pcntl_signal(SIGINT, [$this, 'handle_database_url_rewrite_shutdown']);
                 pcntl_signal(SIGTERM, [$this, 'handle_database_url_rewrite_shutdown']);
-            } elseif ($signal_handling_command !== 'files-diff') {
-                // files-diff must not save the pull command's state from a
-                // shutdown handler; default signal behavior ends the report.
+            } elseif (!in_array($signal_handling_command, ['files-diff', 'db-push'], true)) {
+                // files-diff and db-push must not save pull state from a
+                // shutdown handler; the default signal behavior ends the process.
                 pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
                 pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
             }
@@ -750,7 +751,7 @@ class ImportClient
         $masked = $argv;
         if (isset($masked[2]) && strpos($masked[2], '-') !== 0) {
             $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
-            if ($command === 'files-push') {
+            if (in_array($command, ['files-push', 'db-push'], true)) {
                 $masked[2] = self::mask_url_credentials($masked[2]);
             }
         }
@@ -760,6 +761,9 @@ class ImportClient
             }
             if (strpos($argument, '--secret=') === 0) {
                 $masked[$argument_index] = '--secret=***';
+            }
+            if (strpos($argument, '--source-pass=') === 0) {
+                $masked[$argument_index] = '--source-pass=***';
             }
             if (strpos($argument, '--target-pass=') === 0) {
                 $masked[$argument_index] = '--target-pass=***';
@@ -992,6 +996,11 @@ class ImportClient
             }
             $this->state = $this->load_state();
             $this->run_files_diff($options);
+            return;
+        }
+        if ($command === "db-push") {
+            $this->state = $this->load_state_with_request_context();
+            $this->run_db_push($options);
             return;
         }
         if ($command === "files-push") {
@@ -6416,6 +6425,100 @@ class ImportClient
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI errors are never HTML.
+    /**
+     * Stages a complete local database, or explicitly commits/cleans a staged push.
+     *
+     * @param array<string,mixed> $options Parsed db-push command options.
+     */
+    public function run_db_push(array $options): void
+    {
+        require_once __DIR__ . '/lib/database-push/class-database-push-processor.php';
+        if (empty($options['secret']) || strpos($this->remote_reprint_api_url, 'SECRET_KEY=') !== false
+            || parse_url($this->remote_reprint_api_url, PHP_URL_USER) !== null
+            || parse_url($this->remote_reprint_api_url, PHP_URL_PASS) !== null) {
+            throw new InvalidArgumentException('db-push requires --secret=TOKEN, never a token in the URL.');
+        }
+        if (count(array_filter([$options['commit'] ?? null, $options['cleanup'] ?? null, $options['abort'] ?? null])) > 1) {
+            throw new InvalidArgumentException('db-push accepts only one of --commit, --cleanup, or --abort.');
+        }
+        if (array_key_exists('commit', $options) && !preg_match('/^[a-f0-9]{64}$/D', $options['commit'])) {
+            throw new InvalidArgumentException('db-push --commit requires the 64-character review token from staging.');
+        }
+        if (array_key_exists('source_dsn', $options) && $options['source_dsn'] === '') {
+            throw new InvalidArgumentException('db-push --source-dsn must not be empty.');
+        }
+        $json_flags = JSON_UNESCAPED_SLASHES | ( $this->progress_output_mode === 'jsonl' ? 0 : JSON_PRETTY_PRINT );
+        $state_dir = dirname($this->pull_state_directory) . '/push/database';
+        $saved = is_file($state_dir . '/state.json') ? json_decode(file_get_contents($state_dir . '/state.json'), true) : [];
+        $transport = new MultipartPushStreamClient([
+            'remote_reprint_api_url' => $this->remote_reprint_api_url,
+            'allow_http' => !empty($options['force_http']),
+            'hmac_client' => new Site_Export_HMAC_Client($options['secret']),
+            'request_context_headers' => $this->request_context_headers,
+            'request_sizer' => new PushRequestSizer([], $saved['request_sizer'] ?? []),
+        ]);
+        try {
+            if (!empty($options['commit']) || !empty($options['cleanup']) || !empty($options['abort'])) {
+                if (empty($saved['push_session_id'])) {
+                    throw new RuntimeException('Stage a database with db-push before committing or cleaning it.');
+                }
+                $parameters = ['push_session_id' => $saved['push_session_id']];
+                $endpoint = !empty($options['abort']) ? 'push_db_discard' : 'push_db_cleanup';
+                if (!empty($options['commit'])) {
+                    if (empty($options['writers_stopped'])) {
+                        throw new InvalidArgumentException('Before --commit, stop and drain web requests, cron, queues, and other writers; then pass --writers-stopped.');
+                    }
+                    $parameters['review'] = $options['commit'];
+                    $parameters['writers_stopped'] = 'yes';
+                    $endpoint = 'push_db_commit';
+                }
+                do {
+                    $result = $transport->send_push_request('POST', $endpoint, $parameters, ['accepted']);
+                    if ($result['status'] !== 'complete') {
+                        throw new RuntimeException($result['detail'] ?? 'Database push control request failed.');
+                    }
+                    $response = $result['response'];
+                } while ($endpoint !== 'push_db_commit' && !in_array($response['phase'], ['complete', 'discarded'], true));
+                echo json_encode($response, $json_flags) . "\n";
+                return;
+            }
+            $source = [
+                'dsn' => $options['source_dsn'] ?? '',
+                'user' => $options['source_user'] ?? '',
+                'pass' => $options['source_pass'] ?? '',
+            ];
+            if ($source['dsn'] === '') {
+                $target = $this->get_local_site_database_target();
+                if (( $target['engine'] ?? null ) !== 'mysql') {
+                    throw new InvalidArgumentException('db-push requires a recorded local MySQL database or --source-dsn, --source-user, and --source-pass. SQLite sources are not yet supported.');
+                }
+                $source = [
+                    'dsn' => 'mysql:host=' . $target['host'] . ';port=' . $target['port'] . ';dbname=' . $target['db'] . ';charset=utf8mb4',
+                    'user' => $target['user'],
+                    'pass' => $target['pass'],
+                ];
+            }
+            $url_mapping = [];
+            foreach ($options['rewrite_url'] ?? [] as [$local_url, $hosted_url]) {
+                $url_mapping[$local_url] = $hosted_url;
+            }
+            $factory = is_file($state_dir . '/state.json') ? 'resume' : 'start';
+            $processor = DatabasePushProcessor::$factory($transport, $state_dir, $source, $options['table_prefix'] ?? 'wp_', $url_mapping);
+            try {
+                // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedWhile -- The processor performs the work; the command owns the whole-operation loop.
+                while ($processor->next_step()) {
+                    // The command owns the whole-operation loop. Each processor
+                    // step performs one row, file chunk, request, or transition.
+                }
+                echo json_encode($processor->get_status(), $json_flags) . "\n";
+            } finally {
+                $processor->close();
+            }
+        } finally {
+            $transport->close();
+        }
+    }
+
     /** Rewrite URL-bearing values in an existing database one record at a time. */
     public function run_db_rewrite_urls(array $options): void
     {
@@ -14019,14 +14122,14 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC connection token for export API authentication',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-push', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
             'name' => 'force-http',
             'type' => 'flag',
             'target' => 'force_http',
             'help' => 'Allow a trusted plain-HTTP target; anyone able to observe or alter the connection can read or modify transferred content',
-            'commands' => ['files-push'],
+            'commands' => ['files-push', 'db-push'],
         ],
         [
             'name' => 'progress',
@@ -14042,9 +14145,9 @@ if (
             'name' => 'abort',
             'type' => 'flag',
             'target' => 'abort',
-            'help' => 'Abort current sync and exit (preserves downloaded files)',
+            'help' => 'Abort current sync (preserves downloads). For db-push, discard staged tables and hosted archive without changing live tables',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-push', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls'],
         ],
         [
             'name' => 'verbose',
@@ -14053,7 +14156,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-push', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
         ],
         [
             'name' => 'exclude-host-plugins',
@@ -14176,6 +14279,55 @@ if (
             'commands' => ['pull-files', 'files-pull', 'files-index'],
         ],
 
+        [
+            'name' => 'source-dsn',
+            'type' => 'value',
+            'target' => 'source_dsn',
+            'help' => 'Local MySQL PDO DSN (otherwise uses the recorded db-apply target)',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'source-user',
+            'type' => 'value',
+            'target' => 'source_user',
+            'help' => 'Local MySQL username',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'source-pass',
+            'type' => 'value',
+            'target' => 'source_pass',
+            'help' => 'Local MySQL password',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'table-prefix',
+            'type' => 'value',
+            'target' => 'table_prefix',
+            'help' => 'Identical local and hosted table prefix (default wp_)',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'commit',
+            'type' => 'value',
+            'target' => 'commit',
+            'help' => 'Overwrite production using the staged review token; deletes production-only site rows and tables',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'writers-stopped',
+            'type' => 'flag',
+            'target' => 'writers_stopped',
+            'help' => 'Confirm all web requests, cron, queues, and other database writers have been stopped and drained',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'cleanup',
+            'type' => 'flag',
+            'target' => 'cleanup',
+            'help' => 'Delete retained old tables and the hosted archive after inspection and cache clearing',
+            'commands' => ['db-push'],
+        ],
         // ── db-pull options ──────────────────────────────────────
         [
             'name' => 'max-allowed-packet',
@@ -14299,7 +14451,7 @@ if (
             'target' => 'rewrite_url',
             'argument_labels' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
-            'commands' => ['pull', 'pull-files', 'files-pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
+            'commands' => ['pull', 'pull-files', 'files-pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'db-push'],
         ],
         [
             'name' => 'site-admin',
@@ -14484,6 +14636,7 @@ if (
         for ($i = $start; $i < $argc; $i++) {
             $arg = $argv[$i];
             $matched = false;
+            $def = [];
 
             foreach ($option_defs as $def) {
                 $names = [$def['name']];
@@ -14564,6 +14717,14 @@ if (
                 }
             }
 
+            // Full overwrite must never silently ignore pull selections. Use
+            // the same command declarations as help, not a second option list.
+            if ($matched && ( $argv[1] ?? null ) === 'db-push'
+                && $def['name'] !== 'state-dir'
+                && !in_array('db-push', $def['commands'] ?? [], true)) {
+                fwrite(STDERR, "Error: db-push does not accept --{$def['name']}. Full overwrite includes every site table.\n");
+                exit(1);
+            }
             if (!$matched) {
                 fwrite(STDERR, "Unknown option: {$arg}\n");
                 exit(1);
@@ -15094,6 +15255,13 @@ if (
                 "Requires a prior files-index or files-pull run.\n",
             "extra" => null,
         ],
+        "db-push" => [
+            "level" => "low",
+            "short" => "Stage a full database overwrite for explicit confirmation",
+            "usage" => "reprint db-push <remote-reprint-api-url> --state-dir=DIR --secret=TOKEN [options]",
+            "description" => "Prepares a local MySQL snapshot, rewrites URLs on the client, and streams it into private hosted tables. Prints the table list and review token without changing live tables.\nRequires a host-configured standalone API route. Stop all writers before --commit. Clear caches and verify the site before --cleanup.\n",
+            "extra" => "Initial limits: InnoDB only, 256 tables, 128 columns per table, 1 MiB per row before and after rewriting. No multisite, foreign keys, triggers, generated/spatial columns, partitions, events, or routines.\n",
+        ],
         "db-pull" => [
             "level" => "low",
             "short" => "Pull the database as a SQL dump (index + download)",
@@ -15392,8 +15560,8 @@ if (
                 exit(1);
             }
         }
-    } elseif (!empty($options['force_http'])) {
-        fwrite(STDERR, "Error: --force-http is accepted only by files-push.\n");
+    } elseif ($command !== 'db-push' && !empty($options['force_http'])) {
+        fwrite(STDERR, "Error: --force-http is accepted only by files-push and db-push.\n");
         exit(1);
     }
 
@@ -15457,7 +15625,7 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$filesystem_root && !$flat_document_root && $command !== "pull-metadata") {
+    if (!$filesystem_root && !$flat_document_root && !in_array($command, ["pull-metadata", "db-push"], true)) {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);

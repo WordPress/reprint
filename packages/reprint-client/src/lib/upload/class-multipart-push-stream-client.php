@@ -258,6 +258,7 @@ class MultipartPushStreamClient
      * timeout before any body bytes move.
      *
      * @param string $push_session_id Target-issued 32-character hexadecimal push session ID.
+     * @param string $endpoint File or database archive upload endpoint.
      *
      * @return bool False when connection setup failed; get_last_error()
      *     explains why.
@@ -265,7 +266,7 @@ class MultipartPushStreamClient
      * @throws InvalidArgumentException If the push session ID is malformed.
      * @throws RuntimeException If another upload request is already open.
      */
-    public function start_upload_request(string $push_session_id): bool
+    public function start_upload_request(string $push_session_id, string $endpoint = 'push_upload'): bool
     {
         if ($this->curl_handle !== null) {
             throw new RuntimeException('An upload request is already open; call finish_request() first.');
@@ -289,7 +290,10 @@ class MultipartPushStreamClient
         $this->response_body = '';
         $this->response_too_large = false;
 
-        $request_url = $this->endpoint_url('push_upload', ['push_session_id' => $push_session_id]);
+        if (!in_array($endpoint, ['push_upload', 'push_db_upload'], true)) {
+            throw new InvalidArgumentException('Unknown push upload endpoint: ' . $endpoint);
+        }
+        $request_url = $this->endpoint_url($endpoint, ['push_session_id' => $push_session_id]);
         $headers = $this->request_context_headers;
         foreach ($this->hmac_client->get_envelope_auth_headers('POST', $request_url) as $name => $value) {
             $headers[$name] = $value;

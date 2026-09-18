@@ -24,6 +24,11 @@ final class HTTPServer {
         'push_remove' => 'remove',
     ];
 
+    private const DATABASE_PUSH_ENDPOINTS = ['push_db_create', 'push_db_upload', 'push_db_status', 'push_db_import', 'push_db_commit', 'push_db_cleanup', 'push_db_discard'];
+
+    /** @var DatabasePushEndpoints|null */
+    private $database_push_endpoints;
+
     /** @var array<string, callable> */
     private $handlers;
 
@@ -73,6 +78,10 @@ final class HTTPServer {
                 );
                 // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
             }
+        }
+        if (isset($options['database_push'])) {
+            require_once __DIR__ . '/class-database-push-endpoints.php';
+            $this->database_push_endpoints = new DatabasePushEndpoints($options['database_push']);
         }
         $this->handlers = $options['handlers'] ?? $this->default_handlers();
     }
@@ -408,7 +417,7 @@ final class HTTPServer {
 
     public static function is_push_endpoint(string $endpoint): bool {
         $push_endpoint_methods = self::PUSH_ENDPOINT_METHODS;
-        return isset($push_endpoint_methods[$endpoint]);
+        return isset($push_endpoint_methods[$endpoint]) || in_array($endpoint, self::DATABASE_PUSH_ENDPOINTS, true);
     }
 
     /**
@@ -425,6 +434,11 @@ final class HTTPServer {
         if ($this->push_endpoints !== null) {
             foreach (self::PUSH_ENDPOINT_METHODS as $endpoint => $method) {
                 $handlers[$endpoint] = [$this->push_endpoints, $method];
+            }
+        }
+        if ($this->database_push_endpoints !== null) {
+            foreach (self::DATABASE_PUSH_ENDPOINTS as $endpoint) {
+                $handlers[$endpoint] = [$this->database_push_endpoints, 'handle'];
             }
         }
         return $handlers;
