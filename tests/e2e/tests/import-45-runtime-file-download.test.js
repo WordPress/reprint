@@ -131,12 +131,17 @@ describe('Import: Runtime file download', () => {
 
     it('preflight prints its data and final report as separate JSON lines', () => {
         const records = preflightResult.stdout.trim().split('\n').map(line => JSON.parse(line));
-        assert.equal(records.length, 2, 'Preflight should print its data followed by one report');
-        assert.ok(records[0].timestamp, 'Preflight data should retain its timestamp');
-        assert.ok(records[0].data, 'Preflight data should remain available');
-        assert.equal(records[1].type, 'reprint_report');
-        assert.equal(records[1].command, 'preflight');
-        assert.equal(records[1].exit_code, preflightResult.exitCode);
+        // Downloading runtime files can emit progress before the preflight data.
+        const preflightRecords = records.filter(record => record.data !== undefined);
+        const reports = records.filter(record => record.type === 'reprint_report');
+        assert.equal(preflightRecords.length, 1, 'Preflight data should appear once');
+        assert.ok(preflightRecords[0].timestamp, 'Preflight data should retain its timestamp');
+        assert.ok(preflightRecords[0].data, 'Preflight data should remain available');
+        assert.equal(reports.length, 1, 'Preflight should emit exactly one final report');
+        assert.equal(reports[0], records.at(-1), 'The command report should be the last record');
+        assert.equal(reports[0].command, 'preflight');
+        assert.equal(reports[0].status, 'complete');
+        assert.equal(reports[0].exit_code, preflightResult.exitCode);
     });
 
     it('audit log does NOT contain "Fetch failed"', () => {

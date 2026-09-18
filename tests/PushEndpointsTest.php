@@ -2929,15 +2929,25 @@ final class PushEndpointsTest extends TestCase {
 
         $empty_diff = $this->runFilesDiffCli($local_docroot, $state_directory);
         $this->assertSame(0, $empty_diff['exit'], $empty_diff['output']);
-        $this->assertSame(
-            json_encode([
+        $report = [
+            'type' => 'reprint_report',
+            'schema_version' => 1,
+            'command' => 'files-diff',
+            'status' => 'complete',
+            'exit_code' => 0,
+            'failed_stage' => null,
+            'error' => null,
+            'error_code' => null,
+        ];
+        $this->assertSame([
+            [
                 'command' => 'files-diff',
                 'status' => 'complete',
                 'local_paths_to_push' => 0,
                 'local_paths_to_delete' => 0,
-            ], JSON_UNESCAPED_SLASHES) . "\n",
-            $empty_diff['stdout']
-        );
+            ],
+            $report,
+        ], $this->cliJsonLines($empty_diff['stdout']));
 
         file_put_contents($local_docroot . '/pushed.txt', 'edited after the push');
 
@@ -2945,23 +2955,23 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame(0, $changed_diff['exit'], $changed_diff['output']);
         $changed_stat = lstat($local_docroot . '/pushed.txt');
         $this->assertIsArray($changed_stat);
-        $this->assertSame(
-            json_encode([
+        $this->assertSame([
+            [
                 'command' => 'files-diff',
                 'action' => 'push',
                 'path_b64' => base64_encode('pushed.txt'),
                 'type' => 'file',
                 'size' => (int) $changed_stat['size'],
                 'ctime' => (int) $changed_stat['ctime'],
-            ], JSON_UNESCAPED_SLASHES) . "\n"
-            . json_encode([
+            ],
+            [
                 'command' => 'files-diff',
                 'status' => 'complete',
                 'local_paths_to_push' => 1,
                 'local_paths_to_delete' => 0,
-            ], JSON_UNESCAPED_SLASHES) . "\n",
-            $changed_diff['stdout']
-        );
+            ],
+            $report,
+        ], $this->cliJsonLines($changed_diff['stdout']));
     }
 
     /**
@@ -3101,15 +3111,15 @@ final class PushEndpointsTest extends TestCase {
         $pushed = $this->runFilesPushCli($filesystem_root, $state_directory, [], $remote_document_root);
 
         $this->assertSame(0, $pushed['exit'], $pushed['output']);
-        $this->assertSame(1, $this->lastCliJsonLine($pushed['stdout'])['files_total']);
+        $this->assertSame(1, $this->lastCliCommandResult($pushed['stdout'])['files_total']);
         $this->assertSame('body { color: blue; }', file_get_contents($remote_document_root . '/' . $theme_document_root_relative_path));
         foreach ($host_plugin_files as $document_root_relative_path => $contents) {
             $this->assertFileExists($remote_document_root . '/' . $document_root_relative_path);
             $this->assertSame($contents, file_get_contents($remote_document_root . '/' . $document_root_relative_path));
         }
         $this->assertSame(0, $diff['exit'], $diff['output']);
-        $this->assertSame(1, $this->lastCliJsonLine($diff['stdout'])['local_paths_to_push']);
-        $this->assertSame(0, $this->lastCliJsonLine($diff['stdout'])['local_paths_to_delete']);
+        $this->assertSame(1, $this->lastCliCommandResult($diff['stdout'])['local_paths_to_push']);
+        $this->assertSame(0, $this->lastCliCommandResult($diff['stdout'])['local_paths_to_delete']);
     }
 
     public static function hostPluginRuntimeOptions(): array
@@ -3144,7 +3154,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame(0, $created['exit'], $created['output']);
         $this->assertSame(
             'complete',
-            $this->lastCliJsonLine($created['stdout'])['status'] ?? null
+            $this->lastCliCommandResult($created['stdout'])['status'] ?? null
         );
         $this->assertSame(
             "<?php echo 'from filesystem root';",
@@ -3163,7 +3173,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame(0, $updated['exit'], $updated['output']);
         $this->assertSame(
             'complete',
-            $this->lastCliJsonLine($updated['stdout'])['status'] ?? null
+            $this->lastCliCommandResult($updated['stdout'])['status'] ?? null
         );
         $this->assertFileDoesNotExist($this->docroot . '/newfile.php');
         $this->assertSame(
@@ -3192,7 +3202,7 @@ final class PushEndpointsTest extends TestCase {
         $initial = $this->runFilesPushCli($local_docroot, $state_directory);
 
         $this->assertSame(0, $initial['exit'], $initial['output']);
-        $initial_result = $this->lastCliJsonLine($initial['stdout']);
+        $initial_result = $this->lastCliCommandResult($initial['stdout']);
         $this->assertSame('complete', $initial_result['status'] ?? null);
         $this->assertSame(4, $initial_result['files_done'] ?? null);
         $this->assertSame(4, $initial_result['files_total'] ?? null);
@@ -3301,7 +3311,7 @@ final class PushEndpointsTest extends TestCase {
         $updated = $this->runFilesPushCli($local_docroot, $state_directory);
 
         $this->assertSame(0, $updated['exit'], $updated['output']);
-        $this->assertSame('complete', $this->lastCliJsonLine($updated['stdout'])['status'] ?? null);
+        $this->assertSame('complete', $this->lastCliCommandResult($updated['stdout'])['status'] ?? null);
         $this->assertSame($updated_contents, file_get_contents($this->docroot . '/nested/multi-chunk.bin'));
         $this->assertFileDoesNotExist($this->docroot . '/delete-later.txt');
         $this->assertSame('added', file_get_contents($this->docroot . '/added.txt'));
@@ -3381,7 +3391,7 @@ final class PushEndpointsTest extends TestCase {
         $this->clearEndpointGate();
 
         $this->assertSame(2, $partial['exit'], $partial['output']);
-        $partial_result = $this->lastCliJsonLine($partial['stdout']);
+        $partial_result = $this->lastCliCommandResult($partial['stdout']);
         $this->assertSame('partial', $partial_result['status'] ?? null);
         $this->assertSame('time_limit', $partial_result['reason'] ?? null);
         $this->assertSame('starting_plan', $partial_result['phase'] ?? null);
@@ -3396,7 +3406,7 @@ final class PushEndpointsTest extends TestCase {
         $completed = $this->runFilesPushCli($local_docroot, $state_directory);
 
         $this->assertSame(0, $completed['exit'], $completed['output']);
-        $this->assertSame('complete', $this->lastCliJsonLine($completed['stdout'])['status'] ?? null);
+        $this->assertSame('complete', $this->lastCliCommandResult($completed['stdout'])['status'] ?? null);
         $this->assertSame('value', file_get_contents($this->docroot . '/value.txt'));
     }
 
@@ -3425,7 +3435,7 @@ final class PushEndpointsTest extends TestCase {
         $this->clearEndpointGate();
 
         $this->assertSame(2, $interrupted['exit'], $interrupted['output']);
-        $interrupted_result = $this->lastCliJsonLine($interrupted['stdout']);
+        $interrupted_result = $this->lastCliCommandResult($interrupted['stdout']);
         $this->assertSame('interrupted', $interrupted_result['status'] ?? null);
         $this->assertSame('signal', $interrupted_result['reason'] ?? null);
         $this->assertSame('starting_plan', $interrupted_result['phase'] ?? null);
@@ -3438,7 +3448,7 @@ final class PushEndpointsTest extends TestCase {
         $completed = $this->runFilesPushCli($local_docroot, $state_directory);
 
         $this->assertSame(0, $completed['exit'], $completed['output']);
-        $this->assertSame('complete', $this->lastCliJsonLine($completed['stdout'])['status'] ?? null);
+        $this->assertSame('complete', $this->lastCliCommandResult($completed['stdout'])['status'] ?? null);
         $this->assertSame('signal value', file_get_contents($this->docroot . '/value.txt'));
     }
 
@@ -3492,7 +3502,7 @@ final class PushEndpointsTest extends TestCase {
         $completed = $this->runFilesPushCli($local_docroot, $state_directory);
 
         $this->assertSame(0, $completed['exit'], $completed['output']);
-        $this->assertSame('complete', $this->lastCliJsonLine($completed['stdout'])['status'] ?? null);
+        $this->assertSame('complete', $this->lastCliCommandResult($completed['stdout'])['status'] ?? null);
         $this->assertSame($contents, file_get_contents($this->docroot . '/large.bin'));
         $this->assertFileDoesNotExist($push_state_directory . '/sender.json');
     }
@@ -3529,7 +3539,7 @@ final class PushEndpointsTest extends TestCase {
         }
 
         $this->assertSame(1, $failed['exit'], $failed['output']);
-        $failed_result = $this->lastCliJsonLine($failed['stdout']);
+        $failed_result = $this->lastCliCommandResult($failed['stdout']);
         $this->assertSame('failed', $failed_result['status'] ?? null);
         $this->assertSame('lock_acquisition_failure', $failed_result['reason'] ?? null);
         $this->assertSame($status_requests + 1, $this->countEndpointRequests('push_status'));
@@ -3544,7 +3554,7 @@ final class PushEndpointsTest extends TestCase {
         $completed = $this->runFilesPushCli($local_docroot, $state_directory);
 
         $this->assertSame(0, $completed['exit'], $completed['output']);
-        $this->assertSame('complete', $this->lastCliJsonLine($completed['stdout'])['status'] ?? null);
+        $this->assertSame('complete', $this->lastCliCommandResult($completed['stdout'])['status'] ?? null);
         $this->assertSame('value after failure', file_get_contents($this->docroot . '/value.txt'));
     }
 
@@ -3570,7 +3580,7 @@ final class PushEndpointsTest extends TestCase {
         $restart = $this->runFilesPushCli($local_docroot, $state_directory);
 
         $this->assertSame(2, $restart['exit'], $restart['output']);
-        $restart_result = $this->lastCliJsonLine($restart['stdout']);
+        $restart_result = $this->lastCliCommandResult($restart['stdout']);
         $this->assertSame('restart', $restart_result['status'] ?? null);
         $this->assertSame('local_path_changed', $restart_result['reason'] ?? null);
         $this->assertSame($push_create_requests, $this->countEndpointRequests('push_create'));
@@ -3710,13 +3720,14 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /** @return array<string,mixed> */
-    private function lastCliJsonLine(string $output): array
+    private function lastCliCommandResult(string $output): array
     {
-        $records = $this->cliJsonLines($output);
-        if ($records !== []) {
-            return $records[count($records) - 1];
+        foreach (array_reverse($this->cliJsonLines($output)) as $record) {
+            if (( $record['type'] ?? null ) !== 'reprint_report') {
+                return $record;
+            }
         }
-        $this->fail('No JSON line was found in CLI output: ' . $output);
+        $this->fail('No command result was found in CLI output: ' . $output);
     }
 
     /** @return list<array<string,mixed>> */

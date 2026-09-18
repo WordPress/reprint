@@ -16,10 +16,11 @@ and `auto` on a terminal do not append a report.
 Existing progress and command data stay in place. Stage updates say which
 command and stage are running; the final report says how the invocation ended.
 It does not repeat individual preflight checks. Captured `preflight` output
-now contains its data record followed by the final report. Callers must read
-those records separately, not decode all of stdout as one JSON document. The same applies to
-other commands that print JSON data, such as `pull-metadata` and `files-stats`;
-their data keeps its existing formatting.
+contains its data record followed by the final report. Downloading runtime
+files can also emit progress before those records. Callers must read the
+records separately, not decode all of stdout as one JSON document or assume a
+fixed line count. The same applies to other commands that print JSON data,
+such as `pull-metadata` and `files-stats`; their data keeps its existing formatting.
 
 The report goes to stdout, except when stdout carries SQL; then it goes to
 stderr with the other progress records. `progress.json` remains the source for
