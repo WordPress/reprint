@@ -66,6 +66,7 @@ final class CommandReportTest extends TestCase {
             $this->assertSame('complete', $report['status']);
             $this->assertNull($report['error']);
             $this->assertNull($report['error_code']);
+            $this->assertArrayNotHasKey('http_code', $report);
         } else {
             $this->assertStringNotContainsString('reprint_report', $result['stdout'] . $result['stderr']);
         }
@@ -87,13 +88,14 @@ final class CommandReportTest extends TestCase {
         ];
     }
 
-    public function testPipelineFailureProducesOnlyTheOuterReport(): void
+    /** @dataProvider report_modes */
+    public function testPipelineFailureProducesOnlyTheOuterReport(string $mode): void
     {
         file_put_contents($this->root . '/response.json', json_encode([
             'http_code' => 401,
             'body' => '{"error":"Invalid signature"}',
         ]));
-        $result = $this->run_command('pull-files');
+        $result = $this->run_command('pull-files', ['--progress=' . $mode]);
         $report = $this->read_report($result);
         $this->assertSame(1, $result['exit_code']);
         $this->assertSame('pull-files', $report['command']);
@@ -103,19 +105,46 @@ final class CommandReportTest extends TestCase {
         $this->assertStringContainsString('Invalid signature', $report['error']);
     }
 
-    public function testPreflightFailureAndSavedAssertionHaveTheSameReportError(): void
+    public static function report_modes(): array
     {
-        file_put_contents($this->root . '/response.json', json_encode([
-            'http_code' => 520,
-            'body' => '<html>Unknown error</html>',
-        ]));
-        $preflight = $this->read_report($this->run_command('preflight'));
-        $assertion = $this->read_report($this->run_command('preflight-assert'));
-        $this->assertSame('SERVER_ERROR', $preflight['error_code']);
+        return [['jsonl'], ['compact']];
+    }
+
+    /** @dataProvider preflight_outcomes */
+    public function testPreflightAndSavedAssertionKeepChecksOutOfFinalReport(string $mode, bool $fails): void
+    {
+        if ($fails) {
+            file_put_contents($this->root . '/response.json', json_encode([
+                'http_code' => 520,
+                'body' => '<html>Unknown error</html>',
+            ]));
+        }
+        $preflight = $this->read_report($this->run_command('preflight', ['--progress=' . $mode]));
+        $result = $this->run_command('preflight-assert', ['--progress=' . $mode]);
+        $assertion = $this->read_report($result);
+        $this->assertSame($fails ? 'error' : 'complete', $assertion['status']);
+        $this->assertSame($fails ? 'SERVER_ERROR' : null, $preflight['error_code']);
         $this->assertSame($preflight['error'], $assertion['error']);
         $this->assertSame($preflight['error_code'], $assertion['error_code']);
-        $this->assertNotEmpty($assertion['checks']);
-        $this->assertSame('SERVER_RESPONDED', $assertion['checks'][0]['code']);
+        $records = array_map(static function (string $line): array {
+            return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+        }, explode("\n", trim($result['stdout'])));
+        $this->assertCount(2, $records);
+        $this->assertSame('preflight_assertion', $records[0]['type']);
+        $this->assertNotEmpty($records[0]['checks']);
+        foreach ($records[0]['checks'] as $check) {
+            $this->assertEqualsCanonicalizing(['label', 'pass', 'detail'], array_keys($check));
+        }
+    }
+
+    public static function preflight_outcomes(): array
+    {
+        return [
+            'jsonl success' => ['jsonl', false],
+            'compact success' => ['compact', false],
+            'jsonl error' => ['jsonl', true],
+            'compact error' => ['compact', true],
+        ];
     }
 
     public function testRealFileDownloadReportsCompleteAndAbortIsNotSuccess(): void
@@ -292,6 +321,7 @@ final class CommandReportTest extends TestCase {
         }
         $this->assertCount(1, $reports, $result['stdout'] . $result['stderr']);
         $this->assertSame(1, $reports[0]['schema_version']);
+        $this->assertArrayNotHasKey('checks', $reports[0]);
         $this->assertSame($result['exit_code'], $reports[0]['exit_code']);
         $lines = explode("\n", trim($result['stdout']));
         $this->assertSame($reports[0], json_decode(end($lines), true));

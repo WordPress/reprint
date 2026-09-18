@@ -451,7 +451,7 @@ class ImportClient
     /** Monotonic seconds at the last compact update or stage change. */
     private float $last_compact_progress_time = 0;
 
-    /** @var array<string,mixed> Final error or preflight checks for the current invocation, independent of progress throttling. */
+    /** @var array<string,mixed> Final outcome and error details for the current invocation, independent of progress throttling. */
     public array $command_report_details = [];
 
     /** @var TerminalProgress Renders progress and lifecycle output to the terminal. */
@@ -3144,7 +3144,7 @@ class ImportClient
         $entry["error"] = $error['message'] ?? null;
         $entry["error_code"] = $this->last_error_code;
         $entry["message"] = $error === null ? "Preflight passed." : "Error: " . $error['message'];
-        $this->command_report_details = array_intersect_key($entry, array_flip(['error', 'error_code', 'http_code']));
+        $this->command_report_details = $error === null ? [] : array_intersect_key($entry, array_flip(['error', 'error_code', 'http_code']));
         // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
         echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
         $this->write_progress_file($entry["error"]);
@@ -3170,7 +3170,6 @@ class ImportClient
         // 1. Server responded OK
         $http_ok = ($entry["http_code"] ?? 0) === 200;
         $checks[] = [
-            "code" => "SERVER_RESPONDED",
             "label" => "Server responded",
             "pass" => $http_ok,
             "detail" => $http_ok
@@ -3184,7 +3183,6 @@ class ImportClient
         // 2. Top-level ok flag
         $top_ok = is_array($data) && !empty($data["ok"]);
         $checks[] = [
-            "code" => "PREFLIGHT_OK",
             "label" => "Preflight OK",
             "pass" => $top_ok,
             "detail" => $top_ok
@@ -3211,7 +3209,6 @@ class ImportClient
             $proto_detail = "remote v{$remote_ver}, client v" . PULL_PROTOCOL_VERSION;
         }
         $checks[] = [
-            "code" => "PROTOCOL_COMPATIBLE",
             "label" => "Protocol compatible",
             "pass" => $proto_ok,
             "detail" => $proto_detail,
@@ -3224,7 +3221,6 @@ class ImportClient
         $fs = $data["filesystem"] ?? null;
         $fs_ok = is_array($fs) && !empty($fs["ok"]);
         $checks[] = [
-            "code" => "FILESYSTEM_ACCESSIBLE",
             "label" => "Filesystem accessible",
             "pass" => $fs_ok,
             "detail" => $fs_ok
@@ -3239,7 +3235,6 @@ class ImportClient
         $db = $data["database"] ?? null;
         $db_ok = is_array($db) && !empty($db["connected"]);
         $checks[] = [
-            "code" => "DATABASE_ACCESSIBLE",
             "label" => "Database accessible",
             "pass" => $db_ok,
             "detail" => $db_ok
@@ -13852,9 +13847,9 @@ class ImportClient
         $this->progress_reporter->update($context, $data);
         $this->progress_reporter->write_file();
 
-        if (( $data['status'] ?? null ) === 'error' || ( $data['type'] ?? null ) === 'preflight_assertion') {
+        if (( $data['status'] ?? null ) === 'error') {
             $this->command_report_details = array_intersect_key($data, array_flip([
-                'error', 'error_code', 'failed_stage', 'checks', 'http_code', 'curl_errno',
+                'error', 'error_code', 'failed_stage', 'http_code', 'curl_errno',
                 'consecutive_failures_without_progress',
             ]));
         }

@@ -13,10 +13,11 @@ exception in `--progress=jsonl` or `--progress=compact` mode. The default `auto`
 mode also appends it when the progress stream is not a terminal. `--progress=tty`
 and `auto` on a terminal do not append a report.
 
-Existing progress and command data stay in place; preflight assertion checks
-gain the stable codes described below. Captured `preflight` output now contains
-its data record followed by the final report. Callers must read those records
-separately, not decode all of stdout as one JSON document. The same applies to
+Existing progress and command data stay in place. Stage updates say which
+command and stage are running; the final report says how the invocation ended.
+It does not repeat individual preflight checks. Captured `preflight` output
+now contains its data record followed by the final report. Callers must read
+those records separately, not decode all of stdout as one JSON document. The same applies to
 other commands that print JSON data, such as `pull-metadata` and `files-stats`;
 their data keeps its existing formatting.
 
@@ -57,11 +58,9 @@ HTTP and cURL details, including `http_code`, `curl_errno`, and
 `consecutive_failures_without_progress`, are included when the command reports
 them. Callers must not depend on every failure having those fields.
 
-`preflight-assert` also includes `checks`. Each check retains its `label`, `pass`,
-and `detail`, with a stable `code`: `SERVER_RESPONDED`, `PREFLIGHT_OK`,
-`PROTOCOL_COMPATIBLE`, `FILESYSTEM_ACCESSIBLE`, or `DATABASE_ACCESSIBLE`.
-Translate codes, not English labels or error messages. Unknown codes need a
-generic fallback.
+`preflight-assert` keeps its existing `checks` in its command result, with
+`label`, `pass`, and `detail` for each check. These are not copied into the final
+report, and no per-check codes are added.
 
 ## Reading a ticket
 
