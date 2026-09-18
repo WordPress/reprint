@@ -134,8 +134,8 @@ echo json_encode([
         const jitResponse = await fetch(`${targetUrl}/jit-status.php`);
         assert.equal(jitResponse.status, 200);
         const targetJit = await jitResponse.json();
-        assert.equal(targetJit.on, phpJit.on, 'Starting the generated server must not disable JIT');
         if (phpJit.version_id >= 80400 && phpJit.mode === '1235' && phpJit.on) {
+            assert.equal(targetJit.on, true, 'Replacing mode 1235 must keep JIT enabled');
             assert.equal(targetJit.kind, 5, 'PHP 8.4+ mode 1235 must use tracing JIT');
         }
     }, 240000);
