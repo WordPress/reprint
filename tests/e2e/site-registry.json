@@ -12,6 +12,12 @@
     "mysql55-source": {
       "port": 8195
     },
+    "database-push-source": {
+      "port": 8182
+    },
+    "database-push-target": {
+      "port": 8183
+    },
     "post-requests": {
       "port": 8153
     },

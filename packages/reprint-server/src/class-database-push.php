@@ -117,21 +117,54 @@ final class DatabasePush {
         } elseif (isset($record['values']) && is_array($record['values']) && $state['current_table'] !== null) {
             $columns = [];
             $values = [];
+            $enum_zero_warnings = [];
             foreach ($record['values'] as $column => $encoded) {
                 $columns[] = self::identifier($column);
-                $value = $encoded === null ? null : base64_decode($encoded, true);
+                $value = $encoded === null || $encoded === 0 ? $encoded : base64_decode($encoded, true);
                 if ($value === false) {
                     throw new RuntimeException('Archive column ' . $column . ' is not valid base64.');
                 }
                 $values[] = $value;
+                if ($value === 0) {
+                    $enum_zero_warnings[] = "Data truncated for column '" . $column . "' at row 1";
+                }
             }
             if ($columns === []) {
                 throw new RuntimeException('Database archive row has no columns.');
             }
             $this->database->beginTransaction();
             try {
-                $statement = $this->database->prepare('INSERT INTO ' . self::identifier($state['current_table']) . ' (' . implode(',', $columns) . ') VALUES (' . implode(',', array_fill(0, count($values), '?')) . ')');
-                $statement->execute($values);
+                // IGNORE is needed only to restore legacy ENUM index zero.
+                // Accept exactly its named warnings, never other truncation,
+                // skipped duplicates, or an incomplete server warning list.
+                $insert = $enum_zero_warnings === [] ? 'INSERT INTO ' : 'INSERT IGNORE INTO ';
+                $statement = $this->database->prepare($insert . self::identifier($state['current_table']) . ' (' . implode(',', $columns) . ') VALUES (' . implode(',', array_fill(0, count($values), '?')) . ')');
+                foreach ($values as $position => $value) {
+                    // Integer zero restores ENUM index zero even if "0" is
+                    // itself a declared label. All other values remain bytes.
+                    $type = $value === 0 ? PDO::PARAM_INT : ( $value === null ? PDO::PARAM_NULL : PDO::PARAM_STR );
+                    $statement->bindValue($position + 1, $value, $type);
+                }
+                $statement->execute();
+                if ($enum_zero_warnings !== []) {
+                    // MySQL cannot prepare these diagnostic statements. PDO's
+                    // fallback would replace the INSERT warnings with error 1295.
+                    $this->database->setAttribute(PDO::ATTR_EMULATE_PREPARES, true);
+                    try {
+                        $warning_count = (int) $this->database->query('SHOW COUNT(*) WARNINGS')->fetchColumn();
+                        $warnings = $this->database->query('SHOW WARNINGS')->fetchAll(PDO::FETCH_ASSOC);
+                    } finally {
+                        $this->database->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
+                    }
+                    if ($statement->rowCount() !== 1 || $warning_count !== count($warnings) || $warning_count !== count($enum_zero_warnings)) {
+                        throw new RuntimeException('Restoring ENUM index zero inserted ' . $statement->rowCount() . ' rows with ' . $warning_count . ' warnings (' . count($warnings) . ' available); expected one row and ' . count($enum_zero_warnings) . ' warnings.');
+                    }
+                    foreach ($warnings as $warning) {
+                        if ( (int) $warning['Code'] !== 1265 || !in_array($warning['Message'], $enum_zero_warnings, true)) {
+                            throw new RuntimeException('Database row warning while restoring ENUM index zero: ' . $warning['Message']);
+                        }
+                    }
+                }
                 $state['offset'] = $next_offset;
                 $this->save_state($state);
                 $this->database->commit();

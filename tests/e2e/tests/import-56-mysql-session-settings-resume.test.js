@@ -16,6 +16,7 @@ import {
     writeHookState, readHookState, clearHookState,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
+import { createSqlModeData } from '../lib/mysql-session-data.js';
 
 const describeWithHostPhpProcess = process.env.PHP_BINARY?.endsWith('/playground-php.sh')
     ? describe.skip
@@ -144,15 +145,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
                     + "(1, 'apply-row-1'), (2, 'apply-row-2'), (3, 'apply-row-3')"
                 );
 
-                await connection.query(
-                    `CREATE TABLE \`${sqlModeTable}\` (`
-                    + "`id` INT NOT NULL, `value` ENUM('allowed') NOT NULL, "
-                    + 'PRIMARY KEY (`id`)) ENGINE=InnoDB'
-                );
-                await connection.query(
-                    `INSERT IGNORE INTO \`${sqlModeTable}\` (id, value) `
-                    + "VALUES (1, 'not-an-enum-member')"
-                );
+                await createSqlModeData(connection, sqlModeTable);
             },
         });
 
