@@ -9,14 +9,14 @@ use Throwable;
 
 require_once __DIR__ . '/../recover/functions.php';
 
-const POST_PROCESS_TASKS = array( 'disable-hosting-plugins', 'disable-failing-plugins' );
+const POST_PROCESS_TASKS = array( 'disable-hosting-plugins', 'disable-failing-plugins', 'remove-reprint' );
 
 /**
  * Run selected local tasks, stopping at the first failure. Hosting runs first.
  *
  * @param string      $wordpress_root         Local WordPress root containing wp-load.php.
  * @param string      $tasks                  Comma-separated task names, or all.
- * @param string|null $state_directory        Saved migration state; required for hosting cleanup.
+ * @param string|null $state_directory        Saved migration state; required for hosting or Reprint cleanup.
  * @param string|null $remote_reprint_api_url Source URL selecting a saved remote, never contacted here.
  * @return array {
  *     @type string $status  Complete or failed.
@@ -30,6 +30,7 @@ function run_post_process( string $wordpress_root, string $tasks = 'all', ?strin
 	$results      = array();
 	$process_lock = null;
 	$current_task = null;
+	$client       = null;
 	try {
 		$selected_tasks = 'all' === $tasks ? POST_PROCESS_TASKS : explode( ',', $tasks );
 		foreach ( $selected_tasks as $task ) {
@@ -41,9 +42,9 @@ function run_post_process( string $wordpress_root, string $tasks = 'all', ?strin
 		if ( ! is_file( $wordpress_root . '/wp-load.php' ) ) {
 			throw new RuntimeException( 'post-process requires --fs-root=WORDPRESS_ROOT containing wp-load.php.' );
 		}
-		if ( in_array( 'disable-hosting-plugins', $selected_tasks, true ) ) {
+		if ( in_array( 'disable-hosting-plugins', $selected_tasks, true ) || in_array( 'remove-reprint', $selected_tasks, true ) ) {
 			if ( null === $state_directory || ! is_dir( $state_directory ) ) {
-				throw new RuntimeException( 'disable-hosting-plugins requires --state-dir pointing to saved migration state.' );
+				throw new RuntimeException( 'disable-hosting-plugins and remove-reprint require --state-dir pointing to saved migration state.' );
 			}
 			$process_lock = new ReprintProcessLock( $state_directory );
 			if ( null !== $remote_reprint_api_url ) {
@@ -62,7 +63,9 @@ function run_post_process( string $wordpress_root, string $tasks = 'all', ?strin
 			if ( ! is_file( $remote_directory . '/pull/state.json' ) ) {
 				throw new RuntimeException( 'No saved migration state found for the selected source URL.' );
 			}
-			$client       = new ImportClient( $remote_reprint_api_url ?? '', $state_directory, $wordpress_root, 'post-process', $remote_directory );
+			$client = new ImportClient( $remote_reprint_api_url ?? '', $state_directory, $wordpress_root, 'post-process', $remote_directory );
+		}
+		if ( in_array( 'disable-hosting-plugins', $selected_tasks, true ) ) {
 			$current_task = 'disable-hosting-plugins';
 			$results[]    = array(
 				'task'          => $current_task,
@@ -78,6 +81,14 @@ function run_post_process( string $wordpress_root, string $tasks = 'all', ?strin
 			if ( 'failed' === $result['status'] ) {
 				return array( 'status' => 'failed', 'results' => $results, 'message' => $result['message'] );
 			}
+		}
+		if ( in_array( 'remove-reprint', $selected_tasks, true ) ) {
+			$current_task = 'remove-reprint';
+			$results[]    = array(
+				'task'          => $current_task,
+				'status'        => 'complete',
+				'removed_paths' => $client->run_remove_reprint( $wordpress_root ),
+			);
 		}
 		return array( 'status' => 'complete', 'results' => $results );
 	} catch ( Throwable $error ) {

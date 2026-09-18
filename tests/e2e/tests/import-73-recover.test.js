@@ -1,12 +1,12 @@
 import { describe, it, beforeAll, beforeEach, afterEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ensureSite } from '../lib/site-setup.js';
-import { getSiteDir } from '../lib/test-helpers.js';
+import { apiRequest, getSiteDir } from '../lib/test-helpers.js';
 
 describe('Recover: load WordPress and deactivate fatal plugins', () => {
     const siteDirectory = getSiteDir('recover');
@@ -34,7 +34,7 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         rmSync(join(mustUseDirectory, 'hostinger-mu-plugin.php'), { force: true });
         rmSync(join(siteDirectory, 'wp-content/object-cache.php'), { force: true });
         activate([]);
-        for (const name of ['recover-healthy', 'recover-first', 'recover-second', 'recover-first-extra', 'recover-single.php', 'hostinger']) {
+        for (const name of ['recover-healthy', 'recover-first', 'recover-second', 'recover-first-extra', 'recover-single.php', 'hostinger', 'renamed-reprint']) {
             rmSync(join(pluginsDirectory, name), { recursive: true, force: true });
         }
         rmSync(stateDirectory, { recursive: true, force: true });
@@ -139,7 +139,12 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         const result = postProcess([`--state-dir=${stateDirectory}`, ...options]);
         assert.equal(result.exitCode, 0, result.stderr);
         assert.equal(result.report.status, 'complete');
-        assert.deepEqual(result.report.results.map(item => item.task), ['disable-hosting-plugins', 'disable-failing-plugins']);
+        const registeredTasks = JSON.parse(execFileSync('php', ['-r',
+            'require $argv[1]; echo json_encode(\\Reprint\\Importer\\POST_PROCESS_TASKS);',
+            join(import.meta.dirname, '../../../packages/reprint-client/src/lib/post-process/functions.php')], { encoding: 'utf8' }));
+        assert.deepEqual(result.report.results.map(item => item.task), options.length
+            ? ['disable-hosting-plugins', 'disable-failing-plugins']
+            : registeredTasks);
         assert.deepEqual(result.report.results[0].removed_paths, ['wp-content/mu-plugins/hostinger-mu-plugin.php']);
         assert.deepEqual(result.report.results[1].disabled_plugins.map(item => item.plugin), ['recover-first/main.php']);
         assert.equal(existsSync(join(mustUseDirectory, 'hostinger-mu-plugin.php')), false);
@@ -165,6 +170,46 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         assert.deepEqual(result.report.results.map(item => item.task), ['disable-failing-plugins']);
         assert.deepEqual(activePlugins(), ['hostinger/main.php', 'recover-healthy/main.php']);
         assert.ok(existsSync(join(pluginsDirectory, 'hostinger/main.php')));
+    });
+
+    it('removes a renamed Reprint installation using real preflight and leaves other plugins active', async () => {
+        cpSync(join(pluginsDirectory, 'reprint-server'), join(pluginsDirectory, 'renamed-reprint'), { recursive: true });
+        activate(['renamed-reprint/index.php', 'recover-healthy/main.php']);
+        for (const name of ['reprint_server_connection_token', 'reprint_server_push_authorized_token_fingerprint', 'site_export_secret', 'site_export_push_authorized_token_fingerprint']) {
+            runWp(['option', 'update', name, 'copied-source-credential']);
+        }
+        const response = await apiRequest('recover', 'preflight');
+        assert.equal(response.status, 200, response.text);
+        assert.equal(Buffer.from(response.json.reprint_plugin.basename_b64, 'base64').toString(), 'renamed-reprint/index.php');
+        const target = JSON.parse(runWp(['eval', "echo json_encode(['host' => DB_HOST, 'user' => DB_USER, 'pass' => DB_PASSWORD, 'db' => DB_NAME]);"]));
+        execFileSync('php', ['-r', `
+            require $argv[1];
+            $client = new ImportClient($argv[2], $argv[3], $argv[4]);
+            $client->get_state()->set_preflight_record(['http_code' => 200, 'data' => json_decode($argv[5], true)]);
+            $target = json_decode($argv[6], true);
+            $apply = $client->get_state()->apply;
+            $apply->target_engine = 'mysql';
+            $apply->target_host = $target['host'];
+            $apply->target_port = 3306;
+            $apply->target_user = $target['user'];
+            $apply->target_pass = $target['pass'];
+            $apply->target_db = $target['db'];
+            $client->save_state();
+        `, join(import.meta.dirname, '../../../packages/reprint-client/src/import.php'), sourceUrl, stateDirectory, siteDirectory,
+        JSON.stringify(response.json), JSON.stringify(target)], { encoding: 'utf8' });
+
+        const result = postProcess([`--state-dir=${stateDirectory}`]);
+        assert.equal(result.exitCode, 0, result.stderr);
+        assert.deepEqual(result.report.results.map(item => item.task), ['disable-hosting-plugins', 'disable-failing-plugins', 'remove-reprint']);
+        assert.deepEqual(result.report.results[2].removed_paths, ['wp-content/plugins/renamed-reprint']);
+        assert.equal(existsSync(join(pluginsDirectory, 'renamed-reprint/secret.php')), false);
+        assert.deepEqual(activePlugins(), ['recover-healthy/main.php']);
+        const remainingOptions = JSON.parse(runWp(['option', 'list', '--search=*', '--field=option_name', '--format=json']));
+        for (const name of ['reprint_server_connection_token', 'reprint_server_push_authorized_token_fingerprint', 'site_export_secret', 'site_export_push_authorized_token_fingerprint']) {
+            assert.equal(remainingOptions.includes(name), false, name);
+        }
+        assert.equal(recover().exitCode, 0);
+        assert.deepEqual(postProcess([`--state-dir=${stateDirectory}`, '--tasks=remove-reprint']).report.results[0].removed_paths, []);
     });
 
     it('runs only hosting cleanup without loading or deactivating an ordinary failing plugin', () => {
@@ -286,6 +331,7 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
             require $argv[1];
             $client = new ImportClient($argv[2], $argv[3], $argv[4]);
             $client->get_state()->set_preflight_record(['http_code' => 200, 'data' => [
+                'reprint_plugin' => null,
                 'runtime' => ['document_root' => $argv[5]],
                 'database' => ['wp' => ['paths_urls' => [
                     'abspath' => $argv[5] . '/',

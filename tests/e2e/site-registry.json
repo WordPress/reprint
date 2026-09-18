@@ -237,6 +237,9 @@
     },
     "multisite-plugin-tables": {
       "port": 8181
+    },
+    "recover": {
+      "port": 8182
     }
   }
 }
