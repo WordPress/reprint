@@ -630,7 +630,8 @@ Order:
    intact, so an interrupted commit can never leave the site down for good.
 3. **Commit:** consume `work/deletes`, then `work/files`, with the durable
    `commit.json` checkpoint written before each document-root mutation. The
-   future database batch and symlink updates follow the same bounded cursor.
+   symlink updates follow the same bounded cursor. Database overwrite uses
+   the separate workflow described below.
 4. **Maintenance off:** commit releases its `commit-state` ownership after
    completion; the driver saves the local index and previously pushed rows for
    that remote Reprint API URL after the target confirms commit.
@@ -654,27 +655,37 @@ The driver falls back to it automatically when the normal route stops
 answering sensibly. This is what makes commit failures recoverable from the
 outside instead of requiring SSH.
 
-## Database diff (phase two)
+## Full database overwrite
 
-The database is pushed as a diff — INSERT, UPDATE, DELETE — never as a dump
-that replaces tables. The mechanics mirror the file design:
+`db-push` stages a complete local MySQL database in private incoming tables.
+URL rewriting happens in the client. Staging returns a table list and review
+token; a separate confirmed command exchanges the live and incoming tables
+with one multi-table rename. Production-only site tables are moved aside too.
+No row diff is computed. Old tables remain until explicit cleanup.
 
-- A **row index** — `(table, primary key, row hash)` — plays the role
-  `(path, type, ctime, size)` plays for files. The local machine keeps the row
-  index from the last push as `previously_pushed_rows`; diffing against it
-  yields the upsert and delete sets.
-- Push is local-wins for rows too. Rows changed on the remote outside Reprint
-  are overwritten when the local diff touches the same primary key.
-- The diff stream passes through the URL rewriter in the local-to-remote
-  direction before work.
-- Volatile rows are excluded by default (transients, sessions, cron), the
-  same way volatile files are handled in pull.
-- The batch executes inside the commit maintenance window, bounded and
-  resumable like every other step.
+This command is separate from file commit. It requires a host-configured
+standalone API route, an operator-controlled stop of all writers, and manual
+cache clearing and site inspection before reopening. The first version has
+explicit engine, schema, and row-size limits. See [Full database push](DATABASE-PUSH.md)
+for setup, commands, recovery, and current restrictions.
+
+## Selective database changes (future work)
+
+This mode applies reviewed local INSERT, UPDATE, and DELETE operations rather
+than overwriting the database. The plan is tracked in [issue #827](https://github.com/WordPress/reprint/issues/827).
+
+Retain a baseline and the pull selection. Identify local changes from that
+baseline, then request only the affected production rows for conflict checks.
+A row absent because it was excluded during pull is not a local deletion.
+There is no automatic reconciliation and no automatic local-wins rule for
+conflicting rows. Users review grouped changes, choose what to push, and can
+skip, replace explicitly, or revise a conflicting group. Production values
+must be checked again when applying the approved changes.
 
 ## Accepted limitations
 
-Stated here so nobody rediscovers them as surprises:
+These file-push limits do not replace the database overwrite requirement to
+stop all writers:
 
 - **Same-size corruption is invisible.** Transfers are verified by byte
   count only. Corruption that preserves length passes. We decided detection
@@ -687,7 +698,7 @@ Stated here so nobody rediscovers them as surprises:
   blocks web requests; it cannot block SSH or system cron.
 ## Delivery plan
 
-Files first, database second, each PR small and stacked in this order:
+Files first, followed by full database overwrite and then selective database changes. Keep each PR focused:
 
 1. **Design doc** — this file.
 2. **Envelope auth** — headers-only HMAC for data routes: the
@@ -719,8 +730,11 @@ Files first, database second, each PR small and stacked in this order:
    `work/files` into the document root with the whitelisted maintenance file
    and resumable `commit.json` cursor.
 9. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
-10. **Row index and database diff** — the local row index, previously pushed
-    rows, diff generation and URL rewrite, the commit batch.
+10. **Full database overwrite, then selective changes** — `db-push` first
+    prepares and rewrites a local snapshot, stages incoming tables, and
+    exchanges them only after explicit review. The later selective mode
+    retains a baseline and pull selection, requests candidate production
+    rows, and applies only approved changes with a final conflict check.
 11. **`reprint files-push`** — the low-level, files-only caller that retains
     one sender per process, applies caller time and memory admission budgets,
     and reports completion, continuation, restart, or failure without retrying.
