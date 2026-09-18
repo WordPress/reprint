@@ -317,7 +317,6 @@ describe.each([
         if (version !== 'mysql') await ensureSqliteSite(site, version, true);
         else await ensureMultisite(site);
         fixture = JSON.parse(readFileSync(join(getSiteDir(site), '.multisite-layer.json'), 'utf8'));
-
     });
 
     it.each(['sqlite', 'mysql'])('migrates site 7 to a %s single-site target', async (engine) => {
@@ -330,7 +329,14 @@ describe.each([
         let serverLog = '';
         const connection = await createMysqlConnection();
         try {
-            runWp(getSiteDir(site), ['eval', "wp_update_post(['ID'=>100, 'post_content'=>'Only site 7']);"], fixture.sites[7].url);
+            runWp(getSiteDir(site), ['eval', `
+                wp_update_post(['ID'=>100, 'post_content'=>'Only site 7']);
+                global $wpdb;
+                foreach (['empty' => '', 'null' => null, 'binary' => "a\\0b"] as $name => $value) {
+                    $wpdb->delete($wpdb->postmeta, ['meta_key' => 'sqlite-probe-' . $name]);
+                    $wpdb->insert($wpdb->postmeta, ['post_id' => 100, 'meta_key' => 'sqlite-probe-' . $name, 'meta_value' => $value]);
+                }
+            `], fixture.sites[7].url);
             if (engine === 'mysql') {
                 await connection.query(`DROP DATABASE IF EXISTS ${databaseName}`);
                 await connection.query(`CREATE DATABASE ${databaseName}`);
@@ -355,6 +361,7 @@ describe.each([
                     'administrator' => user_can(get_user_by('login', 'shared'), 'manage_options'),
                     'content' => get_post(100)->post_content, 'media' => wp_get_attachment_url(200),
                     'new_upload' => $upload, 'sqlite' => isset($GLOBALS['@pdo']),
+                    'values' => $wpdb->get_results("SELECT meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_key LIKE 'sqlite-probe-%' ORDER BY meta_key", ARRAY_A),
                 ]);
             `);
             server = spawn(process.env.E2E_WP_CLI_PHP_BINARY || 'php', [
@@ -381,6 +388,11 @@ describe.each([
             assert.ok(target.users.includes('shop-member'));
             assert.equal(target.administrator, true);
             assert.equal(target.content, 'Only site 7');
+            assert.deepEqual(target.values, [
+                { meta_key: 'sqlite-probe-binary', meta_value: 'a\0b' },
+                { meta_key: 'sqlite-probe-empty', meta_value: '' },
+                { meta_key: 'sqlite-probe-null', meta_value: null },
+            ]);
             assert.equal(target.new_upload.error, false);
             assert.ok(target.media.startsWith(`${targetUrl}/wp-content/uploads/sites/7/`));
             assert.equal(await (await fetch(target.media)).text(), 'Media on site 7');
@@ -472,7 +484,7 @@ describe.each([
                     });
                     assert.equal(resumed.exitCode, 0, resumed.stdout + resumed.stderr);
                     const prefix = version === 'mysql' ? 'network_' : 'wp_';
-                    assert.deepEqual(queryMysqlOnSqlite(path, `SELECT blog_id FROM ${prefix}blogs`), [{ blog_id: 7 }]);
+                    assert.deepEqual(queryMysqlOnSqlite(path, `SELECT blog_id FROM ${prefix}blogs`).map(row => Number(row.blog_id)), [7]);
                     assert.deepEqual(queryMysqlOnSqlite(path, `SELECT post_content FROM ${prefix}7_posts WHERE ID=100`), [{ post_content: 'Only site 7' }]);
                     assert.ok(!queryMysqlOnSqlite(path, `SELECT user_login FROM ${prefix}users`).some(row => row.user_login === 'sibling-member'));
                 } finally {

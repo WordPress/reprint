@@ -454,8 +454,9 @@ describe('Pull a selected site into a fresh single site', () => {
             assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).active_resumable_command.current_stage, 'database-cleanup');
 
             // Inject one real SQL statement failure, after the dump is committed.
-            // Earlier cleanup writes succeed; only the activation write fails.
-            await connection.query(`CREATE TRIGGER \`${database}\`.reject_activation BEFORE INSERT ON \`${database}\`.network_7_options
+            // Earlier cleanup writes succeed; only the existing activation row
+            // update fails. Reject UPDATE rather than the old INSERT upsert.
+            await connection.query(`CREATE TRIGGER \`${database}\`.reject_activation BEFORE UPDATE ON \`${database}\`.network_7_options
                 FOR EACH ROW BEGIN
                     IF NEW.option_name = 'active_plugins' THEN
                         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Injected activation write failure';
