@@ -8,7 +8,7 @@ import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, copyFileSync, openSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { once } from 'node:events';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -88,24 +88,56 @@ add_action('wp_enqueue_scripts', function () {
             ],
         });
         assert.equal(result.exitCode, 0, `Pull failed:\n${result.stdout}\n${result.stderr}`);
+        const phpJit = JSON.parse(execFileSync('php', ['-r', `
+            $status = function_exists('opcache_get_status') ? opcache_get_status(false) : false;
+            $jit = is_array($status) && isset($status['jit']) ? $status['jit'] : [];
+            echo json_encode([
+                'version_id' => PHP_VERSION_ID,
+                'mode' => ini_get('opcache.jit'),
+                'on' => !empty($jit['on']),
+            ]);
+        `], { encoding: 'utf8' }));
+        writeFileSync(join(flatDirectory, 'jit-status.php'), `<?php
+$status = function_exists('opcache_get_status') ? opcache_get_status(false) : false;
+$jit = is_array($status) && isset($status['jit']) ? $status['jit'] : [];
+header('Content-Type: application/json');
+echo json_encode([
+    'mode' => ini_get('opcache.jit'),
+    'on' => !empty($jit['on']),
+    'kind' => $jit['kind'] ?? null,
+]);
+`);
         serverLog = join(temporaryDirectory, 'target-server.log');
         const log = openSync(serverLog, 'a');
-        server = spawn('php', ['-S', `127.0.0.1:${port}`, '-t', flatDirectory, join(runtimeDirectory, 'runtime.php')], {
+        const generatedStartScript = readFileSync(join(runtimeDirectory, 'start.sh'), 'utf8');
+        const testStartScript = generatedStartScript.replace(`-S localhost:${port}`, `-S 127.0.0.1:${port}`);
+        assert.notEqual(testStartScript, generatedStartScript, 'Expected the generated server to listen on localhost');
+        const testStartScriptPath = join(runtimeDirectory, 'start-test.sh');
+        writeFileSync(testStartScriptPath, testStartScript);
+        server = spawn('bash', [testStartScriptPath], {
             stdio: ['ignore', log, log],
         });
         closeSync(log);
         let lastResponse = 'No HTTP response';
+        let response;
         for (let attempt = 0; attempt < 100; ++attempt) {
             try {
-                const response = await fetch(targetUrl, { redirect: 'manual' });
+                response = await fetch(targetUrl, { redirect: 'manual' });
                 const body = await response.text();
                 lastResponse = `HTTP ${response.status}, Location: ${response.headers.get('location')}, body: ${body.slice(0, 500)}`;
-                if (response.status === 200) return;
+                if (response.status === 200) break;
             } catch { /* Connection failures are expected while PHP starts listening. */ }
             if (server.exitCode !== null) break;
             await sleep(100);
         }
-        assert.fail(`The migrated site did not serve HTTP 200: ${lastResponse}\n${readFileSync(serverLog, 'utf8').slice(-4000)}`);
+        assert.equal(response?.status, 200, `The migrated site did not serve HTTP 200: ${lastResponse}\n${readFileSync(serverLog, 'utf8').slice(-4000)}`);
+        const jitResponse = await fetch(`${targetUrl}/jit-status.php`);
+        assert.equal(jitResponse.status, 200);
+        const targetJit = await jitResponse.json();
+        assert.equal(targetJit.on, phpJit.on, 'Starting the generated server must not disable JIT');
+        if (phpJit.version_id >= 80400 && phpJit.mode === '1235' && phpJit.on) {
+            assert.equal(targetJit.kind, 5, 'PHP 8.4+ mode 1235 must use tracing JIT');
+        }
     }, 240000);
 
     afterAll(async () => {
