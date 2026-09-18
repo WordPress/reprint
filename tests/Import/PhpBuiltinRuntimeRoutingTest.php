@@ -132,4 +132,14 @@ class PhpBuiltinRuntimeRoutingTest extends TestCase
 
         $this->assertSame("body{color:#111}\n", $output);
     }
+
+    public function testGeneratedRuntimeKeepsJitEnabledWhenAvoidingPhp84Mode1235(): void
+    {
+        $runtime = file_get_contents($this->outputDir . '/runtime.php');
+
+        $this->assertStringContainsString("ini_get('opcache.jit') === '1235'", $runtime);
+        $this->assertStringContainsString("ini_set('opcache.jit', 'tracing')", $runtime);
+        $this->assertStringNotContainsString("ini_set('opcache.jit', 'off')", $runtime);
+        $this->assertStringNotContainsString("ini_set('opcache.jit', 'disable')", $runtime);
+    }
 }

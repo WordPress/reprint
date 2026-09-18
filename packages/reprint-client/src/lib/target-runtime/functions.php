@@ -55,6 +55,14 @@ function generate_runtime_php(RuntimeManifest $manifest, string $filesystem_root
     $lines[] = ' */';
     $lines[] = '';
 
+    // PHP 8.4+'s 1235 mode can crash while compiling normal WordPress
+    // REST code. Keep JIT enabled, but use PHP's documented tracing mode
+    // before WordPress files are loaded.
+    $lines[] = 'if (PHP_VERSION_ID >= 80400 && ini_get(\'opcache.jit\') === \'1235\') {';
+    $lines[] = '    ini_set(\'opcache.jit\', \'tracing\');';
+    $lines[] = '}';
+    $lines[] = '';
+
     // When runtime.php pre-defines DB_* constants (DB_HOST, DB_NAME,
     // etc.), the source site's wp-config.php will try to redefine them
     // with define() — which emits a warning in PHP 8+. Install a
