@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\PostProcess;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
@@ -587,6 +588,59 @@ class ProductionDropInRemovalTest extends TestCase
             'before first removal' => [false],
             'after first removal' => [true],
         ];
+    }
+
+    /** Verify cleanup removes links themselves, not the directories they point to. */
+    public function testHostPluginFileRemovalPreservesSymlinkTargetsAndReportsOnlyRemovedPaths(): void
+    {
+        $this->writeState([]);
+        $plugins_directory = $this->fsRoot . '/wp-content/plugins';
+        $linked_directory = $this->tempDir . '/shared-plugin-files';
+        mkdir($plugins_directory . '/spinupwp', 0755, true);
+        mkdir($linked_directory);
+        file_put_contents($linked_directory . '/keep.php', '<?php');
+        symlink($linked_directory, $plugins_directory . '/hostinger');
+        symlink($linked_directory, $plugins_directory . '/spinupwp/shared');
+        symlink($this->tempDir . '/missing-target', $plugins_directory . '/hostinger-easy-onboarding');
+        $paths = ['wp-content/plugins/hostinger', 'wp-content/plugins/spinupwp', 'wp-content/plugins/hostinger-easy-onboarding'];
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $removed = $this->callPrivate($client, 'record_push_exclusions_and_remove_local_paths', [array_merge($paths, ['wp-content/plugins/already-absent']), $this->fsRoot]);
+
+        $this->assertSame($paths, $removed);
+        $this->assertFileExists($linked_directory . '/keep.php');
+        foreach ($paths as $path) {
+            $this->assertFalse(is_link($this->fsRoot . '/' . $path));
+            $this->assertFileDoesNotExist($this->fsRoot . '/' . $path);
+        }
+    }
+
+    public function testHostingTaskReportsFailureWhenAPluginDirectoryCannotBeRemoved(): void
+    {
+        $this->writeState([]);
+        file_put_contents($this->fsRoot . '/wp-load.php', '<?php');
+        $locked_directory = $this->fsRoot . '/wp-content/plugins/hostinger';
+        mkdir($locked_directory, 0755, true);
+        file_put_contents($locked_directory . '/plugin.php', '<?php');
+        chmod($locked_directory, 0555);
+        if (is_writable($locked_directory)) {
+            chmod($locked_directory, 0755);
+            $this->markTestSkipped('This test requires directory write permissions to prevent unlink.');
+        }
+
+        try {
+            $result = PostProcess::run_selected_tasks($this->fsRoot, 'disable-hosting-plugins', $this->stateDir);
+            $this->assertSame('failed', $result['status']);
+            $this->assertSame('failed', $result['results'][0]['status']);
+            $this->assertStringContainsString('Could not remove source-host path: ' . $locked_directory, $result['message']);
+            $this->assertFileExists($locked_directory . '/plugin.php');
+            $reopened = $this->makeClient();
+            $this->loadClientState($reopened);
+            $this->assertContains('wp-content/plugins/hostinger', $reopened->get_state()->apply->remote_paths_removed_from_local_site);
+        } finally {
+            chmod($locked_directory, 0755);
+        }
     }
 
     // ---- Portable SiteGround plugins stay on disk ----
