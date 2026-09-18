@@ -1518,7 +1518,9 @@ final class FilesPullLocalIndexTest extends TestCase
         $records = [];
         foreach (preg_split('/\R/', trim($output)) ?: [] as $line) {
             $record = json_decode($line, true);
-            if (is_array($record) && ( $record['command'] ?? null ) === 'files-diff') {
+            if (is_array($record) && ( $record['command'] ?? null ) === 'files-diff'
+                && ( $record['type'] ?? null ) !== 'reprint_report'
+            ) {
                 $records[] = $record;
             }
         }

@@ -13940,7 +13940,7 @@ class ImportClient
 // ============================================================================
 
 /**
- * Append the invocation result, never an inner pipeline stage's result.
+ * Append the invocation result in JSONL and compact output, never for an inner stage.
  *
  * A missing client means construction or lock acquisition failed. Reports do
  * not rely on shutdown callbacks: a killed process cannot promise a result.
@@ -13948,7 +13948,7 @@ class ImportClient
  * @param string            $command   Invoked command.
  * @param int               $exit_code Actual process exit code.
  * @param array             $options { Parsed CLI options.
- *     @type bool   $report     Whether to append a final report.
+ *     @type string $progress   Progress output mode; auto detects the progress stream.
  *     @type bool   $abort      Whether this invocation clears saved work.
  *     @type string $sql_output SQL destination; stdout reserves that stream for SQL.
  * }
@@ -13962,7 +13962,13 @@ function reprint_write_command_report(
     ?ImportClient $client,
     ?Throwable $exception = null
 ): void {
-    if (empty($options['report'])) {
+    $stream = !in_array($command, ['files-push', 'files-diff'], true)
+        && ( $options['sql_output'] ?? ( $client === null ? null : $client->get_state()->sql_output ) ) === 'stdout'
+        ? STDERR : STDOUT;
+    $progress_output_mode = $options['progress'] ?? 'auto';
+    if ($progress_output_mode === 'tty'
+        || ( $progress_output_mode === 'auto' && function_exists('posix_isatty') && posix_isatty($stream) )
+    ) {
         return;
     }
     $details = $client === null ? [] : $client->command_report_details;
@@ -13986,9 +13992,6 @@ function reprint_write_command_report(
         'error' => $error,
         'error_code' => $error_code,
     ] + $details;
-    $stream = !in_array($command, ['files-push', 'files-diff'], true)
-        && ( $options['sql_output'] ?? ( $client === null ? null : $client->get_state()->sql_output ) ) === 'stdout'
-        ? STDERR : STDOUT;
     // Error messages may contain arbitrary source bytes. Keep the record valid
     // JSON; path fields in structured details use the protocol's base64 form.
     fwrite($stream, json_encode($report, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES) . "\n");
@@ -14107,18 +14110,10 @@ if (
             'type' => 'value',
             'target' => 'progress',
             'placeholder' => 'MODE',
-            'help' => 'Progress output: auto, tty, jsonl, or compact (default: auto). Compact keeps stage changes, 30-second counter updates, results, warnings, and errors.',
+            'help' => 'Progress output: auto, tty, jsonl, or compact (default: auto). Compact keeps stage changes, 30-second counter updates, results, warnings, and errors. JSONL and compact append a final command report.',
             'help_section' => 'global',
             'commands' => ImportClient::COMMANDS,
             'valid_values' => ImportClient::PROGRESS_OUTPUT_MODES,
-        ],
-        [
-            'name' => 'report',
-            'type' => 'flag',
-            'target' => 'report',
-            'help' => 'Append one versioned JSON command report to the progress stream',
-            'help_section' => 'global',
-            'commands' => ImportClient::COMMANDS,
         ],
         [
             'name' => 'abort',
@@ -15138,6 +15133,7 @@ if (
                 "  tty    Force the single interactive progress bar\n" .
                 "  jsonl  Force one JSON object per line\n" .
                 "  compact  Print stage changes, 30-second counter updates, results, warnings, and errors\n" .
+                "JSONL and compact output end with one final command report.\n" .
                 "Explicit tty, jsonl, and compact modes cannot be combined with --verbose.\n" .
                 "\n" .
                 "Exit outcomes:\n" .
@@ -15449,7 +15445,7 @@ if (
         foreach ($reprint_files_command_arguments as $reprint_files_push_command_argument) {
             $reprint_files_push_option_allowed = in_array(
                 $reprint_files_push_command_argument,
-                ['--force-http', '--verbose', '-v', '--report'],
+                ['--force-http', '--verbose', '-v'],
                 true
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
@@ -15465,8 +15461,7 @@ if (
     } elseif ($command === 'files-diff') {
         foreach ($reprint_files_command_arguments as $reprint_files_diff_command_argument) {
             $reprint_files_diff_option_allowed =
-                $reprint_files_diff_command_argument === '--report'
-                || strpos($reprint_files_diff_command_argument, '--progress=') === 0
+                strpos($reprint_files_diff_command_argument, '--progress=') === 0
                 || strpos($reprint_files_diff_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_diff_command_argument, '--fs-root=') === 0;
             if (!$reprint_files_diff_option_allowed) {

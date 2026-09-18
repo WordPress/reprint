@@ -1,18 +1,24 @@
 # CLI reporting
 
-Add `--report` when a caller needs a final command result without interpreting
-progress messages:
+JSONL and compact CLI output end with a final command result, so callers do not
+need to infer the outcome from progress messages. No separate flag is needed:
 
 ```sh
 php reprint.phar pull "$URL" --state-dir="$STATE_DIR" \
-    --fs-root="$FS_ROOT" --secret="$SECRET" --report
+    --fs-root="$FS_ROOT" --secret="$SECRET" --progress=compact
 ```
 
 The CLI appends one JSON line after a command returns or throws a handled
-exception. Existing progress and command records stay in place; preflight
-assertion checks gain the stable codes described below. `preflight` without
-`--report` still prints its single JSON result. With `--report`, it prints
-that result followed by the report.
+exception in `--progress=jsonl` or `--progress=compact` mode. The default `auto`
+mode also appends it when the progress stream is not a terminal. `--progress=tty`
+and `auto` on a terminal do not append a report.
+
+Existing progress and command data stay in place; preflight assertion checks
+gain the stable codes described below. Captured `preflight` output now contains
+its data record followed by the final report. Callers must read those records
+separately, not decode all of stdout as one JSON document. The same applies to
+other commands that print JSON data, such as `pull-metadata` and `files-stats`;
+their data keeps its existing formatting.
 
 The report goes to stdout, except when stdout carries SQL; then it goes to
 stderr with the other progress records. `progress.json` remains the source for
@@ -31,9 +37,10 @@ live progress. A caller does not need its last update to read the final error.
 }
 ```
 
-`--progress=compact --report` prints short progress followed by the final report.
-Compact mode alone does not enable reports. Neither option creates an additional
-progress log; `progress.json` snapshots and `audit.log` are unchanged.
+`--progress=compact` prints short progress followed by the final report. It does
+not create an additional progress log; `progress.json` snapshots and `audit.log`
+are unchanged. With SQL on stdout, `auto` checks stderr to choose between JSONL
+and terminal progress.
 
 `command` is the outer command the caller invoked. Preflight inside `pull`,
 `pull-files`, or `pull-db` does not produce a separate final report.

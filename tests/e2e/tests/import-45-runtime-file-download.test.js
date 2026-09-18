@@ -129,22 +129,14 @@ describe('Import: Runtime file download', () => {
         );
     });
 
-    it('preflight stdout is single-line JSON (not pretty-printed)', () => {
-        const lines = preflightResult.stdout.trim().split('\n');
-        const lastLine = lines[lines.length - 1];
-        let parsed;
-        try {
-            parsed = JSON.parse(lastLine);
-        } catch {
-            assert.fail(
-                `Last stdout line is not valid JSON: ${lastLine.substring(0, 200)}`,
-            );
-        }
-        assert.ok(parsed.timestamp, 'Parsed result should have a timestamp field');
-        assert.ok(
-            !lastLine.includes('\n'),
-            'Preflight result must be a single line so last-line trackers can capture it',
-        );
+    it('preflight prints its data and final report as separate JSON lines', () => {
+        const records = preflightResult.stdout.trim().split('\n').map(line => JSON.parse(line));
+        assert.equal(records.length, 2, 'Preflight should print its data followed by one report');
+        assert.ok(records[0].timestamp, 'Preflight data should retain its timestamp');
+        assert.ok(records[0].data, 'Preflight data should remain available');
+        assert.equal(records[1].type, 'reprint_report');
+        assert.equal(records[1].command, 'preflight');
+        assert.equal(records[1].exit_code, preflightResult.exitCode);
     });
 
     it('audit log does NOT contain "Fetch failed"', () => {

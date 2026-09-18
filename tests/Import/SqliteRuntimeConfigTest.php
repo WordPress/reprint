@@ -422,7 +422,10 @@ class SqliteRuntimeConfigTest extends TestCase
         $jsonlResult = $this->runApplyRuntimeCli('jsonl', $this->outputDir . '-jsonl');
         $this->assertSame(0, $jsonlResult['exit'], $jsonlResult['stderr']);
         $this->assertSame('', $jsonlResult['stderr']);
-        $record = json_decode(trim($jsonlResult['stdout']), true, 512, JSON_THROW_ON_ERROR);
+        $lines = explode("\n", trim($jsonlResult['stdout']));
+        $this->assertCount(2, $lines);
+        $record = json_decode($lines[0], true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('reprint_report', json_decode($lines[1], true)['type']);
         $this->assertSame('complete', $record['status'] ?? null);
         $this->assertSame('apply-runtime', $record['command'] ?? null);
         $this->assertSame('php-builtin', $record['runtime'] ?? null);

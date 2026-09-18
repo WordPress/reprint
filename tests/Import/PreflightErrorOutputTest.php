@@ -304,6 +304,9 @@ final class PreflightErrorOutputTest extends TestCase {
         $records = array_map(static function (string $line): array {
             return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
         }, array_filter(explode("\n", trim($stdout))));
+        $records = array_values(array_filter($records, static function (array $record): bool {
+            return ( $record['type'] ?? null ) !== 'reprint_report';
+        }));
         $this->assertNotEmpty($records, $stderr);
         return end($records);
     }

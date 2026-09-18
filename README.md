@@ -1090,7 +1090,7 @@ events, so a blocked request or a stage without item/byte counters stays quiet.
 It hides per-file records, preserve-local skips, repeated stage labels,
 per-request results, receive-rate diagnostics, and debug chatter.
 Warnings and errors, including rejected symlink targets, remain individual
-records; compact mode does not group them or add a final report.
+records; compact mode does not group them.
 
 ```bash
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" \
@@ -1103,7 +1103,11 @@ progress snapshot, and `audit.log` remains available for troubleshooting.
 Use `--progress=jsonl` when the caller wants the full progress stream.
 With `--sql-output=stdout`, SQL stays on stdout and compact progress goes to stderr.
 
-Add `--report` to append one versioned JSON result for the invoked command.
+JSONL and compact CLI output automatically append one versioned JSON result for
+the invoked command. The default `auto` mode does this when its progress stream
+is not a terminal. Terminal output does not append a report. Command data is
+unchanged, but captured commands such as preflight now print their data followed
+by the final report rather than a single JSON document.
 See [CLI reporting](docs/CLI-REPORTING.md) for the schema, preflight checks,
 pipeline boundaries, and handling a missing report.
 
