@@ -717,6 +717,10 @@ class ImportClient
             $this->pull_excluded_files_with_path_prefixes =
                 $this->resolve_remote_paths($excluded_raw, "exclude");
         }
+        $this->pull_excluded_files_with_path_prefixes = array_values(array_unique(array_merge(
+            $this->pull_excluded_files_with_path_prefixes,
+            $this->get_excluded_reprint_paths()
+        )));
         $this->excluded_plugins = $this->get_excluded_plugins();
 
         if ($assert_remap) {
@@ -1027,6 +1031,12 @@ class ImportClient
                 "include_host_plugins must be a boolean; received " . gettype($options["include_host_plugins"]) . "."
             );
         }
+        if (array_key_exists("exclude_reprint", $options) && !is_bool($options["exclude_reprint"])) {
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports a CLI/library option type, not HTML.
+                "exclude_reprint must be a boolean; received " . gettype($options["exclude_reprint"]) . "."
+            );
+        }
 
         // High-level pulls persist resume state before they enter the stage
         // runner. Reject invalid options first so a typo does not leave behind
@@ -1084,6 +1094,24 @@ class ImportClient
                 );
             }
             $this->get_state()->include_host_plugins = $options["include_host_plugins"];
+            $this->save_state();
+        }
+
+        // Database cleanup and file selection must keep the same choice across
+        // process boundaries, including the gap between two pipeline stages.
+        if (isset($options['exclude_reprint']) && $options['exclude_reprint'] !== $this->get_state()->exclude_reprint) {
+            $checkpoint = $this->get_state()->active_resumable_command;
+            $pipeline = $this->get_state()->pull_pipeline;
+            if (!$abort && (
+                ( $checkpoint->command_name !== null && $checkpoint->completion_state !== 'complete' )
+                || ( $pipeline->started_by_command !== null && $pipeline->stage_sequence !== []
+                    && $pipeline->last_completed_stage !== end($pipeline->stage_sequence) )
+            )) {
+                throw new RuntimeException(
+                    'Cannot change --exclude-reprint/--include-reprint while a pull is in progress. Finish the current pull or use --abort first.'
+                );
+            }
+            $this->get_state()->exclude_reprint = $options['exclude_reprint'];
             $this->save_state();
         }
 
@@ -7490,6 +7518,11 @@ class ImportClient
         DatabaseConnection $connection,
         array $options
     ): void {
+        // Validate both imported activation lists before network adoption
+        // re-serializes them. Clean network rows cannot reactivate Reprint
+        // when adoption repeats after interruption.
+        $this->cleanup_reprint_database($connection, $this->get_state()->apply->target_engine);
+
         // Network activations must enter active_plugins before host exclusions
         // are applied, including when cleanup resumes after process death.
         $multisite_target = $this->get_multisite_target();
@@ -7846,6 +7879,143 @@ class ImportClient
             return [];
         }
         return excluded_plugins($this->get_state()->preflight_record()["data"] ?? []);
+    }
+
+    /**
+     * Remove Reprint's activation and connection state from the imported database.
+     *
+     * The dump stays unchanged. Every update can repeat after an interrupted
+     * cleanup; the caller marks the import complete only after this returns.
+     *
+     * @param DatabaseConnection $database Open target connection.
+     * @param string             $engine   Target engine: mysql or sqlite.
+     */
+    private function cleanup_reprint_database(DatabaseConnection $database, string $engine): void
+    {
+        if (!$this->get_state()->exclude_reprint) {
+            return;
+        }
+        $this->get_excluded_reprint_paths();
+        $preflight = $this->get_state()->preflight_record()['data'];
+        $plugin = $preflight['reprint_plugin'];
+        if ($plugin === null) {
+            return;
+        }
+        $plugin_basename = isset($plugin['basename_b64']) && is_string($plugin['basename_b64'])
+            ? base64_decode($plugin['basename_b64'], true) : false;
+        if ($plugin_basename === false || $plugin_basename === '') {
+            throw new RuntimeException('The source did not report its Reprint plugin basename. Update the source Reprint Server and rerun preflight, or use --include-reprint.');
+        }
+        $network = $preflight['database']['wp']['multisite']['selection'] ?? null;
+        $site_prefix = $network === null ? ( $preflight['database']['wp']['table_prefix'] ?? null )
+            : $network['base_prefix'] . ( $network['site_id'] === 1 ? '' : $network['site_id'] . '_' );
+        if (!is_string($site_prefix) || $site_prefix === '') {
+            throw new RuntimeException('Reprint database cleanup requires the source WordPress table prefix.');
+        }
+        $activation_options = [[$site_prefix . 'options', 'option_name', 'option_value', 'active_plugins', null]];
+        if ($network !== null) {
+            $activation_options[] = [$network['base_prefix'] . 'sitemeta', 'meta_key', 'meta_value', 'active_sitewide_plugins', $network['network_id']];
+        }
+        // Serialized lengths describe the bytes WordPress sent, which need
+        // not use the column's charset. Without a declared charset, try raw
+        // bytes and still require an exact round trip before editing them.
+        $wordpress_charset = $preflight['database']['wp']['wpdb_charset'] ?? 'binary';
+        $quoted_wordpress_charset = '`' . str_replace('`', '``', $wordpress_charset === '' ? 'binary' : $wordpress_charset) . '`';
+        if (!$database->inTransaction()) {
+            $database->beginTransaction();
+        }
+        foreach ($activation_options as [$table, $name_column, $value_column, $option_name, $network_id]) {
+            $quoted_table = '`' . str_replace('`', '``', $table) . '`';
+            $where = "`{$name_column}` = ?";
+            $params = [$option_name];
+            if ($network_id !== null) {
+                $where .= ' AND site_id = ?';
+                $params[] = $network_id;
+            }
+            $read_expression = "`{$value_column}` AS serialized_value";
+            if ($engine === 'mysql') {
+                $read_expression = "CAST(CONVERT(`{$value_column}` USING {$quoted_wordpress_charset}) AS BINARY) AS serialized_value, " .
+                    "CAST(`{$value_column}` AS BINARY) AS stored_value, CHARSET(`{$value_column}`) AS storage_charset";
+            }
+            $result = $database->query("SELECT {$read_expression} FROM {$quoted_table} WHERE {$where} LIMIT 1", $params);
+            $row = $result->fetch(PDO::FETCH_ASSOC);
+            $result->closeCursor();
+            if ($row === false) {
+                continue;
+            }
+            $serialized = $row['serialized_value'];
+            $plugins = @unserialize($serialized, ['allowed_classes' => false]);
+            if (!is_array($plugins) || serialize($plugins) !== $serialized) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Fixed option name in a CLI error.
+                throw new RuntimeException('The imported ' . $option_name . ' does not round-trip as a serialized plugin array. Refusing to finish cleanup.');
+            }
+            $write_expression = 'FROM_BASE64(?)';
+            if ($engine === 'mysql') {
+                $quoted_storage_charset = '`' . str_replace('`', '``', $row['storage_charset']) . '`';
+                $write_expression = "CONVERT(CONVERT(FROM_BASE64(?) USING {$quoted_wordpress_charset}) USING {$quoted_storage_charset})";
+                $result = $database->query("SELECT CAST({$write_expression} AS BINARY)", [base64_encode($serialized)]);
+                $round_trip = $result->fetchColumn();
+                $result->closeCursor();
+                if ($round_trip !== $row['stored_value']) {
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Fixed option name in a CLI error.
+                    throw new RuntimeException('The imported ' . $option_name . ' cannot round-trip through the WordPress database charset without changing stored bytes. Refusing to finish cleanup.');
+                }
+            }
+            if ($network_id === null) {
+                $plugins = array_values(array_filter($plugins, static function ($active_plugin_basename) use ($plugin_basename) {
+                    return $active_plugin_basename !== $plugin_basename;
+                }));
+            } else {
+                unset($plugins[$plugin_basename]);
+            }
+            $replacement = serialize($plugins);
+            if ($replacement !== $serialized) {
+                $database->execute("UPDATE {$quoted_table} SET `{$value_column}` = {$write_expression} WHERE {$where}",
+                    array_merge([base64_encode($replacement)], $params));
+            }
+        }
+        $options_table = '`' . str_replace('`', '``', $site_prefix . 'options') . '`';
+        $database->execute("DELETE FROM {$options_table} WHERE option_name IN (?, ?, ?, ?)", [
+            'reprint_server_connection_token', 'reprint_server_push_authorized_token_fingerprint',
+            'site_export_secret', 'site_export_push_authorized_token_fingerprint',
+        ]);
+        $database->commit();
+    }
+
+    /**
+     * Read the source plugin's actual paths when Reprint exclusion is selected.
+     *
+     * @return string[] Remote absolute paths, or an empty list when Reprint is included or not installed.
+     */
+    private function get_excluded_reprint_paths(): array
+    {
+        if (!$this->get_state()->exclude_reprint) {
+            return [];
+        }
+        $preflight = $this->get_state()->preflight_record()['data'] ?? [];
+        if (!array_key_exists('reprint_plugin', $preflight)) {
+            throw new RuntimeException(
+                'The source did not report its Reprint plugin path. Update the source Reprint Server and rerun preflight, or use --include-reprint.'
+            );
+        }
+        $plugin = $preflight['reprint_plugin'];
+        if ($plugin === null) {
+            return [];
+        }
+        if (!is_array($plugin) || !is_array($plugin['paths_b64'] ?? null) || empty($plugin['paths_b64'])) {
+            throw new RuntimeException('The source reprint_plugin must contain a non-empty paths_b64 array.');
+        }
+        $paths = [];
+        foreach ($plugin['paths_b64'] as $path_b64) {
+            $path = is_string($path_b64) ? base64_decode($path_b64, true) : false;
+            $path = $path === false ? null : $this->clean_preflight_path($path);
+            if ($path === null || $path === '/' || strpos($path, "\0") !== false
+                || !is_absolute_path($path, $this->get_state()->remote_path_format())) {
+                throw new RuntimeException('The source reprint_plugin.paths_b64 must contain base64 absolute plugin directories, not a filesystem root.');
+            }
+            $paths[] = $path;
+        }
+        return array_values(array_unique($paths));
     }
 
     /**
@@ -9400,8 +9570,8 @@ class ImportClient
     private function fetch_sql(bool $starts_mysql_output = false): void
     {
         $cursor = $this->get_state()->active_resumable_command->remote_cursor ?? null;
-        $complete = false;
         $mode = $this->sql_output_mode;
+        $complete = $mode === 'mysql' && $this->get_state()->active_resumable_command->current_stage === 'database-cleanup';
 
         // ── Set up write strategy based on output mode ──────────────
 
@@ -9882,6 +10052,13 @@ class ImportClient
                         false,
                     );
                 }
+            }
+            if ($mysql_conn !== null && $sql_buffer === '' && $this->get_state()->exclude_reprint) {
+                // SQL is committed. A failed cleanup resumes locally, without
+                // downloading SQL again or requiring the source to stay online.
+                $this->get_state()->active_resumable_command->current_stage = 'database-cleanup';
+                $this->save_state();
+                $this->cleanup_reprint_database($mysql_conn, 'mysql');
             }
         } catch (\Throwable $e) {
             $caught_exception = $e;
@@ -13332,6 +13509,7 @@ class ImportClient
         $this->state->user_agent = $previous_state->user_agent;
         $this->state->follow_symlinks = $previous_state->follow_symlinks;
         $this->state->include_host_plugins = $previous_state->include_host_plugins;
+        $this->state->exclude_reprint = $previous_state->exclude_reprint;
         $this->state->apply->remote_paths_removed_from_local_site = $previous_state->apply->remote_paths_removed_from_local_site;
         $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
         $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
@@ -14080,6 +14258,23 @@ if (
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'db-apply', 'apply-runtime'],
         ],
         [
+            'name' => 'exclude-reprint',
+            'type' => 'flag',
+            'target' => 'exclude_reprint',
+            'help' => 'Skip Reprint files and clean its connection state after import (saved in state; SQL dumps stay unchanged)',
+            'help_section' => 'global',
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'db-pull', 'db-apply'],
+        ],
+        [
+            'name' => 'include-reprint',
+            'type' => 'flag',
+            'target' => 'exclude_reprint',
+            'flag_value' => false,
+            'help' => 'Keep the source Reprint plugin and connection state (default for new state; saved in state)',
+            'help_section' => 'global',
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'db-pull', 'db-apply'],
+        ],
+        [
             'name' => 'no-follow-symlinks',
             'type' => 'flag',
             'target' => 'follow_symlinks',
@@ -14517,6 +14712,11 @@ if (
 
                         case 'flag':
                             if ($arg === "--{$cli_name}" || (isset($def['short']) && $arg === "-{$def['short']}")) {
+                                if ($def['target'] === 'exclude_reprint' && array_key_exists('exclude_reprint', $options)
+                                    && $options['exclude_reprint'] !== ( $def['flag_value'] ?? true )) {
+                                    fwrite(STDERR, "--exclude-reprint and --include-reprint cannot be combined.\n");
+                                    exit(1);
+                                }
                                 if (
                                     $def['target'] === 'include_host_plugins'
                                     && array_key_exists('include_host_plugins', $options)
