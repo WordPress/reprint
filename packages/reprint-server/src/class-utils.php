@@ -969,4 +969,91 @@ final class Utils
         return $target;
     }
 
+    /** @var bool|null Test-only override; null means ask the runtime. */
+    private static $key_auth_required_override = null;
+
+    /**
+     * Whether this host accepts public-key signatures and refuses HMAC.
+     *
+     * function_exists, not extension_loaded: a host that ships the extension
+     * but blocks openssl_verify through disable_functions cannot verify a key
+     * and must stay on HMAC. There is no option, constant, or environment
+     * variable behind this; the host's capability is the whole decision.
+     *
+     * @return bool
+     */
+    public static function key_auth_required(): bool
+    {
+        if (self::$key_auth_required_override !== null) {
+            return self::$key_auth_required_override;
+        }
+        return function_exists('openssl_verify');
+    }
+
+    /**
+     * Forces key_auth_required() for tests that must exercise the HMAC branch
+     * on a machine that has OpenSSL, or the reverse. Not configuration: only
+     * PHP already running in the process can call it, and nothing in
+     * production does. Pass null to clear.
+     *
+     * @param bool|null $value Forced answer, or null to ask the runtime again.
+     */
+    public static function override_key_auth_required_for_tests(?bool $value): void
+    {
+        self::$key_auth_required_override = $value;
+    }
+
+    /**
+     * Reduces a public key to its one-line base64 body.
+     *
+     * Accepts a PEM block or the bare body. Strips the BEGIN/END armour and
+     * every whitespace byte, so CRLF, trailing newlines and indentation all
+     * produce the same result. This one-line form is what the site stores,
+     * what the administrator pastes, and what the key id hashes.
+     *
+     * @param string $pem_or_one_line PEM text or one-line base64.
+     * @return string One-line base64 body.
+     * @throws InvalidArgumentException When the body is empty or not strict base64.
+     */
+    public static function normalize_public_key(string $pem_or_one_line): string
+    {
+        $one_line = preg_replace('/-----[^-]+-----|\s+/', '', $pem_or_one_line);
+        if (!is_string($one_line) || $one_line === '') {
+            throw new InvalidArgumentException('Public key is empty.');
+        }
+        if (base64_decode($one_line, true) === false) {
+            throw new InvalidArgumentException('Public key is not valid base64.');
+        }
+        return $one_line;
+    }
+
+    /**
+     * Re-wraps a one-line public key as the PEM block OpenSSL parses.
+     *
+     * @param string $one_line One-line base64 body from normalize_public_key().
+     * @return string PEM text with a trailing newline.
+     */
+    public static function public_key_to_pem(string $one_line): string
+    {
+        return "-----BEGIN PUBLIC KEY-----\n"
+            . chunk_split($one_line, 64, "\n")
+            . "-----END PUBLIC KEY-----\n";
+    }
+
+    /**
+     * Computes the key id: the first 16 hex characters of SHA-256 over the
+     * DER bytes. Both sides compute it from the same bytes, so nothing has to
+     * be coordinated.
+     *
+     * @param string $pem_or_one_line PEM text or one-line base64.
+     * @return string Sixteen lowercase hex characters.
+     * @throws InvalidArgumentException When the key cannot be normalized.
+     */
+    public static function public_key_fingerprint(string $pem_or_one_line): string
+    {
+        $one_line = self::normalize_public_key($pem_or_one_line);
+        $der = base64_decode($one_line, true);
+        return substr(hash('sha256', (string) $der), 0, 16);
+    }
+
 }
