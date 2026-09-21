@@ -84,14 +84,14 @@ class DiagnoseHttpErrorTest extends TestCase
     public function testAuthNoSecretProvided()
     {
         $result = $this->diagnose(403, '{"error":"Missing X-Auth-Signature header"}', null, false);
-        $this->assertSame('AUTH_NO_SECRET', $result['code']);
+        $this->assertSame('AUTH_NO_CREDENTIAL', $result['code']);
         $this->assertStringContainsString('--secret', $result['message']);
     }
 
     public function test401NoSecretProvided()
     {
         $result = $this->diagnose(401, '', null, false);
-        $this->assertSame('AUTH_NO_SECRET', $result['code']);
+        $this->assertSame('AUTH_NO_CREDENTIAL', $result['code']);
     }
 
     // ── Auth: secret mismatch ────────────────────────────────────
@@ -351,7 +351,7 @@ class DiagnoseHttpErrorTest extends TestCase
             ));
 
             $diagnosis = $reflection->getMethod('diagnose_http_error')->invoke($client, 403, null, null);
-            $this->assertNotSame('AUTH_NO_SECRET', $diagnosis['code']);
+            $this->assertNotSame('AUTH_NO_CREDENTIAL', $diagnosis['code']);
         } finally {
             unlink($key_path);
         }

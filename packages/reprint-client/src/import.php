@@ -12850,6 +12850,7 @@ class ImportClient
 
         $decoded = json_decode($body, true);
         $server_msg = is_array($decoded) ? ($decoded['error'] ?? null) : null;
+        $server_reason = is_array($decoded) && isset($decoded['reason']) && is_string($decoded['reason']) ? $decoded['reason'] : null;
 
         $looks_like_html = !is_array($decoded) && $body !== '' && (
             stripos($body, '<html') !== false ||
@@ -12877,15 +12878,60 @@ class ImportClient
         }
 
         // ── Authentication / authorization ───────────────────────
-        if ($http_code === 401 || $http_code === 403) {
-            if ($this->hmac_client === null && $this->public_key_client === null) {
+        // 503 not_configured is an auth answer too: the site is in a state
+        // where no credential of the kind we sent can succeed.
+        if ($http_code === 401 || $http_code === 403 || ( $http_code === 503 && $server_reason === 'not_configured' )) {
+            $using_key = $this->public_key_client !== null;
+            $key_hint = '';
+            if ($using_key) {
+                $key_hint = "\n\nYour public key (key id " . $this->public_key_client->get_key_id() . "):\n\n  "
+                    . $this->public_key_client->get_public_key();
+            }
+
+            if ($server_reason === 'requires_key_auth') {
                 return [
-                    'code' => 'AUTH_NO_SECRET',
+                    'code' => 'AUTH_REQUIRES_KEY',
                     'message' =>
-                        "No --secret was provided. The remote site requires " .
-                        "authentication.\n\n" .
-                        "Pass --secret=YOUR_SECRET using the same connection " .
-                        "token configured under Tools > Reprint Server on the remote site.",
+                        "This site's host has OpenSSL, so it accepts key authentication only; " .
+                        "connection tokens are not accepted there.\n\n" .
+                        "Run `reprint keygen {$this->remote_reprint_api_url} --state-dir={$this->state_dir}` " .
+                        "(or `reprint pull` with no --secret) and enroll the printed key under Tools > Reprint Server.",
+                ];
+            }
+            if ($server_reason === 'requires_token_auth') {
+                return [
+                    'code' => 'AUTH_REQUIRES_TOKEN',
+                    'message' =>
+                        "This site's host has no OpenSSL, so it accepts connection-token authentication only.\n\n" .
+                        "Pass --secret=TOKEN using the connection token configured under Tools > Reprint Server.",
+                ];
+            }
+            if ($server_reason === 'not_configured') {
+                return [
+                    'code' => 'AUTH_NOT_CONFIGURED',
+                    'message' => $using_key
+                        ? "This site requires key authentication but has no keys enrolled. " .
+                          "Enroll this public key under Tools > Reprint Server." . $key_hint
+                        : "This site has no connection token configured. " .
+                          "Set one under Tools > Reprint Server, or enroll a key if the host supports it.",
+                ];
+            }
+            if ($server_reason === 'unknown_key') {
+                return [
+                    'code' => 'AUTH_UNKNOWN_KEY',
+                    'message' =>
+                        "This key is not enrolled on the site. Enroll it under Tools > Reprint Server, " .
+                        "or check that the key id matches an enrolled key." . $key_hint,
+                ];
+            }
+
+            if ($this->hmac_client === null && !$using_key) {
+                return [
+                    'code' => 'AUTH_NO_CREDENTIAL',
+                    'message' =>
+                        "No credential was provided and the remote site requires authentication.\n\n" .
+                        "Run `reprint keygen {$this->remote_reprint_api_url} --state-dir={$this->state_dir}` and enroll " .
+                        "the printed key, or pass --secret=TOKEN with the connection token from Tools > Reprint Server.",
                 ];
             }
 
@@ -12901,8 +12947,15 @@ class ImportClient
                 ];
             }
 
-            // The server tells us exactly what went wrong. Map each known
-            // HMAC error to a targeted message.
+            if ($using_key && $server_reason === null) {
+                return [
+                    'code' => 'AUTH_KEY_UNSUPPORTED',
+                    'message' =>
+                        "The site rejected the key signature without a reason code, which an older " .
+                        "Reprint Server plugin does when it does not understand key authentication.\n\n" .
+                        "Ask the site owner to update the Reprint Server plugin, or use --secret with a connection token.",
+                ];
+            }
 
             if (Utils::str_contains($server_msg, 'HMAC signature verification failed')) {
                 return [
@@ -12910,6 +12963,14 @@ class ImportClient
                     'message' =>
                         "Wrong connection token. The --secret value does not match " .
                         "the one configured under Tools > Reprint Server in wp-admin.",
+                ];
+            }
+
+            if (Utils::str_contains($server_msg, 'Signature verification failed')) {
+                return [
+                    'code' => 'AUTH_KEY_MISMATCH',
+                    'message' =>
+                        "Signature rejected. The private key does not match the enrolled public key with this key id." . $key_hint,
                 ];
             }
 
