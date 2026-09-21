@@ -77,13 +77,32 @@ final class KeygenCommandTest extends TestCase
     public function testKeygenRefusesASecondRunWithoutForce(): void
     {
         $url = 'https://example.test/?reprint-api';
-        $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir]);
+        $first = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir]);
         $second = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir]);
         $this->assertNotSame(0, $second['exit_code']);
         $this->assertStringContainsString('--force', $second['output']);
 
+        // A loosened mode on the old file must not survive the replacement:
+        // the new key is written as a fresh 0600 file, not into the old inode.
+        $key_path = ImportClient::key_file_path($url, $this->state_dir);
+        chmod($key_path, 0644);
         $forced = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir, '--force']);
         $this->assertSame(0, $forced['exit_code'], $forced['output']);
+        $this->assertNotSame($this->printedKeyId($first['output']), $this->printedKeyId($forced['output']));
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            $this->assertSame(0600, fileperms($key_path) & 0777);
+        }
+        $this->assertSame(
+            $this->printedKeyId($forced['output']),
+            (new \WordPress\Reprint\Server\PublicKeyClient(file_get_contents($key_path)))->get_key_id()
+        );
+    }
+
+    private function printedKeyId(string $output): string
+    {
+        $this->assertMatchesRegularExpression('/^  Key id:\s+([0-9a-f]{16})$/m', $output);
+        preg_match('/^  Key id:\s+([0-9a-f]{16})$/m', $output, $match);
+        return $match[1];
     }
 
     public function testKeygenOutWritesElsewhere(): void

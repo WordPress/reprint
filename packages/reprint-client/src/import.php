@@ -1325,8 +1325,7 @@ class ImportClient
             }
             throw new InvalidArgumentException(
                 // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI guidance with local paths, never HTML.
-                "No credential for this site. Run `reprint keygen {$this->remote_reprint_api_url} --state-dir={$this->state_dir}` "
-                . "and enroll the printed key, or pass --secret=TOKEN."
+                self::no_credential_message($this->remote_reprint_api_url, $this->state_dir)
             );
         }
 
@@ -1853,7 +1852,12 @@ class ImportClient
             'push_state_directory' => $context['push_state_directory'],
             'remote_reprint_api_url' => $context['remote_reprint_api_url'],
             'request_context_headers' => $this->request_context_headers,
-            'hmac_client' => self::build_envelope_signer($options, $this->remote_state_directory),
+            'hmac_client' => self::build_envelope_signer(
+                $options,
+                $this->remote_reprint_api_url,
+                $this->state_dir,
+                $this->remote_state_directory
+            ),
             'allow_http' => $options['force_http'] ?? false,
             'chunk_bytes' => $chunk_bytes,
             'excluded_paths' => $this->get_state()->apply->remote_paths_removed_from_local_site,
@@ -2318,9 +2322,7 @@ class ImportClient
             self::remote_state_directory_path($remote_reprint_api_url, $state_dir)
         );
         if ($credential['scheme'] === null) {
-            throw new InvalidArgumentException(
-                'files-push requires a credential: --secret=TOKEN, --private-key=PATH, or a key generated with `reprint keygen`.'
-            );
+            throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir));
         }
         if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $remote_reprint_api_url) === 1) {
             throw new InvalidArgumentException(
@@ -2466,15 +2468,27 @@ class ImportClient
             throw new RuntimeException("Could not create {$directory}.");
         }
         [$private_key_pem, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        // Write a fresh sibling file and rename it over the target. Rewriting
+        // an existing file in place keeps its old mode until chmod runs and
+        // follows a symlink; a new file is 0600 from its first byte and the
+        // rename replaces a link entry instead of writing through it.
+        $temporary_path = $path . '.' . bin2hex(random_bytes(8)) . '.tmp';
         $previous_umask = umask(0077);
         try {
-            if (file_put_contents($path, $private_key_pem) === false) {
-                throw new RuntimeException("Could not write the private key to {$path}.");
-            }
+            $written_bytes = file_put_contents($temporary_path, $private_key_pem);
         } finally {
             umask($previous_umask);
         }
-        chmod($path, 0600);
+        if (
+            $written_bytes !== strlen($private_key_pem)
+            || !chmod($temporary_path, 0600)
+            || !rename($temporary_path, $path)
+        ) {
+            if (file_exists($temporary_path)) {
+                unlink($temporary_path);
+            }
+            throw new RuntimeException("Could not write the private key to {$path}.");
+        }
         return [
             'path' => $path,
             'public_key' => $public_key,
@@ -2579,9 +2593,27 @@ class ImportClient
         return $contents;
     }
 
-    /** Builds the signer files-push hands to its stream client, from the same resolution every command uses. */
-    private static function build_envelope_signer(array $options, string $remote_state_directory): \WordPress\Reprint\Server\EnvelopeSigner
+    /** The sentence every remote command throws when it finds no credential. */
+    private static function no_credential_message(string $remote_reprint_api_url, string $state_dir): string
     {
+        return "No credential for this site. Run `reprint keygen {$remote_reprint_api_url} --state-dir={$state_dir}` "
+            . 'and enroll the printed key, or pass --secret=TOKEN.';
+    }
+
+    /**
+     * Builds the signer files-push hands to its stream client, from the same resolution every command uses.
+     *
+     * @param array  $options                Parsed CLI options; reads `secret` and `private_key`.
+     * @param string $remote_reprint_api_url Remote Reprint API URL, named in the no-credential message.
+     * @param string $state_dir              `--state-dir`, named in the no-credential message.
+     * @param string $remote_state_directory `<state-dir>/remotes/<md5>` searched for key.pem.
+     */
+    private static function build_envelope_signer(
+        array $options,
+        string $remote_reprint_api_url,
+        string $state_dir,
+        string $remote_state_directory
+    ): \WordPress\Reprint\Server\EnvelopeSigner {
         $credential = self::resolve_credential($options, $remote_state_directory);
         if ($credential['scheme'] === 'hmac') {
             return new \Site_Export_HMAC_Client($credential['secret']);
@@ -2595,7 +2627,7 @@ class ImportClient
                 );
             }
         }
-        throw new InvalidArgumentException('files-push requires a credential: --secret=TOKEN, --private-key=PATH, or a key generated with `reprint keygen`.');
+        throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir));
     }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
