@@ -66,12 +66,18 @@ class SettingsPage {
         if (!is_multisite() || !current_user_can('manage_network_options')) {
             return;
         }
-        echo '<div class="wrap"><h1>' . esc_html__('Reprint Server', 'reprint') . '</h1>';
-        echo '<p>' . esc_html__(
-            'This network token can pull any site in this network. Use the selected site’s home URL followed by ?reprint-api. Each pull creates a separate one-site network. Push is not supported.',
-            'reprint'
-        ) . '</p>';
         $configuration = get_configuration_state();
+        echo '<div class="wrap"><h1>' . esc_html__('Reprint Server', 'reprint') . '</h1>';
+        echo '<p>' . ( $configuration['required_scheme'] === 'key'
+            ? esc_html__(
+                'Enrolled public keys can pull any site in this network. Use the selected site’s home URL followed by ?reprint-api. Each pull creates a separate one-site network. Push is not supported.',
+                'reprint'
+            )
+            : esc_html__(
+                'This network token can pull any site in this network. Use the selected site’s home URL followed by ?reprint-api. Each pull creates a separate one-site network. Push is not supported.',
+                'reprint'
+            )
+        ) . '</p>';
         $this->render_push_access_notice();
         $this->render_configuration_status($configuration);
         $this->render_scheme_status($configuration);
@@ -363,24 +369,28 @@ class SettingsPage {
      * @param array $configuration Configuration returned by get_configuration_state().
      */
     private function render_configuration_status(array $configuration): void {
+        $key_host = $configuration['required_scheme'] === 'key';
         if ($configuration['has_connection_token_file']) {
+            if ($key_host) {
+                $file_detail = esc_html__('It is not accepted on this host.', 'reprint');
+            } elseif (is_multisite()) {
+                $file_detail = esc_html__(
+                    'This page updates only the network option. Remove secret.php to use the stored option value.',
+                    'reprint'
+                );
+            } else {
+                $file_detail = esc_html__(
+                    'This page and the REST API update only the site option. Remove secret.php to use the stored option value.',
+                    'reprint'
+                );
+            }
             $message = '<strong><code>secret.php</code> '
                 . esc_html__('override is active.', 'reprint')
                 . '</strong> '
-                . ( is_multisite()
-                    ? esc_html__(
-                        'This page updates only the network option. Remove secret.php to use the stored option value.',
-                        'reprint'
-                    )
-                    : esc_html__(
-                        'This page and the REST API update only the site option. Remove secret.php to use the stored option value.',
-                        'reprint'
-                    )
-                );
+                . $file_detail;
             $this->render_notice('warning', $message);
         }
 
-        $key_host = $configuration['required_scheme'] === 'key';
         if (!$configuration['is_configured']) {
             $message = '<strong>'
                 . esc_html__('Not configured yet.', 'reprint')
@@ -518,7 +528,7 @@ class SettingsPage {
                             <label>
                                 <input type="checkbox" name="reprint_server_key_push_enabled" value="1"
                                     <?php checked($entry['push']); ?>
-                                    <?php disabled(!$configuration['push_supported'] || $configuration['managed_push_enabled'] !== null || $file_override); ?>
+                                    <?php disabled(is_multisite() || !$configuration['push_supported'] || $configuration['managed_push_enabled'] !== null || $file_override); ?>
                                     onchange="this.form.submit()" />
                                 <?php echo esc_html__('Allow push', 'reprint'); ?>
                             </label>
@@ -641,6 +651,7 @@ class SettingsPage {
             'key_push_saved' => ['success', __('Push access for the key updated.', 'reprint')],
             'key_push_unchanged' => ['success', __('Push access for the key was already up to date.', 'reprint')],
             'key_push_unknown' => ['error', __('That key is not enrolled.', 'reprint')],
+            'key_push_multisite' => ['info', __('Push is not supported on multisite networks.', 'reprint')],
             'key_push_unsupported' => ['error', __('Push access requires PHP 7.2 or newer.', 'reprint')],
             'key_push_managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
             'key_push_file_override' => ['error', __('public-keys.php is active. Push grants cannot be stored for file-provided keys.', 'reprint')],

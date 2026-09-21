@@ -60,8 +60,10 @@ function register_public_keys_setting(): void {
     if (function_exists('is_multisite') && is_multisite()) {
         return;
     }
+    // Own group: options.php resets every option in a submitted group that the form did not post,
+    // so sharing the token form's reprint_server group would empty the keys on each token save.
     register_setting(
-        'reprint_server',
+        'reprint_server_public_keys',
         PUBLIC_KEYS_OPTION,
         [
             'type' => 'array',
@@ -146,9 +148,13 @@ function remove_public_key(string $key_id): string {
 /**
  * Grants or revokes push for one key.
  *
- * @return string saved, unchanged, unknown, unsupported, managed, file_override, or storage_failure.
+ * @return string saved, unchanged, unknown, multisite, unsupported, managed, file_override, or storage_failure.
  */
 function change_key_push_access(string $key_id, bool $enabled): string {
+    // get_push_authorization_error() refuses every push into a network, so a grant could never take effect.
+    if (function_exists('is_multisite') && is_multisite()) {
+        return 'multisite';
+    }
     if (!push_is_supported()) {
         return 'unsupported';
     }

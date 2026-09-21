@@ -997,6 +997,43 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertArrayNotHasKey('show_in_rest', $registered['args']);
     }
 
+    /**
+     * options.php resets every option in a submitted group that the form did not post, so the keys must
+     * not share the token form's group or each token save would empty them.
+     */
+    public function testPublicKeysOptionIsNotInTheTokenFormsSettingsGroup(): void
+    {
+        \WordPress\Reprint\Server\Plugin\register_public_keys_setting();
+        register_connection_token_setting();
+        $keys_setting = $GLOBALS['reprint_server_registered_settings'][PUBLIC_KEYS_OPTION];
+        $token_setting = $GLOBALS['reprint_server_registered_settings'][CONNECTION_TOKEN_OPTION];
+        $this->assertSame('reprint_server', $token_setting['group']);
+        $this->assertNotSame('reprint_server', $keys_setting['group']);
+        $this->assertSame('reprint_server_public_keys', $keys_setting['group']);
+    }
+
+    public function testMultisiteRefusesKeyPushGrants(): void
+    {
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $GLOBALS['reprint_server_test_user_can_manage_network'] = true;
+        $entry = $this->sampleKeyEntry();
+        update_option_public_keys([$entry]);
+
+        $this->assertSame('multisite', \WordPress\Reprint\Server\Plugin\change_key_push_access($entry['key_id'], true));
+        $this->assertFalse(get_enrolled_public_keys()[0]['push']);
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('name="reprint_server_key_push_enabled" value="1"', $html);
+        $this->assertMatchesRegularExpression(
+            '/name="reprint_server_key_push_enabled" value="1"\s+disabled="disabled"/',
+            $html,
+            'the per-key push checkbox is disabled on a network'
+        );
+
+        $_GET['reprint_server_notice'] = 'key_push_multisite';
+        $this->assertStringContainsString('Push is not supported on multisite networks.', $this->renderAdminPage());
+    }
+
     public function testAdminPageShowsTheKeyStatusLineOnAnOpensslHost(): void
     {
         update_option(CONNECTION_TOKEN_OPTION, 'stale-token');
@@ -1070,6 +1107,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('secret.php', $html);
         $this->assertStringNotContainsString('reprint_server_remove_connection_token', $html, 'a secret.php token has no Remove button');
+        $this->assertStringContainsString('<code>secret.php</code> override is active.</strong> It is not accepted on this host.', $html);
+        $this->assertStringNotContainsString('Remove secret.php to use the stored option value.', $html);
     }
 
     public function testRemoveConnectionTokenHandlerClearsTheOptionAndRedirects(): void
@@ -1160,6 +1199,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringNotContainsString('name="' . CONNECTION_TOKEN_OPTION . '"', $html);
         $this->assertStringNotContainsString('reprint_server_save_network_token', $html);
         $this->assertStringContainsString('reprint_server_enroll_public_key', $html);
+        $this->assertStringContainsString('Enrolled public keys can pull any site in this network.', $html);
+        $this->assertStringNotContainsString('This network token can pull any site in this network.', $html);
     }
 
     /** On an HMAC host the network page keeps its editable token form. */
@@ -1173,5 +1214,6 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('reprint_server_save_network_token', $html);
         $this->assertStringContainsString('name="' . CONNECTION_TOKEN_OPTION . '"', $html);
         $this->assertStringNotContainsString('reprint_server_remove_connection_token', $html);
+        $this->assertStringContainsString('This network token can pull any site in this network.', $html);
     }
 }
